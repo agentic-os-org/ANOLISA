@@ -52,23 +52,21 @@ use bpf::*;
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
 
-/// How long a global uprobe attachment is trusted before the next matching
-/// process triggers a re-attach. The kernel can deregister uprobe consumers
-/// without any userspace-visible error (observed on serverless/overlayfs
-/// hosts), leaving the `Link` objects alive but the probes silent. Userspace
-/// cannot query liveness, so re-attach on TTL expiry is the recovery path.
+/// How long a global uprobe attachment is trusted across repeated discovery
+/// of the same PID. The kernel can deregister uprobe consumers without any
+/// userspace-visible error (observed on serverless/overlayfs hosts), leaving
+/// the `Link` objects alive but the probes silent. Userspace cannot query
+/// liveness, so a newly discovered PID always re-attaches and TTL expiry is
+/// the recovery path for later discoveries of that PID.
 ///
-/// 300s was too coarse for short-lived processes (e.g. a `qwen -p` headless
-/// call lives for seconds): a process that execs within the window after a
-/// silent deregistration saw the stale attachment and skipped the re-attach,
-/// so its traffic was silently missed (#3034). 30s shrinks the window by 10x;
-/// the churn cost is bounded by the number of distinct SSL library inodes,
-/// not by the exec rate.
+/// Keeping the TTL for repeat discoveries prevents DNS traffic from causing
+/// continuous uprobe churn, while the new-PID path closes the 30-second window
+/// for short-lived processes (#3034, #3494).
 const STALE_REATTACH_TTL: Duration = Duration::from_secs(30);
 
 /// Effective stale re-attach TTL, resolved once per `SslSniff` at
 /// construction. `AGENTSIGHT_SSL_REATTACH_TTL_SECS` overrides the default
-/// (0 forces a re-attach on every matching exec; used by tests).
+/// (0 forces a re-attach on every attach attempt; used by tests).
 /// Parse the TTL from an optional env-var string, falling back to the
 /// default on absence or parse failure. Extracted so tests never touch the
 /// process environment (which would be unsound under the parallel harness).
@@ -91,6 +89,15 @@ struct InodeAttach {
     /// Held for Drop (detaches the uprobes); never read directly.
     _links: Vec<Link>,
     attached_at: Instant,
+}
+
+fn should_reattach(
+    attachment: &InodeAttach,
+    now: Instant,
+    ttl: Duration,
+    first_attach_for_pid: bool,
+) -> bool {
+    first_attach_for_pid || now.duration_since(attachment.attached_at) >= ttl
 }
 
 /// Outcome of a single uprobe attach attempt for one library.
@@ -339,6 +346,9 @@ pub struct SslSniff {
     skel: Box<SslsniffSkel<'static>>,
     /// Per-file uprobe links with attach metadata (for stale re-attach).
     attachments: HashMap<FileKey, InodeAttach>,
+    /// Resolved static offsets and whether to attach the handshake probes.
+    /// Avoids repeating whole-binary scans for each newly discovered PID.
+    static_attach_offsets: HashMap<FileKey, (StaticSslOffsets, bool)>,
     traced_files: HashSet<FileKey>,
     /// Maps pid -> files that were attached for this pid.
     /// Used to clean up traced_files when the process exits.
@@ -410,6 +420,7 @@ impl SslSniff {
             _open_object: open_object,
             skel,
             attachments: HashMap::default(),
+            static_attach_offsets: HashMap::default(),
             traced_files: HashSet::default(),
             pid_inodes: HashMap::default(),
             reattach_ttl: stale_reattach_ttl(),
@@ -428,10 +439,10 @@ impl SslSniff {
     /// Detects which SSL libraries the process has mapped (OpenSSL, GnuTLS, NSS,
     /// statically-linked SSL — BoringSSL/OpenSSL — or rustls), attaches uprobes,
     /// and skips any library whose `(device, inode)` identity has already been
-    /// traced (dedup via `traced_files`) —
-    /// unless that attachment is stale (older than the re-attach TTL), in
-    /// which case the probes are re-attached and the old links are dropped
-    /// only after the replacement succeeds.
+    /// traced (dedup via `traced_files`) — unless this is the PID's first
+    /// attach or the attachment is stale, in which case the probes are
+    /// re-attached and the old links are dropped only after the replacement
+    /// succeeds.
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
         let mut libs = ssl_libs_from_maps(pid)?;
         if libs.is_empty() {
@@ -440,7 +451,10 @@ impl SslSniff {
             // other Bun-compiled executables). The bounded worker performs the
             // marker prefilter and byte-pattern scan; the normal Static attach
             // path (symbols → offset table → queued scan) takes over from here.
-            if let Some(entry) = probe_exe_static_ssl(pid, &mut self.traced_files) {
+            let exe = proc_pid_entry(pid, "exe");
+            if let Some(entry) =
+                probe_exe_static_ssl(pid, &exe, &self.traced_files, &self.attachments)
+            {
                 libs.push(entry);
             }
         }
@@ -459,6 +473,7 @@ impl SslSniff {
         );
 
         let now = Instant::now();
+        let first_attach_for_pid = !self.pid_inodes.contains_key(&(pid as u32));
         let mut attached_files: Vec<FileKey> = Vec::new();
         for (path, file, kind, mapped_path) in libs {
             // Dedup by (device, inode): with pid=-1 global attach each library
@@ -468,36 +483,42 @@ impl SslSniff {
             // binaries (codex, node, etc). But the kernel can also silently
             // deregister uprobe consumers (observed on serverless/overlayfs
             // hosts), leaving the probes silent with no error. Userspace
-            // cannot query liveness, so treat attachments older than the TTL
-            // as stale and re-attach.
+            // cannot query liveness, so re-attach for each newly discovered
+            // PID and when the attachment expires on later discoveries.
             if !self.traced_files.insert(file) {
-                let stale = match self.attachments.get(&file) {
-                    Some(a) => now.duration_since(a.attached_at) >= self.reattach_ttl,
+                let reattach = match self.attachments.get(&file) {
+                    Some(a) => should_reattach(a, now, self.reattach_ttl, first_attach_for_pid),
                     // Marked but never attached: a queued scan or an Untraceable
                     // binary. The tick retry scheduler handles the queued case;
                     // rescanning it on every sweep is wasted work.
                     None => false,
                 };
-                if !stale {
+                if !reattach {
                     log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
                     // Still record the pid→file association so detach_process
                     // can track all pids referencing this file.
                     attached_files.push(file);
                     continue;
                 }
-                let age_secs = self
-                    .attachments
-                    .get(&file)
-                    .map(|a| now.duration_since(a.attached_at).as_secs());
                 // Build the replacement BEFORE dropping the old links: if the
                 // re-attach fails, the previous (possibly still working) probes
                 // stay active instead of leaving the library untraced.
                 match self.build_attach(pid, file, &path, kind, &mapped_path) {
                     AttachOutcome::Attached(links) => {
-                        log::warn!(
-                            "[attach_process] pid={pid}: re-attached stale {kind:?} uprobe on {path} ({}s old)",
-                            age_secs.unwrap_or(0)
-                        );
+                        if first_attach_for_pid {
+                            log::debug!(
+                                "[attach_process] pid={pid}: re-attached {kind:?} uprobe on {path} for new process"
+                            );
+                        } else {
+                            let age_secs = self
+                                .attachments
+                                .get(&file)
+                                .map(|a| now.duration_since(a.attached_at).as_secs());
+                            log::warn!(
+                                "[attach_process] pid={pid}: re-attached stale {kind:?} uprobe on {path} ({}s old)",
+                                age_secs.unwrap_or(0)
+                            );
+                        }
                         self.record_attach(file, links);
                         self.scan_retry_after.remove(&file);
                         self.stale_reattachs += 1;
@@ -513,7 +534,7 @@ impl SslSniff {
                     }
                     AttachOutcome::Untraceable | AttachOutcome::Failed => {
                         log::warn!(
-                            "[attach_process] pid={pid}: stale re-attach failed for {path}; keeping previous links"
+                            "[attach_process] pid={pid}: re-attach failed for {path}; keeping previous links"
                         );
                         attached_files.push(file);
                     }
@@ -538,6 +559,7 @@ impl SslSniff {
                     // Attach failed: drop the file so a later retry can succeed.
                     self.traced_files.remove(&file);
                     self.scan_retry_after.remove(&file);
+                    self.static_attach_offsets.remove(&file);
                     self.forget_owners_unless_attached(file);
                 }
                 AttachOutcome::Deferred => {
@@ -596,6 +618,7 @@ impl SslSniff {
                 // No owner remains to route this through detach_process, so
                 // release any retained stale attachment explicitly.
                 self.attachments.remove(&file);
+                self.static_attach_offsets.remove(&file);
                 self.forget_file_for_pids(file);
                 continue;
             }
@@ -614,6 +637,10 @@ impl SslSniff {
             }
             match scanned.outcome {
                 ExecutableScan::Offsets(offsets) => {
+                    // Offsets belong to this verified inode revision, not to the
+                    // process or to a successful uprobe attach.
+                    self.static_attach_offsets
+                        .insert(file, (offsets.clone(), false));
                     match attach_static_ssl_by_offset(&mut self.skel, &path, &offsets, false, -1) {
                         Ok(links) => {
                             if self.attachments.contains_key(&file) {
@@ -630,6 +657,9 @@ impl SslSniff {
                             );
                             self.traced_files.remove(&file);
                             self.scan_retry_after.remove(&file);
+                            if !self.attachments.contains_key(&file) {
+                                self.static_attach_offsets.remove(&file);
+                            }
                             self.forget_owners_unless_attached(file);
                         }
                     }
@@ -681,8 +711,8 @@ impl SslSniff {
         self.attachments.len()
     }
 
-    /// How many stale attachments have been replaced by a re-attach
-    /// (diagnostics/tests).
+    /// How many existing attachments have been replaced by a re-attach
+    /// (diagnostics/tests). The name is retained for API compatibility.
     pub fn stale_reattach_count(&self) -> u64 {
         self.stale_reattachs
     }
@@ -872,7 +902,9 @@ impl SslSniff {
             SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
             SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
             SslLibKind::ExplicitTap => {
-                if !cosh_tap_present(path) {
+                // A successful attach proves the symbol is exported; avoid
+                // scanning the whole binary again for each new process.
+                if !self.attachments.contains_key(&file) && !cosh_tap_present(path) {
                     // A pre-tap cosh-ng can be deployed alongside an upgraded
                     // AgentSight, and then its LLM calls are simply not
                     // capturable: there is no TLS-layer API to fall back to.
@@ -898,63 +930,68 @@ impl SslSniff {
                 attach_cosh_tap(&mut self.skel, path, -1)
             }
             SslLibKind::Static | SslLibKind::StaticExeProbe => {
-                match attach_static_ssl_by_symbol(&mut self.skel, path, -1) {
-                    Ok(ls) => Ok(ls),
-                    Err(sym_err) => {
-                        log::debug!(
-                            "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to the offset table"
-                        );
-                        // Consult the offset table before the byte-pattern scan.
-                        // A lookup costs a stat() plus, only when the size already
-                        // matches a known build, a 64 KiB head read; the scan reads
-                        // the whole binary. Probing in the opposite order charged
-                        // every unsupported agent binary its own size in resident
-                        // memory before the table could answer, which exhausted the
-                        // service memory cap during startup attach on hosts running
-                        // several large harnesses (#2981).
-                        if let Some(off) = CODEX_OFFSET_TABLE
-                            .as_ref()
-                            .and_then(|table| table.lookup(path))
-                        {
-                            log::info!(
-                                "[attach_process] pid={pid}: codex offset table matched for {path} \
-                                 (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
-                                off.ssl_write,
-                                off.ssl_read,
-                                off.ssl_do_handshake
+                if let Some((off, handshake)) = self.static_attach_offsets.get(&file).cloned() {
+                    attach_static_ssl_by_offset(&mut self.skel, path, &off, handshake, -1)
+                } else {
+                    match attach_static_ssl_by_symbol(&mut self.skel, path, -1) {
+                        Ok(ls) => Ok(ls),
+                        Err(sym_err) => {
+                            log::debug!(
+                                "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to the offset table"
                             );
-                            return match attach_static_ssl_by_offset(
-                                &mut self.skel,
-                                path,
-                                &off,
-                                true,
-                                -1,
-                            ) {
-                                Ok(links) => AttachOutcome::Attached(links),
-                                Err(e) => {
+                            // Consult the offset table before the byte-pattern scan.
+                            // A lookup costs a stat() plus, only when the size already
+                            // matches a known build, a 64 KiB head read; the scan reads
+                            // the whole binary. Probing in the opposite order charged
+                            // every unsupported agent binary its own size in resident
+                            // memory before the table could answer, which exhausted the
+                            // service memory cap during startup attach on hosts running
+                            // several large harnesses (#2981).
+                            if let Some(off) = CODEX_OFFSET_TABLE
+                                .as_ref()
+                                .and_then(|table| table.lookup(path))
+                            {
+                                log::info!(
+                                    "[attach_process] pid={pid}: codex offset table matched for {path} \
+                                     (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
+                                    off.ssl_write,
+                                    off.ssl_read,
+                                    off.ssl_do_handshake
+                                );
+                                self.static_attach_offsets.insert(file, (off.clone(), true));
+                                return match attach_static_ssl_by_offset(
+                                    &mut self.skel,
+                                    path,
+                                    &off,
+                                    true,
+                                    -1,
+                                ) {
+                                    Ok(links) => AttachOutcome::Attached(links),
+                                    Err(e) => {
+                                        log::warn!(
+                                            "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
+                                        );
+                                        AttachOutcome::Failed
+                                    }
+                                };
+                            }
+                            return match self.scans.submit(path, file, scan_mode(kind)) {
+                                Ok(()) => AttachOutcome::Deferred,
+                                Err(SubmitError::QueueFull) => AttachOutcome::ScanQueueFull,
+                                Err(SubmitError::Replaced) => {
                                     log::warn!(
-                                        "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
+                                        "SSL scan input for pid={pid}, {path} changed before submission; retry discovery"
+                                    );
+                                    AttachOutcome::Failed
+                                }
+                                Err(SubmitError::Failed(error)) => {
+                                    log::warn!(
+                                        "Schedule SSL byte-pattern detection for pid={pid}, {path}: {error:#}"
                                     );
                                     AttachOutcome::Failed
                                 }
                             };
                         }
-                        return match self.scans.submit(path, file, scan_mode(kind)) {
-                            Ok(()) => AttachOutcome::Deferred,
-                            Err(SubmitError::QueueFull) => AttachOutcome::ScanQueueFull,
-                            Err(SubmitError::Replaced) => {
-                                log::warn!(
-                                    "SSL scan input for pid={pid}, {path} changed before submission; retry discovery"
-                                );
-                                AttachOutcome::Failed
-                            }
-                            Err(SubmitError::Failed(error)) => {
-                                log::warn!(
-                                    "Schedule SSL byte-pattern detection for pid={pid}, {path}: {error:#}"
-                                );
-                                AttachOutcome::Failed
-                            }
-                        };
                     }
                 }
             }
@@ -991,6 +1028,7 @@ impl SslSniff {
                     // consistent with `traced_files`. A later process mapping
                     // this file re-attaches through the fresh-attach path.
                     self.attachments.remove(file);
+                    self.static_attach_offsets.remove(file);
                     removed += 1;
                 }
             }
@@ -1428,40 +1466,37 @@ pub(super) fn cosh_tap_present(path: &str) -> bool {
 /// Probe the main executable of `pid` for statically-linked SSL when maps
 /// named no known SSL library.
 ///
-/// Returns a synthetic `Static` lib entry (attach path `<pid>/exe`) for every
-/// executable that is not already in `traced`, so the bounded worker can run
-/// the marker prefilter and byte-pattern scan away from the event consumer.
+/// Returns a synthetic `StaticExeProbe` lib entry so the bounded worker can run
+/// the marker prefilter and byte-pattern scan away from the event consumer. An
+/// already attached executable remains a candidate for the normal re-attach
+/// policy; queued scans and Untraceable-marked files stay negatively cached.
 /// Returns `None` when the exe is unreadable, is a Python interpreter, or is
-/// already present in `traced` (including Untraceable-marked and queued
-/// scans); a worker marker miss is negatively cached in `traced` after the
-/// scan completes.
+/// already present in `traced` without an attachment.
 fn probe_exe_static_ssl(
     pid: i32,
-    traced: &mut HashSet<FileKey>,
+    exe: &Path,
+    traced: &HashSet<FileKey>,
+    attachments: &HashMap<FileKey, InodeAttach>,
 ) -> Option<(String, FileKey, SslLibKind, String)> {
-    let exe = proc_pid_entry(pid, "exe");
     // Never treat Python interpreters as statically-linked BoringSSL via exe
     // content probing: Python stubs/binaries may accidentally contain marker
     // strings and must go through the normal OpenSSL/uv-python paths instead.
-    if let Ok(link) = fs::read_link(&exe) {
+    if let Ok(link) = fs::read_link(exe) {
         let name = Path::new(&link).file_name()?.to_string_lossy();
         if name.starts_with("python") {
             return None;
         }
     }
-    let meta = fs::metadata(&exe).ok()?;
+    let meta = fs::metadata(exe).ok()?;
     use std::os::unix::fs::MetadataExt;
     let key = (stat_dev_to_key(meta.dev()), meta.ino());
-    // Already traced, queued, or previously scanned and marked Untraceable:
-    // skip. Without this check a binary that fails the byte-pattern scan (e.g.
-    // arm64, x86_64-only patterns) would be queued on every attach sweep.
-    if traced.contains(&key) {
+    // An attached executable must reach the re-attach decision for each new
+    // PID; all other marked files either have a queued scan or are Untraceable.
+    if traced.contains(&key) && !attachments.contains_key(&key) {
         return None;
     }
     let exe_str = exe.to_string_lossy().into_owned();
-    log::debug!(
-        "[attach_process] pid={pid}: queuing main executable for static SSL scan: {exe_str}"
-    );
+    log::debug!("[attach_process] pid={pid}: probing main executable for static SSL: {exe_str}");
     // Prefer the resolved on-disk path over `<pid>/exe` as the uprobe
     // target: detection can take seconds (byte-pattern scan), and a
     // short-lived process (a one-shot `opencode run`) exits before the
@@ -1469,7 +1504,7 @@ fn probe_exe_static_ssl(
     // uprobe. The resolved path survives the exit, and the probe is
     // inode-global anyway. Fall back to `<pid>/exe` when readlink fails or
     // the file was replaced underneath (inode no longer matches).
-    let attach_path = match fs::read_link(&exe) {
+    let attach_path = match fs::read_link(exe) {
         Ok(target) => {
             let resolved = target.to_string_lossy().into_owned();
             match fs::metadata(&resolved) {
@@ -2797,6 +2832,55 @@ mod tests {
         );
     }
 
+    fn exe_file_key(path: &Path) -> FileKey {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).expect("stat synthetic executable");
+        (stat_dev_to_key(meta.dev()), meta.ino())
+    }
+
+    #[test]
+    fn attached_static_exe_remains_a_reattach_candidate() {
+        with_static_ssl_fixture(
+            "reattach-candidate",
+            b"junk\x00../../vendor/boringssl/ssl/mem_internal.h\x00tail",
+            |path| {
+                let exe = Path::new(path);
+                let key = exe_file_key(exe);
+                let traced = HashSet::from([key]);
+                let attachments = HashMap::from([(
+                    key,
+                    InodeAttach {
+                        _links: Vec::new(),
+                        attached_at: Instant::now(),
+                    },
+                )]);
+                fs::write(exe, b"positive cache must avoid another marker scan")
+                    .expect("replace fixture contents");
+
+                let entry = probe_exe_static_ssl(4242, exe, &traced, &attachments)
+                    .expect("an attached static executable must reach the re-attach decision");
+                assert_eq!(entry.0, path);
+                assert_eq!(entry.1, key);
+                assert_eq!(entry.2, SslLibKind::StaticExeProbe);
+            },
+        );
+    }
+
+    #[test]
+    fn untraceable_static_exe_stays_negatively_cached() {
+        with_static_ssl_fixture(
+            "negative-cache",
+            b"junk\x00../../vendor/boringssl/ssl/mem_internal.h\x00tail",
+            |path| {
+                let exe = Path::new(path);
+                let key = exe_file_key(exe);
+                let traced = HashSet::from([key]);
+                let attachments = HashMap::new();
+                assert!(probe_exe_static_ssl(4242, exe, &traced, &attachments).is_none());
+            },
+        );
+    }
+
     #[test]
     fn exe_markers_are_boringssl_only() {
         // Policy decision: the exe content probe only admits BoringSSL
@@ -3032,9 +3116,40 @@ mod tests {
         );
     }
 
-    /// The default re-attach TTL must cover short-lived processes (#3034).
-    /// Discriminating: reverting the constant to 300s makes this fail.
-    /// The env override must still work after the default change.
+    #[test]
+    fn first_pid_attach_forces_reattach_before_ttl() {
+        let attached_at = Instant::now();
+        let attachment = InodeAttach {
+            _links: Vec::new(),
+            attached_at,
+        };
+        let recent = attached_at + Duration::from_secs(1);
+        assert!(!should_reattach(
+            &attachment,
+            recent,
+            Duration::from_secs(30),
+            false
+        ));
+        assert!(should_reattach(
+            &attachment,
+            recent,
+            Duration::from_secs(30),
+            true
+        ));
+        assert!(should_reattach(
+            &attachment,
+            attached_at + Duration::from_secs(30),
+            Duration::from_secs(30),
+            false
+        ));
+        assert!(should_reattach(
+            &attachment,
+            recent,
+            Duration::from_secs(0),
+            false
+        ));
+    }
+
     #[test]
     fn stale_reattach_ttl_default_and_override() {
         assert_eq!(parse_reattach_ttl(None), Duration::from_secs(30));
