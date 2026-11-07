@@ -98,6 +98,21 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
     return mapping
 
 
+# 双引号文本字面量；Excel 用两个双引号表示字面量里的一个引号。
+_STRING_LITERAL_RE = re.compile(r'"(?:[^"]|"")*"')
+
+
+def strip_string_literals(formula: str) -> str:
+    """Remove double-quoted text literals from a formula.
+
+    Text inside a literal is data, not a reference: `=IF(A1="Missing!x",...)`
+    must not be read as a reference to a sheet named Missing. Literals are
+    replaced with nothing rather than a placeholder so that no identifier
+    fragment is left behind for the name scan.
+    """
+    return _STRING_LITERAL_RE.sub("", formula)
+
+
 def extract_sheet_refs(formula: str) -> list[str]:
     """
     Extract all sheet names referenced in a formula string.
@@ -110,6 +125,7 @@ def extract_sheet_refs(formula: str) -> list[str]:
     sheet is referenced multiple times in one formula).
     """
     refs = []
+    formula = strip_string_literals(formula)
     # Quoted sheet names: 'Sheet Name'! — an apostrophe inside the name is
     # escaped by doubling it, so the sheet It's is referenced as 'It''s'!A1.
     for m in re.finditer(r"'((?:[^']|'')*)'!", formula):
@@ -137,7 +153,8 @@ def extract_name_refs(formula: str) -> list[str]:
     # apostrophe-escaping form matches extract_sheet_refs above, otherwise
     # "'Company''s Data'!A1" leaves "'Company" behind and the
     # identifier scan reports the sheet name as an unknown name.
-    formula_clean = re.sub(r"'(?:[^']|'')*'![A-Z$0-9:]+", "", formula)
+    formula_clean = strip_string_literals(formula)
+    formula_clean = re.sub(r"'(?:[^']|'')*'![A-Z$0-9:]+", "", formula_clean)
     formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
