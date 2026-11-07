@@ -32,6 +32,8 @@ import sys
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
 
+from xlsx_strings import decode_xstring, encode_xstring, write_shared_strings
+
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -109,19 +111,19 @@ def add_shared_string(work_dir: str, text: str) -> int:
     idx = 0
     for si in root.findall(_tag("si")):
         t_el = si.find(_tag("t"))
-        if t_el is not None and t_el.text == text:
+        if t_el is not None and decode_xstring(t_el.text or "") == text:
             return idx
         idx += 1
 
     si = ET.SubElement(root, _tag("si"))
     t = ET.SubElement(si, _tag("t"))
     t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    t.text = text
+    t.text = encode_xstring(text)
 
     root.set("count", str(int(root.get("count", "0")) + 1))
     root.set("uniqueCount", str(int(root.get("uniqueCount", "0")) + 1))
 
-    _write_tree(tree, ss_path)
+    write_shared_strings(tree, ss_path)
     return idx
 
 
