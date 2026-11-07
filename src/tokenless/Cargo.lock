@@ -2002,6 +2002,7 @@ dependencies = [
  "regex",
  "rtk",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokenless-ccr",
