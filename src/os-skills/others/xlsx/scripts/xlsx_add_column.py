@@ -189,29 +189,25 @@ def ensure_numfmt_style(work_dir: str, ref_style_idx: int, numfmt_code: str) -> 
     return len(list(cellxfs)) - 1
 
 
-def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
-                         ws_root: ET.Element, row_map: dict, border_row: int,
-                         border_style: str, new_col: str) -> None:
+def _apply_border_to_row(
+    work_dir: str,
+    ws_path: str,
+    ws_tree: ET.ElementTree,
+    ws_root: ET.Element,
+    row_map: dict,
+    border_row: int,
+    border_style: str,
+    new_col: str,
+) -> None:
     """Apply a top border to ALL cells in the specified row (A through new_col)."""
     styles_path = os.path.join(work_dir, "xl", "styles.xml")
     st_tree = ET.parse(styles_path)
     st_root = st_tree.getroot()
 
-    # 1. Create a new border entry with the specified top style
     borders = st_root.find(_tag("borders"))
-    new_border = ET.SubElement(borders, _tag("border"))
-    for side in ("left", "right"):
-        ET.SubElement(new_border, _tag(side))
-    top_el = ET.SubElement(new_border, _tag("top"))
-    top_el.set("style", border_style)
-    ET.SubElement(new_border, _tag("bottom"))
-    ET.SubElement(new_border, _tag("diagonal"))
-    borders.set("count", str(len(list(borders))))
-    new_border_id = len(list(borders)) - 1
-
-    # 2. For each existing style used in the row, create a clone with the new borderId
     cellxfs = st_root.find(_tag("cellXfs"))
     style_remap = {}  # old_style_idx -> new_style_idx
+    border_remap = {}  # old_border_id -> new_border_id
 
     if border_row not in row_map:
         return
@@ -223,8 +219,29 @@ def _apply_border_to_row(work_dir: str, ws_path: str, ws_tree: ET.ElementTree,
         if old_s not in style_remap:
             xf_list = list(cellxfs)
             ref_xf = xf_list[min(old_s, len(xf_list) - 1)]
+            old_border_id = int(ref_xf.get("borderId", "0"))
+            if old_border_id not in border_remap:
+                new_border = copy.deepcopy(borders[old_border_id])
+                top_el = new_border.find(_tag("top"))
+                if top_el is None:
+                    top_el = ET.Element(_tag("top"))
+                    top_index = 0
+                    for edge in new_border:
+                        if edge.tag not in {
+                            _tag("left"),
+                            _tag("right"),
+                            _tag("start"),
+                            _tag("end"),
+                        }:
+                            break
+                        top_index += 1
+                    new_border.insert(top_index, top_el)
+                top_el.set("style", border_style)
+                borders.append(new_border)
+                borders.set("count", str(len(borders)))
+                border_remap[old_border_id] = len(borders) - 1
             new_xf = copy.deepcopy(ref_xf)
-            new_xf.set("borderId", str(new_border_id))
+            new_xf.set("borderId", str(border_remap[old_border_id]))
             new_xf.set("applyBorder", "true")
             cellxfs.append(new_xf)
             cellxfs.set("count", str(len(list(cellxfs))))
