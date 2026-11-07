@@ -650,6 +650,7 @@ impl ActPlaneBackend {
     ) -> Result<Binding, BackendError> {
         let _ = normalize_actplane_policy_payload(&request)?;
         let _lifecycle = self.lifecycle();
+        require_init_pid_ns(self.in_init_pidns)?;
         let mut bindings = self.state.bindings();
         if let Some(existing) = bindings
             .values()
@@ -1727,7 +1728,7 @@ fn is_init_pid_namespace() -> bool {
     if !result {
         eprintln!(
             "agentsight-enforcer: not in init PID namespace \
-             (pidns_ino={}); file_delete_guard will be disabled",
+             (pidns_ino={}); policy application will be refused",
             self_ns.ino(),
         );
     }
@@ -1746,6 +1747,20 @@ fn require_target_pid_visibility(
         "target PID resolution requires an init-namespace procfs view; \
          container-local /proc cannot safely bind ActPlane policies. \
          Run the enforcer on the host or with host PID visibility \
+         (hostPID: true / --pid=host)."
+            .into(),
+    ))
+}
+
+/// Rejects PID namespaces that cannot satisfy ActPlane's kernel PID admission checks.
+fn require_init_pid_ns(in_init_pidns: bool) -> Result<(), BackendError> {
+    if in_init_pidns {
+        return Ok(());
+    }
+    Err(BackendError::UnsupportedEnvironment(
+        "ActPlane enforcement requires the init PID namespace: policy admission \
+         compares init-namespace pids that a PID-namespaced enforcer cannot \
+         supply. Run the enforcer on the host or with host PID visibility \
          (hostPID: true / --pid=host)."
             .into(),
     ))
@@ -2756,5 +2771,19 @@ mod tests {
             error.to_string().contains("init-namespace procfs"),
             "message should name the requirement: {error}"
         );
+    }
+
+    #[test]
+    fn apply_outside_init_pidns_is_refused_loudly() {
+        let error = require_init_pid_ns(false).expect_err("pid-ns enforcer must be refused");
+        assert!(
+            matches!(error, BackendError::UnsupportedEnvironment(_)),
+            "expected UnsupportedEnvironment, got: {error}"
+        );
+        assert!(
+            error.to_string().contains("init PID namespace"),
+            "message should name the requirement: {error}"
+        );
+        assert!(require_init_pid_ns(true).is_ok());
     }
 }
