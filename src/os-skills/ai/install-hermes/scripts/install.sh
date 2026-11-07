@@ -795,7 +795,14 @@ clone_repo() {
                 if [ "$restore_now" = "yes" ]; then
                     log_info "Restoring local changes..."
                     if git stash apply "$autostash_ref"; then
-                        git stash drop "$autostash_ref" >/dev/null
+                        local autostash_selector
+                        autostash_selector="$(git stash list --format='%gd %H' |
+                            awk -v oid="$autostash_ref" '$2 == oid { print $1; exit }')"
+                        if [ -n "$autostash_selector" ]; then
+                            git stash drop "$autostash_selector" >/dev/null
+                        else
+                            log_warn "The restored autostash is no longer listed; other stashes were left unchanged."
+                        fi
                         log_warn "Local changes were restored on top of the updated codebase."
                         log_warn "Review git diff / git status if Hermes behaves unexpectedly."
                     else
