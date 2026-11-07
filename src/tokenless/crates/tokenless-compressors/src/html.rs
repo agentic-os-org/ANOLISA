@@ -878,6 +878,7 @@ impl Renderer<'_> {
         let mut blocks: Vec<String> = Vec::new();
         let mut inline = String::new();
         let mut inline_open = false;
+        let mut last_code_span_end = None;
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
@@ -886,13 +887,14 @@ impl Renderer<'_> {
             }
             if is_block(node) {
                 flush_inline(&mut blocks, &mut inline, &mut inline_open);
+                last_code_span_end = None;
                 let child_sectioning = in_sectioning || is_sectioning(node);
                 let rendered = self.block(child, child_sectioning);
                 if !rendered.trim().is_empty() {
                     blocks.push(rendered);
                 }
             } else {
-                self.inline(child, &mut inline, in_sectioning);
+                self.inline(child, &mut inline, in_sectioning, &mut last_code_span_end);
                 inline_open = true;
             }
         }
@@ -916,7 +918,7 @@ impl Renderer<'_> {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let level = node.local_name().as_bytes()[1] - b'0';
                 let mut text = String::new();
-                self.inline_children(id, &mut text, in_sectioning);
+                self.inline_children(id, &mut text, in_sectioning, &mut None);
                 let text = collapse(&text);
                 if text.is_empty() {
                     return String::new();
@@ -954,7 +956,7 @@ impl Renderer<'_> {
             "hr" => "---".to_owned(),
             "dt" => {
                 let mut text = String::new();
-                self.inline_children(id, &mut text, in_sectioning);
+                self.inline_children(id, &mut text, in_sectioning, &mut None);
                 format!("**{}**", collapse(&text))
             }
             "dd" => indent(&self.blocks(id, in_sectioning), "  "),
@@ -989,7 +991,7 @@ impl Renderer<'_> {
                 self.blocks(child, in_sectioning)
             } else {
                 let mut text = String::new();
-                self.inline(child, &mut text, in_sectioning);
+                self.inline(child, &mut text, in_sectioning, &mut None);
                 text.trim().to_owned()
             };
             if body.is_empty() {
@@ -1034,7 +1036,7 @@ impl Renderer<'_> {
             match node.local_name() {
                 "caption" => {
                     let mut text = String::new();
-                    self.inline_children(child, &mut text, in_sectioning);
+                    self.inline_children(child, &mut text, in_sectioning, &mut None);
                     caption = Some(collapse(&text));
                 }
                 "thead" | "tbody" | "tfoot" => {
@@ -1153,28 +1155,46 @@ impl Renderer<'_> {
         out.trim_end().to_owned()
     }
 
-    fn inline_children(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
+    fn inline_children(
+        &mut self,
+        id: usize,
+        out: &mut String,
+        in_sectioning: bool,
+        last_code_span_end: &mut Option<usize>,
+    ) {
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
-            self.inline(child, out, in_sectioning);
+            self.inline(child, out, in_sectioning, last_code_span_end);
         }
     }
 
-    fn inline(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
+    fn inline(
+        &mut self,
+        id: usize,
+        out: &mut String,
+        in_sectioning: bool,
+        last_code_span_end: &mut Option<usize>,
+    ) {
         if self.depth == MAX_DEPTH {
             push_collapsed(out, &self.text(id, in_sectioning, " "));
             return;
         }
         self.depth += 1;
-        self.inline_at_depth(id, out, in_sectioning);
+        self.inline_at_depth(id, out, in_sectioning, last_code_span_end);
         self.depth -= 1;
     }
 
-    fn inline_at_depth(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
+    fn inline_at_depth(
+        &mut self,
+        id: usize,
+        out: &mut String,
+        in_sectioning: bool,
+        last_code_span_end: &mut Option<usize>,
+    ) {
         let node = &self.nodes[id];
         match &node.kind {
             NodeKind::Text(text) => push_collapsed(out, text),
@@ -1184,7 +1204,7 @@ impl Renderer<'_> {
                         self.count_removals(id, in_sectioning);
                         let _ = write!(out, "${tex}$");
                     }
-                    None => self.inline_children(id, out, in_sectioning),
+                    None => self.inline_children(id, out, in_sectioning, last_code_span_end),
                 }
             }
             NodeKind::Element { .. } => match node.local_name() {
@@ -1209,13 +1229,20 @@ impl Renderer<'_> {
                 }
                 "a" => {
                     let mut text = String::new();
-                    self.inline_children(id, &mut text, in_sectioning);
+                    let mut text_code_span_end = None;
+                    self.inline_children(id, &mut text, in_sectioning, &mut text_code_span_end);
+                    let ends_in_code = text_code_span_end == Some(text.trim_end().len());
                     let text = text.trim();
                     match node.attr("href").and_then(destination) {
                         Some(target) if !text.is_empty() && brackets_balanced(text) => {
                             let _ = write!(out, "[{text}]({target})");
                         }
-                        _ => out.push_str(text),
+                        _ => {
+                            out.push_str(text);
+                            if ends_in_code {
+                                *last_code_span_end = Some(out.len());
+                            }
+                        }
                     }
                 }
                 "code" | "kbd" | "samp" => {
@@ -1230,14 +1257,30 @@ impl Renderer<'_> {
                     // `contains` for every prefix length is quadratic in
                     // the run length, which untrusted HTML controls.
                     let ticks = "`".repeat(longest_backtick_run(&text) + 1);
-                    let _ = write!(out, "{ticks}{text}{ticks}");
+                    // Adjacent code elements must not join their closing and
+                    // opening fences. A comment separates syntax without adding
+                    // a space to the page's visible text.
+                    // The position belongs to this append-only output buffer,
+                    // not to a nested link/emphasis buffer or a literal backtick.
+                    if *last_code_span_end == Some(out.len()) {
+                        out.push_str("<!-- -->");
+                    }
+                    // Edge backticks would merge into the delimiter run. CommonMark
+                    // removes one space from both ends of a padded code span.
+                    let pad = if text.starts_with('`') || text.ends_with('`') {
+                        " "
+                    } else {
+                        ""
+                    };
+                    let _ = write!(out, "{ticks}{pad}{text}{pad}{ticks}");
+                    *last_code_span_end = Some(out.len());
                 }
                 "label" => {
                     // Adjacent labels (content-tab titles) must not run together.
                     if !out.is_empty() && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
-                    self.inline_children(id, out, in_sectioning);
+                    self.inline_children(id, out, in_sectioning, last_code_span_end);
                     if !out.is_empty() && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
@@ -1253,7 +1296,7 @@ impl Renderer<'_> {
                         out.push('\n');
                     }
                 }
-                _ => self.inline_children(id, out, in_sectioning),
+                _ => self.inline_children(id, out, in_sectioning, last_code_span_end),
             },
             _ => {}
         }
@@ -1284,7 +1327,7 @@ impl Renderer<'_> {
 
     fn wrapped(&mut self, id: usize, out: &mut String, marker: &str, in_sectioning: bool) {
         let mut text = String::new();
-        self.inline_children(id, &mut text, in_sectioning);
+        self.inline_children(id, &mut text, in_sectioning, &mut None);
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return;
@@ -1503,6 +1546,7 @@ fn span(node: &Node, attr: &str) -> usize {
 /// rendered into its own buffer (emphasis, link text, a heading) counts as
 /// a line start too; the extra backslash there is harmless.
 fn push_collapsed(out: &mut String, text: &str) {
+    // Literal text backticks remain unescaped, including next to code spans.
     let mut escape_at = None;
     let mut seen_visible = false;
     for (index, c) in text.char_indices() {

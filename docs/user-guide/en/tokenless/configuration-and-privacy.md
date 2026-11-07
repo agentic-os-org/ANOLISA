@@ -143,6 +143,15 @@ quadratically with nesting depth, so such pages are not parsed at all.
 It only adopts output when both characters decrease and the heuristic token estimate
 saves at least 16 tokens, including the notice and recovery instruction.
 
+Inline code whose text starts or ends with a backtick gets one padding space at each
+end inside its delimiters; CommonMark removes those spaces when rendering. Adjacent
+code spans are separated by an empty HTML comment (`<!-- -->`) to prevent their
+delimiters from merging without adding a visible space. Raw-text consumers see the
+padding and comment markup; renderers with raw HTML disabled display the comment
+literally, although the code spans remain separate. Consumers can ignore this
+generated separator as markup. Literal backticks in ordinary text remain unescaped:
+text immediately before or after a code span can still disrupt Markdown parsing.
+
 The emitted operation is `html_extraction` and recoverability is `retrievable`, not
 `lossless`: markup and the removed elements are not in the visible output. Follow the
 emitted shell or tool instruction to retrieve the received original while it is in
