@@ -183,7 +183,7 @@ fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Resu
                         .iter()
                         .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
                     {
-                        append_tool_results(&mut steps, blocks);
+                        append_tool_results(&mut steps, blocks, timestamp.as_deref());
                     }
 
                     let mut message_text = String::new();
@@ -458,7 +458,7 @@ fn flatten_tool_result_content(content: &Value) -> String {
     }
 }
 
-fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
+fn append_tool_results(steps: &mut [Step], blocks: &[Value], timestamp: Option<&str>) {
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -507,6 +507,16 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
                 .map(|call| call.tool_call_id.as_str()),
         )
         .map(str::to_string);
+        if let Some(timestamp) = timestamp {
+            for call in step.tool_calls.iter_mut().flatten() {
+                if Some(&call.tool_call_id) == source_call_id.as_ref() {
+                    call.extra.get_or_insert_with(HashMap::new).insert(
+                        "result_timestamp".into(),
+                        Value::String(timestamp.to_string()),
+                    );
+                }
+            }
+        }
         let observation = step.observation.get_or_insert_with(|| Observation {
             results: Vec::new(),
         });
