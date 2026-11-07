@@ -125,6 +125,45 @@ class TestHardeningSummary:
         # The compliance should reflect the fixed count
         assert "100.0%" in output or "23/23" in output
 
+    def test_successful_scan_without_parsed_stats_is_not_a_failure(self):
+        """A succeeded scan with no parsed total must not print a failure."""
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="succeeded",
+                details={
+                    "request": {"args": ["--scan", "--config", "agentos_baseline"]},
+                    "result": {"mode": "scan", "config": "agentos_baseline"},
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+
+        assert "succeeded: 1, failed: 0" in output
+        assert "Latest scan failed" not in output
+
+    def test_failed_scan_still_reports_the_error(self):
+        """The failure notice must remain when every scan failed."""
+        events = [
+            _make_event(
+                event_type="harden",
+                category="hardening",
+                result="failed",
+                details={
+                    "request": {"args": ["--scan"]},
+                    "result": {"mode": "scan"},
+                    "error": "loongshield exited with status 2",
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+
+        assert "succeeded: 0, failed: 1" in output
+        assert "Latest scan failed: loongshield exited with status 2" in output
+
     def test_scan_count_and_compliance(self):
         events = [
             _make_event(
