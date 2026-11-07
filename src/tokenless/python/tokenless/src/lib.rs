@@ -275,12 +275,17 @@ impl PyStatsQuery {
 #[pymethods]
 impl PyTokenlessRuntime {
     #[new]
+    // One bool per RuntimeConfig switch mirrors the keyword-only Python
+    // signature; grouping them into a struct would break the keyword-only
+    // call surface existing callers compile against.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         data_dir=None,
         *,
         compression_enabled=true,
         search_path_sharing_enabled=true,
         diff_compression_enabled=false,
+        mixed_content_enabled=false,
         html_extraction_enabled=true,
         stats_enabled=true,
         sls_enabled=false
@@ -290,6 +295,7 @@ impl PyTokenlessRuntime {
         compression_enabled: bool,
         search_path_sharing_enabled: bool,
         diff_compression_enabled: bool,
+        mixed_content_enabled: bool,
         html_extraction_enabled: bool,
         stats_enabled: bool,
         sls_enabled: bool,
@@ -301,6 +307,7 @@ impl PyTokenlessRuntime {
             compression_enabled,
             search_path_sharing_enabled,
             diff_compression_enabled,
+            mixed_content_enabled,
             html_extraction_enabled,
         })
         .map_err(to_python_error)?;
