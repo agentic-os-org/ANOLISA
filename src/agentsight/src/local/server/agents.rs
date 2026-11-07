@@ -259,31 +259,50 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 /// the main process. We must skip them to avoid counting the same memory multiple times.
 /// On macOS, sysinfo doesn't enumerate threads as separate processes, so this is a no-op.
 fn is_thread(pid: u32) -> bool {
-    if let Ok(status) = std::fs::read_to_string(crate::utils::procfs::proc_pid_entry(pid, "status"))
-    {
-        let mut tgid = None;
-        let mut pid_val = None;
-        for line in status.lines() {
-            if line.starts_with("Tgid:") {
-                tgid = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<u32>().ok());
-            } else if line.starts_with("Pid:") {
-                pid_val = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<u32>().ok());
-            }
-            if tgid.is_some() && pid_val.is_some() {
-                break;
-            }
+    status_says_thread(&crate::utils::procfs::proc_pid_entry(pid, "status"))
+}
+
+/// Whether the `/proc/<pid>/status` file at `path` describes a thread: its
+/// Tgid line names a process other than its own Pid.
+fn status_says_thread(path: &std::path::Path) -> bool {
+    // `/proc/<pid>/status` embeds the process name, and the kernel allows
+    // non-UTF-8 bytes in a name (`prctl(PR_SET_NAME)`, or an executable whose
+    // name is not valid UTF-8). `read_to_string` rejected the whole file, so
+    // the thread passed the `is_thread` check as a process and its memory was
+    // counted a second time under the owning agent. The `Tgid:` and `Pid:`
+    // lines are ASCII, so a lossy decode still finds them.
+    match std::fs::read(path) {
+        Ok(bytes) => parse_thread_status(&String::from_utf8_lossy(&bytes)).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Extract the Tgid/Pid pair from a `/proc/<pid>/status` payload: `Some(true)`
+/// when they differ (the entry is a thread), `Some(false)` when they match,
+/// `None` when either line is missing or does not parse.
+fn parse_thread_status(status: &str) -> Option<bool> {
+    let mut tgid = None;
+    let mut pid_val = None;
+    for line in status.lines() {
+        if line.starts_with("Tgid:") {
+            tgid = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u32>().ok());
+        } else if line.starts_with("Pid:") {
+            pid_val = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u32>().ok());
         }
-        if let (Some(tgid), Some(pid_val)) = (tgid, pid_val) {
-            return tgid != pid_val;
+        if tgid.is_some() && pid_val.is_some() {
+            break;
         }
     }
-    false
+    match (tgid, pid_val) {
+        (Some(tgid), Some(pid_val)) => Some(tgid != pid_val),
+        _ => None,
+    }
 }
 
 fn scan_processes() -> Vec<ProcessInfo> {
@@ -561,6 +580,56 @@ mod tests {
     fn contains_word_no_match() {
         assert!(!contains_word("vim", "claude"));
         assert!(!contains_word("", "claude"));
+    }
+
+    // ── is_thread ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_thread_status_tells_threads_from_processes() {
+        // A thread's Tgid names the owning process; a process's Tgid equals
+        // its own Pid. Either line missing leaves no verdict.
+        assert_eq!(
+            parse_thread_status("Name:\tclaude\nTgid:\t100\nPid:\t101\n"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_thread_status("Name:\tclaude\nTgid:\t100\nPid:\t100\n"),
+            Some(false)
+        );
+        assert_eq!(parse_thread_status("Pid:\t101\n"), None);
+        assert_eq!(parse_thread_status("Tgid:\t100\n"), None);
+    }
+
+    #[test]
+    fn is_thread_reads_a_status_with_a_non_utf8_name() {
+        // `/proc/<pid>/status` embeds the process name, and the kernel allows
+        // non-UTF-8 bytes in a name. `read_to_string` rejected the whole
+        // file, so the thread passed the is_thread check as a process and its
+        // memory was counted a second time under the owning agent.
+        let dir = std::env::temp_dir().join(format!("agentsight-is-thread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let process_dir = dir.join("100");
+        let thread_dir = dir.join("101");
+        std::fs::create_dir_all(&process_dir).expect("create fake proc dir");
+        std::fs::create_dir_all(&thread_dir).expect("create fake proc dir");
+        std::fs::write(
+            process_dir.join("status"),
+            b"Name:\tclaude\xa0-22\nTgid:\t100\nPid:\t100\n",
+        )
+        .expect("write non-UTF-8 status");
+        std::fs::write(
+            thread_dir.join("status"),
+            b"Name:\tclaude\xa0-22\nTgid:\t100\nPid:\t101\n",
+        )
+        .expect("write non-UTF-8 status");
+
+        // The process keeps its own entry; the thread is recognized as one.
+        assert!(!status_says_thread(&process_dir.join("status")));
+        assert!(status_says_thread(&thread_dir.join("status")));
+        // A pid without a status file is not a thread either.
+        assert!(!status_says_thread(&dir.join("102").join("status")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── match_agents ───────────────────────────────────────────────────────
