@@ -17,6 +17,7 @@ _ADAPTERS = {
     "copilot-shell": "copilot-shell",
     "codex": "codex",
     "qwencode": "qwencode",
+    "workbuddy": "workbuddy",
 }
 
 
