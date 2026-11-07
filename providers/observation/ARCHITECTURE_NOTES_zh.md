@@ -26,9 +26,11 @@ Qoder SDK 的 Bridge 管理 daemon/Query 生命周期，并通过原生回调与
 | 模型请求检查/改写 | 仅 TLS API 入口元数据，发送采用为 unknown | 需要请求重组、协议语义、授权动作和服务端结果验证；当前未实现 |
 
 传输观测可独立于原生 Hook。真实 LangChain 模型调用已通过采集验证；Claude Agent
-SDK 完成本机模型调用，但实际 bundled 发送进程缺少受支持的动态 libssl；Qoder 认证后
+SDK 通过显式启用固定指纹的静态 TLS profile 完成本机模型采集；仅动态 libssl 的对照
+仍不支持该发送进程。一次 Claude Code / Token Plan 交互也已完成并采集 TLS 元数据。Qoder 认证后
 的本机直连 fixture 受到实测账号自定义 Provider 能力限制，传输路径仍未验证。具体结果见[SDK 实测矩阵](POC_REPORT_zh.md#不使用原生-hook-的-sdk-验证)。
-现有解析器识别映射中的 `libssl.so` 符号；静态链接、其他 TLS 库和 ABI 需要单独支持。
+默认解析器识别映射中的 `libssl.so` 符号。静态支持限定于单个已验证二进制 profile，
+未知构建拒绝准入；其他 TLS 库和 ABI 需要单独支持。
 
 ## 高代码 SDK 工具的两类执行检查
 
@@ -92,8 +94,8 @@ Source 仅持有获准进程的描述符，不接收完整 AW 控制 Socket。�
 | 固定权限入口 | 固定经审核的程序和对象资产；限制附着目标，处理 helper/collector 退出及权限不足 |
 | 接入查询消费者 | 实现只读身份桥与独立查询 Provider，验证 unknown/缺失证据在消费侧的行为 |
 
-当前 TLS fixture 带间隔用例及 LangChain 模型传输通过；Qoder 模型传输、Claude 发送
-路径支持和受限生产试点仍待完成。
+当前 TLS fixture 带间隔用例、LangChain 模型传输及固定 Claude 静态入口已通过；
+Qoder 模型传输、Claude 固定 profile 的负载范围和受限生产试点仍待完成。
 已有 helper 使用实验操作者指定的动态库和 BPF 对象，经现有 sudo 授权加载；持续部署
 前须收紧到审核过的固定资产。README 中的命令只启动合成 fixture。按上述范围完成验证
 后，可以单独批准只读小规模试点，无需先满足极端并发或通用生产改写的要求。

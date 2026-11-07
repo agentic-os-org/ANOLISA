@@ -51,3 +51,16 @@ for kernel helper compatibility. Host library licensing remains with the system
 package. Its x86-64 uprobe register layout is explicit; there is no kernel BTF
 or guessed instruction-offset dependency. The loader uses Linux UAPI link
 creation because the tested libbpf version lacks the multi-uprobe wrapper.
+
+## Static Claude profile discovery
+
+The Bun static-BoringSSL search was informed by
+[Heron static TLS research](https://github.com/Netis/heron/blob/3e8b2ea09ff7b5665408bc40b520a9bacf88f3c2/docs/design/03-ebpf-static-targets.md)
+and its read-anchored discovery method (Apache-2.0; the document attributes the
+prologue data to eunomia-bpf AgentSight). No Heron code or prologue pattern is
+shipped here. `scripts/static_tls.py` is a new, opt-in exact-hash/file-offset
+profile derived from the locally installed Claude Agent SDK 0.2.88 x86-64 wheel,
+whose bundled CLI reports 2.1.161. Disassembly and receiver-confirmed local TLS
+runs validate the entry. The CLI binary is not redistributed. The earlier
+no-offset constraint still applies to the ptrace comparison; only the read-only
+BPF Source accepts this fixed static profile.

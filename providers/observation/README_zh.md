@@ -46,6 +46,7 @@ Permit 固定 PID/启动 ticks、UID、PID namespace、boot、可执行文件身
 | 选项或资源 | 默认值 / 上限 |
 | --- | --- |
 | `--function` | `SSL_write`，也支持 `SSL_write_ex` |
+| `--static-profile` | 显式选择 `claude-2.1.161-linux-x64`，仅 SSL_write，精确二进制 hash |
 | `--duration` | 10 / 30 秒活跃采集 |
 | `--max-events` | 4096 / 65536 |
 | `--rate` | 每秒 10000 / 100000 条事件 |
@@ -124,6 +125,24 @@ sudo -n unshare --net -- sh -c '
 附着两种 SSL 探针并核验服务端接收。没有认证支持时添加 `--case qoder` 会报告
 BLOCKED，使矩阵返回非零。输出包含私有结果及进程诊断，完成清理后只删除选定 fixture
 输出目录；依赖包及运行证据不入源码。
+
+固定 SDK 内含的 Claude Code 2.1.161 Linux x86-64 Worker 可使用静态 profile。
+复用上述 Python 环境执行：
+
+```bash
+sudo -n unshare --net -- sh -c '
+  ip link set lo up
+  exec runuser -u "$1" -- "$2" "$3" --output "$4"
+' fixture "$(id -un)" "$SDK_PYTHON" \
+  "$PWD/providers/observation/scripts/claude_static_demo.py" \
+  "$PWD/providers/observation/target/claude-static"
+```
+
+预期三次本机模型调用均通过，事件归属真实发送进程，并匹配服务端完整请求摘要。
+该命令不使用模型账号或外部端点。Profile 需显式启用，未知可执行文件 hash 或 API
+在附着前拒绝。传输 runner 和直接 collector 也支持
+`--static-profile claude-2.1.161-linux-x64`；尚无静态 SSL_write_ex profile。
+单独的 Token Plan 交互结果记录在报告中，不纳入自动化 fixture。
 
 Qoder 认证后的直连测试需要账号具备自定义 Provider 能力，fixture 保留 SDK 的真实能力
 检查。凭据文件须仅本人可读；helper 接收文件路径，再通过继承 FD 传入，不将凭据值放入

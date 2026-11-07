@@ -30,12 +30,15 @@ and [SDK](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) guides.
 
 Transport observation runs independently of native Hooks. Real LangChain model
 calls now pass capture validation. Claude Agent SDK completes its local model
-call, but its actual bundled sender lacks supported dynamic libssl. Qoder's
+call with an opt-in fingerprint-pinned static TLS profile. Its dynamic-libssl-only
+control remains unsupported. One interactive Claude Code / Token Plan turn also
+completed with TLS metadata captured. Qoder's
 authenticated direct-model fixture is blocked by the tested account's custom
 provider capability; its transport path remains unverified. See the
 [measured SDK matrix](POC_REPORT.md#sdk-boundaries-without-native-hooks).
 The resolver recognizes mapped `libssl.so` symbols; static linking, other TLS
-libraries and other ABIs require separate support.
+libraries and other ABIs require separate support. Static support is restricted
+to the single validated binary profile; unknown builds fail admission.
 
 ## High-code SDK tools: two enforcement boundaries
 
@@ -112,8 +115,9 @@ The first acceptance should establish usefulness on real low-rate tasks.
 | Fix the privilege entrypoint | Pin reviewed program/object assets, constrain attachment targets and handle helper/collector exits and permission failures |
 | Connect the query consumer | Implement the read-only identity bridge and independent Provider; test missing/unknown evidence consumption |
 
-Paced TLS fixtures and LangChain model transport pass; Qoder model transport,
-Claude sender support and a restricted production pilot remain open. The lab helper loads operator-selected shared
+Paced TLS fixtures, LangChain model transport and the pinned Claude static entry
+pass; Qoder model transport,
+the pinned Claude workload envelope and a restricted production pilot remain open. The lab helper loads operator-selected shared
 libraries and BPF objects using existing sudo authorization; persistent use must
 restrict this to reviewed assets. README commands launch synthetic fixtures only.
 Completing this restricted acceptance can support a separately approved read-only

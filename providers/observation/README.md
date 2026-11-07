@@ -54,6 +54,7 @@ lab loader requires fixed, reviewed assets before persistent deployment.
 | Option or resource | Default / limit |
 | --- | --- |
 | `--function` | `SSL_write`; also `SSL_write_ex` |
+| `--static-profile` | Opt-in `claude-2.1.161-linux-x64`; SSL_write only, exact binary hash |
 | `--duration` | 10 / 30 active seconds |
 | `--max-events` | 4096 / 65536 |
 | `--rate` | 10000 / 100000 events per second |
@@ -144,6 +145,26 @@ receipt. Adding `--case qoder` without authentication support reports BLOCKED an
 makes the suite exit nonzero. Output contains private results and process
 diagnostics; remove only the chosen fixture output after cleanup. Packages and
 generated evidence are not source assets.
+
+For the fixed Claude Code 2.1.161 Linux x86-64 Worker bundled in the pinned SDK,
+run the static-profile demo with the Python environment prepared above:
+
+```bash
+sudo -n unshare --net -- sh -c '
+  ip link set lo up
+  exec runuser -u "$1" -- "$2" "$3" --output "$4"
+' fixture "$(id -un)" "$SDK_PYTHON" \
+  "$PWD/providers/observation/scripts/claude_static_demo.py" \
+  "$PWD/providers/observation/target/claude-static"
+```
+
+Expected: three local model calls with sender-owned events and receiver-confirmed
+wire digests. No model account or external endpoint is used. The profile is
+opt-in; an unknown executable hash or API is rejected before attachment. The
+same selector is available as `--static-profile claude-2.1.161-linux-x64` on the
+transport runner and direct collector. No static SSL_write_ex profile exists.
+The separate interactive Token Plan result is recorded in the report; it is
+not part of the automated fixture.
 
 Qoder's authenticated direct test requires an account with custom-provider access.
 The test keeps that SDK capability check. Use an owner-only token file; the helper

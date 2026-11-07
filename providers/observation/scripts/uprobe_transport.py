@@ -12,6 +12,7 @@ import time
 
 from correlation import process_ref
 from transport_events import Entry, SCHEMA, STAT_NAMES, Sink, project
+from static_tls import PROFILES, resolve_static
 from uprobe_counter import broker, drop_privileges, fingerprint, load_permit, receive_link, resolve
 
 STOPPING = False
@@ -28,7 +29,11 @@ def open_transport(options: argparse.Namespace, uid: int) -> tuple[list[int], di
     pidfd = os.pidfd_open(process["pid"])
     descriptors = (ctypes.c_int * 3)(-1, -1, -1)
     try:
-        path, offset, digest = resolve(process["pid"], options.function)
+        path, offset, digest = (
+            resolve_static(process["pid"], options.function, options.static_profile)
+            if options.static_profile
+            else resolve(process["pid"], options.function)
+        )
         if select.select([pidfd], [], [], 0)[0] or process_ref(process["pid"]) != process:
             raise ValueError("stale_process_identity")
         loader = ctypes.CDLL(str(options.library), use_errno=True)
@@ -55,6 +60,7 @@ def open_transport(options: argparse.Namespace, uid: int) -> tuple[list[int], di
             "library_sha256": digest,
             "symbol_file_offset": offset,
             "bpf_object_sha256": fingerprint(options.object),
+            "static_profile": options.static_profile,
         }
     except BaseException:
         for fd in descriptors:
@@ -96,7 +102,8 @@ def collect(options: argparse.Namespace) -> None:
             options,
             opener=open_transport,
             program=Path(__file__).resolve(),
-            extras=("--object", str(options.object)),
+            extras=("--object", str(options.object))
+            + (("--static-profile", options.static_profile) if options.static_profile else ()),
             fd_count=3,
         )
         drop_privileges(os.getuid(), os.getgid())
@@ -222,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument("--permit", type=Path, required=True)
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--object", type=Path, required=True)
+    parser.add_argument("--static-profile", choices=tuple(PROFILES))
     parser.add_argument("--function", choices=("SSL_write", "SSL_write_ex"), default="SSL_write")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--duration", type=float, default=10)

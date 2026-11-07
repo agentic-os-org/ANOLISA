@@ -22,6 +22,7 @@ from correlation import process_ref
 from run_case import ROOT, line, records, stop, wait_for
 from transport_cases import build
 from uprobe_counter import resolve
+from static_tls import PROFILES, resolve_static
 
 sys.path.insert(0, str(ROOT / "fixtures"))
 from sdk_transport_server import ModelServer
@@ -75,6 +76,7 @@ def one(
     sdk: Path,
     token_file: Path | None = None,
     auth_broker: Path | None = None,
+    static_profile: str | None = None,
 ) -> dict:
     directory = output / kind
     directory.mkdir(mode=0o700)
@@ -205,8 +207,12 @@ def one(
                 entry["executable_sha256"] = hashlib.sha256(
                     Path(f"/proc/{pid}/exe").read_bytes()
                 ).hexdigest()
-                for function in ("SSL_write", "SSL_write_ex"):
-                    resolve(pid, function)
+                selected = static_profile if kind == "claude" and entry["model_sender"] else None
+                for function in (("SSL_write",) if selected else ("SSL_write", "SSL_write_ex")):
+                    if selected:
+                        resolve_static(pid, function, selected)
+                    else:
+                        resolve(pid, function)
                     permit = directory / f"permit-{pid}.json"
                     permit.write_text(
                         json.dumps(
@@ -238,6 +244,7 @@ def one(
                                 "--privileged-fixture-setup",
                                 "--duration",
                                 "30",
+                                *(["--static-profile", selected] if selected else []),
                             ],
                             stderr=error,
                         )
@@ -369,6 +376,7 @@ def main() -> None:
     parser.add_argument("--qoder-sdk", type=Path, required=True)
     parser.add_argument("--qoder-token-file", type=Path)
     parser.add_argument("--auth-broker", type=Path)
+    parser.add_argument("--static-profile", choices=tuple(PROFILES))
     parser.add_argument("--case", choices=["langchain", "claude", "qoder"], action="append")
     options = parser.parse_args()
     if {name for _, name in socket.if_nameindex()} != {"lo"} or os.geteuid() == 0:
@@ -448,6 +456,7 @@ def main() -> None:
                 options.qoder_sdk.resolve(),
                 options.qoder_token_file,
                 options.auth_broker,
+                options.static_profile,
             )
         except Exception as error:
             result = {
