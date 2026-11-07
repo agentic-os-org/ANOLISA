@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 /// System prompt instructing the LLM to rank candidate sessions by relevance.
 const SEMANTIC_SEARCH_SYSTEM_PROMPT: &str = "你是一个会话搜索助手。用户想查找与其查询语义相关的 Agent 会话。\
 请返回与用户查询语义相关的会话，按相关性从高到低排序。\
-仅返回 JSON 数组: [{\"session_id\": \"...\", \"relevance\": \"high|medium\", \"reason\": \"一句话理由\"}]。\
-如果没有相关会话，返回空数组 []。";
+仅返回 JSON 对象: {\"results\": [{\"session_id\": \"...\", \"relevance\": \"high|medium\", \"reason\": \"一句话理由\"}]}。\
+如果没有相关会话，返回 {\"results\": []}。";
 
 /// Default LLM ranking budget. Slow reasoning models legitimately exceed
 /// this; deployments raise it via `search_timeout_secs` in the optimization
@@ -68,6 +68,23 @@ pub struct SemanticSearchResult {
 pub struct SemanticSearchResponse {
     /// Ranked results; empty when nothing matched or the LLM is unavailable.
     pub results: Vec<SemanticSearchResult>,
+}
+
+// JSON-object mode requires an envelope. Keep accepting arrays from existing
+// compatible backends that do not enforce the requested response format.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RankingResponse {
+    Object { results: Vec<SemanticSearchResult> },
+    LegacyArray(Vec<SemanticSearchResult>),
+}
+
+impl RankingResponse {
+    fn into_results(self) -> Vec<SemanticSearchResult> {
+        match self {
+            Self::Object { results } | Self::LegacyArray(results) => results,
+        }
+    }
 }
 
 fn truncate_for_llm(value: &str, max_chars: usize) -> String {
@@ -186,15 +203,14 @@ pub async fn rank_sessions(
 
     let parsed = actix_web::rt::time::timeout(
         timeout,
-        client.chat_json_parsed_labeled::<Vec<SemanticSearchResult>>(
-            messages,
-            Some("semantic_search"),
-        ),
+        client.chat_json_parsed_labeled::<RankingResponse>(messages, Some("semantic_search")),
     )
     .await;
 
     match parsed {
-        Ok(Ok(items)) => normalize_results(anchor_to_candidates(items, candidates)),
+        Ok(Ok(response)) => {
+            normalize_results(anchor_to_candidates(response.into_results(), candidates))
+        }
         Ok(Err(error)) => {
             log::warn!("semantic_search: LLM ranking failed, returning empty results: {error:#}");
             vec![]
