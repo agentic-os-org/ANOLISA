@@ -162,7 +162,7 @@ for framework in openclaw hermes qwenpaw qoder qwenwork claude-code codex openco
 done
 install -m 0644 adapters/tokenless/manifest.json "$adapters/"
 install -m 0644 adapters/tokenless/hook_dispatch.py "$adapters/"
-for host in claude-code qoder qwenwork opencode cosh-ng copilot-shell codex qwencode unknown; do
+for host in claude-code qoder qwenwork opencode cmd cosh-ng copilot-shell codex qwencode unknown; do
     install -d -m 0755 "$adapters/$host"
     install -m 0644 "adapters/tokenless/$host/hook_adapter.py" "$adapters/$host/"
 done
