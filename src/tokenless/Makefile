@@ -270,6 +270,7 @@ test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cle
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
 	python3 tests/test_stats_http.py
+	python3 tests/test_windows_ci.py
 
 .PHONY: test-headroom-pipeline-worker
 test-headroom-pipeline-worker:
