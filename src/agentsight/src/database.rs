@@ -11,6 +11,9 @@ use agentsight_sqlite_lifecycle::{
     LifecycleError, MaintenanceJob, MaintenanceWorker, MaintenanceWorkerState,
 };
 
+#[cfg(target_os = "linux")]
+mod checkpoint_schedule;
+
 /// Stable identity of an SQLite database known to AgentSight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DatabaseId {
@@ -427,29 +430,30 @@ impl DatabaseManager {
         budget: Option<std::sync::Arc<crate::utils::cpu_budget::CpuBudget>>,
         mut action: impl FnMut(bool) -> Result<bool, LifecycleError> + Send + 'static,
     ) -> Result<Box<dyn MaintenanceJob>, DatabaseManagerError> {
-        let mut last_cleanup: Option<Instant> = None;
-        let mut last_checkpoint: Option<Instant> = None;
-        let mut continuation = false;
+        let mut schedule =
+            checkpoint_schedule::CheckpointSchedule::new(budget.is_some(), cleanup_interval);
+        let mut wal_path = self
+            .entries
+            .get(&id)
+            .ok_or(DatabaseManagerError::NotRegistered(id.as_str()))?
+            .path
+            .as_os_str()
+            .to_os_string();
+        wal_path.push("-wal");
         let tick = if budget.is_some() {
             Duration::from_millis(20)
         } else {
             Duration::from_secs(1)
         };
-        // Smaller WAL copy intervals limit the cost of a non-preemptible checkpoint.
-        let checkpoint_interval = if budget.is_some() {
-            Duration::from_millis(200)
-        } else {
-            Duration::from_secs(1)
-        };
         self.maintenance_job(id, cleanup_interval.min(tick), move || {
-            let cleanup =
-                continuation || last_cleanup.is_none_or(|last| last.elapsed() >= cleanup_interval);
-            if budget.is_some()
-                && !cleanup
-                && last_checkpoint.is_some_and(|last| last.elapsed() < checkpoint_interval)
-            {
+            let wal_bytes = if budget.is_some() {
+                std::fs::metadata(&wal_path).map_or(0, |metadata| metadata.len())
+            } else {
+                0
+            };
+            let Some(cleanup) = schedule.next(Instant::now(), wal_bytes) else {
                 return Ok(());
-            }
+            };
             let _permit = if let Some(budget) = &budget {
                 let Some(permit) = budget
                     .try_acquire(crate::utils::cpu_budget::WorkClass::Maintenance)
@@ -462,11 +466,7 @@ impl DatabaseManager {
                 None
             };
             let complete = action(cleanup)?;
-            continuation = cleanup && !complete;
-            last_checkpoint = Some(Instant::now());
-            if cleanup && complete {
-                last_cleanup = Some(Instant::now());
-            }
+            schedule.completed(cleanup, complete, Instant::now(), wal_bytes);
             Ok(())
         })
     }

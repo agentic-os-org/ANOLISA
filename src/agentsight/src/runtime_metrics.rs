@@ -301,6 +301,30 @@ fn increment_counter(name: &'static str, current: u64, previous: u64) {
 
 fn describe_metrics() {
     metrics::describe_gauge!(
+        "agentsight_sqlite_wal_bytes",
+        "WAL file bytes before checkpoint admission"
+    );
+    metrics::describe_gauge!(
+        "agentsight_sqlite_wal_frames",
+        "WAL frames reported by the latest passive checkpoint"
+    );
+    metrics::describe_gauge!(
+        "agentsight_sqlite_wal_copied_frames",
+        "Frames copied at the latest passive checkpoint"
+    );
+    metrics::describe_gauge!(
+        "agentsight_sqlite_wal_pending_frames",
+        "WAL frames still pinned after the latest passive checkpoint"
+    );
+    metrics::describe_counter!(
+        "agentsight_sqlite_checkpoints_total",
+        "Passive checkpoint results by database and outcome"
+    );
+    metrics::describe_histogram!(
+        "agentsight_sqlite_checkpoint_seconds",
+        "Checkpoint duration by database and mode"
+    );
+    metrics::describe_gauge!(
         "agentsight_completion_queue_count",
         "Raw completed captures awaiting CPU admission"
     );
