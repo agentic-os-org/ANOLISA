@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "RunCommand",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TOKENLESS_AGENT_ID=trae bash \"@TOKENLESS_ADAPTER_DIR@/hooks/run-hook.sh\" rewrite_hook.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TOKENLESS_AGENT_ID=trae bash \"@TOKENLESS_ADAPTER_DIR@/hooks/run-hook.sh\" tool_ready_hook.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(?!(?:Read|Glob|LS)$).+",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TOKENLESS_AGENT_ID=trae bash \"@TOKENLESS_ADAPTER_DIR@/hooks/run-hook.sh\" compress_response_hook.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
