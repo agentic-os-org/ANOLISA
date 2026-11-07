@@ -185,6 +185,7 @@ class TokenlessConfig:
     rtk_enabled: bool = True
     search_path_sharing_enabled: bool = True
     diff_compression_enabled: bool = False
+    mixed_content_enabled: bool = False
     html_extraction_enabled: bool = True
 
     def __post_init__(self) -> None:
@@ -346,6 +347,7 @@ class TokenlessSdk:
             self.config.data_dir,
             search_path_sharing_enabled=self.config.search_path_sharing_enabled,
             diff_compression_enabled=self.config.diff_compression_enabled,
+            mixed_content_enabled=self.config.mixed_content_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,
         )
         self._rtk_launcher = self._resolve_launcher() if self.config.rtk_enabled else None

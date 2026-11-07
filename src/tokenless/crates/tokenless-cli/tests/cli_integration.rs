@@ -2426,6 +2426,83 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
 }
 
 #[test]
+fn mixed_content_compression_follows_its_opt_in_switch() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let table = (0..40)
+        .map(|index| format!("{index},record-{index}-{}", "payload ".repeat(8)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let body = serde_json::to_string_pretty(
+        &(0..40)
+            .map(|index| {
+                serde_json::json!({
+                    "id": index,
+                    "message": format!("record-{index}-{}", "x".repeat(60)),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let content = format!("HEAD /api/items HTTP/1.1\n\n{body}\n\n```csv\n{table}\n```\n\ndone\n");
+    for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+        let mut command = tokenless_bin();
+        command
+            .env("TOKENLESS_DATA_DIR", fixture.data_dir.join("mixed"))
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB")
+            .env_remove("TOKENLESS_MIXED_CONTENT_ENABLED")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0");
+        if let Some(value) = enabled {
+            command.env("TOKENLESS_MIXED_CONTENT_ENABLED", value);
+        }
+        let output = spawn_with_stdin(
+            &mut command,
+            &["compress"],
+            &build_log_request(&content, "success", "mixed-integration"),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        if enabled.is_none() || enabled == Some("0") {
+            assert_eq!(result["disposition"], "passthrough");
+            assert_eq!(result["output"], content);
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["disposition"], "applied");
+        // Both regions route: the JSON region may select TOON or cleanup
+        // (policy-dependent), but the tabular region always compacts.
+        let operations = result["applied_operations"].as_array().unwrap();
+        assert!(
+            operations.contains(&serde_json::json!("tabular_compaction")),
+            "{operations:?}"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|op| ["toon", "json_cleanup"].contains(&op.as_str().unwrap())),
+            "{operations:?}"
+        );
+        let compressed = result["output"].as_str().unwrap();
+        assert!(compressed.len() < content.len());
+        // Surrounding prose is byte-for-byte.
+        assert!(compressed.starts_with("HEAD /api/items HTTP/1.1\n\n"));
+        assert!(compressed.ends_with("\n\ndone\n"));
+        // The fence label survives untouched.
+        assert!(compressed.contains("```csv\n"));
+    }
+}
+
+#[test]
 fn compress_post_tool_reduces_and_restores_build_logs() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,

@@ -39,6 +39,9 @@ pub struct EntryOptions {
     pub diff_compression_enabled: bool,
     /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
+    /// Whether structured regions inside mixed tool outputs may be compressed
+    /// individually. Disabled by default.
+    pub mixed_content_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
     /// Tokenless executable whose `rtk` subcommand runs rewritten PreTool commands.
@@ -456,6 +459,39 @@ fn keeps_command_native(command: &str) -> bool {
 /// Uses the same shell segments and transparent wrappers as PreTool ownership.
 pub(crate) fn is_search_command(command: &str) -> bool {
     command_has_segment(command, native_output::is_search)
+}
+
+/// Whether some shell segment of the command produces output that is not the
+/// search's own bytes: a genuine producer (`cargo build`, `xargs cat`), not a
+/// presentation filter (`sort`, `head`, `wc`) and not a no-op (`cd`). A pure
+/// search — however wrapped or filtered — keeps its complete-output
+/// protection; only a search feeding a producer can have its guard relaxed.
+pub(crate) fn command_has_producer_segment(command: &str) -> bool {
+    command_has_segment(command, |words| {
+        if native_output::is_search(words) {
+            return false;
+        }
+        native_output::inner_command(words).is_some_and(|inner| {
+            !matches!(
+                inner,
+                "sort"
+                    | "head"
+                    | "tail"
+                    | "uniq"
+                    | "wc"
+                    | "column"
+                    | "tee"
+                    | "tac"
+                    | "nl"
+                    | "pr"
+                    | "fmt"
+                    | "cat"
+                    | "cd"
+                    | "pushd"
+                    | "popd"
+            )
+        })
+    })
 }
 
 fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) -> bool {
@@ -1075,6 +1111,7 @@ pub(crate) fn post_tool_with_store(
                 search_path_sharing_enabled: options.search_path_sharing_enabled,
                 diff_compression_enabled: options.diff_compression_enabled,
                 html_extraction_enabled: options.html_extraction_enabled,
+                mixed_content_enabled: options.mixed_content_enabled,
                 stash_enabled: options.stash_enabled,
                 require_reversibility: true,
                 force_json: false,
@@ -1390,6 +1427,7 @@ mod tests {
             search_path_sharing_enabled: true,
             diff_compression_enabled: false,
             html_extraction_enabled: false,
+            mixed_content_enabled: false,
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),

@@ -18,6 +18,7 @@ use tokenless_protocol::{
 
 use super::arbitration::{ArbitrationInput, Verdict, decide};
 use super::content::detect;
+use super::mixed;
 use super::stash_ledger::StashLedger;
 
 /// Policy resolved by Runtime for one PostTool call.
@@ -35,6 +36,7 @@ pub(crate) struct PostToolPipelineConfig {
     pub(crate) force_json: bool,
     pub(crate) allow_toon: bool,
     pub(crate) min_toon_chars: usize,
+    pub(crate) mixed_content_enabled: bool,
     pub(crate) json: JsonCompressionConfig,
 }
 
@@ -86,12 +88,25 @@ impl PostToolPipeline {
         // match; other domain compressors may drop rows or rewrite source text.
         // Compound commands have no per-command output boundaries. Protect the
         // complete result when any segment searches, even a quiet condition.
-        let protect_search_output = request.tool_name == "Grep"
-            || (request.content_origin == ContentOrigin::CommandOutput
-                && request
-                    .command
-                    .as_deref()
-                    .is_some_and(crate::entry::is_search_command));
+        // A compound command whose segments search is protected from the
+        // whole-content routes, but its non-search runs may still compress
+        // through the search-guarded mixed path below.
+        let search_command = request.content_origin == ContentOrigin::CommandOutput
+            && request
+                .command
+                .as_deref()
+                .is_some_and(crate::entry::is_search_command);
+        // Only a search feeding a genuine producer segment relaxes the
+        // guard: a pure search — however wrapped or filtered — keeps its
+        // complete-output protection on the search route.
+        let compound_search_output = request.content_origin == ContentOrigin::CommandOutput
+            && request.tool_name != "Grep"
+            && search_command
+            && request
+                .command
+                .as_deref()
+                .is_some_and(crate::entry::command_has_producer_segment);
+        let protect_search_output = request.tool_name == "Grep" || search_command;
         // Data printed by a shell file read (`cat build.log`) compresses like
         // command output; a page printed that way is source the agent may edit,
         // so only HTML keeps it verbatim. Read tool results were excluded above.
@@ -120,10 +135,32 @@ impl PostToolPipeline {
             && request.capabilities.replace_with_text;
         let search_candidate = config.search_path_sharing_enabled
             && (protect_search_output
+                && (!compound_search_output || !config.mixed_content_enabled)
                 || (content_type == ContentType::SearchResults
                     && (request.content_origin == ContentOrigin::ApiResponse
                         || (request.content_origin == ContentOrigin::CommandOutput
                             && SearchResultsCompressor.is_path_list(&request.content)))))
+            && request.capabilities.replace_with_text;
+        // Mixed-content routing fires only when no whole-content domain
+        // matched: standalone documents keep their existing routes and
+        // eligibility checks untouched. Per-region compression reuses the
+        // same compressors, arbitration and stash lifecycle as those routes.
+        // Tabular regions are recognized only inside explicit fences (a bare
+        // CSV block has no verifiable boundary); bare regions are JSON only.
+        // Search output stays out even when the search route itself is
+        // switched off: path-sharing off means do-not-touch, not free rein.
+        // A compound command with a search segment reaches the mixed route
+        // as a search-guarded candidate instead: every line its search may
+        // have produced is preserved byte-for-byte, and only the runs the
+        // command's other segments produced are offered to the log domain.
+        let mixed_candidate = config.mixed_content_enabled
+            && !diff_candidate
+            && !html_candidate
+            && !json_candidate
+            && !build_log_candidate
+            && !tabular_candidate
+            && !search_candidate
+            && (!protect_search_output || compound_search_output)
             && request.capabilities.replace_with_text;
         if !diff_candidate
             && !html_candidate
@@ -131,6 +168,15 @@ impl PostToolPipeline {
             && !build_log_candidate
             && !tabular_candidate
             && !search_candidate
+            && (!mixed_candidate
+                || (compound_search_output
+                    && !mixed::search_guarded_runs(&request.content)
+                        .iter()
+                        .any(|segment| {
+                            matches!(segment, mixed::GuardedSegment::Run(run)
+                            if mixed::search_guarded_run_is_compressible(run))
+                        }))
+                || (!compound_search_output && !mixed::has_recognizable_regions(&request.content)))
         {
             return passthrough(request, before_tokens, content_type);
         }
@@ -297,7 +343,7 @@ impl PostToolPipeline {
                 stash_errors: 0,
                 unrecoverable_truncations: None,
             }
-        } else {
+        } else if tabular_candidate {
             let outcome = TabularCompressor.compress(&request.content);
             DomainCandidate {
                 output: outcome.output,
@@ -313,6 +359,92 @@ impl PostToolPipeline {
                 stash_writes: outcome.stash_writes,
                 stash_errors: outcome.metrics.stash_errors,
                 unrecoverable_truncations: None,
+            }
+        } else if compound_search_output {
+            // Search-guarded compound output: the command's segments search,
+            // so every line a search hit could occupy is preserved
+            // byte-for-byte and only the runs between them reach the log
+            // domain. A run the compressor rejects (or that saves nothing)
+            // stays byte-for-byte; a rejected run's tentative Stash writes
+            // still reach the ledger, and a failed write surfaces as a
+            // stash error instead of a silent pass, matching every other
+            // domain's storage contract.
+            let mut output = String::with_capacity(request.content.len());
+            let mut operations: Vec<AppliedOperation> = Vec::new();
+            let recoverability = tokenless_compressors::Recoverability::Lossless;
+            let mut stash_writes = Vec::new();
+            let mut stash_errors = 0usize;
+            let mut changed = false;
+            for segment in mixed::search_guarded_runs(&request.content) {
+                match segment {
+                    mixed::GuardedSegment::SearchHit(line) => output.push_str(line),
+                    mixed::GuardedSegment::Run(run) => {
+                        let outcome = mixed::compress_search_guarded_run(
+                            &run,
+                            attached_store,
+                            &request.capabilities.recovery,
+                        );
+                        match outcome {
+                            Some(outcome) => {
+                                stash_writes.extend(outcome.stash_writes);
+                                stash_errors += outcome.stash_errors;
+                                if let Some(compressed) = outcome.output {
+                                    changed = true;
+                                    operations.extend(outcome.operations);
+                                    output.push_str(&compressed);
+                                } else {
+                                    for line in run.lines {
+                                        output.push_str(line);
+                                    }
+                                }
+                            }
+                            None => {
+                                for line in run.lines {
+                                    output.push_str(line);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed && stash_writes.is_empty() && stash_errors == 0 {
+                return passthrough(request, before_tokens, content_type);
+            }
+            DomainCandidate {
+                output,
+                operations,
+                recoverability,
+                stash_writes,
+                stash_errors,
+                unrecoverable_truncations: None,
+            }
+        } else {
+            // Mixed-content regions. Region recognition ran inside
+            // `mixed::compress_regions`; every rejected or unsupported region
+            // stays byte-for-byte in the candidate. `None` from
+            // `compress_regions` means no region changed and no tentative
+            // Stash write was produced — a passthrough, not a no-savings
+            // verdict, so unsupported content keeps the plain route's
+            // disposition. A zero-operation result (changed regions that all
+            // saved nothing, or unchanged regions carrying tentative writes)
+            // still reaches the arbiter and reads as `no_savings`, matching
+            // the standalone JSON route.
+            match mixed::compress_regions(
+                &request.content,
+                config,
+                attached_store,
+                &request.capabilities.recovery,
+                config.allow_toon && request.capabilities.replace_with_text,
+            ) {
+                Some(outcome) => DomainCandidate {
+                    output: outcome.output,
+                    operations: outcome.operations,
+                    recoverability: outcome.recoverability,
+                    stash_writes: outcome.stash_writes,
+                    stash_errors: outcome.stash_errors,
+                    unrecoverable_truncations: outcome.unrecoverable_truncations,
+                },
+                None => return passthrough(request, before_tokens, content_type),
             }
         };
 
@@ -489,6 +621,8 @@ mod tests {
     include!("tests/tabular_pipeline_tests.rs");
     include!("tests/html_pipeline_tests.rs");
     include!("tests/path_list_pipeline_tests.rs");
+    use super::super::content::MAX_SCAN_BYTES;
+    include!("tests/mixed_pipeline_tests.rs");
     fn search_input() -> String {
         (1..30)
             .map(|line| format!("crates/long_directory/src/search_file.rs:{line}:  value  \r\n"))
@@ -853,6 +987,7 @@ mod tests {
             force_json: true,
             allow_toon: false,
             min_toon_chars: usize::MAX,
+            mixed_content_enabled: false,
             json: JsonCompressionConfig {
                 truncate_arrays_at,
                 array_tail_preserve: 0,
@@ -1103,6 +1238,13 @@ mod tests {
         let mut config = config(Duration::from_secs(1), 32);
         config.force_json = false;
         config.require_reversibility = true;
+        config
+    }
+
+    fn mixed_config() -> PostToolPipelineConfig {
+        let mut config = build_log_config();
+        config.force_json = false;
+        config.mixed_content_enabled = true;
         config
     }
 

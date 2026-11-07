@@ -240,6 +240,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "rtk_enabled",
                 "search_path_sharing_enabled",
                 "diff_compression_enabled",
+                "mixed_content_enabled",
                 "html_extraction_enabled",
             },
         )

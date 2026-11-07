@@ -781,6 +781,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     ),
                     diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
                     html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
+                    mixed_content_enabled: env_flag("TOKENLESS_MIXED_CONTENT_ENABLED", false),
                     stash_enabled: true,
                     rtk_launcher,
                     rtk_data_dir,

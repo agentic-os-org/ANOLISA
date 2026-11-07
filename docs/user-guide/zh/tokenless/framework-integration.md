@@ -51,6 +51,7 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 | 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录、已识别的原生 Shell 搜索，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
 | 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` 显式开启（默认关闭）且宿主支持文本替换时，任何整内容领域都无法处理的混合工具输出 | fenced `json`/`csv`/`tsv` 块与括号平衡的裸 JSON 文档按区域用与独立路由相同的策略压缩；周围文本逐字节保留，被拒绝的区域逐字节保留 |
 | 长纯文本、Stack Trace、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于

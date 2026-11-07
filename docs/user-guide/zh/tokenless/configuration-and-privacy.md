@@ -134,6 +134,30 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 
 有限样本已验证局部转写及原文恢复。
 
+## 可选混合内容区域压缩
+
+混合内容区域压缩默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_MIXED_CONTENT_ENABLED=1` 开启；取消该变量或设为 `0` 关闭。`1`、`true`、
+`yes`（不区分大小写）表示开启。此开关独立于总压缩开关，不是 `config.json` 字段。
+开启时，设置 `TOKENLESS_COMPRESSION_ENABLED=0` 会测量候选，但仍返回原文。
+
+SDK 与原生绑定不读取该环境变量。要在那里开启，Rust 将
+`RuntimeConfig.mixed_content_enabled` 设为 `true`，Python 传入
+`TokenlessConfig(mixed_content_enabled=True)` 或原生 `TokenlessRuntime` 的同名参数。
+
+该路由处理既不是完整结构化文档、也不归其他领域处理的工具输出。它识别边界显式可验证
+的类型化区域——info string 标注 `json`、`csv` 或 `tsv` 的围栏代码块（缩进不超过
+3 个空格，由同标记且长度不小于开 fence 的闭合 fence 终结），以及在首 3 列内以 `{` 或
+`[` 开始且括号平衡的裸 JSON 文档——并让每个区域走与独立路由完全相同的压缩器和策略。
+区域周围的散文、日志和分隔符逐字节保留；压缩器拒绝的区域保持原样；选择 TOON 的
+fenced JSON 区域其 fence label 改写为 `toon`（仅改写 info word，其余属性保留原文与顺序）；未闭合的 fence 或不平衡的文档保护其余输出。区域只在与其他领域相同的
+64 KiB / 200 行检测窗口内识别；开在窗口之外的区域逐字节保留。仅当不涉及 Grep 工具
+输出且宿主可以用文本替换输出时，区域才会运行。整个候选仍需通过 Pipeline 的字符与
+token 仲裁；没有区域发生变化且未产生暂存 Stash 写入的候选直接透传；有识别区域但
+压缩后无节省的候选按 `no_savings` 处置，与独立路由一致。
+
+有限样本已验证区域压缩及原文恢复。
+
 ## 环境变量
 
 ### 用户常用变量
@@ -149,6 +173,7 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关 | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` | 混合内容区域压缩开关 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
 
