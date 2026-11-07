@@ -6,6 +6,11 @@ AGENT="${ANOLISA_TARGET:-opencode}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PLUGIN_SOURCE="$ADAPTER_DIR/opencode/plugin.js"
+if [ -z "${HOME:-}" ] && [ -z "${TOKENLESS_OPENCODE_CONFIG_DIR:-}" ] &&
+        [ -z "${OPENCODE_CONFIG_DIR:-}" ] && [ -z "${XDG_CONFIG_HOME:-}" ]; then
+    echo "[${COMPONENT}] ERROR: cannot resolve the OpenCode config directory: HOME and all overrides are unset" >&2
+    exit 1
+fi
 CONFIG_HOME="${TOKENLESS_OPENCODE_CONFIG_DIR:-${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}}"
 PLUGIN_LINK="$CONFIG_HOME/plugins/tokenless.js"
 
