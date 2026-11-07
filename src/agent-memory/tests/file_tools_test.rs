@@ -175,6 +175,31 @@ fn remove_file_then_dir() {
     svc.remove("d", true).unwrap();
 }
 
+#[test]
+fn remove_empty_dir_without_recursive() {
+    let (_t, svc) = setup();
+    // An empty dir has nothing to recurse over: recursive=false must
+    // succeed per the tool description ("recursive=true is required to
+    // remove non-empty directories").
+    svc.mkdir("empty").unwrap();
+    svc.remove("empty", false).unwrap();
+    // recursive=true on an empty dir stays valid — it takes the normal
+    // recursive path, which removes the (empty) directory as well.
+    svc.mkdir("empty2").unwrap();
+    svc.remove("empty2", true).unwrap();
+    let err = svc.remove("empty", false).unwrap_err();
+    assert!(matches!(err, MemoryError::NotFound(_)));
+
+    // A dir that becomes empty only after its content is removed behaves
+    // the same way on the next call.
+    svc.mkdir("d2").unwrap();
+    svc.write("d2/f.md", "f", false).unwrap();
+    let err = svc.remove("d2", false).unwrap_err();
+    assert!(matches!(err, MemoryError::InvalidArgument(_)));
+    svc.remove("d2/f.md", false).unwrap();
+    svc.remove("d2", false).unwrap();
+}
+
 // ---------- mem_list ----------
 
 #[test]
