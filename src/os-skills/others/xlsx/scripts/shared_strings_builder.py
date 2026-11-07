@@ -122,6 +122,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # The generated XML declares encoding="UTF-8"; pin stdout to UTF-8 so
+    # non-ASCII strings survive hosts running a C/POSIX locale instead of
+    # crashing mid-output and leaving a truncated file behind the redirect.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
+
     if args.file:
         try:
             raw = load_from_file(args.file)
