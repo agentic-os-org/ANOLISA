@@ -131,13 +131,16 @@ def shift_chart_range(text: str, at: int, delta: int) -> str:
       Sheet1!$B$5:$B$20
       'Q1 Data'!$A$3:$A$15
     """
-    # Split on the "!" to preserve sheet name
-    if '!' not in text:
+    # The delimiter can also occur inside a quoted worksheet name. Match
+    # its complete qualifier so digit-bearing sheet names stay untouched.
+    qualified = re.fullmatch(r"('(?:[^']|'')+'|[^'!]+)!(.+)", text)
+    if qualified is None:
         return text
-    bang = text.index('!')
-    sheet_part = text[:bang + 1]
-    range_part = text[bang + 1:]
-    return sheet_part + shift_formula(range_part, at, delta)
+    sheet_part, range_part = qualified.groups()
+    # Foreign workbooks and 3D sheet ranges are outside this local edit.
+    if any(marker in sheet_part for marker in ("[", "]", ":")):
+        return text
+    return sheet_part + "!" + shift_formula(range_part, at, delta)
 
 
 # ---------------------------------------------------------------------------
