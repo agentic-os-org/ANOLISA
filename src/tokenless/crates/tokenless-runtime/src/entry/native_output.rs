@@ -69,7 +69,7 @@ pub(super) fn is_search(words: &[String]) -> bool {
     inner_command(words).is_some_and(|command| matches!(command, "grep" | "rg"))
 }
 
-fn inner_command(words: &[String]) -> Option<&str> {
+pub(super) fn inner_command(words: &[String]) -> Option<&str> {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         if is_environment_assignment(word)
