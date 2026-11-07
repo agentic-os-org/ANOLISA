@@ -1525,3 +1525,49 @@ fn restore_accepts_directory_orders_and_dotted_forms_extraction_tolerates() {
         }
     }
 }
+
+#[test]
+fn reclaim_removes_stale_atomic_write_staging_from_the_meta_dir() {
+    let (_tmp, svc) = setup();
+    // A crash between `write_atomic`'s staging and its rename leaves one of
+    // these in the meta-directory root, one level above `snapshots/`, where no
+    // listing, git status or tar export can see it.
+    let old = svc.mount.meta_dir.join(".memory-write-OLD.tmp");
+    let young = svc.mount.meta_dir.join(".memory-write-NEW.tmp");
+    std::fs::write(&old, b"junk").unwrap();
+    std::fs::write(&young, b"junk").unwrap();
+    age_file(&old, 2 * 24 * 3600);
+    // Not ours: neither the prefix nor the suffix matches.
+    let other = svc.mount.meta_dir.join("consent.toml");
+    std::fs::write(&other, b"auto_consolidation = \"deny\"\n").unwrap();
+    age_file(&other, 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        agent_memory::snapshot::reclaim::DEFAULT_MIN_ARTIFACT_AGE,
+    );
+    assert_eq!(report.partials_removed, 1);
+    assert_eq!(report.kept_young, 1);
+    assert!(!old.exists(), "stale staging must be reclaimed");
+    assert!(young.exists(), "staging below the age guard must survive");
+    assert!(other.exists(), "other meta files must be left alone");
+}
+
+#[test]
+fn reclaim_reaches_meta_staging_without_a_snapshots_dir() {
+    let (_tmp, svc) = setup();
+    // No snapshot has ever been taken, so `snapshots/` does not exist. The
+    // meta sweep must still run: a crash on the first atomic write is exactly
+    // the case that leaves staging behind.
+    assert!(!svc.mount.meta_dir.join("snapshots").exists());
+    let old = svc.mount.meta_dir.join(".memory-write-ORPHAN.tmp");
+    std::fs::write(&old, b"junk").unwrap();
+    age_file(&old, 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        agent_memory::snapshot::reclaim::DEFAULT_MIN_ARTIFACT_AGE,
+    );
+    assert_eq!(report.partials_removed, 1);
+    assert!(!old.exists());
+}
