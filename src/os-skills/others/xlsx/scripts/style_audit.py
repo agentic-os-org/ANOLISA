@@ -266,15 +266,11 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
 
         for cell in ws.findall(f".//{NSP}c"):
             cell_ref = cell.get("r", "?")
-            s_attr = cell.get("s")
+            s_attr = cell.get("s", "0")
             has_formula = cell.find(f"{NSP}f") is not None
             v_elem = cell.find(f"{NSP}v")
             value_text = v_elem.text if v_elem is not None else None
             total_cells += 1
-
-            # Skip cells with no style
-            if s_attr is None:
-                continue
 
             try:
                 s_idx = int(s_attr)
