@@ -116,12 +116,21 @@ impl EmbeddingProvider for OpenAiEmbedding {
             .await
             .map_err(|e| MemoryError::Other(format!("OpenAI embed parse: {e}")))?;
 
+        // An empty `data` array is a provider contract violation, not an
+        // embedding: falling back to a zero vector here would silently
+        // persist a meaningless vector for the document (it can never
+        // match anything) while the caller believes the embed succeeded.
         let vector = data
             .data
             .into_iter()
             .next()
             .map(|d| d.embedding)
-            .unwrap_or_else(|| vec![0.0_f32; self.dimensions.load(Ordering::Relaxed)]);
+            .ok_or_else(|| {
+                MemoryError::Other(format!(
+                    "OpenAI embed error: model {} returned an empty data array",
+                    self.model
+                ))
+            })?;
 
         // Lock in the true dimensionality from the response so the
         // startup estimate doesn't mislabel the provider (e.g. DashScope
@@ -133,5 +142,32 @@ impl EmbeddingProvider for OpenAiEmbedding {
 
     fn dimensions(&self) -> usize {
         self.dimensions.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::testutil::serve_once;
+
+    #[tokio::test]
+    async fn empty_data_array_is_an_error_not_a_zero_vector() {
+        let url = serve_once(200, r#"{"data": []}"#);
+        let provider = OpenAiEmbedding::new("k", "text-embedding-3-small", Some(&url)).unwrap();
+        let result = provider.embed("hello world").await;
+        let err = result.expect_err("a 200 response carrying no embedding must surface an error");
+        assert!(
+            err.to_string().contains("empty data array"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_embedding_round_trips_and_observes_dims() {
+        let url = serve_once(200, r#"{"data": [{"embedding": [0.25, 0.5]}]}"#);
+        let provider = OpenAiEmbedding::new("k", "text-embedding-3-small", Some(&url)).unwrap();
+        let embedding = provider.embed("hello world").await.unwrap();
+        assert_eq!(embedding.vector, vec![0.25_f32, 0.5]);
+        assert_eq!(provider.dimensions(), 2);
     }
 }

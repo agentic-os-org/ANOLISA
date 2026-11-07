@@ -85,16 +85,48 @@ impl EmbeddingProvider for OllamaEmbedding {
             .await
             .map_err(|e| MemoryError::Other(format!("Ollama embed parse: {e}")))?;
 
-        let vector = data
-            .embeddings
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| vec![0.0_f32; self.dimensions]);
+        // An empty `embeddings` array is a provider contract violation,
+        // not an embedding: falling back to a zero vector here would
+        // silently persist a meaningless vector for the document (it can
+        // never match anything) while the caller believes the embed
+        // succeeded. Mirrors the OpenAI provider's empty-data handling.
+        let vector = data.embeddings.into_iter().next().ok_or_else(|| {
+            MemoryError::Other(format!(
+                "Ollama embed error: model {} returned an empty embeddings array",
+                self.model
+            ))
+        })?;
 
         Ok(Embedding { vector })
     }
 
     fn dimensions(&self) -> usize {
         self.dimensions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::testutil::serve_once;
+
+    #[tokio::test]
+    async fn empty_embeddings_array_is_an_error_not_a_zero_vector() {
+        let url = serve_once(200, r#"{"embeddings": []}"#);
+        let provider = OllamaEmbedding::new("nomic-embed-text", &url).unwrap();
+        let result = provider.embed("hello world").await;
+        let err = result.expect_err("a 200 response carrying no embedding must surface an error");
+        assert!(
+            err.to_string().contains("empty embeddings array"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_embedding_round_trips() {
+        let url = serve_once(200, r#"{"embeddings": [[0.25, 0.5]]}"#);
+        let provider = OllamaEmbedding::new("nomic-embed-text", &url).unwrap();
+        let embedding = provider.embed("hello world").await.unwrap();
+        assert_eq!(embedding.vector, vec![0.25_f32, 0.5]);
     }
 }
