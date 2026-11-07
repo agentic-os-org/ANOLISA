@@ -116,3 +116,6 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 
 `aw config add-native-source` 记录原生来源引用，保留原文件。通用 loader API 保留原生
 配置，分别报告加载、准入与激活状态；用法见[配置说明](../../docs/user-guide/zh/aw/configuration.md#记录原生配置来源)。
+
+本地审计消费者可以使用 `aw audit-export` 在服务停止后读取保留的元数据。
+所属状态目录与有界读取接口见[审计导出](../../docs/user-guide/zh/aw/cli-reference.md#aw-audit-export)。

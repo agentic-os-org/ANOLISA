@@ -216,7 +216,7 @@ class NativeResidentServiceTests(ResidentPolicyTests, unittest.IsolatedAsyncioTe
         self.assertEqual([item["kind"] for item in completed], ["skipped", "provider", "skipped", "provider"])
         self.assertTrue(all(item["status"] == "ok" and item["failure"] is None for item in completed))
         sequences = []
-        for path in (self.root / "s/journal").iterdir():
+        for path in (self.root / "s/journal").glob("*.jsonl"):
             records = [json.loads(line)["record"] for line in path.read_text().splitlines()]
             steps = [record["call"]["step_id"] for record in records
                      if record.get("phase") == "completed" and record.get("call", {}).get("method") == "invoke"]

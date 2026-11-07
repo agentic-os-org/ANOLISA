@@ -74,6 +74,14 @@ pub fn drained(service: &Service) {
 pub fn audit(fixture: &Fixture, event: &str, expected: &[(&str, bool)], terminal: &str) {
     let journals: Vec<Vec<Value>> = fs::read_dir(fixture.root.join("state/journal"))
         .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
         .map(|entry| {
             fs::read_to_string(entry.unwrap().path())
                 .unwrap()

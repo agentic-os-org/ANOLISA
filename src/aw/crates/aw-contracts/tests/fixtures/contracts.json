@@ -845,5 +845,32 @@
         "failureCode": null
       }
     }
+  },
+  "audit-export-request-v1alpha1": {
+    "api_version": "audit-export.aw/v1alpha1",
+    "operation": {
+      "type": "enumerate",
+      "cursor": null,
+      "limit": 64
+    }
+  },
+  "audit-export-response-v1alpha1": {
+    "api_version": "audit-export.aw/v1alpha1",
+    "source_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "result": {
+      "type": "enumerate",
+      "keys": [],
+      "inventory_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "next_cursor": null,
+      "changed": false,
+      "limits": {
+        "page": 64,
+        "inventory_entries": 10000,
+        "chain_bytes": 8388608,
+        "chain_records": 4096,
+        "response_bytes": 1048576
+      }
+    },
+    "error": null
   }
 }

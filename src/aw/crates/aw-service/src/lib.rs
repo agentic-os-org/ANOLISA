@@ -11,8 +11,10 @@ mod server;
 mod wire;
 
 pub mod agentsight;
+pub mod audit_export;
 pub mod inspect;
 pub mod launch_service;
+pub mod public_projection;
 
 pub use client::Client;
 pub use runtime::process::Process as ProcessIdentity;

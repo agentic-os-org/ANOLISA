@@ -218,7 +218,7 @@ class GateTests(GateFixture):
             (
                 "aw-core",
                 core,
-                ["aw-config", "aw-contracts", "aw-provider", "serde_json", "sha2", "thiserror"],
+                ["aw-config", "aw-contracts", "aw-provider", "serde_json", "sha2", "thiserror", "libc"],
             ),
             (
                 "aw-config",

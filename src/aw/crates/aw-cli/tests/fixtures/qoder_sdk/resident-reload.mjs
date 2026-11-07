@@ -49,8 +49,8 @@ try {
   update("empty.json");
   open = await create();
   assert.equal((await runFixture()).denied, false, "removed scan must not remain attached");
-  assert.equal(state.query.options.hooks.PreToolUse[0].timeout, 1,
-    "removed policy retains only the native identity registration Hook");
+  assert.equal(state.query.options.hooks.PreToolUse[0].timeout, 9,
+    "removed policy retains the bounded metadata callback");
   let releaseClose, enteredClose;
   const entered = new Promise(resolve => { enteredClose = resolve; });
   const gate = new Promise(resolve => { releaseClose = resolve; });

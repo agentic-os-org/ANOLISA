@@ -110,6 +110,12 @@ service 继续负责运行期激活与策略代次。见[编辑合同](configura
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
 
+`aw-service` 在持久 Journal 中独立生产白名单公共运行事实。配置策略的 Hook 记录
+`ExecutionEvent` 与 Provider 完成事实；Qoder SDK 和 QwenPaw 无策略工具回调也保留
+原生关联和结果状态。CLI 的 Worker 启动、结束事实不依赖 Sight。公共投影复用原始
+记录序号、摘要和持久时间；正文只计算摘要，实际效果采用与覆盖范围缺少证据时保留
+未确认状态。详见 [公共对象](runtime/public-objects.md)。
+
 Skill 校验复用 `tool.before` 与既有的 opaque `event.native` 扩展。
 Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录、来源）或
 解析错误。sec-core Provider 调用公开的只读 Ledger 检查并映射信任状态，目录授权
@@ -176,7 +182,7 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 | Provider 消息与 View 协议 | `aw-provider/schemas/` |
 | Provider 私有配置与后端数据 | 对应的具体 Provider 目录 |
 
-`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 23 份。
+`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 28 份。
 计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
 此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
 
@@ -214,3 +220,8 @@ loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享�
 原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
 `install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
 私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。
+
+公共审计消费者通过 `aw audit-export` → `aw-service::audit_export` →
+`aw-core::journal::reader` 读取。读取器固定所属用户的存储并验证有界源链，
+Service 投影保留的公共对象；此路径不使用控制 RPC。
+游标与缺口语义见[审计增量读取](runtime/audit-export.md)。

@@ -7,6 +7,14 @@ use std::collections::BTreeMap;
 /// Exact bundled schema resources, identified by their local catalogue name.
 pub const SCHEMAS: &[(&str, &str)] = &[
     (
+        "audit-export-request-v1alpha1",
+        include_str!("../schemas/audit-export-request-v1alpha1.schema.json"),
+    ),
+    (
+        "audit-export-response-v1alpha1",
+        include_str!("../schemas/audit-export-response-v1alpha1.schema.json"),
+    ),
+    (
         "object-meta-v1alpha1",
         include_str!("../schemas/object-meta-v1alpha1.schema.json"),
     ),

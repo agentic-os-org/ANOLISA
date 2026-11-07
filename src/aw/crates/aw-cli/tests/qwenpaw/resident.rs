@@ -84,6 +84,14 @@ fn check_withhold_failure(boolean: bool) {
     assert_eq!(after["failure"], if boolean { "protocol" } else { "exit" });
     let durable_withhold = fs::read_dir(fixture.root.join("state/journal"))
         .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
         .any(|entry| {
             fs::read_to_string(entry.unwrap().path())
                 .unwrap()
