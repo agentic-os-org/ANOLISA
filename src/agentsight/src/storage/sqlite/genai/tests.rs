@@ -1921,6 +1921,102 @@ fn adopting_an_interrupted_idle_snapshot_restores_pending() {
     cleanup_db(&path);
 }
 
+/// A finished call must not stay labelled as interrupted: the serve-mode
+/// HealthChecker flips a pid's pending rows to interrupted/agent_crash on a
+/// transient offline judgment, and `count_interruption_type_for_conversation`
+/// has no status filter, so a stale label kept inflating the RetryStorm
+/// attribution long after the call completed. The adoption branch in
+/// `insert_pending` already proves the intended invariant.
+#[test]
+fn completing_a_pending_call_clears_the_stale_interruption_type() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_complete_clears_interruption_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let info = PendingCallInfo {
+        call_id: "late-complete".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-stale".to_string()),
+        session_id: Some("s-stale".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: Some("hello".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: None,
+    };
+    store.insert_pending(&info).unwrap();
+    assert_eq!(
+        store
+            .mark_pending_interrupted_for_pid(42, "agent_crash")
+            .unwrap(),
+        1
+    );
+
+    let mut call = LLMCall::new(
+        "late-complete".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.metadata
+        .insert("conversation_id".to_string(), "c-stale".to_string());
+    call.metadata
+        .insert("call_kind".to_string(), "main".to_string());
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let (status, itype): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, interruption_type FROM genai_events WHERE call_id = 'late-complete'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "complete");
+        assert_eq!(itype, None, "a finished call is not an interruption");
+    }
+    assert_eq!(
+        store.count_interruption_type_for_conversation("c-stale", "agent_crash"),
+        0,
+        "the stale type must not count toward the RetryStorm threshold"
+    );
+
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_insert_pending_records_idle_origin_and_match_key() {
     let path =
