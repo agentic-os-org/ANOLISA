@@ -67,6 +67,8 @@ python3 SKILL_DIR/scripts/formula_check.py /path/to/file.xlsx --json
 python3 SKILL_DIR/scripts/formula_check.py /path/to/file.xlsx --sheet Summary
 ```
 
+A name that does not exist (including an empty name) exits 1 with `sheet_not_found`; `--sheet` without a value prints usage and exits 1.
+
 **Summary mode (counts only, no per-cell detail):**
 
 ```bash
@@ -89,11 +91,11 @@ It performs five checks:
 
 3. **Unknown named-range detection (heuristic)**: Identifiers in formulas that are not function names, not cell references, and not found in `workbook.xml`'s `<definedNames>` are flagged as `unknown_name_ref` warnings. This is a heuristic — false positives are possible; always verify manually.
 
-4. **Shared formula integrity**: Shared formula consumer cells (those with only `<f t="shared" si="N"/>`) are skipped for formula counting and cross-ref checks because they inherit the primary cell's formula. Only the primary cell (with `ref="..."` attribute and formula text) is checked and counted.
+4. **Shared formula integrity**: Consumer cells (`<f t="shared" si="N"/>`) inherit the primary cell's formula and are not counted separately. After scanning a sheet, every consumer `si` must have a primary on that same sheet; an orphan is reported as `orphan_shared_formula`. A primary is identified by `si` plus formula text (its `ref` attribute is optional); a primary with `si` and `ref` but no text is reported as `shared_primary_missing_text`.
 
 5. **Malformed error cells**: Cells with `t="e"` but no `<v>` child element are flagged as structural XML issues.
 
-Hard errors (exit code 1): `error_value`, `broken_sheet_ref`, `malformed_error_cell`, `file_error`
+Hard errors (exit code 1): `error_value`, `broken_sheet_ref`, `malformed_error_cell`, `orphan_shared_formula`, `shared_primary_missing_text`, `sheet_not_found`, `no_sheets_checked`, `file_error`
 Soft warnings (exit code 0): `unknown_name_ref` — must be verified manually but do not block delivery alone
 
 #### Reading formula_check.py human-readable output
@@ -192,9 +194,15 @@ Field reference:
 | `type: "broken_sheet_ref"` | Formula references a sheet name not present in workbook.xml |
 | `type: "unknown_name_ref"` | Formula references an identifier not in `<definedNames>` (heuristic, soft warning) |
 | `type: "malformed_error_cell"` | Cell has `t="e"` but no `<v>` child — structural XML problem |
+| `type: "orphan_shared_formula"` | Shared-formula consumer whose `si` has no primary cell on the sheet |
+| `type: "shared_primary_missing_text"` | Shared-formula primary (`si` + `ref`) has no formula text |
+| `type: "sheet_not_found"` | `--sheet` named a sheet that does not exist |
+| `type: "no_sheets_checked"` | No worksheet could be loaded from the workbook |
 | `type: "file_error"` | The file could not be opened (bad ZIP, not found, etc.) |
 | `sheet` | The sheet where the error was found |
 | `cell` | Cell reference in A1 notation |
+| `si` | Shared-formula group id (string) for shared-formula errors |
+| `valid_sheets` | Sheet names present in the workbook (for `sheet_not_found` and `broken_sheet_ref`) |
 | `formula` | The full formula text from the `<f>` element (null if not present) |
 | `error` | The error string from `<v>` (for `error_value` type) |
 | `missing_sheet` | The sheet name extracted from the formula that does not exist |
