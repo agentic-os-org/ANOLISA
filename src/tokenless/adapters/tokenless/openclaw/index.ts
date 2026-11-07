@@ -387,6 +387,11 @@ export default {
     const shellTools = new Set(
       categories.layer_2_shell.tools.map((tool) => tool.toLowerCase()),
     );
+    const searchTools = new Set(
+      ["Grep", "grep", "grep_code", "grep_search", "search_files"].map((tool) =>
+        tool.toLowerCase(),
+      ),
+    );
 
     const sessionIdFor = (ctx: HookContext): string => {
       if (ctx.sessionId) {
@@ -642,11 +647,18 @@ export default {
               if (block === null) return;
               const toolName = event.toolName;
               const normalizedToolName = toolName.toLowerCase();
-              const contentOrigin = fileTools.has(normalizedToolName)
-                ? "file_content"
-                : shellTools.has(normalizedToolName)
-                  ? "command_output"
-                  : "api_response";
+              // A native search's match listing is derived match data, not a
+              // file copy: api_response routes it through the lossless
+              // search-only path. File reads stay file_content, byte-for-byte.
+              const isSearchText =
+                searchTools.has(normalizedToolName) && block.text.length >= 200;
+              const contentOrigin = isSearchText
+                ? "api_response"
+                : fileTools.has(normalizedToolName)
+                  ? "file_content"
+                  : shellTools.has(normalizedToolName)
+                    ? "command_output"
+                    : "api_response";
               const input: Record<string, unknown> = {
                 result_kind: toolName === RETRIEVE_TOOL ? "retrieve" : "tool",
                 tool_name: toolName,

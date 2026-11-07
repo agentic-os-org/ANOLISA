@@ -237,9 +237,13 @@ It preserves host metadata, including any limits; completeness means all receive
 possible matches before host truncation. Other Grep modes and hosts keep their existing route.
 Unwrapped Grep listings are recorded as `api_response` in statistics, rather than `file_content`:
 they are filtered tool responses, not authoritative file copies. Historical origin-grouped queries
-therefore have a version boundary. Core treats the exact tool name `Grep` as a search-only tool:
-it cannot enter JSON, table, or log compressors, even when search path sharing is disabled. SDK
-callers should use that name only for this search contract.
+therefore have a version boundary. Core treats the native search alias family (`Grep`, `grep`,
+`grep_code`, `grep_search`, `search_files`) as search-only tools: they cannot enter JSON, table,
+or log compressors, even when search path sharing is disabled. Replacement hosts declare the
+search text slot — or the whole result when the host's text is the listing — as `api_response`
+instead of `file_content`, so identical search text compresses identically through a search tool
+and through the shell; file reads keep `file_content` and stay byte-for-byte. SDK callers should
+use those names only for this search contract.
 
 RTK ownership is provisional until execution completes. PreTool atomically stores the original and exact executed commands
 and assigns each rewritten RTK invocation a generation and ordinal in `rtk-outcomes.db` under

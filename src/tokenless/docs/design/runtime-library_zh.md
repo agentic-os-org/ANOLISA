@@ -69,7 +69,7 @@ Tokenless 不增加截断回退，宿主自身的输出限制仍然有效。`max
 
 搜索压缩器开启但没有候选时，使用公共仲裁的 `no_savings`；连接持久化 Store 时，Stash
 计数为零。关闭搜索压缩或命中生命周期门槛时仍为透传。API 和文件读取结果上的 `command`
-元数据不会开启 Shell 搜索保护；精确工具名 `Grep` 保留其原生搜索契约。
+元数据不会开启 Shell 搜索保护；原生搜索别名家族保留其原生搜索契约。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
@@ -210,9 +210,12 @@ Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 同一路径在非连续位置出现时会生成新的文件头。
 
 解包的 Grep 列表在统计中记作 `api_response`，而非 `file_content`，因为它是筛选后的工具响应，
-不是权威文件副本。按来源分组的历史查询因此存在版本边界。Core 将精确工具名 `Grep` 视为
-仅适用搜索压缩的工具；即使搜索路径共享关闭，也不会转入 JSON、表格或日志压缩。SDK 调用者
-仅应对符合此搜索契约的工具使用该名称。
+不是权威文件副本。按来源分组的历史查询因此存在版本边界。Core 将原生搜索别名家族
+（`Grep`、`grep`、`grep_code`、`grep_search`、`search_files`）视为仅适用搜索压缩的工具；
+即使搜索路径共享关闭，也不会转入 JSON、表格或日志压缩。支持文本替换的宿主把搜索文本槽位
+（宿主文本即命中列表时为整个结果）声明为 `api_response` 而非 `file_content`，因此同一段搜索
+文本经搜索工具与经 Shell 的压缩行为一致；文件读取保持 `file_content` 并逐字节保留。SDK 调用者
+仅应对符合此搜索契约的工具使用这些名称。
 
 ## Stats 查询
 

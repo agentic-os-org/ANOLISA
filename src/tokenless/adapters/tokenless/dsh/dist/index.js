@@ -286,6 +286,26 @@ function contentOrigin(toolName) {
   return 'api_response'
 }
 
+const SEARCH_TOOLS = new Set(['grep', 'grep_code', 'grep_search', 'search_files'])
+
+/** api_response for a native search's match-listing text, else the mapped origin.
+ *
+ * Search listings are derived match data, not file copies: Core's lossless
+ * search-only route folds their repeated paths while every received match,
+ * line number, order, duplicate and line ending is retained. File reads keep
+ * `file_content` and stay byte-for-byte.
+ */
+function effectiveOrigin(toolName, content) {
+  if (
+    SEARCH_TOOLS.has(toolName.toLowerCase())
+    && typeof content === 'string'
+    && content.length >= 200
+  ) {
+    return 'api_response'
+  }
+  return contentOrigin(toolName)
+}
+
 /** Recognize the exact local recovery command emitted by Tokenless markers. */
 function isTokenlessRetrieveCommand(toolName, args) {
   if (!COMMAND_TOOLS.has(toolName.toLowerCase())) return false
@@ -497,7 +517,7 @@ export function apply(ctx, config = {}) {
         config,
         content,
         status,
-        contentOrigin(exec.name),
+        effectiveOrigin(exec.name, content),
         true,
         retrieveResult ? 'retrieve' : 'tool',
         !retrieveResult && tokenlessRetrieveCommandAvailable(config),

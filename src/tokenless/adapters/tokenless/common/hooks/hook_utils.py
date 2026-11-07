@@ -155,6 +155,13 @@ SKIP_TOOLS: set[str] = set(_tool_categories.get("layer_1_skip", {}).get("tools",
 # These tools produce text output that can be safely truncated if too long.
 SHELL_TOOLS: set[str] = set(_tool_categories.get("layer_2_shell", {}).get("tools", []))
 
+# Native search aliases inside layer_1_skip whose model-visible text is a
+# derived match listing, not an authoritative file copy. Hosts that support
+# text replacement declare that text as `api_response` so Core's lossless
+# search-only route applies; file reads keep `file_content` and stay
+# byte-for-byte. Mirrored in tool_categories.json `_aliases`.
+SEARCH_TOOLS: set[str] = {"Grep", "grep", "grep_code", "grep_search", "search_files"}
+
 _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
     r"^[ \t]*(?:\"tokenless\"|'tokenless'|tokenless)[ \t]+retrieve[ \t]+"
     r"(?:\"(?:[0-9a-f]{24}|<<tokenless:[0-9a-f]{24}>>)\"|"
