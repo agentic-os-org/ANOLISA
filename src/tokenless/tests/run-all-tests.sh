@@ -496,6 +496,26 @@ EOF
     rm -rf "$bypass_dir"
 
     # ==========================================
+    # 6.22 env-fix script: fix-tool string entries with constraints
+    # ==========================================
+    log_info "Test 6.22: env-fix fix-tool splits >= constraints off string entries"
+    if command -v git >/dev/null 2>&1; then
+        local constraint_spec
+        constraint_spec=$(mktemp)
+        printf '%s\n' '{"TestConstraint":{"required":["git>=1.0.0","jq"],"recommended":[]}}' > "$constraint_spec"
+        local ct_out
+        ct_out=$(TOKENLESS_TOOL_READY_SPEC="$constraint_spec" bash "$FIX_SCRIPT" fix-tool TestConstraint 2>&1)
+        # main ignores the override, so it reads the packaged spec and prints
+        # "no spec for tool: TestConstraint" (exit 0). Both assertions fail there
+        # for that reason as well as for the jq split.
+        assert_contains "$ct_out" "satisfies >=1.0.0" "env-fix fix-tool splits >= off a string dep"
+        assert_contains "$ct_out" "jq: already available" "env-fix fix-tool keeps plain string deps working"
+        rm -f "$constraint_spec"
+    else
+        log_pass "env-fix fix-tool constraint split (skipped: git not installed)"
+    fi
+
+    # ==========================================
     # 6.23 Core attribution: ENV_DEPENDENCY_MISSING
     # ==========================================
     log_info "Test 6.23: Attribution — ENV_DEPENDENCY_MISSING"
