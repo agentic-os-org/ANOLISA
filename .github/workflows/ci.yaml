@@ -1164,6 +1164,49 @@ jobs:
           test -x ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/scripts/install.sh
 
   # =========================================================================
+  # Test selective-claw plugin (part of the tokenless test block)
+  # =========================================================================
+  # The optional plugin under src/tokenless/plugins/selective-claw carries an
+  # independent npm/vitest regression suite that no other job executes. It is
+  # already covered by the tokenless path filter, so gate on the same output
+  # instead of adding a new detect-changes flag.
+  test-selective-claw:
+    name: Test selective-claw plugin
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tokenless == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the same 22.x the sibling npm suites use: the esbuild
+      # --target=node22 build needs Node 22, and the tests load node:sqlite.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: src/tokenless/plugins/selective-claw/package-lock.json
+
+      # Same install policy as build-openclaw-plugin in src/tokenless/Makefile:
+      # npm ci from a tracked lockfile with --ignore-scripts, which keeps the
+      # optional `openclaw` peer unmet without failing the install.
+      - name: Install selective-claw plugin dependencies
+        working-directory: src/tokenless/plugins/selective-claw
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck selective-claw plugin
+        working-directory: src/tokenless/plugins/selective-claw
+        run: npx tsc --noEmit
+
+      - name: Build selective-claw plugin
+        working-directory: src/tokenless/plugins/selective-claw
+        run: npm run build
+
+      - name: Test selective-claw plugin suite
+        working-directory: src/tokenless/plugins/selective-claw
+        run: npm test
+
+  # =========================================================================
   # Step 7: Test ws-ckpt
   # =========================================================================
   test-ws-ckpt:
