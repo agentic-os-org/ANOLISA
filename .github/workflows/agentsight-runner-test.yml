@@ -72,6 +72,10 @@ jobs:
         working-directory: src/agentsight
         run: python3 tests/test_extract_codex_offsets.py
 
+      - name: Run scripts test suites
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --with pytest --no-project -m pytest scripts/tests -q
+
       - name: Lint
         working-directory: src/agentsight
         run: cargo clippy --workspace --all-targets -- -D warnings
