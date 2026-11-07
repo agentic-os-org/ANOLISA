@@ -86,7 +86,11 @@ impl PostToolPipeline {
         // match; other domain compressors may drop rows or rewrite source text.
         // Compound commands have no per-command output boundaries. Protect the
         // complete result when any segment searches, even a quiet condition.
-        let protect_search_output = request.tool_name == "Grep"
+        // Native search aliases reach the exact-name guard through the
+        // adapters' api_response declaration: the host contract reserves the
+        // whole alias family for the search-only route, whatever the content
+        // shape — a match listing must not fall to JSON or tabular either.
+        let protect_search_output = native_search_tool(&request.tool_name)
             || (request.content_origin == ContentOrigin::CommandOutput
                 && request
                     .command
@@ -426,6 +430,18 @@ fn is_wrapped_structured_json(content: &str) -> bool {
     )
 }
 
+/// Whether the tool name is a native search alias whose host contract
+/// reserves it for complete search listings. Adapters declare such results
+/// as `api_response` (never `file_content` — a file read is not a search),
+/// so the name alone routes them to the lossless search-only path and keeps
+/// them out of JSON, table, HTML and log compressors even with `force_json`.
+fn native_search_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "Grep" | "grep" | "grep_code" | "grep_search" | "search_files"
+    )
+}
+
 fn passthrough(
     request: &PostToolRequest,
     before_tokens: u64,
@@ -648,6 +664,83 @@ mod tests {
             [AppliedOperation::SearchPathSharing]
         );
         assert_eq!(run.response.recoverability, Recoverability::Lossless);
+    }
+
+    #[test]
+    fn native_search_aliases_route_like_grep_across_shapes_and_switches() {
+        // The adapters declare native search aliases as api_response: Core
+        // routes the whole alias family through the lossless search-only
+        // path, whatever the content shape. A match listing that also looks
+        // like JSON, tabular data, a build log or HTML must never reach
+        // those compressors — including with force_json — and disabling
+        // path sharing preserves the text instead of unlocking lossy routes.
+        let json_shaped_search = format!(
+            "{}\n{}",
+            "src/project/module.py:1:{\"matches\": [1, 2, 3]}",
+            "src/project/module.py:2:{\"matches\": [4, 5, 6]}"
+        )
+        .repeat(12);
+        for tool in ["grep", "grep_code", "grep_search", "search_files", "Grep"] {
+            for (label, content) in [
+                ("listing", search_input()),
+                ("json_shaped", json_shaped_search.clone()),
+                (
+                    "tabular_shaped",
+                    format!("{}a,b\n", "src/x.py:1:").repeat(30),
+                ),
+                (
+                    "log_shaped",
+                    format!("{}Compiling package v0.1.0\n", "src/x.py:1:").repeat(30),
+                ),
+            ] {
+                for force_json in [false, true] {
+                    for sharing in [true, false] {
+                        let mut req = request(&content);
+                        req.tool_name = tool.into();
+                        req.content_origin = ContentOrigin::ApiResponse;
+                        let mut cfg = config(Duration::from_secs(1), 32);
+                        cfg.force_json = force_json;
+                        cfg.search_path_sharing_enabled = sharing;
+                        let run = PostToolPipeline::run(&req, &cfg, None);
+                        let expected = if sharing {
+                            Disposition::Applied
+                        } else {
+                            // Disabling the search domain returns the text
+                            // unchanged without computing a candidate — the
+                            // do-not-touch boundary, not a lossy fallback.
+                            Disposition::Passthrough
+                        };
+                        assert_eq!(
+                            run.response.disposition, expected,
+                            "{tool}/{label}/force_json={force_json}/sharing={sharing}"
+                        );
+                        assert!(
+                            run.response
+                                .applied_operations
+                                .iter()
+                                .all(|op| *op == AppliedOperation::SearchPathSharing),
+                            "{tool}/{label}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn file_read_search_results_stay_byte_for_byte() {
+        // A file read whose text happens to look like a search listing is an
+        // authoritative file copy: file_content passes through before any
+        // compression decision, regardless of tool name.
+        for tool in ["Grep", "grep", "search_files", "Read"] {
+            let mut req = request(&search_input());
+            req.tool_name = tool.into();
+            req.content_origin = ContentOrigin::FileContent;
+            let run = PostToolPipeline::run(&req, &config(Duration::from_secs(1), 32), None);
+            assert_eq!(run.response.disposition, Disposition::Passthrough, "{tool}");
+            assert_eq!(run.response.output, search_input());
+            assert!(run.response.applied_operations.is_empty());
+        }
     }
 
     #[test]

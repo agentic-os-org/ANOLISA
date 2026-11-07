@@ -266,5 +266,110 @@ class PathListHooks(unittest.TestCase):
                         self.assertEqual(Path(path).read_text(), Path(path).stem.split()[-1])
 
 
+@unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
+class NativeSearchHooks(unittest.TestCase):
+    """Native search aliases route through the lossless search-only path.
+
+    The same search text used to bypass compression when it arrived through a
+    search tool (origin file_content) but compressed through Bash
+    (command_output). Adapters now declare the search text slot as
+    api_response; the envelope's other fields and file reads stay untouched.
+    """
+
+    @staticmethod
+    def matches():
+        return "".join(
+            f"src/project/with/very/long/common/search/path/module.py:{i}:matched_value_{i}\n"
+            for i in range(1, 19)
+        )
+
+    def run_response(self, payload, agent="qoder-cli"):
+        agent_env = corpus.RESPONSE_AGENTS.get(agent, {"TOKENLESS_AGENT_ID": agent})
+        proc = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def replacement(self, envelope):
+        output = envelope["hookSpecificOutput"]
+        return output.get("updatedToolOutput", output.get("updatedToolResponse"))
+
+    def test_qoder_grep_content_slot_routes_like_bash_stdout(self):
+        # The issue's fixture: identical search text through Grep (structured
+        # content slot) and Bash (stdout). Both compress; the Grep envelope's
+        # mode/numLines/numFiles metadata is preserved around the slot.
+        text = self.matches()
+        grep_payload = {
+            "session_id": "search-session",
+            "tool_use_id": "search-call",
+            "tool_name": "Grep",
+            "tool_response": {"mode": "content", "content": text, "numLines": 18, "numFiles": 1},
+        }
+        envelope = self.run_response(grep_payload)
+        replaced = self.replacement(envelope)
+        self.assertIsInstance(replaced, str)
+        replaced = json.loads(replaced)
+        self.assertEqual(replaced["mode"], "content")
+        self.assertEqual(replaced["numLines"], 18)
+        self.assertEqual(replaced["numFiles"], 1)
+        self.assertIn("[Search results grouped by file", replaced["content"])
+
+    def test_bash_stdout_search_still_routes(self):
+        text = self.matches()
+        bash_payload = {
+            "session_id": "search-session",
+            "tool_use_id": "search-call",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg -n matched_value src"},
+            "tool_response": {"stdout": text, "stderr": "", "exitCode": 0},
+        }
+        envelope = self.run_response(bash_payload)
+        replaced = self.replacement(envelope)
+        self.assertIn("[Search results grouped by file", replaced["stdout"])
+
+    def test_search_aliases_route_across_replacement_hosts(self):
+        text = self.matches()
+        cases = [
+            # Qoder serializes non-Bash-slot replacements for its host;
+            # qwenwork and opencode pass the updated envelope object through.
+            ("qoder-cli", {"content": text, "mode": "content"}, "content", True),
+            ("qwenwork", {"content": text, "mode": "content"}, "content", False),
+            ("opencode", {"content": text, "mode": "content"}, "content", False),
+            # Cosh-NG consumes the whole updatedToolResponse string as the
+            # model-visible llmContent text, so the replacement is the text.
+            ("cosh-ng", {"llmContent": text}, "[Search results", False),
+        ]
+        for agent, response, slot, wrapped in cases:
+            with self.subTest(agent=agent):
+                payload = {
+                    "session_id": "search-session",
+                    "tool_use_id": "search-call",
+                    "tool_name": "grep",
+                    "tool_response": response,
+                }
+                envelope = self.run_response(payload, agent=agent)
+                replaced = self.replacement(envelope)
+                if wrapped:
+                    self.assertIsInstance(replaced, str, envelope)
+                    replaced = json.loads(replaced)
+                    self.assertIn("[Search results grouped by file", replaced[slot], envelope)
+                elif agent == "cosh-ng":
+                    self.assertIsInstance(replaced, str)
+                    self.assertIn(slot, replaced)
+                else:
+                    self.assertIsInstance(replaced, dict)
+                    self.assertIn("[Search results grouped by file", replaced[slot], envelope)
+
+    def test_small_search_results_and_file_reads_pass_through(self):
+        # Below the slot minimum the search keeps its protection without a
+        # candidate; a Read result is an authoritative file copy either way.
+        for payload in [
+            {"tool_name": "Grep", "tool_response": {"content": "a.py:1:x", "mode": "content"}},
+            {"tool_name": "Read", "tool_response": {"content": self.matches()}},
+        ]:
+            with self.subTest(tool=payload["tool_name"]):
+                payload = {"session_id": "s", "tool_use_id": "c", **payload}
+                self.assertEqual(self.run_response(payload), {})
+
+
 if __name__ == "__main__":
     unittest.main()
