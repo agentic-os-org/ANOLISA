@@ -109,6 +109,8 @@ python3 __SKILL_DIR__/scripts/validate_mcp.py '<json>' --merge <config_path>
 
 脚本会自动处理目录创建、已有配置保留和新条目合并。如果脚本报错，看错误信息自己修正 JSON 后重试，不要把错误丢给用户。
 
+例外：如果错误是 `Cannot merge unreadable config <path>` 或 `Cannot merge into non-object config <path>`，说明**目标配置文件本身**损坏或不是 JSON 对象，不是你的入参 JSON 有问题。此时不要重试，也不要覆盖该文件；把情况告诉用户，请他们先修复或备份该文件，再重新执行合并。
+
 ### 4. 确认结果
 
 写入后跑一下检查：
