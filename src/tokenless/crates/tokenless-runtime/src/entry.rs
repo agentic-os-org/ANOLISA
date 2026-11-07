@@ -39,6 +39,9 @@ pub struct EntryOptions {
     pub diff_compression_enabled: bool,
     /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
+    /// Whether structured regions inside mixed tool outputs may be compressed
+    /// individually. Disabled by default.
+    pub mixed_content_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
     /// Tokenless executable whose `rtk` subcommand runs rewritten PreTool commands.
@@ -1075,6 +1078,7 @@ pub(crate) fn post_tool_with_store(
                 search_path_sharing_enabled: options.search_path_sharing_enabled,
                 diff_compression_enabled: options.diff_compression_enabled,
                 html_extraction_enabled: options.html_extraction_enabled,
+                mixed_content_enabled: options.mixed_content_enabled,
                 stash_enabled: options.stash_enabled,
                 require_reversibility: true,
                 force_json: false,
@@ -1390,6 +1394,7 @@ mod tests {
             search_path_sharing_enabled: true,
             diff_compression_enabled: false,
             html_extraction_enabled: false,
+            mixed_content_enabled: false,
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),

@@ -46,6 +46,15 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [0.9.2] - 2026-11-05
 
+### 新增
+
+- 新增可选的混合内容压缩，用于既不是完整结构化文档、也无法被既有领域处理的工具输出。通过
+  `TOKENLESS_MIXED_CONTENT_ENABLED` 开启后，PostTool Pipeline 识别显式定界的 typed
+  region——标注 `json`、`csv`、`tsv` 的 fenced code block 和括号平衡的裸 JSON 文档——并用与
+  独立文档完全相同的压缩器和策略逐段压缩，周围文本逐字节保留。选择 TOON 的 fenced JSON
+  区域会同步更新 fence label；压缩器拒绝的区域逐字节保留
+  （[#9326](https://github.com/agentic-os-org/ANOLISA/issues/9326)）。
+
 ### 变更
 
 - 可通过 core 和 plugins RPM 分别选择安装命令行程序与框架集成。

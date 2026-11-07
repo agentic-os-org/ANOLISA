@@ -302,6 +302,7 @@ impl PyTokenlessRuntime {
             search_path_sharing_enabled,
             diff_compression_enabled,
             html_extraction_enabled,
+            mixed_content_enabled: false,
         })
         .map_err(to_python_error)?;
         Ok(Self { inner })
