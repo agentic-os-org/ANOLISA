@@ -1,4 +1,4 @@
-//! Thread-local storage faults exercise the rename-visible, directory-sync-failed window.
+//! Thread-local storage faults exercise failure windows without filesystem tricks.
 
 use std::{
     cell::RefCell,
@@ -10,6 +10,7 @@ use std::{
 
 thread_local! {
     static DATABASE_SYNC_FAILURE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TMPFILE_FAILURE: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// Restore the previous fault when the isolated test scope exits, including unwinding.
@@ -38,6 +39,39 @@ pub(crate) fn fail_database_sync(path: &Path) -> DatabaseSyncFailure {
 pub(super) fn check_database_sync(path: &Path) -> io::Result<()> {
     if DATABASE_SYNC_FAILURE.with(|failure| failure.borrow().as_deref() == Some(path)) {
         Err(io::Error::from_raw_os_error(libc::EIO))
+    } else {
+        Ok(())
+    }
+}
+
+/// Restore the previous fault when the isolated test scope exits, including unwinding.
+pub(crate) struct TmpfileFailure {
+    previous: bool,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for TmpfileFailure {
+    fn drop(&mut self) {
+        TMPFILE_FAILURE.with(|failure| {
+            let _ = failure.replace(self.previous);
+        });
+    }
+}
+
+/// Fail O_TMPFILE staging until the guard drops, forcing the named fallback path.
+pub(crate) fn fail_tmpfile() -> TmpfileFailure {
+    let previous = TMPFILE_FAILURE.with(|failure| failure.replace(true));
+    TmpfileFailure {
+        previous,
+        _same_thread: PhantomData,
+    }
+}
+
+pub(super) fn check_tmpfile() -> Result<(), crate::store::Error> {
+    if TMPFILE_FAILURE.with(|failure| *failure.borrow()) {
+        Err(crate::store::Error::Io(io::Error::from_raw_os_error(
+            libc::EOPNOTSUPP,
+        )))
     } else {
         Ok(())
     }
