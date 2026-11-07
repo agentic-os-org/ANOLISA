@@ -212,6 +212,7 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
   }, [provider, availableModels]);
 
   async function save(): Promise<boolean> {
+    if (loading || config === null) return false;
     setError(null);
 
     const timeoutSecs = Number(semanticSearchTimeoutSecs);

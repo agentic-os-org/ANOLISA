@@ -52,8 +52,9 @@ const StorageCard = React.forwardRef<StorageCardHandle>((_, ref) => {
   }, [load]);
 
   const save = useCallback(async (): Promise<boolean> => {
+    if (loading || limitMb === null) return false;
     const value = Number(input);
-    if (!Number.isInteger(value) || value < 0 || (value > 0 && value < MIN_STORAGE_LIMIT_MB)) {
+    if (!input.trim() || !Number.isInteger(value) || value < 0 || (value > 0 && value < MIN_STORAGE_LIMIT_MB)) {
       setError(t('comp.settings.storage.invalid'));
       return false;
     }
@@ -68,7 +69,7 @@ const StorageCard = React.forwardRef<StorageCardHandle>((_, ref) => {
       setError(cause instanceof Error ? cause.message : String(cause));
       return false;
     }
-  }, [input, t]);
+  }, [input, loading, limitMb, t]);
 
   React.useImperativeHandle(ref, () => ({ save }));
 
