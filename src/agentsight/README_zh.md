@@ -385,6 +385,8 @@ Linux 交叉构建通过 `scripts/build-enforcer.sh --target
 以跳过可选的 `bpf-build` 宿主依赖。
 打包器消费凭据并完成打包后，才可清理本次 enforcer 独立目录。
 
+> `cargo build --release` 只编译 Rust，不会重新构建内嵌的 Dashboard UI，因此面向用户的构建请使用 `make build-all`。
+
 ### GitHub 预构建产物
 
 Release Preview 从选定的源码提交构建 Linux x86_64、Linux ARM64 与 macOS ARM64；
