@@ -282,6 +282,7 @@ fn context(result: &AggregatedResult, parse_sse: bool) -> Option<HttpContext> {
                 sse_response.or_else(|| stream.response_json_body())
             };
             return Some(HttpContext {
+                request_fingerprint: None,
                 retain_raw: false,
                 request: stream.request_json_body().or_else(|| {
                     super::super::MessageParser::decode_request_body(
@@ -313,6 +314,7 @@ fn context(result: &AggregatedResult, parse_sse: bool) -> Option<HttpContext> {
         _ => return None,
     };
     Some(HttpContext {
+        request_fingerprint: request.fingerprint(request.source_event.pid),
         retain_raw: false,
         request: request.json_body().or_else(|| {
             super::super::MessageParser::decode_request_body(&request.path, request.body())

@@ -137,6 +137,8 @@ pub enum AnalysisResult {
 /// Short-lived parsed payloads shared by semantic analysis and delivery.
 #[derive(Debug, Clone)]
 pub struct HttpContext {
+    /// Fingerprint prepared by an earlier snapshot of this immutable request body.
+    pub(crate) request_fingerprint: Option<[u8; 32]>,
     /// Whether HTTP persistence or raw delivery needs the serialized bodies.
     pub retain_raw: bool,
     /// HTTP metadata; full body strings are built only for raw export.

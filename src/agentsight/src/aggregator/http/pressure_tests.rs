@@ -23,6 +23,7 @@ fn source(id: u64, rw: i32, body: &[u8]) -> Rc<SslEvent> {
 
 fn request(id: u64, body: &[u8]) -> ParsedRequest {
     ParsedRequest {
+        cached_fingerprint: Default::default(),
         method: "POST".into(),
         path: "/v1/chat/completions".into(),
         version: 11,
