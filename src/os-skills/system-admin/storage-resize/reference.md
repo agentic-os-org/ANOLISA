@@ -413,8 +413,8 @@ watch -n 1 'df -h /'
 - [NVMe 云盘在线扩容](https://help.aliyun.com/zh/ecs/user-guide/online-expand-nvme-disk)
 
 ### Alinux4 文档
-- [Alinux4 产品使用手册](../../docs/Alinux4/KB704267_阿里云服务器操作系统 V4 产品使用手册-V2.pdf)
-- [Alinux4 系统管理员手册](../../docs/Alinux4/KB704270_阿里云服务器操作系统 V4 系统管理员手册-V5.pdf)
+- [Alinux4 产品文档](https://help.aliyun.com/zh/alinux/)
+- [磁盘分区操作说明](https://help.aliyun.com/zh/alinux/user-guide/view-and-change-disk-partition-types)
 
 ### Linux 内核文档
 - [XFS 文件系统文档](https://xfs.org/)
