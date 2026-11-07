@@ -49,6 +49,29 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## Planned Skill Retirement
+
+OS Skills plans to remove the nine skills below from its default bundle and wind
+down routine maintenance of the bundled copies. They remain in the current bundle.
+The plan keeps OS Skills focused on OS operations and directs users to the tools,
+upstream skills, and distribution guidance maintained for each workflow.
+
+| Skill | Migration path |
+|-------|----------------|
+| `github` | Use `gh` directly for issues, pull requests, and CI. See the [GitHub CLI manual](https://cli.github.com/manual/). |
+| `clawhub-skill-mng` | Use the official CLI to search, install, and update skills. Check the registry and installation path if you relied on the bundled cosh settings. See the [ClawHub CLI guide](https://github.com/openclaw/clawhub/blob/main/docs/cli.md). |
+| `humanizer` | Install the upstream skill separately when needed. See [Humanizer](https://github.com/blader/humanizer). |
+| `image-gen` | We plan to maintain Bailian integrations with the products that use them. For direct API use, see the [Alibaba Cloud Model Studio text-to-image guide](https://www.alibabacloud.com/help/en/model-studio/text-to-image). |
+| `pdf-reader` | Use your Agent's PDF tools or a PyMuPDF integration. Verify page selection, table extraction, and JSON output before switching an automated workflow. See the [PyMuPDF documentation](https://pymupdf.readthedocs.io/en/latest/). |
+| `xlsx` | Use the related upstream skill for general spreadsheet workflows. Test that edited workbooks remain intact and compatible with the applications you use before switching. See [MiniMax XLSX](https://github.com/MiniMax-AI/skills/blob/main/skills/minimax-xlsx/SKILL.md). |
+| `regex-mastery` | Use the regular expression reference for your tool or language. For `grep`, see the [GNU grep reference](https://www.gnu.org/s/grep/manual/html_node/Regular-Expressions.html). |
+| `shell-scripting` | For general scripting, see the [Bash manual](https://www.gnu.org/s/bash/manual/bash.html) or [Zsh manual](https://zsh.sourceforge.io/Doc/Release/index.html). For ALinux 4 operations, see the [Bash scripting reference](system-admin/alinux-admin/references/shell-scripting.md). |
+| `upgrade-alinux-kernel` | Follow the distribution's upgrade and recovery guidance for your installed release. See the [Alibaba Cloud Linux documentation](https://www.alibabacloud.com/help/en/alinux/). |
+
+If a bundled skill causes data loss or blocks a critical workflow, include the
+OS Skills version and the observed impact in your [GitHub issue](https://github.com/agentic-os-org/ANOLISA/issues).
+Report vulnerabilities through the [security policy](../../SECURITY.md).
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:
