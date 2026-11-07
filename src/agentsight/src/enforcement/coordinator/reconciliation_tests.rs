@@ -638,7 +638,7 @@ fn remote_rejection_fails_only_one_binding_and_allows_readiness() {
         .expect("accepted desired binding should seed");
     let client = ScriptedClient::new(vec![
         Err(EnforcementError::Remote {
-            code: "kernel_failure".into(),
+            code: "unsupported_environment".into(),
             message: "/root/secret.txt\npolicy label CREDENTIAL\u{7}".into(),
         }),
         Ok(enforced(accepted_request.clone(), 7)),
@@ -657,7 +657,9 @@ fn remote_rejection_fails_only_one_binding_and_allows_readiness() {
     assert_eq!(rejected.state, BindingState::Failed);
     assert_eq!(
         rejected.message.as_deref(),
-        Some("enforcer rejected desired binding: kernel attachment failed")
+        Some(
+            "enforcer rejected desired binding: unsupported environment; run the enforcer on the host or with host PID visibility"
+        )
     );
     assert_eq!(rejected.domain_id, None);
     assert_eq!(
@@ -776,6 +778,19 @@ fn acknowledgement_store_failure_remains_generation_fatal() {
             EnforcementStoreError::BindingConflict(_)
         ))
     ));
+}
+
+#[test]
+fn unsupported_environment_is_a_terminal_rejection() {
+    assert!(is_binding_rejection("unsupported_environment"));
+    assert_eq!(
+        replace_failure_code("unsupported_environment"),
+        Some(ReplaceFailureCode::KernelFailure)
+    );
+    assert!(
+        remote_rejection_message("unsupported_environment", "raw detail")
+            .contains("host PID visibility")
+    );
 }
 
 #[test]

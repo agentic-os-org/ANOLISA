@@ -210,6 +210,8 @@ pub struct ActPlaneBackend {
     stop: Arc<AtomicBool>,
     poller: Mutex<Option<JoinHandle<()>>>,
     lifecycle: Mutex<()>,
+    /// Init-namespace identity captured by BPF for control-plane map operations.
+    control_pid: i32,
     /// True when the enforcer is running in the init PID namespace.
     /// File-delete-guard requires this for correct cap_task seeding and
     /// domain propagation.  When false, health reports file_delete_guard=false.
@@ -236,8 +238,11 @@ impl ActPlaneBackend {
                 .reload_handle()
                 .map_err(|error| kernel_error("open reload handle", error))?,
         );
+        let control_pid = reload
+            .current_process_kernel_pid()
+            .map_err(|error| kernel_error("resolve enforcer kernel pid", error))?;
         engine
-            .protect_pid(std::process::id() as i32)
+            .protect_pid(control_pid)
             .map_err(|error| kernel_error("protect enforcer pid", error))?;
         let drained = prepare_runtime(
             || {
@@ -277,6 +282,7 @@ impl ActPlaneBackend {
             stop,
             poller: Mutex::new(Some(poller)),
             lifecycle: Mutex::new(()),
+            control_pid,
             in_init_pidns: is_init_pid_namespace(),
         })
     }
@@ -304,8 +310,7 @@ impl ActPlaneBackend {
         kernel_pid: Option<i32>,
     ) -> Vec<String> {
         let mut errors = Vec::new();
-        let control_pid = std::process::id() as i32;
-        if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
+        if let Err(error) = self.engine.unbind_pid_from_domain(self.control_pid, id) {
             errors.push(format!("unbind control pid: {error}"));
         }
         // Use the resolved kernel PID when the target runs in a PID namespace;
@@ -347,6 +352,7 @@ impl ActPlaneBackend {
                 "ordinary write protection requires the attached file_permission hook".into(),
             ));
         }
+        require_target_pid_visibility(self.in_init_pidns, procfs_exposes_init_namespace_pids())?;
         // Resolve namespace-local PID to host PID BEFORE start-time validation,
         // so that the stale-process check reads the correct /proc/<host_pid>/stat.
         let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
@@ -523,7 +529,6 @@ impl ActPlaneBackend {
         }
 
         if let Some(compiled) = compiled.as_ref() {
-            let control_pid = std::process::id() as i32;
             let control_state = CapState {
                 scope_id: 1,
                 labels: label,
@@ -538,7 +543,7 @@ impl ActPlaneBackend {
                 label_mask: u64::MAX,
                 ..CapState::default()
             };
-            if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
+            if let Err(error) = self.engine.bind_state(self.control_pid, id, control_state) {
                 let cleanup = self.cleanup_binding(&request, id, None);
                 return Err(kernel_error_with_cleanup(
                     "bind control process",
@@ -546,9 +551,9 @@ impl ActPlaneBackend {
                     cleanup,
                 ));
             }
-            if let Err(error) = self
-                .reload
-                .append_policy_delta(control_pid, id, &compiled.bytes)
+            if let Err(error) =
+                self.reload
+                    .append_policy_delta(self.control_pid, id, &compiled.bytes)
             {
                 let cleanup = self.cleanup_binding(&request, id, None);
                 return Err(kernel_error_with_cleanup(
@@ -557,7 +562,7 @@ impl ActPlaneBackend {
                     cleanup,
                 ));
             }
-            if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
+            if let Err(error) = self.engine.unbind_pid_from_domain(self.control_pid, id) {
                 let cleanup = self.cleanup_binding(&request, id, None);
                 return Err(kernel_error_with_cleanup(
                     "unbind control process",
@@ -1607,8 +1612,9 @@ fn kernel_error_with_cleanup(
 /// Resolve a potentially namespace-local PID to the global (init namespace)
 /// kernel PID that BPF `handle_fork` / `cap_fork` will use.
 ///
-/// The enforcer **must** run in the init PID namespace for this to work.
-/// When it does, host `/proc/<pid>/status` exposes the full `NSpid` chain.
+/// The procfs view must be rooted in the init PID namespace so that
+/// `/proc/<pid>/status` exposes the full `NSpid` chain. A nested enforcer
+/// therefore needs a host procfs mount; its container-local `/proc` is unsafe.
 ///
 /// **Algorithm**:
 /// 1. Fast path: `/proc/<input_pid>/stat` exists and `start_time` matches →
@@ -1700,25 +1706,48 @@ fn proc_start_time(pid: i32) -> Result<u64, ()> {
         .ok_or(())
 }
 
-/// Check whether the current process runs in the init PID namespace by
-/// comparing its pid-namespace inode with that of PID 1.
+/// Kernel-assigned inode of the initial PID namespace (`PROC_PID_INIT_INO`).
+const PROC_PID_INIT_INO: u64 = 0xEFFF_FFFC;
+
+/// Returns whether procfs PID 1 belongs to the initial PID namespace.
+fn procfs_exposes_init_namespace_pids() -> bool {
+    fs::metadata("/proc/1/ns/pid")
+        .map(|metadata| metadata.ino() == PROC_PID_INIT_INO)
+        .unwrap_or(false)
+}
+
+/// Returns whether the current process runs in the initial PID namespace.
 fn is_init_pid_namespace() -> bool {
-    let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
+    let Ok(self_ns) = fs::metadata("/proc/self/ns/pid") else {
         return false; // can't read → assume not init, fail-closed
     };
-    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
-        return false;
-    };
-    let result = self_ns == init_ns;
+    // PID 1 may be container-local; the kernel assigns a fixed inode to the init namespace.
+    let result = self_ns.ino() == PROC_PID_INIT_INO;
     if !result {
         eprintln!(
             "agentsight-enforcer: not in init PID namespace \
-             (self={}, pid1={}); file_delete_guard will be disabled",
-            self_ns.display(),
-            init_ns.display(),
+             (pidns_ino={}); file_delete_guard will be disabled",
+            self_ns.ino(),
         );
     }
     result
+}
+
+/// Rejects target binding when procfs cannot establish init-namespace process identity.
+fn require_target_pid_visibility(
+    in_init_pidns: bool,
+    procfs_init: bool,
+) -> Result<(), BackendError> {
+    if in_init_pidns || procfs_init {
+        return Ok(());
+    }
+    Err(BackendError::UnsupportedEnvironment(
+        "target PID resolution requires an init-namespace procfs view; \
+         container-local /proc cannot safely bind ActPlane policies. \
+         Run the enforcer on the host or with host PID visibility \
+         (hostPID: true / --pid=host)."
+            .into(),
+    ))
 }
 
 #[cfg(test)]
@@ -1737,6 +1766,18 @@ mod tests {
     use super::*;
 
     const _: fn(&PinnedEngine) -> std::io::Result<usize> = PinnedEngine::drain_pending_events;
+
+    #[test]
+    fn pid_namespace_detection_uses_nsfs_inode() {
+        let expected = fs::metadata("/proc/self/ns/pid")
+            .map(|metadata| metadata.ino() == PROC_PID_INIT_INO)
+            .unwrap_or(false);
+        assert_eq!(is_init_pid_namespace(), expected);
+        let procfs_expected = fs::metadata("/proc/1/ns/pid")
+            .map(|metadata| metadata.ino() == PROC_PID_INIT_INO)
+            .unwrap_or(false);
+        assert_eq!(procfs_exposes_init_namespace_pids(), procfs_expected);
+    }
 
     #[test]
     fn source_label_rejects_unrelated_dsl_labels_but_accepts_structured_policies() {
@@ -2698,5 +2739,21 @@ mod tests {
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn target_pid_visibility_is_required_outside_init_pidns() {
+        assert!(require_target_pid_visibility(true, false).is_ok());
+        assert!(require_target_pid_visibility(false, true).is_ok());
+        let error = require_target_pid_visibility(false, false)
+            .expect_err("container-local procfs must be refused");
+        assert!(
+            matches!(error, BackendError::UnsupportedEnvironment(_)),
+            "expected UnsupportedEnvironment, got: {error}"
+        );
+        assert!(
+            error.to_string().contains("init-namespace procfs"),
+            "message should name the requirement: {error}"
+        );
     }
 }
