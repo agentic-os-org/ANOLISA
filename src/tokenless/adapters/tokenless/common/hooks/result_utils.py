@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from hook_utils import SHELL_TOOLS, SKIP_TOOLS, skip, try_parse_json
+from hook_utils import SHELL_TOOLS, SEARCH_TOOLS, SKIP_TOOLS, skip, try_parse_json
 
 
 @dataclass
@@ -58,6 +58,60 @@ def content_origin(tool_name: str) -> str:
     if tool_name in SHELL_TOOLS:
         return "command_output"
     return "api_response"
+
+
+def is_search_tool(tool_name: str) -> bool:
+    """Whether the tool is a native search alias whose text is match listings.
+
+    Search listings are derived match data, not authoritative file copies:
+    their repeated paths can be folded losslessly while every received match,
+    line number, order, duplicate and line ending is retained. File reads keep
+    their ``file_content`` origin and stay byte-for-byte.
+    """
+    return tool_name in SEARCH_TOOLS
+
+
+def search_text_field(
+    tool_name: str, envelope: object, slots: tuple[str, ...]
+) -> tuple[str, str] | None:
+    """The search tool's text slot inside its result envelope, or ``None``.
+
+    A native search result keeps its host envelope (``mode`` counters,
+    truncation indicators, other metadata): only the named slot holds the
+    match listing the lossless search compressor reads. A slot is eligible
+    when it is a string at or above the shared minimum so tiny or empty
+    results never become the compression target.
+    """
+    if not is_search_tool(tool_name) or not isinstance(envelope, dict):
+        return None
+    for name in slots:
+        value = envelope.get(name)
+        if isinstance(value, str) and len(value) >= 200:
+            return (name, value)
+    return None
+
+
+def search_origin(
+    tool_name: str, envelope: object, slots: tuple[str, ...] = ("content", "output", "text")
+) -> str | None:
+    """The origin to declare for a native search result, or ``None``.
+
+    An envelope that carries the match listing in one text slot (or that is
+    the listing itself) declares ``api_response`` — Core routes that derived
+    match text through the lossless search-only path, and replacement
+    rewrites only the received slot. Any other shape keeps the caller's
+    classification: unknown search envelopes are preserved, never guessed.
+    """
+    if not is_search_tool(tool_name):
+        return None
+    if isinstance(envelope, str):
+        return "api_response" if len(envelope) >= 200 else None
+    if isinstance(envelope, dict):
+        for name in slots:
+            value = envelope.get(name)
+            if isinstance(value, str) and len(value) >= 200:
+                return "api_response"
+    return None
 
 
 def process_result(value: object) -> dict | None:

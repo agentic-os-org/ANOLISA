@@ -20,6 +20,8 @@ from result_utils import (
     content_origin,
     process_result,
     result_status,
+    search_origin,
+    search_text_field,
     select_text_field,
 )
 
@@ -135,6 +137,13 @@ def response(data: dict) -> ToolResult:
             field = selected
     arguments = data.get("tool_input", {})
     origin = content_origin(tool)
+    # Native search results hold match listings in one text slot. Declaring
+    # that slot as api_response routes the derived match text through the
+    # lossless search-only path; the envelope's counters and other fields
+    # stay untouched, and replacement rewrites only the slot itself.
+    if search_origin(tool, envelope) == "api_response":
+        field = search_text_field(tool, envelope, ("content", "output", "text"))
+        origin = "api_response"
     can_replace = True
     command = (
         arguments.get("command")

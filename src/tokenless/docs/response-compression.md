@@ -183,8 +183,10 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 `command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
 `nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
 改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样，
-且跳过新增的纯路径列表策略。`Grep` 工具及通过 `command` 识别出的原生 `grep`、`rg` 输出
-只允许进入无损的 Search Results 路径共享。格式识别由统一搜索压缩入口负责；关闭搜索压缩、
+且跳过新增的纯路径列表策略。原生搜索别名（`Grep`、`grep`、`grep_code`、`grep_search`、
+`search_files`）及通过 `command` 识别出的原生 `grep`、`rg` 输出只允许进入无损的 Search
+Results 路径共享；支持文本替换的宿主把搜索命中文本声明为 `api_response`（文件读取保持
+`file_content` 逐字节透传）。格式识别由统一搜索压缩入口负责；关闭搜索压缩、
 格式不支持或无收益时原样返回，即使设置 `force_json` 也不会转入其他压缩器。
 纯路径列表按内容识别，允许非文件来源的命令或 API 结果，不依赖 `find` 或特定工具名。
 通过入口后按下表静态派发，每个领域各调用一次：
