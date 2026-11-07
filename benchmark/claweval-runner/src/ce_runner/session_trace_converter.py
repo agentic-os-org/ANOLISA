@@ -60,9 +60,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def normalize_timestamp(ts: str) -> str:
-    """Normalize timestamp format: convert 'Z' suffix to '+00:00'."""
-    if ts and ts.endswith("Z"):
+def normalize_timestamp(ts: object) -> str:
+    """Normalize timestamp format: convert 'Z' suffix to '+00:00'.
+
+    A timestamp that is present but not a non-empty string (null, a number, an
+    empty string) is treated exactly like a missing one: one malformed event
+    must not fail the conversion of the whole session.
+    """
+    if not isinstance(ts, str) or not ts:
+        return now_iso()
+    if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     return ts
 
@@ -571,7 +578,8 @@ def convert_session_to_trace(
         _last_ts = None
         for _ev in session_events:
             _ts = _ev.get("timestamp", "")
-            if _ts:
+            # 非字符串时间戳无法比较，跳过后 wall_time 仍由其余事件决定
+            if isinstance(_ts, str) and _ts:
                 try:
                     _dt_val = datetime.fromisoformat(normalize_timestamp(_ts))
                     _epoch = _dt_val.timestamp()
