@@ -17,7 +17,8 @@ pub(crate) fn routes(
     let mut hooks = Vec::new();
     for event in ["input.submit", "tool.before", "tool.after"] {
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        if selected.is_empty() {
+        let observe = adapter == "qoder-sdk" && event != "input.submit";
+        if selected.is_empty() && !observe {
             continue;
         }
         let budget = document["spec"]["events"][event]
@@ -34,6 +35,18 @@ pub(crate) fn routes(
                 hook["skill_check"] = json!(true);
             }
             hooks.push(hook);
+        }
+        if selected.is_empty() {
+            hooks.push(json!({"event":event,"step":crate::adapter::OBSERVE_STEP,"on_error":"report","budget_ms":budget,"replace_result":false}));
+            events.insert(
+                event.into(),
+                HookEvent {
+                    budget_ms: budget,
+                    replacement_step: None,
+                    steps: BTreeMap::from([(crate::adapter::OBSERVE_STEP.into(), "report".into())]),
+                },
+            );
+            continue;
         }
         events.insert(
             event.into(),

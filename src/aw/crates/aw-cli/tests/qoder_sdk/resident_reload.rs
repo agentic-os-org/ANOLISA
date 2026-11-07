@@ -77,7 +77,7 @@ fn first_query_policy_update_preserves_launch_receipt() {
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         let expected_denial = updated_hooks.unwrap_or(initial_hooks);
         assert_eq!(result["denied"], expected_denial);
-        assert_eq!(result["receipt_hooks"], usize::from(initial_hooks));
+        assert_eq!(result["receipt_hooks"], 2);
         assert_eq!(f.root.join("executed").exists(), !expected_denial);
         assert!(f.root.join("query-closed").exists());
         assert!(f.root.join("daemon-stopped").exists());

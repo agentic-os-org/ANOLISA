@@ -268,6 +268,8 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
     runtime.instances.lock().unwrap().insert(
         "fixture".into(),
         Some(Instance {
+            run: None,
+            native_facts: Arc::default(),
             bytes: bytes.to_vec(),
             context: ProcessContext {
                 cwd: directory.clone(),
