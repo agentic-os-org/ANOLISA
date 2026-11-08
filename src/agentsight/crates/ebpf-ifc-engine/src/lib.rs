@@ -33,6 +33,7 @@ mod file_protection_pinned_maps;
 mod file_protection_rename_tests;
 #[cfg(test)]
 mod file_protection_write_tests;
+mod target_identity;
 use capability::{
     CapState, DeltaRequest, AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE,
     AUTH_NARROW_SCOPE, AUTH_REQUIRE_GATE, TARGET_CHILD, TARGET_SELF,
@@ -48,6 +49,9 @@ pub use file_protection_map_writer::{
     FILE_PROTECTION_MAX_TARGETS, FILE_PROTECTION_NAME_MAX,
 };
 pub use file_protection_pinned_maps::PinnedFileProtectionMaps;
+pub use target_identity::{
+    procfs_start_time_from_boottime, resolve_process_identity, ProcessIdentity,
+};
 
 const BPF_ANY: u64 = 0;
 const BPF_NOEXIST: u64 = 1;
@@ -105,13 +109,13 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
 // the marker check loudly instead of being silently reused with mismatched
 // links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v6_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v7_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v7_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v8_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v7_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v8_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -387,6 +391,7 @@ struct Event {
     domain_id: u32,
     session_root: i32,
     timestamp_ns: u64,
+    process_start_boottime: u64,
     comm: [u8; COMM_LEN],
     filename: [u8; FILENAME_LEN],
     taint_rule_id: u32,
@@ -396,6 +401,7 @@ struct Event {
     matched_labels: u64,
     prov_label: u64,
     prov_timestamp_ns: u64,
+    prov_start_boottime: u64,
     prov_pid: i32,
     prov_op: u32,
     prov_ip: u32,
@@ -407,6 +413,8 @@ struct Event {
 pub struct Provenance {
     pub label: u64,
     pub timestamp_ns: u64,
+    /// Kernel start boot time in nanoseconds, captured with the provenance record.
+    pub process_start_boottime: u64,
     pub pid: i32,
     pub op: u32,
     pub target: String,
@@ -431,6 +439,8 @@ pub struct Violation {
     pub matched_labels: u64,
     pub provenance: Option<Provenance>,
     pub timestamp_ns: u64,
+    /// Kernel start boot time in nanoseconds for the violating process.
+    pub process_start_boottime: u64,
 }
 
 /// Parameters for creating a child runtime policy domain and binding a pid to it.
@@ -654,19 +664,9 @@ fn pin_profile_marker(
 ///
 /// Kernels before 5.15 attach tracepoints through the perf_event ioctl, which
 /// bpffs cannot pin, so the installing process keeps them attached for its
-/// lifetime. The `<pid>_<start_time>` suffix names that process; once it is
-/// gone the pinned layout is stale and gets rebuilt.
+/// lifetime. The `<pid>_<start_time>` suffix names that process by kernel TGID
+/// and raw boot-time clock ticks; once it is gone the layout is stale.
 const TRACEPOINT_HOLDER_PREFIX: &str = "tp_holder_";
-
-fn proc_start_time(pid: i32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(") ")?
-        .1
-        .split_whitespace()
-        .nth(19)?
-        .parse()
-        .ok()
-}
 
 fn pin_tracepoint_holder(
     bpf: &Ebpf,
@@ -674,12 +674,12 @@ fn pin_tracepoint_holder(
     created: &mut Vec<PathBuf>,
 ) -> io::Result<PathBuf> {
     let cap_pending_fd = dup_array_map_fd(bpf, "cap_pending_submitter")?;
-    // A host-wide marker cannot use a namespace-local process ID.
+    // A host-wide marker cannot use a namespace-local process ID or clock offset.
     let pid =
         capture_current_thread_identity_fd(cap_req_map_fd(bpf)?, cap_pending_fd.as_raw_fd())?.pid;
-    let start = proc_start_time(pid).ok_or_else(|| {
+    let start = target_identity::kernel_process_start_ticks(pid)?.ok_or_else(|| {
         err(format!(
-            "read /proc/{pid}/stat start time for tracepoint holder"
+            "kernel process {pid} disappeared while pinning the tracepoint holder"
         ))
     })?;
     let marker = paths.map(&format!("{TRACEPOINT_HOLDER_PREFIX}{pid}_{start}"));
@@ -719,7 +719,7 @@ fn tracepoint_holder_owned_by_current_process(
         let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
             continue;
         };
-        if proc_start_time(pid) != Some(start) {
+        if target_identity::kernel_process_start_ticks(pid)? != Some(start) {
             continue;
         }
         if allow_current {
@@ -730,7 +730,7 @@ fn tracepoint_holder_owned_by_current_process(
                 cap_pending_fd.as_raw_fd(),
             )?
             .pid;
-            if pid == current_pid && proc_start_time(current_pid) == Some(start) {
+            if pid == current_pid {
                 return Ok(true);
             }
         }
@@ -2894,6 +2894,15 @@ impl PinnedEngine {
             // Stale layout from an incompatible ActPlane revision: fall
             // through and rebuild instead of failing the process start.
             Err(e) if e.kind() == io::ErrorKind::InvalidData => false,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "{e}; ActPlane left the pin root at {} unchanged because a tracepoint holder may still be alive. Stop the previous enforcer and confirm from its PID namespace or the host that the holder has exited; then manually remove only this pin root and restart the enforcer",
+                        paths.root.display()
+                    ),
+                ));
+            }
             Err(e) => return Err(e),
         };
         if present {
@@ -4548,6 +4557,7 @@ fn decode(e: &Event) -> Violation {
         Some(Provenance {
             label: e.prov_label,
             timestamp_ns: e.prov_timestamp_ns,
+            process_start_boottime: e.prov_start_boottime,
             pid: e.prov_pid,
             op: e.prov_op,
             target,
@@ -4572,6 +4582,7 @@ fn decode(e: &Event) -> Violation {
         matched_labels: e.matched_labels,
         provenance,
         timestamp_ns: e.timestamp_ns,
+        process_start_boottime: e.process_start_boottime,
     }
 }
 
@@ -4683,7 +4694,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<CRule>(), 224);
         assert_eq!(std::mem::size_of::<CConfig>(), 74_760);
         assert_eq!(std::mem::align_of::<Event>(), 8);
-        assert_eq!(std::mem::size_of::<Event>(), 384);
+        assert_eq!(std::mem::size_of::<Event>(), 400);
     }
 
     // Structured-policy map keys are hashed by their byte image, so the Rust
@@ -5027,7 +5038,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v6"));
+        assert!(marker.contains("file_v7"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -5063,7 +5074,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v8"));
+        assert!(marker.contains("agent_file_guard_v9"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -5115,7 +5126,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v7"));
+        assert!(marker.contains("credential_exfiltration_v8"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -6283,10 +6294,9 @@ os.execv({hit:?}, [{hit:?}])
         let reload = engine.reload_handle().expect("reload handle");
         let kernel_pid = reload.current_process_kernel_pid().expect("kernel pid");
         assert_ne!(kernel_pid, std::process::id() as i32);
-        assert!(
-            proc_start_time(kernel_pid).is_some(),
-            "the test requires an init-namespace procfs view"
-        );
+        let kernel_start = target_identity::kernel_process_start_ticks(kernel_pid)
+            .expect("resolve current kernel start time")
+            .expect("current process must be visible");
         if let Some(holder) = &engine._tracepoint_holder {
             let marker = holder
                 ._marker
@@ -6294,12 +6304,12 @@ os.execv({hit:?}, [{hit:?}])
                 .file_name()
                 .and_then(|name| name.to_str())
                 .expect("holder marker name");
-            let pid = marker
+            let (pid, start) = marker
                 .strip_prefix(TRACEPOINT_HOLDER_PREFIX)
                 .and_then(|owner| owner.split_once('_'))
-                .map(|(pid, _)| pid)
                 .expect("holder marker owner");
             assert_eq!(pid.parse::<i32>(), Ok(kernel_pid));
+            assert_eq!(start.parse::<u64>(), Ok(kernel_start));
         }
     }
 
@@ -6488,7 +6498,7 @@ os.execv({hit:?}, [{hit:?}])
     }
 
     #[test]
-    fn pinned_engine_present_rejects_pre_ordinary_write_layout() {
+    fn pinned_engine_present_rejects_stale_layout_markers() {
         let root = std::env::temp_dir().join(format!(
             "actplane-pin-write-{}-{}",
             std::process::id(),
@@ -6505,6 +6515,22 @@ os.execv({hit:?}, [{hit:?}])
             (
                 HookReserve::agent_file_guard(),
                 "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::file_enforcement(),
+                "agentsight_profile_file_v6_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::credential_exfiltration(),
+                "agentsight_profile_credential_exfiltration_v7_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::full_profile(),
+                "agentsight_profile_full_v7_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::agent_file_guard(),
+                "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a",
             ),
         ] {
             let paths = PinnedEnginePaths::new(root.join(old));
@@ -6547,7 +6573,7 @@ os.execv({hit:?}, [{hit:?}])
                 }
             }
             std::fs::write(paths.map(old), b"").expect("old marker pin");
-            let error = pinned_engine_present(&paths, reserve).expect_err("v4 must be stale");
+            let error = pinned_engine_present(&paths, reserve).expect_err("old marker must be stale");
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert!(error.to_string().contains("pinned metadata mismatch"));
 

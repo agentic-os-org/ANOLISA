@@ -98,9 +98,9 @@ fn file_guard_startup_warning(profile: Option<&str>, available: bool) -> Option<
     // ready 只表示引擎可接收请求，不能据此承诺防误删能力；不改变 health 门控。
     Some(format!(
         "file_delete_guard=false (requested ACTPLANE_PINNED_PROFILE={}): \
-         file deletion protection requires the agent-file-guard profile, active BPF-LSM, \
-         and the initial PID namespace. Changing from credential-exfiltration disables \
-         credential-to-network blocking; schedule pinned-engine reprovisioning before switching. \
+         file deletion protection requires the agent-file-guard profile and active BPF-LSM. \
+         Changing from credential-exfiltration disables credential-to-network blocking; \
+         schedule pinned-engine reprovisioning before switching. \
          See the AgentSight deployment guide for prerequisites and activation steps",
         profile.unwrap_or("full")
     ))
@@ -133,6 +133,7 @@ mod tests {
         assert!(message.contains("ACTPLANE_PINNED_PROFILE=credential-exfiltration"));
         assert!(message.contains("agent-file-guard"));
         assert!(message.contains("active BPF-LSM"));
+        assert!(!message.contains("initial PID namespace"));
         assert!(message.contains("disables credential-to-network blocking"));
         assert!(message.contains("pinned-engine reprovisioning"));
     }

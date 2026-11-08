@@ -1,0 +1,1869 @@
+diff --git a/bpf/Cargo.toml b/bpf/Cargo.toml
+index dbd1fc9ad1d9a36be1002d8b21b7eb65cd3a9b5d..3a727d4db4e32cf00e6a1b8e56a2f744660a5b95 100644
+--- a/bpf/Cargo.toml
++++ b/bpf/Cargo.toml
+@@ -17,0 +18 @@ libc = "0.2"
++libbpf-rs = "0.23.3"
+diff --git a/bpf/build.rs b/bpf/build.rs
+index c3ba506d246d3139b8ee148d942db6ba4159b1b9..5afc700b0d50f7fb6e543ba2130b2208ffc1ecf0 100644
+--- a/bpf/build.rs
++++ b/bpf/build.rs
+@@ -1,10 +1,2 @@
+-// Makes the prebuilt eBPF CO-RE objects available to lib.rs (include_bytes! from
+-// OUT_DIR). Two variants are maintained:
+-//   - process.bpf.o:            full build with bpf_d_path (kernel 7.1.x+)
+-//   - process-inode-only.bpf.o: compiled with -DINODE_GUARD_ONLY, no bpf_d_path
+-//                                 (kernel 5.10/6.6 where verifier rejects it)
+-//
+-// By default this just copies the committed prebuilt/*.bpf.o files, so
+-// `cargo build` / `cargo install` needs NO clang/llvm/libbpf and no submodules.
+-//
+-// Set ACTPLANE_REBUILD_BPF=1 to rebuild both from the kernel C via the Makefile.
++// Copies the target-specific full and inode-only CO-RE objects to OUT_DIR.
++// Cargo builds need no BPF toolchain unless ACTPLANE_REBUILD_BPF=1 is explicit.
+@@ -15,7 +7,10 @@ use std::process::Command;
+-fn main() {
+-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+-    let prebuilt_full = manifest.join("prebuilt/process.bpf.o");
+-    let prebuilt_inode = manifest.join("prebuilt/process-inode-only.bpf.o");
+-    let built_full = manifest.join(".output/process.bpf.o");
+-    let built_inode = manifest.join(".output/process-inode-only.bpf.o");
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
++    let out = PathBuf::from(env::var("OUT_DIR")?);
++    let target_arch = env::var("CARGO_CFG_TARGET_ARCH")?;
++    let bpf_arch = match target_arch.as_str() {
++        "x86_64" => "x86",
++        "aarch64" => "arm64",
++        _ => return Err(format!("unsupported BPF target architecture: {target_arch}").into()),
++    };
++    let prebuilt = manifest.join("prebuilt").join(&target_arch);
+@@ -22,0 +18 @@ fn main() {
++    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH");
+@@ -24,2 +20 @@ fn main() {
+-    println!("cargo:rerun-if-changed={}", prebuilt_full.display());
+-    println!("cargo:rerun-if-changed={}", prebuilt_inode.display());
++    println!("cargo:rerun-if-changed=build.rs");
+@@ -27,4 +22,2 @@ fn main() {
+-    let rebuild = env::var_os("ACTPLANE_REBUILD_BPF").is_some();
+-
+-    if rebuild || !prebuilt_full.exists() || !prebuilt_inode.exists() {
+-        for f in [
++    if env::var_os("ACTPLANE_REBUILD_BPF").is_some() {
++        for file in [
+@@ -31,0 +25 @@ fn main() {
++            "target_identity.bpf.c",
+@@ -32,0 +27 @@ fn main() {
++            "file_read_guard.bpf.h",
+@@ -39 +34 @@ fn main() {
+-            println!("cargo:rerun-if-changed={}", manifest.join(f).display());
++            println!("cargo:rerun-if-changed={}", manifest.join(file).display());
+@@ -40,0 +36,3 @@ fn main() {
++        // Separate output directories prevent a cross build from reusing host
++        // objects. Force compilation even if only the selected ARCH changed.
++        let output = format!(".output/{target_arch}");
+@@ -44,10 +42,6 @@ fn main() {
+-            .arg("process")
+-            .status()
+-            .expect("run make -C bpf process (ACTPLANE_REBUILD_BPF)");
+-        assert!(status.success(), "make -C bpf process failed");
+-        std::fs::create_dir_all(manifest.join("prebuilt")).ok();
+-        std::fs::copy(&built_full, &prebuilt_full)
+-            .unwrap_or_else(|e| panic!("copy {} -> prebuilt: {e}", built_full.display()));
+-        let status = Command::new("make")
+-            .arg("-C")
+-            .arg(&manifest)
++            .arg(format!("ARCH={bpf_arch}"))
++            .arg(format!("OUTPUT={output}"))
++            .args(["-W", "process.bpf.c"])
++            .args(["-W", "target_identity.bpf.c"])
++            .arg(format!("{output}/process.bpf.o"))
++            .arg(format!("{output}/target_identity.bpf.o"))
+@@ -55,5 +49,12 @@ fn main() {
+-            .status()
+-            .expect("run make -C bpf process-inode-only (ACTPLANE_REBUILD_BPF)");
+-        assert!(status.success(), "make -C bpf process-inode-only failed");
+-        std::fs::copy(&built_inode, &prebuilt_inode)
+-            .unwrap_or_else(|e| panic!("copy {} -> prebuilt: {e}", built_inode.display()));
++            .status()?;
++        if !status.success() {
++            return Err(format!("BPF rebuild failed for {target_arch}: {status}").into());
++        }
++        std::fs::create_dir_all(&prebuilt)?;
++        for name in [
++            "process.bpf.o",
++            "process-inode-only.bpf.o",
++            "target_identity.bpf.o",
++        ] {
++            std::fs::copy(manifest.join(&output).join(name), prebuilt.join(name))?;
++        }
+@@ -62,4 +63,13 @@ fn main() {
+-    std::fs::copy(&prebuilt_full, out.join("process.bpf.o"))
+-        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", prebuilt_full.display()));
+-    std::fs::copy(&prebuilt_inode, out.join("process-inode-only.bpf.o"))
+-        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", prebuilt_inode.display()));
++    // Missing committed artifacts fail closed; never implicitly invoke make
++    // (release builders deliberately lack the BPF headers/toolchain).
++    for name in [
++        "process.bpf.o",
++        "process-inode-only.bpf.o",
++        "target_identity.bpf.o",
++    ] {
++        let source = prebuilt.join(name);
++        println!("cargo:rerun-if-changed={}", source.display());
++        std::fs::copy(&source, out.join(name))
++            .map_err(|error| format!("copy {} -> OUT_DIR: {error}", source.display()))?;
++    }
++    Ok(())
+diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
+index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15d3647bfe 100644
+--- a/bpf/src/lib.rs
++++ b/bpf/src/lib.rs
+@@ -26,0 +27,10 @@ pub mod capability;
++#[cfg(test)]
++mod file_protection_delete_tests;
++mod file_protection_generation;
++mod file_protection_map_writer;
++mod file_protection_pinned_maps;
++#[cfg(test)]
++mod file_protection_rename_tests;
++#[cfg(test)]
++mod file_protection_write_tests;
++mod target_identity;
+@@ -30,0 +41,14 @@ use capability::{
++pub use file_protection_generation::{
++    ActiveFileProtectionGeneration, FileProtectionDetachError, FileProtectionStaging,
++    InactiveFileProtectionGeneration,
++};
++pub use file_protection_map_writer::{
++    FileProtectionDomainValue, FileProtectionGeneration, FileProtectionMapCounts,
++    FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,
++    FileProtectionTargetValue, TreeGuard, TreePathIdentity, FILE_PROTECTION_MAP_CAPACITY,
++    FILE_PROTECTION_MAX_TARGETS, FILE_PROTECTION_NAME_MAX,
++};
++pub use file_protection_pinned_maps::PinnedFileProtectionMaps;
++pub use target_identity::{
++    procfs_start_time_from_boottime, resolve_process_identity, ProcessIdentity,
++};
+@@ -88 +112 @@ const PINNED_FILE_PROFILE_MARKER: &str =
+-    "agentsight_profile_file_v6_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_file_v7_a62e5d9d96f91101cda019519053e950d532380a";
+@@ -90 +114 @@ const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
+-    "agentsight_profile_credential_exfiltration_v7_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_credential_exfiltration_v8_a62e5d9d96f91101cda019519053e950d532380a";
+@@ -92 +116 @@ const PINNED_FULL_PROFILE_MARKER: &str =
+-    "agentsight_profile_full_v7_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_full_v8_a62e5d9d96f91101cda019519053e950d532380a";
+@@ -94 +118 @@ const PINNED_AGENT_FILE_GUARD_MARKER: &str =
+-    "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a";
+@@ -219,0 +244,4 @@ pub const INODE_GUARD_WRITE: u32 = 4;
++/// Reserved ABI flag for directory-tree guards, separate from per-target operation flags.
++pub const INODE_GUARD_TREE: u32 = 8;
++/// Denies reading or mapping the protected regular file.
++pub const INODE_GUARD_READ: u32 = 16;
+@@ -230,0 +259,85 @@ pub struct InodeGuardVal {
++// Mirrors BPF te_path_key; statx mount IDs must fit kernel mount.mnt_id (u32).
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
++struct TreePathKey {
++    ino: u64,
++    dev: u32,
++    mnt_id: u32,
++    domain_id: u32,
++    generation: u32,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicyRootVal {
++    root_mask: u64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicyStableVal {
++    target_mask: u64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicySlotKey {
++    parent: TreePathKey,
++    name_len: u32,
++    name: [u8; FILE_PROTECTION_NAME_MAX + 1],
++    // Explicit tail storage avoids indeterminate repr(C) padding in map keys.
++    _pad: u32,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicySlotVal {
++    direct_mask: u64,
++    exact_exclude_mask: u64,
++    subtree_exclude_mask: u64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicyTargetKey {
++    domain_id: u32,
++    generation: u32,
++    target_id: u32,
++    _pad: u32,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicyTargetVal {
++    guard: InodeGuardVal,
++    flags: u32,
++    target_id: u32,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct PolicyDomainVal {
++    generation: u32,
++    target_count: u32,
++    tree_mask: u64,
++    delete_mask: u64,
++    ordinary_write_mask: u64,
++    protection_set_id: u64,
++    guard: InodeGuardVal,
++}
++
++// The structured file-protection map ABI is shared with process.bpf.c by layout
++// alone; pin every key and value size/alignment so a C-side edit cannot silently
++// reinterpret staged generations. Sizes are the BTF sizes of the C structs.
++const _: () = assert!(std::mem::size_of::<InodeGuardVal>() == 16);
++const _: () = assert!(std::mem::size_of::<TreePathKey>() == 24);
++const _: () = assert!(std::mem::align_of::<TreePathKey>() == 8);
++const _: () = assert!(std::mem::size_of::<PolicyRootVal>() == 8);
++const _: () = assert!(std::mem::size_of::<PolicyStableVal>() == 8);
++const _: () = assert!(std::mem::size_of::<PolicySlotKey>() == 288);
++const _: () = assert!(std::mem::align_of::<PolicySlotKey>() == 8);
++const _: () = assert!(std::mem::size_of::<PolicySlotVal>() == 24);
++const _: () = assert!(std::mem::size_of::<PolicyTargetKey>() == 16);
++const _: () = assert!(std::mem::size_of::<PolicyTargetVal>() == 24);
++const _: () = assert!(std::mem::size_of::<PolicyDomainVal>() == 56);
++
+@@ -248,0 +362,8 @@ unsafe impl aya::Pod for InodeGuardVal {}
++unsafe impl aya::Pod for TreePathKey {}
++unsafe impl aya::Pod for PolicyRootVal {}
++unsafe impl aya::Pod for PolicyStableVal {}
++unsafe impl aya::Pod for PolicySlotKey {}
++unsafe impl aya::Pod for PolicySlotVal {}
++unsafe impl aya::Pod for PolicyTargetKey {}
++unsafe impl aya::Pod for PolicyTargetVal {}
++unsafe impl aya::Pod for PolicyDomainVal {}
+@@ -272,0 +394 @@ struct Event {
++    process_start_boottime: u64,
+@@ -281,0 +404 @@ struct Event {
++    prov_start_boottime: u64,
+@@ -292,0 +416,2 @@ pub struct Provenance {
++    /// Kernel start boot time in nanoseconds, captured with the provenance record.
++    pub process_start_boottime: u64,
+@@ -316,0 +442,2 @@ pub struct Violation {
++    /// Kernel start boot time in nanoseconds for the violating process.
++    pub process_start_boottime: u64,
+@@ -540,2 +667,2 @@ fn pin_profile_marker(
+-/// lifetime. The `<pid>_<start_time>` suffix names that process; once it is
+-/// gone the pinned layout is stale and gets rebuilt.
++/// lifetime. The `<pid>_<start_time>` suffix names that process by kernel TGID
++/// and raw boot-time clock ticks; once it is gone the layout is stale.
+@@ -544,10 +670,0 @@ const TRACEPOINT_HOLDER_PREFIX: &str = "tp_holder_";
+-fn proc_start_time(pid: i32) -> Option<u64> {
+-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+-    stat.rsplit_once(") ")?
+-        .1
+-        .split_whitespace()
+-        .nth(19)?
+-        .parse()
+-        .ok()
+-}
+-
+@@ -560 +677 @@ fn pin_tracepoint_holder(
+-    // A host-wide marker cannot use a namespace-local process ID.
++    // A host-wide marker cannot use a namespace-local process ID or clock offset.
+@@ -563 +680 @@ fn pin_tracepoint_holder(
+-    let start = proc_start_time(pid).ok_or_else(|| {
++    let start = target_identity::kernel_process_start_ticks(pid)?.ok_or_else(|| {
+@@ -565 +682 @@ fn pin_tracepoint_holder(
+-            "read /proc/{pid}/stat start time for tracepoint holder"
++            "kernel process {pid} disappeared while pinning the tracepoint holder"
+@@ -605 +722 @@ fn tracepoint_holder_owned_by_current_process(
+-        if proc_start_time(pid) != Some(start) {
++        if target_identity::kernel_process_start_ticks(pid)? != Some(start) {
+@@ -616 +733 @@ fn tracepoint_holder_owned_by_current_process(
+-            if pid == current_pid && proc_start_time(current_pid) == Some(start) {
++            if pid == current_pid {
+@@ -1006,0 +1124,8 @@ fn pinned_engine_present_inner(
++        "te_policy_roots",
++        "te_policy_dirs",
++        "te_policy_stable",
++        "te_policy_slots",
++        "te_policy_targets",
++        "te_policy_domains",
++        "te_policy_slot_scratch",
++        "te_policy_permission_scratch",
+@@ -1445,0 +1571 @@ enum TracepointNeed {
++    RenameCompat,
+@@ -1458,0 +1585,18 @@ const TRACEPOINTS: &[TracepointSpec] = &[
++    TracepointSpec {
++        name: "guard_rename_enter",
++        category: "raw_syscalls",
++        event: "sys_enter",
++        need: TracepointNeed::RenameCompat,
++    },
++    TracepointSpec {
++        name: "guard_rename_exit",
++        category: "raw_syscalls",
++        event: "sys_exit",
++        need: TracepointNeed::RenameCompat,
++    },
++    TracepointSpec {
++        name: "guard_rename_task_exit",
++        category: "sched",
++        event: "sched_process_exit",
++        need: TracepointNeed::RenameCompat,
++    },
+@@ -1909,0 +2054 @@ const LSM_PROGS: &[(&str, &str)] = &[
++    ("enforce_path_rmdir", "path_rmdir"),
+@@ -1910,0 +2056 @@ const LSM_PROGS: &[(&str, &str)] = &[
++    ("enforce_path_rename_legacy", "path_rename"),
+@@ -2060,0 +2207,8 @@ impl HookBudget {
++fn rename_compat_needed_for_arity(budget: HookBudget, arity: u32) -> bool {
++    budget.features & FEAT_BLOCK_FILE != 0 && !budget.file_open_only && arity == 4
++}
++
++fn rename_compat_needed(budget: HookBudget) -> bool {
++    path_rename_arity().is_ok_and(|arity| rename_compat_needed_for_arity(budget, arity))
++}
++
+@@ -2061,0 +2216,3 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
++    if spec.need == TracepointNeed::RenameCompat {
++        return rename_compat_needed(budget);
++    }
+@@ -2070,0 +2228 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
++        TracepointNeed::RenameCompat => rename_compat_needed(budget),
+@@ -2101 +2258,0 @@ fn lsm_needed(
+-    advanced_hooks: bool,
+@@ -2109 +2266,6 @@ fn lsm_needed(
+-        "enforce_mmap_file" | "enforce_file_mprotect" => advanced_hooks && block_file,
++        // Nominal requirement without a hook budget: writable shared mappings
++        // bypass file_permission, so any file-blocking profile would want the
++        // mapping mediation. lsm_needed_for_budget decides whether the hook
++        // set can actually carry it (verifier stack budget on the validated
++        // kernels); do not read this arm as the production gate.
++        "enforce_mmap_file" | "enforce_file_mprotect" => block_file,
+@@ -2114 +2276,3 @@ fn lsm_needed(
+-        | "enforce_path_rename" => block_file,
++        | "enforce_path_rmdir"
++        | "enforce_path_rename"
++        | "enforce_path_rename_legacy" => block_file,
+@@ -2137,8 +2301,17 @@ fn lsm_needed_for_budget(
+-    lsm_needed(
+-        name,
+-        block_exec,
+-        block_file,
+-        block_connect,
+-        recv_flow,
+-        budget.advanced_tracepoints,
+-    )
++    // Mapping mediation ships only with the advanced tracepoint budget: the
++    // inode-only profile denies writable opens instead, which keeps these
++    // hooks out of its verifier stack budget.
++    if matches!(name, "enforce_mmap_file" | "enforce_file_mprotect") {
++        return (budget.advanced_tracepoints
++            || budget.features == HookReserve::agent_file_guard().policy_features)
++            && block_file;
++    }
++    lsm_needed(name, block_exec, block_file, block_connect, recv_flow)
++}
++
++fn rename_program_selected(name: &str) -> bool {
++    match name {
++        "enforce_path_rename" => path_rename_arity().is_ok_and(|arity| arity == 5),
++        "enforce_path_rename_legacy" => path_rename_arity().is_ok_and(|arity| arity == 4),
++        _ => true,
++    }
+@@ -2148,0 +2322 @@ fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
++        && rename_program_selected(name)
+@@ -2201,0 +2376,42 @@ fn lsm_hook_available(hook: &str) -> bool {
++// Vendor kernels backport hook signatures independently of their release number.
++// Refuse unknown BTF shapes instead of reading a guessed context slot.
++fn path_rename_arity() -> io::Result<u32> {
++    static ARITY: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
++    ARITY
++        .get_or_init(|| unsafe {
++            let btf = libbpf_sys::btf__load_vmlinux_btf();
++            if btf.is_null() || libbpf_sys::libbpf_get_error(btf.cast()) != 0 {
++                return Err("cannot read kernel BTF for path_rename".into());
++            }
++            let result = (|| {
++                let id = libbpf_sys::btf__find_by_name_kind(
++                    btf,
++                    c"bpf_lsm_path_rename".as_ptr(),
++                    libbpf_sys::BTF_KIND_FUNC,
++                );
++                if id < 0 {
++                    return Err("kernel BTF has no bpf_lsm_path_rename".into());
++                }
++                let func = libbpf_sys::btf__type_by_id(btf, id as u32);
++                if func.is_null() {
++                    return Err("invalid path_rename BTF function".into());
++                }
++                let proto = libbpf_sys::btf__type_by_id(btf, (*func).__bindgen_anon_1.type_);
++                if proto.is_null()
++                    || ((*proto).info >> 24) & 0x1f != libbpf_sys::BTF_KIND_FUNC_PROTO
++                {
++                    return Err("invalid path_rename BTF prototype".into());
++                }
++                match (*proto).info & 0xffff {
++                    arity @ (4 | 5) => Ok(arity),
++                    arity => Err(format!("unsupported path_rename BTF arity {arity}")),
++                }
++            })();
++            libbpf_sys::btf__free(btf);
++            result
++        })
++        .as_ref()
++        .copied()
++        .map_err(|message| err(message.clone()))
++}
++
+@@ -2680,0 +2897,9 @@ impl PinnedEngine {
++            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
++                return Err(io::Error::new(
++                    io::ErrorKind::WouldBlock,
++                    format!(
++                        "{e}; ActPlane left the pin root at {} unchanged because a tracepoint holder may still be alive. Stop the previous enforcer and confirm from its PID namespace or the host that the holder has exited; then manually remove only this pin root and restart the enforcer",
++                        paths.root.display()
++                    ),
++                ));
++            }
+@@ -2741,0 +2967,10 @@ impl PinnedEngine {
++    /// Whether the active profile has the LSM hook required for ordinary writes.
++    pub fn supports_file_permission_guard(&self) -> bool {
++        self.supports_file_delete_guard()
++            && self
++                .paths
++                .link("enforce_file_permission")
++                .try_exists()
++                .unwrap_or(false)
++    }
++
+@@ -2815,0 +3051,34 @@ impl PinnedEngine {
++    pub fn clear_file_protection_generations(&self) -> io::Result<()> {
++        let domains = self.clear_policy_map::<u32, PolicyDomainVal>("te_policy_domains");
++        if let Err(error) = domains {
++            return Err(err(format!(
++                "deactivate stale structured file-protection domains: {error}"
++            )));
++        }
++        let errors: Vec<_> = [
++            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_roots"),
++            self.clear_policy_map::<TreePathKey, PolicyRootVal>("te_policy_dirs"),
++            self.clear_policy_map::<TreePathKey, PolicyStableVal>("te_policy_stable"),
++            self.clear_policy_map::<PolicySlotKey, PolicySlotVal>("te_policy_slots"),
++            self.clear_policy_map::<PolicyTargetKey, PolicyTargetVal>("te_policy_targets"),
++        ]
++        .into_iter()
++        .filter_map(Result::err)
++        .map(|error| error.to_string())
++        .collect();
++        if errors.is_empty() {
++            Ok(())
++        } else {
++            Err(err(errors.join("; ")))
++        }
++    }
++
++    fn clear_policy_map<K: aya::Pod + Copy, V: aya::Pod + Copy>(
++        &self,
++        name: &str,
++    ) -> io::Result<()> {
++        let data = pinned_map_data(&self.paths, name)?;
++        let fd = dup_cloexec_fd(data.fd().as_fd().as_raw_fd())?;
++        clear_hash_map::<K, V>(&fd, name)
++    }
++
+@@ -3254,0 +3524,3 @@ impl Loader {
++        if enforce && has_block_file && !hook_budget.file_open_only {
++            path_rename_arity()?;
++        }
+@@ -3294,0 +3567,3 @@ impl Loader {
++                if !rename_program_selected(name) {
++                    continue;
++                }
+@@ -4284,0 +4560 @@ fn decode(e: &Event) -> Violation {
++            process_start_boottime: e.prov_start_boottime,
+@@ -4308,0 +4585 @@ fn decode(e: &Event) -> Violation {
++        process_start_boottime: e.process_start_boottime,
+@@ -4398,0 +4676,10 @@ mod tests {
++        assert_eq!(std::mem::size_of::<TreePathKey>(), 24);
++        assert_eq!(std::mem::align_of::<TreePathKey>(), 8);
++        assert_eq!(std::mem::size_of::<PolicyRootVal>(), 8);
++        assert_eq!(std::mem::size_of::<PolicyStableVal>(), 8);
++        assert_eq!(std::mem::size_of::<PolicySlotKey>(), 288);
++        assert_eq!(std::mem::align_of::<PolicySlotKey>(), 8);
++        assert_eq!(std::mem::size_of::<PolicySlotVal>(), 24);
++        assert_eq!(std::mem::size_of::<PolicyTargetKey>(), 16);
++        assert_eq!(std::mem::size_of::<PolicyTargetVal>(), 24);
++        assert_eq!(std::mem::size_of::<PolicyDomainVal>(), 56);
+@@ -4410 +4697,123 @@ mod tests {
+-        assert_eq!(std::mem::size_of::<Event>(), 384);
++        assert_eq!(std::mem::size_of::<Event>(), 400);
++    }
++
++    // Structured-policy map keys are hashed by their byte image, so the Rust
++    // mirrors must contain no implicit repr(C) padding the kernel would compare
++    // as uninitialized bytes, and every declared tail byte must be zeroed.
++    #[test]
++    fn policy_map_keys_have_deterministic_byte_images() {
++        assert_eq!(
++            std::mem::size_of::<TreePathKey>(),
++            std::mem::size_of::<u64>() + 4 * std::mem::size_of::<u32>()
++        );
++        assert_eq!(
++            std::mem::size_of::<PolicyTargetKey>(),
++            4 * std::mem::size_of::<u32>()
++        );
++        assert_eq!(
++            std::mem::size_of::<PolicySlotKey>(),
++            std::mem::size_of::<TreePathKey>()
++                + std::mem::size_of::<u32>()
++                + FILE_PROTECTION_NAME_MAX
++                + 1
++                + std::mem::size_of::<u32>()
++        );
++
++        let slot = FileProtectionSlot::new(
++            TreePathIdentity {
++                ino: 9,
++                dev: 0x0801,
++                mnt_id: 0,
++            },
++            "etc",
++        )
++        .expect("valid basename");
++        let key = PolicySlotKey {
++            parent: TreePathKey {
++                ino: slot.parent.ino,
++                dev: slot.parent.dev,
++                mnt_id: slot.parent.mnt_id,
++                domain_id: 3,
++                generation: 4,
++            },
++            name_len: slot.name_len,
++            name: slot.name,
++            _pad: 0,
++        };
++        let bytes = unsafe {
++            std::slice::from_raw_parts(
++                (&key as *const PolicySlotKey).cast::<u8>(),
++                std::mem::size_of::<PolicySlotKey>(),
++            )
++        };
++        let name_offset = std::mem::size_of::<TreePathKey>() + std::mem::size_of::<u32>();
++        assert_eq!(&bytes[name_offset..name_offset + 3], b"etc");
++        assert!(
++            bytes[name_offset + 3..].iter().all(|byte| *byte == 0),
++            "slot-key name tail and explicit padding must be zero"
++        );
++    }
++
++    // Normalized target ids are 1-based so each one maps to exactly one bit of
++    // the 64-bit masks carried by te_policy_domain_val.
++    #[test]
++    fn target_ids_are_bounded_and_cover_the_domain_masks() {
++        for flag in [
++            INODE_GUARD_UNLINK,
++            INODE_GUARD_RENAME,
++            INODE_GUARD_WRITE,
++            INODE_GUARD_TREE,
++        ] {
++            assert_eq!(flag.count_ones(), 1, "guard flags must be single bits");
++        }
++
++        let mut covered = 0u64;
++        for target_id in 1..=FILE_PROTECTION_MAX_TARGETS as u32 {
++            let value = PolicyTargetVal {
++                guard: InodeGuardVal {
++                    flags: INODE_GUARD_UNLINK | INODE_GUARD_TREE,
++                    domain_id: 5,
++                    rule_id: target_id,
++                    _pad: 0,
++                },
++                flags: 0b11,
++                target_id,
++            };
++            assert_eq!(
++                value.guard.rule_id, value.target_id,
++                "events must report the stable target id"
++            );
++            covered |= 1u64 << (value.target_id - 1);
++        }
++        assert_eq!(covered, u64::MAX, "64 target ids must fill the mask width");
++
++        let domain = PolicyDomainVal {
++            generation: 1,
++            target_count: FILE_PROTECTION_MAX_TARGETS as u32,
++            tree_mask: covered,
++            delete_mask: covered,
++            ordinary_write_mask: 0,
++            protection_set_id: 7,
++            guard: InodeGuardVal {
++                flags: INODE_GUARD_UNLINK,
++                domain_id: 5,
++                rule_id: 0,
++                _pad: 0,
++            },
++        };
++        assert_eq!(domain.generation, 1);
++        assert_eq!(domain.target_count, domain.tree_mask.count_ones());
++        assert_eq!(domain.delete_mask & domain.ordinary_write_mask, 0);
++        assert_eq!(domain.protection_set_id, 7);
++        assert_eq!(domain.guard.flags, INODE_GUARD_UNLINK);
++
++        let root = PolicyRootVal { root_mask: 0b1 };
++        let stable = PolicyStableVal { target_mask: 0b1 };
++        let slot = PolicySlotVal {
++            direct_mask: 0b1,
++            exact_exclude_mask: 0b10,
++            subtree_exclude_mask: 0b100,
++        };
++        assert_eq!(root.root_mask, stable.target_mask);
++        assert_eq!(slot.direct_mask & slot.exact_exclude_mask, 0);
++        assert_eq!(slot.subtree_exclude_mask, 0b100);
+@@ -4559,8 +4968 @@ mod tests {
+-        assert!(lsm_needed(
+-            "enforce_file_open",
+-            false,
+-            true,
+-            false,
+-            false,
+-            false,
+-        ));
++        assert!(lsm_needed("enforce_file_open", false, true, false, false,));
+@@ -4584,0 +4987,37 @@ mod tests {
++    #[test]
++    fn legacy_rename_context_is_independent_of_dataflow_profile() {
++        let budget = HookBudget::for_pinned_reserve(HookReserve::agent_file_guard());
++        assert!(budget.suppress_dataflow_tracepoints);
++        assert!(!budget.has_file_flow());
++        assert!(rename_compat_needed_for_arity(budget, 4));
++        assert!(!rename_compat_needed_for_arity(budget, 5));
++        assert!(!rename_compat_needed_for_arity(HookBudget::default(), 4));
++        assert!(!rename_compat_needed_for_arity(
++            HookBudget::for_pinned_reserve(HookReserve::file_enforcement()),
++            4,
++        ));
++        for name in [
++            "guard_rename_enter",
++            "guard_rename_exit",
++            "guard_rename_task_exit",
++        ] {
++            let spec = TRACEPOINTS
++                .iter()
++                .find(|spec| spec.name == name)
++                .expect("compatibility tracepoint");
++            assert_eq!(spec.need, TracepointNeed::RenameCompat);
++            assert_eq!(
++                tracepoint_needed(spec, budget),
++                rename_compat_needed(budget)
++            );
++        }
++        assert!(lsm_needed(
++            "enforce_path_rename_legacy",
++            false,
++            true,
++            false,
++            false
++        ));
++        assert!(lsm_needed("enforce_path_unlink", false, true, false, false));
++    }
++
+@@ -4602 +5041 @@ mod tests {
+-        assert!(marker.contains("file_v6"));
++        assert!(marker.contains("file_v7"));
+@@ -4638 +5077 @@ mod tests {
+-        assert!(marker.contains("agent_file_guard_v8"));
++        assert!(marker.contains("agent_file_guard_v9"));
+@@ -4690 +5129 @@ mod tests {
+-        assert!(marker.contains("credential_exfiltration_v7"));
++        assert!(marker.contains("credential_exfiltration_v8"));
+@@ -4710,8 +5149 @@ mod tests {
+-        assert!(lsm_needed(
+-            "enforce_task_kill",
+-            false,
+-            false,
+-            false,
+-            false,
+-            false
+-        ));
++        assert!(lsm_needed("enforce_task_kill", false, false, false, false));
+@@ -4723 +5154,0 @@ mod tests {
+-            false,
+@@ -4731 +5161,0 @@ mod tests {
+-            false,
+@@ -4739 +5168,0 @@ mod tests {
+-            false,
+@@ -4742 +5171 @@ mod tests {
+-        assert!(!lsm_needed(
++        assert!(!lsm_needed_for_budget(
+@@ -4744,0 +5174 @@ mod tests {
++            true,
+@@ -4747,2 +5177 @@ mod tests {
+-            false,
+-            true
++            HookBudget::for_pinned_reserve(HookReserve::agent_file_guard()),
+@@ -4755 +5183,0 @@ mod tests {
+-            false,
+@@ -4758 +5186 @@ mod tests {
+-        assert!(lsm_needed(
++        assert!(lsm_needed_for_budget(
+@@ -4764 +5192,4 @@ mod tests {
+-            true
++            HookBudget::for_pinned_reserve(
++                HookReserve::pinned_profile_value(Some("credential-exfiltration"))
++                    .expect("credential profile"),
++            ),
+@@ -5866,4 +6297,3 @@ os.execv({hit:?}, [{hit:?}])
+-        assert!(
+-            proc_start_time(kernel_pid).is_some(),
+-            "the test requires an init-namespace procfs view"
+-        );
++        let kernel_start = target_identity::kernel_process_start_ticks(kernel_pid)
++            .expect("resolve current kernel start time")
++            .expect("current process must be visible");
+@@ -5877 +6307 @@ os.execv({hit:?}, [{hit:?}])
+-            let pid = marker
++            let (pid, start) = marker
+@@ -5880 +6309,0 @@ os.execv({hit:?}, [{hit:?}])
+-                .map(|(pid, _)| pid)
+@@ -5882,0 +6312 @@ os.execv({hit:?}, [{hit:?}])
++            assert_eq!(start.parse::<u64>(), Ok(kernel_start));
+@@ -6032,0 +6463,8 @@ os.execv({hit:?}, [{hit:?}])
++            "te_policy_roots",
++            "te_policy_dirs",
++            "te_policy_stable",
++            "te_policy_slots",
++            "te_policy_targets",
++            "te_policy_domains",
++            "te_policy_slot_scratch",
++            "te_policy_permission_scratch",
+@@ -6061,0 +6500,111 @@ os.execv({hit:?}, [{hit:?}])
++    #[test]
++    fn pinned_engine_present_rejects_stale_layout_markers() {
++        let root = std::env::temp_dir().join(format!(
++            "actplane-pin-write-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .expect("clock")
++                .as_nanos()
++        ));
++        for (reserve, old) in [
++            (
++                HookReserve::full_profile(),
++                "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a",
++            ),
++            (
++                HookReserve::agent_file_guard(),
++                "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a",
++            ),
++            (
++                HookReserve::file_enforcement(),
++                "agentsight_profile_file_v6_a62e5d9d96f91101cda019519053e950d532380a",
++            ),
++            (
++                HookReserve::credential_exfiltration(),
++                "agentsight_profile_credential_exfiltration_v7_a62e5d9d96f91101cda019519053e950d532380a",
++            ),
++            (
++                HookReserve::full_profile(),
++                "agentsight_profile_full_v7_a62e5d9d96f91101cda019519053e950d532380a",
++            ),
++            (
++                HookReserve::agent_file_guard(),
++                "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a",
++            ),
++        ] {
++            let paths = PinnedEnginePaths::new(root.join(old));
++            std::fs::create_dir_all(paths.maps_dir()).expect("maps dir");
++            std::fs::create_dir_all(paths.links_dir()).expect("links dir");
++            for name in [
++                "rb",
++                "cap_req",
++                "cap_pending_submitter",
++                "cap_task",
++                "cap_state",
++                "cap_policy",
++                "ts_counts",
++                "ts_proc",
++                "ts_proc_domains",
++                "ts_root",
++                "te_protected_pids",
++                "te_inode_guard",
++                "te_policy_roots",
++                "te_policy_dirs",
++                "te_policy_stable",
++                "te_policy_slots",
++                "te_policy_targets",
++                "te_policy_domains",
++                "te_policy_slot_scratch",
++                "te_policy_permission_scratch",
++                "te_inode_path",
++            ] {
++                std::fs::write(paths.map(name), b"").expect("map pin");
++            }
++            let budget = HookBudget::for_pinned_reserve(reserve);
++            for spec in TRACEPOINTS {
++                if tracepoint_needed(spec, budget) {
++                    std::fs::write(paths.link(spec.name), b"").expect("tracepoint pin");
++                }
++            }
++            for (name, _) in LSM_PROGS {
++                if lsm_link_expected(name, budget, bpf_lsm_active()) {
++                    std::fs::write(paths.link(name), b"").expect("LSM pin");
++                }
++            }
++            std::fs::write(paths.map(old), b"").expect("old marker pin");
++            let error = pinned_engine_present(&paths, reserve).expect_err("old marker must be stale");
++            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++            assert!(error.to_string().contains("pinned metadata mismatch"));
++
++            let current = reserve.profile_marker();
++            std::fs::rename(paths.map(old), paths.map(current)).expect("current marker pin");
++            assert!(pinned_engine_present(&paths, reserve).expect("complete current layout"));
++            std::fs::remove_file(paths.map("te_policy_permission_scratch"))
++                .expect("remove permission scratch");
++            assert!(
++                !pinned_engine_present(&paths, reserve).expect("incomplete layout"),
++                "missing permission scratch must prevent reuse even with all links"
++            );
++        }
++        std::fs::remove_dir_all(&root).expect("remove private fixture");
++    }
++
++    #[test]
++    #[ignore = "requires root, BPF LSM, unlimited memlock and --test-threads=1; private pins only"]
++    fn pinned_engine_reinstalls_pre_ordinary_write_marker_on_live_kernel() {
++        let _fixture = file_protection_delete_tests::Fixture::new("fp-write-upgrade");
++        let engine = PinnedEngine::open_or_install_singleton().expect("load private engine");
++        let paths = engine.paths.clone();
++        let current = HookReserve::agent_file_guard().profile_marker();
++        let old = "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
++        std::fs::rename(paths.map(current), paths.map(old)).expect("simulate v4 marker");
++        // Release any process-owned tracepoints before replacing this private layout.
++        drop(engine);
++        let reopened = PinnedEngine::open_or_install_singleton().expect("reinstall private engine");
++        assert_eq!(reopened.paths, paths);
++        assert!(paths.map(current).exists());
++        assert!(paths.map("te_policy_permission_scratch").exists());
++        assert!(!paths.map(old).exists());
++    }
++
+@@ -6144,0 +6694,8 @@ os.execv({hit:?}, [{hit:?}])
++            "te_policy_roots",
++            "te_policy_dirs",
++            "te_policy_stable",
++            "te_policy_slots",
++            "te_policy_targets",
++            "te_policy_domains",
++            "te_policy_slot_scratch",
++            "te_policy_permission_scratch",
+@@ -6187,0 +6745,8 @@ os.execv({hit:?}, [{hit:?}])
++            "te_policy_roots",
++            "te_policy_dirs",
++            "te_policy_stable",
++            "te_policy_slots",
++            "te_policy_targets",
++            "te_policy_domains",
++            "te_policy_slot_scratch",
++            "te_policy_permission_scratch",
+diff --git a/bpf/src/target_identity.rs b/bpf/src/target_identity.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..eeecb0dc648d85212edc0378a415d047a685d09e
+--- /dev/null
++++ b/bpf/src/target_identity.rs
+@@ -0,0 +1,924 @@
++//! Resolves process identity through a task iterator when procfs hides outer PIDs.
++
++use std::fs;
++use std::io::{self, Read};
++use std::os::unix::fs::MetadataExt;
++
++use libbpf_rs::{Iter, ObjectBuilder};
++
++static OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/target_identity.bpf.o"));
++
++const RECORD_SIZE: usize = 24;
++const MAX_ITERATOR_BYTES: u64 = 16 * 1024 * 1024;
++const NANOS_PER_SECOND: i128 = 1_000_000_000;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++struct TargetRecord {
++    kernel_pid: i32,
++    local_pid: i32,
++    pidns_inum: u32,
++    start_boottime: u64,
++}
++
++/// Kernel process identity and the procfs clock bias validated during resolution.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct ProcessIdentity {
++    /// Init-namespace kernel TGID.
++    pub kernel_pid: i32,
++    /// Namespace-init ticks subtracted by procfs in container uptime mode.
++    pub procfs_start_time_bias: u64,
++}
++
++/// Resolves a namespace-local process ID to its init-namespace kernel identity.
++///
++/// The task iterator enumerates processes visible in the caller's active PID
++/// namespace. The target's namespace inode and procfs start time must both
++/// match, so a colliding or reused local PID is never accepted as identity.
++/// PID 1 cross-checks whether this procfs subtracts namespace-init ticks, as
++/// Alibaba kernels do for containers in a non-root `cpuacct` cgroup.
++///
++/// # Errors
++///
++/// Returns `NotFound` when the target is absent or its start time no longer
++/// matches. Returns another I/O error when the namespace cannot be inspected,
++/// procfs and iterator clocks disagree, or the BPF iterator cannot be used safely.
++pub fn resolve_process_identity(
++    local_pid: i32,
++    expected_start_time: u64,
++) -> io::Result<ProcessIdentity> {
++    if local_pid <= 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "target PID must be positive",
++        ));
++    }
++    let namespace = fs::metadata(format!("/proc/{local_pid}/ns/pid"))?;
++    let caller_namespace = fs::metadata("/proc/self/ns/pid")?;
++    let proc_init_namespace = fs::metadata("/proc/1/ns/pid")?;
++    if caller_namespace.dev() != proc_init_namespace.dev()
++        || caller_namespace.ino() != proc_init_namespace.ino()
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::WouldBlock,
++            "procfs PID 1 is not the caller's PID namespace init",
++        ));
++    }
++    let proc_init_start = read_procfs_start_time(1)?;
++    let boottime_offset = read_boottime_offset()?;
++    let clock_ticks = clock_ticks_per_second()?;
++    let records = read_records()?;
++    boottime_offset.verify()?;
++    let procfs_start_time_bias = select_procfs_start_time_bias(
++        &records,
++        caller_namespace.ino(),
++        proc_init_start,
++        boottime_offset.value,
++        clock_ticks,
++    )?;
++    let kernel_pid = select_kernel_pid(
++        &records,
++        local_pid,
++        namespace.ino(),
++        expected_start_time,
++        boottime_offset.value,
++        clock_ticks,
++        procfs_start_time_bias,
++    )?;
++    Ok(ProcessIdentity {
++        kernel_pid,
++        procfs_start_time_bias,
++    })
++}
++
++/// Converts kernel `start_boottime` nanoseconds using the validated procfs bias.
++///
++/// # Errors
++///
++/// Returns an error when the caller's time namespace is unstable or differs
++/// between the current thread, process leader, and child namespace, or when the
++/// result is outside the procfs clock-tick range.
++pub fn procfs_start_time_from_boottime(
++    start_boottime: u64,
++    start_time_bias: u64,
++) -> io::Result<u64> {
++    let boottime_offset = read_boottime_offset()?;
++    let clock_ticks = clock_ticks_per_second()?;
++    boottime_offset.verify()?;
++    proc_start_time_with_bias(
++        start_boottime,
++        boottime_offset.value,
++        clock_ticks,
++        start_time_bias,
++    )
++    .ok_or_else(|| {
++        io::Error::new(
++            io::ErrorKind::InvalidData,
++            "process start time is outside the procfs clock-tick representation",
++        )
++    })
++}
++
++pub(crate) fn kernel_process_start_ticks(kernel_pid: i32) -> io::Result<Option<u64>> {
++    if kernel_pid <= 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "kernel PID must be positive",
++        ));
++    }
++    let namespace = fs::metadata("/proc/self/ns/pid")?;
++    let clock_ticks = clock_ticks_per_second()?;
++    let records = read_records()?;
++    select_kernel_process_start_ticks(&records, kernel_pid, namespace.ino(), clock_ticks)
++}
++
++fn read_records() -> io::Result<Vec<TargetRecord>> {
++    let open = ObjectBuilder::default()
++        .open_memory(OBJECT)
++        .map_err(|error| iterator_error("open target identity object", error))?;
++    let mut object = open
++        .load()
++        .map_err(|error| iterator_error("load target identity object", error))?;
++    let program = object.prog_mut("resolve_target_identity").ok_or_else(|| {
++        io::Error::new(
++            io::ErrorKind::InvalidData,
++            "target identity object has no resolve_target_identity program",
++        )
++    })?;
++    let link = program
++        .attach()
++        .map_err(|error| iterator_error("attach target identity iterator", error))?;
++    let iter = Iter::new(&link)
++        .map_err(|error| iterator_error("create target identity iterator", error))?;
++    let mut bytes = Vec::new();
++    iter.take(MAX_ITERATOR_BYTES + 1)
++        .read_to_end(&mut bytes)
++        .map_err(|error| iterator_error("read target identity iterator", error))?;
++    if bytes.len() as u64 > MAX_ITERATOR_BYTES {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "target identity iterator output exceeds 16 MiB",
++        ));
++    }
++    decode_records(&bytes)
++}
++
++fn iterator_error(context: &str, error: impl std::fmt::Display) -> io::Error {
++    io::Error::other(format!("{context}: {error}"))
++}
++
++fn read_procfs_start_time(pid: i32) -> io::Result<u64> {
++    let path = format!("/proc/{pid}/stat");
++    let bytes = fs::read(&path)?;
++    let stat = String::from_utf8_lossy(&bytes);
++    let invalid = || {
++        io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!("{path} has no valid field 22 start time"),
++        )
++    };
++    stat.rsplit_once(") ")
++        .ok_or_else(invalid)?
++        .1
++        .split_whitespace()
++        .nth(19)
++        .ok_or_else(invalid)?
++        .parse()
++        .map_err(|_| invalid())
++}
++
++fn decode_records(bytes: &[u8]) -> io::Result<Vec<TargetRecord>> {
++    if bytes.len() % RECORD_SIZE != 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "target identity iterator returned a partial record",
++        ));
++    }
++    bytes
++        .chunks_exact(RECORD_SIZE)
++        .map(|record| {
++            Ok(TargetRecord {
++                kernel_pid: i32::from_ne_bytes(record[0..4].try_into().map_err(|_| {
++                    io::Error::new(io::ErrorKind::InvalidData, "invalid kernel PID record")
++                })?),
++                local_pid: i32::from_ne_bytes(record[4..8].try_into().map_err(|_| {
++                    io::Error::new(io::ErrorKind::InvalidData, "invalid local PID record")
++                })?),
++                pidns_inum: u32::from_ne_bytes(record[8..12].try_into().map_err(|_| {
++                    io::Error::new(io::ErrorKind::InvalidData, "invalid PID namespace record")
++                })?),
++                start_boottime: u64::from_ne_bytes(record[16..24].try_into().map_err(|_| {
++                    io::Error::new(
++                        io::ErrorKind::InvalidData,
++                        "invalid process start-time record",
++                    )
++                })?),
++            })
++        })
++        .collect()
++}
++
++fn select_procfs_start_time_bias(
++    records: &[TargetRecord],
++    pidns_inum: u64,
++    proc_init_start: u64,
++    boottime_offset: i128,
++    clock_ticks: u64,
++) -> io::Result<u64> {
++    let mut candidates = records
++        .iter()
++        .filter(|record| record.local_pid == 1 && u64::from(record.pidns_inum) == pidns_inum);
++    let Some(init) = candidates.next() else {
++        return Err(io::Error::new(
++            io::ErrorKind::NotFound,
++            format!("PID namespace {pidns_inum} has no visible init process"),
++        ));
++    };
++    if candidates.next().is_some() || init.kernel_pid <= 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!("PID namespace {pidns_inum} has ambiguous init identity records"),
++        ));
++    }
++    let init_start = proc_start_time(init.start_boottime, boottime_offset, clock_ticks)
++        .ok_or_else(|| {
++            io::Error::new(
++                io::ErrorKind::InvalidData,
++                "namespace init start time overflows the procfs clock-tick representation",
++            )
++        })?;
++    match proc_init_start {
++        0 if init_start != 0 => Ok(init_start),
++        value if value == init_start && value != 0 => Ok(0),
++        _ => Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!(
++                "procfs PID 1 start {proc_init_start} does not match iterator start {init_start} in either clock mode"
++            ),
++        )),
++    }
++}
++
++fn select_kernel_pid(
++    records: &[TargetRecord],
++    local_pid: i32,
++    pidns_inum: u64,
++    expected_start_time: u64,
++    boottime_offset: i128,
++    clock_ticks: u64,
++    start_time_bias: u64,
++) -> io::Result<i32> {
++    let mut candidates = records.iter().filter(|record| {
++        record.local_pid == local_pid && u64::from(record.pidns_inum) == pidns_inum
++    });
++    let Some(candidate) = candidates.next() else {
++        return Err(io::Error::new(
++            io::ErrorKind::NotFound,
++            format!("process {local_pid} is absent from PID namespace {pidns_inum}"),
++        ));
++    };
++    if candidates.next().is_some() {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!("process {local_pid} has ambiguous kernel identity records"),
++        ));
++    }
++    if candidate.kernel_pid <= 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!("process {local_pid} has an invalid kernel PID"),
++        ));
++    }
++    let actual_start = proc_start_time_with_bias(
++        candidate.start_boottime,
++        boottime_offset,
++        clock_ticks,
++        start_time_bias,
++    )
++    .ok_or_else(|| {
++        io::Error::new(
++            io::ErrorKind::InvalidData,
++            "target process start time is outside the procfs clock-tick representation",
++        )
++    })?;
++    if actual_start != expected_start_time {
++        return Err(io::Error::new(
++            io::ErrorKind::NotFound,
++            format!("process {local_pid} is stale or has been reused"),
++        ));
++    }
++    Ok(candidate.kernel_pid)
++}
++
++fn select_kernel_process_start_ticks(
++    records: &[TargetRecord],
++    kernel_pid: i32,
++    pidns_inum: u64,
++    clock_ticks: u64,
++) -> io::Result<Option<u64>> {
++    let mut candidates = records
++        .iter()
++        .filter(|record| record.kernel_pid == kernel_pid);
++    if let Some(candidate) = candidates.next() {
++        if candidates.next().is_some() {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                format!("kernel process {kernel_pid} has ambiguous identity records"),
++            ));
++        }
++        return proc_start_time(candidate.start_boottime, 0, clock_ticks)
++            .map(Some)
++            .ok_or_else(|| {
++                io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "kernel process start time overflows the clock-tick representation",
++                )
++            });
++    }
++
++    // Global PID 1 proves that this iterator sees the initial PID namespace.
++    // Otherwise absence can also mean a live process in an invisible namespace.
++    if records.iter().any(|record| {
++        record.kernel_pid == 1
++            && record.local_pid == 1
++            && u64::from(record.pidns_inum) == pidns_inum
++    }) {
++        return Ok(None);
++    }
++    Err(io::Error::new(
++        io::ErrorKind::WouldBlock,
++        format!("kernel process {kernel_pid} is not visible from this PID namespace"),
++    ))
++}
++
++fn proc_start_time(start_boottime: u64, boottime_offset: i128, clock_ticks: u64) -> Option<u64> {
++    if clock_ticks == 0 || NANOS_PER_SECOND % i128::from(clock_ticks) != 0 {
++        return None;
++    }
++    let adjusted = i128::from(start_boottime).checked_add(boottime_offset)?;
++    if adjusted < 0 || adjusted > i128::from(u64::MAX) {
++        return None;
++    }
++    let divisor = NANOS_PER_SECOND / i128::from(clock_ticks);
++    u64::try_from(adjusted / divisor).ok()
++}
++
++fn proc_start_time_with_bias(
++    start_boottime: u64,
++    boottime_offset: i128,
++    clock_ticks: u64,
++    start_time_bias: u64,
++) -> Option<u64> {
++    // Alibaba's container uptime patch subtracts init ticks after each operand
++    // has been truncated, not the raw nanosecond delta.
++    proc_start_time(start_boottime, boottime_offset, clock_ticks)?.checked_sub(start_time_bias)
++}
++
++type NamespaceIdentity = (u64, u64);
++
++struct BoottimeOffset {
++    value: i128,
++    namespace: Option<NamespaceIdentity>,
++}
++
++impl BoottimeOffset {
++    fn verify(&self) -> io::Result<()> {
++        for path in [
++            "/proc/thread-self/ns/time",
++            "/proc/self/ns/time",
++            "/proc/thread-self/ns/time_for_children",
++            "/proc/self/ns/time_for_children",
++        ] {
++            if namespace_identity(path)? != self.namespace {
++                return Err(io::Error::new(
++                    io::ErrorKind::WouldBlock,
++                    "time namespace changed while resolving process identity",
++                ));
++            }
++        }
++        Ok(())
++    }
++}
++
++fn namespace_identity(path: &'static str) -> io::Result<Option<NamespaceIdentity>> {
++    match fs::metadata(path) {
++        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => {
++            // CONFIG_TIME_NS=n has no time entries; an unreadable procfs is not absent support.
++            fs::read_dir("/proc/thread-self/ns")?;
++            Ok(None)
++        }
++        Err(error) => Err(error),
++    }
++}
++
++fn read_boottime_offset() -> io::Result<BoottimeOffset> {
++    let current = namespace_identity("/proc/thread-self/ns/time")?;
++    let leader = namespace_identity("/proc/self/ns/time")?;
++    let current_children = namespace_identity("/proc/thread-self/ns/time_for_children")?;
++    let leader_children = namespace_identity("/proc/self/ns/time_for_children")?;
++    // The offset file is meaningful only when both threads and both child namespaces agree.
++    if current != leader || current != current_children || current != leader_children {
++        return Err(io::Error::new(
++            io::ErrorKind::WouldBlock,
++            "current, leader, and child time namespaces differ",
++        ));
++    }
++    let value = if current.is_some() {
++        parse_boottime_offset(&fs::read_to_string("/proc/self/timens_offsets")?)?
++    } else {
++        0
++    };
++    Ok(BoottimeOffset {
++        value,
++        namespace: current,
++    })
++}
++
++fn parse_boottime_offset(contents: &str) -> io::Result<i128> {
++    let Some(line) = contents.lines().find(|line| line.starts_with("boottime")) else {
++        return Ok(0);
++    };
++    let fields: Vec<_> = line.split_whitespace().collect();
++    if fields.len() != 3 {
++        return Err(invalid_time_offset());
++    }
++    let seconds = fields[1]
++        .parse::<i64>()
++        .map_err(|_| invalid_time_offset())?;
++    let nanoseconds = fields[2]
++        .parse::<i64>()
++        .map_err(|_| invalid_time_offset())?;
++    if !(0..1_000_000_000).contains(&nanoseconds) {
++        return Err(invalid_time_offset());
++    }
++    i128::from(seconds)
++        .checked_mul(NANOS_PER_SECOND)
++        .and_then(|offset| offset.checked_add(i128::from(nanoseconds)))
++        .ok_or_else(invalid_time_offset)
++}
++
++fn invalid_time_offset() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidData,
++        "invalid /proc/self/timens_offsets boottime entry",
++    )
++}
++
++fn clock_ticks_per_second() -> io::Result<u64> {
++    // SAFETY: sysconf takes a constant key and has no pointer arguments.
++    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
++    if ticks <= 0 {
++        return Err(io::Error::other(
++            "sysconf(_SC_CLK_TCK) did not return a positive clock frequency",
++        ));
++    }
++    Ok(ticks as u64)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn record(kernel_pid: i32, local_pid: i32, pidns_inum: u32, start: u64) -> TargetRecord {
++        TargetRecord {
++            kernel_pid,
++            local_pid,
++            pidns_inum,
++            start_boottime: start,
++        }
++    }
++
++    fn encode(record: TargetRecord) -> Vec<u8> {
++        let mut bytes = Vec::new();
++        bytes.extend_from_slice(&record.kernel_pid.to_ne_bytes());
++        bytes.extend_from_slice(&record.local_pid.to_ne_bytes());
++        bytes.extend_from_slice(&record.pidns_inum.to_ne_bytes());
++        bytes.extend_from_slice(&0u32.to_ne_bytes());
++        bytes.extend_from_slice(&record.start_boottime.to_ne_bytes());
++        bytes
++    }
++
++    #[test]
++    fn decodes_native_records() {
++        let expected = record(4100, 17, 4026533000, 123_000_000);
++        let decoded = decode_records(&encode(expected)).expect("decode record");
++        assert_eq!(decoded, vec![expected]);
++    }
++
++    #[test]
++    fn rejects_partial_records() {
++        let error = decode_records(&[0; RECORD_SIZE - 1]).expect_err("partial record must fail");
++        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    }
++
++    #[test]
++    fn resolves_only_matching_namespace_and_start_time() {
++        let records = [
++            record(4000, 17, 1000, 50_000_000),
++            record(4100, 17, 2000, 123_000_000),
++            record(4200, 18, 2000, 123_000_000),
++        ];
++        let resolved =
++            select_kernel_pid(&records, 17, 2000, 12, 0, 100, 0).expect("resolve target");
++        assert_eq!(resolved, 4100);
++    }
++
++    #[test]
++    fn calibrates_container_tick_bias_from_pid_one() {
++        let records = [
++            record(320, 1, 2000, 158_539_519_520),
++            record(348, 14, 2000, 161_602_832_594),
++        ];
++        let bias =
++            select_procfs_start_time_bias(&records, 2000, 0, 0, 100).expect("container clock mode");
++        assert_eq!(bias, 15853);
++        assert_eq!(
++            select_kernel_pid(&records, 14, 2000, 307, 0, 100, bias)
++                .expect("resolve container target"),
++            348
++        );
++    }
++
++    #[test]
++    fn container_bias_subtracts_ticks_after_truncating_each_operand() {
++        let records = [
++            record(320, 1, 2000, 19_999_999),
++            record(348, 14, 2000, 20_000_000),
++        ];
++        let bias =
++            select_procfs_start_time_bias(&records, 2000, 0, 0, 100).expect("container clock mode");
++        assert_eq!(bias, 1);
++        assert_eq!(
++            select_kernel_pid(&records, 14, 2000, 1, 0, 100, bias)
++                .expect("tick subtraction must not use the one-nanosecond delta"),
++            348
++        );
++    }
++
++    #[test]
++    fn accepts_unbiased_procfs_only_when_pid_one_matches() {
++        let records = [record(320, 1, 2000, 123_000_000)];
++        assert_eq!(
++            select_procfs_start_time_bias(&records, 2000, 12, 0, 100)
++                .expect("ordinary procfs clock"),
++            0
++        );
++        for proc_init_start in [11, 13] {
++            let error = select_procfs_start_time_bias(&records, 2000, proc_init_start, 0, 100)
++                .expect_err("inconsistent init clocks must fail closed");
++            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++        }
++        let zero_records = [record(320, 1, 2000, 1_000_000)];
++        let error = select_procfs_start_time_bias(&zero_records, 2000, 0, 0, 100)
++            .expect_err("a zero init tick cannot distinguish clock modes");
++        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    }
++
++    #[test]
++    fn rejects_stale_and_missing_targets() {
++        let records = [record(4100, 17, 2000, 123_000_000)];
++        let stale = select_kernel_pid(&records, 17, 2000, 11, 0, 100, 0)
++            .expect_err("start-time mismatch must fail");
++        assert_eq!(stale.kind(), io::ErrorKind::NotFound);
++        let missing = select_kernel_pid(&records, 19, 2000, 12, 0, 100, 0)
++            .expect_err("missing PID must fail");
++        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
++    }
++
++    #[test]
++    fn rejects_ambiguous_records() {
++        let records = [
++            record(4100, 17, 2000, 123_000_000),
++            record(4200, 17, 2000, 123_000_000),
++        ];
++        let error = select_kernel_pid(&records, 17, 2000, 12, 0, 100, 0)
++            .expect_err("duplicate identity must fail");
++        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    }
++
++    #[test]
++    fn rejects_non_positive_kernel_pids() {
++        for kernel_pid in [0, -1] {
++            let records = [record(kernel_pid, 17, 2000, 123_000_000)];
++            let error = select_kernel_pid(&records, 17, 2000, 12, 0, 100, 0)
++                .expect_err("invalid kernel PID must fail");
++            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++        }
++    }
++
++    #[test]
++    fn resolves_kernel_process_start_without_a_time_namespace_offset() {
++        let records = [
++            record(1, 1, 1000, 1_000_000),
++            record(4100, 17, 2000, 123_000_000),
++        ];
++        assert_eq!(
++            select_kernel_process_start_ticks(&records, 4100, 2000, 100).expect("live process"),
++            Some(12)
++        );
++        assert_eq!(
++            select_kernel_process_start_ticks(&records, 4200, 1000, 100).expect("stale process"),
++            None
++        );
++    }
++
++    #[test]
++    fn refuses_to_call_an_invisible_kernel_process_stale() {
++        let records = [record(4100, 1, 2000, 123_000_000)];
++        let error = select_kernel_process_start_ticks(&records, 4200, 2000, 100)
++            .expect_err("an invisible process may still be live");
++        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
++    }
++
++    #[test]
++    fn rejects_duplicate_kernel_process_records() {
++        let records = [
++            record(1, 1, 1000, 1_000_000),
++            record(4100, 17, 2000, 123_000_000),
++            record(4100, 23, 3000, 123_000_000),
++        ];
++        let error = select_kernel_process_start_ticks(&records, 4100, 1000, 100)
++            .expect_err("duplicate kernel identity must fail");
++        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    }
++
++    #[test]
++    fn applies_boottime_namespace_offset_before_tick_conversion() {
++        assert_eq!(proc_start_time(123_000_000, -3_000_000, 100), Some(12));
++        assert_eq!(proc_start_time(1_000_000, -3_000_000, 100), None);
++        assert_eq!(proc_start_time(123_000_000, 0, 0), None);
++    }
++
++    #[test]
++    fn parses_signed_boottime_offsets() {
++        assert_eq!(
++            parse_boottime_offset("monotonic 1 2\nboottime -3 4\n").expect("offset"),
++            -2_999_999_996
++        );
++        assert_eq!(
++            parse_boottime_offset("monotonic 1 2\n").expect("default"),
++            0
++        );
++        assert!(parse_boottime_offset("boottime 0 1000000000\n").is_err());
++        assert!(parse_boottime_offset("boottime malformed\n").is_err());
++    }
++
++    fn target_start_time(local_pid: i32) -> u64 {
++        fs::read_to_string(format!("/proc/{local_pid}/stat"))
++            .expect("target stat")
++            .rsplit_once(") ")
++            .expect("comm terminator")
++            .1
++            .split_whitespace()
++            .nth(19)
++            .expect("start time")
++            .parse()
++            .expect("numeric start time")
++    }
++
++    #[test]
++    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN and a kernel with task iterators"]
++    fn resolves_preexisting_process_in_nested_pid_namespace() {
++        const CHILD_ENV: &str = "ACTPLANE_TEST_TARGET_IDENTITY_PIDNS";
++        if std::env::var_os(CHILD_ENV).is_none() {
++            let test_binary = std::env::current_exe().expect("current test binary");
++            let status = std::process::Command::new("unshare")
++                .args(["--pid", "--fork", "--mount-proc"])
++                .arg(test_binary)
++                .args([
++                    "target_identity::tests::resolves_preexisting_process_in_nested_pid_namespace",
++                    "--exact",
++                    "--ignored",
++                    "--nocapture",
++                    "--test-threads=1",
++                ])
++                .env(CHILD_ENV, "1")
++                .status()
++                .expect("spawn PID-namespaced identity test");
++            assert!(status.success(), "nested target identity probe failed");
++            return;
++        }
++
++        let mut target = std::process::Command::new("sleep")
++            .arg("30")
++            .spawn()
++            .expect("spawn pre-existing target");
++        let local_pid = target.id() as i32;
++        let start_time = target_start_time(local_pid);
++        let identity = resolve_process_identity(local_pid, start_time)
++            .expect("resolve existing target through live task iterator");
++        let kernel_pid = identity.kernel_pid;
++        assert_ne!(kernel_pid, local_pid, "outer and local PIDs must differ");
++        assert_eq!(
++            fs::metadata(format!("/proc/{kernel_pid}/ns/pid"))
++                .expect_err("kernel PID must be hidden by container procfs")
++                .kind(),
++            io::ErrorKind::NotFound
++        );
++        target.kill().expect("kill target");
++        target.wait().expect("reap target");
++    }
++
++    #[test]
++    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN, pre-5.15 tracepoints and --test-threads=1"]
++    fn nested_crash_left_tracepoint_holder_requires_confirmed_cleanup() {
++        const NESTED_ENV: &str = "ACTPLANE_TEST_HOLDER_RECOVERY_PIDNS";
++        const CRASH_ENV: &str = "ACTPLANE_TEST_HOLDER_RECOVERY_CRASH";
++        const TEST_NAME: &str =
++            "target_identity::tests::nested_crash_left_tracepoint_holder_requires_confirmed_cleanup";
++
++        if std::env::var_os(NESTED_ENV).is_none() {
++            let pins = std::path::PathBuf::from("/sys/fs/bpf").join(format!(
++                "pidns-holder-recovery-{}-{}",
++                std::process::id(),
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .expect("clock")
++                    .as_nanos()
++            ));
++            struct PinCleanup(std::path::PathBuf);
++            impl Drop for PinCleanup {
++                fn drop(&mut self) {
++                    if self.0.exists() {
++                        std::fs::remove_dir_all(&self.0).expect("remove private pins");
++                    }
++                }
++            }
++            let _cleanup = PinCleanup(pins.clone());
++            // SAFETY: ignored live suites are explicitly run serially in their own test process.
++            unsafe {
++                std::env::set_var("ACTPLANE_BPF_PIN_ROOT", &pins);
++                std::env::set_var("ACTPLANE_PINNED_PROFILE", "agent-file-guard");
++            }
++            let status = std::process::Command::new("unshare")
++                .args(["--pid", "--fork"])
++                .arg(std::env::current_exe().expect("current test binary"))
++                .args([
++                    TEST_NAME,
++                    "--exact",
++                    "--ignored",
++                    "--nocapture",
++                    "--test-threads=1",
++                ])
++                .env(NESTED_ENV, "1")
++                .status()
++                .expect("spawn nested tracepoint holder recovery test");
++            assert!(status.success(), "nested holder recovery test failed");
++            return;
++        }
++
++        let paths = crate::PinnedEnginePaths::from_env();
++        if std::env::var_os(CRASH_ENV).is_some() {
++            let engine = crate::PinnedEngine::open_or_install_singleton()
++                .expect("install crash-left tracepoint holder");
++            assert!(
++                engine._tracepoint_holder.is_some(),
++                "this regression requires process-held pre-5.15 tracepoints"
++            );
++            // Simulate a crash: process exit bypasses TracepointMarker::drop.
++            std::process::exit(0);
++        }
++
++        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
++            .args([
++                TEST_NAME,
++                "--exact",
++                "--ignored",
++                "--nocapture",
++                "--test-threads=1",
++            ])
++            .env(CRASH_ENV, "1")
++            .status()
++            .expect("spawn crashing tracepoint holder");
++        assert!(status.success(), "holder installation process failed");
++        let markers: Vec<_> = std::fs::read_dir(paths.maps_dir())
++            .expect("list holder markers")
++            .map(|entry| entry.expect("holder marker entry").path())
++            .filter(|path| {
++                path.file_name()
++                    .and_then(|name| name.to_str())
++                    .is_some_and(|name| name.starts_with(crate::TRACEPOINT_HOLDER_PREFIX))
++            })
++            .collect();
++        assert_eq!(markers.len(), 1, "crash must leave one holder marker");
++
++        let error = crate::PinnedEngine::open_or_install_singleton()
++            .expect_err("an unverifiable holder must block restart");
++        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
++        let message = error.to_string();
++        for expected in [
++            "not visible from this PID namespace",
++            "left the pin root",
++            "manually remove only this pin root",
++            paths.root.to_str().expect("ASCII pin root"),
++        ] {
++            assert!(
++                message.contains(expected),
++                "missing recovery detail: {message}"
++            );
++        }
++        assert!(paths.root.exists());
++        assert!(markers[0].exists(), "failed restart must retain pins");
++
++        crate::remove_stale_pin_root(&paths).expect("confirmed manual cleanup");
++        assert!(!markers[0].exists());
++        let engine = crate::PinnedEngine::open_or_install_singleton()
++            .expect("restart after confirmed cleanup");
++        assert!(engine._tracepoint_holder.is_some());
++    }
++
++    #[test]
++    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN and time/PID/task namespaces"]
++    fn time_namespace_identity_is_fail_closed_and_offset_aware() {
++        const MODE_ENV: &str = "ACTPLANE_TEST_TARGET_IDENTITY_TIME_NS";
++        const TEST_NAME: &str =
++            "target_identity::tests::time_namespace_identity_is_fail_closed_and_offset_aware";
++        const OFFSET_NS: i128 = 5_000_000_000;
++        const ENTER_OFFSET_NAMESPACE: &str = r#"
++import ctypes, os, sys
++libc = ctypes.CDLL(None, use_errno=True)
++if libc.unshare(0x80) != 0:
++    error = ctypes.get_errno()
++    raise OSError(error, os.strerror(error))
++with open('/proc/self/timens_offsets', 'w') as offsets:
++    offsets.write('boottime 5 0\n')
++os.execvp('unshare', [
++    'unshare', '--pid', '--fork', '--mount-proc',
++    sys.argv[1], sys.argv[2], '--exact', '--ignored', '--nocapture', '--test-threads=1',
++])
++"#;
++
++        let mode = std::env::var(MODE_ENV).ok();
++        if mode.is_none() {
++            let test_binary = std::env::current_exe().expect("test binary");
++            let status = std::process::Command::new(&test_binary)
++                .args([
++                    TEST_NAME,
++                    "--exact",
++                    "--ignored",
++                    "--nocapture",
++                    "--test-threads=1",
++                ])
++                .env(MODE_ENV, "mixed")
++                .status()
++                .expect("spawn isolated mixed time namespace test");
++            assert!(status.success(), "mixed time namespace guard failed");
++            let status = std::process::Command::new("python3")
++                .args(["-c", ENTER_OFFSET_NAMESPACE])
++                .arg(&test_binary)
++                .arg(TEST_NAME)
++                .env(MODE_ENV, "offset")
++                .status()
++                .expect("spawn offset time/PID namespace test");
++            assert!(
++                status.success(),
++                "offset time namespace identity probe failed"
++            );
++            return;
++        }
++
++        if mode.as_deref() == Some("mixed") {
++            // SAFETY: this isolated thread intentionally changes only its child time namespace.
++            let result = unsafe { libc::unshare(libc::CLONE_NEWTIME) };
++            assert_eq!(
++                result,
++                0,
++                "unshare time namespace: {}",
++                io::Error::last_os_error()
++            );
++            let error = procfs_start_time_from_boottime(10_000_000, 0)
++                .expect_err("mixed current and child time namespaces must fail closed");
++            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
++            return;
++        }
++
++        assert_eq!(mode.as_deref(), Some("offset"));
++        assert_eq!(
++            read_boottime_offset().expect("stable time namespace").value,
++            OFFSET_NS
++        );
++        let mut target = std::process::Command::new("sleep")
++            .arg("30")
++            .spawn()
++            .expect("spawn pre-existing offset-namespace target");
++        let local_pid = target.id() as i32;
++        let start_time = target_start_time(local_pid);
++        let identity = resolve_process_identity(local_pid, start_time)
++            .expect("resolve target through its time namespace offset");
++        let kernel_pid = identity.kernel_pid;
++        assert_ne!(kernel_pid, local_pid, "outer and local PIDs must differ");
++        let records = read_records().expect("read target start_boottime");
++        let raw_start = records
++            .iter()
++            .find(|record| record.kernel_pid == kernel_pid)
++            .expect("resolved target record")
++            .start_boottime;
++        assert_eq!(
++            procfs_start_time_from_boottime(raw_start, identity.procfs_start_time_bias)
++                .expect("convert target start_boottime"),
++            start_time
++        );
++        target.kill().expect("kill target");
++        target.wait().expect("reap target");
++    }
++}
+diff --git a/bpf/target_identity.bpf.c b/bpf/target_identity.bpf.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff8025973dd72060d4dec1967c695717da3aa005
+--- /dev/null
++++ b/bpf/target_identity.bpf.c
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include "vmlinux.h"
++
++#include <bpf/bpf_core_read.h>
++#include <bpf/bpf_helpers.h>
++
++#define MAX_PID_NAMESPACE_LEVEL 32
++
++struct target_identity_record {
++	__u32 kernel_pid;
++	__u32 local_pid;
++	__u32 pidns_inum;
++	__u32 reserved;
++	__u64 start_boottime;
++};
++
++SEC("iter/task")
++int resolve_target_identity(struct bpf_iter__task *ctx)
++{
++	struct target_identity_record record = {};
++	struct task_struct *task = ctx->task;
++	struct pid *pid;
++	struct upid *upid;
++	__u32 level;
++
++	if (!task)
++		return 0;
++	if (BPF_CORE_READ(task, pid) != BPF_CORE_READ(task, tgid))
++		return 0;
++	pid = BPF_CORE_READ(task, thread_pid);
++	if (!pid)
++		return 0;
++	level = BPF_CORE_READ(pid, level);
++	if (level >= MAX_PID_NAMESPACE_LEVEL)
++		return 0;
++	upid = &pid->numbers[level];
++
++	record.kernel_pid = BPF_CORE_READ(task, tgid);
++	record.local_pid = BPF_CORE_READ(upid, nr);
++	record.pidns_inum = BPF_CORE_READ(upid, ns, ns.inum);
++	record.start_boottime = BPF_CORE_READ(task, start_boottime);
++	bpf_seq_write(ctx->meta->seq, &record, sizeof(record));
++	return 0;
++}
++
++char LICENSE[] SEC("license") = "GPL";

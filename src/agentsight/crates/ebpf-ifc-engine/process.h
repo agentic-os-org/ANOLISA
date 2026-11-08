@@ -114,6 +114,7 @@ struct event {
 	unsigned int domain_id;         /* runtime domain whose rule matched */
 	int session_root;               /* root pid for session-scoped state */
 	unsigned long long timestamp_ns;
+	unsigned long long process_start_boottime;
 	char comm[TASK_COMM_LEN];
 	char filename[MAX_FILENAME_LEN]; /* offending exe / path ("" for connect) */
 	unsigned int taint_rule_id;
@@ -123,6 +124,7 @@ struct event {
 	unsigned long long matched_labels;
 	unsigned long long prov_label;
 	unsigned long long prov_timestamp_ns;
+	unsigned long long prov_start_boottime;
 	int prov_pid;
 	unsigned int prov_op;            /* enum taint_op that introduced prov_label */
 	unsigned int prov_ip;            /* endpoint provenance, network order */
