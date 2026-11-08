@@ -10,15 +10,17 @@ writes its document with a plain ``cat >`` instead, which inherits the caller's
 umask: 0644 under the default 022, so the key was readable by every local user
 on exactly the hosts where nothing else protects it.
 
-These cases pin the mode of a freshly written settings.json on both paths. What
-they deliberately do *not* assert is that an existing 0644 file gets tightened,
-or that the ``.bak`` copy comes out 0600: the merge helper documents keeping the
-mode the user chose for the file, and ``shutil.copy2`` carries it to the backup.
+These cases pin the mode of everything the installer writes: a freshly created
+settings.json on both paths, and the timestamped ``.bak`` that keeps the rotated
+key. What they deliberately do *not* assert is that a pre-existing 0644
+settings.json gets tightened -- the merge helper documents keeping the mode the
+user chose for that file and ``test_claude_code_settings_merge.py`` pins it, so
+the live file is left exactly as its owner had it.
 
 The installer is driven end to end with rpm, sudo, dnf, curl and claude stubbed
 on PATH -- no network, no package manager, no root and no real Claude Code
-install. Baseline on a tree without the fallback fix: the python3-less case
-fails with 0644 (420 != 384).
+install. Baseline on a tree without this PR: the python3-less case fails with
+0644 (420 != 384), and so does the backup case.
 
 Usage: python3 src/os-skills/ai/install-claude-code/scripts/test_claude_code_config_permissions.py
 """
@@ -35,6 +37,7 @@ from pathlib import Path
 INSTALLER = Path(__file__).resolve().parent / "install-claude-code.sh"
 
 API_KEY = "sk-test-placeholder-not-a-real-key"
+ROTATED_KEY = "sk-old-placeholder-not-a-real-key"
 
 # The native install path runs `curl -fsSL https://claude.ai/install.sh | bash`
 # and then looks for a runnable `claude`: feed it a no-op "installer" and drop a
@@ -131,6 +134,37 @@ class ClaudeCodeConfigPermissionsTestCase(unittest.TestCase):
         # creates is the one that ends up world-readable under umask 022.
         result = self.run_installer(search_path=self.without_python3())
         self.assert_owner_only_fresh_settings(result)
+
+    def test_backup_of_the_rotated_key_is_owner_only(self):
+        # The backup is the installer's own artifact and it keeps the previous
+        # key in cleartext, so it must not inherit a world-readable mode from
+        # the file it was copied from. The live file keeps the mode its owner
+        # chose -- that is the merge helper's documented behavior.
+        if shutil.which("python3") is None:
+            self.skipTest("python3 is required to exercise the merge path")
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text(
+            json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": ROTATED_KEY}}) + "\n",
+            encoding="utf-8",
+        )
+        self.settings.chmod(0o644)
+
+        result = self.run_installer()
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+
+        backups = sorted(self.settings.parent.glob("settings.json.bak.*"))
+        self.assertEqual(len(backups), 1, "expected exactly one backup: %s" % backups)
+        self.assertIn(ROTATED_KEY, backups[0].read_text(encoding="utf-8"))
+        self.assertEqual(
+            mode_of(backups[0]),
+            0o600,
+            "the backup retains the rotated token and must be owner-only",
+        )
+        self.assertEqual(mode_of(self.settings), 0o644,
+                         "the mode the user chose for settings.json must be kept")
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))
+                         ["env"]["ANTHROPIC_AUTH_TOKEN"], API_KEY)
 
     def test_fresh_settings_are_owner_only_with_python3(self):
         # Already correct on the merge path; pinned here so a future rewrite of

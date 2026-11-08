@@ -355,6 +355,15 @@ def merge():
             keep_mode = 0o600
         if backup:
             shutil.copy2(path, backup)
+            # copy2 carries over the mode of the file it copied, but this
+            # backup is our artifact rather than one the user chose a mode
+            # for, and it keeps the rotated key in cleartext: owner-only
+            # whatever the original was. Best effort - a filesystem without
+            # POSIX modes must not fail the install.
+            try:
+                os.chmod(backup, 0o600)
+            except OSError:
+                pass
             print(f"Existing settings backed up to {backup}")
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(document, handle, indent=2, ensure_ascii=False)
