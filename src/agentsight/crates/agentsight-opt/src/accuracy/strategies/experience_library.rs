@@ -93,28 +93,9 @@ impl ExperienceLibraryStrategy {
         Self
     }
 
-    /// The command a call ran, when its arguments carry one.
-    ///
-    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
-    /// command, so matching `BACKTRACK_KEYWORDS` against it reads *arguments*
-    /// as actions: an `Edit` quoting `git reset --hard`, a `Grep` for
-    /// `git stash`, or a `Read` of `docs/回退.md` all signalled a reversal
-    /// no tool ever ran. Read the command argument instead, and treat a call
-    /// that does not carry one as not a backtrack. Same shape as the merged
-    /// `verify_before_done` helper (2479ca543).
+    /// Read complete execution evidence, never the truncated display preview.
     fn command_of(call: &ToolCallRecord) -> Option<String> {
-        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
-            return COMMAND_KEYS
-                .iter()
-                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
-                .filter(|c| !c.is_empty())
-                .map(str::to_string);
-        }
-        // The summary is truncated, so a long argument string does not parse.
-        // A file-scoped call is never a command; for a command-scoped one the
-        // truncated summary *is* the command text.
-        call.target.is_none().then(|| call.cmd.clone())
+        call.execution_command()
     }
 
     /// Compute all inefficiency signals from tool calls.
@@ -125,13 +106,17 @@ impl ExperienceLibraryStrategy {
         //    tool's `cmd` is the arguments JSON truncated at 50 chars, so two
         //    rewrites of one file never share it; the recorded `target` is the
         //    stable identity for write tools (see trace::file_target). Other
-        //    tools keep the command summary: repeated greps in one directory are
+        //    commands use their complete execution identity. Other
+        //    tools keep the argument summary: repeated greps in one directory are
         //    exploration, not rework.
         fn cluster_key(c: &ToolCallRecord) -> (&str, &str) {
             let target = crate::cost::is_write_tool(&c.name)
                 .then_some(c.target.as_deref())
                 .flatten();
-            (c.name.as_str(), target.unwrap_or(c.cmd.as_str()))
+            (
+                c.name.as_str(),
+                target.or(c.command.as_deref()).unwrap_or(c.cmd.as_str()),
+            )
         }
         let mut counts: HashMap<(&str, &str), (usize, &str)> = HashMap::new();
         for c in calls {
@@ -153,7 +138,7 @@ impl ExperienceLibraryStrategy {
         for ((name, cmd), (n, first_id)) in clusters {
             let cmd_short: String = cmd.chars().take(80).collect();
             signals.push(Signal {
-                id: format!("repeat_cluster:{name}:{cmd_short}"),
+                id: format!("repeat_cluster:{name}:{cmd_short}:{first_id}"),
                 desc: format!("重复调用簇：{name} `{cmd_short}` 共 {n} 次"),
                 first_call_id: first_id.to_string(),
             });
@@ -196,11 +181,7 @@ impl ExperienceLibraryStrategy {
             if is_backtrack_cmd(&lc) {
                 signals.push(Signal {
                     id: format!("backtrack:{}", c.call_id),
-                    desc: format!(
-                        "回退操作：{} `{}`",
-                        c.name,
-                        c.cmd.chars().take(80).collect::<String>()
-                    ),
+                    desc: format!("回退操作：{} `{}`", c.name, command),
                     first_call_id: c.call_id.clone(),
                 });
             }
@@ -311,6 +292,7 @@ mod tests {
             cmd: cmd.into(),
             err: false,
             target: None,
+            command: None,
             result_tokens: None,
         }
     }
@@ -355,6 +337,7 @@ mod tests {
             cmd: cmd.into(),
             err,
             target: None,
+            command: None,
             result_tokens: None,
         }
     }
@@ -551,5 +534,51 @@ mod tests {
             vec!["Bash_1", "Bash_2"],
             "real reversals must still signal: {signals:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod full_command_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn backtrack_signals_use_full_inventory_arguments() {
+        let command = format!("cd /workspace/{} && git reset --hard", "nested/".repeat(20));
+        for (arguments, expected) in [
+            (json!({"command":command}), 1),
+            (json!({"command":["git","reset","--hard"]}), 1),
+            (
+                json!({"todos":[format!("git reset later {}", "pending ".repeat(20))]}),
+                0,
+            ),
+        ] {
+            let trajectory = crate::AtifTrajectory::from_json(&json!({"schema_version":"ATIF-v1.7","steps":[{"step_id":1,"source":"agent","tool_calls":[{"tool_call_id":"call","function_name":"tool","arguments":arguments}]}]}).to_string()).unwrap();
+            let inventory = crate::trace::build_inventory(&trajectory);
+            assert_eq!(
+                ExperienceLibraryStrategy::compute_signals(&inventory.tool_calls).len(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn different_commands_with_one_display_prefix_are_not_retries() {
+        let inventory = |suffixes: &[&str]| {
+            let calls: Vec<_> = suffixes.iter().enumerate().map(|(index,suffix)| {
+                json!({"tool_call_id":format!("call-{index}"),"function_name":"Bash","arguments":{"command":format!("cd /workspace/{} && cat {suffix}","nested/".repeat(20))}})
+            }).collect();
+            crate::trace::build_inventory(&crate::AtifTrajectory::from_json(&json!({"schema_version":"ATIF-v1.7","steps":[{"step_id":1,"source":"agent","tool_calls":calls}]}).to_string()).unwrap())
+        };
+        let distinct = inventory(&["a.rs", "b.rs", "c.rs"]);
+        assert!(distinct
+            .tool_calls
+            .windows(2)
+            .all(|pair| pair[0].cmd == pair[1].cmd));
+        assert!(ExperienceLibraryStrategy::compute_signals(&distinct.tool_calls).is_empty());
+        let repeated = inventory(&["a.rs", "a.rs", "a.rs", "b.rs", "b.rs", "b.rs"]);
+        let signals = ExperienceLibraryStrategy::compute_signals(&repeated.tool_calls);
+        assert_eq!(signals.len(), 2);
+        assert_ne!(signals[0].id, signals[1].id);
     }
 }

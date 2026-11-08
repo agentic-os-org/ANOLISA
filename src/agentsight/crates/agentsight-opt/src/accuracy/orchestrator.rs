@@ -231,6 +231,7 @@ mod tests {
             cmd: cmd.into(),
             err,
             target: None,
+            command: None,
             result_tokens: None,
         }
     }
