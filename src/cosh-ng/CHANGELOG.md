@@ -6,7 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.28.1] - Unreleased
+## [0.29.0] - 2026-11-08
+
+### Added
+
+- Alibaba Cloud ECS instances can now answer questions without `/auth`: eligible requests use the OS Console model access automatically, defaulting to `qwen3.7-plus`, while an already configured provider stays selected; `/auth` gains an identity entry to switch back to the saved identity or to another provider, `n` disables automatic access for the current or future sessions, and `Esc` cancels the activation wait without replaying the question (#9449)
+- `skills.system_paths` registers additional skill directories at System priority, so a skill collection installed outside the cosh package is discovered without a custom install prefix (#9460)
+
+### Changed
+
+- **BREAKING**: `make install` installs into the shared `anolisa` namespace by default, placing skills and extensions under `/usr/local/share/anolisa` as RPM and the ANOLISA installer already do; pass `AWPRJ=` to keep the previous independent layout, and `make layout` prints the resolved directories (#9462)
+- Cosh now finds skills and extensions installed under a custom prefix or a custom XDG data directory, and both RPM and the ANOLISA installer record the directories they used so the runtime follows them (#9460)
+- A directory whose root holds `SKILL.md` is loaded as one skill, so its reference documents are no longer mistaken for separate skills (#9460)
+- `COSH_HOME` relocates the user extension and state directories; `COSH_STATES_DIR` still takes precedence for state (#9352)
+- Installation through the ANOLISA installer now requires ANOLISA 0.3.21 or later, which supplies the component discovery data (#9351)
+
+### Fixed
+
+- `cosh-cli checkpoint status` names the workspaces whose change detection is not running and reports how many change events the shared watcher had to drop, so a workspace that silently stopped recording changes is visible (#7592)
+
+## [0.28.1] - 2026-11-03
 
 ### Changed
 
