@@ -98,7 +98,7 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | 回滚到指定检查点 |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | 回滚 N 个祖先版本 |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | 列出检查点；默认自动翻页 |
-| `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | 显示检查点间差异 |
+| `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | 以文本或 JSON 数组显示检查点间差异 |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | 查看工作区状态 |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | 清理旧检查点 |
@@ -157,6 +157,9 @@ ws-ckpt list -w /home/user/projects/my-project
 
 # 比较两个快照的差异
 ws-ckpt diff -w /home/user/projects/my-project -f snap-001 -t snap-002
+
+# 以 JSON 输出快照与当前工作区的差异
+ws-ckpt diff -w /home/user/projects/my-project -f snap-001 --format json
 
 # 回滚到指定检查点
 ws-ckpt rollback -w /home/user/projects/my-project -s snap-001
@@ -254,6 +257,11 @@ ws-ckpt init -w /path/to/workspace
 | `-` | 删除文件/目录（Deleted） | 红色 |
 | `M` | 内容修改（Modified） | 黄色 |
 | `R` | 重命名（Renamed） | 青色 |
+
+`diff --format json` 输出顶层数组，元素沿用现有文件级差异结构。每项包含 `path`、
+`change_type`（`Added`、`Modified`、`Deleted` 或 `Renamed`）和 `detail`；没有变更时输出 `[]`。
+重命名在 `detail` 中保留源路径 → 目标路径的说明。省略 `--to` 时比较源快照与当前工作区。
+默认文本输出及其标记保持不变。
 
 > diff 内置智能解析器，自动将 btrfs 底层的临时 inode 引用（如 `o261-118-0`）解析为真实文件路径，并对同一文件的多个操作去重合并。预览回滚（`rollback --preview`）使用相同的标记含义。
 

@@ -99,7 +99,7 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | Restore workspace to a checkpoint |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | Rollback N ancestors |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | List checkpoints; auto-page by default |
-| `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | Show differences between checkpoints |
+| `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | Show differences between checkpoints as text or a JSON array |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | Delete a specific checkpoint |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | Show current workspace status |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | Remove old checkpoints |
@@ -166,6 +166,9 @@ ws-ckpt list -w /home/user/projects/my-project
 
 # Diff between two snapshots
 ws-ckpt diff -w /home/user/projects/my-project -f snap-001 -t snap-002
+
+# Diff a snapshot against the current workspace as JSON
+ws-ckpt diff -w /home/user/projects/my-project -f snap-001 --format json
 
 # Rollback to a specific checkpoint
 ws-ckpt rollback -w /home/user/projects/my-project -s snap-001
@@ -281,6 +284,11 @@ whose live subvolume still exists.
 | `-` | File/directory deleted | Red |
 | `M` | Content modified | Yellow |
 | `R` | Renamed | Cyan |
+
+`diff --format json` emits a top-level array of the existing file-level entries. Each entry has
+`path`, `change_type` (`Added`, `Modified`, `Deleted`, or `Renamed`), and `detail`; no changes emit
+`[]`. A rename keeps its source → destination description in `detail`. Omitting `--to` compares the
+source snapshot with the current workspace. The default text output and its markers are unchanged.
 
 > diff ships a smart resolver that maps btrfs low-level transient inode references (such as `o261-118-0`) to real file paths and dedupes multiple operations on the same file. Rollback previews (`rollback --preview`) use the same marker semantics.
 

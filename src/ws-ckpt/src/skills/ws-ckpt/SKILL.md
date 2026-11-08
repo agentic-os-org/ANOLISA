@@ -90,12 +90,13 @@ ws-ckpt rollback -w <path-to-workspace> -s snap1 --preview  # 仅预览
 ### diff — 查看快照间差异
 
 ```bash
-ws-ckpt diff -w <workspace> -f <from-snapshot> [-t <to-snapshot>]
+ws-ckpt diff -w <workspace> -f <from-snapshot> [-t <to-snapshot>] [--format text|json]
 ```
 
 - `-w`:工作区路径(必填)
 - `-f`:源快照 ID(必填)
 - `-t`:目标快照 ID(可选，省略时与当前工作区状态比较)
+- `--format`:输出格式，默认 `text`；`json` 输出文件级差异数组
 
 ```bash
 # 两个快照之间的差异

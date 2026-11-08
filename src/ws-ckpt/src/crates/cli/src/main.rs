@@ -240,6 +240,10 @@ enum Commands {
         /// Target snapshot (ID or name); omit to diff against current workspace
         #[arg(long, short = 't', value_parser = snapshot_id_value_parser())]
         to: Option<String>,
+
+        /// Output format: text or json (default: text)
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
     },
 
     /// Show daemon and workspace status
@@ -570,6 +574,7 @@ async fn run(cli: Cli) -> Result<()> {
             workspace,
             from,
             to,
+            format,
         } => {
             let request = Request::Diff {
                 workspace: resolve_workspace_arg(&workspace),
@@ -578,7 +583,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
 
             let response = send_request_to_daemon(&request).await?;
-            handle_diff_response(response)?;
+            handle_diff_response(response, &format)?;
         }
         Commands::Status { workspace, format } => {
             let request = Request::Status {
@@ -1376,10 +1381,14 @@ fn handle_list_page_response(response: Response, format: &str, explicit_page: bo
 }
 
 /// Handle DiffOk response, formatting diff entries.
-fn handle_diff_response(response: Response) -> Result<()> {
+fn handle_diff_response(response: Response, format: &str) -> Result<()> {
     match response {
         Response::DiffOk { changes } => {
-            print_diff_entries(&changes);
+            if format == "json" {
+                emit_json(serde_json::to_value(&changes)?);
+            } else {
+                print_diff_entries(&changes);
+            }
         }
         Response::Error { code, message } => {
             eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
@@ -3881,13 +3890,120 @@ mod tests {
                 workspace,
                 from,
                 to,
+                format,
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(from, "msg1-step0");
                 assert_eq!(to, Some("msg2-step0".to_string()));
+                assert_eq!(format, "text");
             }
             _ => panic!("expected Diff"),
         }
+    }
+
+    #[test]
+    fn parse_diff_json_format() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "--workspace",
+            "/tmp/test",
+            "--from",
+            "msg1-step0",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Diff { format, .. } => assert_eq!(format, "json"),
+            _ => panic!("expected Diff"),
+        }
+    }
+
+    #[test]
+    fn parse_diff_rejects_invalid_format() {
+        let error = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "--workspace",
+            "/tmp/test",
+            "--from",
+            "msg1-step0",
+            "--format",
+            "jso",
+        ])
+        .err()
+        .expect("invalid diff format must be rejected");
+        assert!(error.to_string().contains("invalid value 'jso'"));
+    }
+
+    #[test]
+    fn diff_json_serializes_all_change_types() {
+        let _ = take_json_output();
+        let changes = vec![
+            ws_ckpt_common::DiffEntry {
+                path: "added.txt".into(),
+                change_type: ChangeType::Added,
+                detail: None,
+            },
+            ws_ckpt_common::DiffEntry {
+                path: "modified.txt".into(),
+                change_type: ChangeType::Modified,
+                detail: Some("content changed".into()),
+            },
+            ws_ckpt_common::DiffEntry {
+                path: "deleted.txt".into(),
+                change_type: ChangeType::Deleted,
+                detail: None,
+            },
+            ws_ckpt_common::DiffEntry {
+                path: "new.txt".into(),
+                change_type: ChangeType::Renamed,
+                detail: Some("old.txt".into()),
+            },
+        ];
+        handle_diff_response(Response::DiffOk { changes }, "json").unwrap();
+        assert_eq!(
+            take_json_output().unwrap(),
+            serde_json::json!([
+                {"path": "added.txt", "change_type": "Added", "detail": null},
+                {"path": "modified.txt", "change_type": "Modified", "detail": "content changed"},
+                {"path": "deleted.txt", "change_type": "Deleted", "detail": null},
+                {"path": "new.txt", "change_type": "Renamed", "detail": "old.txt"}
+            ])
+        );
+    }
+
+    #[test]
+    fn diff_json_empty_serializes_empty_array() {
+        let _ = take_json_output();
+        handle_diff_response(Response::DiffOk { changes: vec![] }, "json").unwrap();
+        assert_eq!(take_json_output(), Some(serde_json::json!([])));
+    }
+
+    #[test]
+    fn diff_text_response_does_not_emit_json() {
+        let _ = take_json_output();
+        let changes = vec![ws_ckpt_common::DiffEntry {
+            path: "added.txt".into(),
+            change_type: ChangeType::Added,
+            detail: None,
+        }];
+        handle_diff_response(Response::DiffOk { changes }, "text").unwrap();
+        assert!(take_json_output().is_none());
+    }
+
+    #[test]
+    fn diff_unexpected_response_does_not_emit_json() {
+        let _ = take_json_output();
+        handle_diff_response(
+            Response::CheckpointOk {
+                snapshot_id: "unexpected".into(),
+            },
+            "json",
+        )
+        .unwrap();
+        assert!(take_json_output().is_none());
     }
 
     #[test]
