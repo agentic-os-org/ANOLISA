@@ -124,6 +124,9 @@ python3 src/aw/scripts/check.py   # from the repository root: CI behavior tests,
 `build-all.sh` defaults to system source installation under `/usr/local`;
 `--user` defaults to `$HOME/.local`. Use `--prefix /usr` when staging distribution
 package paths. The script selects matching AW Providers automatically for selected backends.
+Selecting AW keeps core and skills and skips standalone component plugin
+bundles. If cosh-ng is also selected, the build keeps the Cosh extensions for
+the selected agent-sec-core and Tokenless backends.
 Discovery uses `providers/<canonical-backend>/Makefile` and the `aw-provider-*`
 package name from that directory's `Cargo.toml`; `sec-core` resolves to
 `agent-sec-core`, whose Provider is named `aw-provider-sec-core`. A partial build
