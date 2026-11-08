@@ -63,28 +63,9 @@ impl ConfirmBeforeActStrategy {
         Self
     }
 
-    /// The command a call ran, when its arguments carry one.
-    ///
-    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
-    /// command, so matching [`SENSITIVE_KEYWORDS`] against it reads
-    /// *arguments* as actions: a `Read` of `docs/delete-guide.md` or an
-    /// `Edit` of `src/force-push.md` satisfied the keyword table and was
-    /// handed to the LLM as a sensitive write operation. Read the command
-    /// argument instead, and treat a call that does not carry one as not a
-    /// command.
+    /// Read complete execution evidence, never the truncated display preview.
     fn command_of(call: &ToolCallRecord) -> Option<String> {
-        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
-            return COMMAND_KEYS
-                .iter()
-                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
-                .filter(|c| !c.is_empty())
-                .map(str::to_string);
-        }
-        // The summary is truncated, so a long argument string does not parse.
-        // A file-scoped call is never a command; for a command-scoped one the
-        // truncated summary *is* the command text.
-        call.target.is_none().then(|| call.cmd.clone())
+        call.execution_command()
     }
 
     /// Rust oracle: collect sensitive-op candidates by keyword match.
@@ -138,7 +119,14 @@ impl Detector for ConfirmBeforeActStrategy {
         } else {
             sensitive
                 .iter()
-                .map(|c| format!("- call_id={} tool={} cmd={}", c.call_id, c.name, c.cmd))
+                .map(|c| {
+                    format!(
+                        "- call_id={} tool={} cmd={}",
+                        c.call_id,
+                        c.name,
+                        c.execution_command().unwrap_or_default()
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -233,6 +221,7 @@ mod tests {
             cmd: cmd.into(),
             err: false,
             target: None,
+            command: None,
             result_tokens: None,
         }
     }
@@ -305,5 +294,34 @@ mod tests {
             3,
             "command-scoped calls must keep matching in both encodings"
         );
+    }
+}
+
+#[cfg(test)]
+mod full_command_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sensitive_candidates_use_full_inventory_arguments() {
+        let command = format!(
+            "cd /workspace/{} && git push origin main",
+            "nested/".repeat(20)
+        );
+        for (arguments, expected) in [
+            (json!({"command":command}), 1),
+            (json!({"command":["git","push","origin","main"]}), 1),
+            (
+                json!({"todos":[format!("git push later {}", "pending ".repeat(20))]}),
+                0,
+            ),
+        ] {
+            let trajectory = crate::AtifTrajectory::from_json(&json!({"schema_version":"ATIF-v1.7","steps":[{"step_id":1,"source":"agent","tool_calls":[{"tool_call_id":"call","function_name":"tool","arguments":arguments}]}]}).to_string()).unwrap();
+            let inventory = crate::trace::build_inventory(&trajectory);
+            assert_eq!(
+                ConfirmBeforeActStrategy::find_sensitive_ops(&inventory.tool_calls).len(),
+                expected
+            );
+        }
     }
 }

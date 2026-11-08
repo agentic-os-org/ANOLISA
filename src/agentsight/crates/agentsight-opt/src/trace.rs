@@ -229,6 +229,7 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 cmd: call.command_summary(cmd_chars),
                 err,
                 target: file_target(call),
+                command: crate::tool_command::from_arguments(&call.arguments),
                 result_tokens: None,
             });
         }

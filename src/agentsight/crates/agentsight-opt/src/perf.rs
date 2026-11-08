@@ -358,6 +358,7 @@ mod tests {
                 cmd: String::new(),
                 err: false,
                 target: None,
+                command: None,
                 result_tokens: None,
             }
         }

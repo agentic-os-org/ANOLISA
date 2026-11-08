@@ -215,6 +215,7 @@ mod tests {
                 cmd: "rg foo".into(),
                 err: false,
                 target: None,
+                command: None,
                 result_tokens: None,
             }],
             tool_agg: vec![ToolAggStats {
