@@ -149,7 +149,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Mon Nov 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sun Nov 08 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Add telemetry preparation for image builds without starting collection.
+- Clarify adapter quick start and remove the obsolete QwenWork RTK warning.
+- Refresh component catalog versions and installed resource declarations.
+
+* Mon Nov 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.21-1
 - Ship distribution-owned component contracts and recognize standalone RPM cores.
 - Render MCP command paths and preserve discovery files during raw lifecycle operations.
 - Activate managed cosh extensions and refresh component catalog versions.
