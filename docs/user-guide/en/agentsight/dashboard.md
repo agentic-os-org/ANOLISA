@@ -240,6 +240,32 @@ and shows the matching/total round count. **Clear filter** restores the full lis
 detail stays visible while filtering; selecting another trajectory or importing/loading a new
 document clears the filter. Searching sends no model request and leaves **Download JSON** unchanged.
 
+### Workspace snapshots in Agent Steps
+
+With `ws-ckpt` installed and its daemon reachable, a server-loaded trajectory can show the verified
+registered workspace beside the interaction timeline. Agent Step cards contain green snapshot
+entries with their IDs and creation times. **Load more** follows the snapshot cursor; **Refresh**
+starts a new query and replaces the previous fixed-time result.
+
+Workspace discovery uses only successful, explicit ws-ckpt tool arguments, successful recorded
+workspace configuration updates, or static `-w`/`--workspace` arguments in recorded Bash calls.
+AgentSight does not infer a workspace from process cwd, execute a recorded command, or substitute
+the plugin's current configuration for historical evidence. A candidate must pass `ws-ckpt status`
+with an absolute registered path and a nonempty workspace ID. Verification failures and snapshots
+that cannot be associated safely appear under **Anomalies**.
+
+Snapshots are grouped by complete Agent Step intervals: a snapshot belongs to a Step when its
+creation time is at or after that Step's start and before the next Agent Step's start. The final
+Step ends at the fixed query time shown in the viewer. Pagination preserves that query time. This
+is temporal association only; it does not prove that the Step caused the snapshot.
+
+**View snapshot / rollback** opens a read-only dialog with snapshot metadata, target-snapshot →
+current-workspace changes, and current-workspace → target-snapshot file-level rollback impact.
+**Confirm rollback** remains disabled because stopped writers, a retained protection snapshot,
+guarded restoration, and privileged authorization are not yet established by this view. No restore
+is attempted. Imported JSON documents do not call the server snapshot APIs, even when they contain
+a session ID.
+
 ## Settings
 
 The SQLite storage card consumes schema v2 from authenticated `GET /api/storage/status`. On Linux,

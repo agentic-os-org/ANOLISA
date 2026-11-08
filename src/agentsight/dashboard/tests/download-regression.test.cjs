@@ -52,6 +52,10 @@ function viewer(browser) {
       if (name === '../utils/download') return download(browser);
       if (name === '../utils/roundModel') return require(join(dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD), '../utils/roundModel.js'));
       if (name === '../utils/savings') return require(join(dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD), '../utils/savings.js'));
+      if (name === '../utils/useWorkspaceSnapshots') return {
+        useWorkspaceSnapshots: () => ({ data: null, loading: false, loadingMore: false, error: null, refresh() {}, loadMore() {} }),
+        workspaceSnapshotTargetKey: () => '',
+      };
       if (name.startsWith('../components/')) return {};
       throw new Error(`Unexpected ATIF viewer dependency ${name}`);
     },

@@ -1331,6 +1331,11 @@ function renderAtifPage() {
     })(),
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': panelStub,
+    '../components/WorkspaceSnapshotDialog': componentStub('WorkspaceSnapshotDialog'),
+    '../utils/useWorkspaceSnapshots': {
+      useWorkspaceSnapshots: () => ({ data: null, loading: false, loadingMore: false, error: null, refresh() {}, loadMore() {} }),
+      workspaceSnapshotTargetKey: () => '',
+    },
     '../utils/trajectoryTree': {
       buildTrajectoryTree: () => null,
       findNodeByPath: () => null,

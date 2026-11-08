@@ -15,8 +15,8 @@ function collapsibles(page, root, title) {
   ).length > 0);
 }
 
-function viewer(locale = 'en-US') {
-  const states = [], refs = [], readers = [], requests = [], downloads = [];
+function viewer(locale = 'en-US', search = '') {
+  const states = [], refs = [], readers = [], requests = [], downloads = [], snapshotTargets = [];
   let stateIndex = 0, refIndex = 0, child = false;
   const react = {
     useState(initial) {
@@ -50,7 +50,7 @@ function viewer(locale = 'en-US') {
       require(name) {
         if (name === 'react') return react;
         if (name === 'react/jsx-runtime') return { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
-        if (name === 'react-router-dom') return { useSearchParams: () => [new URLSearchParams(), () => {}] };
+        if (name === 'react-router-dom') return { useSearchParams: () => [new URLSearchParams(search), () => {}] };
         if (name === '../i18n') return { useI18n: () => ({ t }), useLocaleTag: () => locale };
         if (name === '../utils/trajectoryTree') return tree;
         if (name === '../utils/roundModel') return roundModel;
@@ -66,6 +66,14 @@ function viewer(locale = 'en-US') {
         };
         if (modules[name]) return modules[name];
         if (name === '../components/CausalAttributionPanel') return { CausalAttributionPanel: () => null };
+        if (name === '../components/WorkspaceSnapshotDialog') return { WorkspaceSnapshotDialog: () => null };
+        if (name === '../utils/useWorkspaceSnapshots') return {
+          useWorkspaceSnapshots: (target) => {
+            snapshotTargets.push(target);
+            return { data: null, loading: false, loadingMore: false, error: null, refresh() {}, loadMore() {} };
+          },
+          workspaceSnapshotTargetKey: () => '',
+        };
         throw new Error(`Unexpected ATIF dependency ${name}`);
       },
     });
@@ -87,7 +95,7 @@ function viewer(locale = 'en-US') {
     return { ...node, props: { ...node.props, children: renderChildren(node.props?.children) } };
   }
   return {
-    requests, downloads, parts: page.parts, t,
+    requests, downloads, snapshotTargets, parts: page.parts, t,
     find(root, predicate) { return nodes(root, predicate); },
     import(data) {
       const input = nodes(render(), (node) => node.type === 'input' && node.props.type === 'file')[0];
@@ -291,6 +299,19 @@ test('a malformed export falls back to a valid collected document and validates 
     assert.equal(page.session(), valid ? 'fixture' : undefined);
     assert.equal(page.error(), valid ? undefined : page.t('atif.malformedCollected', { id: 'fixture' }));
   }
+});
+
+test('snapshot targets use the resolved path for a stale URL node', async () => {
+  const page = viewer('en-US', 'type=session&id=fixture&node=stale');
+  page.load();
+  page.requests[0].resolve(document());
+  await new Promise(setImmediate);
+  assert.equal(page.session(), 'fixture');
+  const target = page.snapshotTargets.at(-1);
+  assert.ok(target);
+  assert.equal(target.type, 'session');
+  assert.equal(target.id, 'fixture');
+  assert.deepEqual(Array.from(target.trajectoryPath), []);
 });
 
 test('embedded document identities survive validation and render in the actual graph', () => {

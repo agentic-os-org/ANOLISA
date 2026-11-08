@@ -18,6 +18,9 @@ pub(crate) mod storage_status;
 mod system_audit;
 mod token_savings;
 mod tokenless;
+mod workspace_evidence;
+mod workspace_snapshot_client;
+mod workspace_snapshots;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -263,6 +266,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
+                .service(workspace_snapshots::list_workspace_snapshots)
+                .service(workspace_snapshots::workspace_snapshot_detail)
                 .service(handlers::get_agent_health)
                 .service(handlers::get_agent_process_health)
                 .service(
@@ -379,6 +384,16 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
         "Exchange token for a session cookie",
     ),
     ("GET", "/api/docs", "This route list"),
+    (
+        "GET",
+        "/api/atif/workspace-snapshots",
+        "Verified workspace snapshots grouped by Agent Step",
+    ),
+    (
+        "POST",
+        "/api/atif/workspace-snapshots/detail",
+        "Read-only snapshot diffs and rollback impact",
+    ),
     ("GET", "/api/sessions", "List observed agent sessions"),
     (
         "POST",

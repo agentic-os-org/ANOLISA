@@ -15,6 +15,8 @@ const {
   fetchSecurityCase,
   fetchSecurityStatus,
   fetchStorageStatus,
+  fetchWorkspaceSnapshotDetail,
+  fetchWorkspaceSnapshots,
   reviewSecurityCase,
   semanticSearchSessions,
 } = require(process.env.AGENTSIGHT_API_CLIENT_BUILD);
@@ -105,6 +107,71 @@ function securityCaseDetail() {
     containment: null,
   };
 }
+
+test('workspace snapshot list binds the embedded path, cursor and abort signal', async () => {
+  const payload = {
+    document_digest: 'digest-1',
+    query_time: '2026-01-02T03:04:05Z',
+    workspace: { ws_id: 'ws-1', path: '/workspace' },
+    evidence: null,
+    groups: [],
+    next_cursor: null,
+    anomalies: [],
+  };
+  let invocation;
+  global.fetch = async (url, init) => {
+    invocation = { url, init };
+    return new Response(JSON.stringify(payload), { status: 200 });
+  };
+  const controller = new AbortController();
+  const result = await fetchWorkspaceSnapshots(
+    { type: 'session', id: 'session / 1', trajectoryPath: ['child / 1', '#0'] },
+    { cursor: 'cursor / 1', signal: controller.signal },
+  );
+
+  const url = new URL(invocation.url);
+  assert.equal(url.pathname, '/api/atif/workspace-snapshots');
+  assert.equal(url.searchParams.get('session_id'), 'session / 1');
+  assert.equal(url.searchParams.get('conversation_id'), null);
+  assert.deepEqual(JSON.parse(url.searchParams.get('trajectory_path')), ['child / 1', '#0']);
+  assert.equal(url.searchParams.get('cursor'), 'cursor / 1');
+  assert.equal(invocation.init.signal, controller.signal);
+  assert.deepEqual(result, payload);
+});
+
+test('workspace snapshot detail posts the immutable list identity', async () => {
+  const request = {
+    conversation_id: 'conversation-1',
+    trajectory_path: '["child-1"]',
+    document_digest: 'digest-1',
+    query_time: '2026-01-02T03:04:05Z',
+    workspace: { ws_id: 'ws-1', path: '/workspace' },
+    snapshot_id: 'snapshot-1',
+    step_index: 4,
+  };
+  const payload = {
+    ...request,
+    snapshot: { id: 'snapshot-1', workspace: '/workspace', meta: { created_at: '2026-01-02T03:00:00Z' } },
+    target_to_current: [],
+    current_to_target: [],
+    rollback_enabled: false,
+    rollback_disabled_reason: 'disabled',
+  };
+  let invocation;
+  global.fetch = async (url, init) => {
+    invocation = { url, init };
+    return new Response(JSON.stringify(payload), { status: 200 });
+  };
+  const controller = new AbortController();
+  const result = await fetchWorkspaceSnapshotDetail(request, controller.signal);
+
+  assert.equal(new URL(invocation.url).pathname, '/api/atif/workspace-snapshots/detail');
+  assert.equal(invocation.init.method, 'POST');
+  assert.equal(invocation.init.headers['Content-Type'], 'application/json');
+  assert.deepEqual(JSON.parse(invocation.init.body), request);
+  assert.equal(invocation.init.signal, controller.signal);
+  assert.deepEqual(result, payload);
+});
 
 test('fetchAgentProtectionPreview rejects a body that is not a preview', async () => {
   // The macOS local viewer has no enforcement routes, so its `/api/*` catch-all

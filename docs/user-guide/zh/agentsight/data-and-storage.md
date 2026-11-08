@@ -193,6 +193,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 | Tokenless 记录 | `POST /api/tokenless/refresh`、`GET /api/tokenless/records`、`GET /api/tokenless/records/{cache_id}` | 刷新已保存统计、列出元数据和读取详情；内容需显式指定 `include_content=true`。三条路由即使来自 loopback 也需要 Dashboard 凭据 |
 | Token 节省 | `GET /api/token-savings`、`GET /api/token-savings/session/{id}` | Tokenless 节省量 |
 | ATIF 导出 | `GET /api/export/atif/session/{id}`（还有 `trace`、`conversation`） | 轨迹导出 |
+| 工作区快照 | `GET /api/atif/workspace-snapshots`、`POST /api/atif/workspace-snapshots/detail` | 按 Agent Step 分组、固定查询时间并支持翻页的 ws-ckpt 快照，以及只读元数据和两个方向的文件级差异。详情 POST 路由不会恢复文件，服务不暴露回滚路由 |
 | 轨迹 | `GET /api/trajectories`、`/filters`、`/steps`、`/{session_id}` | 已采集轨迹。列表支持可选的 `label`、`exclude_label`、`human_backed` 过滤；`label` 是逗号分隔的有效标签，例如 `good,bad` |
 | 复用标签 | `POST /api/reuse/triage`、`GET /api/reuse/sessions`、`POST /api/reuse/sessions/{session_id}/label`、`POST /api/reuse/sessions/labels:batch-confirm`、`GET /api/reuse/label-stats`、`POST /api/reuse/judge` | 规则分诊与人工标签决定。judge 需要 `features.reuse_llm_judge=true` 与已配置的 LLM 凭据，并会产生付费模型调用 |
 | 偏好 | `GET /api/preferences`、`/export`、`/turns` | 用户偏好分析、Markdown 导出，以及供 Agent 侧推理使用的用户原始轮次 |

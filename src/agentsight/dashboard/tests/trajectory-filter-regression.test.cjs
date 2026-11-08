@@ -71,6 +71,10 @@ function viewer({ readFailure = false } = {}) {
       if (name === '../utils/roundModel') return require(process.env.AGENTSIGHT_ROUND_MODEL_BUILD);
       if (name === '../utils/text') return require(join(output, '../utils/text.js'));
       if (name === '../utils/download') return download;
+      if (name === '../utils/useWorkspaceSnapshots') return {
+        useWorkspaceSnapshots: () => ({ data: null, loading: false, loadingMore: false, error: null, refresh() {}, loadMore() {} }),
+        workspaceSnapshotTargetKey: () => '',
+      };
       if (name.startsWith('../components/')) return {};
       throw new Error(`Unexpected ATIF viewer dependency ${name}`);
     },

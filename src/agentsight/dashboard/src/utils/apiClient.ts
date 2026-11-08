@@ -987,6 +987,123 @@ export async function fetchTrajectoryAtif(sessionId: string): Promise<AtifDocume
   );
 }
 
+// ─── Read-only workspace snapshots ────────────────────────────────────────────
+
+export interface WorkspaceSnapshotTarget {
+  type: 'session' | 'conversation';
+  id: string;
+  trajectoryPath: string[];
+}
+
+export interface VerifiedWorkspace {
+  ws_id: string;
+  path: string;
+}
+
+export interface WorkspaceSnapshotMeta {
+  created_at: string;
+  message: string | null;
+  pinned: boolean;
+  missing: boolean;
+  parent_id: string | null;
+}
+
+export interface WorkspaceSnapshot {
+  id: string;
+  workspace: string;
+  meta: WorkspaceSnapshotMeta;
+}
+
+export interface StepSnapshotGroup {
+  step_index: number;
+  step_id: number;
+  interval_start: string;
+  interval_end: string;
+  snapshots: WorkspaceSnapshot[];
+}
+
+export interface SnapshotAnomaly {
+  code: string;
+  message: string;
+  timestamp?: string;
+}
+
+export interface WorkspaceEvidence {
+  step_index: number;
+  observed_at: string;
+  kind: string;
+}
+
+export interface WorkspaceSnapshotListResponse {
+  document_digest: string;
+  query_time: string;
+  workspace: VerifiedWorkspace | null;
+  evidence: WorkspaceEvidence | null;
+  groups: StepSnapshotGroup[];
+  next_cursor: string | null;
+  anomalies: SnapshotAnomaly[];
+}
+
+export type SnapshotChangeType = 'Added' | 'Modified' | 'Deleted' | 'Renamed';
+
+export interface SnapshotDiffEntry {
+  path: string;
+  change_type: SnapshotChangeType;
+  detail: string | null;
+}
+
+export interface WorkspaceSnapshotDetailRequest {
+  session_id?: string;
+  conversation_id?: string;
+  trajectory_path: string;
+  document_digest: string;
+  query_time: string;
+  workspace: VerifiedWorkspace;
+  snapshot_id: string;
+  step_index: number;
+}
+
+export interface WorkspaceSnapshotDetailResponse {
+  workspace: VerifiedWorkspace;
+  snapshot: WorkspaceSnapshot;
+  step_index: number;
+  query_time: string;
+  target_to_current: SnapshotDiffEntry[];
+  current_to_target: SnapshotDiffEntry[];
+  rollback_enabled: boolean;
+  rollback_disabled_reason: string;
+}
+
+export async function fetchWorkspaceSnapshots(
+  target: WorkspaceSnapshotTarget,
+  options: { cursor?: string; signal?: AbortSignal } = {},
+): Promise<WorkspaceSnapshotListResponse> {
+  const params = new URLSearchParams({
+    [target.type === 'session' ? 'session_id' : 'conversation_id']: target.id,
+    trajectory_path: JSON.stringify(target.trajectoryPath),
+  });
+  if (options.cursor) params.set('cursor', options.cursor);
+  return apiFetch<WorkspaceSnapshotListResponse>(
+    `${API_BASE}/api/atif/workspace-snapshots?${params.toString()}`,
+    { signal: options.signal },
+  );
+}
+
+export async function fetchWorkspaceSnapshotDetail(
+  request: WorkspaceSnapshotDetailRequest,
+  signal?: AbortSignal,
+): Promise<WorkspaceSnapshotDetailResponse> {
+  return apiFetch<WorkspaceSnapshotDetailResponse>(
+    `${API_BASE}/api/atif/workspace-snapshots/detail`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal,
+    },
+  );
+}
+
 // ─── Interruption APIs ───────────────────────────────────────────────────────
 
 export type InterruptionSeverity = 'critical' | 'high' | 'medium' | 'low';

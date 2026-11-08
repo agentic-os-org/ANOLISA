@@ -20,7 +20,8 @@
     "test:agent-health-notifier": "node --test tests/agent-health-notifier-regression.test.cjs",
     "test:crash-episodes": "node --test tests/crash-episode-regression.test.cjs",
     "test:token-savings-rate": "node tests/run-token-savings-rate-regression.cjs",
-    "test:optimization-autorun": "node --test tests/optimization-autorun-regression.test.cjs"
+    "test:optimization-autorun": "node --test tests/optimization-autorun-regression.test.cjs",
+    "test:workspace-snapshots": "node tests/run-workspace-snapshots-regression.cjs"
   },
   "dependencies": {
     "react": "^18.2.0",

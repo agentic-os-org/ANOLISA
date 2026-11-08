@@ -9,9 +9,18 @@ import type {
 import {
   fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
 } from '../utils/apiClient';
-import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
+import type {
+  SessionSavingsDetail,
+  OptimizationItem,
+  StepSnapshotGroup,
+  WorkspaceSnapshot,
+  WorkspaceSnapshotDetailRequest,
+  WorkspaceSnapshotTarget,
+} from '../utils/apiClient';
 import { SubagentGraph } from '../components/SubagentGraph';
 import { CausalAttributionPanel } from '../components/CausalAttributionPanel';
+import { WorkspaceSnapshotDialog } from '../components/WorkspaceSnapshotDialog';
+import { useWorkspaceSnapshots, workspaceSnapshotTargetKey } from '../utils/useWorkspaceSnapshots';
 import type { TrajNode } from '../utils/trajectoryTree';
 import {
   buildTrajectoryTree, findNodeByPath, findNodeByRef, encodeNodePath, decodeNodePath,
@@ -192,9 +201,13 @@ interface StepCardProps {
   onToggleSection: (key: string) => void;
   savingsMap?: Map<string, OptimizationItem>;
   onNavigateSubagent?: (ref: SubagentTrajectoryRef) => void;
+  snapshotGroup?: StepSnapshotGroup;
+  onOpenSnapshot?: (group: StepSnapshotGroup, snapshot: WorkspaceSnapshot) => void;
 }
 
-const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap, onNavigateSubagent }) => {
+const StepCard: React.FC<StepCardProps> = ({
+  step, expandedSections, onToggleSection, savingsMap, onNavigateSubagent, snapshotGroup, onOpenSnapshot,
+}) => {
   const { t } = useI18n();
   const locale = useLocaleTag();
   const style = getSourceStyle(step.source);
@@ -249,6 +262,30 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
           {/* Agent-only sections */}
           {step.source === 'agent' && (
             <>
+              {snapshotGroup && snapshotGroup.snapshots.length > 0 && (
+                <section className="mt-3 rounded-lg border border-green-200 bg-green-50/60 p-3" aria-label={t('atif.workspaceSnapshots')}>
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-green-800">
+                    <span className="h-2 w-2 rounded-full bg-green-500" />
+                    {t('atif.workspaceSnapshots')}
+                    <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs">{snapshotGroup.snapshots.length}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {snapshotGroup.snapshots.map(snapshot => (
+                      <button
+                        key={snapshot.id}
+                        data-testid="workspace-snapshot-entry"
+                        onClick={() => onOpenSnapshot?.(snapshotGroup, snapshot)}
+                        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-green-200 bg-white px-3 py-2 text-left transition-colors hover:bg-green-100"
+                      >
+                        <span className="min-w-0 break-all font-mono text-sm font-medium text-green-800">{snapshot.id}</span>
+                        <span className="text-xs text-gray-500">{fmtTimestamp(snapshot.meta.created_at, locale)}</span>
+                        <span className="ml-auto text-xs font-medium text-green-700">{t('atif.viewSnapshotRollback')}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              )}
+
               {/* Reasoning */}
               {hasReasoning && (
                 <Collapsible
@@ -466,10 +503,12 @@ interface RoundDetailProps {
   onToggleSection: (key: string) => void;
   savingsMap?: Map<string, OptimizationItem>;
   onNavigateSubagent?: (ref: SubagentTrajectoryRef) => void;
+  snapshotGroups?: Map<AtifStep, StepSnapshotGroup>;
+  onOpenSnapshot?: (group: StepSnapshotGroup, snapshot: WorkspaceSnapshot) => void;
 }
 
 const RoundDetail: React.FC<RoundDetailProps> = ({
-  round, expandedSections, onToggleSection, savingsMap, onNavigateSubagent,
+  round, expandedSections, onToggleSection, savingsMap, onNavigateSubagent, snapshotGroups, onOpenSnapshot,
 }) => {
   const { t } = useI18n();
   const stats = roundStats(round);
@@ -501,6 +540,8 @@ const RoundDetail: React.FC<RoundDetailProps> = ({
             onToggleSection={onToggleSection}
             savingsMap={savingsMap}
             onNavigateSubagent={onNavigateSubagent}
+            snapshotGroup={snapshotGroups?.get(step)}
+            onOpenSnapshot={onOpenSnapshot}
           />
         ))}
       </div>
@@ -647,7 +688,11 @@ export const AtifViewerPage: React.FC = () => {
   // Query that produced the document on screen, as opposed to the live form
   // fields: editing the input without pressing Load must not retarget the
   // causal panel (or store its history under an id that was never loaded).
-  const [loadedQuery, setLoadedQuery] = useState<{ type: 'session' | 'conversation'; id: string } | null>(null);
+  const [loadedQuery, setLoadedQuery] = useState<{
+    type: 'session' | 'conversation';
+    id: string;
+    origin: 'server' | 'import';
+  } | null>(null);
 
   // Data state
   const [doc, setDoc] = useState<AtifDocument | null>(null);
@@ -772,7 +817,7 @@ export const AtifViewerPage: React.FC = () => {
       }
       if (requestId !== loadRequestIdRef.current) return;
       setDoc(data);
-      setLoadedQuery({ type: qt, id: i.trim() });
+      setLoadedQuery({ type: qt, id: i.trim(), origin: 'server' });
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
       // Round selection follows the node the URL restored, not always the root.
@@ -859,7 +904,7 @@ export const AtifViewerPage: React.FC = () => {
         setSearchParams(nextParams, { replace: true });
         setError(null);
         setQueryId(parsed.session_id ?? '');
-        setLoadedQuery({ type: 'session', id: parsed.session_id ?? '' });
+        setLoadedQuery({ type: 'session', id: parsed.session_id ?? '', origin: 'import' });
         setExpandedSections(new Set());
         setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument), t), new Set()));
       } catch {
@@ -884,6 +929,52 @@ export const AtifViewerPage: React.FC = () => {
     const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
     downloadBlob(blob, `atif-${(doc.session_id ?? 'trajectory').slice(0, 16)}.json`);
   }, [doc]);
+
+  const snapshotTarget: WorkspaceSnapshotTarget | null = loadedQuery?.origin === 'server'
+    ? { type: loadedQuery.type, id: loadedQuery.id, trajectoryPath: selectedNode?.path ?? [] }
+    : null;
+  const snapshotTargetKey = workspaceSnapshotTargetKey(snapshotTarget);
+  const snapshots = useWorkspaceSnapshots(snapshotTarget);
+  const [snapshotSelection, setSnapshotSelection] = useState<{
+    targetKey: string;
+    request: WorkspaceSnapshotDetailRequest;
+  } | null>(null);
+
+  const openSnapshot = useCallback((group: StepSnapshotGroup, snapshot: WorkspaceSnapshot) => {
+    const list = snapshots.data;
+    if (!snapshotTarget || !list?.workspace) return;
+    setSnapshotSelection({
+      targetKey: snapshotTargetKey,
+      request: {
+        ...(snapshotTarget.type === 'session'
+          ? { session_id: snapshotTarget.id }
+          : { conversation_id: snapshotTarget.id }),
+        trajectory_path: JSON.stringify(snapshotTarget.trajectoryPath),
+        document_digest: list.document_digest,
+        query_time: list.query_time,
+        workspace: list.workspace,
+        snapshot_id: snapshot.id,
+        step_index: group.step_index,
+      },
+    });
+  }, [snapshotTarget, snapshotTargetKey, snapshots.data]);
+
+  const snapshotGroups = React.useMemo(() => {
+    const byIndex = new Map<number, StepSnapshotGroup>(
+      (snapshots.data?.groups ?? []).map(group => [group.step_index, group]),
+    );
+    const byStep = new Map<AtifStep, StepSnapshotGroup>();
+    stepsOf(activeDoc).forEach((step, index) => {
+      const group = byIndex.get(index);
+      if (group) byStep.set(step, group);
+    });
+    return byStep;
+  }, [activeDoc, snapshots.data?.groups]);
+
+  const activeSnapshotRequest = snapshotSelection?.targetKey === snapshotTargetKey
+    && snapshotSelection.request.query_time === snapshots.data?.query_time
+    ? snapshotSelection.request
+    : null;
 
   // Compute metrics (fallback when final_metrics is partial)
   const steps = activeDoc?.steps ?? [];
@@ -1109,15 +1200,74 @@ export const AtifViewerPage: React.FC = () => {
 
             {/* Round master-detail: left = round list, right = round detail */}
             <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">
-                {selectedNode && selectedNode.depth > 0 && (
-                  <span className="text-indigo-600">{selectedNode.label} · </span>
+              <div className="mb-4 space-y-2">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <h2 className="text-lg font-semibold text-gray-900">
+                    {selectedNode && selectedNode.depth > 0 && (
+                      <span className="text-indigo-600">{selectedNode.label} · </span>
+                    )}
+                    {t('atif.interactionTrajectory')}
+                    <span className="ml-2 text-sm font-normal text-gray-400">
+                      {t('atif.roundsSteps', { rounds: rounds.length, steps: steps.length })}
+                    </span>
+                  </h2>
+                  {snapshots.data?.workspace && (
+                    <span className="inline-flex min-w-0 flex-wrap items-center gap-1 rounded-lg bg-green-50 px-2.5 py-1 text-xs text-green-800" title={snapshots.data.workspace.ws_id}>
+                      <span className="font-medium">{t('atif.workspaceVerified')}:</span>
+                      <span className="break-all font-mono">{snapshots.data.workspace.path}</span>
+                    </span>
+                  )}
+                  {snapshots.data?.next_cursor && (
+                    <button
+                      onClick={snapshots.loadMore}
+                      disabled={snapshots.loadingMore}
+                      className="text-xs font-medium text-green-700 hover:text-green-900 disabled:opacity-50"
+                    >
+                      {snapshots.loadingMore ? t('atif.loadingMoreSnapshots') : t('atif.loadMoreSnapshots')}
+                    </button>
+                  )}
+                  {snapshotTarget && (
+                    <button onClick={snapshots.refresh} className="text-xs font-medium text-gray-500 hover:text-gray-800">
+                      {t('common.refresh')}
+                    </button>
+                  )}
+                </div>
+
+                {loadedQuery?.origin === 'import' && (
+                  <p className="text-xs text-gray-500">{t('atif.workspaceSnapshotsImported')}</p>
                 )}
-                {t('atif.interactionTrajectory')}
-                <span className="ml-2 text-sm font-normal text-gray-400">
-                  {t('atif.roundsSteps', { rounds: rounds.length, steps: steps.length })}
-                </span>
-              </h2>
+                {snapshotTarget && snapshots.loading && <p className="text-xs text-gray-500">{t('atif.loading')}</p>}
+                {snapshots.error !== null && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                    {t('atif.snapshotsLoadFailed')}
+                    <button onClick={snapshots.refresh} className="ml-2 font-medium underline">{t('common.retry')}</button>
+                  </div>
+                )}
+                {snapshots.data && !snapshots.data.workspace && (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {t('atif.workspaceUnverified')}
+                  </p>
+                )}
+                {snapshots.data?.workspace && (
+                  <div className="text-xs text-gray-500">
+                    <p>{t('atif.snapshotAssociationNote')}</p>
+                    <p className="mt-0.5 font-mono">{t('atif.snapshotQueryTime', { time: snapshots.data.query_time })}</p>
+                  </div>
+                )}
+                {snapshots.data && snapshots.data.anomalies.length > 0 && (
+                  <details className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    <summary className="cursor-pointer font-medium">{t('atif.snapshotAnomalies', { n: snapshots.data.anomalies.length })}</summary>
+                    <ul className="mt-2 space-y-1">
+                      {snapshots.data.anomalies.map((anomaly, index) => (
+                        <li key={`${anomaly.code}:${anomaly.timestamp ?? ''}:${index}`}>
+                          <span className="font-mono font-medium">{anomaly.code}</span>: {anomaly.message}
+                          {anomaly.timestamp && <span className="ml-1 font-mono">({anomaly.timestamp})</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
 
               {steps.length === 0 ? (
                 <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
@@ -1162,6 +1312,8 @@ export const AtifViewerPage: React.FC = () => {
                         onToggleSection={toggleSection}
                         savingsMap={savingsMap}
                         onNavigateSubagent={navigateToSubagent}
+                        snapshotGroups={snapshotGroups}
+                        onOpenSnapshot={openSnapshot}
                       />
                     ) : (
                       <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
@@ -1186,6 +1338,7 @@ export const AtifViewerPage: React.FC = () => {
           </>
         )}
       </main>
+      <WorkspaceSnapshotDialog request={activeSnapshotRequest} onClose={() => setSnapshotSelection(null)} />
     </>
   );
 };

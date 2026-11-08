@@ -163,6 +163,11 @@ function renderViewerPage() {
     '../utils/apiClient': { ...stubs },
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': componentStub('CausalAttributionPanel'),
+    '../components/WorkspaceSnapshotDialog': componentStub('WorkspaceSnapshotDialog'),
+    '../utils/useWorkspaceSnapshots': {
+      useWorkspaceSnapshots: () => ({ data: null, loading: false, loadingMore: false, error: null, refresh() {}, loadMore() {} }),
+      workspaceSnapshotTargetKey: () => '',
+    },
     '../utils/trajectoryTree': {
       buildTrajectoryTree: () => null,
       findNodeByPath: () => ({ doc: null }),
