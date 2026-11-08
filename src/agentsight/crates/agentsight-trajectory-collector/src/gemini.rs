@@ -14,11 +14,27 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 
 use agentsight_atif::{
     Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult, Step, StepSource,
     ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
 };
+
+/// Gemini's resolved project comes from a separate `.project_root` marker,
+/// so chat size/mtime alone cannot identify the collected snapshot. Use the
+/// existing negative-fingerprint namespace to invalidate pre-fix byte sizes.
+pub(crate) fn scan_fingerprint(project: &str, file_size: i64, mtime_ns: i64) -> i64 {
+    let mut digest = Sha256::new();
+    digest.update(b"agentsight-gemini-project-v1\0");
+    digest.update(file_size.to_le_bytes());
+    digest.update(mtime_ns.to_le_bytes());
+    digest.update(project.as_bytes());
+    let hash = digest.finalize();
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(&hash[..8]);
+    i64::from_le_bytes(bytes) | i64::MIN
+}
 
 /// Return `true` when the events look like a Gemini CLI chat stream: the
 /// leading partial-metadata record, a `$`-prefixed correction record, or a
