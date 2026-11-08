@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -54,3 +55,44 @@ def test_ready_service_short_circuits_without_spawn(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(parallel.subprocess, "Popen", popen)
     parallel.start_mock_services_with_offset(task_yaml, str(tmp_path), 0)
     popen.assert_not_called()
+
+
+def test_spawn_applies_address_space_limit_without_preexec_callback(tmp_path, monkeypatch):
+    task_dir = tmp_path / "tasks" / "probe"
+    task_dir.mkdir(parents=True)
+    probe = tmp_path / "probe.py"
+    limit_file = tmp_path / "limit.txt"
+    probe.write_text(
+        "from pathlib import Path\n"
+        "import resource\n"
+        "import sys\n"
+        "soft, hard = resource.getrlimit(resource.RLIMIT_AS)\n"
+        "Path(sys.argv[1]).write_text(f'{soft} {hard}')\n"
+    )
+    task_yaml = task_dir / "task.yaml"
+    task_yaml.write_text(
+        "services:\n"
+        "  - name: limit-probe\n"
+        "    port: 8010\n"
+        f"    command: {sys.executable} {probe} {limit_file}\n"
+        "    health_check: http://localhost:8010/healthz\n"
+        "    health_check_method: GET\n"
+    )
+
+    real_popen = parallel.subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        assert "preexec_fn" not in kwargs
+        child = real_popen(*args, **kwargs)
+        assert child.wait(timeout=10) == 0
+        return child
+
+    monkeypatch.setattr(parallel.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        parallel.httpx, "get",
+        lambda *args, **kwargs: MagicMock(status_code=200 if limit_file.exists() else 503),
+    )
+    parallel.start_mock_services_with_offset(str(task_yaml), str(task_dir), 0)
+
+    limit = 512 * 1024 * 1024
+    assert limit_file.read_text() == f"{limit} {limit}"
