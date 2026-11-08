@@ -9,6 +9,37 @@
 
 ## [未发布]
 
+## [0.4.0] - 2026-11-08
+
+### 新增
+
+- 为镜像构建新增内部命令 `anolisa telemetry prepare`。该命令准备遥测文件，
+  并为下次启动启用常驻 systemd 单元，不启动采集，也不记录构建宿主的实例快照。
+  实际执行需要 root 权限和 system 安装范围；已有退出采集标记或服务配置失败时
+  会停止准备。使用 `--no-service` 可跳过单元配置，随后需在启动时先执行
+  `anolisa telemetry init`，再运行 `anolisa telemetry upload --loop`。
+  现有 RPM 和镜像构建流程不会自动切换到该命令
+  ([#9412](https://github.com/agentic-os-org/ANOLISA/pull/9412))。
+
+### 变更
+
+- 在 `anolisa --help` 中提供组件安装和适配器连接的快速上手步骤。
+  `anolisa adapter --help` 现在说明前置条件、发现、启用、状态检查，以及
+  在 Agent 框架内验证集成的步骤
+  ([#9661](https://github.com/agentic-os-org/ANOLISA/pull/9661))。
+- 将组件目录更新至 AgentSight `0.16.0`、cosh-ng `0.29.0`、agent-sec-core `1.2.0`、
+  SkillFS `0.5.6`、Tokenless `0.9.4` 和 ws-ckpt `0.7.0`。
+- 更新随 CLI 提供的安装契约，按所选布局记录 cosh-ng 的资源位置，并包含
+  Tokenless 的宿主分发器和适配器资源。Tokenless 契约不再安装独立的 `rtk`
+  可执行文件或符号链接；当前 Tokenless 包通过 `tokenless rtk` 提供该功能。
+
+### 修复
+
+- 启用 QwenWork 适配器时，不再因缺少独立 RTK 可执行文件而提示命令改写不可用。
+  当前 Tokenless 使用 `tokenless rtk`；Tokenless `0.9.2` 及更早版本仍需要独立
+  可执行文件，但此预检查不再报告该文件缺失
+  ([#9454](https://github.com/agentic-os-org/ANOLISA/pull/9454))。
+
 ## [0.3.21] - 2026-11-02
 
 ### 新增

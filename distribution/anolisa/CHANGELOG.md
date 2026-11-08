@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
+### Added
+
+- Add the internal `anolisa telemetry prepare` command for image builds. It
+  prepares telemetry files and enables the resident systemd unit for the next
+  boot without starting collection or recording the build host's instance
+  snapshot. Applying it requires root and system scope; an existing opt-out
+  marker or service setup failure stops preparation. Use `--no-service` to skip
+  unit setup, then run `anolisa telemetry init` at boot before
+  `anolisa telemetry upload --loop`. Existing RPM and image-build flows are not
+  switched to this command automatically
+  ([#9412](https://github.com/agentic-os-org/ANOLISA/pull/9412)).
+
+### Changed
+
+- Show a component installation and adapter connection quick start in
+  `anolisa --help`. `anolisa adapter --help` now explains prerequisites,
+  discovery, enablement, status checks, and verification in the agent framework
+  ([#9661](https://github.com/agentic-os-org/ANOLISA/pull/9661)).
+- Update the component catalog to AgentSight `0.16.0`, cosh-ng `0.29.0`,
+  agent-sec-core `1.2.0`, SkillFS `0.5.6`, Tokenless `0.9.4`, and ws-ckpt `0.7.0`.
+- Update bundled installation contracts to record cosh-ng resource locations
+  for the selected layout and include Tokenless's host dispatcher and adapter
+  resources. Tokenless's contract no longer installs a separate `rtk` executable
+  or symlink; current Tokenless packages provide it through `tokenless rtk`.
+
+### Fixed
+
+- Stop reporting that command rewriting is unavailable when enabling the
+  QwenWork adapter without a separate RTK executable. Current Tokenless uses
+  `tokenless rtk`; Tokenless `0.9.2` and earlier still require their separate
+  executable, whose absence is no longer reported by this preflight check
+  ([#9454](https://github.com/agentic-os-org/ANOLISA/pull/9454)).
+
 ## [0.3.21] - 2026-11-02
 
 ### Added
