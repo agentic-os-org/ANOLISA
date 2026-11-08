@@ -277,6 +277,13 @@ write_config() {
     fi
     local escaped_key
     escaped_key="$(printf '%s' "$api_key" | sed 's/[\"]/\\&/g')"
+    # The cleartext token lands in this file and no python helper is around
+    # to set its mode here, so create it owner-only before writing: a plain
+    # `cat >` leaves it at the umask default (0644 under 022), readable by
+    # every local user. Tightening the empty file first means the key is
+    # never exposed, and the redirect keeps the mode of the file it opens.
+    : > "$settings_file"
+    chmod 600 "$settings_file" 2>/dev/null || true
     cat > "$settings_file" <<JSONEOF
 {
   "env": {
