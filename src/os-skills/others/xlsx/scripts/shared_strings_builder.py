@@ -20,20 +20,58 @@ Output format:
 
 Notes:
     - Strings are de-duplicated: identical strings appear only once in the table.
+      De-duplication compares the ORIGINAL strings, before any escaping, so a
+      literal escape token like "_x0041_" stays distinct from the corresponding
+      control character.
     - The 'count' attribute equals the number of unique strings (appropriate for new files
       where each string is used in exactly one cell). If a string appears in multiple cells,
       manually increment 'count' by the number of extra references.
     - Special characters (&, <, >) are automatically XML-escaped.
+    - Text is additionally encoded with the SpreadsheetML ST_Xstring rules
+      (MS-OI29500): literal "_xHHHH_" sequences are protected as "_x005F_HHHH_",
+      control characters that are illegal in XML 1.0 (including carriage
+      returns, which XML line-end normalization would otherwise turn into
+      line feeds) are encoded as "_xHHHH_", and the noncharacters U+FFFE /
+      U+FFFF are encoded as "_xFFFE_" / "_xFFFF_". Excel decodes these on
+      read; ordinary Unicode, tabs and line feeds pass through untouched.
     - Leading/trailing spaces are preserved with xml:space="preserve".
 """
 
 import sys
 import html
+import re
 import argparse
 
 
 HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 SST_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+# ST_Xstring escape notation (MS-OI29500, "SpreadsheetML shared string
+# parsing"): Excel decodes "_xHHHH_" sequences in shared-string text, so
+# literal look-alikes must be escaped and characters that are illegal in
+# XML 1.0 (or that XML line-end normalization would corrupt) must be
+# encoded. The literal-escape pass MUST run before the control-character
+# pass, otherwise the escapes produced for control characters would
+# themselves be escaped a second time.
+ST_XSTRING_LITERAL = re.compile(r"(_x[0-9a-fA-F]{4}_)")
+ST_XSTRING_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f]")
+ST_XSTRING_NONCHARACTERS = (("￾", "_xFFFE_"), ("￿", "_xFFFF_"))
+
+
+def st_xstring_escape(s: str) -> str:
+    """Encode a string with the SpreadsheetML ST_Xstring rules.
+
+    - A literal "_xHHHH_" sequence becomes "_x005F_HHHH_".
+    - Characters in [\x00-\x08, \x0b-\x1f] (including "\r") become
+      "_xHHHH_" with uppercase hexadecimal digits.
+    - The noncharacters U+FFFE and U+FFFF become "_xFFFE_" / "_xFFFF_".
+    - Tabs, line feeds and ordinary Unicode are left untouched.
+    """
+    s = ST_XSTRING_LITERAL.sub(r"_x005F\1", s)
+    s = ST_XSTRING_CONTROL.sub(lambda m: f"_x{ord(m.group(0)):04X}_", s)
+    for char, escape in ST_XSTRING_NONCHARACTERS:
+        s = s.replace(char, escape)
+    return s
 
 
 def escape_text(s: str) -> tuple[str, bool]:
@@ -41,7 +79,7 @@ def escape_text(s: str) -> tuple[str, bool]:
     Return (escaped_text, needs_preserve).
     needs_preserve is True if the string has leading or trailing whitespace.
     """
-    escaped = html.escape(s, quote=False)
+    escaped = html.escape(st_xstring_escape(s), quote=False)
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 

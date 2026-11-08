@@ -242,6 +242,24 @@ then fill in indices while writing worksheet XML. This avoids re-counting indice
 <si><t xml:space="preserve">  (note)  </t></si>  <!-- preserve leading/trailing spaces -->
 ```
 
+**ST_Xstring escapes** (MS-OI29500): Excel additionally decodes `_xHHHH_`
+sequences inside `<t>` text. The helper script applies these rules
+automatically; hand-written XML must too:
+
+- A literal `_xHHHH_` in the original text must be written as `_x005F_HHHH_`
+  (the leading `_` is escaped), e.g. text `_x0041_` → `<t>_x005F_x0041_</t>`.
+- Characters illegal in XML 1.0 — control chars `0x00-0x08`, `0x0B`, `0x0C`,
+  `0x0E-0x1F` — cannot appear even as numeric references; encode them as
+  `_xHHHH_`, e.g. `\x01` → `<t>_x0001_</t>`.
+- Carriage returns must be encoded as `_x000D_`: a literal CR is normalized
+  to LF by XML line-end handling. (`&#xD;` also round-trips, but `_x000D_`
+  matches what Excel and XlsxWriter emit.)
+- Noncharacters U+FFFE / U+FFFF are encoded as `_xFFFE_` / `_xFFFF_`.
+
+The helper script `shared_strings_builder.py` applies all of these rules
+before XML escaping, and its de-duplication compares original strings (so
+literal `_x0001_` and the control character `\x01` stay separate entries).
+
 **Helper script**: use `shared_strings_builder.py` to generate the complete
 `sharedStrings.xml` from a plain list of strings:
 
