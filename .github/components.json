@@ -103,6 +103,10 @@
       "path_prefixes": [
         "src/os-skills/"
       ],
+      "supporting_paths": [
+        ".github/actions/build-os-skills-prebuilt/",
+        ".github/workflows/os-skills-prebuilt-ci.yaml"
+      ],
       "label": "component:skill",
       "commit_scope": "skill",
       "commit_scope_aliases": [

@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Regression tests for PDF table extraction in read_pdf.py (#5626).
+"""Regression tests for PDF table extraction in read_pdf.py.
 
 Builds a real three-page ruled PDF with PyMuPDF (drawn ruling plus cell
 text) and drives the actual CLI via subprocess. No network.
-
-Baseline on unchanged main: 4 failures (no ``--tables`` option) /
-2 passing controls (text-format rejection stays an error, defaults
-unchanged).
 """
 
 import json
@@ -17,9 +13,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "os-skills"
+    Path(__file__).resolve().parents[1]
     / "others"
     / "pdf-reader"
     / "scripts"
@@ -88,9 +82,7 @@ class PdfReaderTablesTestCase(unittest.TestCase):
         )
 
     def json_ok(self, proc):
-        self.assertEqual(
-            proc.returncode, 0, f"cli failed: {proc.stderr[-400:]}"
-        )
+        self.assertEqual(proc.returncode, 0, f"cli failed: {proc.stderr[-400:]}")
         # Old PyMuPDF versions print an import advisory onto stdout; the
         # JSON payload always starts at the first opening brace.
         return json.loads(proc.stdout[proc.stdout.index("{") :])
@@ -111,8 +103,11 @@ class TestTableExtraction(PdfReaderTablesTestCase):
         out = self.json_ok(self.run_cli("-p", "2-3", "--tables", "--format", "json"))
         self.assertEqual([p["page"] for p in out["pages"]], [2, 3])
         self.assertEqual(out["pages"][0]["tables"][0]["rows"], P2_LABELS)
-        self.assertTrue(bbox_close(out["pages"][0]["tables"][0]["bbox"],
-                                   [90.0, 100.0, 450.0, 280.0]))
+        self.assertTrue(
+            bbox_close(
+                out["pages"][0]["tables"][0]["bbox"], [90.0, 100.0, 450.0, 280.0]
+            )
+        )
         self.assertEqual(out["pages"][1]["tables"], [])
 
     def test_metadata_coexists_with_tables(self):
@@ -145,4 +140,4 @@ class TestDefaultContract(PdfReaderTablesTestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2, exit=False)
+    unittest.main(verbosity=2)

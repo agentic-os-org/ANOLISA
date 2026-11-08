@@ -49,6 +49,28 @@ def duplicates(values: list[str]) -> set[str]:
     return dupes
 
 
+def supporting_paths(component: dict[str, Any]) -> list[str]:
+    """Return normalized auxiliary paths without treating them as source roots."""
+    value = component.get("supporting_paths", [])
+    if not isinstance(value, list):
+        return []
+    return [path for path in value if valid_supporting_path(path)]
+
+
+def valid_supporting_path(path: Any) -> bool:
+    """Require literal repository paths; a trailing slash identifies a directory."""
+    return (
+        isinstance(path, str)
+        and bool(re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*/?", path))
+        and all(part not in {".", ".."} for part in path.rstrip("/").split("/"))
+    )
+
+
+def path_contains(parent: str, child: str) -> bool:
+    """Match files exactly and directories only at a slash boundary."""
+    return child == parent or (parent.endswith("/") and child.startswith(parent))
+
+
 def issue_form_component_options(path: Path) -> list[str]:
     """Return the component dropdown values without depending on fixed indentation."""
     try:
@@ -180,6 +202,26 @@ for index, component in enumerate(components):
             f"{component_id}: invalid path prefix {prefix!r}",
         )
 
+    auxiliary = component.get("supporting_paths", [])
+    require(
+        isinstance(auxiliary, list),
+        f"{component_id}: supporting_paths must be a list",
+    )
+    if isinstance(auxiliary, list):
+        for path in auxiliary:
+            require(
+                valid_supporting_path(path),
+                f"{component_id}: invalid supporting path {path!r}",
+            )
+            if valid_supporting_path(path):
+                target = ROOT / path
+                exists = target.is_dir() if path.endswith("/") else target.is_file()
+                require(
+                    exists,
+                    f"{component_id}: supporting path {path!r} does not exist "
+                    "with the declared type",
+                )
+
     if component["status"] in {"active", "deprecated"}:
         require(bool(component["issue_option"]), f"{component_id}: {component['status']} components need an issue_option")
         require(bool(component["commit_scope"]), f"{component_id}: {component['status']} components need a commit_scope")
@@ -232,6 +274,28 @@ for field, values in (
 ):
     for duplicate in sorted(duplicates(values)):
         errors.append(f"duplicate {field}: {duplicate}")
+
+# Auxiliary ownership must not duplicate a source root or another declaration.
+owned_paths = [
+    (component["id"], path, auxiliary)
+    for component in components
+    if isinstance(component, dict)
+    for auxiliary, values in (
+        (False, component.get("path_prefixes", [])),
+        (True, supporting_paths(component)),
+    )
+    for path in values
+    if isinstance(path, str)
+]
+for index, (owner, path, auxiliary) in enumerate(owned_paths):
+    for other_owner, other_path, other_auxiliary in owned_paths[index + 1 :]:
+        if (auxiliary or other_auxiliary) and (
+            path_contains(path, other_path) or path_contains(other_path, path)
+        ):
+            errors.append(
+                f"overlapping component ownership: {owner} {path!r} and "
+                f"{other_owner} {other_path!r}"
+            )
 
 scope_rule = commitlint_doc.get("rules", {}).get("scope-enum", [])
 commitlint_scopes = set()
@@ -292,16 +356,21 @@ for label, mapped_patterns in codeowner_mappings.items():
     component = components_by_label.get(label)
     if not component:
         continue
-    declared_patterns = [f"/{prefix}" for prefix in component.get("path_prefixes", [])]
+    declared_patterns = [
+        f"/{path}"
+        for path in [*component.get("path_prefixes", []), *supporting_paths(component)]
+    ]
     for mapped_pattern in sorted(mapped_patterns):
-        if not any(mapped_pattern.startswith(prefix) for prefix in declared_patterns):
+        if not any(
+            path_contains(prefix, mapped_pattern) for prefix in declared_patterns
+        ):
             errors.append(
-                f"CODEOWNERS: {mapped_pattern} is not declared by {component['id']} path prefixes"
+                f"CODEOWNERS: {mapped_pattern} is not declared by {component['id']} component paths"
             )
 for component in components:
     if component.get("status") == "internal":
         continue
-    for prefix in component.get("path_prefixes", []):
+    for prefix in [*component.get("path_prefixes", []), *supporting_paths(component)]:
         pattern = f"/{prefix}"
         if pattern not in codeowner_mappings.get(component["label"], set()):
             errors.append(f"CODEOWNERS: {pattern} does not map to {component['label']}")

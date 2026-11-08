@@ -159,6 +159,10 @@ Copy any skill directory to one of the skill search paths:
 4. Test the skill in Copilot Shell.
 5. Submit a pull request.
 
+Keep script regression tests in `tests/` within this component. See the
+[contribution guide](../../CONTRIBUTING.md#skill-regression-tests-and-path-ownership)
+for dependencies, test commands, and component ownership.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.

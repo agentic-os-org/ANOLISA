@@ -18,6 +18,8 @@ on:
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/pr-labels.test.js"
+      - ".github/workflows/pr-opened.yml"
       - ".github/scripts/issue-triage.js"
       - ".github/scripts/issue-triage.test.js"
       - ".github/scripts/sec-core-issue-*"
@@ -50,6 +52,8 @@ on:
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/pr-labels.test.js"
+      - ".github/workflows/pr-opened.yml"
       - ".github/scripts/issue-triage.js"
       - ".github/scripts/issue-triage.test.js"
       - ".github/scripts/sec-core-issue-*"
@@ -117,6 +121,7 @@ jobs:
           node --test \
             .github/scripts/issue-triage.test.js \
             .github/scripts/issue-claim.test.js \
+            .github/scripts/pr-labels.test.js \
             .github/scripts/sec-core-issue-analysis.test.js \
             .github/scripts/issue-analysis.test.js
           python3 .github/scripts/test_dingtalk_notification.py
