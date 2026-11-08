@@ -35,7 +35,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 | agentsight | `src/agentsight/` | Linux 完整 eBPF；macOS 仅 `trace`/`serve` | `sight` | `sight` | Linux 使用 `make build-all`；macOS 使用 `make build-mac`；Linux 运行 `make lint`、`make test` |
 | tokenless | `src/tokenless/` | 完整开发在 Linux；发布的 CLI 二进制和 npm adapter 支持 macOS x64/arm64 | `tokenless` | `tokenless` | `make build`、`make lint`、`make test` |
 | agent-memory | `src/agent-memory/` | 仅 Linux | `memory` | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
-| os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 静态 Markdown skill 定义和 shell 资源；`make build` 用于确认没有编译步骤 |
+| os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 无需编译；运行[组件回归测试](#skill-回归测试与路径归属) |
 | anolisa | `distribution/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
 | SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
@@ -160,6 +160,32 @@ cargo test --workspace
 
 CI 会根据变更路径追加 coverage、打包、前端、adapter 和集成任务。修改生成包或框架
 adapter 时请查看 [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)。
+
+### Skill 回归测试与路径归属
+
+修改 Skill 脚本的贡献者应将组件回归测试放在 `src/os-skills/tests/`。
+SkillFS 的测试放在 `src/skillfs/tests/`，包括其内置 `skillfs-mount` 脚本的测试。
+原来的 `tests/os-skills/` 已收敛到这两个组件目录。仓库级 `tests/` 用于共享测试
+入口和跨组件测试。
+
+在仓库根目录使用 Python 3.11 和虚拟环境执行：
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
+.venv/bin/python -m unittest discover -s src/os-skills/tests -v
+.venv/bin/python -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py' -v
+```
+
+OS Skills 套件覆盖 Skill 脚本及安装、打包布局，PDF 回归测试使用固定版本的
+PyMuPDF 依赖。上面的 SkillFS 命令只检查 Python 日志使用统计脚本，不能替代
+Linux 上的 Rust 或 FUSE 检查。两个套件均接入各自组件的 prebuilt CI 工作流。
+
+维护组件归属时，`.github/components.json` 的 `path_prefixes` 登记源码根目录，
+`supporting_paths` 登记这些目录之外的组件专属文件。以斜杠结尾表示目录，其他
+附属路径精确匹配文件。例如，OS Skills 专属的 prebuilt action 和工作流归属
+OS Skills，共用构建 action 和发布工作流仍按共享范围维护。同步更新
+`.github/CODEOWNERS` 中对应的组件条目，CI 会检查两处声明一致。
 
 ## Commit 规范
 

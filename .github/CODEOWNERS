@@ -63,3 +63,7 @@
 
 # Shared benchmark runners and their documentation.
 /benchmark/                             @alex-yuxi                 # auto-label: component:benchmark
+
+# OS Skills component-specific build action and workflow.
+/.github/actions/build-os-skills-prebuilt/ @zkl123                  # auto-label: component:skill
+/.github/workflows/os-skills-prebuilt-ci.yaml @zkl123              # auto-label: component:skill

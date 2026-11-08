@@ -23,8 +23,8 @@ import unittest
 from pathlib import Path
 
 PROJECT_SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "src/skillfs/docs/skills/skillfs-mount/scripts/skill_usage_from_chat_logs.py"
+    Path(__file__).resolve().parents[1]
+    / "docs/skills/skillfs-mount/scripts/skill_usage_from_chat_logs.py"
 )
 SCRIPT = Path(os.environ.get("ANOLISA_CHAT_USAGE_SCRIPT", str(PROJECT_SCRIPT)))
 
@@ -48,7 +48,9 @@ class TestLiteralChatLogRoots(unittest.TestCase):
         chat.parent.mkdir(parents=True, exist_ok=True)
         event = {
             "timestamp": "2026-10-28T00:00:00Z",
-            "message": {"parts": [{"functionCall": {"name": "skill", "args": {"skill": skill}}}]},
+            "message": {
+                "parts": [{"functionCall": {"name": "skill", "args": {"skill": skill}}}]
+            },
         }
         chat.write_text((json.dumps(event) + "\n") * calls, encoding="utf-8")
 

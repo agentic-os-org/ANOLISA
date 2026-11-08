@@ -41,7 +41,7 @@ jobs:
               const m = line.match(/#\s*auto-label:\s*(\S+)/);
               if (!m) continue;
               const rawPrefix = line.split(/\s+/)[0];
-              // Detect glob patterns like *.md (suffix match), otherwise prefix match
+              // Leading-* globs match suffixes; directory rules end with a slash.
               const isGlob  = rawPrefix.startsWith('*');
               const prefix  = isGlob ? rawPrefix.slice(1) : rawPrefix.replace(/^\//, '');
               const label   = m[1];
@@ -67,7 +67,9 @@ jobs:
               let componentMatch = null, componentPrefix = null;
               let scopeMatch     = null, scopePrefix     = null;
               for (const { prefix, label, type, isGlob } of rules) {
-                const matched = isGlob ? fn.endsWith(prefix) : fn.startsWith(prefix);
+                const matched = isGlob ? fn.endsWith(prefix)
+                  : prefix.endsWith('/') ? fn.startsWith(prefix)
+                  : fn === prefix;
                 if (matched) {
                   if (type === 'component') { componentMatch = label; componentPrefix = prefix; }
                   else                      { scopeMatch     = label; scopePrefix     = prefix; }

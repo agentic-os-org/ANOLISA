@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""Regression tests for skill_usage_from_chat_logs.py (#6116).
+"""Regression tests for skill_usage_from_chat_logs.py.
 
 Drives the real CLI over a temporary copilot-shell-format log tree. A log
 that interleaves well-formed tool calls with malformed records must still
 exit 0 and tally only the well-formed calls.
 
-Baseline on unchanged main: 2 of the 3 tests fail — a non-object line raises
-``AttributeError: 'list' object has no attribute 'get'`` and an unhashable
-``name`` raises ``TypeError: unhashable type: 'list'``; both abort the run
-(exit 1) so the later well-formed call is never counted.
-``test_empty_function_call_is_not_an_unnamed_tool`` guards the pre-existing
-"falsy functionCall is skipped" behaviour that a naive ``isinstance`` check
-would lose.
+Empty functionCall records must remain skipped rather than counted as
+unnamed tools.
 """
 
 import json
@@ -22,9 +17,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "skillfs"
+    Path(__file__).resolve().parents[1]
     / "docs"
     / "skills"
     / "skillfs-mount"
@@ -71,7 +64,9 @@ class TestMalformedEntries(ChatLogsTestCase):
                 event([skill_call("good")]),
                 # Valid JSON, but the functionCall values are unhashable.
                 event([{"functionCall": {"name": []}}]),
-                event([{"functionCall": {"name": "skill", "args": {"skill": ["bad"]}}}]),
+                event(
+                    [{"functionCall": {"name": "skill", "args": {"skill": ["bad"]}}}]
+                ),
                 event([skill_call("after")]),
             ]
         )

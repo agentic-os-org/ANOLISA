@@ -152,6 +152,9 @@ sudo yum install os-skills
 4. 在 Copilot Shell 中测试技能。
 5. 提交 Pull Request。
 
+脚本回归测试统一放在本组件的 `tests/` 目录。依赖、测试命令与组件归属规则见
+[贡献指南](../../CONTRIBUTING_zh.md#skill-回归测试与路径归属)。
+
 ## 许可证
 
 Apache License 2.0 — 详见 [LICENSE](../../LICENSE)。

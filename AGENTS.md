@@ -72,7 +72,11 @@ make test
 make build-mac
 
 # os-skills
-cd src/os-skills   # Skill definitions are static assets, no compilation needed
+# From the repository root; Python 3.11 virtual environment
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
+.venv/bin/python -m unittest discover -s src/os-skills/tests -v
+# No compilation needed. Keep component tests under src/os-skills/tests/.
 
 # tokenless (per-component)
 cd src/tokenless

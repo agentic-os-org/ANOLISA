@@ -156,6 +156,99 @@ class RepositoryMetadataValidationTest(unittest.TestCase):
                 self.update_component("anolisa", path_prefixes=[prefix])
                 self.assert_validation_error(f"anolisa: invalid path prefix {prefix!r}")
 
+    def test_supporting_ci_paths_preserve_source_and_release_contracts(self) -> None:
+        component = self.component("skill")
+        self.assertEqual(component["path_prefixes"], ["src/os-skills/"])
+        self.assertEqual(component["release_tag_prefix"], "skill/v")
+        self.assertEqual(
+            component["supporting_paths"],
+            [
+                ".github/actions/build-os-skills-prebuilt/",
+                ".github/workflows/os-skills-prebuilt-ci.yaml",
+            ],
+        )
+        result = self.run_validator()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invalid_supporting_paths_are_rejected(self) -> None:
+        for value in (
+            "",
+            "/",
+            "../tests/",
+            "tests/../",
+            "./tests/",
+            "tests//",
+            "tests/*",
+            "tests/\\x",
+            7,
+            None,
+        ):
+            with self.subTest(value=value):
+                self.update_component("skill", supporting_paths=[value])
+                self.assert_validation_error(
+                    f"skill: invalid supporting path {value!r}"
+                )
+        self.update_component("skill", supporting_paths=".github/")
+        self.assert_validation_error("skill: supporting_paths must be a list")
+
+    def test_supporting_paths_must_exist_with_the_declared_type(self) -> None:
+        for path in (
+            ".github/actions/undeclared/",
+            ".github/actions/build-os-skills-prebuilt",
+            ".github/workflows/os-skills-prebuilt-ci.yaml/",
+        ):
+            with self.subTest(path=path):
+                self.update_component("skill", supporting_paths=[path])
+                self.assert_validation_error(
+                    f"skill: supporting path {path!r} does not exist with the declared type"
+                )
+
+    def test_supporting_paths_require_codeowners_mappings(self) -> None:
+        path = self.root / ".github/CODEOWNERS"
+        original = path.read_text(encoding="utf-8")
+        for declared in self.component("skill")["supporting_paths"]:
+            with self.subTest(path=declared):
+                path.write_text(
+                    "\n".join(
+                        line
+                        for line in original.splitlines()
+                        if not line.startswith(f"/{declared} ")
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                self.assert_validation_error(
+                    f"CODEOWNERS: /{declared} does not map to component:skill"
+                )
+
+    def test_supporting_file_mapping_is_exact(self) -> None:
+        path = self.root / ".github/CODEOWNERS"
+        target = ".github/workflows/os-skills-prebuilt-ci.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + f"/{target}.extra @zkl123 # auto-label: component:skill\n",
+            encoding="utf-8",
+        )
+        self.assert_validation_error(
+            f"CODEOWNERS: /{target}.extra is not declared by skill component paths"
+        )
+
+    def test_supporting_paths_cannot_overlap_other_ownership(self) -> None:
+        path = ".github/actions/build-os-skills-prebuilt/"
+        original = self.component("skill")["supporting_paths"]
+        for other in (path, path + "build.sh"):
+            with self.subTest(path=other):
+                self.update_component("skillfs", supporting_paths=[other])
+                self.assert_validation_error("overlapping component ownership: skill ")
+        self.update_component("skillfs", supporting_paths=[])
+        self.update_component("skill", supporting_paths=[*original, path])
+        self.assert_validation_error("overlapping component ownership: skill ")
+        (self.root / "src/os-skills/tests").mkdir(parents=True)
+        self.update_component("skill", supporting_paths=["src/os-skills/tests/"])
+        self.assert_validation_error(
+            "overlapping component ownership: skill 'src/os-skills/' and skill 'src/os-skills/tests/'"
+        )
+
     def test_active_and_deprecated_components_require_public_metadata(self) -> None:
         original = self.component("cosh")
         for status in ("active", "deprecated"):
@@ -280,7 +373,7 @@ class RepositoryMetadataValidationTest(unittest.TestCase):
                     encoding="utf-8",
                 )
                 output = self.assert_validation_error(
-                    f"CODEOWNERS: /{undeclared} is not declared by anolisa path prefixes"
+                    f"CODEOWNERS: /{undeclared} is not declared by anolisa component paths"
                 )
                 self.assertIn(
                     f"route pattern '^{undeclared}' is not an exact declared component path", output
@@ -344,7 +437,7 @@ class RepositoryMetadataValidationTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assert_validation_error(
-            "CODEOWNERS: /src/legacy-ktuner/ is not declared by ktuner path prefixes"
+            "CODEOWNERS: /src/legacy-ktuner/ is not declared by ktuner component paths"
         )
 
     def test_complete_codeowners_annotation_is_validated(self) -> None:

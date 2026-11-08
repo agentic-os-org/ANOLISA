@@ -47,7 +47,7 @@ scopes are used in commit subjects and PR titles.
 | agentsight | `src/agentsight/` | Linux full eBPF; macOS `trace`/`serve` only | `sight` | `sight` | Linux uses `make build-all`; macOS uses `make build-mac`; Linux runs `make lint`, `make test` |
 | tokenless | `src/tokenless/` | Linux for full development; macOS x64/arm64 for shipped CLI binaries and npm adapters | `tokenless` | `tokenless` | `make build`, `make lint`, `make test` |
 | agent-memory | `src/agent-memory/` | Linux only | `memory` | `memory` | `make build`, `make fmt-check`, `make lint`, `make test`; use `make smoke` for MCP changes |
-| os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | Static Markdown skill definitions and shell assets; `make build` confirms that no compilation step is required |
+| os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | No compilation; run the [component regression tests](#skill-regression-tests-and-path-ownership) |
 | anolisa | `distribution/anolisa/` | Linux and macOS arm64 | n/a | `anolisa` | `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
 | SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
@@ -205,6 +205,37 @@ filesystem-layer changes require `scripts/test.sh` when FUSE is available.
 CI adds coverage, packaging, frontend, adapter, and integration jobs according
 to the changed paths. Check [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)
 when changing generated packages or framework adapters.
+
+### Skill regression tests and path ownership
+
+For contributors changing skill scripts, keep component regression tests in
+`src/os-skills/tests/`. Tests for SkillFS belong in `src/skillfs/tests/`,
+including tests of its bundled `skillfs-mount` scripts. The former
+`tests/os-skills/` directory has been consolidated into these component
+directories. Reserve repository-level `tests/` for shared test runners and
+tests that exercise multiple components.
+
+From the repository root, use Python 3.11 and a virtual environment:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
+.venv/bin/python -m unittest discover -s src/os-skills/tests -v
+.venv/bin/python -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py' -v
+```
+
+The OS Skills suite covers skill scripts and installation/package layout.
+Its PDF regression uses the pinned PyMuPDF dependency. The SkillFS command
+above only checks the Python log-usage scripts; it does not replace the Linux
+Rust or FUSE checks. Both suites run in their component's prebuilt CI workflow.
+
+For maintainers changing component ownership, `.github/components.json`
+keeps source roots in `path_prefixes` and component-specific files outside
+those roots in `supporting_paths`. A trailing slash denotes a directory;
+other supporting paths name exact files. For example, the OS Skills prebuilt
+action and workflow belong to OS Skills, while shared build actions and release
+workflows retain their shared ownership. Update the matching component entries
+in `.github/CODEOWNERS` too; CI checks that the declarations agree.
 
 ## Commit messages
 
