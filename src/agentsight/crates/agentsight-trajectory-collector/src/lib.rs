@@ -130,6 +130,8 @@ fn process_session(
 
     let file_size = if session.source == "cline" {
         cline::scan_fingerprint(&session.path, &session.project, file_size, file_mtime_ns)?
+    } else if session.source == "gemini-cli" {
+        gemini::scan_fingerprint(&session.project, file_size, file_mtime_ns)
     } else {
         file_size
     };
