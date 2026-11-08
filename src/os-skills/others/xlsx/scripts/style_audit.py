@@ -97,6 +97,9 @@ def _parse_styles(styles_xml: bytes) -> dict:
             bold_elem = font.find(f"{NSP}b")
             if color_elem is not None:
                 rgb = color_elem.get("rgb", "").lower()
+                # Cell-style colors do not use the aRGB alpha byte.
+                if re.fullmatch(r"[0-9a-f]{8}", rgb):
+                    rgb = "00" + rgb[2:]
                 theme = color_elem.get("theme")
             else:
                 rgb = ""
