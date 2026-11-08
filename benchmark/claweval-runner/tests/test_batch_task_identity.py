@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -146,3 +148,57 @@ def test_directory_aliases_do_not_bypass_identity_check(
         _run_selected(tmp_path, "T001,T001-alias", monkeypatch)
     assert error.value.code == 1
     assert "Duplicate task selection" in capsys.readouterr().out
+
+
+
+def test_failed_execution_futures_keep_each_task_and_trial(tmp_path, monkeypatch):
+    first = _task(tmp_path, "first", "task_id: T001\ntask_name: First\n")
+    second = _task(tmp_path, "second", "task_id: T002\ntask_name: Second\n")
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    args = SimpleNamespace(
+        tasks_dir=str(tmp_path), tag=None, parallel=2, config=None,
+        timeout=60, trials=2, skip_preflight=True,
+    )
+
+    real_load = batch_runner.load_task_yaml
+
+    def load_task_yaml(path):
+        if threading.current_thread() is not threading.main_thread():
+            raise OSError(f"unable to open {Path(path).parent.name}")
+        return real_load(path)
+
+    monkeypatch.setattr(batch_runner, "load_task_yaml", load_task_yaml)
+    monkeypatch.setattr(batch_runner, "make_trace_dir", lambda _: str(traces))
+    monkeypatch.setattr(batch_runner, "check_gateway", lambda _: 18789)
+    monkeypatch.setattr(batch_runner, "restart_gateway", lambda *_: True)
+    monkeypatch.setattr(batch_runner, "find_missing_fixtures", lambda _: {})
+    monkeypatch.setattr(batch_runner, "setup_parallel_workers", lambda *a, **kw: {"task_slots": {}})
+    for name in (
+        "require_valid_config", "ensure_user_session_persistent", "stop_gateway",
+        "cleanup_mock_services", "kill_mcp_bridges", "cleanup_parallel_workers",
+        "reap_orphan_agent_processes",
+    ):
+        monkeypatch.setattr(batch_runner, name, Mock())
+    monkeypatch.setattr(batch_runner.time, "sleep", lambda _: None)
+
+    batch_runner.run_batch(
+        args,
+        lambda _: {"model": "judge", "base_url": "https://example.invalid"},
+        lambda _: {"model_id": "agent", "base_url": "https://example.invalid"},
+        lambda _: {},
+        lambda *a, **kw: [str(first), str(second)],
+    )
+
+    results = json.loads((traces / "batch_results.json").read_text(encoding="utf-8"))
+    by_id = {result["task_id"]: result for result in results}
+    assert set(by_id) == {"T001", "T002"}
+    for task_id, directory in [("T001", "first"), ("T002", "second")]:
+        result = by_id[task_id]
+        assert result["task_name"] == directory.title()
+        assert [trial["trial"] for trial in result["trials"]] == [1, 2]
+        assert {trial["error"] for trial in result["trials"]} == {f"unable to open {directory}"}
+
+    summary = json.loads((traces / "batch_summary.json").read_text(encoding="utf-8"))
+    assert summary["tasks"] == 2
+    assert summary["errored"] == 2
