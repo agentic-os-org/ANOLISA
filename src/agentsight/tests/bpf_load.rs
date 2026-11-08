@@ -133,6 +133,78 @@ fn unclassified_tls_processes_still_register_for_first_call() {
 
 #[test]
 #[ignore]
+fn unclassified_late_python_ssl_registers_via_retry() {
+    use libbpf_rs::MapFlags;
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: uprobe attach requires root");
+        return;
+    }
+    let mut child = Command::new("python3")
+        .args([
+            "-u",
+            "-c",
+            "import sys; print('ready', flush=True); sys.stdin.readline(); import ssl, time; time.sleep(60)",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start delayed Python SSL fixture");
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("fixture stdout"))
+        .read_line(&mut ready)
+        .expect("read fixture readiness");
+    assert_eq!(ready.trim(), "ready");
+
+    let mut probes = Probes::new(&[], None, false, false, &[]).expect("load isolated probes");
+    let map = probes.traced_processes_handle().expect("filter handle");
+    probes
+        .attach_unclassified_process(child.id() as i32)
+        .expect("attach before Python imports ssl");
+    let registered_before_import = map
+        .lookup(&child.id().to_ne_bytes(), MapFlags::ANY)
+        .unwrap()
+        .is_some();
+    if registered_before_import {
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("skipping: this Python maps SSL before the delayed import");
+        return;
+    }
+
+    writeln!(child.stdin.as_mut().expect("fixture stdin")).expect("trigger delayed import");
+    let mut registered = false;
+    for _ in 0..250 {
+        probes.poll_pending_ssl();
+        registered = map
+            .lookup(&child.id().to_ne_bytes(), MapFlags::ANY)
+            .unwrap()
+            .is_some();
+        if registered {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for _ in 0..5 {
+        probes.poll_pending_ssl();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let filter_slots = map.keys().count();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        registered,
+        "late libssl mapping must attach and register without another exec or attach call"
+    );
+    assert_eq!(filter_slots, 1, "retries must not duplicate registration");
+}
+
+#[test]
+#[ignore]
 fn proctrace_bpf_loads() {
     config::set_verbose(true);
     ProcTrace::new().expect("proctrace BPF should load on this kernel");

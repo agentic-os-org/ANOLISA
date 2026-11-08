@@ -28,9 +28,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod late_retry;
 mod scan;
 mod scan_jobs;
 use crate::utils::cpu_budget::{CpuBudget, CpuPermit, WorkClass};
+pub(crate) use late_retry::IdentityStatus;
+use late_retry::{LateRetries, ProcessIdentity};
 use scan::{collect_pattern_hits, fill_buf};
 #[cfg(test)]
 use scan::{file_has_ssl_markers, ssl_exe_markers};
@@ -329,6 +332,21 @@ impl SslEvent {
 /// 32 bits.
 type FileKey = (u64, u64);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SslAdmission {
+    identity: ProcessIdentity,
+}
+
+impl SslAdmission {
+    pub(super) fn pid(self) -> u32 {
+        self.identity.pid
+    }
+
+    pub(super) fn status(self) -> IdentityStatus {
+        self.identity.status()
+    }
+}
+
 /// Bounds deferred queue-full retries so the scanner cannot grow without limit.
 const MAX_SCAN_RETRIES: usize = 32;
 
@@ -353,6 +371,8 @@ pub struct SslSniff {
     /// Maps pid -> files that were attached for this pid.
     /// Used to clean up traced_files when the process exits.
     pid_inodes: HashMap<u32, Vec<FileKey>>,
+    /// Start-time identities remain after retry completion to detect PID reuse.
+    pid_identities: HashMap<u32, ProcessIdentity>,
     /// Stale re-attach TTL, resolved once at construction from the
     /// `AGENTSIGHT_SSL_REATTACH_TTL_SECS` override (or the default).
     reattach_ttl: Duration,
@@ -362,7 +382,9 @@ pub struct SslSniff {
     /// Retry deadlines for files that arrived while the bounded scan queue was full.
     scan_retry_after: HashMap<FileKey, ScanRetry>,
     /// Unclassified pids waiting for a deferred scan to install its uprobes.
-    pending_pid_admissions: HashSet<u32>,
+    pending_pid_admissions: HashMap<u32, ProcessIdentity>,
+    /// Processes whose exec-time maps did not yield a live SSL attachment.
+    late_retries: LateRetries,
     /// Rate-limits procfs liveness sweeps to once per second.
     last_pid_prune: Instant,
     // Channel for user-space SslEvent (lightweight, no need for Box)
@@ -423,11 +445,13 @@ impl SslSniff {
             static_attach_offsets: HashMap::default(),
             traced_files: HashSet::default(),
             pid_inodes: HashMap::default(),
+            pid_identities: HashMap::default(),
             reattach_ttl: stale_reattach_ttl(),
             stale_reattachs: 0,
             scans: scan_jobs::ScanJobs::new()?,
             scan_retry_after: HashMap::default(),
-            pending_pid_admissions: HashSet::default(),
+            pending_pid_admissions: HashMap::default(),
+            late_retries: LateRetries::default(),
             last_pid_prune: Instant::now(),
             tx,
             rx,
@@ -444,8 +468,74 @@ impl SslSniff {
     /// re-attached and the old links are dropped only after the replacement
     /// succeeds.
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
+        self.attach_process_inner(pid, None, false)
+    }
+
+    /// Attach an observed exec and retain a bounded retry while it has no probes.
+    pub(super) fn attach_observed_process(
+        &mut self,
+        pid: i32,
+        admit: bool,
+    ) -> Result<Option<SslAdmission>> {
+        let identity = match ProcessIdentity::read(pid) {
+            Ok(identity) => identity,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.detach_process(pid as u32);
+                return Ok(None);
+            }
+            Err(error) => {
+                log::debug!("cannot establish SSL process identity for pid {pid}: {error}");
+                return Ok(None);
+            }
+        };
+        if !self.identity_state_matches(identity) {
+            self.detach_process(identity.pid);
+        }
+
+        let result = self.attach_process_inner(pid, Some(identity), false);
+        let mut admission = None;
+        match identity.status() {
+            IdentityStatus::Stale => self.detach_process_for(identity),
+            IdentityStatus::Unavailable => self.schedule_late_retry(identity, admit),
+            IdentityStatus::Current if self.has_process_attachments(identity.pid) => {
+                if admit {
+                    self.pending_pid_admissions.insert(identity.pid, identity);
+                    self.schedule_late_retry(identity, true);
+                    if result.is_ok() {
+                        admission = Some(SslAdmission { identity });
+                    }
+                } else {
+                    self.clear_admission_state(identity);
+                }
+            }
+            IdentityStatus::Current => self.schedule_late_retry(identity, admit),
+        }
+        result.map(|_| admission)
+    }
+
+    fn schedule_late_retry(&mut self, identity: ProcessIdentity, admit: bool) {
+        if !self.late_retries.schedule(identity, admit, Instant::now()) {
+            log::debug!(
+                "late SSL retry capacity reached; not tracking pid {}",
+                identity.pid
+            );
+        }
+    }
+
+    fn attach_process_inner(
+        &mut self,
+        pid: i32,
+        expected: Option<ProcessIdentity>,
+        retry: bool,
+    ) -> Result<()> {
+        if expected.is_some_and(|identity| identity.status() != IdentityStatus::Current) {
+            return Ok(());
+        }
         let mut libs = ssl_libs_from_maps(pid)?;
         if libs.is_empty() {
+            if expected.is_some_and(|identity| identity.status() != IdentityStatus::Current) {
+                return Ok(());
+            }
             // No SSL library recognizable by name in maps: the process may
             // statically link SSL under an unknown binary name (opencode and
             // other Bun-compiled executables). The bounded worker performs the
@@ -459,7 +549,11 @@ impl SslSniff {
             }
         }
         if libs.is_empty() {
-            log::warn!("[attach_process] pid={pid}: no SSL libraries found in maps");
+            if retry {
+                log::debug!("[attach_process] pid={pid}: SSL libraries are not mapped yet");
+            } else {
+                log::warn!("[attach_process] pid={pid}: no SSL libraries found in maps");
+            }
             return Ok(());
         }
 
@@ -476,6 +570,9 @@ impl SslSniff {
         let first_attach_for_pid = !self.pid_inodes.contains_key(&(pid as u32));
         let mut attached_files: Vec<FileKey> = Vec::new();
         for (path, file, kind, mapped_path) in libs {
+            if expected.is_some_and(|identity| identity.status() != IdentityStatus::Current) {
+                break;
+            }
             // Dedup by (device, inode): with pid=-1 global attach each library
             // only needs to be attached once — the kernel's uprobe_mmap
             // mechanism installs breakpoints for new processes that map an
@@ -577,6 +674,9 @@ impl SslSniff {
         // Merge instead of replacing: a later attach for the same pid must not
         // drop a still-pending scan association created by an earlier sweep.
         if !attached_files.is_empty() {
+            if let Some(identity) = expected {
+                self.pid_identities.insert(identity.pid, identity);
+            }
             let entry = self.pid_inodes.entry(pid as u32).or_default();
             for file in attached_files {
                 if !entry.contains(&file) {
@@ -600,11 +700,17 @@ impl SslSniff {
         self.scans.set_budget(budget);
     }
 
-    /// Install completed scans on the BPF-owning thread, retaining inode checks.
-    ///
-    /// Returns the unclassified pids whose deferred attachment just completed
-    /// and that are still alive, so the caller can claim their filter slots.
+    /// Install completed scans and claim still-live unclassified pids.
     pub fn poll_pending_scans(&mut self) -> Vec<u32> {
+        let admissions = self.poll_pending_scan_admissions();
+        for admission in &admissions {
+            self.complete_admission(*admission);
+        }
+        admissions.into_iter().map(SslAdmission::pid).collect()
+    }
+
+    /// Install completed scans and return identity-bearing admissions.
+    pub(crate) fn poll_pending_scan_admissions(&mut self) -> Vec<SslAdmission> {
         let mut admitted = Vec::new();
         for _ in 0..4 {
             let Some(scanned) = self.scans.try_recv() else {
@@ -692,6 +798,65 @@ impl SslSniff {
         admitted
     }
 
+    /// Retry late library discovery and return identity-bearing admissions.
+    pub(super) fn poll_late_retries(&mut self) -> Vec<SslAdmission> {
+        let batch = self.late_retries.poll(Instant::now());
+        let mut admitted = Vec::new();
+        for request in batch.expired {
+            let identity = request.identity;
+            let pid = identity.pid;
+            match identity.status() {
+                IdentityStatus::Stale => self.detach_process_for(identity),
+                IdentityStatus::Unavailable => {}
+                // Retry expiry must not cancel an independently bounded static scan.
+                IdentityStatus::Current if self.pid_has_pending_scan(pid) => {}
+                IdentityStatus::Current if self.has_process_attachments(pid) => {
+                    if request.admit {
+                        self.pending_pid_admissions.insert(pid, identity);
+                        admitted.push(SslAdmission { identity });
+                    } else {
+                        self.clear_admission_state(identity);
+                    }
+                }
+                IdentityStatus::Current => self.detach_process_for(identity),
+            }
+        }
+
+        for request in batch.due {
+            let identity = request.identity;
+            let pid = identity.pid;
+            if self.late_retries.identity(pid) != Some(identity) {
+                continue;
+            }
+            let result = self.attach_process_inner(pid as i32, Some(identity), true);
+            match identity.status() {
+                IdentityStatus::Stale => {
+                    self.detach_process_for(identity);
+                    continue;
+                }
+                IdentityStatus::Unavailable => {
+                    self.late_retries.reschedule(identity, Instant::now());
+                    continue;
+                }
+                IdentityStatus::Current => {}
+            }
+            if let Err(error) = result {
+                log::debug!("late SSL attach retry failed for pid {pid}: {error:#}");
+            }
+            if self.has_process_attachments(pid) {
+                if request.admit {
+                    self.pending_pid_admissions.insert(pid, identity);
+                    admitted.push(SslAdmission { identity });
+                } else {
+                    self.clear_admission_state(identity);
+                }
+            } else if !self.late_retries.reschedule(identity, Instant::now()) {
+                self.detach_process_for(identity);
+            }
+        }
+        admitted
+    }
+
     /// Whether `pid` still maps a file whose scan is queued or awaiting retry.
     pub(super) fn pid_has_pending_scan(&self, pid: u32) -> bool {
         self.pid_inodes.get(&pid).is_some_and(|files| {
@@ -703,7 +868,21 @@ impl SslSniff {
 
     /// Retain an unclassified pid until its deferred attachment completes.
     pub(super) fn defer_pid_admission(&mut self, pid: u32) {
-        self.pending_pid_admissions.insert(pid);
+        let identity = self
+            .pid_identities
+            .get(&pid)
+            .copied()
+            .or_else(|| self.late_retries.identity(pid));
+        let Some(identity) = identity else {
+            return;
+        };
+        match identity.status() {
+            IdentityStatus::Current => {
+                self.pending_pid_admissions.insert(pid, identity);
+            }
+            IdentityStatus::Stale => self.detach_process_for(identity),
+            IdentityStatus::Unavailable => {}
+        }
     }
 
     /// Number of SSL library files with live uprobe attachments (diagnostics).
@@ -753,22 +932,58 @@ impl SslSniff {
         );
     }
 
-    /// Return pids waiting for `file` that are still alive and claim them.
-    fn take_ready_pids(&mut self, file: FileKey) -> Vec<u32> {
-        let procfs_usable = proc_pid_entry(1, "").is_dir();
-        let (ready, dead) = ready_pids_for_file(
+    /// Return admissions whose original process identity is still current.
+    fn take_ready_pids(&mut self, file: FileKey) -> Vec<SslAdmission> {
+        let (ready, stale) = ready_pids_for_file(
             &self.pid_inodes,
             &self.pending_pid_admissions,
             file,
-            |pid| !procfs_usable || !pid_definitely_exited(pid),
+            ProcessIdentity::status,
         );
-        for pid in &ready {
-            self.pending_pid_admissions.remove(pid);
-        }
-        for pid in dead {
-            self.detach_process(pid);
+        for identity in stale {
+            self.detach_process_for(identity);
         }
         ready
+            .into_iter()
+            .map(|identity| SslAdmission { identity })
+            .collect()
+    }
+
+    pub(super) fn retry_admission(&mut self, admission: SslAdmission) -> bool {
+        self.identity_state_matches(admission.identity)
+            && self
+                .late_retries
+                .reschedule(admission.identity, Instant::now())
+    }
+
+    pub(super) fn complete_admission(&mut self, admission: SslAdmission) {
+        self.clear_admission_state(admission.identity);
+    }
+
+    pub(super) fn detach_stale_admission(&mut self, admission: SslAdmission) {
+        self.detach_process_for(admission.identity);
+    }
+
+    fn clear_admission_state(&mut self, identity: ProcessIdentity) {
+        if self.pending_pid_admissions.get(&identity.pid) == Some(&identity) {
+            self.pending_pid_admissions.remove(&identity.pid);
+        }
+        self.late_retries.remove_if(identity);
+    }
+
+    fn identity_state_matches(&self, identity: ProcessIdentity) -> bool {
+        stored_identity_matches(
+            identity,
+            self.pid_identities.get(&identity.pid).copied(),
+            self.pending_pid_admissions.get(&identity.pid).copied(),
+            self.late_retries.identity(identity.pid),
+        )
+    }
+
+    fn detach_process_for(&mut self, identity: ProcessIdentity) {
+        if self.identity_state_matches(identity) {
+            self.detach_process(identity.pid);
+        }
     }
 
     /// Reap `pid_inodes` entries whose process exited without a BPF exit event
@@ -1011,6 +1226,8 @@ impl SslSniff {
     /// producing duplicate uprobe fds.
     pub fn detach_process(&mut self, pid: u32) {
         self.pending_pid_admissions.remove(&pid);
+        self.late_retries.remove(pid);
+        self.pid_identities.remove(&pid);
         if let Some(files) = self.pid_inodes.remove(&pid) {
             let mut removed = 0;
             for file in &files {
@@ -1550,31 +1767,44 @@ fn pid_definitely_exited(pid: u32) -> bool {
     )
 }
 
-/// Partition pids waiting on `file` into live and exited groups.
+fn stored_identity_matches(
+    identity: ProcessIdentity,
+    owner: Option<ProcessIdentity>,
+    pending: Option<ProcessIdentity>,
+    retry: Option<ProcessIdentity>,
+) -> bool {
+    [owner, pending, retry]
+        .into_iter()
+        .all(|stored| stored.is_none_or(|stored| stored == identity))
+}
+
+/// Select current admissions and stale owners; unavailable identities stay pending.
 fn ready_pids_for_file(
     pid_inodes: &HashMap<u32, Vec<FileKey>>,
-    pending: &HashSet<u32>,
+    pending: &HashMap<u32, ProcessIdentity>,
     file: FileKey,
-    alive: impl Fn(u32) -> bool,
-) -> (Vec<u32>, Vec<u32>) {
+    status: impl Fn(ProcessIdentity) -> IdentityStatus,
+) -> (Vec<ProcessIdentity>, Vec<ProcessIdentity>) {
     let mut ready = Vec::new();
-    let mut dead = Vec::new();
+    let mut stale = Vec::new();
     for (pid, files) in pid_inodes {
-        if files.contains(&file) && pending.contains(pid) {
-            if alive(*pid) {
-                ready.push(*pid);
-            } else {
-                dead.push(*pid);
+        if let Some(identity) = pending.get(pid).copied()
+            && files.contains(&file)
+        {
+            match status(identity) {
+                IdentityStatus::Current => ready.push(identity),
+                IdentityStatus::Stale => stale.push(identity),
+                IdentityStatus::Unavailable => {}
             }
         }
     }
-    (ready, dead)
+    (ready, stale)
 }
 
 /// Drop `file` from every pid association, removing pids left with no files.
 fn forget_file_associations(
     pid_inodes: &mut HashMap<u32, Vec<FileKey>>,
-    pending: &mut HashSet<u32>,
+    pending: &mut HashMap<u32, ProcessIdentity>,
     file: FileKey,
 ) {
     let mut empty = Vec::new();
@@ -1598,7 +1828,7 @@ fn forget_file_associations(
 fn forget_owners_after_failed_result(
     has_attachment: bool,
     pid_inodes: &mut HashMap<u32, Vec<FileKey>>,
-    pending: &mut HashSet<u32>,
+    pending: &mut HashMap<u32, ProcessIdentity>,
     file: FileKey,
 ) {
     if !has_attachment {
@@ -2187,6 +2417,13 @@ mod python_tests;
 mod tests {
     use super::*;
 
+    fn pid_identity(pid: u32) -> ProcessIdentity {
+        ProcessIdentity {
+            pid,
+            start_time: 1000 + u64::from(pid),
+        }
+    }
+
     /// Build a raw ring-buffer sample: the header prefix (each field written at its
     /// real bindgen offset) followed by `payload`, with buf_size/len/truncated/
     /// is_handshake set explicitly. Each scalar header field gets a DISTINCT
@@ -2521,20 +2758,60 @@ mod tests {
     }
 
     #[test]
-    fn ready_pid_selection_keeps_live_pids_and_drops_exited() {
+    fn deferred_admission_rejects_a_reused_pid() {
+        let file = (7, 7);
+        let current = ProcessIdentity::read(std::process::id() as i32).unwrap();
+        let pid_inodes = HashMap::from([(current.pid, vec![file])]);
+        let reused = ProcessIdentity {
+            start_time: current.start_time + 1,
+            ..current
+        };
+        let pending = HashMap::from([(current.pid, reused)]);
+        let (ready, stale) =
+            ready_pids_for_file(&pid_inodes, &pending, file, ProcessIdentity::status);
+        assert!(ready.is_empty());
+        assert_eq!(stale, vec![reused]);
+
+        let pending = HashMap::from([(current.pid, current)]);
+        let (ready, stale) =
+            ready_pids_for_file(&pid_inodes, &pending, file, ProcessIdentity::status);
+        assert_eq!(ready, vec![current]);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn successful_owner_identity_still_detects_pid_reuse() {
+        let current = ProcessIdentity::read(std::process::id() as i32).unwrap();
+        let reused = ProcessIdentity {
+            start_time: current.start_time + 1,
+            ..current
+        };
+        assert!(!stored_identity_matches(reused, Some(current), None, None));
+        assert!(stored_identity_matches(current, Some(current), None, None));
+    }
+
+    #[test]
+    fn ready_pid_selection_defers_unavailable_and_drops_stale() {
         let file = (7, 7);
         let mut pid_inodes = HashMap::new();
         pid_inodes.insert(10, vec![file]);
         pid_inodes.insert(11, vec![file]);
         pid_inodes.insert(12, vec![(8, 8)]);
-        let mut pending = HashSet::new();
-        pending.insert(10);
-        pending.insert(11);
+        pid_inodes.insert(13, vec![file]);
+        let pending = HashMap::from([
+            (10, pid_identity(10)),
+            (11, pid_identity(11)),
+            (13, pid_identity(13)),
+        ]);
 
-        let (ready, dead) = ready_pids_for_file(&pid_inodes, &pending, file, |pid| pid == 10);
-        assert_eq!(ready, vec![10]);
-        assert_eq!(dead, vec![11]);
-        assert_eq!(pid_inodes.len(), 3);
+        let (ready, stale) =
+            ready_pids_for_file(&pid_inodes, &pending, file, |identity| match identity.pid {
+                10 => IdentityStatus::Current,
+                11 => IdentityStatus::Stale,
+                _ => IdentityStatus::Unavailable,
+            });
+        assert_eq!(ready, vec![pid_identity(10)]);
+        assert_eq!(stale, vec![pid_identity(11)]);
     }
 
     #[test]
@@ -2544,17 +2821,18 @@ mod tests {
         pid_inodes.insert(10, vec![file]);
         pid_inodes.insert(11, vec![file, (8, 8)]);
         pid_inodes.insert(12, vec![file]);
-        let mut pending = HashSet::new();
-        pending.insert(10);
-        pending.insert(11);
-        pending.insert(12);
+        let mut pending = HashMap::from([
+            (10, pid_identity(10)),
+            (11, pid_identity(11)),
+            (12, pid_identity(12)),
+        ]);
 
         forget_file_associations(&mut pid_inodes, &mut pending, file);
 
         assert_eq!(pid_inodes.get(&11), Some(&vec![(8, 8)]));
         assert!(!pid_inodes.contains_key(&10));
         assert!(!pid_inodes.contains_key(&12));
-        assert_eq!(pending, HashSet::from([11]));
+        assert_eq!(pending, HashMap::from([(11, pid_identity(11))]));
     }
 
     #[test]
@@ -2566,11 +2844,11 @@ mod tests {
         let file = (7, 7);
         let mut pid_inodes = HashMap::new();
         pid_inodes.insert(10, vec![file]);
-        let mut pending = HashSet::from([10]);
+        let mut pending = HashMap::from([(10, pid_identity(10))]);
 
         forget_owners_after_failed_result(true, &mut pid_inodes, &mut pending, file);
         assert_eq!(pid_inodes.get(&10), Some(&vec![file]));
-        assert!(pending.contains(&10));
+        assert!(pending.contains_key(&10));
 
         // Without a retained attachment there is no exit path to preserve.
         forget_owners_after_failed_result(false, &mut pid_inodes, &mut pending, file);
