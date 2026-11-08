@@ -23,6 +23,44 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "contract"))
 
 import corpus
+from path_list_view import FLAT_HEADER, GROUPED_HEADER, restore_path_list
+
+
+class PathListViewDecoding(unittest.TestCase):
+    # Hand-built views test the decoder contract; PathListHooks below exercises
+    # the real Rust encoder through the binary and host hooks.
+    def test_both_formats_preserve_filenames_and_endings(self) -> None:
+        names = ['plain.rs', 'Dir="other"', 'Base=other', '"quoted.rs', '',
+                 '中文 quote"back\\slash.rs', 'line\u2028separator.rs',
+                 'line\u2029separator.rs', 'plain.rs']
+        for ending in ("\n", "\r\n"):
+            for trailing in (False, True):
+                metadata = {"base": "./项目/", "line_ending": ending,
+                            "trailing_newline": trailing}
+                paths = [directory + name for directory in ("", '目录"/nested/', "")
+                         for name in names]
+                flat = FLAT_HEADER + "\n" + json.dumps({**metadata, "paths": paths})
+                grouped = GROUPED_HEADER + "\n" + json.dumps(metadata) + "\n"
+                for directory in ("", '目录"/nested/', ""):
+                    grouped += "Dir=" + json.dumps(directory) + "\n"
+                    for name in names:
+                        quoted = not name or name.startswith(('"', 'Dir=', 'Base='))
+                        grouped += (json.dumps(name) if quoted else name) + "\n"
+                expected = ending.join(metadata["base"] + path for path in paths)
+                if trailing:
+                    expected += ending
+                for view in (flat, grouped):
+                    with self.subTest(ending=ending, trailing=trailing, header=view.split("\n")[0]):
+                        restored, decoded_paths = restore_path_list(view)
+                        self.assertEqual(restored, expected)
+                        self.assertEqual(decoded_paths, [metadata["base"] + path for path in paths])
+
+    def test_unknown_header_and_missing_directory_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            restore_path_list("unknown\n{}")
+        metadata = {"base": "src/", "line_ending": "\n", "trailing_newline": True}
+        with self.assertRaises(ValueError):
+            restore_path_list(GROUPED_HEADER + "\n" + json.dumps(metadata) + "\nfile.rs\n")
 
 
 @unittest.skipUnless(
@@ -144,8 +182,9 @@ class PathListHooks(unittest.TestCase):
     @staticmethod
     def paths():
         return "".join(
-            f'/workspace/project with spaces/中文/long_directory/records/file "{i}".json\n'
+            f'/workspace/project with spaces/中文/long_directory/records/file{separator}name "{i}".json\n'
             for i in range(60)
+            for separator in ["\u2028" if i == 0 else "\u2029" if i == 1 else " "]
         )
 
     def run_response(self, content, agent="qwenwork", tool="Bash", command=None, extra_env=None):
@@ -169,16 +208,16 @@ class PathListHooks(unittest.TestCase):
         output = envelope["hookSpecificOutput"]
         return output.get("updatedToolOutput", output.get("updatedToolResponse"))
 
-    def restore(self, view):
-        header, encoded = view.split("\n", 1)
-        self.assertEqual(
-            header, "[Path list; all received paths retained; full path = base + each paths entry]"
+    def restore(self, view: str) -> str:
+        return restore_path_list(view)[0]
+
+    def test_directory_interleaving_retains_the_flat_view(self) -> None:
+        source = "".join(
+            f"/workspace/project/component_{i % 3}/file_{i}.json\n" for i in range(90)
         )
-        data = json.loads(encoded)
-        output = data["line_ending"].join(data["base"] + path for path in data["paths"])
-        if data["trailing_newline"]:
-            output += data["line_ending"]
-        return output
+        view = self.replacement(self.run_response(source))
+        self.assertEqual(view.split("\n", 1)[0], FLAT_HEADER)
+        self.assertEqual(self.restore(view), source)
 
     def test_content_routes_across_hosts_and_tool_names(self):
         source = self.paths()
@@ -186,7 +225,9 @@ class PathListHooks(unittest.TestCase):
             for tool in ("Bash", "mcp__files__list_paths"):
                 with self.subTest(agent=agent, tool=tool):
                     output = self.run_response(source, agent=agent, tool=tool)
-                    self.assertEqual(self.restore(self.replacement(output)), source)
+                    view = self.replacement(output)
+                    self.assertEqual(view.split("\n", 1)[0], GROUPED_HEADER)
+                    self.assertEqual(self.restore(view), source)
                     self.assertNotIn("additionalContext", output["hookSpecificOutput"])
 
     def test_qwenwork_and_qoder_preserve_shell_envelopes_and_metadata(self):
@@ -239,7 +280,8 @@ class PathListHooks(unittest.TestCase):
                 (target / "databoard-target.json").write_text('{"id":42}', encoding="utf-8")
             for index in range(60):
                 target = root / "app-data/local.ali-skill-workbench/data/project with spaces/records"
-                (target / f"document {index}.json").write_text(str(index), encoding="utf-8")
+                separator = "\u2028" if index == 0 else "\u2029" if index == 1 else " "
+                (target / f"document{separator}name {index}.json").write_text(str(index), encoding="utf-8")
             quoted_root = shlex.quote(str(root))
             commands = (
                 f'find {quoted_root} -name "databoard-*" 2>/dev/null; echo "---"; ls -la {quoted_root} | head',
@@ -259,10 +301,10 @@ class PathListHooks(unittest.TestCase):
                     for path in paths:
                         self.assertEqual(Path(path).read_text(encoding="utf-8"), '{"id":42}')
                 else:
-                    restored = self.restore(self.replacement(output))
+                    restored, paths = restore_path_list(self.replacement(output))
                     self.assertEqual(restored, executed.stdout)
-                    self.assertEqual(len(restored.splitlines()), 60)
-                    for path in restored.splitlines():
+                    self.assertEqual(len(paths), 60)
+                    for path in paths:
                         self.assertEqual(Path(path).read_text(), Path(path).stem.split()[-1])
 
 

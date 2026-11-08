@@ -400,7 +400,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
 | Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
-| Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
+| Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix or consecutive parent directories in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Rewrites with RTK and submits shell input that runs through `tokenless rtk` when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
@@ -508,12 +508,23 @@ pure path lists also accept other command output. File content
 and file reads skip the path-list strategy; existing file-read JSON, table, and log handling remains available.
 Other non-file tool results can use the same Core capability regardless of tool name.
 
-Pure lists need at least three POSIX paths with uniform LF or CRLF endings. The smaller view contains
-a shared directory `base`, all `paths`, `line_ending`, and `trailing_newline` as compact JSON after a
-fixed English header. Decode each path as `base` plus its entry, preserving order and duplicates;
-join with `line_ending` and append it only when `trailing_newline` is true. No Stash or recovery call
-is needed. Mixed output, blank lines, NUL separators, ambiguous formats, and candidates without net
-byte and estimated-token savings pass through.
+Pure lists need at least three POSIX paths with uniform LF or CRLF endings. Tokenless chooses between a shared-prefix JSON view and a view that additionally shares consecutive
+parent directories. The flat view contains `base`, all `paths`, `line_ending`, and `trailing_newline`
+as compact JSON after `[Path list; all received paths retained; full path = base + each paths entry]`;
+decode each path as `base` plus its entry.
+The grouped view starts with `[Paths grouped by directory; all received paths retained; full path = base + Dir + entry]`,
+then a JSON metadata line containing `base`, `line_ending`, and `trailing_newline`.
+Each `Dir=` line sets a JSON-quoted relative directory; concatenate `base`, the latest directory,
+and each subsequent entry. Entry lines starting with `"` are JSON strings; others are literal
+filenames. Empty basenames and names starting with `"`, `Dir=`, or `Base=` are JSON-quoted.
+`Base=` is reserved to avoid suggesting a base override to readers; it is not a decoder instruction.
+Both views preserve order and duplicates: join decoded paths with `line_ending` and append it
+only when `trailing_newline` is true. No Stash or recovery call is needed.
+When the flat view is profitable, grouping must be no larger in bytes or estimated tokens
+and improve at least one measure. When the flat view is unprofitable, grouping can still be used
+if it saves both bytes and estimated tokens compared with the original input. The complete selected view must reduce input bytes and
+estimated tokens and reconstruct the input exactly. Mixed output, blank lines, NUL separators,
+ambiguous formats, and candidates without net savings pass through.
 
 Direct native `find`, `grep`, and `rg` and calls behind the [built-in RTK prefixes](cli-reference.md#shell-rewriting)
 keep the entire command, including compound commands, outside RTK rewriting. Nesting and shell

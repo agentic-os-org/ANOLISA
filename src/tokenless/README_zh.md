@@ -19,7 +19,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理 SGR 颜色，并可恢复地缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C 和通用命令日志的常规进度；pnpm 还可在无需恢复时压紧已识别的通知、依赖清单和装饰条布局，保留全部任务相关事实 |
-| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
+| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀或连续父目录，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；同类来源中 JSON 字符串值里的 HTML 在不丢失可见文字、链接目标、表单状态以及样式、属性、换行、列表编号或表头所承载的含义，且不暴露屏幕上被隐藏的文字时就地转写，保持 JSON 结构；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
