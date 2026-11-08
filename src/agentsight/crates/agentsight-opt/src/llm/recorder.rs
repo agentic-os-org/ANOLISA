@@ -201,6 +201,47 @@ impl TrajectoryRecorder {
             }
         }
 
+        // Calls are recorded on completion, so the first recorded call need
+        // not have the earliest start. Retain each delegation's full lifetime
+        // using the same completion metadata as imported tool calls.
+        for (label, group_calls) in &groups {
+            let start = group_calls
+                .iter()
+                .filter_map(|call| {
+                    chrono::DateTime::parse_from_rfc3339(&call.start_ts)
+                        .ok()
+                        .map(|time| (time, &call.start_ts))
+                })
+                .min_by_key(|(time, _)| *time);
+            let end = group_calls
+                .iter()
+                .filter_map(|call| {
+                    chrono::DateTime::parse_from_rfc3339(&call.end_ts)
+                        .ok()
+                        .map(|time| (time, &call.end_ts))
+                })
+                .max_by_key(|(time, _)| *time);
+            let dispatch_id = format!("dispatch-{label}");
+            if let Some(step) = steps.iter_mut().find(|step| {
+                step.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == dispatch_id))
+            }) {
+                if let Some((_, timestamp)) = start {
+                    step.timestamp = Some(timestamp.clone());
+                }
+                if let (Some((start, _)), Some((end, timestamp))) = (start, end) {
+                    if end >= start {
+                        for call in step.tool_calls.iter_mut().flatten() {
+                            call.extra
+                                .get_or_insert_with(HashMap::new)
+                                .insert("result_timestamp".into(), serde_json::json!(timestamp));
+                        }
+                    }
+                }
+            }
+        }
+
         // Build one embedded subagent trajectory per label group.
         let subagents: Vec<AtifTrajectory> = groups
             .iter()
