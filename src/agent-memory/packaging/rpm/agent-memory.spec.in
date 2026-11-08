@@ -226,6 +226,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun Nov 08 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.14-1
+- Default source installation to the ANOLISA namespace and preserve shared files
+- Reclaim abandoned snapshots and clean up failed snapshot creation
+- Serialize index upgrades and preserve paths during date normalization
+- Keep UTF-8 grep output valid and avoid descriptor-duplication panics
+- Preserve OpenClaw-owned configuration during plugin removal
+
 * Wed Oct 28 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.12-1
 - Enforce automatic capture consent and attribute new observations to agents
 - Preserve files on failed edits and validate snapshots before restoration

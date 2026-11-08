@@ -7,6 +7,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.14] - 2026-11-08
+
+### Changed
+
+- **Breaking for source installations:** `make install` now defaults to `AWPRJ=anolisa`, placing the adapter in the shared ANOLISA namespace while preserving unrelated files in that adapter tree. To keep managing an existing independent installation, pass `AWPRJ=` explicitly; to migrate, first run `make uninstall AWPRJ=` with the original profile and path overrides. This source-install change leaves runtime configuration paths and RPM/raw payload layouts unchanged (#9462).
+- Raw archives no longer claim ANOLISA's distribution-owned discovery contract, avoiding installation collisions with its pre-staged registry. Raw installation requires ANOLISA 0.3.21 or later (#9351).
+
+### Added
+
+- Reclaim abandoned snapshot files and restore staging directories when opening a memory mount, with a default age threshold of 24 hours. Corrupt snapshot sidecars are repaired only after validating the archive; invalid archives are discarded and healthy pairs are retained. Configure `[memory.snapshot_reclaim]` to disable cleanup or change `min_artifact_age_secs`; values below 60 seconds fail startup in TOML and are ignored with a warning through the environment override. Across processes, protection of active operations relies on this age threshold, so keep it longer than snapshot creation or restoration can take (#9219).
+
+### Fixed
+
+- Concurrent memory clients now serialize index schema upgrades, preventing duplicate migrations from disabling an otherwise usable search index. This does not repair an already damaged index (#9302).
+- Failed `mem_snapshot` calls clean up incomplete archives and archives created by that call without a completed sidecar, preventing repeated failures from silently consuming disk. Cleanup failures are logged (#9145).
+- Consolidation preserves quoted paths and date words beside path separators instead of rewriting filenames containing terms such as `today` or `昨天`; ordinary date phrases in prose still normalize (#7935).
+- `mem_grep` clips oversized lines at a complete UTF-8 character boundary, preventing long Chinese text and other multibyte input from crashing the worker. The existing line-length limit remains (#9408).
+- Starting the index watcher no longer duplicates the mount's root descriptor, avoiding the panic previously caused by that duplication under file-descriptor exhaustion (#3523).
+- OpenClaw plugin removal delegates configuration and managed-file changes to OpenClaw, preserving included and custom configuration files. A missing host CLI or leftover plugin paths now produces an error; an already-unregistered plugin succeeds only when both known plugin paths are absent (#9271).
+
 ## [0.2.13] - Unreleased
 
 ### Changed
