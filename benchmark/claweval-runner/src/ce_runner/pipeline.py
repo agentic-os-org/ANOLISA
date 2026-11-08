@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ._common import _PYTHON, log
@@ -41,7 +42,15 @@ def archive_session_alongside_trace(session_file: str, trace_file: str) -> str:
         os.makedirs(sessions_dir, exist_ok=True)
         stem = Path(trace_file).stem
         dst = os.path.join(sessions_dir, f"{stem}.session.jsonl")
-        shutil.copy2(session_file, dst)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{stem}.", suffix=".tmp", dir=sessions_dir, delete=False
+        ) as tmp:
+            staged = Path(tmp.name)
+        try:
+            shutil.copy2(session_file, staged)
+            os.replace(staged, dst)
+        finally:
+            staged.unlink(missing_ok=True)
         return dst
     except Exception as exc:
         log(f"  [WARNING] Failed to archive session {session_file}: {exc}")

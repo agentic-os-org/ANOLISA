@@ -60,6 +60,35 @@ class TestArchiveSession:
         assert "sessions" in str(archived_path)
         assert "trace_001.session.jsonl" in str(archived_path)
 
+    @pytest.mark.parametrize("existing_archive", [False, True])
+    def test_failed_copy_does_not_publish_partial_archive(
+        self, tmp_path, monkeypatch, existing_archive
+    ):
+        from ce_runner import pipeline
+
+        session_file = tmp_path / "source.jsonl"
+        session_file.write_bytes(b'{"type":"message"}\n')
+        trace_file = tmp_path / "trace.jsonl"
+        archive = tmp_path / "sessions" / "trace.session.jsonl"
+        if existing_archive:
+            archive.parent.mkdir()
+            archive.write_bytes(b'{"type":"previous"}\n')
+
+        def fail_after_partial_write(source, destination):
+            assert Path(source) == session_file
+            Path(destination).write_bytes(b"partial")
+            raise OSError("archive write failed")
+
+        monkeypatch.setattr(pipeline.shutil, "copy2", fail_after_partial_write)
+
+        assert pipeline.archive_session_alongside_trace(str(session_file), str(trace_file)) == ""
+        assert session_file.read_bytes() == b'{"type":"message"}\n'
+        if existing_archive:
+            assert archive.read_bytes() == b'{"type":"previous"}\n'
+            assert list(archive.parent.iterdir()) == [archive]
+        else:
+            assert list(archive.parent.iterdir()) == []
+
     def test_archive_missing_session(self):
         """Return empty string when session doesn't exist."""
         from ce_runner.pipeline import archive_session_alongside_trace
