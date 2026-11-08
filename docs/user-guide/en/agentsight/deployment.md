@@ -66,10 +66,12 @@ for file deletion protection. Even with BPF-LSM active, `ready=true` does not im
 reports the requested profile and activation requirements. SecCore continues to reject
 Apply with `AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE`; it does not silently allow it.
 
-Before activation, verify that `/sys/kernel/security/lsm` lists `bpf` and the enforcer
-runs in the host's initial PID namespace. The `agent-file-guard` profile supplies file
-protection hooks, but switching to it removes `credential-exfiltration` credential-to-network
-blocking. These profiles are not independent switches that can be enabled together.
+Before activation, verify that `/sys/kernel/security/lsm` lists `bpf`. The enforcer and
+its target may share either the host's initial PID namespace or a container's default PID
+namespace; `hostPID: true` / `--pid=host` is not required for a same-container target. The
+`agent-file-guard` profile supplies file protection hooks, but switching to it removes
+`credential-exfiltration` credential-to-network blocking. These profiles are not independent
+switches that can be enabled together.
 Schedule a maintenance window and retain the original binding configuration: switching
 rebuilds an incompatible pinned engine, and restarting clears runtime bindings, leaving a
 protection gap during the transition.
@@ -100,11 +102,26 @@ mutations require the existing [Dashboard authentication](data-and-storage.md) c
 
 After verifying `ready=true` and `capabilities.file_delete_guard=true`, re-apply file
 deletion protection bindings through SecCore. If the capability remains false, check
-BPF-LSM, PID namespaces, and engine load logs; do not bypass the capability gate.
+BPF-LSM, the selected profile, and engine load logs; do not bypass the capability gate.
 `/run/agentsight/enforcer.sock` uses an internal versioned protocol, not HTTP for
 `curl --unix-socket`. To roll back, set the same drop-in back to `credential-exfiltration`,
 restart the enforcer, and re-apply the original bindings. Restarting only the enforcer
 does not require stopping AgentSight capture or the Dashboard.
+
+### Recover a crashed pre-5.15 tracepoint holder
+
+On kernels before 5.15, the installing enforcer keeps tracepoints attached and pins a
+`tp_holder_<kernel-pid>_<start>` marker under the ActPlane pin root (by default,
+`/sys/fs/bpf/actplane/v1`). After a crash, a restart in a nested or container-default PID
+namespace may be unable to prove whether that holder is still alive. Startup then fails with
+recovery guidance and leaves the pin root unchanged; an invisible holder is never treated as
+stale automatically.
+
+Stop the previous enforcer from the host or the PID namespace where it ran, and confirm that
+the old holder process has exited. Only after confirming that no holder remains, manually
+remove the stale ActPlane pin root (or the root configured by `ACTPLANE_BPF_PIN_ROOT`), restart
+the enforcer, and verify the health and startup log again. Never remove a shared pin root merely
+because the marker's process is invisible from the current container.
 
 ## Foreground run for troubleshooting
 

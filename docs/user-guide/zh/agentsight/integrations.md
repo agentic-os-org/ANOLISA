@@ -123,9 +123,9 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。需要单独启动 enforcer 守护进程。
 源码运行见[源码构建](deployment.md#源码构建)。
 
-ActPlane 策略下发要求 enforcer 运行在宿主的初始 PID namespace。请直接在宿主运行守护进程，
-或为容器设置 `hostPID: true` / `--pid=host`。在其他 PID namespace 中，策略下发会返回
-`unsupported_environment`；采集与分析不受影响。
+ActPlane 策略下发支持宿主的初始 PID namespace，也支持容器的默认 PID namespace。
+当 enforcer 与目标进程共享容器 PID namespace 时，无需设置 `hostPID: true` / `--pid=host`，
+这些 host PID 部署方式仍然受支持。策略下发错误不影响采集与分析。
 
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
@@ -142,11 +142,11 @@ $ sudo journalctl -u agentsight-enforcer
 切换 `agent-file-guard` 的前置条件、互斥能力、维护窗口及重新 Apply 步骤，见
 [启用系统层文件防误删](deployment.md#启用系统层文件防误删)。
 
-PID namespace 的支持边界更窄。enforcer 自身执行 map 操作时使用 BPF 捕获的
-init-namespace PID，但这不会把同一容器 procfs 中的目标 `root_pid` 转换为宿主 PID。
-目标解析仍要求 `/proc` 视图包含 init namespace 的完整 `NSpid` 链；只报告
-namespace-local ID 的容器 procfs 会在目标绑定前以 `unsupported_environment` 拒绝，
-采集与分析不受影响。`file_delete_guard` 同样仍仅限 init PID namespace。
+对于同一容器内的目标，`root_pid` 保持为 procfs 显示的 namespace-local PID。enforcer 独立解析
+并校验对应的内核身份，不会通过 `NSpid` 链换算或猜测宿主 PID。当本地 PID、PID namespace、
+进程启动时间或 procfs 时钟无法校验时，包括 PID 已失效或被复用、container-uptime 时钟关系
+不一致，Apply 都会 fail-closed。启用 `agent-file-guard` profile 和 BPF-LSM 后，
+`file_delete_guard` 同样支持初始或容器默认 PID namespace。
 
 拦截能力还取决于引擎的 hook 预算：只有当引擎启动时预留了对应的 BPF LSM hook、且内核启用了
 BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。上述不含

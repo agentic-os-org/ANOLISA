@@ -148,10 +148,10 @@ Capture and analysis are unaffected; only the Risk Enforcement page and the
 `/api/enforcement/*` endpoints disappear. Start the enforcer daemon separately.
 For source builds, see [Source build](deployment.md#source-build).
 
-ActPlane policy application requires the enforcer to run in the host's initial PID namespace.
-Run the daemon on the host, or use `hostPID: true` / `--pid=host` for a container. In any other PID
-namespace, policy application is rejected with `unsupported_environment`; capture and analysis are
-unaffected.
+ActPlane policy application supports both the host's initial PID namespace and a container's
+default PID namespace. `hostPID: true` / `--pid=host` remains supported but is not required when
+the enforcer and its target share a container PID namespace. Capture and analysis are unaffected
+by policy-application errors.
 
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
@@ -169,13 +169,12 @@ profile. Even when `ready=true`, check `capabilities.file_delete_guard`; the def
 [Enable system-level file deletion protection](deployment.md#enable-system-level-file-deletion-protection)
 for prerequisites, the mutually exclusive capability, maintenance window, and re-apply steps.
 
-PID namespaces have a narrower support boundary. The enforcer uses a kernel-captured
-init-namespace PID for its own map operations, but this does not translate a target
-`root_pid` from the same container's procfs. Target resolution still requires a `/proc`
-view that exposes the init-namespace `NSpid` chain; a container procfs that reports only
-namespace-local IDs is rejected before target binding with `unsupported_environment`.
-Capture and analysis are unaffected. `file_delete_guard` also remains restricted to the
-init PID namespace.
+For a same-container target, `root_pid` remains the namespace-local PID shown by procfs. The
+enforcer independently resolves and validates the corresponding kernel identity instead of
+translating or guessing a host PID from an `NSpid` chain. Apply fails closed when the local PID,
+PID namespace, process start time, or procfs clock cannot be validated, including stale or reused
+PIDs and inconsistent container-uptime clocks. With the `agent-file-guard` profile and active
+BPF-LSM, the same initial-or-container PID namespace support applies to `file_delete_guard`.
 
 Blocking also depends on the engine's hook budget: a `block` rule can only deny an operation when
 the matching BPF LSM hook was reserved at engine start and BPF LSM is active on the kernel
