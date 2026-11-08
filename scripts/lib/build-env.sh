@@ -159,7 +159,6 @@ resolve_build_environment() {
             agent-sec-core)
                 build_env_require_rust "$directory/v2"
                 build_env_require_rust "$directory/linux-sandbox"
-                BUILD_ENV_NEEDS_NODE=true
                 if [[ "$BUILD_ENV_PACKAGE_KIND" == deb ]]; then
                     build_env_add_package libc6-dev
                 else
@@ -168,13 +167,17 @@ resolve_build_environment() {
                 ;;
             ws-ckpt)
                 build_env_require_rust "$directory/src"
-                BUILD_ENV_NEEDS_NODE=true
                 ;;
             *) build_env_require_rust "$directory" ;;
         esac
         case "$component" in
-            tokenless) BUILD_ENV_NEEDS_JUST=true; BUILD_ENV_NEEDS_NODE=true; build_env_add_package patch ;;
+            agent-memory|agent-sec-core|tokenless|ws-ckpt)
+                if ! skip_component_plugins "$component"; then BUILD_ENV_NEEDS_NODE=true; fi ;;
+        esac
+        case "$component" in
+            tokenless) BUILD_ENV_NEEDS_JUST=true; build_env_add_package patch ;;
             agentsight)
+                # The embedded dashboard is part of the core build.
                 BUILD_ENV_NEEDS_NODE=true
                 # libbpf-cargo formats production eBPF skeletons with rustfmt.
                 channel="$(build_env_channel "$directory")"
@@ -194,7 +197,6 @@ resolve_build_environment() {
                 fi
                 ;;
             agent-memory)
-                BUILD_ENV_NEEDS_NODE=true
                 build_env_add_package cmake
                 if [[ "$BUILD_ENV_PACKAGE_KIND" == deb ]]; then
                     build_env_add_package libsystemd-dev

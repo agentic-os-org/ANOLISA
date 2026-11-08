@@ -51,7 +51,7 @@ test_all_components_plan_build_dependencies_without_runtime_gates() {
     COMPONENTS=(cosh-ng skillfs ws-ckpt tokenless agentsight agent-sec-core aw aw-provider-sec-core aw-provider-tokenless)
     resolve_build_environment
     $BUILD_ENV_NEEDS_RUST || fail 'Rust missing from all-component requirements'
-    $BUILD_ENV_NEEDS_NODE || fail 'Node missing from plugin requirements'
+    $BUILD_ENV_NEEDS_NODE || fail 'Node missing from AgentSight dashboard requirements'
     $BUILD_ENV_NEEDS_JUST || fail 'just missing from Tokenless requirements'
     has_package python3 || fail 'system Python helper was omitted'
     has_package libfuse3-dev || fail 'SkillFS FUSE development dependency was omitted'
@@ -77,6 +77,23 @@ test_tokenless_and_checkpoint_each_prepare_node() {
         $BUILD_ENV_NEEDS_NODE || fail "$component does not prepare Node/npm"
         if has_package libbpf-dev; then fail 'partial build prepared AgentSight dependencies'; fi
     done
+}
+
+test_aw_build_only_requires_node_for_the_agentsight_dashboard() {
+    COMPONENTS=(aw tokenless ws-ckpt agent-sec-core agent-memory)
+    resolve_build_environment
+    if $BUILD_ENV_NEEDS_NODE; then fail 'AW build planned Node for skipped plugins'; fi
+    $BUILD_ENV_NEEDS_JUST || fail 'AW build dropped the Tokenless RTK prerequisite'
+    has_package libc6-dev || fail 'AW build dropped the static sandbox prerequisite'
+    has_package cmake || fail 'AW build dropped the memory core prerequisite'
+
+    COMPONENTS+=(cosh-ng)
+    resolve_build_environment
+    if $BUILD_ENV_NEEDS_NODE; then fail 'Native cosh-ng extensions should not require Node'; fi
+
+    COMPONENTS+=(agentsight)
+    resolve_build_environment
+    $BUILD_ENV_NEEDS_NODE || fail 'AW build dropped the AgentSight dashboard prerequisite'
 }
 
 test_provider_only_uses_its_pinned_toolchain() {
