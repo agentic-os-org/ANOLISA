@@ -24,13 +24,15 @@ Notes:
       where each string is used in exactly one cell). If a string appears in multiple cells,
       manually increment 'count' by the number of extra references.
     - Special characters (&, <, >) are automatically XML-escaped.
+    - SpreadsheetML escape tokens, carriage returns and XML-invalid characters
+      are encoded with ST_Xstring escapes before XML escaping.
     - Leading/trailing spaces are preserved with xml:space="preserve".
 """
 
-import sys
-import html
 import argparse
-
+import html
+import re
+import sys
 
 HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 SST_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -38,10 +40,20 @@ SST_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 def escape_text(s: str) -> tuple[str, bool]:
     """
-    Return (escaped_text, needs_preserve).
+    Return XML-safe SpreadsheetML text and whether edge whitespace needs preservation.
+
+    Escape literal ST_Xstring tokens before introducing new ones, so original
+    text remains distinct from encoded controls. Tabs and line feeds are valid
+    XML element text; carriage returns must escape XML newline normalization.
     needs_preserve is True if the string has leading or trailing whitespace.
     """
-    escaped = html.escape(s, quote=False)
+    escaped = re.sub(r"_x[0-9a-fA-F]{4}_", lambda match: "_x005F_" + match[0][1:], s)
+    escaped = re.sub(
+        r"[\x00-\x08\x0b-\x1f\ud800-\udfff\ufffe\uffff]",
+        lambda match: f"_x{ord(match[0]):04X}_",
+        escaped,
+    )
+    escaped = html.escape(escaped, quote=False)
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 
@@ -56,10 +68,12 @@ def build_xml(strings: list[str]) -> str:
     for i, s in enumerate(strings):
         escaped, preserve = escape_text(s)
         if preserve:
-            lines.append(f'  <si><t xml:space="preserve">{escaped}</t></si>'
-                         f'  <!-- index {i} -->')
+            lines.append(
+                f'  <si><t xml:space="preserve">{escaped}</t></si>'
+                f"  <!-- index {i} -->"
+            )
         else:
-            lines.append(f'  <si><t>{escaped}</t></si>  <!-- index {i} -->')
+            lines.append(f"  <si><t>{escaped}</t></si>  <!-- index {i} -->")
     lines.append("</sst>")
     return "\n".join(lines) + "\n"
 
@@ -75,7 +89,7 @@ def build_index_table(strings: list[str]) -> str:
     lines.append("")
     lines.append(
         f"Total: {len(strings)} unique strings. "
-        "Use these indices in <c t=\"s\"><v>N</v></c> cells."
+        'Use these indices in <c t="s"><v>N</v></c> cells.'
     )
     return "\n".join(lines) + "\n"
 
@@ -137,7 +151,7 @@ def main() -> None:
     if not raw:
         print(
             "ERROR: No strings provided.\n"
-            "Usage: shared_strings_builder.py \"String1\" \"String2\" ...\n"
+            'Usage: shared_strings_builder.py "String1" "String2" ...\n'
             "   or: shared_strings_builder.py --file strings.txt",
             file=sys.stderr,
         )
