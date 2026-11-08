@@ -22,7 +22,6 @@ use uuid::Uuid;
 use super::AppState;
 use crate::enforcement::{
     EnforcementCoordinatorError, canonical_policy_file, read_process_start_time,
-    resolve_and_read_target, resolve_to_host_pid,
 };
 
 /// Bounded evidence list query.
@@ -570,18 +569,7 @@ pub(super) async fn apply_binding(
             false,
         );
     }
-    let mut request = body.into_inner();
-    // Replace namespace-local PID with host PID so the enforcer seeds cap_task
-    // with the PID that BPF handle_fork will actually use.
-    let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
-    if host_pid != request.root_pid {
-        log::info!(
-            "resolved namespace PID {} to host PID {}",
-            request.root_pid,
-            host_pid
-        );
-        request.root_pid = host_pid;
-    }
+    let request = body.into_inner();
     run_binding(move || coordinator.apply(request)).await
 }
 
@@ -827,9 +815,7 @@ fn public_health(mut status: HealthStatus) -> HealthStatus {
 }
 
 fn validate_target_identity(root_pid: i32, expected_start_time: u64) -> Result<(), String> {
-    // resolve_and_read_target handles namespace PID translation + start-time check.
-    let (_host_pid, actual_start_time) =
-        resolve_and_read_target(root_pid, expected_start_time).map_err(|e| e.to_string())?;
+    let actual_start_time = read_process_start_time(root_pid).map_err(|error| error.to_string())?;
     if actual_start_time != expected_start_time {
         return Err(format!(
             "PID {root_pid} start time changed: expected {expected_start_time}, found {actual_start_time}"

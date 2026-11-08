@@ -101,16 +101,22 @@ constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
                            (engine.parents[1] / "scripts/build-enforcer.sh").read_text(), re.M))
 for relative, key in (("build.rs", "BPF_BUILD"), ("src/lib.rs", "BPF_LIB"),
                       ("src/file_protection_pinned_maps.rs", "FILE_PROTECTION_PINNED_MAPS"),
+                      ("src/target_identity.rs", "TARGET_IDENTITY_RUST"),
+                      ("target_identity.bpf.c", "TARGET_IDENTITY_C"),
                       ("file_read_guard.bpf.h", "FILE_READ_GUARD")):
     assert git_blob((engine / relative).read_bytes()) == constants[f"ACTPLANE_STAGED_{key}_BLOB"], \
         f"stale source inventory: {relative}"
 for arch, opposite in (("x86_64", "aarch64"), ("aarch64", "x86_64")):
-    for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+    for name, variant in (("process.bpf.o", "PREBUILT_BPF"),
+                          ("process-inode-only.bpf.o", "INODE_BPF"),
+                          ("target_identity.bpf.o", "TARGET_IDENTITY_BPF")):
         path = engine / "prebuilt" / arch / name
         data = path.read_bytes()
-        variant = "PREBUILT_BPF" if name == "process.bpf.o" else "INODE_BPF"
         assert git_blob(data) == constants[f"ACTPLANE_STAGED_{arch.upper()}_{variant}_BLOB"], \
             f"stale artifact inventory: {path}"
+        if name == "target_identity.bpf.o":
+            print(f"Verified {arch} {name} source attestation")
+            continue
         rename_dispatcher(data, arch)
         # Opposite-ABI immediates outside the function must not affect the test.
         rename_dispatcher(data + struct.pack("<III", 276, 38, 316), arch)
@@ -146,7 +152,7 @@ for arch in ("x86_64", "aarch64", "riscv64"):
         assert not list(out.iterdir())
     else:
         assert result.returncode == 0, result.stderr
-        for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+        for name in ("process.bpf.o", "process-inode-only.bpf.o", "target_identity.bpf.o"):
             assert (out / name).read_bytes() == (engine / "prebuilt" / arch / name).read_bytes()
 
 fixture = tmp / "rebuild-engine"
@@ -157,13 +163,15 @@ tools.mkdir()
 import pathlib, sys
 args = sys.argv[1:]
 assert "-W" in args and args[args.index("-W") + 1] == "process.bpf.c"
+assert "target_identity.bpf.c" in args
 arch = next(arg[5:] for arg in args if arg.startswith("ARCH="))
 output = next(arg[7:] for arg in args if arg.startswith("OUTPUT="))
 assert arch == {".output/x86_64": "x86", ".output/aarch64": "arm64"}[output]
 assert output + "/process.bpf.o" in args and "process-inode-only" in args
+assert output + "/target_identity.bpf.o" in args
 root = pathlib.Path(args[args.index("-C") + 1])
 (root / output).mkdir(parents=True, exist_ok=True)
-for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+for name in ("process.bpf.o", "process-inode-only.bpf.o", "target_identity.bpf.o"):
     (root / output / name).write_text(arch + name)
 ''')
 (tools / "make").chmod(0o755)
@@ -178,7 +186,7 @@ for arch, bpf_arch in (("x86_64", "x86"), ("aarch64", "arm64")):
     assert result.returncode != 0 and b"copy " in result.stderr, "missing object triggered make"
     env["ACTPLANE_REBUILD_BPF"] = "1"
     subprocess.run([str(tmp / "engine-build")], env=env, check=True, capture_output=True)
-    for name in ("process.bpf.o", "process-inode-only.bpf.o"):
+    for name in ("process.bpf.o", "process-inode-only.bpf.o", "target_identity.bpf.o"):
         assert (pathlib.Path(env["OUT_DIR"]) / name).read_text() == bpf_arch + name
 PY
 
@@ -267,20 +275,26 @@ constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
 (root / "Cargo.toml").write_text(f'rev = "{constants["ACTPLANE_REVISION"]}"\n' * 2)
 engine = root / "crates/ebpf-ifc-engine"
 (engine / "prebuilt").mkdir(parents=True)
-for name in ("process.bpf.c", "process.h", "file_read_guard.bpf.h", "taint.h", "taint_engine.bpf.h",
-             "capability.bpf.h", "channel.bpf.h"):
+for name in ("process.bpf.c", "target_identity.bpf.c", "process.h", "file_read_guard.bpf.h",
+             "taint.h", "taint_engine.bpf.h", "capability.bpf.h", "channel.bpf.h"):
     (engine / name).write_text(name)
 (engine / "build.rs").write_bytes(b"staged-build")
 (engine / "src").mkdir()
 (source / "bpf/src").mkdir()
-for name in ("lib.rs", "file_protection_generation.rs", "file_protection_generation_tests.rs",
-             "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
+for name in ("lib.rs", "target_identity.rs", "file_protection_generation.rs",
+             "file_protection_generation_tests.rs", "file_protection_map_writer.rs",
+             "file_protection_pinned_maps.rs"):
     (engine / "src" / name).write_bytes(f"staged-{name}".encode())
 for arch in ("x86_64", "aarch64"):
     (engine / "prebuilt" / arch).mkdir()
     (engine / "prebuilt" / arch / "process.bpf.o").write_bytes(f"{arch}-full-object".encode())
     (engine / "prebuilt" / arch / "process-inode-only.bpf.o").write_bytes(
         f"{arch}-inode-object".encode())
+    (engine / "prebuilt" / arch / "target_identity.bpf.o").write_bytes(
+        f"{arch}-target-identity-object".encode())
+(source / "bpf/Cargo.toml").write_bytes(b"patched-cargo")
+(source / "bpf/target_identity.bpf.c").write_bytes(b"target_identity.bpf.c")
+(source / "bpf/src/target_identity.rs").write_bytes(b"staged-target_identity.rs")
 (source / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
 (tools / "git").write_text('''#!/usr/bin/env python3
 import pathlib, sys
@@ -291,20 +305,28 @@ if command == "rev-parse":
 elif command == "checkout":
     # Model the source reset performed by the real cache checkout/reset.
     (pathlib.Path(source) / "bpf/prebuilt/process.bpf.o").write_bytes(b"upstream-object")
+    (pathlib.Path(source) / "bpf/Cargo.toml").write_bytes(b"patched-cargo")
     (pathlib.Path(source) / "bpf/build.rs").write_bytes(b"patched-build")
     (pathlib.Path(source) / "bpf/src/lib.rs").write_bytes(b"patched-lib")
+    (pathlib.Path(source) / "bpf/target_identity.bpf.c").write_bytes(b"target_identity.bpf.c")
+    (pathlib.Path(source) / "bpf/src/target_identity.rs").write_bytes(b"staged-target_identity.rs")
     print("fixture Git diagnostic")
 elif command == "hash-object":
     path = pathlib.Path(source) / args[0]
     key = {"Makefile": "PATCHED_BPF_MAKEFILE"}.get(path.name)
+    if path.name == "Cargo.toml":
+        key = "PATCHED_BPF_CARGO"
     if path.name == "file_read_guard.bpf.h" and path.read_bytes() == b"file_read_guard.bpf.h":
         key = "STAGED_FILE_READ_GUARD"
+    if path.name == "target_identity.bpf.c" and path.read_bytes() == b"target_identity.bpf.c":
+        key = "STAGED_TARGET_IDENTITY_C"
     if path.suffix == ".rs" and path.name != "build.rs":
         data = path.read_bytes()
         if path.name == "lib.rs":
             key = {b"patched-lib": "PATCHED_BPF_LIB", b"staged-lib.rs": "STAGED_BPF_LIB"}.get(data)
         elif data == f"staged-{path.name}".encode():
-            key = "STAGED_" + path.stem.upper()
+            key = "STAGED_TARGET_IDENTITY_RUST" if path.name == "target_identity.rs" \
+                else "STAGED_" + path.stem.upper()
     if path.name == "build.rs":
         key = {b"staged-build": "STAGED_BPF_BUILD",
                b"patched-build": "PATCHED_BPF_BUILD"}.get(path.read_bytes())
@@ -312,7 +334,8 @@ elif command == "hash-object":
         data = path.read_bytes()
         key = "PREBUILT_BPF" if data == b"upstream-object" else None
         for arch in ("x86_64", "aarch64"):
-            for variant, suffix in (("full", "PREBUILT_BPF"), ("inode", "INODE_BPF")):
+            for variant, suffix in (("full", "PREBUILT_BPF"), ("inode", "INODE_BPF"),
+                                    ("target-identity", "TARGET_IDENTITY_BPF")):
                 if data == f"{arch}-{variant}-object".encode():
                     key = f"STAGED_{arch.upper()}_{suffix}"
     print(constants["ACTPLANE_" + key + "_BLOB"] if key else "0" * 40)
@@ -336,21 +359,28 @@ arch = host.split("-")[0]
 patch_config = args[args.index("--config") + 1]
 source = pathlib.Path(patch_config.split('path="')[1].rstrip('"'))
 assert (source / "build.rs").read_bytes() == b"staged-build"
-for name in ("lib.rs", "file_protection_generation.rs", "file_protection_generation_tests.rs",
-             "file_protection_map_writer.rs", "file_protection_pinned_maps.rs"):
+for name in ("lib.rs", "target_identity.rs", "file_protection_generation.rs",
+             "file_protection_generation_tests.rs", "file_protection_map_writer.rs",
+             "file_protection_pinned_maps.rs"):
     path = source / "src" / name
     assert path.read_bytes() == f"staged-{name}".encode()
     if os.environ.get("FIXTURE_MUTATE_SOURCE") == name:
         path.write_bytes(b"mutation during build")
-assert (source / "file_read_guard.bpf.h").read_bytes() == b"file_read_guard.bpf.h"
-if os.environ.get("FIXTURE_MUTATE_SOURCE") == "file_read_guard.bpf.h":
-    (source / "file_read_guard.bpf.h").write_bytes(b"mutation during build")
+for name in ("file_read_guard.bpf.h", "target_identity.bpf.c"):
+    path = source / name
+    assert path.read_bytes() == name.encode()
+    if os.environ.get("FIXTURE_MUTATE_SOURCE") == name:
+        path.write_bytes(b"mutation during build")
 objects = source / "prebuilt" / arch
 assert (objects / "process.bpf.o").read_bytes() == f"{arch}-full-object".encode()
 assert (objects / "process-inode-only.bpf.o").read_bytes() == f"{arch}-inode-object".encode()
+assert (objects / "target_identity.bpf.o").read_bytes() == f"{arch}-target-identity-object".encode()
 if os.environ.get("FIXTURE_WRONG_PAIR"):
     arch = "aarch64" if arch == "x86_64" else "x86_64"
-output.write_bytes(str(target).encode() + f"{arch}-full-object {arch}-inode-object".encode())
+output.write_bytes(
+    str(target).encode()
+    + f"{arch}-full-object {arch}-inode-object {arch}-target-identity-object".encode()
+)
 if os.environ.get("FIXTURE_BAD_OBJECT"):
     output.write_bytes(b"missing embedded objects")
 output.chmod(0o755)
@@ -406,8 +436,9 @@ for failure in CARGO_BUILD_TARGET=other-target ACTPLANE_REBUILD_BPF=1 FIXTURE_BA
     fi
 done
 
-for source_file in lib.rs file_protection_generation.rs file_protection_generation_tests.rs \
-    file_protection_map_writer.rs file_protection_pinned_maps.rs file_read_guard.bpf.h; do
+for source_file in lib.rs target_identity.rs file_protection_generation.rs \
+    file_protection_generation_tests.rs file_protection_map_writer.rs \
+    file_protection_pinned_maps.rs file_read_guard.bpf.h target_identity.bpf.c; do
     if "${fixture_env[@]}" "FIXTURE_MUTATE_SOURCE=$source_file" \
         "$fixture_root/scripts/build-enforcer.sh" >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
         printf 'attested build accepted a mutation of %s\n' "$source_file" >&2
@@ -424,13 +455,13 @@ arm_bin="$("${fixture_env[@]}" EXPECTED_TARGET=aarch64-unknown-linux-gnu \
 [[ -x "$arm_bin" && -f "$arm_bin.sha256" && "$arm_bin" != "$first_bin" ]]
 python3 "$repo_root/src/agentsight/scripts/copy-enforcer.py" "$arm_bin" "$tmp_dir/arm-enforcer"
 cmp "$arm_bin" "$tmp_dir/arm-enforcer"
-# Each target embeds only its own object pair; EM_BPF alone does not identify the ABI.
+# Each target embeds only its own three objects; EM_BPF alone does not identify the ABI.
 python3 - "$first_bin" "$arm_bin" <<'PY'
 import pathlib
 import sys
 
 x86, arm = (pathlib.Path(path).read_bytes() for path in sys.argv[1:])
-for variant in ("full", "inode"):
+for variant in ("full", "inode", "target-identity"):
     assert f"x86_64-{variant}-object".encode() in x86
     assert f"aarch64-{variant}-object".encode() not in x86
     assert f"aarch64-{variant}-object".encode() in arm

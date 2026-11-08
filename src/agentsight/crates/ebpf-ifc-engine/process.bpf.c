@@ -1482,6 +1482,7 @@ static __always_inline void copy_violation_provenance(struct event *v,
 		return;
 	v->prov_label = p->label;
 	v->prov_timestamp_ns = p->timestamp_ns;
+	v->prov_start_boottime = p->start_boottime;
 	v->prov_pid = p->pid;
 	v->prov_op = p->op;
 	v->prov_ip = p->ip;
@@ -1500,6 +1501,7 @@ static __always_inline void fill_violation_provenance(struct event *v, pid_t pid
 	v->matched_label = 0;
 	v->prov_label = 0;
 	v->prov_timestamp_ns = 0;
+	v->prov_start_boottime = 0;
 	v->prov_pid = 0;
 	v->prov_op = 0;
 	v->prov_ip = 0;
@@ -1566,6 +1568,7 @@ static __always_inline void emit_violation(pid_t pid, unsigned int rule_id,
 	v->domain_id = domain_id;
 	v->session_root = te_root(pid);
 	v->timestamp_ns = bpf_ktime_get_ns();
+	v->process_start_boottime = BPF_CORE_READ(task, start_boottime);
 	v->taint_rule_id = rule_id;
 	v->conn_ip = conn_ip;
 	v->taint_label = te_labels_for_domain(pid, domain_id);

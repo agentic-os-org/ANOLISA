@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::var_os("ACTPLANE_REBUILD_BPF").is_some() {
         for file in [
             "process.bpf.c",
+            "target_identity.bpf.c",
             "process.h",
             "file_read_guard.bpf.h",
             "taint.h",
@@ -41,21 +42,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .arg(format!("ARCH={bpf_arch}"))
             .arg(format!("OUTPUT={output}"))
             .args(["-W", "process.bpf.c"])
+            .args(["-W", "target_identity.bpf.c"])
             .arg(format!("{output}/process.bpf.o"))
+            .arg(format!("{output}/target_identity.bpf.o"))
             .arg("process-inode-only")
             .status()?;
         if !status.success() {
             return Err(format!("BPF rebuild failed for {target_arch}: {status}").into());
         }
         std::fs::create_dir_all(&prebuilt)?;
-        for name in ["process.bpf.o", "process-inode-only.bpf.o"] {
+        for name in [
+            "process.bpf.o",
+            "process-inode-only.bpf.o",
+            "target_identity.bpf.o",
+        ] {
             std::fs::copy(manifest.join(&output).join(name), prebuilt.join(name))?;
         }
     }
 
     // Missing committed artifacts fail closed; never implicitly invoke make
     // (release builders deliberately lack the BPF headers/toolchain).
-    for name in ["process.bpf.o", "process-inode-only.bpf.o"] {
+    for name in [
+        "process.bpf.o",
+        "process-inode-only.bpf.o",
+        "target_identity.bpf.o",
+    ] {
         let source = prebuilt.join(name);
         println!("cargo:rerun-if-changed={}", source.display());
         std::fs::copy(&source, out.join(name))

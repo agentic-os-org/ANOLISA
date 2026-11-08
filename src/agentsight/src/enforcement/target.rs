@@ -16,31 +16,10 @@ pub(crate) enum TargetValidationError {
     InvalidPath { path: PathBuf, message: String },
 }
 
-/// Reads the Linux process start time after excluding protected service processes.
-///
-/// If `pid` is a namespace-local PID (e.g. from a container), it is first
-/// resolved to the host PID via [`resolve_to_host_pid`] using `expected_start_time`
-/// for disambiguation.  The returned tuple is `(host_pid, start_time)` so callers
-/// can use the resolved PID for BPF map seeding.
-pub(crate) fn resolve_and_read_target(
-    pid: i32,
-    expected_start_time: u64,
-) -> Result<(i32, u64), TargetValidationError> {
-    let host_pid = resolve_to_host_pid(pid, expected_start_time);
-    let start_time = read_process_start_time(host_pid)?;
-    Ok((host_pid, start_time))
-}
-
 /// Reads a `/proc` text file, decoding non-UTF-8 bytes lossily.
 ///
-/// `/proc/<pid>/stat` and `/proc/<pid>/status` embed the process name, and the
-/// kernel allows almost any non-NUL bytes in a name (`prctl(PR_SET_NAME)` sets
-/// them directly, and an executable whose name is not valid UTF-8 passes them
-/// on). `read_to_string` rejects such a file outright, which made a target
-/// process unvalidatable — and its PID unresolvable — purely because of its
-/// name, while every field these parsers read (start time, NSpid, PPid) is
-/// plain ASCII positioned after or around the name. A lossy decode keeps all
-/// of those fields intact.
+/// `/proc/<pid>/stat` embeds a process name that may contain non-UTF-8 bytes.
+/// Lossy decoding preserves the ASCII start-time field behind that name.
 fn read_proc_text_lossy(path: &str) -> std::io::Result<String> {
     fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -131,110 +110,6 @@ fn invalid_path(path: &Path, message: impl Into<String>) -> TargetValidationErro
     }
 }
 
-/// Resolve a potentially namespace-local PID to the global (init namespace)
-/// kernel PID.  The enforcer must run in the init PID namespace.
-///
-/// 1. Fast path: `/proc/<pid>/stat` exists and `start_time` matches → host PID.
-/// 2. Slow path: scan `/proc/*/status` for a process whose innermost NSpid
-///    equals `input_pid` and whose start_time matches.
-/// 3. Fallback: return input unchanged.
-pub(crate) fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
-    // Fast path: pid valid in host /proc and start_time matches.
-    if let Ok(pst) = proc_start_time(input_pid) {
-        if pst == input_start_time {
-            return first_nspid(input_pid).unwrap_or(input_pid);
-        }
-    }
-
-    // Slow path: scan /proc for NSpid inner match + start_time match.
-    let Ok(proc_dir) = fs::read_dir("/proc") else {
-        return input_pid;
-    };
-    for entry in proc_dir.flatten() {
-        let name = entry.file_name();
-        let Ok(host_pid) = name.to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        if host_pid <= 0 {
-            continue;
-        }
-        let nspid = read_nspid_chain(host_pid);
-        if nspid.len() < 2 {
-            continue;
-        }
-        if *nspid.last().unwrap() != input_pid {
-            continue;
-        }
-        if let Ok(pst) = proc_start_time(host_pid) {
-            if pst == input_start_time {
-                return nspid[0];
-            }
-        }
-    }
-    input_pid
-}
-
-fn read_nspid_chain(pid: i32) -> Vec<i32> {
-    let Ok(status) = read_proc_text_lossy(&format!("/proc/{pid}/status")) else {
-        return vec![];
-    };
-    parse_nspid_from_status(&status)
-}
-
-/// Parse the `NSpid:` line from `/proc/<pid>/status` content.
-/// Returns empty vec if the line is absent.
-fn parse_nspid_from_status(status: &str) -> Vec<i32> {
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("NSpid:") {
-            return rest
-                .split_whitespace()
-                .filter_map(|s| s.parse::<i32>().ok())
-                .collect();
-        }
-    }
-    vec![]
-}
-
-fn first_nspid(pid: i32) -> Option<i32> {
-    read_nspid_chain(pid).first().copied()
-}
-
-fn proc_start_time(pid: i32) -> Result<u64, ()> {
-    let stat = read_proc_text_lossy(&format!("/proc/{pid}/stat")).map_err(|_| ())?;
-    parse_start_time_from_stat(&stat)
-}
-
-/// Parse process start time (field 22) from `/proc/<pid>/stat` content.
-fn parse_start_time_from_stat(stat: &str) -> Result<u64, ()> {
-    let after = &stat[stat.rfind(')').ok_or(())? + 2..];
-    after
-        .split_ascii_whitespace()
-        .nth(19)
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or(())
-}
-
-/// Check whether the current process is in the init PID namespace.
-#[allow(dead_code)] // Used by agentsight-enforcer crate (actplane.rs has its own copy).
-pub(crate) fn is_init_pid_namespace() -> bool {
-    let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
-        return false;
-    };
-    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
-        return false;
-    };
-    let result = self_ns == init_ns;
-    if !result {
-        eprintln!(
-            "agentsight: not in init PID namespace (self={}, pid1={}); \
-             file_delete_guard disabled",
-            self_ns.display(),
-            init_ns.display(),
-        );
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,131 +182,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_to_host_pid_fast_path_returns_self_for_current_process() {
-        // In the root namespace the current process PID is its own host PID.
-        let pid = std::process::id() as i32;
-        let pst = proc_start_time(pid).expect("own start time");
-        assert_eq!(resolve_to_host_pid(pid, pst), pid);
-    }
-
-    #[test]
-    fn resolve_to_host_pid_returns_input_for_nonexistent_pid() {
-        // A PID that definitely doesn't exist should fall through to fallback.
-        assert_eq!(resolve_to_host_pid(2_000_000_000, 0), 2_000_000_000);
-    }
-
-    #[test]
-    fn resolve_to_host_pid_rejects_pid_with_wrong_start_time() {
-        // Own PID exists but wrong start_time → should not match fast path.
-        let pid = std::process::id() as i32;
-        let result = resolve_to_host_pid(pid, 999_999_999);
-        // Falls through to slow path; no NSpid inner match → returns input.
-        assert_eq!(result, pid);
-    }
-
-    #[test]
-    fn read_nspid_chain_returns_at_least_self() {
-        let pid = std::process::id() as i32;
-        let chain = read_nspid_chain(pid);
-        assert!(!chain.is_empty(), "NSpid chain should not be empty");
-        assert_eq!(chain[0], pid, "first NSpid should be host PID");
-    }
-
-    #[test]
-    fn read_nspid_chain_returns_empty_for_invalid_pid() {
-        assert!(read_nspid_chain(2_000_000_000).is_empty());
-    }
-
-    #[test]
-    fn proc_start_time_succeeds_for_self() {
-        let pst = proc_start_time(std::process::id() as i32);
-        assert!(pst.is_ok());
-        assert!(pst.unwrap() > 0);
-    }
-
-    #[test]
-    fn proc_start_time_fails_for_nonexistent_pid() {
-        assert!(proc_start_time(2_000_000_000).is_err());
-    }
-
-    #[test]
-    fn is_init_pid_namespace_matches_procfs_ground_truth() {
-        // The answer depends on where the suite runs, and BOTH outcomes are
-        // legitimate. In the CI containers `/proc/self/ns/pid` and
-        // `/proc/1/ns/pid` are readable and equal, so the guard reports true.
-        // On a bare-metal host an unprivileged test user cannot readlink
-        // `/proc/1/ns/pid` (EACCES, PID 1 is root-owned), and the guard must
-        // fail closed to false. Deriving the expectation from procfs lets the
-        // real environment pick the branch instead of asserting a
-        // container-only truth that fails on every bare-metal run.
-        let self_ns = fs::read_link("/proc/self/ns/pid");
-        let init_ns = fs::read_link("/proc/1/ns/pid");
-        match (self_ns, init_ns) {
-            (Ok(self_ns), Ok(init_ns)) => {
-                assert_eq!(
-                    is_init_pid_namespace(),
-                    self_ns == init_ns,
-                    "procfs ground truth: self ns {:?} vs pid 1 ns {:?}",
-                    self_ns,
-                    init_ns
-                );
-            }
-            // Partial information (either namespace link unreadable) must
-            // read as "not in the init PID namespace": `file_delete_guard`
-            // stays disabled rather than acting on an unverified assumption.
-            _ => assert!(!is_init_pid_namespace()),
-        }
-    }
-
-    #[test]
-    fn resolve_and_read_target_succeeds_for_live_process() {
-        // Spawn a short-lived child and resolve it.
+    fn reads_start_time_for_live_process() {
         use std::process::Command;
         let mut child = Command::new("sleep")
             .arg("10")
             .spawn()
             .expect("spawn sleep");
         let pid = child.id() as i32;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let pst = proc_start_time(pid).expect("child start time");
-        let (host_pid, start_time) = resolve_and_read_target(pid, pst).expect("resolve");
-        assert_eq!(host_pid, pid);
-        assert_eq!(start_time, pst);
-        // cleanup
+        let start_time = read_process_start_time(pid).expect("child start time");
+        assert!(start_time > 0);
+        assert_eq!(
+            read_process_start_time(pid).expect("stable identity"),
+            start_time
+        );
         let _ = child.kill();
         let _ = child.wait();
     }
 
     #[test]
-    fn parse_nspid_single_level() {
-        let status = "Name:\ttest\nPid:\t42\nNSpid:\t42\nTgid:\t42\n";
-        assert_eq!(parse_nspid_from_status(status), vec![42]);
-    }
-
-    #[test]
-    fn parse_nspid_nested_namespace() {
-        let status = "Name:\tgateway\nPid:\t39560\nNSpid:\t39560\t1\nTgid:\t39560\n";
-        assert_eq!(parse_nspid_from_status(status), vec![39560, 1]);
-    }
-
-    #[test]
-    fn parse_nspid_missing_line() {
-        // Status content without NSpid line (edge case)
-        let status = "Name:\ttest\nPid:\t42\nTgid:\t42\n";
-        assert_eq!(parse_nspid_from_status(status), Vec::<i32>::new());
-    }
-
-    #[test]
-    fn parse_start_time_from_valid_stat() {
-        // Synthetic /proc/pid/stat content: comm in parens, then 19 fields before starttime
+    fn validate_stat_reads_start_time() {
         let stat = "42 (test-proc) S 1 42 42 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 12345 1000 100 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
-        assert_eq!(parse_start_time_from_stat(stat), Ok(12345));
-    }
-
-    #[test]
-    fn parse_start_time_from_malformed_stat() {
-        assert!(parse_start_time_from_stat("garbage").is_err());
-        assert!(parse_start_time_from_stat("").is_err());
+        assert_eq!(validate_stat(42, stat).ok(), Some(12345));
+        assert!(validate_stat(42, "garbage").is_err());
+        assert!(validate_stat(42, "").is_err());
     }
 
     #[test]
@@ -455,8 +228,7 @@ mod tests {
             "the ASCII start-time field survives"
         );
 
-        // The parsers consume exactly this lossy shape and still resolve.
-        assert_eq!(parse_start_time_from_stat(&text), Ok(99999));
+        assert_eq!(validate_stat(42, &text).ok(), Some(99999));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -464,22 +236,6 @@ mod tests {
     #[test]
     fn read_proc_text_lossy_reports_missing_files() {
         assert!(read_proc_text_lossy("/proc/2000000000/stat").is_err());
-    }
-
-    #[test]
-    fn parse_start_time_survives_a_replacement_char_in_the_comm() {
-        // A comm decoded lossily keeps its parentheses structure, so the
-        // start-time field behind the name stays reachable.
-        let stat = "42 (cl\u{fffd}ude) S 1 42 42 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 77777 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
-        assert_eq!(parse_start_time_from_stat(stat), Ok(77777));
-    }
-
-    #[test]
-    fn parse_nspid_survives_a_replacement_char_in_the_name_line() {
-        // /proc/<pid>/status leads with `Name:`, so a non-UTF-8 name decodes
-        // lossily in front of the NSpid line the resolver needs.
-        let status = "Name:\tcl\u{fffd}ude\nPid:\t39560\nNSpid:\t39560\t1\nTgid:\t39560\n";
-        assert_eq!(parse_nspid_from_status(status), vec![39560, 1]);
     }
 
     #[test]

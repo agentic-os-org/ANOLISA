@@ -195,6 +195,7 @@ struct pid_domain_id {
 struct te_prov {
 	__u64 label;
 	__u64 timestamp_ns;
+	__u64 start_boottime;
 	pid_t pid;
 	__u32 op;
 	__u32 ip;
@@ -660,6 +661,8 @@ static __always_inline void te_record_proc_prov(pid_t pid, __u32 domain_id,
 	__builtin_memset(p, 0, sizeof(*p));
 	p->label = label;
 	p->timestamp_ns = bpf_ktime_get_ns();
+	p->start_boottime = BPF_CORE_READ((struct task_struct *)bpf_get_current_task(),
+					 start_boottime);
 	p->pid = pid;
 	p->op = op;
 	p->ip = ip;

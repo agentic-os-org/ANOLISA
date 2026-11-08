@@ -18,22 +18,31 @@ ACTPLANE_POST_0008_BPF_LIB_BLOB="d76db22d5517abf3c5b43d5d30fe11d641d4c805"
 ACTPLANE_POST_0009_BPF_LIB_BLOB="450b8c3035bb66602f5b946da7dc4af72cdc5202"
 ACTPLANE_POST_0010_BPF_LIB_BLOB="50745a8aa253c912bf31e0297e5518a925ff2f3f"
 ACTPLANE_POST_0011_BPF_LIB_BLOB="14ed2e00223320b356fef558fa1ad11eac1389ad"
-ACTPLANE_PATCHED_BPF_LIB_BLOB="4397955eb60f319044a652073903fd2631e95e58"
+ACTPLANE_POST_0012_BPF_LIB_BLOB="4397955eb60f319044a652073903fd2631e95e58"
+ACTPLANE_PATCHED_BPF_LIB_BLOB="6e8c98460518cc4281db53802ccedb15d3647bfe"
+ACTPLANE_BASE_BPF_CARGO_BLOB="dd223632e640b23873f29442ca244bb67490f47e"
+ACTPLANE_POST_0012_BPF_CARGO_BLOB="dbd1fc9ad1d9a36be1002d8b21b7eb65cd3a9b5d"
+ACTPLANE_PATCHED_BPF_CARGO_BLOB="3a727d4db4e32cf00e6a1b8e56a2f744660a5b95"
 ACTPLANE_BASE_BPF_BUILD_BLOB="ae2345ecd26bbf47a6f7dae228ed08ec7e83bcbc"
-ACTPLANE_PATCHED_BPF_BUILD_BLOB="c3ba506d246d3139b8ee148d942db6ba4159b1b9"
+ACTPLANE_POST_0012_BPF_BUILD_BLOB="c3ba506d246d3139b8ee148d942db6ba4159b1b9"
+ACTPLANE_PATCHED_BPF_BUILD_BLOB="5afc700b0d50f7fb6e543ba2130b2208ffc1ecf0"
 ACTPLANE_BASE_BPF_MAKEFILE_BLOB="eddb4267ba5a10e7f94ad64f19323040368813c1"
 ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB="b354320bf25dacc72af1a60419f81ea0a173eb1f"
-ACTPLANE_STAGED_BPF_LIB_BLOB="50088e47198a1b1cdaf7da9262b90e36f3f133e5"
+ACTPLANE_STAGED_BPF_LIB_BLOB="6e8c98460518cc4281db53802ccedb15d3647bfe"
 ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_BLOB="b92b9f26d9831f8d06676f71f8eb7e220fa782e5"
 ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB="37050a44c22b09bb27893a728aae9beccc785bf1"
 ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB="671d27eb6a160c658271fa7eff11be471afd4e48"
 ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB="d8be16f330f99500348820d5a00dbc0549d8d1a3"
-ACTPLANE_STAGED_BPF_BUILD_BLOB="511f39c201881d4beeeb6099bba3c6832ebca9b9"
+ACTPLANE_STAGED_BPF_BUILD_BLOB="5afc700b0d50f7fb6e543ba2130b2208ffc1ecf0"
+ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB="eeecb0dc648d85212edc0378a415d047a685d09e"
+ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB="ff8025973dd72060d4dec1967c695717da3aa005"
 ACTPLANE_STAGED_FILE_READ_GUARD_BLOB="561a9abe4f7a532d18a6762a133a8ef3e4a0c46e"
-ACTPLANE_STAGED_X86_64_PREBUILT_BPF_BLOB="065d96596cf57323fbe18fa2a9126c71b98ae1be"
-ACTPLANE_STAGED_X86_64_INODE_BPF_BLOB="abbc7c67c5f2fa4a4050dbe25905d2b6c9fd0306"
-ACTPLANE_STAGED_AARCH64_PREBUILT_BPF_BLOB="e6239472edd02f17c4950cccb4baae9e5db80596"
-ACTPLANE_STAGED_AARCH64_INODE_BPF_BLOB="9dc408622d8f354aae03c9f264cad2537a22a17b"
+ACTPLANE_STAGED_X86_64_PREBUILT_BPF_BLOB="a8ba9c04f25349b8e70365d3cf66b2cb41e60218"
+ACTPLANE_STAGED_X86_64_INODE_BPF_BLOB="aadb1b5fd2b1c14ce9a9f075eb4b3223a08bdfb2"
+ACTPLANE_STAGED_X86_64_TARGET_IDENTITY_BPF_BLOB="6676923b18e0e55574dcabd7a529c42f311ec1cf"
+ACTPLANE_STAGED_AARCH64_PREBUILT_BPF_BLOB="c60e615866f342c3f787b651ecb16e9999997d7f"
+ACTPLANE_STAGED_AARCH64_INODE_BPF_BLOB="4c0bcd67aea7357213fe631fbd079fe730853d1a"
+ACTPLANE_STAGED_AARCH64_TARGET_IDENTITY_BPF_BLOB="09d36a7dd3fcd948b4441c21a036d8f49b78ba7c"
 ACTPLANE_PREBUILT_BPF_BLOB="0ef15841f84be784774024ad844e70bc6124a753"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -51,6 +60,7 @@ PATCH_0009_FILE="$PATCH_DIR/0009-migrate-session-tree.patch"
 PATCH_0010_FILE="$PATCH_DIR/0010-support-legacy-kernel-runtime.patch"
 PATCH_0011_FILE="$PATCH_DIR/0011-gate-blocking-on-active-lsm.patch"
 PATCH_0012_FILE="$PATCH_DIR/0012-capture-kernel-control-identity.patch"
+PATCH_0013_FILE="$PATCH_DIR/0013-resolve-target-kernel-identity.patch"
 PATCH_FILES="$PATCH_0001_FILE
 $PATCH_0002_FILE
 $PATCH_0003_FILE
@@ -62,7 +72,8 @@ $PATCH_0008_FILE
 $PATCH_0009_FILE
 $PATCH_0010_FILE
 $PATCH_0011_FILE
-$PATCH_0012_FILE"
+$PATCH_0012_FILE
+$PATCH_0013_FILE"
 CARGO=${CARGO:-cargo}
 
 # An explicit target is opt-in; native callers retain their existing behavior.
@@ -85,11 +96,13 @@ case "$BUILD_TARGET" in
         BPF_TARGET_ARCH=x86_64
         ACTPLANE_STAGED_PREBUILT_BPF_BLOB=$ACTPLANE_STAGED_X86_64_PREBUILT_BPF_BLOB
         ACTPLANE_STAGED_INODE_BPF_BLOB=$ACTPLANE_STAGED_X86_64_INODE_BPF_BLOB
+        ACTPLANE_STAGED_TARGET_IDENTITY_BPF_BLOB=$ACTPLANE_STAGED_X86_64_TARGET_IDENTITY_BPF_BLOB
         ;;
     aarch64-unknown-linux-gnu)
         BPF_TARGET_ARCH=aarch64
         ACTPLANE_STAGED_PREBUILT_BPF_BLOB=$ACTPLANE_STAGED_AARCH64_PREBUILT_BPF_BLOB
         ACTPLANE_STAGED_INODE_BPF_BLOB=$ACTPLANE_STAGED_AARCH64_INODE_BPF_BLOB
+        ACTPLANE_STAGED_TARGET_IDENTITY_BPF_BLOB=$ACTPLANE_STAGED_AARCH64_TARGET_IDENTITY_BPF_BLOB
         ;;
     *) echo "unsupported enforcer target: $BUILD_TARGET" >&2; exit 1 ;;
 esac
@@ -170,9 +183,9 @@ if [ "$ACTUAL_REVISION" != "$ACTPLANE_REVISION" ]; then
 fi
 
 UNEXPECTED_TRACKED=$(git -C "$SOURCE_DIR" diff --name-only --ignore-submodules=all \
-    "$ACTPLANE_REVISION" -- . | grep -Ev '^bpf/(src/lib\.rs|build\.rs|Makefile)$' || true)
+    "$ACTPLANE_REVISION" -- . | grep -Ev '^bpf/(Cargo\.toml|src/lib\.rs|build\.rs|Makefile)$' || true)
 UNEXPECTED_UNTRACKED=$(git -C "$SOURCE_DIR" ls-files --others --exclude-standard \
-    | grep -v '^\.cargo-ok$' || true)
+    | grep -Ev '^(\.cargo-ok|bpf/(src/target_identity\.rs|target_identity\.bpf\.c|prebuilt/(x86_64|aarch64)/target_identity\.bpf\.o))$' || true)
 UNEXPECTED_IGNORED=$(git -C "$SOURCE_DIR" ls-files --others --ignored --exclude-standard || true)
 DIRTY_SUBMODULES=$(git -C "$SOURCE_DIR" submodule status --recursive \
     | grep -E '^[+U]' || true)
@@ -190,9 +203,17 @@ if [ "$ACTUAL_PREBUILT_BPF_BLOB" != "$ACTPLANE_PREBUILT_BPF_BLOB" ]; then
     exit 1
 fi
 
+ACTUAL_BPF_CARGO_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Cargo.toml)
 ACTUAL_BPF_BUILD_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/build.rs)
 ACTUAL_BPF_MAKEFILE_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Makefile)
+if [ "$ACTUAL_BPF_CARGO_BLOB" != "$ACTPLANE_BASE_BPF_CARGO_BLOB" ] \
+    && [ "$ACTUAL_BPF_CARGO_BLOB" != "$ACTPLANE_POST_0012_BPF_CARGO_BLOB" ] \
+    && [ "$ACTUAL_BPF_CARGO_BLOB" != "$ACTPLANE_PATCHED_BPF_CARGO_BLOB" ]; then
+    echo "ActPlane BPF Cargo manifest failed source attestation" >&2
+    exit 1
+fi
 if [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_BASE_BPF_BUILD_BLOB" ] \
+    && [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_POST_0012_BPF_BUILD_BLOB" ] \
     && [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_PATCHED_BPF_BUILD_BLOB" ]; then
     echo "ActPlane BPF build script failed source attestation" >&2
     exit 1
@@ -212,42 +233,42 @@ if [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_BASE_BPF_LIB_BLOB" ]; then
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0001_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0002_FILE" "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0002_FILE" "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0002_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0003_FILE" "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0003_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0004_FILE" "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0004_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0005_FILE" "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0005_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0006_FILE" "$PATCH_0007_FILE" "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0007_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0008_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0009_FILE" "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0009_BPF_LIB_BLOB" ]; then
-    for patch_file in "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE"; do
+    for patch_file in "$PATCH_0010_FILE" "$PATCH_0011_FILE" "$PATCH_0012_FILE" "$PATCH_0013_FILE"; do
         git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
@@ -256,28 +277,42 @@ elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0010_BPF_LIB_BLOB" ]; then
     git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0011_FILE"
     git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0012_FILE"
     git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0012_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0013_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0013_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0011_BPF_LIB_BLOB" ]; then
     git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0012_FILE"
     git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0012_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0013_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0013_FILE"
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0012_BPF_LIB_BLOB" ]; then
+    git -C "$SOURCE_DIR" apply --unidiff-zero --check "$PATCH_0013_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero "$PATCH_0013_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ]; then
     echo "ActPlane BPF loader does not match the pinned revision or reviewed patch queue" >&2
     exit 1
 fi
 
 ACTUAL_BPF_LIB_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/lib.rs)
+ACTUAL_BPF_CARGO_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Cargo.toml)
 ACTUAL_BPF_BUILD_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/build.rs)
 ACTUAL_BPF_MAKEFILE_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Makefile)
+ACTUAL_TARGET_IDENTITY_RUST_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/target_identity.rs)
+ACTUAL_TARGET_IDENTITY_C_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/target_identity.bpf.c)
 if [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ] \
+    || [ "$ACTUAL_BPF_CARGO_BLOB" != "$ACTPLANE_PATCHED_BPF_CARGO_BLOB" ] \
     || [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_PATCHED_BPF_BUILD_BLOB" ] \
-    || [ "$ACTUAL_BPF_MAKEFILE_BLOB" != "$ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB" ]; then
+    || [ "$ACTUAL_BPF_MAKEFILE_BLOB" != "$ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB" ] \
+    || [ "$ACTUAL_TARGET_IDENTITY_RUST_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB" ] \
+    || [ "$ACTUAL_TARGET_IDENTITY_C_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB" ]; then
     echo "ActPlane compatibility patch result failed source attestation" >&2
     exit 1
 fi
 
-# Kernel-side changes live in this repository and ship as two reviewed
+# Kernel-side changes live in this repository and ship as three reviewed
 # prebuilt objects: the full variant for kernels that permit bpf_d_path in LSM
-# hooks, and the inode/mailbox variant for legacy kernels. Pin both by hash so
-# the attested enforcer embeds exactly the reviewed bytes. The C sources and
+# hooks, the inode/mailbox variant for legacy kernels, and the target identity
+# task iterator. Pin all three by hash so the attested enforcer embeds exactly
+# the reviewed bytes. The C sources and
 # Makefile are copied alongside for auditability; ACTPLANE_REBUILD_BPF remains
 # forbidden for this release build.
 VENDORED_ENGINE_DIR="$AGENTSIGHT_ROOT/crates/ebpf-ifc-engine"
@@ -289,25 +324,31 @@ STAGED_GENERATION_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE
 STAGED_GENERATION_TESTS_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_generation_tests.rs")
 STAGED_MAP_WRITER_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_map_writer.rs")
 STAGED_PINNED_MAPS_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/file_protection_pinned_maps.rs")
+STAGED_TARGET_IDENTITY_RUST_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/src/target_identity.rs")
+STAGED_TARGET_IDENTITY_C_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/target_identity.bpf.c")
 STAGED_FILE_READ_GUARD_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_ENGINE_DIR/file_read_guard.bpf.h")
 STAGED_PREBUILT_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_PREBUILT_DIR/process.bpf.o")
 STAGED_INODE_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_PREBUILT_DIR/process-inode-only.bpf.o")
+STAGED_TARGET_IDENTITY_BLOB=$(git -C "$AGENTSIGHT_ROOT" hash-object "$VENDORED_PREBUILT_DIR/target_identity.bpf.o")
 if [ "$STAGED_BPF_BUILD_BLOB" != "$ACTPLANE_STAGED_BPF_BUILD_BLOB" ] \
     || [ "$STAGED_BPF_LIB_BLOB" != "$ACTPLANE_STAGED_BPF_LIB_BLOB" ] \
     || [ "$STAGED_GENERATION_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_BLOB" ] \
     || [ "$STAGED_GENERATION_TESTS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB" ] \
     || [ "$STAGED_MAP_WRITER_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB" ] \
     || [ "$STAGED_PINNED_MAPS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB" ] \
+    || [ "$STAGED_TARGET_IDENTITY_RUST_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB" ] \
+    || [ "$STAGED_TARGET_IDENTITY_C_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB" ] \
     || [ "$STAGED_FILE_READ_GUARD_BLOB" != "$ACTPLANE_STAGED_FILE_READ_GUARD_BLOB" ] \
     || [ "$STAGED_PREBUILT_BLOB" != "$ACTPLANE_STAGED_PREBUILT_BPF_BLOB" ] \
-    || [ "$STAGED_INODE_BLOB" != "$ACTPLANE_STAGED_INODE_BPF_BLOB" ]; then
+    || [ "$STAGED_INODE_BLOB" != "$ACTPLANE_STAGED_INODE_BPF_BLOB" ] \
+    || [ "$STAGED_TARGET_IDENTITY_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_BPF_BLOB" ]; then
     echo "vendored ebpf-ifc-engine sources or prebuilt objects failed source attestation" >&2
     exit 1
 fi
-for engine_file in process.bpf.c process.h file_read_guard.bpf.h taint.h taint_engine.bpf.h capability.bpf.h channel.bpf.h; do
+for engine_file in process.bpf.c target_identity.bpf.c process.h file_read_guard.bpf.h taint.h taint_engine.bpf.h capability.bpf.h channel.bpf.h; do
     cp "$VENDORED_ENGINE_DIR/$engine_file" "$SOURCE_DIR/bpf/$engine_file"
 done
-for engine_file in lib.rs file_protection_generation.rs file_protection_generation_tests.rs file_protection_map_writer.rs file_protection_pinned_maps.rs; do
+for engine_file in lib.rs target_identity.rs file_protection_generation.rs file_protection_generation_tests.rs file_protection_map_writer.rs file_protection_pinned_maps.rs; do
     cp "$VENDORED_ENGINE_DIR/src/$engine_file" "$SOURCE_DIR/bpf/src/$engine_file"
 done
 cp "$VENDORED_ENGINE_DIR/build.rs" "$SOURCE_DIR/bpf/build.rs"
@@ -315,6 +356,8 @@ mkdir -p "$STAGED_PREBUILT_DIR"
 cp "$VENDORED_PREBUILT_DIR/process.bpf.o" "$STAGED_PREBUILT_DIR/process.bpf.o"
 cp "$VENDORED_PREBUILT_DIR/process-inode-only.bpf.o" \
     "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o"
+cp "$VENDORED_PREBUILT_DIR/target_identity.bpf.o" \
+    "$STAGED_PREBUILT_DIR/target_identity.bpf.o"
 
 SOURCE_DIR=$(CDPATH= cd -- "$SOURCE_DIR" && pwd)
 mkdir -p "$TARGET_ROOT"
@@ -335,7 +378,10 @@ ACTUAL_GENERATION_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protectio
 ACTUAL_GENERATION_TESTS_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_generation_tests.rs)
 ACTUAL_MAP_WRITER_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_map_writer.rs)
 ACTUAL_PINNED_MAPS_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/file_protection_pinned_maps.rs)
+ACTUAL_TARGET_IDENTITY_RUST_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/target_identity.rs)
+ACTUAL_TARGET_IDENTITY_C_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/target_identity.bpf.c)
 ACTUAL_FILE_READ_GUARD_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/file_read_guard.bpf.h)
+ACTUAL_BPF_CARGO_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Cargo.toml)
 ACTUAL_BPF_BUILD_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/build.rs)
 ACTUAL_BPF_MAKEFILE_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/Makefile)
 if [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_STAGED_BPF_LIB_BLOB" ] \
@@ -343,7 +389,10 @@ if [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_STAGED_BPF_LIB_BLOB" ] \
     || [ "$ACTUAL_GENERATION_TESTS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_GENERATION_TESTS_BLOB" ] \
     || [ "$ACTUAL_MAP_WRITER_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_MAP_WRITER_BLOB" ] \
     || [ "$ACTUAL_PINNED_MAPS_BLOB" != "$ACTPLANE_STAGED_FILE_PROTECTION_PINNED_MAPS_BLOB" ] \
+    || [ "$ACTUAL_TARGET_IDENTITY_RUST_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_RUST_BLOB" ] \
+    || [ "$ACTUAL_TARGET_IDENTITY_C_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_C_BLOB" ] \
     || [ "$ACTUAL_FILE_READ_GUARD_BLOB" != "$ACTPLANE_STAGED_FILE_READ_GUARD_BLOB" ] \
+    || [ "$ACTUAL_BPF_CARGO_BLOB" != "$ACTPLANE_PATCHED_BPF_CARGO_BLOB" ] \
     || [ "$ACTUAL_BPF_BUILD_BLOB" != "$ACTPLANE_STAGED_BPF_BUILD_BLOB" ] \
     || [ "$ACTUAL_BPF_MAKEFILE_BLOB" != "$ACTPLANE_PATCHED_BPF_MAKEFILE_BLOB" ]; then
     echo "attested ActPlane sources mutated during the build" >&2
@@ -354,8 +403,10 @@ fi
 # the pinned files after the build.
 STAGED_BLOB=$(git -C "$SOURCE_DIR" hash-object "$STAGED_PREBUILT_DIR/process.bpf.o")
 STAGED_INODE_BLOB=$(git -C "$SOURCE_DIR" hash-object "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o")
+STAGED_TARGET_IDENTITY_BLOB=$(git -C "$SOURCE_DIR" hash-object "$STAGED_PREBUILT_DIR/target_identity.bpf.o")
 if [ "$STAGED_BLOB" != "$ACTPLANE_STAGED_PREBUILT_BPF_BLOB" ] \
-    || [ "$STAGED_INODE_BLOB" != "$ACTPLANE_STAGED_INODE_BPF_BLOB" ]; then
+    || [ "$STAGED_INODE_BLOB" != "$ACTPLANE_STAGED_INODE_BPF_BLOB" ] \
+    || [ "$STAGED_TARGET_IDENTITY_BLOB" != "$ACTPLANE_STAGED_TARGET_IDENTITY_BPF_BLOB" ]; then
     echo "attested prebuilt objects mutated during the build" >&2
     exit 1
 fi
@@ -363,7 +414,8 @@ fi
 ENFORCER_BIN="$PRIVATE_DIR/agentsight-enforcer"
 python3 - "$PRIVATE_TARGET/$BUILD_TARGET/release/agentsight-enforcer" "$ENFORCER_BIN" \
     "$STAGED_PREBUILT_DIR/process.bpf.o" \
-    "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o" <<'PY'
+    "$STAGED_PREBUILT_DIR/process-inode-only.bpf.o" \
+    "$STAGED_PREBUILT_DIR/target_identity.bpf.o" <<'PY'
 import hashlib
 import pathlib
 import sys
