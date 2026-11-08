@@ -52,28 +52,33 @@ struct AgentTurn {
 /// Calls stay pending across user steering boundaries.
 #[derive(Default)]
 struct PendingCalls {
-    /// Tool calls whose `*_output` has not arrived yet, innermost last. Codex
-    /// reports each command a call ran as an `item_completed` between the call
-    /// and its output, so an item belongs to the innermost call still open.
+    /// Tool calls whose `*_output` has not arrived yet. Explicit item IDs
+    /// identify concurrent owners; the single-call fallback supports older
+    /// transcripts whose command-item IDs differ from their outer call ID.
     open_calls: Vec<String>,
     /// Whether one of those commands failed, keyed by the call it belongs to.
     command_failed: HashMap<String, bool>,
 }
 
 impl PendingCalls {
-    /// Attribute one `CommandExecution` item to the innermost open call.
+    /// Attribute one `CommandExecution` item to its explicitly identified call.
     ///
-    /// The item has no `call_id`; the rollout orders it between its call and
-    /// that call's output, and one call can run several commands whose mixed
-    /// outcomes collapse into "this call failed if any of them did".
+    /// Current Codex uses the call ID as the item's `id`. Older nested-command
+    /// records can have a separate item ID; only a single open call makes that
+    /// fallback unambiguous. Any failed command makes its owning call fail.
     fn record_command(&mut self, item: &serde_json::Value) {
-        let Some(call_id) = self.open_calls.last() else {
+        let call_id = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|id| self.open_calls.iter().find(|call| call.as_str() == id))
+            .or_else(|| (self.open_calls.len() == 1).then(|| &self.open_calls[0]));
+        let Some(call_id) = call_id else {
             return;
         };
         let failed = item
             .get("status")
             .and_then(|v| v.as_str())
-            .is_some_and(|status| status == "failed")
+            .is_some_and(|status| matches!(status, "failed" | "declined"))
             || item
                 .get("exit_code")
                 .and_then(|v| v.as_i64())
@@ -239,8 +244,8 @@ pub fn convert_codex_events(
                 }
                 "item_completed" => {
                     // A `CommandExecution` item carries the exit verdict the
-                    // `*_output` text does not spell out; it has no `call_id`,
-                    // so it is attributed to the innermost call still open.
+                    // `*_output` text does not spell out; its ID identifies the
+                    // issuing call even when several calls overlap.
                     let item = payload.get("item").unwrap_or(&serde_json::Value::Null);
                     if payload_type_str(item) == "CommandExecution" {
                         pending.record_command(item);
