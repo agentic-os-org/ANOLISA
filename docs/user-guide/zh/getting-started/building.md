@@ -47,7 +47,7 @@ Linux-only 组件。
 
 | 需求 | 依据 |
 |------|------|
-| Node.js | 完整构建使用 Node.js 22 或更高版本，包括 AgentSight 的 DSH 插件。agent-memory、agent-sec-core、Tokenless 和 ws-ckpt 的插件也由 npm 构建。 |
+| Node.js | 脚本使用 Node.js 22 或更高版本和 npm 构建 AgentSight 的内嵌 Dashboard，以及独立的框架插件。 |
 | Python | 系统 `python3` 用于构建辅助脚本和安装检查。agent-sec-core 默认的 V2 构建不需要 uv、虚拟环境或固定版本 Python runtime。Python SDK wheel 和 Python 专属测试有各自的要求。 |
 | Rust | AW 和两个 Provider 固定 `1.97.1`；agent-sec-core 的 linux-sandbox 固定 `1.93.0`；cosh-ng 跟随 `stable`。遵循组件的 `rust-toolchain.toml` 和最低 `rust-version`；最低版本不代表需要单独安装该版本工具链。 |
 | cosh-ng | Linux 源码构建需要 `pkg-config` 和 OpenSSL 开发文件。 |
@@ -110,6 +110,12 @@ make install COMPONENTS="cosh-ng tokenless"
 后端名称拼接：`agent-sec-core` 会带上 `aw-provider-sec-core`，`tokenless` 会带上
 `aw-provider-tokenless`。当前源码目录的默认选集共有九个目标。以后增加匹配的
 Provider 时会随对应后端自动加入；未选中的后端及其 Provider 不会被额外加入。
+
+选中 `aw` 时（包括 `--all`），脚本构建并暂存所选组件的核心文件、随附技能和匹配的 AW Provider，
+跳过 Tokenless、sec-core、ws-ckpt、AgentSight 和 agent-memory 的独立 `-plugins` 产物。
+同时选中 `cosh-ng` 时，脚本也会交付所选 sec-core 和 Tokenless 后端的原生 Cosh Extension，
+提供 Cosh 安全 Hook 及 Shell 输入和输出优化。AgentSight 仍构建内嵌 Dashboard。
+需要某个组件的完整独立适配器包时，选择该组件即可，无需选择 `aw`。
 
 ```bash
 # Prepare dependencies, build the default targets and install system files
@@ -193,6 +199,8 @@ user 模式默认不安装系统包，也不调用 `sudo`。缺失的系统构�
 显式单独选择 Provider 只提供 AW 桥接程序，不会选中对应后端，也不会赋予后端
 所需的权限。
 
+每次打包都使用空的 `--destdir`。复用打包根目录会保留上次暂存的独立适配器文件。
+
 依赖准备只处理所选构建目标的需求。脚本保留组件编译结果和缓存供后续构建复用，
 不准备 uv 或固定版本 Python 环境。RTK、ActPlane 源码准备仍由各组件的构建流程
 维护。AW 和 Provider 由脚本直接调用各自的 Makefile；上方仓库根 Makefile 仍有
@@ -209,6 +217,41 @@ AW 和 Provider 支持用 `CARGO_TARGET_DIR` 指定构建输出，统一入口�
 runtime 或宿主能力时，会在安装组件文件前给出提示。
 只编译和打包暂存不要求构建机能够运行所选服务。`--ignore-deps` 同时跳过构建环境
 准备和运行时检查，适用于已准备好环境的主机。
+
+### 将已安装的主机迁移到 AW
+
+覆盖安装会保留已有适配器文件和框架注册。切换前，使用实际运行框架的服务账户或
+Agent 用户，并沿用其 profile、配置路径和环境。记录已启用的插件或 Hook 及其加载来源，
+备份生效的配置，并保留原适配器包。由 ANOLISA 管理的注册可用
+[`anolisa adapter status`](anolisa-cli.md#adapter) 查看来源。需要停用整项注册时，运行
+`anolisa adapter disable <component> <framework>`。独立注册请使用框架自己的插件或
+Hook 设置。
+
+1. 准备并校验 [AW 配置](../aw/configuration.md)。按已启用的 Provider、事件和工具选择器，
+   核对原生 Hook 的覆盖范围。保留 AW 尚未在当前 profile 接管的原生 Hook。Cosh 继续使用
+   sec-core 和 Tokenless Extension，通过 [`/extensions list`](../cosh-ng/core/extensions.md)
+   核对来源。依赖 OpenClaw 或 Hermes 的自动快照或原生工具时，保留
+   [ws-ckpt 插件](../ws-ckpt/index.md#插件安装)。卸载脚本也会删除框架目录里的 Skill 副本。
+   如仍需使用该 Skill，请将它恢复到框架的 Skill 目录。
+2. 停止原 Agent 进程或 Gateway，关闭重叠的原生注册，再用 AW 启动。例如，在
+   [AW 使用的 OpenClaw profile](../aw/configuration.md#openclaw) 中，用
+   `openclaw plugins inspect <id> --json` 分别查看 `agent-sec` 和 `tokenless`。
+   如果 AW 已接管 `exec` 扫描，并且可以停用原生扫描器的插件自保护，在选定的
+   原生 JSON 中将 `plugins.entries.agent-sec.config.capabilities.scan-code.enabled`
+   设为 `false`。同时调整服务环境中已有的 `CODE_SCANNER_HOOK_ENABLED` 覆盖值。
+   `agent-sec` 的其他能力仍可使用。如果 AW Tokenless 步骤已覆盖当前 profile
+   所需能力，将 `plugins.entries.tokenless.enabled` 设为 `false`。需要原生 Tokenless
+   恢复工具时，保留原生插件，并在该 profile 中关闭重叠的 AW 步骤。
+3. 通过 AW 启动新会话或 Gateway，按接管的能力执行
+   [安全检查](../aw/security.md#验证检查)和 [Tokenless 验证](../aw/tokenless.md#查看效果)。
+   对照 AW 记录和框架日志，确认测试调用只触发一次预期的检查或压缩。启动所需服务后，
+   在同一环境中运行相应的 core 命令，例如 `agent-sec-cli skillsec status`、`tokenless --version`
+   或 `ws-ckpt status`。确认 Agent 能发现并使用所需的 Skill。若已安装 checkpoint
+   Skill，可在 [Cosh](../cosh-ng/core/skills.md) 中运行 `/skills detail ws-ckpt`。
+
+回滚时退出 AW 管理的 Agent 并停止其 AW 服务。恢复备份的原生配置，通过原安装工具
+或框架设置重新启用之前关闭的注册。使用原 profile 启动原生 Agent 或 Gateway，
+再次检查插件、CLI 和 Skill。
 
 ## 5. 组件构建入口
 

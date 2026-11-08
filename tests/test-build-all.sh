@@ -15,6 +15,9 @@ absent() {
 absent_event() {
     if grep -Fxq -- "$1" "$EVENT_LOG"; then fail "unexpected event '$1'"; fi
 }
+absent_install() {
+    if grep -Eq '^make\|[^|]+\|install[^|]*\|' "$EVENT_LOG"; then fail 'unexpected installation'; fi
+}
 assert_component_event() {
     local event="$1" expected="$2" actual
     actual="$(awk -F '|' -v event="$event" '$1 == event { print $2 }' "$EVENT_LOG")"
@@ -58,7 +61,7 @@ for argument in "$@"; do
     if $need_directory; then directory="$argument"; need_directory=false; continue; fi
     case "$argument" in
         -C) need_directory=true ;;
-        build|install|uninstall|install-core|install-plugins|install-skills) target="$argument" ;;
+        build|build-core|build-core-with-cosh|build-all|install|install-core|install-core-with-cosh|install-core-and-skills|install-core-and-skills-with-cosh) target="$argument" ;;
     esac
 done
 component="${directory##*/}"
@@ -69,7 +72,7 @@ printf 'make|%s|%s' "$component" "$target" >> "$EVENT_LOG"
 printf '|%s' "$@" >> "$EVENT_LOG"
 printf '|CARGO_BUILD_JOBS=%s' "${CARGO_BUILD_JOBS:-}" >> "$EVENT_LOG"
 printf '\n' >> "$EVENT_LOG"
-if [[ "$target" == build && "$component" == "${FAIL_COMPONENT:-}" ]]; then exit 23; fi
+if [[ "$target" == build* && "$component" == "${FAIL_COMPONENT:-}" ]]; then exit 23; fi
 if [[ -n "${NATIVE_MAKE:-}" ]]; then
     if [[ "$component" == agent-sec-core && "$target" == build ]]; then
         # Keep native BUILD_DIR resolution and delivery; replace compilation only.
@@ -141,18 +144,25 @@ test_default_builds_all_before_install() {
     setup_case default
     invoke --ignore-deps
     success
-    local component
     local expected='cosh-ng skillfs ws-ckpt tokenless agentsight agent-sec-core aw'
     local actual
-    actual="$(awk -F '|' '$1 == "make" && $3 == "build" && $2 !~ /^aw-provider-/ { print $2 }' "$EVENT_LOG" | paste -sd ' ' -)"
+    actual="$(awk -F '|' '$1 == "make" && $3 ~ /^build/ && $2 !~ /^aw-provider-/ { print $2 }' "$EVENT_LOG" | paste -sd ' ' -)"
     [[ "$actual" == "$expected" ]] || fail "unexpected default backend build order: $actual"
     contains "$EVENT_LOG" 'make|aw-provider-sec-core|build|'
     contains "$EVENT_LOG" 'make|aw-provider-tokenless|build|'
-    [[ "$(grep -c '^make|.*|build|' "$EVENT_LOG")" -eq 9 ]] || fail 'expected nine builds'
-    [[ "$(grep -c '^make|.*|install|' "$EVENT_LOG")" -eq 9 ]] || fail 'expected nine installs'
+    [[ "$(grep -Ec '^make\|[^|]+\|build[^|]*\|' "$EVENT_LOG")" -eq 9 ]] || fail 'expected nine builds'
+    [[ "$(grep -Ec '^make\|[^|]+\|install[^|]*\|' "$EVENT_LOG")" -eq 9 ]] || fail 'expected nine installs'
+    contains "$EVENT_LOG" 'make|ws-ckpt|build-core|'
+    contains "$EVENT_LOG" 'make|ws-ckpt|install-core-and-skills|'
+    contains "$EVENT_LOG" 'make|agent-sec-core|build-core-with-cosh|'
+    contains "$EVENT_LOG" 'make|agent-sec-core|install-core-and-skills-with-cosh|'
+    contains "$EVENT_LOG" 'make|tokenless|build-core|'
+    contains "$EVENT_LOG" 'make|tokenless|install-core-with-cosh|'
+    contains "$EVENT_LOG" 'make|agentsight|build-all|'
+    contains "$EVENT_LOG" 'make|agentsight|install-core|'
     local last_build first_install
-    last_build="$(grep -n '^make|.*|build|' "$EVENT_LOG" | tail -1 | cut -d: -f1)"
-    first_install="$(grep -n '^make|.*|install|' "$EVENT_LOG" | head -1 | cut -d: -f1)"
+    last_build="$(awk -F '|' '$1 == "make" && $3 ~ /^build/ { n = NR } END { print n }' "$EVENT_LOG")"
+    first_install="$(awk -F '|' '$1 == "make" && $3 ~ /^install/ { print NR; exit }' "$EVENT_LOG")"
     (( last_build < first_install )) || fail 'component installation preceded a later build'
     contains "$EVENT_LOG" 'INSTALL_PROFILE=system'
     contains "$EVENT_LOG" 'PREFIX=/usr/local'
@@ -186,6 +196,23 @@ test_partial_backend_builds_its_provider() {
         contains "$EVENT_LOG" "prepare-components|${backend/sec-core/agent-sec-core} $provider"
         absent "$EVENT_LOG" '|install|'
     done
+}
+
+test_standalone_plugins_are_kept_when_aw_is_not_selected() {
+    setup_case without-aw
+    invoke --component tokenless --component agent-memory --ignore-deps --destdir "$CASE_ROOT/stage"
+    success
+    for component in tokenless agent-memory; do
+        contains "$EVENT_LOG" "make|$component|build|"
+        contains "$EVENT_LOG" "make|$component|install|"
+    done
+    contains "$EVENT_LOG" 'make|aw-provider-tokenless|install|'
+
+    setup_case memory-with-aw
+    invoke --component agent-memory --component aw --ignore-deps --destdir "$CASE_ROOT/stage"
+    success
+    contains "$EVENT_LOG" 'make|agent-memory|build-core|'
+    contains "$EVENT_LOG" 'make|agent-memory|install-core|'
 }
 
 test_provider_selected_explicitly_and_implicitly_is_built_once() {
@@ -287,9 +314,13 @@ test_no_install_prepares_then_builds_only() {
 test_staging_has_no_runtime_or_privileged_install() {
     setup_case staging
     local destination="$CASE_ROOT/package root"
-    invoke --component sec-core --component aw --ignore-deps --no-install --destdir "$destination" --prefix /opt/anolisa
+    invoke --component sec-core --component tokenless --component aw --ignore-deps --no-install --destdir "$destination" --prefix /opt/anolisa
     success
-    [[ "$(grep -c '^make|.*|install|' "$EVENT_LOG")" -eq 3 ]] || fail 'staging did not install the backend, AW and bound provider'
+    contains "$EVENT_LOG" 'make|agent-sec-core|build-core|'
+    contains "$EVENT_LOG" 'make|agent-sec-core|install-core-and-skills|'
+    contains "$EVENT_LOG" 'make|tokenless|install-core|'
+    contains "$EVENT_LOG" 'make|aw|install|'
+    contains "$EVENT_LOG" 'make|aw-provider-sec-core|install|'
     contains "$EVENT_LOG" "DESTDIR=$destination"
     contains "$EVENT_LOG" 'PREFIX=/opt/anolisa'
     absent_event runtime
@@ -302,9 +333,9 @@ test_build_failure_prevents_every_install() {
     invoke --component cosh-ng --component tokenless --component aw --ignore-deps
     unset FAIL_COMPONENT
     [[ "$STATUS" -ne 0 ]] || fail 'build failure was ignored'
-    contains "$EVENT_LOG" 'make|tokenless|build|'
+    contains "$EVENT_LOG" 'make|tokenless|build-core|'
     absent "$EVENT_LOG" 'make|aw|'
-    absent "$EVENT_LOG" '|install|'
+    absent_install
 }
 
 test_runtime_failure_prevents_every_install() {
@@ -597,11 +628,11 @@ test_user_profile_can_compile_system_only_components() {
     setup_case user-build
     invoke --all --user --no-install
     success
-    [[ "$(grep -c '^make|.*|build|' "$EVENT_LOG")" -eq 9 ]] || fail 'user build omitted system-only components'
+    [[ "$(grep -Ec '^make\|[^|]+\|build[^|]*\|' "$EVENT_LOG")" -eq 9 ]] || fail 'user build omitted system-only components'
     assert_component_event prepare-components 'cosh-ng skillfs ws-ckpt tokenless agentsight agent-sec-core aw aw-provider-sec-core aw-provider-tokenless'
-    contains "$EVENT_LOG" 'make|agent-sec-core|build|'
+    contains "$EVENT_LOG" 'make|agent-sec-core|build-core-with-cosh|'
     contains "$EVENT_LOG" 'INSTALL_PROFILE=user'
-    absent "$EVENT_LOG" '|install|'
+    absent_install
     absent_event root
     absent_event runtime
 }
@@ -649,10 +680,11 @@ test_supported_only_filters_before_dependency_preparation_and_installation() {
         success
         contains "$EVENT_LOG" "prepare-components|$expected"
         contains "$EVENT_LOG" 'prepare-policy|user|auto'
-        actual="$(awk -F '|' '$1 == "make" && $3 == "build" { print $2 }' "$EVENT_LOG" | paste -sd ' ' -)"
+        actual="$(awk -F '|' '$1 == "make" && $3 ~ /^build/ { print $2 }' "$EVENT_LOG" | paste -sd ' ' -)"
         [[ "$actual" == "$expected" ]] || fail "unexpected supported-only build set: $actual"
-        actual="$(awk -F '|' '$1 == "make" && $3 == "install" { print $2 }' "$EVENT_LOG" | paste -sd ' ' -)"
+        actual="$(awk -F '|' '$1 == "make" && $3 ~ /^install/ { print $2 }' "$EVENT_LOG" | paste -sd ' ' -)"
         [[ "$actual" == "$expected" ]] || fail "unexpected supported-only install set: $actual"
+        contains "$EVENT_LOG" 'make|tokenless|install-core-with-cosh|'
         contains "$EVENT_LOG" 'INSTALL_PROFILE=user'
         contains "$EVENT_LOG" "PREFIX=$TEST_HOME/.local"
         for component in skillfs ws-ckpt agentsight agent-sec-core; do
@@ -679,9 +711,9 @@ test_supported_only_filters_build_and_dependency_actions() {
         if [[ "$action" == --check-deps ]]; then expected_event=check; else expected_event=prepare; fi
         contains "$EVENT_LOG" "$expected_event-components|$expected"
         if [[ "$action" == --no-install ]]; then
-            [[ "$(grep -c '^make|.*|build|' "$EVENT_LOG")" -eq 4 ]] || fail 'supported-only build did not select four components'
+            [[ "$(grep -Ec '^make\|[^|]+\|build(-core)?\|' "$EVENT_LOG")" -eq 4 ]] || fail 'supported-only build did not select four components'
         else absent "$EVENT_LOG" 'make|'; fi
-        absent "$EVENT_LOG" '|install|'
+        absent_install
         absent_event root
         absent_event runtime
     done
@@ -769,7 +801,7 @@ test_runtime_is_checked_once_before_any_host_install() {
     [[ "$(grep -c '^runtime$' "$EVENT_LOG")" -eq 1 ]] || fail 'runtime preflight did not run once for the complete selection'
     local runtime_line first_install
     runtime_line="$(grep -n '^runtime$' "$EVENT_LOG" | cut -d: -f1)"
-    first_install="$(grep -n '^make|.*|install|' "$EVENT_LOG" | head -1 | cut -d: -f1)"
+    first_install="$(awk -F '|' '$1 == "make" && $3 ~ /^install/ { print NR; exit }' "$EVENT_LOG")"
     (( runtime_line < first_install )) || fail 'runtime preflight ran after files were installed'
 }
 
