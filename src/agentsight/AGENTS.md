@@ -22,6 +22,32 @@
 - 跨模块行为优先写集成测试，而非单元测试
 - 测试代码放在独立的 `*_tests.rs` 文件或 `#[cfg(test)] mod tests` 中，避免在主实现中添加仅测试用的函数
 
+### Submission validation
+
+- Authors must understand and verify AI-assisted changes. A second agent's
+  agreement does not replace a build, regression test, or integration check.
+- Before marking a PR ready, review the final diff and affected callers in a
+  fresh context. For behavior fixes, provide a regression that fails on the
+  faulty implementation and passes with the fix; retain existing assertions.
+- Run applicable Linux build and regression checks for shared modules, target
+  dependencies, `cfg`, and feature changes. Record affected targets and checks
+  not run; cross-compilation proves a build, not native runtime behavior.
+- Protocol and pipeline changes must cover affected consumers and relevant
+  JSON/SSE, text/tool-call, terminal/error, and missing-field combinations.
+  Storage and performance changes also need failure-path and completeness checks.
+- Describe the regression case in the PR template once; update it when the
+  affected behavior changes. GitHub automatically associates each push with its
+  current SHA and required CI results, including `Test agentsight`. Do not copy
+  CI SHA, environment, commands, or results into the PR description after pushes.
+- For required verification outside CI (such as real-kernel BPF tracing), record
+  the environment, commands/results, and remaining gaps. Keep a Draft while that
+  verification is outstanding; CI success does not prove uncovered behavior.
+- Follow the external contributor work limits in
+  [community triage](../../.github/TRIAGE.md#agentsight-work-limits).
+  Defaults are five ordinary claims and five ready PRs, configurable separately.
+  Registered AgentSight maintainers, repository writers, and maintainer-prioritized
+  P0/P1 work are exempt from quantity limits, not validation.
+
 ### FFI
 - 修改 FFI 函数签名时必须同步更新 `cbindgen.toml` 并确认 `build.rs` drift guard 通过
 - FFI 类型必须使用 `#[repr(C)]`

@@ -18,6 +18,9 @@ on:
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/sight-pr-policy*"
+      - ".github/scripts/sight-work-limits*"
+      - ".github/workflows/sight-submission-policy.yml"
       - ".github/scripts/issue-triage.js"
       - ".github/scripts/issue-triage.test.js"
       - ".github/scripts/sec-core-issue-*"
@@ -50,6 +53,9 @@ on:
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/sight-pr-policy*"
+      - ".github/scripts/sight-work-limits*"
+      - ".github/workflows/sight-submission-policy.yml"
       - ".github/scripts/issue-triage.js"
       - ".github/scripts/issue-triage.test.js"
       - ".github/scripts/sec-core-issue-*"
@@ -108,6 +114,8 @@ jobs:
         run: |
           node --check .github/scripts/issue-triage.js
           node --check .github/scripts/issue-claim.js
+          node --check .github/scripts/sight-pr-policy.js
+          node --check .github/scripts/sight-work-limits.js
           node --check .github/scripts/sec-core-issue-analysis.js
           node --check .github/scripts/issue-analysis.js
           node --check .github/scripts/sec-core-issue-runtime.js
@@ -117,6 +125,8 @@ jobs:
           node --test \
             .github/scripts/issue-triage.test.js \
             .github/scripts/issue-claim.test.js \
+            .github/scripts/sight-pr-policy.test.js \
+            .github/scripts/sight-work-limits.test.js \
             .github/scripts/sec-core-issue-analysis.test.js \
             .github/scripts/issue-analysis.test.js
           python3 .github/scripts/test_dingtalk_notification.py
