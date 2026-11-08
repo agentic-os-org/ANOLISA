@@ -23,6 +23,13 @@ What it updates in every XML file under <work_dir>:
   - Chart series <numRef><f> and <strRef><f> range references in xl/charts/*.xml
   - PivotCache source <worksheetSource ref="..."> in xl/pivotCaches/*.xml
 
+It also removes xl/calcChain.xml together with its [Content_Types].xml
+Override and workbook.xml.rels Relationship. The calculation chain caches
+formula load order as cell references, so it goes stale after a shift and
+makes Excel show the "found unreadable content" recovery prompt on open;
+Excel rebuilds the chain on the next full calculation, so dropping it is
+lossless.
+
 IMPORTANT: Run this script on the UNPACKED directory before repacking.
 After running, repack with xlsx_pack.py and re-validate with formula_check.py.
 
@@ -287,6 +294,79 @@ def process_pivot_cache(path: str, at: int, delta: int) -> int:
     return changes
 
 
+# ---------------------------------------------------------------------------
+# Stale calc chain cleanup
+# ---------------------------------------------------------------------------
+
+CALC_CHAIN_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain"
+)
+
+
+def _strip_elements(content: str, tag: str, attr: str, value: str) -> tuple[str, int]:
+    """Remove every <tag ... attr="value" .../> element from raw XML text.
+
+    Text-level on purpose: an ElementTree round-trip would re-serialize
+    namespaces across the whole package file and bury the one-element
+    removal in diff noise. Handles self-closing and explicitly closed
+    empty forms, any attribute order, and single-line or pretty-printed
+    files; [^>] keeps the match inside one element.
+    """
+    v = re.escape(value)
+    pattern = (rf'<{tag}\s[^>]*{attr}="{v}"[^>]*/>'
+               rf'|<{tag}\s[^>]*{attr}="{v}"[^>]*>\s*</{tag}>')
+    return re.subn(pattern, "", content)
+
+
+def drop_stale_calc_chain(work_dir: str) -> list[str]:
+    """Drop xl/calcChain.xml and its package registrations after a row shift.
+
+    The calculation chain caches formula load order as cell references;
+    after a shift it no longer matches the sheets, and Excel answers a
+    stale chain with the "found unreadable content" recovery prompt. The
+    part is an optional cache - Excel rebuilds it on the next full
+    calculation - so removal is lossless. Deleting only the file would
+    leave the [Content_Types].xml Override and the workbook.xml.rels
+    Relationship dangling and corrupt the package, so they go with it.
+
+    Returns the cleanup steps performed; an empty list means the work dir
+    has no calc chain part and stays untouched.
+    """
+    calc_chain = os.path.join(work_dir, "xl", "calcChain.xml")
+    if not os.path.isfile(calc_chain):
+        return []
+
+    os.remove(calc_chain)
+    removed = ["deleted xl/calcChain.xml (Excel rebuilds it on recalculation)"]
+
+    content_types = os.path.join(work_dir, "[Content_Types].xml")
+    if os.path.isfile(content_types):
+        with open(content_types, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        content, n = _strip_elements(
+            content, "Override", "PartName", "/xl/calcChain.xml")
+        if n:
+            with open(content_types, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            removed.append(
+                f"removed {n} calcChain Override(s) from [Content_Types].xml")
+
+    rels = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+    if os.path.isfile(rels):
+        with open(rels, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        content, n = _strip_elements(
+            content, "Relationship", "Type", CALC_CHAIN_REL_TYPE)
+        if n:
+            with open(rels, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            removed.append(
+                f"removed {n} calcChain Relationship(s) from"
+                " xl/_rels/workbook.xml.rels")
+
+    return removed
+
+
 def _write_tree(tree: ET.ElementTree, path: str) -> None:
     """Write ElementTree back to file with pretty-printing."""
     tree.write(path, encoding="unicode", xml_declaration=False)
@@ -379,6 +459,10 @@ def main() -> None:
                 if n:
                     print(f"  Updated pivot source range in xl/pivotCaches/{fname}")
                     total_changes += n
+
+    # A shifted calc chain makes Excel offer content recovery on open
+    for step in drop_stale_calc_chain(work_dir):
+        print(f"  Dropped stale calc chain: {step}")
 
     print()
     print(f"Total changes: {total_changes}")

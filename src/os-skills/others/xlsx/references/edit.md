@@ -516,6 +516,8 @@ python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1
 
 The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
 
+It also deletes `xl/calcChain.xml` together with its `[Content_Types].xml` Override and `workbook.xml.rels` Relationship: the cached calculation chain goes stale after a shift and makes Excel show the content-recovery prompt on open, while Excel rebuilds the chain on the next full calculation, so nothing needs manual review there.
+
 **After running the shift script, always repack and validate:**
 ```bash
 python3 SKILL_DIR/scripts/xlsx_pack.py /tmp/xlsx_work/ output.xlsx
