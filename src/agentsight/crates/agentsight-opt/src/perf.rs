@@ -159,9 +159,9 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
 /// Detect true idle gaps: periods where the agent has finished responding
 /// (produced text output) and is waiting for the user's next message.
 ///
-/// Gap = next user step's timestamp − the agent step's end. ATIF user steps
-/// are genuine user turns (tool results live in agent step observations),
-/// so no tool_result filtering is needed.
+/// A text-bearing tool call is still work in progress. Imported user-source
+/// steps may carry only tool feedback or injected context; neither establishes
+/// a human idle endpoint.
 fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
     let Some(origin) = traj.origin_ts() else {
         return vec![];
@@ -170,7 +170,7 @@ fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
     let steps = &traj.steps;
 
     for (i, step) in steps.iter().enumerate() {
-        if !step.is_agent() || !step.has_text_output() {
+        if !step.is_agent() || !step.has_text_output() || !step.calls().is_empty() {
             continue;
         }
         let Some(end) = step.end_ts() else { continue };
@@ -180,6 +180,11 @@ fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
                 break; // interaction continued without user input
             }
             if next.is_user() {
+                if crate::trace::strip_system_context(next.message.as_deref().unwrap_or(""))
+                    .is_empty()
+                {
+                    break;
+                }
                 // Next-turn user step: gap measured to its timestamp when
                 // recorded, else to the following agent step's request start.
                 let user_ts = next.end_ts().or_else(|| {
