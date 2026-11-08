@@ -28,16 +28,25 @@ impl SearchResultsCompressor {
 
     /// Returns a smaller, byte-reversible view, or no candidate.
     ///
-    /// Supports plain path lists and numbered matches. Numbered matches require
-    /// at least three records, each with a path containing `/` or
+    /// Tries [`Self::compress_paths`], then [`Self::compress_matches`]. Callers
+    /// that know which listing the producer wrote should call that method
+    /// directly.
+    #[must_use]
+    pub fn compress(&self, input: &str) -> Option<String> {
+        self.compress_paths(input)
+            .or_else(|| self.compress_matches(input))
+    }
+
+    /// Shares consecutive identical paths in numbered `path:line:text` matches.
+    ///
+    /// Requires at least three records, each with a path containing `/` or
     /// `.` and no colon or line ending. Unsupported records reject the whole
     /// input. Row suffixes, including line numbers and line endings, are copied
     /// verbatim; only consecutive identical paths share a JSON-quoted header.
+    /// File text shaped like these rows is folded the same way, so callers must
+    /// know that a search wrote each `path:line:` prefix.
     #[must_use]
-    pub fn compress(&self, input: &str) -> Option<String> {
-        if let Some(output) = self.compress_paths(input) {
-            return Some(output);
-        }
+    pub fn compress_matches(&self, input: &str) -> Option<String> {
         let mut output = String::from(HEADER);
         let mut previous_path = None;
         let mut records = 0;
