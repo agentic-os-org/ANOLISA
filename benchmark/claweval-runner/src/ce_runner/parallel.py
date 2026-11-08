@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import resource
 import subprocess
 import time
 from pathlib import Path
@@ -98,11 +97,12 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
                 v = os.path.join(project_root, v)
             env[k] = v
 
+        # Apply limits in a fresh interpreter. A preexec_fn can deadlock
+        # between fork and exec when the batch runner has active threads.
+        launcher = Path(__file__).with_name("_service_exec.py")
         subprocess.Popen(
-            cmd, env=env, cwd=project_root,
+            [_PYTHON, str(launcher), *cmd], env=env, cwd=project_root,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            preexec_fn=lambda: resource.setrlimit(
-                resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024)),
         )
 
         # Wait for health
