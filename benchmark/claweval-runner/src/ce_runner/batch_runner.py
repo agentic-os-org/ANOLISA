@@ -652,21 +652,24 @@ def run_batch(args, get_judge_config, get_model_config, get_user_agent_config,
             log(f"  >> Submitting {task_id}{mode_tag} ({trials} trial{'s' if trials > 1 else ''})")
 
             fut = exec_pool.submit(_execute_task_all_trials, tyaml, task_dir, trials, task_slots)
-            exec_futures[fut] = (tyaml, task_dir)
+            exec_futures[fut] = (tyaml, task_id)
 
         # Process execution results as they complete, submit grading
         for fut in as_completed(exec_futures):
-            task_yaml, task_dir = exec_futures[fut]
+            task_yaml, submitted_task_id = exec_futures[fut]
             try:
                 trial_results = fut.result()
             except Exception as exc:
-                log(f"[ERROR] Task execution future failed: {exc}\n{traceback.format_exc()}")
-                trial_results = [{"task_id": "?", "trial": t, "error": str(exc)}
-                                for t in range(1, trials + 1)]
+                log(f"[ERROR] {submitted_task_id} execution future failed: "
+                    f"{exc}\n{traceback.format_exc()}")
+                trial_results = [
+                    {"task_id": submitted_task_id, "trial": t, "error": str(exc)}
+                    for t in range(1, trials + 1)
+                ]
 
             for exec_result in trial_results:
                 trial = exec_result.get("trial", 0)
-                task_id = exec_result.get("task_id", "?")
+                task_id = exec_result.get("task_id", submitted_task_id)
                 exec_wt = exec_result.get("wall_time_s", 0)
                 log(f"  << exec done {task_id} trial {trial} wall={exec_wt:.1f}s")
 
