@@ -34,6 +34,9 @@ pub struct Plan {
     pub replacement: bool,
     /// Capture default metadata and configured observation without policy steps.
     pub observe: bool,
+    /// Hermes source guard action for the active Skill checker, absent when disabled.
+    #[serde(default)]
+    pub skill_check: Option<String>,
 }
 
 /// Check the reusable native entrypoint; runtime bridges verify its protocol.
@@ -117,9 +120,10 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?;
     let steps =
         aw_core::admission::preflight(&config, target, capabilities).map_err(|e| e.to_string())?;
-    if steps
-        .iter()
-        .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))
+    if capabilities.adapter != "hermes"
+        && steps
+            .iter()
+            .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))
     {
         return Err("Skill checking requires ordinary resident mode".into());
     }
@@ -153,6 +157,9 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
         .iter()
         .filter(|step| step.event == event)
         .collect::<Vec<_>>();
+    if adapter == "hermes" && event == "input.submit" && !selected.is_empty() {
+        crate::adapters::hermes::validate_reload_submission(document, target)?;
+    }
     let replacement = selected.iter().any(|step| step.execution.replaces_result());
     let mut ordered = selected
         .iter()
@@ -178,11 +185,7 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
         .unwrap_or(&document["spec"]["execution"]["default_event_budget_ms"])
         .as_f64()
         .ok_or("invalid event budget")? as u64;
-    let maximum = if matches!(adapter, "openclaw" | "hermes") {
-        12000
-    } else {
-        55000
-    };
+    let maximum = if adapter == "openclaw" { 12000 } else { 55000 };
     if !(1..=maximum).contains(&budget) || (replacement && !sequential) {
         return Err(format!(
             "runtime policy requires 1..{maximum} ms budgets and ordered replacement"
@@ -202,6 +205,17 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
         observe: event != "input.submit"
             && (matches!(adapter, "qwenpaw" | "qoder-sdk")
                 || adapter::observation_enabled(document, target)),
+        skill_check: if adapter == "hermes" {
+            selected
+                .iter()
+                .filter(|step| {
+                    crate::adapters::sdk_tools::checks_skill_tool(step, "hermes", "skill_view")
+                })
+                .map(|step| step.on_error.clone())
+                .max_by_key(|action| action == "block")
+        } else {
+            None
+        },
     })
 }
 
@@ -374,7 +388,7 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
         }
         value = json!({});
     }
-    if adapter == "qoder" || value != json!({}) {
+    if matches!(adapter, "qoder" | "hermes") || value != json!({}) {
         result.stdout = serde_json::to_vec(&value)?;
     }
     Ok(result)
@@ -392,6 +406,13 @@ pub fn adopt_step(
         && serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|value| value["block"] == true)
     {
         output.exit = NativeExit::Code(2);
+    }
+    if adapter == "hermes" && event == "tool.before" {
+        if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
+            if value["action"] == "block" || value["decision"] == "block" {
+                output.exit = NativeExit::Code(2);
+            }
+        }
     }
     let succeeded = matches!(output.exit, NativeExit::Code(0));
     let mut value = serde_json::from_slice::<Value>(&output.stdout).ok();

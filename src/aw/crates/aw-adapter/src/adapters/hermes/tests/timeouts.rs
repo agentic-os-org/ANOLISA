@@ -108,3 +108,49 @@ fn disabled_observation_leaves_only_action_timeouts_to_validate() {
     prepared.callback_timeout = 1.0;
     prepared.validate_steps(&[]).unwrap();
 }
+
+#[test]
+fn reloadable_routes_preserve_the_full_hermes_budget() {
+    let profile = Profile::new("unknown: keep\n");
+    let mut prepared = prepared(&profile, "off");
+    let validator = aw_config::Validator::new().unwrap();
+    prepared.input.document = validator
+        .parse(include_bytes!(
+            "../../../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    prepared.input.document["spec"]["agents"] = json!({"hermes": {
+        "adapter":"hermes", "argv":["hermes","chat"]}});
+    prepared.input.document["spec"]["execution"]["default_event_budget_ms"] = json!(55000);
+    prepared.input.options.reloadable = true;
+    for (timeout, accepted) in [(0.0, true), (17.0, false), (59.9, false), (60.0, true)] {
+        prepared.callback_timeout = timeout;
+        let result = prepared.validate_steps(&[]);
+        assert_eq!(result.is_ok(), accepted, "timeout={timeout}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.to_string().contains("60 seconds"));
+        }
+    }
+    prepared.callback_timeout = 60.0;
+    let directory = profile.0.join("launch");
+    fs::create_dir(&directory).unwrap();
+    let files = crate::test_support::Artifacts(directory);
+    let plan = prepared
+        .configure(&LaunchContext {
+            files: &files,
+            binding_path: &profile.0.join("binding"),
+            executable: std::path::Path::new("/usr/bin/aw"),
+            steps: &[],
+        })
+        .unwrap();
+    assert_eq!(plan.readiness.unwrap().hooks, 2);
+    let launch: Value =
+        serde_json::from_slice(&fs::read(files.0.join("hermes-launch.json")).unwrap()).unwrap();
+    for hook in launch["hooks"].as_array().unwrap() {
+        assert_eq!(hook["timeout"], 59);
+    }
+    prepared.input.document["spec"]["execution"]["default_event_budget_ms"] = json!(55001);
+    assert!(prepared.validate_steps(&[]).is_err());
+}

@@ -2,6 +2,8 @@
 
 #[path = "hermes_trust/checkout.rs"]
 mod checkout;
+#[path = "hermes_trust/startup_cleanup.rs"]
+mod startup_cleanup;
 
 use super::*;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
@@ -22,6 +24,21 @@ fn hermes_plugin_checks_launch_revision_before_readiness() {
     assert!(
         output.status.success() && stderr.contains("Ran 3 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn hermes_native_startup_precedes_dispatch() {
+    let fixture = Fixture::new();
+    let mut command = Command::new(&fixture.python);
+    command.arg("-B").arg(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hermes/native_startup.py"),
+    );
+    let output = fixture.run(command);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

@@ -208,3 +208,45 @@ class SkillTests(NativeFixture):
         rows = [json.loads(row) for row in self.trace.read_text().splitlines()]
         self.assertEqual(rows[0]["payload"]["extra"]["aw_skill"]["directory"], str(self.folder / "local"))
         self.assertIsNone(self.skills._selection.get())
+
+    def dynamic_execute(self, name, mode, before=None, output=None):
+        from agent.shell_hooks import ShellHookSpec
+        arguments = {"name": name}
+        captured = []
+        def spawn(_spec, data):
+            captured.append(json.loads(data))
+            if before:
+                before()
+            return {"returncode": 0, "stdout": json.dumps(output if output is not None else {"aw_skill_check": mode}),
+                    "stderr": "", "timed_out": False, "error": None, "elapsed_seconds": 0}
+        spec = ShellHookSpec(event="pre_tool_call", command="fixture", timeout=3, fail_closed=True)
+        with self.skills.invocation("skill_view", arguments, dynamic=True), patch("agent.shell_hooks._spawn", spawn):
+            reply = self.skills.dynamic_callback(spec)(tool_name="skill_view", args=arguments)
+            if reply and reply.get("action") == "block":
+                return captured, reply
+            return captured, json.loads(self.native.skill_view(**arguments))
+
+    def test_dynamic_skill_policy_can_enable_then_remove_source_pinning(self):
+        path = self.source("local")
+        rows, reply = self.dynamic_execute("local", "block")
+        self.assertEqual(rows[0]["extra"]["aw_skill"]["directory"], str(path))
+        self.assertIn("PRIVATE_INSTRUCTIONS", json.dumps(reply))
+        rows, reply = self.dynamic_execute("local", "block",
+            before=lambda: (path / "SKILL.md").write_text("CHANGED_INSTRUCTIONS"))
+        self.assertEqual(reply["action"], "block")
+        self.assertNotIn("CHANGED_INSTRUCTIONS", json.dumps(reply))
+        (path / "SKILL.md").write_text("NATIVE_BEHAVIOR")
+        _, reply = self.dynamic_execute("local", None,
+            before=lambda: (path / "SKILL.md").write_text("CURRENT_NATIVE_BODY"))
+        self.assertIn("CURRENT_NATIVE_BODY", json.dumps(reply))
+        self.assertIsNone(self.skills._selection.get())
+
+    def test_dynamic_skill_resolution_preserves_report_and_rejects_missing_admission(self):
+        (self.folder / "flat.md").write_text("LEGACY_BODY")
+        _, blocked = self.dynamic_execute("flat", "block")
+        self.assertEqual(blocked["action"], "block")
+        _, report = self.dynamic_execute("flat", "report")
+        self.assertIn("LEGACY_BODY", json.dumps(report))
+        _, absent = self.dynamic_execute("flat", None, output={})
+        self.assertEqual(absent["action"], "block")
+        self.assertNotIn("LEGACY_BODY", json.dumps(absent))

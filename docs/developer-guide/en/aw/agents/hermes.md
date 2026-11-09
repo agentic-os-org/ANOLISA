@@ -70,3 +70,46 @@ aw run --config /absolute/aw.hermes-submission.yaml --agent hermes \
 The configured argv includes `chat --oneshot --quiet`. `--query-file /absolute/prompt.txt` can replace `--query`. A policy denial exits the CLI with code 2 and zero model calls; the checked text never enters the native conversation. Callback faults follow `on_error`, and pending scanners are closed before dispatch or rejection. Inputs must be nonblank UTF-8 text and fit within 256 KiB of encoded callback data.
 
 Enabling `input.submit` requires a quiet query and rejects interactive chat or `--image`. This boundary checks the text after native query-file parsing and before image routing; later native context or Skill expansion retains its separate contract. Native API request plugins remain responsible for their own rewrites. Without submission steps, the existing native chat options remain available. Python factories, gateway sessions and interactive `/steer` are outside this CLI entrypoint.
+
+## Prepare native startup and update policy
+
+After connecting the plugin, install the startup module in the explicitly
+selected, dedicated Hermes virtual environment. The example uses Python 3.14;
+select the existing `site-packages` path for that environment. AW creates three
+new files and refuses to replace existing startup assets.
+
+```bash
+aw instance setup --config /absolute/aw.yaml --agent hermes \
+  --directory /absolute/hermes-venv/lib/python3.14/site-packages \
+  --native-profile /absolute/hermes-profile > hermes-startup.json
+export AW_INSTANCE_BOOTSTRAP="$(python3 -c 'import json; print(json.load(open("hermes-startup.json"))["environment"]["AW_INSTANCE_BOOTSTRAP"])')"
+/absolute/hermes-venv/bin/hermes chat --cli
+```
+
+Use the same native arguments in the configured target. Argument mismatches
+abort before native dispatch. Restart once after preparation. The startup module retains native main and reuses AW's registration,
+argument-integrity and completion guards in that process. Version and management
+commands remain native. Preparation failure prevents chat dispatch.
+
+```bash
+aw instance update --config /absolute/aw.yaml --agent hermes
+```
+
+Updates activate between confirmed completed chat turns. The native request
+includes model work, tool execution and callback cleanup. Cancellation returning
+no reply, exceptions or unfinished callbacks retain the busy gate; restart the
+process after resolving the failure. Budgets for this update path are at most
+12,000 ms, and the native plugin callback timeout must be at least 17 seconds
+(or explicitly unlimited).
+
+Tool observation, denial and result replacement use stable routes. Quiet
+single-query text mode also reserves admission before `input.submit` and keeps
+that admission through the chat turn; interactive targets reject submission
+policy additions. Skill checking is currently rejected on the update path;
+use the ordinary `aw run` Skill integration when that capability is required.
+
+To remove native-start preparation, stop the dedicated environment's Hermes
+processes, then remove exactly the three files listed by `setup`:
+`aw-native-bootstrap.pth`, `aw_native_startup.py` and
+`aw-native-bootstrap.json`. Keep other environment and plugin files. Plugin
+rollback follows the existing [cleanup procedure](#upgrade-and-cleanup).

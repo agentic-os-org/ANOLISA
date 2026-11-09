@@ -19,6 +19,7 @@ pub struct Asset {
 pub fn asset(adapter: &str) -> Result<Asset> {
     let (bytes, python): (&[u8], bool) = match adapter {
         "openclaw" => (include_bytes!("../native/openclaw/startup.mjs"), false),
+        "hermes" => (include_bytes!("../native/hermes/startup.py"), true),
         "qwenpaw" => (include_bytes!("../native/qwenpaw/startup.py"), true),
         _ => return Err("startup setup requires OpenClaw, Hermes or QwenPaw".into()),
     };
