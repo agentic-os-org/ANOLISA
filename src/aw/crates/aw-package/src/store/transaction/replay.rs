@@ -264,10 +264,20 @@ pub(super) fn finish(
         return Ok(conflicts);
     }
     let workspace = entry.workspace();
-    match fs::remove_staging(&workspace, &entry.transaction_id) {
-        Ok(_) => {}
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    // Reclaim staging names only inside the workspace the journal recorded.
+    // A directory that replaced the workspace keeps its bytes, so the removal
+    // check below reports the conflict instead of deleting unattributed data.
+    match (
+        entry.workspace_identity.as_ref(),
+        fs::directory_identity(&workspace),
+    ) {
+        (Some(expected), Ok(actual))
+            if expected.dev == actual.dev && expected.ino == actual.ino =>
+        {
+            fs::remove_staging(&workspace, &entry.transaction_id)?;
+        }
+        (_, Err(Error::Io(error))) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => {}
     }
     match fs::directory(&workspace) {
         Ok(_) if !fs::rmdir(&workspace, entry.workspace_identity.as_ref())? => {

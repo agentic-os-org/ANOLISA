@@ -301,3 +301,57 @@ fn staging_failures_leave_no_residue_and_keep_the_database_retryable() {
         assert_eq!(inventory.installations[0].packages.len(), 1);
     }
 }
+
+#[test]
+fn replacement_workspace_bytes_survive_recovery() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let transactions = fixture.paths.root.join("transactions");
+    let directories = fs::entries(&transactions).unwrap();
+    assert_eq!(directories.len(), 1);
+    let entry = journal::read(&fixture.paths, &directories[0]).unwrap();
+    let workspace = entry.workspace();
+    assert!(
+        fs::entries(&workspace)
+            .unwrap()
+            .iter()
+            .any(|path| is_staging(path)),
+        "the crash must leave a staging file behind"
+    );
+
+    let recorded = fs::directory_identity(&workspace).unwrap();
+    let journaled = entry.workspace_identity.clone().unwrap();
+    assert_eq!((recorded.dev, recorded.ino), (journaled.dev, journaled.ino));
+
+    // Replace the workspace with a new inode that reuses a staging basename.
+    // The replacement directory is allocated while the original still exists,
+    // so the filesystem cannot hand the original inode number back to it.
+    // Recovery must not delete bytes it cannot attribute to this transaction.
+    let replacement = workspace.with_file_name(format!(".replacement-{}", entry.transaction_id));
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::remove_dir_all(&workspace).unwrap();
+    std::fs::rename(&replacement, &workspace).unwrap();
+    let replaced = fs::directory_identity(&workspace).unwrap();
+    assert_ne!(
+        (recorded.dev, recorded.ino),
+        (replaced.dev, replaced.ino),
+        "the replacement directory must use a new inode"
+    );
+    let foreign = workspace.join(format!(".aw-staging-{}-4242-7", entry.transaction_id));
+    std::fs::write(&foreign, b"foreign bytes\n").unwrap();
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert_eq!(report.conflicts, vec![workspace.clone()]);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign bytes\n");
+    assert!(workspace.exists());
+
+    // Recovery is idempotent: the same bytes still conflict on the next pass.
+    let report = fixture.recover();
+    assert_eq!(report.conflicts, vec![workspace]);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign bytes\n");
+}
