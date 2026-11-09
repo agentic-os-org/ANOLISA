@@ -53,6 +53,12 @@ impl RegistrationPointer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        Self::read_current(prefix)
+    }
+
+    // Discovery checks only the current locator; explicit operands still reject old layouts.
+    fn read_current(prefix: &Path) -> Result<Option<Self>> {
+        paths::absolute(prefix)?;
         let directory = prefix.join(".local-packages");
         let entries = match paths::entries(&directory) {
             Ok(entries) => entries,
@@ -105,8 +111,14 @@ pub(crate) fn check_registered(
     paths: &DatabasePaths,
     prefix: &Path,
     installation_id: &str,
+    explicit: bool,
 ) -> Result<()> {
-    match RegistrationPointer::read(prefix) {
+    let pointer = if explicit {
+        RegistrationPointer::read(prefix)
+    } else {
+        RegistrationPointer::read_current(prefix)
+    };
+    match pointer {
         Ok(Some(pointer)) => require(
             pointer.installation_id == installation_id
                 && pointer.database_root == paths.root

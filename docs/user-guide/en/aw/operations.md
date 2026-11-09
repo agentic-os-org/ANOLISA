@@ -44,6 +44,13 @@ aw doctor --prefix "$AW_EXTENSION_PREFIX"
 3. Generate configuration with the new paths, use a new state directory and verify an actual tool call.
 4. Retain the old installation and backups. To roll back, stop the new service and restore the old paths and configuration.
 
+An old prefix containing `.aw-packages` can remain registered in the same user
+database while you install into a new directory. AW preserves its records and
+files. Check the new installation with `--prefix "$AW_EXTENSION_PREFIX"`;
+operations explicitly targeting the old prefix reject its metadata. Use the
+old CLI to manage that installation. A global `doctor` still reports its
+unsupported metadata.
+
 Remove locally managed Provider extensions with:
 
 ```bash

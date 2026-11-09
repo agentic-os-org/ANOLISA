@@ -14,6 +14,8 @@ mod scope;
 mod support;
 #[path = "packages/terminal.rs"]
 mod terminal;
+#[path = "packages/upgrade.rs"]
+mod upgrade;
 #[path = "packages/validation.rs"]
 mod validation;
 
