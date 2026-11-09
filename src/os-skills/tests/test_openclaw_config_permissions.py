@@ -24,7 +24,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "install_openclaw.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "ai"
+    / "install-openclaw"
+    / "scripts"
+    / "install_openclaw.py"
+)
 
 API_KEY = "sk-test-placeholder-not-a-real-key"
 OLD_API_KEY = "sk-rotated-placeholder-not-a-real-key"
