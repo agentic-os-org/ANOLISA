@@ -220,13 +220,6 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
-        if !self.input.options.reloadable
-            && adapter::observation_enabled(&self.input.document, &self.input.target)
-        {
-            return Err(
-                "QwenPaw resident task scopes do not support native evidence capture".into(),
-            );
-        }
         if self.input.options.reloadable {
             crate::reload::validate(
                 &self.input.document,
@@ -238,7 +231,19 @@ impl PreparedLaunch for Prepared {
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
-        self.configure_in(context, &self.working.clone())
+        if self.input.options.resident_policy_reload {
+            let mut plan = self.configure_in(context, context.files.directory())?;
+            let plugin = self.plugin.as_mut().ok_or("missing staged plugin")?;
+            // The independent binding owns these assets until explicit release.
+            plugin.cleanup_on_drop = false;
+            plan.command.environment.insert(
+                "AW_QWENPAW_PLUGIN".into(),
+                plugin.path.clone().into_os_string(),
+            );
+            Ok(plan)
+        } else {
+            self.configure_in(context, &self.working.clone())
+        }
     }
 
     fn attachment(
