@@ -1,12 +1,14 @@
 """Deterministic iterator ownership tests without a native CLI or installed SDK."""
 
 import asyncio
+import os
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(sys.argv.pop(1))))
 
@@ -105,6 +107,7 @@ sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object)
 from aw_invocations import dispatch
 from aw_transport import ManagedTransport
 from aw_resident import ManagedClient
+import aw_resident
 
 
 class Contracts(unittest.IsolatedAsyncioTestCase):
@@ -357,6 +360,50 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
                             self.assertIsInstance(await anext(messages), ResultMessage)
                     self.assertTrue(client.sdk_closed)
                     self.assertFalse(client._aw_receiving)
+
+
+class NativeReadiness(unittest.IsolatedAsyncioTestCase):
+    async def test_unsupported_python_is_rejected_before_ready(self):
+        with patch.object(aw_resident.sys, "version_info", (3, 10)), \
+                patch.object(aw_resident, "Bridge") as bridge:
+            with self.assertRaisesRegex(RuntimeError, "Python >=3.11"):
+                await aw_resident.prepare_native()
+            bridge.assert_not_called()
+
+    async def test_shared_group_is_rejected_before_ready(self):
+        with patch.object(aw_resident.os, "getpid", return_value=11), \
+                patch.object(aw_resident.os, "getpgrp", return_value=10), \
+                patch.object(aw_resident, "Bridge") as bridge:
+            with self.assertRaisesRegex(RuntimeError, "own process group"):
+                await aw_resident.prepare_native()
+            bridge.assert_not_called()
+
+    async def test_readiness_acknowledgement_precedes_native_receipt(self):
+        order = []
+        scope = SimpleNamespace(ready=AsyncMock(side_effect=lambda: order.append("ack")))
+        bridge = SimpleNamespace(config={"resident_policy_reload": True, "observation_enabled": False},
+                                 ready=Mock(side_effect=lambda: order.append("receipt")))
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(aw_resident.os, "getpid", return_value=11), \
+                patch.object(aw_resident.os, "getpgrp", return_value=11), \
+                patch.object(aw_resident, "Bridge", return_value=bridge), \
+                patch.object(aw_resident, "Scope", return_value=scope):
+            await aw_resident.prepare_native()
+            self.assertEqual(order, ["ack", "receipt"])
+            self.assertEqual(os.environ["AW_CLAUDE_RESIDENT_GROUP"], "11")
+
+    async def test_failed_registration_cannot_publish_native_ready(self):
+        scope = SimpleNamespace(ready=AsyncMock(side_effect=RuntimeError("registration rejected")))
+        bridge = SimpleNamespace(config={"resident_policy_reload": True, "observation_enabled": False},
+                                 ready=Mock())
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(aw_resident.os, "getpid", return_value=11), \
+                patch.object(aw_resident.os, "getpgrp", return_value=11), \
+                patch.object(aw_resident, "Bridge", return_value=bridge), \
+                patch.object(aw_resident, "Scope", return_value=scope):
+            with self.assertRaisesRegex(RuntimeError, "registration rejected"):
+                await aw_resident.prepare_native()
+            bridge.ready.assert_not_called()
 
 
 if __name__ == "__main__":

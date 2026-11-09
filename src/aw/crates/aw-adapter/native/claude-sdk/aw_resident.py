@@ -6,6 +6,7 @@ import asyncio
 from contextlib import aclosing
 from dataclasses import replace
 import os
+import re
 from pathlib import Path
 import runpy
 import signal
@@ -145,16 +146,19 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_lock = asyncio.Lock()
         self._aw_completion = asyncio.Lock()
         self._aw_connect_task: asyncio.Task[Any] | None = None
-        from aw_mcp import claim_servers, snapshot_servers
+        from aw_mcp import snapshot_servers
 
-        composed = self._aw_bridge.options(
-            replace(
-                options,
-                cwd=self._aw_cwd,
-                env=dict(options.env),
-                mcp_servers=snapshot_servers(options.mcp_servers),
-            )
-        )
+        self._aw_options = replace(options, cwd=self._aw_cwd, env=dict(options.env),
+                                   mcp_servers=snapshot_servers(options.mcp_servers))
+        self._aw_mcp = []
+        super().__init__(options=self._aw_options)
+        if not self._aw_bridge.config.get("resident_policy_reload"):
+            self._aw_compose(self._aw_options)
+
+    def _aw_compose(self, options: ClaudeAgentOptions) -> None:
+        from aw_mcp import claim_servers
+
+        composed = self._aw_bridge.options(options)
         # Track caller hooks as well as AW hooks: SDK cancellation removes its
         # in-flight index before a callback's asynchronous finally has drained.
         for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
@@ -200,7 +204,7 @@ class ManagedClient(ClaudeSDKClient):
         }
         if composed.can_use_tool:
             composed.can_use_tool = tracked(composed.can_use_tool)
-        super().__init__(options=composed)
+        self.options = composed
         self._aw_mcp = claim_servers(composed.mcp_servers, self._aw_bridge)
 
     def _aw_check(self) -> None:
@@ -211,8 +215,7 @@ class ManagedClient(ClaudeSDKClient):
 
     async def connect(self, prompt: str | AsyncIterable[dict[str, Any]] | None = None) -> None:
         self._aw_check()
-        checked_input = any(hook["event"] == "input.submit"
-                            for hook in self._aw_bridge.config["hooks"])
+        checked_input = False
         async with self._aw_lock:
             if self._aw_state != "new":
                 raise RuntimeError("AW task clients cannot reconnect; create a new client")
@@ -222,7 +225,21 @@ class ManagedClient(ClaudeSDKClient):
                     raise ValueError(
                         "can_use_tool callback requires streaming mode when connecting with a prompt"
                     )
-                await self._aw_bridge.scope.open(self._aw_cwd, self._aw_environment)
+                reloadable = self._aw_bridge.config.get("resident_policy_reload", False)
+                if reloadable:
+                    await self._aw_bridge.scope.reserve()
+                await self._aw_bridge.scope.open(self._aw_cwd, self._aw_environment,
+                                                 acknowledge=not reloadable)
+                if reloadable:
+                    snapshot = await self._aw_bridge.scope.policy()
+                    if (not isinstance(snapshot, dict) or
+                            re.fullmatch(r"[a-f0-9]{64}", snapshot.get("policy_revision", "")) is None):
+                        raise ValueError("AW resident policy handoff is malformed")
+                    self._aw_bridge.config = Bridge({**self._aw_bridge.config,
+                                                    "hooks": snapshot["hooks"]}).config
+                    self._aw_compose(self._aw_options)
+                checked_input = any(hook["event"] == "input.submit"
+                                    for hook in self._aw_bridge.config["hooks"])
                 self._aw_check()
                 _active.add(self)
                 self._aw_connect_task = asyncio.current_task()
@@ -234,6 +251,8 @@ class ManagedClient(ClaudeSDKClient):
                             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                         },
                     )
+                    if reloadable:
+                        await self._aw_bridge.scope.acknowledge()
                     await super().connect(None)
                     async with asyncio.timeout(5):
                         transport = self._custom_transport
@@ -419,6 +438,8 @@ class ManagedClient(ClaudeSDKClient):
                     finally:
                         for server in self._aw_mcp:
                             server.release()
+                if self._aw_bridge.config.get("resident_policy_reload"):
+                    await self._aw_bridge.scope.release()
         except BaseException:
             _poisoned = True
             # An undrained callback may still execute caller code. Close the
@@ -441,6 +462,21 @@ class ManagedClient(ClaudeSDKClient):
                 await self._aw_cleanup()
 
 
+async def prepare_native() -> None:
+    """Confirm a prepared native host before its first managed SDK client."""
+    if sys.version_info < (3, 11):
+        raise RuntimeError("AW resident Claude SDK requires Python >=3.11")
+    if os.getpid() != os.getpgrp():
+        raise RuntimeError("Native Claude host requires its own process group; start it with setsid")
+    bridge = Bridge()
+    if not bridge.config.get("resident_policy_reload"):
+        raise RuntimeError("Native Claude startup requires aw instance prepare")
+    os.environ["AW_CLAUDE_RESIDENT_GROUP"] = str(os.getpgrp())
+    os.environ["AW_CLAUDE_RESIDENT"] = "1"
+    await Scope(bridge.config).ready()
+    bridge.ready()
+
+
 def main() -> None:
     """Start a script/module host without creating a model client during readiness."""
     if sys.version_info < (3, 11):
@@ -457,8 +493,8 @@ def main() -> None:
     os.environ["AW_CLAUDE_RESIDENT_GROUP"] = str(os.getpgrp())
     os.environ["AW_CLAUDE_RESIDENT"] = "1"
     bridge = Bridge()
-    if bridge.config["observation_enabled"]:
-        raise ValueError("AW resident Claude does not support AgentSight evidence")
+    if bridge.config.get("resident_policy_reload"):
+        asyncio.run(Scope(bridge.config).ready())
     bridge.ready()
     if args[0] == "-m":
         sys.argv = args[1:]

@@ -42,8 +42,8 @@ def _copy_json(value: Any) -> Any:
 class Bridge:
     """Compose one foreground SDK client with its private AW launch binding."""
 
-    def __init__(self) -> None:
-        self.config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config if config is not None else json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
                 raise ValueError(f"AW configuration requires {key}")

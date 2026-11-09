@@ -129,7 +129,7 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/claude-sdk/aw_transport.py"),
         )?;
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
-        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "hooks": hooks}))?)?;
+        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "resident_policy_reload": self.input.options.resident_policy_reload, "hooks": hooks}))?)?;
         let mut command = self.input.command.clone();
         let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(existing) = command.environment.get(std::ffi::OsStr::new("PYTHONPATH")) {

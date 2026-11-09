@@ -129,6 +129,49 @@ the [managed MCP factory](../deployment/resident.md).
 Run pinned native tests through [contributing](../../../../../src/aw/CONTRIBUTING.md).
 See [resident deployment](../deployment/resident.md) for resident clients and managed MCP.
 
+## Native startup and idle policy updates
+
+A native Python host can prepare AW before creating managed SDK clients.
+Its `aw.yaml` target `claude` selects the Python environment and worker script.
+Install this startup code once and restart the host. The application module
+uses the existing `aw_claude.create_client` factory and closes every client.
+Start the dedicated host with `setsid python native_host.py`: AW can terminate
+that host's process group if SDK cancellation cannot be acknowledged.
+
+```python
+import asyncio
+import json
+import os
+import subprocess
+import sys
+
+prepared = json.loads(subprocess.check_output(
+    ["aw", "instance", "prepare", "--agent", "claude"], text=True))
+os.environ.update(prepared["environment"])
+sys.path[:0] = prepared["environment"]["PYTHONPATH"].split(os.pathsep)
+
+from aw_resident import prepare_native
+
+async def main():
+    await prepare_native()
+    from application import run_worker
+    await run_worker()
+
+try:
+    asyncio.run(main())
+finally:
+    subprocess.run(["aw", "instance", "release", "--binding", prepared["binding"]],
+                   check=True)
+```
+
+After readiness, `aw instance update --agent claude` loads the same default
+`aw.yaml`. An open client keeps its policy for its entire conversation;
+updates require every client to disconnect and complete cleanup. The next
+client fetches and installs the current routes before SDK connection, including
+native callback composition and managed MCP checks. Preparation and teardown
+hold the same admission reservation, so updates cannot race their completion.
+A host without its own process group is rejected before readiness.
+
 ## Check user text before submission
 
 Use [the Claude submission configuration](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)

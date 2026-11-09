@@ -58,7 +58,7 @@ pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
             capabilities.adapter.as_str(),
             capabilities.entrypoint.as_str()
         ),
-        ("agentscope", "factory") | ("pi", "sdk")
+        ("agentscope", "factory") | ("pi", "sdk") | ("claude-sdk", "sdk-worker")
     ) {
         return Ok(());
     }
@@ -101,6 +101,7 @@ pub fn scope_policy(
         "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, true)?,
         "agentscope" => crate::adapters::agentscope::event_routes(document, steps)?,
         "pi" => crate::adapters::pi::routes(document, steps)?,
+        "claude-sdk" => crate::adapters::sdk_tools::routes(document, steps, "claude-sdk")?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
     Ok(json!({"events": events, "hooks": hooks}))
