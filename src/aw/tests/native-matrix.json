@@ -1400,6 +1400,38 @@
               }
             }
           ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/claude-sdk/native_update.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "passed": true,
+                "python": "3.12.3",
+                "sdk": "0.2.88",
+                "model_requests": 4,
+                "sdk_processes_stopped": true,
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "allow-side-effect",
+                  "updated-denial",
+                  "sdk-cleanup"
+                ]
+              }
+            }
+          ]
         }
       ],
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
