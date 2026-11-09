@@ -1,7 +1,7 @@
 //! Execute one active Adapter plan behind a stable native callback command.
 
 use super::{
-    adapter::{Adapter, HookOutput},
+    adapter::{Adapter, HookBinding, HookOutput},
     bridge, Arguments, Result,
 };
 use aw_adapter::{
@@ -24,6 +24,16 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
     let event = args.required("--event")?;
     let transport_deadline = Instant::now() + Duration::from_secs(59);
     let input = super::hook::read_input(transport_deadline)?;
+    invoke_bound(adapter, binding, event, input, transport_deadline)
+}
+
+pub(super) fn invoke_bound(
+    adapter: &dyn Adapter,
+    binding: HookBinding,
+    event: &str,
+    input: Vec<u8>,
+    transport_deadline: Instant,
+) -> Result<HookOutput> {
     let raw: Value = serde_json::from_slice(&input)?;
     let context = binding.native_context();
     let normalized = adapter.normalize(&context, event, &raw)?;
@@ -32,12 +42,19 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
         return Err("stale stable bridge binding".into());
     }
     let id = &binding.binding.instance_id;
-    let key = aw_adapter::reload::tool_key(
-        normalized["session_id"].as_str().ok_or("missing session")?,
-        normalized["tool"]["call_id"]
+    let key = if event == "input.submit" {
+        normalized["session_id"]
             .as_str()
-            .ok_or("missing tool call")?,
-    )?;
+            .ok_or("missing session")?
+            .to_owned()
+    } else {
+        aw_adapter::reload::tool_key(
+            normalized["session_id"].as_str().ok_or("missing session")?,
+            normalized["tool"]["call_id"]
+                .as_str()
+                .ok_or("missing tool call")?,
+        )?
+    };
     // QwenPaw tracks the actual tool generator in middleware, including its
     // finally path. Qoder exposes separate native before/terminal callbacks.
     let lifecycle = |phase| -> Result<()> {
@@ -78,7 +95,16 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
         if plan.groups.is_empty() {
             // An empty policy still consumes the native correlation. A replay
             // after adding steps must not acquire a new execution budget.
-            client.call(
+            let close = if event == "input.submit" {
+                Operation::CloseInputEvent {
+                    instance_id: id.clone(),
+                    session_id: normalized["session_id"]
+                        .as_str()
+                        .ok_or("missing session")?
+                        .into(),
+                    turn_id: normalized["turn_id"].as_str().ok_or("missing turn")?.into(),
+                }
+            } else {
                 Operation::CloseHookEvent {
                     instance_id: id.clone(),
                     event: event.into(),
@@ -90,9 +116,9 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
                         .as_str()
                         .ok_or("missing tool call")?
                         .into(),
-                },
-                deadline,
-            )?;
+                }
+            };
+            client.call(close, deadline)?;
             let mut output = adapter.reply(false);
             if plan.observe
                 && client
@@ -141,8 +167,10 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
                             match result {
                                 Ok(output) => output,
                                 Err(_) => {
-                                    let mut output = adapter
-                                        .reply(event == "tool.before" && step.on_error == "block");
+                                    let mut output = adapter.reply(
+                                        matches!(event, "input.submit" | "tool.before")
+                                            && step.on_error == "block",
+                                    );
                                     output.stderr.extend_from_slice(
                                         b"AW step failed; query instance audit for metadata\n",
                                     );
@@ -161,9 +189,12 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
                 .iter()
                 .any(|output| matches!(output.exit, NativeExit::Code(2)));
             outputs.extend(results);
-            if event == "tool.before"
+            if matches!(event, "input.submit" | "tool.before")
                 && blocked
-                && matches!(binding.adapter.as_str(), "qwenpaw" | "qoder-sdk")
+                && matches!(
+                    binding.adapter.as_str(),
+                    "qwenpaw" | "qoder-sdk" | "openclaw" | "hermes"
+                )
             {
                 let close = if binding.adapter == "qoder-sdk" {
                     Operation::CloseHookEvent {
@@ -184,6 +215,19 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
         }
         Ok(aw_adapter::reload::combine(&binding.adapter, outputs)?)
     })();
+    if event == "input.submit" {
+        client.call(
+            Operation::CloseInputEvent {
+                instance_id: id.clone(),
+                session_id: normalized["session_id"]
+                    .as_str()
+                    .ok_or("missing session")?
+                    .into(),
+                turn_id: normalized["turn_id"].as_str().ok_or("missing turn")?.into(),
+            },
+            Instant::now() + Duration::from_secs(2),
+        )?;
+    }
     let denied = result.as_ref().is_ok_and(aw_adapter::reload::denied);
     if binding.adapter == "qoder"
         && (event == "tool.after" || (event == "tool.before" && (denied || result.is_err())))

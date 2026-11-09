@@ -35,6 +35,9 @@ fn metadata_and_human_inventory_describe_public_syntax_only() {
         "aw service stop",
         "aw list",
         "aw doctor",
+        "aw instance prepare",
+        "aw instance setup",
+        "aw instance release",
     ] {
         assert!(names.contains(&public), "missing {public}");
     }
@@ -45,12 +48,27 @@ fn metadata_and_human_inventory_describe_public_syntax_only() {
         "aw status",
         "aw stop",
         "aw validate",
+        "aw native-prepare",
+        "aw native-setup",
+        "aw native-release",
     ] {
         assert!(!names.contains(&hidden), "exposed {hidden}");
     }
     for absent in ["aw provider", "aw migrate", "aw service start"] {
         assert!(!names.contains(&absent));
     }
+    let binding_commands: Vec<_> = commands
+        .iter()
+        .filter(|entry| {
+            entry["arguments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg["long"] == "binding")
+        })
+        .map(|entry| entry["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(binding_commands, vec!["aw instance release"]);
     let install = commands
         .iter()
         .find(|entry| entry["command"] == "aw install")
@@ -94,7 +112,9 @@ fn every_shell_uses_public_tree_and_does_not_install_a_script() {
             "aw,hook",
             "aw,bridge",
             "--adapter",
-            "--binding",
+            "native-prepare",
+            "native-setup",
+            "native-release",
         ] {
             assert!(!text.contains(hidden), "{shell}: exposed {hidden}");
         }

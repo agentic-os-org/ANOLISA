@@ -122,6 +122,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
         if !resident_policy || ready.pid != owner_pid {
             return Err("invalid resident worker readiness".into());
         }
+        super::native::ready(&root, &client, owner_pid, deadline)?;
         client.call(
             Operation::BridgeLifecycle {
                 instance_id: root.binding.instance_id,
@@ -139,6 +140,9 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
             return Err("invalid resident policy reservation".into());
         }
         if action == "reserve" {
+            // Direct Queries and prewarm have no daemon readiness callback. Complete
+            // the same owner/registration checks before taking the first root claim.
+            super::native::ready(&root, &client, owner_pid, deadline)?;
             client.call(
                 Operation::BridgeLifecycle {
                     instance_id: root.binding.instance_id.clone(),

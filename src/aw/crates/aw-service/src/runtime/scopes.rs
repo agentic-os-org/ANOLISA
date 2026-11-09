@@ -22,6 +22,7 @@ pub(super) struct Owner {
     pub(super) parent: Option<String>,
     pub(super) process: Process,
     pub(super) independent: bool,
+    pub(super) native: bool,
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) acknowledge_by: Option<Instant>,
     policy_confirmed: bool,
@@ -40,7 +41,7 @@ impl Runtime {
     fn scope_owner(&self, id: &str, execution: bool) -> Result<()> {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         if let Some(owner) = owners.get(id) {
-            if execution && owner.independent && owner.parent.is_none() {
+            if execution && owner.independent && !owner.native && owner.parent.is_none() {
                 return Err(rejected("registration_requires_scope"));
             }
             if owner.acknowledge_by.is_some() {
@@ -68,7 +69,11 @@ impl Runtime {
         Ok(())
     }
 
-    pub(super) fn acknowledge_scope(&self, id: &str) -> Result<Value> {
+    pub(super) fn acknowledge_scope(
+        self: &Arc<Self>,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<Value> {
         let instances = self
             .instances
             .lock()
@@ -116,13 +121,30 @@ impl Runtime {
             owner.cancelled.store(true, Ordering::Release);
             return Err(error);
         }
+        let cancellation = Arc::clone(&owner.cancelled);
+        let pid = owner.process.metadata()["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or_else(|| rejected("scope_process_identity"))?;
+        drop(owners);
+        drop(instances);
+        // A committed ACK must remain fenced if optional-worker initialization
+        // fails. Maintenance owns reclamation even when the caller loses its reply.
+        let started = self
+            .start_observation(id, deadline)
+            .and_then(|_| self.report_run(id, crate::RunOutcome::Started { pid }));
+        if let Err(error) = started {
+            cancellation.store(true, Ordering::Release);
+            return Err(error);
+        }
         Ok(json!({"acknowledged": true}))
     }
 
     pub(super) fn scope_allows_observation(&self, id: &str) -> Result<bool> {
+        self.check_scope_cleanup(id)?;
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
-        Ok(!owners.get(id).is_some_and(|owner| owner.parent.is_some())
-            && !owners
+        Ok(owners.get(id).is_some_and(|owner| owner.parent.is_some())
+            || !owners
                 .values()
                 .any(|owner| owner.parent.as_deref() == Some(id)))
     }
@@ -148,6 +170,7 @@ impl Runtime {
             Owner {
                 parent: None,
                 independent: false,
+                native: false,
                 acknowledge_by: None,
                 policy_confirmed: true,
                 validity: None,
@@ -185,12 +208,15 @@ impl Runtime {
                             .reload
                             .as_ref()
                             .is_none_or(|reload| reload.resident)
-                        && instance.observation.is_none()
                 })
                 .ok_or_else(|| rejected("scope_parent_unavailable"))?;
             let owner = owners
                 .get(parent)
-                .filter(|owner| owner.parent.is_none() && !owner.cancelled.load(Ordering::Acquire))
+                .filter(|owner| {
+                    !owner.native
+                        && owner.parent.is_none()
+                        && !owner.cancelled.load(Ordering::Acquire)
+                })
                 .ok_or_else(|| rejected("scope_parent_unowned"))?;
             owner.process.corroborate(pid)?;
             if let Some(reload) = &instance.reload {
@@ -215,6 +241,7 @@ impl Runtime {
                 Owner {
                     parent: Some(parent.into()),
                     independent,
+                    native: false,
                     acknowledge_by: Some(deadline + Duration::from_secs(5)),
                     policy_confirmed,
                     validity: None,
@@ -413,6 +440,7 @@ impl Runtime {
 impl Owner {
     pub(super) fn independent(
         process: Process,
+        native: bool,
         cancelled: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Self {
@@ -421,6 +449,7 @@ impl Owner {
             process,
             cancelled,
             independent: true,
+            native,
             acknowledge_by: Some(deadline),
             policy_confirmed: true,
             validity: None,

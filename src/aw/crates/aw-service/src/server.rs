@@ -193,6 +193,7 @@ fn connection(
             | Operation::OpenScope { .. }
             | Operation::Registration {
                 command: crate::RegistrationCommand::Register { .. }
+                    | crate::RegistrationCommand::RegisterNative { .. }
             }
     );
     let result = (|| {

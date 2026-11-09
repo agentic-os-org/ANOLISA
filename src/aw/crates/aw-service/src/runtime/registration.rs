@@ -46,7 +46,8 @@ impl Runtime {
             return Err(rejected("service_stopping"));
         }
         match command {
-            command @ RegistrationCommand::Register { .. } => {
+            command @ (RegistrationCommand::Register { .. }
+            | RegistrationCommand::RegisterNative { .. }) => {
                 self.register(command, peer, deadline, cancelled)
             }
             RegistrationCommand::Query { key } => {
@@ -227,16 +228,29 @@ impl Runtime {
                 serde_json::to_vec(&command).map_err(|_| rejected("registration_encoding"))?
             )
         );
-        let RegistrationCommand::Register {
-            key,
-            target,
-            capabilities,
-            cwd,
-            environment,
-        } = command
-        else {
-            return Err(rejected("registration_action"));
+        let native = matches!(&command, RegistrationCommand::RegisterNative { .. });
+        let (key, target, capabilities, cwd, environment, config) = match command {
+            RegistrationCommand::Register {
+                key,
+                target,
+                capabilities,
+                cwd,
+                environment,
+                config,
+            }
+            | RegistrationCommand::RegisterNative {
+                key,
+                target,
+                capabilities,
+                cwd,
+                environment,
+                config,
+            } => (key, target, capabilities, cwd, environment, config),
+            _ => return Err(rejected("registration_action")),
         };
+        if native && !matches!(capabilities.adapter.as_str(), "openclaw" | "hermes") {
+            return Err(rejected("registration_adapter_unsupported"));
+        }
         let process = Process::read(key.owner.pid)?;
         process.registration_owner(&key.owner)?;
         process.caller(peer)?;
@@ -268,20 +282,37 @@ impl Runtime {
             record
         };
         let result = (|| {
+            let bytes = config
+                .as_ref()
+                .map_or(self.bytes.as_slice(), |value| value.as_bytes());
+            let validator = aw_config::Validator::new()?;
+            let document = validator.parse(bytes)?;
+            validator
+                .parse(&self.bytes)?
+                .validate_policy_update(&document)?;
             let candidate = self
                 .admission
-                .preflight(&self.bytes, &target, capabilities.clone().into())
+                .preflight(bytes, &target, capabilities.clone().into())
                 .map_err(|_| rejected("binding_preflight"))?;
             // Use the ordinary factory's route projection, including native input,
             // Skill and result handling constraints; no restricted reload profile.
-            let document = aw_config::Validator::new()?.parse(&self.bytes)?;
-            let routes = aw_adapter::reload::scope_policy(
-                document.as_value(),
-                &target,
-                candidate.requirements(),
-                &capabilities.clone().into(),
-            )
-            .map_err(|_| rejected("registration_adapter_unsupported"))?;
+            let routes = if native {
+                aw_adapter::reload::validate(
+                    document.as_value(),
+                    &target,
+                    &capabilities.clone().into(),
+                )
+                .map_err(|_| rejected("registration_adapter_unsupported"))?;
+                json!({"events": aw_adapter::reload::routes()})
+            } else {
+                aw_adapter::reload::scope_policy(
+                    document.as_value(),
+                    &target,
+                    candidate.requirements(),
+                    &capabilities.clone().into(),
+                )
+                .map_err(|_| rejected("registration_adapter_unsupported"))?
+            };
             if !std::path::Path::new(&cwd).is_absolute() {
                 return Err(rejected("registration_cwd"));
             }
@@ -292,6 +323,7 @@ impl Runtime {
                     record.id.clone(),
                     Owner::independent(
                         record.process.clone(),
+                        native,
                         Arc::clone(&record.cancellation),
                         deadline,
                     ),
@@ -314,6 +346,7 @@ impl Runtime {
                 });
                 let result = self.bind_id(
                     record.id.clone(),
+                    bytes,
                     target,
                     capabilities,
                     ProcessContext {
@@ -321,8 +354,7 @@ impl Runtime {
                         environment,
                         stderr_bytes: 64 * 1024,
                     },
-                    deadline,
-                    &record.cancellation,
+                    (deadline, &record.cancellation),
                 );
                 finished.store(true, Ordering::Release);
                 result

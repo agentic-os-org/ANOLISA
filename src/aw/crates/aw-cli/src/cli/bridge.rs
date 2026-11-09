@@ -48,7 +48,10 @@ fn invoke(args: &Arguments) -> Result<Exit> {
             key,
             unsafe { libc::getppid() } as u32,
         )
-    } else if matches!(binding.adapter.as_str(), "qwenpaw" | "qoder-sdk") {
+    } else if matches!(
+        binding.adapter.as_str(),
+        "qwenpaw" | "qoder-sdk" | "openclaw" | "hermes"
+    ) {
         (
             serde_json::from_value::<LifecyclePhase>(native["phase"].clone())?,
             native["key"]
@@ -67,14 +70,42 @@ fn invoke(args: &Arguments) -> Result<Exit> {
     if client.identity() != &binding.binding.identity {
         return Err("stale lifecycle binding".into());
     }
+    if matches!(phase, LifecyclePhase::Ready) {
+        super::native::ready(&binding, &client, pid, deadline)?;
+    }
     client.call(
         Operation::BridgeLifecycle {
-            instance_id: binding.binding.instance_id,
+            instance_id: binding.binding.instance_id.clone(),
             pid,
             phase,
-            key,
+            key: key.clone(),
         },
         deadline,
     )?;
+    if binding.adapter == "qoder" && native["hook_event_name"] == "UserPromptSubmit" {
+        let id = binding.binding.instance_id.clone();
+        let output = super::dispatch::invoke_bound(
+            aw_adapter::select("qoder")?,
+            binding,
+            "input.submit",
+            bytes,
+            Instant::now() + Duration::from_secs(59),
+        );
+        if !output
+            .as_ref()
+            .is_ok_and(|output| !aw_adapter::reload::denied(output))
+        {
+            client.call(
+                Operation::BridgeLifecycle {
+                    instance_id: id,
+                    pid,
+                    phase: LifecyclePhase::RequestEnd,
+                    key,
+                },
+                Instant::now() + Duration::from_secs(2),
+            )?;
+        }
+        return super::hook::emit(output?);
+    }
     Ok(Exit::Code(0))
 }

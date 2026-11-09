@@ -53,8 +53,34 @@ impl Runtime {
             owner.process.corroborate(*pid)?;
             Process::read(*pid)?.caller(peer)?;
         } else {
-            owner.process.caller(peer)?;
-            if owner.parent.is_none() {
+            if owner.native
+                && !matches!(
+                    operation,
+                    Operation::EnableReload { .. }
+                        | Operation::AssociateProcess { .. }
+                        | Operation::BridgeLifecycle { .. }
+                )
+            {
+                peer.check()?;
+                owner.process.corroborate(
+                    peer.metadata()["pid"]
+                        .as_u64()
+                        .and_then(|pid| u32::try_from(pid).ok())
+                        .ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                )?;
+                peer.check()?;
+            } else {
+                owner.process.caller(peer)?;
+            }
+            if !owner.native
+                && owner.parent.is_none()
+                && !matches!(
+                    operation,
+                    Operation::EnableReload { .. }
+                        | Operation::AssociateProcess { .. }
+                        | Operation::BridgeLifecycle { .. }
+                )
+            {
                 return Err(rejected("registration_requires_scope"));
             }
         }

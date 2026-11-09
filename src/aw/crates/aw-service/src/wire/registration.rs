@@ -46,6 +46,26 @@ pub enum RegistrationCommand {
     Register {
         /// Recovery key; repeating identical input returns the retained state.
         key: RegistrationKey,
+        /// Optional policy snapshot; launch and daemon settings must match the service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<String>,
+        /// Existing configured target.
+        target: String,
+        /// Adapter-verified capabilities at the application's native entrypoint.
+        capabilities: Capabilities,
+        /// Absolute Provider working directory supplied by the application.
+        cwd: String,
+        /// Complete explicit Provider environment; never inherited from the daemon.
+        #[serde(with = "environment")]
+        environment: BTreeMap<OsString, OsString>,
+    },
+    /// Prepare a native command bridge with root callbacks and idle-only updates.
+    RegisterNative {
+        /// Recovery key; repeating identical input returns the retained state.
+        key: RegistrationKey,
+        /// Optional policy snapshot; launch and daemon settings must match the service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<String>,
         /// Existing configured target.
         target: String,
         /// Adapter-verified capabilities at the application's native entrypoint.

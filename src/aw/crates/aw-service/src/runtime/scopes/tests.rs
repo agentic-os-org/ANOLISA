@@ -11,6 +11,9 @@ use std::{
     sync::{mpsc, TryLockError},
 };
 
+#[path = "observation_tests.rs"]
+mod observation;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Fixture {
@@ -274,7 +277,7 @@ fn owner_death_before_dispatch(during_audit: bool) {
                 runtime.event_loop(
                     (&key, instance),
                     &event,
-                    (&cancelled, &context),
+                    (&cancelled, &context, None),
                     receiver,
                     false,
                     true,
