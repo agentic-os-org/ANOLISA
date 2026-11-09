@@ -246,7 +246,7 @@ def _plugins_section(config: dict[str, object]) -> dict[str, object]:
     return plugins
 
 
-def _enable_plugin(config: dict[str, object], plugin_id: str) -> None:
+def _enable_plugin(config: dict[str, object], plugin_id: str) -> dict[str, object]:
     plugins = _plugins_section(config)
 
     entries = plugins.setdefault("entries", {})
@@ -263,6 +263,20 @@ def _enable_plugin(config: dict[str, object], plugin_id: str) -> None:
             raise RuntimeError("Invalid OpenClaw config: plugins.allow must be an array")
         if plugin_id not in allowed_plugins:
             allowed_plugins.append(plugin_id)
+    return entry
+
+
+def _request_verbose_markers(entry: dict[str, object]) -> None:
+    """Turn on the stdout markers the tokenless activation evidence reads.
+
+    The plugin prints its registration line and its per-call rewrite and
+    optimization lines only when ``verbose`` is set, so without it every run
+    reads as weak evidence whether or not the plugin acted.
+    """
+    plugin_config = entry.setdefault("config", {})
+    if not isinstance(plugin_config, dict):
+        raise RuntimeError(f"Invalid OpenClaw config: plugins.entries.{_TOKENLESS_PLUGIN_ID}.config must be an object")
+    plugin_config["verbose"] = True
 
 
 def _claim_context_engine_slot(config: dict[str, object], plugin_id: str) -> None:
@@ -342,7 +356,7 @@ class OpenClawSandboxManager:
         agent_list = self._ensure_agent_list(config)
         _apply_openclaw_stability_defaults(config, temperature=self._temperature, seed=self._seed)
         if self._tokenless:
-            _enable_plugin(config, _TOKENLESS_PLUGIN_ID)
+            _request_verbose_markers(_enable_plugin(config, _TOKENLESS_PLUGIN_ID))
         if self._headroom:
             _enable_plugin(config, _HEADROOM_PLUGIN_ID)
             _claim_context_engine_slot(config, _HEADROOM_PLUGIN_ID)

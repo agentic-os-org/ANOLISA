@@ -47,6 +47,18 @@ _TOKENLESS_MARKERS = (
     "[tokenless:",
     "tokenless:",
 )
+# Per-call markers. With verbose on, the current plugin prints ``rewrote <tool>`` and
+# ``post-tool optimized <tool>``, and the binary reports a PostTool call that saved
+# nothing as ``compression did not reduce size``; that line proves the hook ran too.
+# The ``rewrite: <cmd> -> <cmd>`` and response-compression forms of earlier releases
+# stay recognised for old logs.
+_RTK_REWRITE_MARKERS = ("[tokenless:rtk] rewrote ", "[tokenless:rtk] rewrite:")
+_RESPONSE_COMPRESSION_MARKERS = (
+    "[tokenless:post-tool] optimized ",
+    "tokenless: compression did not reduce size",
+    "tokenless: response compression",
+    "[tokenless:response",
+)
 
 
 def _summarize_session_jsonl(path: Path) -> dict[str, object]:
@@ -96,11 +108,13 @@ def _summarize_session_jsonl(path: Path) -> dict[str, object]:
 
 def _raw_output_tokenless_summary(raw_output: str) -> dict[str, object]:
     marker_lines = [line for line in raw_output.splitlines() if any(marker in line for marker in _TOKENLESS_MARKERS)]
-    rtk_rewrite_lines = [line for line in raw_output.splitlines() if "[tokenless:rtk] rewrite:" in line]
+    rtk_rewrite_lines = [
+        line for line in raw_output.splitlines() if any(marker in line for marker in _RTK_REWRITE_MARKERS)
+    ]
     response_compression_lines = [
         line
         for line in raw_output.splitlines()
-        if "tokenless: response compression" in line or "[tokenless:response" in line
+        if any(marker in line for marker in _RESPONSE_COMPRESSION_MARKERS)
     ]
     return {
         "plugin_registered": "[tokenless] OpenClaw plugin registered" in raw_output,
