@@ -162,3 +162,82 @@ pub(super) fn check_staging_sync(parent: &Path) -> Result<(), crate::store::Erro
     }
     Ok(())
 }
+
+thread_local! {
+    static WORKSPACE_CHECK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Restore the previous hook when the isolated test scope exits, including unwinding.
+pub(crate) struct WorkspaceCheckHook {
+    previous: Option<Box<dyn FnOnce()>>,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for WorkspaceCheckHook {
+    fn drop(&mut self) {
+        WORKSPACE_CHECK.with(|hook| {
+            let _ = hook.replace(self.previous.take());
+        });
+    }
+}
+
+/// Run `action` once, after recovery verified the workspace identity and before
+/// it removes staging names; lets tests replace the workspace in that window.
+pub(crate) fn replace_workspace_after_check(action: impl FnOnce() + 'static) -> WorkspaceCheckHook {
+    let previous = WORKSPACE_CHECK.with(|hook| hook.replace(Some(Box::new(action))));
+    WorkspaceCheckHook {
+        previous,
+        _same_thread: PhantomData,
+    }
+}
+
+pub(crate) fn check_workspace() {
+    let action = WORKSPACE_CHECK.with(|hook| hook.borrow_mut().take());
+    if let Some(action) = action {
+        action();
+    }
+}
+
+thread_local! {
+    static ENUMERATION_FAILURE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Restore the previous fault when the isolated test scope exits, including unwinding.
+pub(crate) struct EnumerationFailure {
+    previous: Option<PathBuf>,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for EnumerationFailure {
+    fn drop(&mut self) {
+        ENUMERATION_FAILURE.with(|failure| {
+            let _ = failure.replace(self.previous.take());
+        });
+    }
+}
+
+/// Fail the next directory enumeration under this test directory with EIO.
+pub(crate) fn fail_enumeration(root: &Path) -> EnumerationFailure {
+    let previous = ENUMERATION_FAILURE.with(|failure| failure.replace(Some(root.into())));
+    EnumerationFailure {
+        previous,
+        _same_thread: PhantomData,
+    }
+}
+
+pub(super) fn check_enumeration(path: &Path) -> Result<(), crate::store::Error> {
+    let armed = ENUMERATION_FAILURE.with(|failure| {
+        let mut slot = failure.borrow_mut();
+        let matches = slot.as_deref().is_some_and(|root| path.starts_with(root));
+        if matches {
+            *slot = None;
+        }
+        matches
+    });
+    if armed {
+        return Err(crate::store::Error::Io(io::Error::from_raw_os_error(
+            libc::EIO,
+        )));
+    }
+    Ok(())
+}

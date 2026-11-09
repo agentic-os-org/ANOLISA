@@ -5,14 +5,17 @@ use aw_exec::PackageLock;
 mod faults;
 mod staging;
 #[cfg(test)]
-pub(super) use faults::{fail_database_sync, fail_staging_sync, fail_staging_write, fail_tmpfile};
+pub(super) use faults::{
+    check_workspace, fail_database_sync, fail_enumeration, fail_staging_sync, fail_staging_write,
+    fail_tmpfile, replace_workspace_after_check,
+};
 pub(super) use staging::{anonymous, publish, remove_staging, write_bytes};
 
 use crate::store::{require, Error, Payload, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    ffi::{CString, OsStr},
+    ffi::{CStr, CString, OsStr},
     fs::{File, Metadata},
     io::Read,
     os::{
@@ -502,6 +505,79 @@ pub(super) fn entries(path: &Path) -> Result<Vec<PathBuf>> {
         "too many transaction directory entries",
     )?;
     let after = directory_identity(path)?;
+    require(
+        held.dev == after.dev && held.ino == after.ino,
+        "transaction directory replaced",
+    )?;
+    Ok(entries)
+}
+
+/// Identify an open descriptor without resolving its path again.
+pub(super) fn identity_of(file: &File) -> Result<Identity> {
+    Ok(from_metadata(&file.metadata()?, String::new()))
+}
+
+/// Enumerate a directory through the descriptor that already passed the
+/// identity check, so a replacement at the same path cannot redirect cleanup.
+pub(super) fn entries_in(directory: &File, path: &Path) -> Result<Vec<PathBuf>> {
+    #[cfg(test)]
+    faults::check_enumeration(path)?;
+    let held = from_metadata(&directory.metadata()?, String::new());
+    // SAFETY: dup duplicates the live descriptor and touches no filesystem state.
+    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: dup shares the directory offset with the original; rewind it so a
+    // repeated enumeration starts at the first entry.
+    if unsafe { libc::lseek(duplicate, 0, libc::SEEK_SET) } < 0 {
+        // SAFETY: the duplicate is owned by this function.
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: fdopendir takes ownership of the duplicate on success.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        // SAFETY: fdopendir did not take ownership of the duplicate on failure.
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut entries = Vec::new();
+    loop {
+        // Clear errno first: readdir returns null both at end-of-directory and
+        // on a read failure, and only errno tells the two apart.
+        // SAFETY: errno is a thread-local slot owned by the calling thread.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: readdir borrows the live stream for the duration of the call.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or(0) == 0 {
+                break;
+            }
+            // SAFETY: the stream is live and not used again.
+            unsafe { libc::closedir(stream) };
+            return Err(error.into());
+        }
+        // SAFETY: d_name is a NUL-terminated name inside the returned dirent.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        entries.push(path.join(OsStr::from_bytes(name.to_bytes())));
+        if entries.len() > 8192 {
+            // SAFETY: the stream is live and not used again.
+            unsafe { libc::closedir(stream) };
+            return Err(Error::Invalid(
+                "too many transaction directory entries".into(),
+            ));
+        }
+    }
+    // SAFETY: the stream is live and not used again.
+    if unsafe { libc::closedir(stream) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let after = identity_of(directory)?;
     require(
         held.dev == after.dev && held.ino == after.ino,
         "transaction directory replaced",

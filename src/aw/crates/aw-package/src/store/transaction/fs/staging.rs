@@ -227,27 +227,30 @@ pub(in crate::store::transaction) fn write_bytes(
 /// Remove the staging leftovers a crash between creation and publication can
 /// leave in a directory owned by `owner`. Names owned by anything else stay.
 pub(in crate::store::transaction) fn remove_staging(
+    directory: &File,
     path: &Path,
     owner: &str,
 ) -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
-    for entry in super::entries(path)? {
-        if !entry
-            .file_name()
-            .is_some_and(|name| staging_name(name, owner))
-        {
+    for entry in super::entries_in(directory, path)? {
+        let Some(name) = entry.file_name() else {
+            continue;
+        };
+        if !staging_name(name, owner) {
             continue;
         }
-        let (parent, name) = parent(&entry)?;
         let name = cstring(name)?;
-        // SAFETY: name is one child of the anchored parent; unlinkat never follows symlinks.
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        // SAFETY: name is one child of the verified directory; unlinkat never follows symlinks.
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::NotFound {
                 return Err(error.into());
             }
         }
         removed.push(entry);
+    }
+    if !removed.is_empty() {
+        directory.sync_all()?;
     }
     Ok(removed)
 }
@@ -369,7 +372,8 @@ mod tests {
         std::fs::write(&owned, b"leftover").expect("owned staging file");
         std::fs::write(&other, b"other").expect("other staging file");
         std::fs::write(&payload, b"payload").expect("payload file");
-        let removed = remove_staging(&parent, "txn").expect("reclaim staging");
+        let directory = std::fs::File::open(&parent).expect("staging directory");
+        let removed = remove_staging(&directory, &parent, "txn").expect("reclaim staging");
         assert_eq!(removed, vec![owned]);
         assert!(other.exists(), "unrelated staging names must stay");
         assert!(payload.exists(), "payload files must stay");

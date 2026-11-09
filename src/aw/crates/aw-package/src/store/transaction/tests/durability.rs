@@ -355,3 +355,97 @@ fn replacement_workspace_bytes_survive_recovery() {
     assert_eq!(report.conflicts, vec![workspace]);
     assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign bytes\n");
 }
+
+#[test]
+fn workspace_replaced_after_identity_check_keeps_foreign_bytes() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let transactions = fixture.paths.root.join("transactions");
+    let directories = fs::entries(&transactions).unwrap();
+    assert_eq!(directories.len(), 1);
+    let entry = journal::read(&fixture.paths, &directories[0]).unwrap();
+    let workspace = entry.workspace();
+    let name = fs::entries(&workspace)
+        .unwrap()
+        .into_iter()
+        .find(|path| is_staging(path))
+        .and_then(|path| path.file_name().map(std::ffi::OsString::from))
+        .expect("staging file");
+    let replacement = workspace.with_file_name(format!(".replacement-{}", entry.transaction_id));
+    std::fs::create_dir(&replacement).unwrap();
+    let moved = workspace.clone();
+    let foreign_name = name.clone();
+    let _hook = fs::replace_workspace_after_check(move || {
+        std::fs::remove_dir_all(&moved).unwrap();
+        std::fs::rename(&replacement, &moved).unwrap();
+        std::fs::write(moved.join(&foreign_name), b"foreign bytes\n").unwrap();
+    });
+
+    // Recovery verifies the recorded workspace, then the replacement lands in
+    // that window: cleanup must stay on the verified inode and keep the bytes.
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert_eq!(report.conflicts, vec![workspace.clone()]);
+    assert_eq!(
+        std::fs::read(workspace.join(&name)).unwrap(),
+        b"foreign bytes\n"
+    );
+
+    // Repeated recovery reports the same conflict without touching the bytes.
+    let report = fixture.recover();
+    assert_eq!(report.conflicts, vec![workspace.clone()]);
+    assert_eq!(
+        std::fs::read(workspace.join(&name)).unwrap(),
+        b"foreign bytes\n"
+    );
+}
+
+#[test]
+fn enumeration_failure_keeps_the_journal_for_a_later_recovery() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let transactions = fixture.paths.root.join("transactions");
+    let directories = fs::entries(&transactions).unwrap();
+    assert_eq!(directories.len(), 1);
+    let entry = journal::read(&fixture.paths, &directories[0]).unwrap();
+    let workspace = entry.workspace();
+    let staging = fs::entries(&workspace)
+        .unwrap()
+        .into_iter()
+        .find(|path| is_staging(path))
+        .expect("staging file");
+
+    // The aborted pass must keep the journal and the payload it cannot account
+    // for: a partial entry list is not evidence that the directory is clean.
+    let failure = fs::fail_enumeration(&fixture.prefix);
+    let error = super::super::recover(&fixture.paths, &AtomicBool::new(false))
+        .expect_err("enumeration failure must abort recovery");
+    assert!(
+        matches!(error, Error::Io(ref io) if io.raw_os_error() == Some(libc::EIO)),
+        "{error:?}"
+    );
+    drop(failure);
+
+    assert!(
+        entry.path().exists(),
+        "the journal must survive the aborted pass"
+    );
+    assert!(staging.exists(), "the staging payload must survive");
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!directories[0].exists());
+    assert!(!workspace.exists());
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert!(inventory.installations.is_empty());
+    assert!(inventory.doctor().unwrap().healthy());
+}
