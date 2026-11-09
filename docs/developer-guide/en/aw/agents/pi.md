@@ -78,7 +78,7 @@ native streaming and report-mode Tokenless.
 ## Native startup and idle policy updates
 
 A native Node host can prepare AW once at startup, then run the existing
-`createSession`/`runWorker` factory in its own process. Keep `aw.yaml` in its
+`createSession` factory with `runWorker` or `run` in its own process. Keep `aw.yaml` in its
 working directory; target `pi` must identify the factory application and its
 installed SDK packages. Add the following bootstrap to the native host and
 restart it once. Run the host with `node native-host.mjs`.
@@ -106,7 +106,11 @@ application factory preparation or unconfirmed cleanup; close every session
 before updating. Newly created sessions adopt the new policy, including
 input and Skill checks. Strict output updates still require both Pi packages
 at 0.84.2. A preparation failure leaves dispatch disabled; release only after
-all sessions have closed. Native startup requires the resident factory.
+all sessions have closed. For an application exporting `run(session, context)`, the
+native helper creates the initial managed session and supplies `createSession`
+and `closeSession` in `context`. Close every active session before updating the
+instance; remaining sessions are closed when `run` returns. `input.submit`
+continues to require `runWorker`, including after a policy update.
 
 ## Check user submissions
 
@@ -197,3 +201,14 @@ Skills, flat Markdown files and a same-named extension command have no checked
 source. Automatic context injection, direct file reads and Skill commands need
 policies at their own execution points. A bare pi-agent-core application must
 supply its business Skill loader before this Coding Agent source contract applies.
+
+
+## Task observation
+
+With `evidence` enabled, each acknowledged managed session owns a bounded observation
+worker. Configured native Hook calls contribute callback metadata; session close drains
+pending reads and releases its source-session claims. A failed evidence query does not
+block an otherwise admitted tool call. Pi and Claude SDK retain the existing source
+identity limits: callback association remains `unverified`, coverage remains `unknown`,
+and AW does not claim that AgentSight history belongs to this SDK session. Empty tool
+policies do not add synthetic observation callbacks for these adapters.

@@ -56,8 +56,9 @@ launches provide resident child scopes, long-session retirement and explicit
 updates between fully drained replies. A reused Agent reads the active policy
 for each new reply after reservation. App startup confirms update readiness before
 the first reply; startup policy remains active until an update succeeds.
-Native evidence capture is rejected for ordinary resident launches because that
-child-scope observation contract is unavailable.
+Each acknowledged reply scope owns bounded native callback observation and drains
+it before close. Verified native identity can query the configured evidence source;
+a missing or unavailable source leaves explicit gaps and unknown coverage.
 
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
@@ -117,8 +118,22 @@ setup files listed in `aw-startup.json`, then unset `AW_INSTANCE_BOOTSTRAP` and
 restart to remove this integration. This startup route supports one native App
 process; ACP, TUI and multiprocessing require separate integration.
 
-Native MCP connection settings and native permission updates have their own
-lifecycle. Serialize and verify those changes separately: the pinned QwenPaw
-baseline can restore an older native permission policy when an earlier connection
-reload completes after a permission update. AW instance policies retain their
-independent admission boundary.
+Stock QwenPaw 2.2.2.post1 can publish stale MCP permissions after a policy update
+has been acknowledged. Native permission hot updates require a version containing
+the [driver publication fix](https://github.com/kongche-jbw/QwenPaw/commit/6e7fb8a19ce61eca3b8dbc86d1818fc94b7252a8).
+The verified [2.2.2.post1 backport](https://github.com/kongche-jbw/QwenPaw/commit/099f645819218256364e7d63ae35dce21e383bda)
+is an unreleased Preview: both native and AW-managed Apps retain deny during
+concurrent reload, with no denied server-side tool effect, and subsequent normal
+reload recovers. New calls after policy acknowledgement use the latest policy;
+already-authorized in-flight calls may complete.
+
+Stop the App, install a complete wheel built from that fixed revision in its
+dedicated environment, then restart. Use QwenPaw's
+[wheel build script](https://github.com/kongche-jbw/QwenPaw/blob/099f645819218256364e7d63ae35dce21e383bda/scripts/wheel_build.sh)
+to retain Console assets. With an unpatched version, keep native MCP configuration
+and permissions unchanged while the App runs; make changes after exit, verify
+persisted configuration, then restart.
+
+`aw instance update` changes AW policy at the reply idle boundary. AW
+`tool.before` denial protects subsequent calls that pass through its Hooks;
+the QwenPaw fix supplies native driver concurrency control.

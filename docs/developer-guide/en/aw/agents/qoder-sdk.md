@@ -188,7 +188,7 @@ interfaces, which require regression checks when upgrading the SDK.
 | Permissions and input | Preserve native denial; check public Hook input. Subsequent native rewrites remain unchecked before execution. |
 | Environment and authentication | Queries sharing a daemon cannot override env/auth; use native `daemon.auth()` for credential changes or separate daemons for different credentials |
 | Post checks | Ordinary resident Queries adopt `replace_result` for one text slot via `updatedToolOutput`, including `/file/content` in native `Read` text results; file metadata remains intact and PII checks also scan the retained envelope; `withhold_result` closes delivery on check failure. Restricted `--reloadable` mode remains observation-only. |
-| AgentSight | Ordinary resident mode requires `evidence.mode: off` |
+| AgentSight | Each acknowledged Query owns bounded callback observation and closes it with its scope. Native session/tool-call association is verified; AgentSight source process identity requires separate verification and unavailable evidence retains unknown coverage |
 | Worktree | Ordinary callbacks carry parent Query cwd, so policies needing actual execution cwd cannot use worktrees; restricted mode rejects them |
 
 Cleanup waits for native Query, Hook, permission, credential and MCP callbacks to drain. Failed or timed-out private lease cleanup fences new work; fix the cause and restart the worker.

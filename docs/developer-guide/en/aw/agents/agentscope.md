@@ -228,7 +228,9 @@ Pause dispatch before updating. Model execution, active tool tasks and unconfirm
 cleanup keep the instance busy. Explicitly close partially consumed reply streams.
 A lost scope-open response fences later replies until the worker is restarted; a
 confirmed child close with an unconfirmed reservation release is retried before
-the next reply. Native evidence capture remains outside resident policy scopes.
+the next reply. Each acknowledged reply scope owns bounded callback observation
+and drains it before close. AgentScope source identity remains unverified, so
+coverage stays unknown.
 See [policy updates](../deployment/policy-updates.md) for eligible configuration
 fields and revision selection.
 

@@ -93,14 +93,22 @@ AgentScope SDK 2.0.6 工厂回复支持应用自有私有租约。工具显式�
 
 | 入口 | 受管 MCP | 空闲策略更新 |
 | --- | --- | --- |
-| Qoder SDK | 进程内 handler，提供 Query 身份 | 普通常驻模式支持，全部 Query 关闭后更新 |
-| QwenPaw App | 显式包装 MCP 客户端调用 | 普通常驻模式支持，全部 reply 排空后更新 |
-| Claude SDK resident | 进程内 handler，可压缩成功单文本结果，`report` 故障保留原始结果 | 修改需重启 |
-| Pi SDK | 通过受管自定义工具接入 MCP 客户端 | 修改需重启 |
-| AgentScope SDK | 覆盖已暴露的原生工具回调 | 普通工厂回复的 Scope 清理后支持更新 |
-| Qoder CLI、OpenClaw、Hermes | 覆盖已暴露的原生工具回调 | 普通模式修改需重启 |
+| Qoder SDK | 进程内 handler，提供 Query 身份 | 普通或已准备的原生工厂；全部 Query 关闭后更新 |
+| QwenPaw App | 显式包装 MCP 客户端调用 | 普通或已准备的原生 App；全部 reply 和清理排空后更新 |
+| AgentScope SDK | 覆盖已暴露的原生工具回调 | 普通或已准备的原生工厂；reply、工具和 Scope 清理结束后更新 |
+| Claude SDK resident | 进程内 handler，可压缩成功单文本结果，`report` 故障保留原始结果 | 已准备的原生工厂；全部客户端断开并完成清理后更新 |
+| Pi SDK | 通过受管自定义工具接入 MCP 客户端 | 已准备的原生 worker 工厂；全部 Session 关闭后更新 |
+| OpenClaw Gateway | 覆盖已暴露的原生工具回调 | 已准备的原生 Gateway；成功完成 run 并排空工具回调后更新 |
+| Hermes 本机 chat | 覆盖已暴露的原生工具回调 | 已准备的原生 chat；确认轮次完成并排空回调后更新 |
+| Qoder CLI | 原生工具回调 | 已准备的原生 TUI／print；TUI 也支持首请求前 attach 或 `--reloadable`；须等待请求与清理结束 |
 
-Qoder TUI、Qoder SDK 和 QwenPaw 另有受限更新模式，版本与部署步骤见[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)。
+原生启动需要先按框架文档完成准备。SDK 应用保留 AW 工厂接入；OpenClaw、Hermes 和
+QwenPaw 安装一次启动组件并重启。Qoder TUI 沿用独占 profile、首请求前 attach 的路径。
+尚未接入的运行中进程没有就绪的 AW 实例。接点就绪并完成表中的清理后，执行
+`aw instance update --agent TARGET` 即可加载默认 `aw.yaml`。普通 `aw run` 启动的
+Pi、Claude SDK、OpenClaw 和 Hermes 仍沿用原有重启要求。Qoder SDK 和 QwenPaw
+保留受限 `--reloadable` 模式，QwenPaw 另有受限的外部 attach 路径。具体入口与清理限制见
+[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)。
 MCP 工具需按实际输入语义配置安全检查，接线见 [Qoder SDK / QwenPaw MCP](../../../../src/aw/docs/design/zh/adapters/structured-mcp.md) 与 [Claude SDK MCP](../../../../src/aw/docs/design/zh/adapters/claude-mcp.md)。
 
 Qoder SDK 应用还可接入固定摘要的 Bash 凭据消费者、Worker import 和声明式角色资产。

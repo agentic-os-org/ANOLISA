@@ -15,6 +15,14 @@ See the [integration roadmap](../integrations/agentsight/agentsight-integration.
 capped at one second. `report_run` records actual spawn/exit or launch failure;
 PIDs remain launcher-reported data. `status.observations` exposes metadata only.
 
+Prepared native roots start observation after Ready and process association.
+Resident task Scopes start it after acknowledgement, so unconfirmed tasks cannot
+probe a source. Each child owns its worker, buffers and source claims; release
+drains the worker before freeing those claims. Concurrent tasks cannot claim the
+same source session, and the conflict remains visible in coverage. This preserves
+the existing Adapter association rules; native preparation adds no new verified
+source dialect.
+
 Native registration includes an internal `$aw.observe` callback when an event has
 no admitted actions. `observe_hook_event` corroborates its original input without
 opening a Host action event; it rejects attempts to use this path for configured

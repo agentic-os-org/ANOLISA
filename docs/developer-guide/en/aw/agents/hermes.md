@@ -99,14 +99,18 @@ Updates activate between confirmed completed chat turns. The native request
 includes model work, tool execution and callback cleanup. Cancellation returning
 no reply, exceptions or unfinished callbacks retain the busy gate; restart the
 process after resolving the failure. Budgets for this update path are at most
-12,000 ms, and the native plugin callback timeout must be at least 17 seconds
-(or explicitly unlimited).
+55,000 ms. Before preparation, set the native `plugins.hook_callback_timeout`
+to at least 60 seconds (or explicitly unlimited) so the full event budget and
+callback cleanup can complete. AW validates this prerequisite without changing
+the native configuration.
 
 Tool observation, denial and result replacement use stable routes. Quiet
 single-query text mode also reserves admission before `input.submit` and keeps
 that admission through the chat turn; interactive targets reject submission
-policy additions. Skill checking is currently rejected on the update path;
-use the ordinary `aw run` Skill integration when that capability is required.
+policy additions. `check_skill` can be enabled or removed between turns; it
+uses the same directory resolution, source-integrity checks and checked rendering
+as the [Skill integration](#skill-trust). A turn with no Skill checker retains
+the native loading behavior.
 
 To remove native-start preparation, stop the dedicated environment's Hermes
 processes, then remove exactly the three files listed by `setup`:

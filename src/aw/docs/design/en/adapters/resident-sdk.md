@@ -200,9 +200,11 @@ remains unsupported. Explicit managed handlers can acquire per-tool credentials
 through `awExecutionFactory`; see [private execution leases](private-execution.md).
 Native close, lease drain and original callback cleanup share a 60-second deadline.
 A failed tool with confirmed credential revocation still releases its scope;
-uncertain lease cleanup retains ownership and fences the worker. Ordinary Queries require evidence
-`mode: off`; launch admission rejects enabled AgentSight evidence because child
-scopes cannot inherit observation roots. Resident scopes reject policy reload.
+uncertain lease cleanup retains ownership and fences the worker. Ordinary Queries
+start configured bounded observation after scope acknowledgement; close drains
+reads and releases source claims. Qoder SDK callback facts retain unverified
+source identity and unknown coverage. Active task snapshots remain immutable;
+idle root updates apply to the next Query.
 The separate [reloadable Qoder SDK path](../runtime/policy-reload.md#qoder-sdk-request-admission)
 retains its 1,024-correlation boundary and request/feature limits.
 
@@ -272,13 +274,16 @@ application draining or guarantees SDK cleanup. Deployment acceptance must test
 draining, forced shutdown, worker replacement and supervisor restart in the actual image.
 Already executed local or remote tool effects cannot be undone by PostTool.
 
-Active scopes still reject policy reload and AgentSight observation; those need
-separate binding contracts. Upgrade/rollback CLI and daemon together: drain, stop the old daemon,
+Active scopes retain their admitted policy snapshot; root updates require idle
+admission and affect subsequent scopes. Upgrade/rollback CLI and daemon together:
+drain, stop the old daemon,
 install the matching build and restart. Wire v1alpha7 rejects older live bindings;
 configuration v1alpha1 and Provider v1alpha1 stay unchanged.
 
-Resident entrypoints reject enabled AgentSight evidence before publishing ready;
-`evidence.mode: off` remains supported. Both Claude message consumers drain
+Acknowledged resident scopes own their configured observation worker. Pi and
+Claude retain metadata from configured Hook callbacks with unverified source
+identity and unknown coverage; empty policies add no observation callbacks.
+`evidence.mode: off` disables collection. Both Claude message consumers drain
 callbacks before ResultMessage and reject EOF without that terminal message.
 Claude owns and explicitly closes its response and transport iterators during
 teardown. Dispatch identity is restored only in the reader task that installed
@@ -328,7 +333,7 @@ hosted-Worker acceptance separately from parser checks.
 | Owned scopes and resident factories (#8953/#8954) | Per-client context, owner death, bounded release, common startup |
 | Managed MCP (#8955) | Explicit handler source, native permissions, successful single-text adoption |
 | Long sessions (#8956) | Producer identity, callback drain, state reclamation, concurrent budgets |
-| Qoder resident adoption (#9069) | Ordinary Queries support strict Post and per-handler private leases with Hook-visible redaction. MCP parent tool correlation, Post replacement and resident hot reload remain pending; ordinary Queries require evidence `mode: off`. |
+| Qoder resident adoption (#9069) | Ordinary Queries support strict Post and per-handler private leases with Hook-visible redaction. MCP parent tool correlation and Post replacement remain pending; idle root updates use immutable Query snapshots, and configured Hook facts retain unverified source identity. |
 | Schema / BeforeModel (#8952) | Admit a request event/effect; classify actual tools/context after resume/compaction; preserve routing and cache/signature semantics; prove model-visible adoption. The relay supplies a request location, not these contracts. |
 | Retrieve (#8952) | Register recovery before lossy output; authenticate markers; tenant/task storage, TTL/quota, byte-exact retrieval, no recompression. |
 

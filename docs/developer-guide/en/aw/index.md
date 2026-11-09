@@ -13,7 +13,7 @@ For developers integrating AW into applications, deploying workers or implementi
 
 ## Deploy and validate
 
-- [Independent instances](deployment/independent-instances.md) · Registration, Ready, query and release for application-owned processes.
+- [Independent instances](deployment/independent-instances.md) · Prepare native startup, confirm Ready, update and release application-owned instances.
 - [Resident SDKs](deployment/resident.md) · Task factories, MCP and client cleanup.
 - [Services and containers](deployment/lifecycle.md) · Persistence, shutdown, upgrades and capacity.
 - [Policy updates](deployment/policy-updates.md) · Prewarm, drain, activate and recover.

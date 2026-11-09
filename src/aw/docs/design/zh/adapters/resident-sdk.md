@@ -148,8 +148,9 @@ Qoder 准入 `tool.before` observe/block 和 `tool.after` observe。普通 resid
 获取逐工具凭据，见[私有执行租约](private-execution.md)。原生 close、租约排空与
 原始回调清理共用 60 秒期限。工具失败且凭据已确认撤销时仍释放 scope；凭据清理未确认时
 保留所有权并封锁 worker。
-普通 Query 要求 evidence `mode: off`；子 scope 无法继承观测根 binding，启动准入明确
-拒绝启用的 AgentSight evidence。常驻 scope 拒绝策略 reload。
+普通 Query 在 scope 确认后启动已配置的有界观测，关闭时排空读取并释放来源关联声明。
+Qoder SDK 回调事实保留 unverified 来源身份和 unknown 覆盖。活动任务快照保持不变；
+根实例空闲更新应用于后续 Query。
 独立的[可更新 Qoder SDK 路径](../runtime/policy-reload.md#qoder-sdk-请求准入)保留
 1,024 个关联边界及请求/功能限制。
 
@@ -200,10 +201,13 @@ launcher 在目标的 `shutdown_grace_ms` 宽限期结束后开始
 实际镜像必须验收排空、强制退出、worker 更换和监督器重启。PostTool 无法撤回已经发生的工具
 副作用，包括远端副作用。
 
-活动 scope 仍拒绝策略 reload 和 AgentSight observation，后续需要独立 binding 合同。升级和回退都先排空、停止旧 daemon，再安装匹配
+活动 scope 保留已准入的策略快照；根实例更新要求空闲，并应用于后续 scope。
+升级和回退都先排空、停止旧 daemon，再安装匹配
 构建并重启。wire v1alpha7 拒绝旧活动 binding，配置和 Provider 协议仍为 v1alpha1。
 
-常驻入口在发布 ready 前拒绝启用的 AgentSight evidence，`evidence.mode: off` 继续支持。
+已确认的常驻 scope 独立持有已配置的观测 worker。Pi 和 Claude 记录已配置 Hook
+产生的回调元数据，来源身份保持 unverified，覆盖保持 unknown；空策略不会新增观测
+回调。`evidence.mode: off` 关闭采集。
 Claude 两种消息消费方式均在回调排空后交付 ResultMessage，缺少终态消息的 EOF 会报错。
 Claude 显式持有并关闭响应与 transport 迭代器。调用身份上下文仅由设置它的 reader task
 恢复。SDK 的 transport 迭代器在原生进程清理前接收取消，避免其 GeneratorExit
@@ -240,7 +244,7 @@ daemon 和 hosted Worker 验收。
 | 受管 scope 与常驻工厂（#8953/#8954） | 客户端上下文、owner 死亡、有界释放、统一启动 |
 | 受管 MCP（#8955） | 明确 handler 来源、原生权限、成功单文本结果采纳 |
 | 长期会话（#8956） | 生产端调用身份、回调排空、状态回收、并发预算 |
-| Qoder 常驻接入（#9069） | 普通 Query 支持严格 Post、逐 handler 私有租约和 Hook 可见脱敏。MCP 父工具关联、Post 替换及 resident 热更新仍待交付；普通 Query 要求 evidence `mode: off`。 |
+| Qoder 常驻接入（#9069） | 普通 Query 支持严格 Post、逐 handler 私有租约和 Hook 可见脱敏。MCP 父工具关联和 Post 替换仍待交付；根实例空闲更新使用不可变 Query 快照，已配置 Hook 事实保留 unverified 来源身份。 |
 | Schema / BeforeModel（#8952） | 准入请求事件/效果；分类 resume/compaction 后实际 tools/context；保留路由和缓存/签名语义；验收模型实际采纳。转发层提供请求位置，这些合同仍需实现。 |
 | Retrieve（#8952） | 有损输出前注册恢复工具；marker 鉴权；租户/任务存储、TTL/配额、逐字恢复、禁止重复压缩。 |
 

@@ -171,7 +171,7 @@ wrapper 须启动所选 SDK 的 Worker，镜像保留其 preload 资产与环境
 | 权限与输入 | 保留原生拒绝，检查公开 Hook 可见的参数；后续原生改写未经过最终执行前再次检查 |
 | 环境与认证 | 共享 daemon 的 Query 不覆盖 env/auth；更换凭据用原生 `daemon.auth()`；不同凭据可用独立 daemon |
 | 后置检查 | 普通常驻 Query 通过 `updatedToolOutput` 采用单文本槽的 `replace_result`，包括原生 `Read` 文本结果中的 `/file/content`；文件元数据保留，PII 检查也覆盖保留字段；检查失败用 `withhold_result` 停止交付。受限 `--reloadable` 模式仍仅支持观察。 |
-| AgentSight | 普通 resident 设置 `evidence.mode: off` |
+| AgentSight | 每个确认就绪的 Query 独立保存有界回调观测，随 Scope 关闭。原生 session/tool-call 关联已核验；AgentSight 来源进程身份需单独核验，证据不可用时覆盖保持未知 |
 | worktree | 普通模式回调携带父 Query cwd，依赖实际执行目录的策略不支持 worktree；受限模式直接拒绝 |
 
 清理须等待原生 Query、Hook、权限、凭据及 MCP 回调排空。私有租约清理失败或超时会封锁新工作，修复后重启 worker。

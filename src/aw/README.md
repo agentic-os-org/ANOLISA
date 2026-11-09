@@ -54,7 +54,7 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 
 Use `aw instance attach --agent TARGET --pid PID` to attach a supported native process, then `aw instance update --agent TARGET` to apply policy while idle. Both commands default to `aw.yaml` in the current directory; see the [command reference](../../docs/user-guide/en/aw/cli-reference.md#aw-instance-attach-and-aw-instance-update) for prerequisites and explicit configuration selection.
 
-Explicit Adapters can use `aw instance` to register, confirm Ready, query and release application-owned instances on an existing same-user daemon. The initial contract uses fixed configuration and ordinary Qoder SDK / QwenPaw routes; language packages and native factory migration are separate work. See [independent instances](../../docs/developer-guide/en/aw/deployment/independent-instances.md).
+Use `aw instance setup` or an application-owned `prepare` call to retain native startup across the eight supported Adapters after one-time integration. Native readiness confirms registration, and `aw instance update` applies policy between completed tasks. SDK factories and QwenPaw use task Scopes; Qoder, OpenClaw and Hermes use native request boundaries. See [independent instances](../../docs/developer-guide/en/aw/deployment/independent-instances.md).
 
 ## Hook support matrix
 

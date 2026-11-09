@@ -130,9 +130,10 @@ plugin before switching binaries.
 
 `--reloadable` retains the previous whole-request/tool busy tracking and policy
 update behavior. Its binding cannot open resident child scopes; attempting to
-combine both modes fails explicitly. Native evidence capture is rejected for an
-ordinary resident launch because the shared child-scope observation contract is
-unavailable. Reloadable evidence behavior is unchanged.
+combine both modes fails explicitly. Each acknowledged ordinary resident scope
+starts its configured bounded observation and releases source claims on close.
+Native callback association uses the existing QwenPaw identity checks; unavailable
+source queries retain unknown coverage. Reloadable evidence behavior is unchanged.
 
 Native permission denials and externally executed tools complete before acting
 middleware and therefore produce no AW tool callbacks. A zero-step ordinary

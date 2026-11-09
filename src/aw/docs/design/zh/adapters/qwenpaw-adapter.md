@@ -96,8 +96,9 @@ lease 实现负责，需单独验收。
 停止，等待临时插件清理完成，再切换二进制。
 
 `--reloadable` 保留既有整请求/工具 busy 跟踪及策略更新行为，其 binding 无法创建
-resident 子作用域；混合启用两种模式会明确失败。共享子作用域尚无原生证据采集合同，
-普通 resident 启动会拒绝该配置；reloadable 证据采集行为保持原状。
+resident 子作用域；混合启用两种模式会明确失败。普通 resident 子作用域确认后启动
+已配置的有界观测，关闭时释放来源关联声明。原生回调沿用既有 QwenPaw 身份核验；
+来源查询不可用时保留 unknown 覆盖。reloadable 证据采集行为保持原状。
 
 原生权限拒绝和外部执行工具在 acting middleware 前完成，因而不产生 AW 工具回调。
 零步骤的普通配置仍会安装 resident 准入及清理 middleware。

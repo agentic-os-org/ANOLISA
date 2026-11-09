@@ -37,8 +37,9 @@ Startup 回执确认插件加载，每个 Agent 在请求开始前另行通过�
 Hook 就绪信息后使用 App/API；ACP/TUI、多 worker 启动继续被拒绝。`--reloadable`
 保留独立的请求空闲更新合同；普通启动提供 resident 子作用域、长会话回收，以及 reply
 完整排空后的显式更新。复用的 Agent 在每轮新 reply 预留任务后读取活动策略。
-App startup 在首个 reply 前确认更新就绪；启动策略持续生效，直到更新成功。共享
-子作用域尚无原生证据采集合同，普通 resident 启动会拒绝该配置。
+App startup 在首个 reply 前确认更新就绪；启动策略持续生效，直到更新成功。
+每个确认就绪的回复 Scope 独立保存有界原生回调观测，关闭前排空。已核实的原生身份
+可查询配置的证据源；证据源缺失或不可用时保留具体缺口与未知覆盖。
 
 每次安装使用独立的 `aw-native-<uuid>` 目录与 manifest ID，保留用户已有的
 `aw-native` 插件及配置。`config.json` 加载和 MCP 动态更新由 QwenPaw 负责。
@@ -93,6 +94,17 @@ aw instance update --agent qwenpaw
 `AW_INSTANCE_BOOTSTRAP`，再重新启动。此路径支持单个原生 App 进程；ACP、TUI 和多进程
 需要单独接入。
 
-原生 MCP 连接配置与原生权限策略有各自的更新生命周期，需要串行修改并核验结果。
-固定版本 QwenPaw 中，较早发起的连接重载若在权限更新后完成，可能恢复旧的原生权限策略。
-AW 实例策略仍按独立的准入边界执行。
+QwenPaw 2.2.2.post1 原版的异步 MCP 重载可能在权限更新确认后重新发布旧权限。
+需要原生权限热更新时，采用包含[驱动发布修复](https://github.com/kongche-jbw/QwenPaw/commit/6e7fb8a19ce61eca3b8dbc86d1818fc94b7252a8)
+的版本。已验证的 [2.2.2.post1 回补提交](https://github.com/kongche-jbw/QwenPaw/commit/099f645819218256364e7d63ae35dce21e383bda)
+属于未发布 Preview：原生 App 和 AW 管理 App 均已验证并发重载期间撤权，拒绝调用没有
+服务端副作用，后续正常重载可恢复。权限确认后的新调用采用最新策略，已经授权的在途调用
+可以完成。
+
+先停止 App，在专用环境中安装该固定提交构建的完整 wheel，再重启。源码构建使用
+QwenPaw 的 [wheel 构建脚本](https://github.com/kongche-jbw/QwenPaw/blob/099f645819218256364e7d63ae35dce21e383bda/scripts/wheel_build.sh)，
+保留 Console 静态资源。继续使用未修复版本时，运行期间保持原生 MCP 配置与权限不变；
+变更应在 App 退出后完成，并核验持久配置后再启动。
+
+`aw instance update` 更新 AW 策略，继续按回复空闲边界生效。AW 的 `tool.before`
+阻断保护经过其 Hook 的后续调用；原生驱动的并发控制由上述 QwenPaw 修复提供。
