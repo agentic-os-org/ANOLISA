@@ -81,7 +81,7 @@ fn qoder_and_qwenpaw_facts_export_after_service_shutdown_without_sight() {
             let native = if adapter == "qwenpaw" {
                 json!({"event":"tool.before","session_id":"session","tool_call":{"name":"bash","id":"call","input":input.to_string()}})
             } else {
-                json!({"hook_event_name":"PreToolUse","session_id":"session","tool_use_id":"call","tool_name":"Bash","tool_input":input})
+                json!({"hook_event_name":"PreToolUse","session_id":"session","tool_use_id":"call","aw_native_tool_use_id":"native-call","tool_name":"Bash","tool_input":input})
             };
             let event = json!({"name":"tool.before","agent":{"adapter":adapter,"binding_id":"qoder","instance_id":id},
                 "session_id":"session","tool":{"name":"bash","native_name":if adapter=="qwenpaw" {"bash"} else {"Bash"},
@@ -122,6 +122,20 @@ fn qoder_and_qwenpaw_facts_export_after_service_shutdown_without_sight() {
         for name in ["instance.started", "tool.before", "instance.ended"] {
             assert!(events.contains(&name), "{events:?}");
         }
+        let tool = replay
+            .iter()
+            .map(|page| &page["result"]["event"]["data"])
+            .find(|event| event["name"] == "tool.before")
+            .unwrap();
+        assert_eq!(tool["subject"]["toolCallId"], "call");
+        assert_eq!(
+            tool["nativeRefs"]["toolCallId"],
+            if adapter == "qoder-sdk" {
+                "native-call"
+            } else {
+                "call"
+            }
+        );
         assert!(!serde_json::to_string(&replay)
             .unwrap()
             .contains("private command content"));

@@ -190,7 +190,10 @@ pub fn source_matches_adapter(adapter: &Value, name: &Value) -> bool {
 pub fn native_references(adapter: &str, event: &Value) -> Value {
     let native = &event["native"];
     let call = match adapter {
-        "qoder" | "qoder-sdk" | "claude-sdk" => &native["tool_use_id"],
+        "qoder-sdk" => native
+            .get("aw_native_tool_use_id")
+            .unwrap_or(&native["tool_use_id"]),
+        "qoder" | "claude-sdk" => &native["tool_use_id"],
         "qwenpaw" | "agentscope" | "pi" => &native["tool_call"]["id"],
         "hermes" => &native["extra"]["tool_call_id"],
         _ => &Value::Null,
