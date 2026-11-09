@@ -308,10 +308,12 @@ struct Scope {
 }
 
 pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit> {
-    if let Some(protocol) = arguments
-        .first()
-        .filter(|name| matches!(name.as_str(), "hook" | "bridge" | "scope"))
-    {
+    if let Some(protocol) = arguments.first().filter(|name| {
+        matches!(
+            name.as_str(),
+            "hook" | "bridge" | "scope" | "qoder-bootstrap"
+        )
+    }) {
         // Native callbacks have fail-closed replies and exit codes even for
         // malformed arguments. Keep their exact parser and protocol boundary.
         return crate::runtime(

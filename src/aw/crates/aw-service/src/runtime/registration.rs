@@ -248,7 +248,12 @@ impl Runtime {
             } => (key, target, capabilities, cwd, environment, config),
             _ => return Err(rejected("registration_action")),
         };
-        if native && !matches!(capabilities.adapter.as_str(), "openclaw" | "hermes") {
+        if native
+            && !matches!(
+                capabilities.adapter.as_str(),
+                "openclaw" | "hermes" | "qoder"
+            )
+        {
             return Err(rejected("registration_adapter_unsupported"));
         }
         let process = Process::read(key.owner.pid)?;

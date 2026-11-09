@@ -127,6 +127,7 @@ pub(super) fn setup(args: &Arguments) -> Result<Exit> {
             "--config",
             "--agent",
             "--directory",
+            "--remove",
             "--native-settings",
             "--native-profile",
             "--native-state-dir",
@@ -140,6 +141,12 @@ pub(super) fn setup(args: &Arguments) -> Result<Exit> {
     let name = config.as_value()["spec"]["agents"][target]["adapter"]
         .as_str()
         .ok_or("configured Agent target not found")?;
+    if name == "qoder" {
+        return qoder(args, &configuration, config.as_value(), target);
+    }
+    if args.flags.contains_key("--remove") {
+        return Err("startup removal is available for Qoder only".into());
+    }
     let asset = aw_adapter::startup::asset(name)?;
     let mut descriptor = json!({"binary":std::env::current_exe()?.canonicalize()?,
         "config":configuration,"agent":target});
@@ -196,6 +203,78 @@ pub(super) fn setup(args: &Arguments) -> Result<Exit> {
     )?;
     writeln!(output)?;
     output.flush()?;
+    installation.retained = true;
+    Ok(Exit::Code(0))
+}
+
+fn qoder(args: &Arguments, configuration: &Path, config: &Value, target: &str) -> Result<Exit> {
+    if args.flags.keys().any(|key| key.starts_with("--native-")) {
+        return Err(
+            "Qoder startup uses HOME/.qoder/settings.json; native overrides are unsupported".into(),
+        );
+    }
+    let mut installation = Installation::open(Path::new(args.required("--directory")?), false)?;
+    if installation.directory.metadata()?.mode() & 0o077 != 0 {
+        return Err("Qoder startup directory must be private (0700)".into());
+    }
+    let path = installation.path.join("aw-native-bootstrap.json");
+    if args.flags.contains_key("--remove") {
+        let descriptor = super::qoder_bootstrap::descriptor(&path)?;
+        if descriptor["config"] != json!(configuration) || descriptor["agent"] != target {
+            return Err(
+                "startup installation does not match the selected configuration and target".into(),
+            );
+        }
+        super::qoder_bootstrap::recover(&installation.path)?;
+        let settings = Path::new(
+            descriptor["settings"]
+                .as_str()
+                .ok_or("startup settings missing")?,
+        );
+        aw_adapter::attachment::bootstrap::remove(settings, &descriptor["groups"])?;
+        fs::remove_file(&path)?;
+        installation.retained = true;
+        println!("{}", json!({"removed":true,"settings":settings}));
+        return Ok(Exit::Code(0));
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?);
+    let profile = home.join(".qoder");
+    let metadata = fs::symlink_metadata(&profile)?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+        || profile.canonicalize()? != profile
+    {
+        return Err(
+            "Qoder startup requires a canonical private HOME/.qoder directory (0700)".into(),
+        );
+    }
+    let settings = profile.join("settings.json");
+    let executable = std::env::current_exe()?.canonicalize()?;
+    let groups = aw_adapter::attachment::bootstrap::groups(
+        &executable,
+        &path,
+        config["spec"]["agents"][target]["qoder"]["sequential"].as_bool(),
+    )?;
+    installation.write("aw-native-bootstrap.json", &serde_json::to_vec(&json!({
+        "binary":executable,"config":configuration,"agent":target,"settings":settings,"groups":groups
+    }))?)?;
+    aw_adapter::attachment::bootstrap::install(&settings, &groups)?;
+    let result = (|| -> Result<()> {
+        installation.verify()?;
+        let mut output = std::io::stdout().lock();
+        serde_json::to_writer(
+            &mut output,
+            &json!({"environment":{},"files":[path],"settings":settings}),
+        )?;
+        writeln!(output)?;
+        output.flush()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        aw_adapter::attachment::bootstrap::remove(&settings, &groups)?;
+    }
+    result?;
     installation.retained = true;
     Ok(Exit::Code(0))
 }

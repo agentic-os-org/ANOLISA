@@ -1,7 +1,7 @@
 //! Explicit registration of a caller-owned, quiescent native process.
 
 pub(super) mod confirm;
-mod process;
+pub(super) mod process;
 
 use super::{adapter::HookBinding, read_file, readiness, run, Arguments, Exit, Result};
 use aw_adapter::{

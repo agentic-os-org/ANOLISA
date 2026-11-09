@@ -42,7 +42,7 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
         capabilities.adapter.as_str(),
         capabilities.entrypoint.as_str(),
     ) {
-        ("qoder", "tui")
+        ("qoder", "tui" | "print")
         | ("qwenpaw", "app")
         | ("qoder-sdk", "sdk-worker")
         | ("openclaw", "gateway")

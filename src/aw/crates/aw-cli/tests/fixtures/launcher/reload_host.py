@@ -40,7 +40,8 @@ if adapter == "qoder":
     def qoder_event(name, call="call", scenario="allow"):
         payload = {"hook_event_name": name, "cwd": str(root), "session_id": "session",
                    "tool_use_id": call, "tool_name": "custom_tool", "tool_input": {"x": 1},
-                   "notification_type": "idle_prompt",
+                   "notification_type": "idle_prompt", "prompt": "fixture prompt",
+                   "request_set_id": call,
                    "scenario": scenario}
         if name == "PostToolUse":
             payload["tool_response"] = "native result"
@@ -108,7 +109,7 @@ async def main():
         if command["action"] == "stop":
             return
         if adapter == "qoder":
-            started = qoder_event("UserPromptSubmit")
+            started = qoder_event("UserPromptSubmit", f"request-{index}")
             assert all(item["code"] == 0 for item in started), started
             (root / f"entered-{index}").write_text("model wait")
             if command.get("hold"):

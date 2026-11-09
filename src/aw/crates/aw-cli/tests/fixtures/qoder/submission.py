@@ -30,7 +30,7 @@ print(json.dumps(reply))
 '''
 
 
-def exercise(binaries, native, output):
+def exercise(binaries, native, output, native_start=False):
     if not os.environ.get("QODER_PERSONAL_ACCESS_TOKEN"):
         raise RuntimeError("Qoder acceptance requires QODER_PERSONAL_ACCESS_TOKEN")
     cases = []
@@ -38,6 +38,12 @@ def exercise(binaries, native, output):
         root = Path(directory)
         home = root / "home"
         home.mkdir(mode=0o700)
+        profile = home / ".qoder"
+        profile.mkdir(mode=0o700)
+        settings = profile / "settings.json"
+        original_settings = {"theme": "fixture-theme", "permissions": {"trustDirectories": [str(root)]}}
+        settings.write_text(json.dumps(original_settings))
+        settings.chmod(0o600)
         environment = {**os.environ, "HOME": str(home)}
         controls = {key: value for key, value in environment.items()
                     if key != "QODER_PERSONAL_ACCESS_TOKEN"}
@@ -68,8 +74,13 @@ def exercise(binaries, native, output):
             config = case / "aw.json"
             config.write_text(json.dumps(document))
             try:
-                process = subprocess.run([aw, "run", "--config", str(config), "--agent", "qoder",
-                    "--", "-p", "AW harmless input fixture", "--output-format", "json"],
+                command = [aw, "run", "--config", str(config), "--agent", "qoder", "--"]
+                if native_start:
+                    subprocess.run([aw, "instance", "setup", "--config", str(config), "--agent", "qoder",
+                                    "--directory", str(case / "startup")], cwd=case, env=controls,
+                                   capture_output=True, check=True, timeout=10)
+                    command = [str(native)]
+                process = subprocess.run([*command, "-p", "AW harmless input fixture", "--output-format", "json"],
                     cwd=case, env=environment, capture_output=True, text=True, timeout=60)
                 assert process.returncode != 0, scenario
                 (output / f"{scenario}.stdout").write_text(process.stdout)
@@ -89,6 +100,13 @@ def exercise(binaries, native, output):
                 snapshot = json.loads(subprocess.check_output([aw, "status", "--config", str(config)],
                     env=controls, text=True, timeout=10))["result"]
                 assert snapshot["bindings"] == snapshot["events"] == 0, snapshot
+                if native_start:
+                    assert not list((case / "startup").glob("owner-*"))
+                    assert not list((case / "state").glob("native-*"))
+                    subprocess.run([aw, "instance", "setup", "--remove", "--config", str(config), "--agent", "qoder",
+                                    "--directory", str(case / "startup")], cwd=case, env=controls,
+                                   capture_output=True, check=True, timeout=10)
+                    assert json.loads(settings.read_text()) == original_settings
                 cases.append({"case": scenario, "passed": True, "provider_calls": len(requests), "model_turns": 0})
             finally:
                 for journal in (case / "state/journal").glob("*.jsonl"):
@@ -97,7 +115,7 @@ def exercise(binaries, native, output):
                     subprocess.run([aw, "stop", "--config", str(config)], env=controls,
                                    capture_output=True, check=True, timeout=15)
     (output / "results.json").write_text(json.dumps({"passed": True,
-        "native_version": version, "runtime_removed": not root.exists(), "cases": cases}, indent=2) + "\n")
+        "native_version": version, "native_start": native_start, "runtime_removed": not root.exists(), "cases": cases}, indent=2) + "\n")
 
 
 def interrupted(signum, frame):
@@ -107,8 +125,9 @@ def interrupted(signum, frame):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", type=Path, required=True)
-    parser.add_argument("--agent-bin", type=Path, required=True)
+    parser.add_argument("--agent-bin", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--native-start", action="store_true")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -116,7 +135,17 @@ if __name__ == "__main__":
         signal.signal(signum, interrupted)
     own_children()
     try:
-        exercise(args.bin.resolve(), args.agent_bin.resolve(), output)
+        if args.agent_bin is not None:
+            exercise(args.bin.resolve(), args.agent_bin.resolve(), output, args.native_start)
+        elif args.native_start:
+            from native_qoder import install
+            pin = json.loads((AW / "tests/native-matrix.json").read_text())["agents"]["qoder"]["qoder_reload_cli"]
+            with tempfile.TemporaryDirectory(prefix="aw-qoder-native-start-") as directory:
+                native = Path(directory) / "qoder"
+                (output / "native-install.json").write_text(json.dumps(install(pin, native), indent=2) + "\n")
+                exercise(args.bin.resolve(), native / "qodercli", output, True)
+        else:
+            parser.error("--agent-bin is required without --native-start")
     finally:
         reaped = reap_children()
         (output / "cleanup.json").write_text(json.dumps({"passed": True, "reaped": reaped}) + "\n")
