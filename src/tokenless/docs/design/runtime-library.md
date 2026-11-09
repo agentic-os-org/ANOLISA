@@ -223,6 +223,38 @@ JSON with `base`, `paths`, `line_ending`, and `trailing_newline`. Concatenate `b
 to reconstruct the input byte for byte. The shared prefix always ends at `/`. The full view,
 including its header and metadata, must reduce bytes and estimated tokens before arbitration.
 
+The compressor also renders a directory-grouped candidate for the same lists. It helps when the
+common prefix is short but consecutive entries repeat their own directory chains, such as sorted
+relative trees:
+
+```text
+[Paths grouped by directory; full path = base + Dir + entry; CRLF; no final newline]
+Base="src/tokenless/crates/"
+Dir="tokenless-ccr/"
+Cargo.toml
+Dir="tokenless-ccr/src/backends/"
+in_memory.rs
+mod.rs
+sqlite.rs
+Dir="tokenless-ccr/src/"
+key.rs
+lib.rs
+```
+
+The grouped view shares each directory among its consecutive entries only: a `Base=` line holds the
+JSON-quoted common prefix that ends at `/`, each `Dir=` line holds a JSON-quoted directory relative
+to the base, and the remaining lines are the entries below that directory, in received order.
+Line endings and the final-newline state are recorded once in the header (`CRLF; final newline`,
+`CRLF; no final newline`, or `no final newline`; their absence means LF with a final newline).
+An entry that would be ambiguous as a bare line — empty, or starting with `Base=`, `Dir=`, or `"` —
+is JSON-quoted like the headers. To reconstruct, concatenate `base` + the current `Dir` + each
+entry, join with the recorded ending, and append the ending only when the header records a final
+newline. Arbitration emits the smaller of the two candidates, and a candidate is emitted only when
+it restores its input byte for byte and reduces both bytes and estimated tokens; a list without
+directory locality (for example an order shuffled by modification time) keeps the common-prefix
+view or passes through. Eligibility, routing, the `search_path_sharing` switch, reporting, and
+recoverability are unchanged; statistics still report `search_path_sharing` for both formats.
+
 PreTool leaves recognized native `find` invocations unchanged so PostTool receives native results. This also
 preserves an entire compound command containing such a call; mixed output is not a path list and stays
 unchanged. The path-list route itself does not require `find`: other unoptimized tool results with

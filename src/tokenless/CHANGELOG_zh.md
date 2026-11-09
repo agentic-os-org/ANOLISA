@@ -32,6 +32,10 @@ Tokenless 的所有重要变更都会记录在此文件中。
 - 可选的 Selective-Claw 插件在 SQLite 仍可回滚时，回滚失败的启动及历史协调消息导入批次，避免已导入的部分前缀使重试跳过剩余历史。已有的不完整历史不会被修复；清理失败会与原始错误一起报告（[#9835](https://github.com/agentic-os-org/ANOLISA/pull/9835)）。
 - Codex 适配器安装在未设置 `HOME` 时，不再因未绑定变量中止或误用根目录下的 marketplace 路径。二进制安装要求显式前缀或有效主目录；没有可用根路径时会报告跳过 marketplace 注册，dry-run 预览仍不写入文件（[#8795](https://github.com/agentic-os-org/ANOLISA/pull/8795)）。
 
+### 变更
+
+- 符合搜索路径共享条件的纯路径列表现在还会渲染按目录分组的视图，在相邻条目之间共享目录。核心会在公共前缀视图与分组视图中选择较小者，且仅当该视图逐字节还原输入、并同时减少字节数与估算 Token 时输出；没有目录局部性的列表保持原视图或原样通过。资格判定、路由、`search_path_sharing` 开关、统计与可恢复性均不变（[#9721](https://github.com/agentic-os-org/ANOLISA/pull/9721)）。
+
 ## [0.9.4] - 2026-11-06
 
 ### 变更
