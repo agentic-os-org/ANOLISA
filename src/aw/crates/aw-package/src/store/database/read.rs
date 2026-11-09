@@ -94,7 +94,12 @@ pub(super) fn inventory(paths: &DatabasePaths, prefix: Option<&Path>) -> Result<
         for installation in &inventory.installations {
             // Listing records must survive a missing or inaccessible payload root.
             // Doctor reports those directory failures separately.
-            super::check_registered(paths, &installation.prefix, &installation.installation_id)?;
+            super::check_registered(
+                paths,
+                &installation.prefix,
+                &installation.installation_id,
+                prefix.is_some(),
+            )?;
         }
     }
     Ok(inventory)

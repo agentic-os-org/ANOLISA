@@ -1,5 +1,7 @@
 //! Read-only current package inventory and bounded file verification.
 
+#[path = "database/discovery.rs"]
+mod discovery;
 #[path = "database/doctor_metadata.rs"]
 mod doctor_metadata;
 
