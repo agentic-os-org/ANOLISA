@@ -162,10 +162,18 @@ The ANOLISA container entrypoint (`distribution/docker/docker-entrypoint.sh`) al
 checks for `cap_bpf`/`cap_sys_admin`, starts `agentsight-start` when they are present, and otherwise
 prints the exact `docker run` flags to add instead of failing silently.
 
+On kernels that still charge BPF maps to `RLIMIT_MEMLOCK` (before 5.11, and vendor 5.10 kernels such
+as Alibaba Cloud Linux 5.10), the 64 KiB container default is far too small and probe creation fails
+with `EPERM`. `agentsight trace` raises the limit itself when it holds `CAP_SYS_RESOURCE`, so add
+`--cap-add CAP_SYS_RESOURCE` (Kubernetes: `SYS_RESOURCE`), or start the container with
+`--ulimit memlock=-1`. When neither is possible, the probe creation error states the effective limit
+and these remedies.
+
 For a Kubernetes sidecar, the same three things matter:
 
-1. capabilities — `securityContext.capabilities.add: ["BPF", "PERFMON"]`, or `privileged: true` on
-   platforms that do not support fine-grained eBPF capabilities;
+1. capabilities — `securityContext.capabilities.add: ["BPF", "PERFMON"]` (plus `SYS_RESOURCE` on the
+   memlock-charging kernels above), or `privileged: true` on platforms that do not support
+   fine-grained eBPF capabilities;
 2. host visibility — the sidecar must share the Agent container's PID namespace
    (`shareProcessNamespace: true`) so it can see Agent processes and attach uprobes;
 3. BTF — mount `/sys/kernel/btf` read-only from the host.
@@ -217,9 +225,10 @@ kubectl -n agentsight rollout status ds/agentsight
 kubectl -n agentsight port-forward ds/agentsight 7396:7396   # then open http://localhost:7396
 ```
 
-The manifest requests `BPF` + `PERFMON` + `SYS_PTRACE` capabilities (the last one is needed to
-read `/proc/<pid>/maps` of another uid's process once it is non-dumpable; without it such Agents
-are silently skipped), mounts host `/sys/kernel/btf` read-only, and persists data to hostPath
+The manifest requests `BPF` + `PERFMON` + `SYS_PTRACE` + `SYS_RESOURCE` capabilities (`SYS_PTRACE` is
+needed to read `/proc/<pid>/maps` of another uid's process once it is non-dumpable; without it such
+Agents are silently skipped. `SYS_RESOURCE` lets AgentSight lift `RLIMIT_MEMLOCK` on memlock-charging
+kernels), mounts host `/sys/kernel/btf` read-only, and persists data to hostPath
 `/var/log/sysak`; resource limits mirror the packaged systemd unit (300m CPU / 350Mi memory). It
 talks to no Kubernetes API, so no RBAC is needed. The pod runs only the trace and serve workers
 (`agentsight-start`), so the Risk Enforcement page has no data in this form. To override

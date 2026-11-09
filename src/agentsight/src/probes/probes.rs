@@ -134,6 +134,31 @@ impl Probes {
         cgroup_filter_enabled: bool,
         runtime_limits: &RuntimeLimits,
     ) -> Result<Self> {
+        let memlock = super::raise_memlock_limit();
+        Self::create(
+            target_pids,
+            target_uid,
+            enable_filewatch,
+            enable_udpdns,
+            tcp_targets,
+            cgroup_filter_enabled,
+            runtime_limits,
+        )
+        .map_err(|err| match memlock {
+            Some(limit) => err.context(super::memlock_hint(limit)),
+            None => err,
+        })
+    }
+
+    fn create(
+        target_pids: &[u32],
+        target_uid: Option<u32>,
+        enable_filewatch: bool,
+        enable_udpdns: bool,
+        tcp_targets: &[TcpTarget],
+        cgroup_filter_enabled: bool,
+        runtime_limits: &RuntimeLimits,
+    ) -> Result<Self> {
         // Create proctrace first - it owns the traced_processes map, the ring
         // buffer, and (when enabled) the cgroup_filter map.
         let proctrace = ProcTrace::new_with_target_and_maps(

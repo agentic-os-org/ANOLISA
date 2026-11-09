@@ -152,10 +152,16 @@ ANOLISA 的容器入口脚本（`distribution/docker/docker-entrypoint.sh`）已
 `cap_bpf`/`cap_sys_admin`，有就启动 `agentsight-start`，没有则打印需要补上的 `docker run` 参数，而不是
 静默失败。
 
+在仍把 BPF map 计入 `RLIMIT_MEMLOCK` 的内核上（5.11 之前的内核，以及 Alibaba Cloud Linux 5.10 等厂商
+5.10 内核），容器默认的 64 KiB 远远不够，探针创建会以 `EPERM` 失败。`agentsight trace` 持有
+`CAP_SYS_RESOURCE` 时会自行调高该上限，因此请追加 `--cap-add CAP_SYS_RESOURCE`（Kubernetes 中为
+`SYS_RESOURCE`），或以 `--ulimit memlock=-1` 启动容器。两者都做不到时，探针创建的报错会写明当前生效的
+上限和上述处理办法。
+
 做 Kubernetes Sidecar 时，同样是三件事：
 
-1. 能力——`securityContext.capabilities.add: ["BPF", "PERFMON"]`；不支持细粒度 eBPF 能力的平台上使用
-   `privileged: true`；
+1. 能力——`securityContext.capabilities.add: ["BPF", "PERFMON"]`（在上述按 memlock 记账的内核上再加
+   `SYS_RESOURCE`）；不支持细粒度 eBPF 能力的平台上使用 `privileged: true`；
 2. 可见性——Sidecar 需与 Agent 容器共享 PID 命名空间（`shareProcessNamespace: true`），才能看到 Agent
    进程并挂载 uprobe；
 3. BTF——以只读方式挂载宿主机的 `/sys/kernel/btf`。
@@ -203,8 +209,9 @@ kubectl -n agentsight rollout status ds/agentsight
 kubectl -n agentsight port-forward ds/agentsight 7396:7396   # 然后打开 http://localhost:7396
 ```
 
-清单申请了 `BPF` + `PERFMON` + `SYS_PTRACE` 权能（最后一个用于读取其他 uid 进程的
-`/proc/<pid>/maps`——目标进程一旦转为 non-dumpable，缺它会被静默跳过），只读挂载宿主
+清单申请了 `BPF` + `PERFMON` + `SYS_PTRACE` + `SYS_RESOURCE` 权能（`SYS_PTRACE` 用于读取其他 uid 进程的
+`/proc/<pid>/maps`——目标进程一旦转为 non-dumpable，缺它会被静默跳过；`SYS_RESOURCE` 用于在按 memlock
+记账的内核上调高 `RLIMIT_MEMLOCK`），只读挂载宿主
 `/sys/kernel/btf`，数据持久化到 hostPath `/var/log/sysak`；资源限制与安装包的 systemd unit
 对齐（300m CPU / 350Mi 内存）。它不访问 Kubernetes API，因此无需 RBAC。Pod 内只运行 trace 与
 serve 两个 worker（`agentsight-start`），因此该形态下 Risk Enforcement 页面无数据。如需覆盖
