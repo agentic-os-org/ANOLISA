@@ -50,3 +50,49 @@ fn qwenpaw_dispatch_identity_keeps_native_call_and_exact_input() {
         }
     }
 }
+
+#[test]
+fn qoder_sdk_references_preserve_original_tool_identity() {
+    let context = NativeContext {
+        target: "target".into(),
+        instance_id: "instance".into(),
+        cwd: "/tmp".into(),
+    };
+    let invocation = "f930e5bb-810c-470e-b472-58b7b2039865";
+    let cases = [
+        (None, json!(invocation)),
+        (Some(json!("native-tool-id")), json!("native-tool-id")),
+        (Some(Value::Null), Value::Null),
+        (Some(json!("")), Value::Null),
+        (Some(json!(" ")), Value::Null),
+        (Some(json!("native\ncall")), Value::Null),
+        (Some(json!("x".repeat(513))), Value::Null),
+        (Some(json!(42)), Value::Null),
+    ];
+    for name in ["tool.before", "tool.after"] {
+        for (original, expected) in &cases {
+            let mut native = json!({"session_id":"session","tool_use_id":invocation,"cwd":"/tmp",
+                "tool_name":"Bash","tool_input":{"command":"true"},
+                "hook_event_name":if name == "tool.before" {"PreToolUse"} else {"PostToolUse"}});
+            if let Some(original) = original {
+                native["aw_native_tool_use_id"] = original.clone();
+            }
+            if name == "tool.after" {
+                native["tool_response"] = json!({"stdout":"done","is_error":false});
+            }
+            let event = select("qoder-sdk")
+                .unwrap()
+                .normalize(&context, name, &native)
+                .unwrap();
+            assert_eq!(event["tool"]["call_id"], invocation);
+            assert_eq!(
+                native_references("qoder-sdk", &event)["toolCallId"],
+                *expected,
+                "{name}: {original:?}"
+            );
+            for adapter in ["qoder", "claude-sdk"] {
+                assert_eq!(native_references(adapter, &event)["toolCallId"], invocation);
+            }
+        }
+    }
+}
