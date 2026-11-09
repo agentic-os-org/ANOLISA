@@ -3,6 +3,7 @@
 mod confirmation;
 mod discovery;
 mod dispatch;
+mod instance;
 mod inventory;
 mod management;
 mod package;
@@ -72,8 +73,8 @@ enum Command {
     Inspect(Inspect),
     /// Read one public audit page without connecting to the control socket
     AuditExport(AuditExport),
-    /// Register, confirm, query or release an application-owned instance using stdin JSON
-    Instance(Instance),
+    /// Attach a native process, update policy, or exchange application-owned instance JSON
+    Instance(instance::Instance),
     /// Send one operation from stdin JSON to an existing service
     Request(Request),
     /// Serve the command Provider stdin/stdout protocol
@@ -357,19 +358,6 @@ pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit
             }
         }
     }
-}
-
-#[derive(Args, Debug, PartialEq)]
-struct Instance {
-    /// Unix socket of an already running same-user daemon
-    #[arg(long)]
-    socket: String,
-    /// Discover protocol and generation; does not read stdin or create an instance
-    #[arg(long)]
-    connect: bool,
-    /// Total input, connection and request budget
-    #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..=60000))]
-    timeout_ms: u64,
 }
 
 #[derive(Args, Debug, PartialEq)]

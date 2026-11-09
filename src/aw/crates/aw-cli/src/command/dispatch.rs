@@ -4,7 +4,7 @@ use super::{Agent, Command, Config, Endpoint, Native, Service, Validate};
 use crate::cli::{Arguments, Exit, Result};
 use std::collections::BTreeMap;
 
-fn options<const N: usize>(entries: [(&str, Option<String>); N]) -> Arguments {
+pub(super) fn options<const N: usize>(entries: [(&str, Option<String>); N]) -> Arguments {
     Arguments {
         flags: entries
             .into_iter()
@@ -142,9 +142,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ),
             ]),
         ),
-        Command::Instance(value) => {
-            crate::cli::instance::run(&value.socket, value.connect, value.timeout_ms)
-        }
+        Command::Instance(value) => super::instance::run(value),
         Command::Policy => crate::runtime("policy", &Arguments::default()),
         Command::Hook(value) => crate::runtime(
             "hook",

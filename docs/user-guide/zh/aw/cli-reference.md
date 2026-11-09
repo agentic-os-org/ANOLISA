@@ -50,6 +50,8 @@ aw config init --help
 | `aw recover` | 恢复中断的本地包操作 |
 | `aw commands` | 枚举公开命令，可输出机器可读的参数信息 |
 | `aw completion` | 打印 Shell 补全脚本 |
+| `aw instance attach` | 接入或移除选定进程的受支持原生 Hook |
+| `aw instance update` | 默认使用共享 `aw.yaml` 更新策略 |
 | `aw instance` | 使用 JSON 登记、确认、查询和释放业务自管实例 |
 | `aw audit-export` | 无需控制连接，读取一页保留的公共审计元数据 |
 | `aw request` | 将 stdin JSON 操作发送给服务，供集成与诊断使用 |
@@ -290,6 +292,32 @@ aw completion bash > aw.bash
 | `aw scope` | 必填 `--adapter`、`--binding`、`--action`；调用路由使用 `--event`、`--step`、`--on-error`、`--close-event true` |
 
 内部生命周期动作和消息是随版本变化的实现细节。应用集成使用 [Agent 指南](../../../developer-guide/zh/aw/native-agents.md)中的托管工厂，由工厂管理这些调用与清理。
+
+## `aw instance attach` 与 `aw instance update`
+
+在共享 `aw.yaml` 所在目录执行以下命令，或显式传入 `--config FILE`。当前接入支持
+Qoder TUI 和 QwenPaw App，须满足[外部进程接入条件](../../../developer-guide/zh/aw/deployment/process-attach.md)。
+接入前暂停派发请求，等待原生确认后恢复。命令不会启动或重启 Agent。
+
+```bash
+aw instance attach --agent TARGET --pid NATIVE_PID
+aw instance update --agent TARGET
+aw instance update --instance INSTANCE_ID --policy next.yaml
+aw instance attach --agent TARGET --pid NATIVE_PID --remove
+```
+
+将 `TARGET`、`NATIVE_PID`、`INSTANCE_ID` 分别替换为配置目标名、选定的进程和返回的
+实例 ID。attach 核验进程身份并等待原生 Hook 加载确认；移除保留原进程及其他 Hook。
+接入和移除均接受 `--config FILE`、`--agent TARGET`、`--pid PID`，通过 `--remove` 选择移除。
+
+update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deployment/policy-updates.md)，
+接受 `--config FILE`、`--agent TARGET`、`--instance ID`、`--policy FILE` 和
+`--expected-revision SHA256`。可选择目标、实例，或两者交集。省略 `--policy` 时使用共享
+配置作为候选；匹配多个实例时须提供 `--instance`。忙碌或更新被拒绝时保留原策略；
+实例不存在会报错，不会触发自动接入。
+
+这些命令沿用现有接入和更新的 JSON 响应，不增加其他原生入口的接入或更新能力。
+下述业务自管 JSON 协议保持独立，不能与这些子命令混用。
 
 ## `aw instance`
 

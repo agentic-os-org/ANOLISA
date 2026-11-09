@@ -1,5 +1,8 @@
 //! Reusable native hosts exercise aw run, explicit updates, callbacks and cleanup.
 
+#[path = "instance.rs"]
+mod instance;
+
 use super::support::{Fixture, Process, Service, TIMEOUT};
 use aw_service::Operation;
 use serde_json::{json, Value};
