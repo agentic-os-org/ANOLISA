@@ -8,14 +8,21 @@ Usage:
 """
 
 import json
-import sys
 import os
+import shutil
+import stat
+import sys
 
 FORBIDDEN_FIELDS = {"type", "transport", "disabled", "alwaysAllow", "scope"}
 
 
 def merge(json_str, config_path):
-    """Parse input JSON, merge mcpServers into existing config, write back."""
+    """Parse input JSON, merge mcpServers into existing config, write back.
+
+    An existing config this script cannot read is not treated as an empty one:
+    the merge rewrites the whole file, so falling back would delete whatever
+    the file held that is not `mcpServers`.
+    """
     try:
         new = json.loads(json_str)
     except json.JSONDecodeError as e:
@@ -36,8 +43,30 @@ def merge(json_str, config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
+        except UnicodeDecodeError as e:
+            # This merge rewrites the file, so an undecodable one is fatal:
+            # the settings it holds may be ones this script cannot represent,
+            # and rewriting would drop them with no trace. Fail closed and
+            # leave the file byte-identical.
+            print(f"ERROR: Cannot decode {config_path} as UTF-8: {e}", file=sys.stderr)
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            # Recoverable -- the caller can repair the JSON -- but the
+            # rewrite still replaces it, so keep the bytes and the mode it is
+            # about to take the place of. `copy2` is inside its own handler
+            # because an exception raised by a sibling clause is not caught by
+            # this try's other handlers.
             print(f"WARNING: Could not parse {config_path}: {e}", file=sys.stderr)
+            backup = f"{config_path}.bak"
+            try:
+                shutil.copy2(config_path, backup)
+            except OSError as backup_error:
+                print(f"ERROR: Cannot back up {config_path}: {backup_error}", file=sys.stderr)
+                sys.exit(1)
+            print(f"WARNING: Original kept at {backup}", file=sys.stderr)
+        except OSError as e:
+            print(f"ERROR: Cannot read {config_path}: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if not isinstance(existing, dict):
         existing = {}
@@ -56,11 +85,37 @@ def merge(json_str, config_path):
             existing["mcp"] = {}
         existing["mcp"].update(new["mcp"])
 
-    # Write
-    os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # Write. `open(config_path, "w")` truncates before it writes, so a failure
+    # part-way would leave a half-written settings file in place of the
+    # original; stage beside it and rename instead.
+    # The rename publishes a new inode, so it also publishes that inode's
+    # mode: a fresh staging file is `0666 & ~umask`, which would collapse a
+    # 0600 config to 0644 on every merge. This file holds headers and `env`
+    # values, so carry the mode the user chose instead, and start a new file
+    # private rather than umask-default. `realpath` first, because renaming
+    # onto a symlink replaces the link and leaves its target behind.
+    target = os.path.realpath(config_path)
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    try:
+        keep_mode = stat.S_IMODE(os.stat(target).st_mode)
+    except OSError:
+        keep_mode = 0o600
+    staging = f"{target}.tmp"
+    try:
+        with open(staging, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.chmod(staging, keep_mode)
+        os.replace(staging, target)
+    except OSError as e:
+        print(f"ERROR: Cannot write {config_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if os.path.exists(staging):
+            try:
+                os.remove(staging)
+            except OSError:
+                pass
 
     print(json.dumps(existing, indent=2, ensure_ascii=False))
     print(f"\nWritten to: {config_path}", file=sys.stderr)
@@ -75,7 +130,7 @@ def check(config_path):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except json.JSONDecodeError as e:
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
 

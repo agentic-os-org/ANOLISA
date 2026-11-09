@@ -31,7 +31,7 @@ def verify_build_metadata(
     try:
         with path.open("rb") as stream:
             metadata = tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ValueError(f"cannot read build metadata: {error}") from error
 
     expected_identity = {

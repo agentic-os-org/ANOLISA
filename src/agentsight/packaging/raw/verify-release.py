@@ -35,7 +35,7 @@ def read_toml(path: Path) -> dict[str, object]:
     try:
         with path.open("rb") as stream:
             return tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
 
 
