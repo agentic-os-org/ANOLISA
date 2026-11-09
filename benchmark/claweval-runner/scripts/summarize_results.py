@@ -180,7 +180,10 @@ def fmt(val):
     if isinstance(val, bool):
         return "Y" if val else "N"
     if isinstance(val, float):
-        if val == int(val) and abs(val) < 1e6:
+        # Test the bound before `int()`: it is False for NaN and either
+        # infinity, while `int()` raises on them and would abort the whole
+        # summary over one nonfinite metric.
+        if abs(val) < 1e6 and val == int(val):
             return str(int(val))
         return f"{val:.2f}"
     return str(val)
