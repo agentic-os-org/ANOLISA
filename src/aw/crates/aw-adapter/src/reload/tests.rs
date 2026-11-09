@@ -410,6 +410,102 @@ fn policy_updates_use_native_entrypoints_across_framework_releases() {
 }
 
 #[test]
+fn hermes_native_json_veto_survives_later_approval() {
+    for field in ["action", "decision"] {
+        for status in [0, 3] {
+            let veto = adopt_step(
+                "hermes",
+                "tool.before",
+                "report",
+                HookOutput {
+                    exit: NativeExit::Code(status),
+                    stdout: serde_json::to_vec(&json!({field:"block","message":"native veto"}))
+                        .unwrap(),
+                    stderr: vec![],
+                },
+            )
+            .unwrap();
+            assert!(matches!(veto.exit, NativeExit::Code(2)));
+            let output = combine(
+                "hermes",
+                vec![
+                    veto,
+                    HookOutput {
+                        exit: NativeExit::Code(0),
+                        stdout: br#"{"action":"approve"}"#.to_vec(),
+                        stderr: vec![],
+                    },
+                ],
+            )
+            .unwrap();
+            assert!(matches!(output.exit, NativeExit::Code(2)));
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value[field], "block");
+            assert_eq!(value["message"], "native veto");
+        }
+    }
+}
+
+#[test]
+fn hermes_success_keeps_the_submission_json_envelope() {
+    let output = combine(
+        "hermes",
+        vec![HookOutput {
+            exit: NativeExit::Code(0),
+            stdout: b"{}".to_vec(),
+            stderr: vec![],
+        }],
+    )
+    .unwrap();
+    assert!(matches!(output.exit, NativeExit::Code(0)));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn hermes_skill_plan_selects_only_matching_checks_and_preserves_budget() {
+    let mut value = document("hermes");
+    value["spec"]["execution"]["default_event_budget_ms"] = json!(55000);
+    let mut selected = steps("tool.before", false);
+    for step in &mut selected {
+        step.execution = StepExecution::Provider {
+            operation: "check_skill".into(),
+            effects: vec!["observe".into(), "block".into()],
+        };
+        step.step_tools = vec!["native:hermes:skill_view".into()];
+    }
+    assert_eq!(
+        plan(&value, "target", &[], "tool.before")
+            .unwrap()
+            .skill_check,
+        None
+    );
+    let report = plan(&value, "target", &selected, "tool.before").unwrap();
+    assert_eq!(report.skill_check.as_deref(), Some("report"));
+    assert_eq!(report.budget_ms, 55000);
+    selected[0].on_error = "block".into();
+    assert_eq!(
+        plan(&value, "target", &selected, "tool.before")
+            .unwrap()
+            .skill_check
+            .as_deref(),
+        Some("block")
+    );
+    selected[0].step_tools = vec!["native:hermes:terminal".into()];
+    assert_eq!(
+        plan(&value, "target", &selected, "tool.before")
+            .unwrap()
+            .skill_check
+            .as_deref(),
+        Some("report")
+    );
+    value["spec"]["execution"]["default_event_budget_ms"] = json!(55001);
+    assert!(plan(&value, "target", &selected, "tool.before").is_err());
+}
+
+#[test]
 fn openclaw_dispatch_preserves_first_denial_and_tokenless_fresh_arguments() {
     let arguments = json!({"command":"rtk git status --short","cwd":"/work tree"});
     let retry = format!(

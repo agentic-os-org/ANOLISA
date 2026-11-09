@@ -287,6 +287,19 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if self.input.options.reloadable {
+            crate::reload::validate(
+                &self.input.document,
+                &self.input.target,
+                &self.capabilities(),
+            )?;
+            if self.callback_timeout > 0.0 && self.callback_timeout < 60.0 {
+                return Err(
+                    "Hermes native policy updates require plugins.hook_callback_timeout of at least 60 seconds or zero (unlimited)"
+                        .into(),
+                );
+            }
+        }
         if !self.native_steps(steps, "input.submit").is_empty() {
             check_submission_args(&self.input.command.args)?;
         }
@@ -345,6 +358,32 @@ impl PreparedLaunch for Prepared {
                 },
             );
         }
+        if self.input.options.reloadable {
+            events = crate::reload::routes();
+            for event in events.values_mut() {
+                event.budget_ms = 55000;
+            }
+            if check_submission_args(&self.input.command.args).is_ok() {
+                events.insert(
+                    "input.submit".into(),
+                    HookEvent {
+                        budget_ms: 55000,
+                        replacement_step: None,
+                        steps: BTreeMap::from([(crate::reload::DISPATCH.into(), "block".into())]),
+                    },
+                );
+                submissions = vec![
+                    json!({"event":"input.submit", "step":crate::reload::DISPATCH,
+                    "on_error":"block", "timeout":59}),
+                ];
+            }
+            hooks = vec![
+                json!({"event":"tool.before", "step":crate::reload::DISPATCH,
+                    "on_error":"block", "timeout":59, "replace_result":false}),
+                json!({"event":"tool.after", "step":crate::reload::DISPATCH,
+                    "on_error":"report", "timeout":59, "replace_result":true}),
+            ];
+        }
         let ready = context.files.directory().join("hermes-ready.json");
         let token = String::from_utf8(read_file("/proc/sys/kernel/random/uuid", 128)?)?
             .trim()
@@ -353,7 +392,7 @@ impl PreparedLaunch for Prepared {
             "binding":context.binding_path.to_str().ok_or("Hermes binding path must be UTF-8")?,
             "profile":self.profile.to_str().ok_or("Hermes profile path must be UTF-8")?,
             "cwd":self.input.command.cwd.to_str().ok_or("Hermes working directory must be UTF-8")?,
-            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision});
+            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision, "reloadable":self.input.options.reloadable});
         let path = context
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;
@@ -361,6 +400,10 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "aw_skill.py",
             include_bytes!("../../native/hermes/aw_skill.py"),
+        )?;
+        context.files.write(
+            "aw_reload.py",
+            include_bytes!("../../native/hermes/aw_reload.py"),
         )?;
         let entrypoint = context.files.write(
             "hermes-entrypoint.py",
@@ -435,6 +478,23 @@ fn event_name(event: &str) -> Result<&'static str> {
         "tool.after" => Ok("post_tool_call"),
         _ => Err("unsupported Hermes hook event".into()),
     }
+}
+
+/// Retain the immutable native CLI mode when activating submission policy.
+pub(crate) fn validate_reload_submission(document: &Value, target: &str) -> Result<()> {
+    let args = document["spec"]["agents"][target]["argv"]
+        .as_array()
+        .ok_or("Hermes native argv missing")?
+        .iter()
+        .skip(1)
+        .map(|value| {
+            value
+                .as_str()
+                .map(OsString::from)
+                .ok_or_else(|| "invalid Hermes native argv".into())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    check_submission_args(&args)
 }
 
 fn check_submission_args(args: &[OsString]) -> Result<()> {

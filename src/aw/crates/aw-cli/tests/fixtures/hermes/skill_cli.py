@@ -87,17 +87,19 @@ def main(args):
             (profile / "config.yaml").write_text(hermes_yaml.safe_dump({
                 "updates": {"check": False}, "memory": {"memory_enabled": False, "user_profile_enabled": False},
                 "model": {"provider": "custom", "default": "fixture", "key_env": "AW_FIXTURE_KEY", "base_url": url,
-                          "api_mode": "chat_completions"}, "plugins": {"enabled": []}}))
+                          "api_mode": "chat_completions"}, "plugins": {"enabled": [], "hook_callback_timeout": 60}}))
+            (profile / "config.yaml").chmod(0o600)
             for name in CASES:
                 directory = profile / "skills" / name
                 directory.mkdir(parents=True)
                 (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: fixture\n---\nPRIVATE_SKILL_BODY\n")
             env = {key: value for key, value in os.environ.items()
                    if not key.startswith(("AW_", "HERMES_", "OPENAI_")) and not key.lower().endswith("_proxy")}
-            env.update(HOME=str(root / "home"), HERMES_HOME=str(profile), AW_FIXTURE_KEY="fixture",
+            env.update(PATH=str(args.hermes.parent) + ":/usr/bin:/bin", HOME=str(root / "home"), HERMES_HOME=str(profile), AW_FIXTURE_KEY="fixture",
                        OPENAI_API_KEY="fixture", OPENAI_BASE_URL=url, PYTHONDONTWRITEBYTECODE="1", FAKE_ROOT=str(root))
             processes = Processes(root, args.output, env)
             reports = []
+            assets = []
             try:
                 for case in CASES:
                     combined = case.startswith("input-")
@@ -128,6 +130,8 @@ def main(args):
                             "enabled": True, "required": True, "steps": [{"id": "prompt", "provider": "input",
                                 "operation": "scan_prompt", "effects": ["observe", "block"], "on_error": "block"}]}
                         config["spec"]["agents"]["hermes"]["argv"][-1] = "risk" if case == "input-denied" else "hello"
+                    if args.native_site_packages:
+                        config["spec"]["agents"]["hermes"]["argv"].insert(2, "--cli")
                     path = root / "aw.json"
                     save(path, config)
                     base = [args.aw, "--config", path, "--agent", "hermes", "--native-profile", profile]
@@ -137,7 +141,14 @@ def main(args):
                         processes.stop(child)
                     service = processes.start("service-" + case, [args.aw, "serve", "--config", path, "--state-dir", state])
                     await_condition(lambda: (state / "aw.sock").exists(), 10, "AW socket")
-                    child = processes.start("native-" + case, [base[0], "run", *base[1:]])
+                    if args.native_site_packages:
+                        if not assets:
+                            setup = json.loads(checked([args.aw, "instance", "setup", *base[1:], "--directory", args.native_site_packages], env=env).stdout)
+                            assets = [args.native_site_packages / name for name in ("aw-native-bootstrap.pth", "aw_native_startup.py", "aw-native-bootstrap.json")]
+                            env.update(setup["environment"])
+                        child = processes.start("native-" + case, config["spec"]["agents"]["hermes"]["argv"])
+                    else:
+                        child = processes.start("native-" + case, [base[0], "run", *base[1:]])
                     assert processes.wait(child, 120) == (2 if case == "input-denied" else 0), case
                     save(args.output / (case + "-model.json"), server.requests)
                     save(args.output / (case + "-audit.json"), [json.loads(line) for file in state.rglob("*.jsonl") for line in file.read_text().splitlines()])
@@ -160,6 +171,8 @@ def main(args):
                 save(args.output / "result.json", {"case_count": len(reports), "cases": reports, "bindings": 0, "events": 0})
             finally:
                 processes.close()
+                for asset in assets:
+                    asset.unlink(missing_ok=True)
     finally:
         server.shutdown()
         server.server_close()
@@ -170,4 +183,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     for name in ("aw", "provider", "hermes", "source", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--native-site-packages", type=Path)
     main(parser.parse_args())

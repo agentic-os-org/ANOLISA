@@ -136,7 +136,7 @@ pub(super) fn invoke_bound(
                     b"AW observation failed; query instance audit for metadata\n",
                 );
             }
-            return Ok(output);
+            return native_reply(&binding.adapter, event, output, plan.skill_check.as_deref());
         }
         let handle: EventHandle = serde_json::from_value(client.call(
             Operation::OpenHookEvent {
@@ -213,7 +213,12 @@ pub(super) fn invoke_bound(
                 break;
             }
         }
-        Ok(aw_adapter::reload::combine(&binding.adapter, outputs)?)
+        native_reply(
+            &binding.adapter,
+            event,
+            aw_adapter::reload::combine(&binding.adapter, outputs)?,
+            plan.skill_check.as_deref(),
+        )
     })();
     if event == "input.submit" {
         client.call(
@@ -272,4 +277,54 @@ fn step_output(
         &step.on_error,
         output,
     )?)
+}
+
+fn native_reply(
+    adapter: &str,
+    event: &str,
+    mut output: HookOutput,
+    skill: Option<&str>,
+) -> Result<HookOutput> {
+    if adapter == "hermes" && event == "tool.before" {
+        let mut value: Value = if output.stdout.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_slice(&output.stdout)?
+        };
+        // Only the admitted plan determines source pinning. Native/Provider replies
+        // cannot disable a configured checker or invent a trusted Skill receipt.
+        value
+            .as_object_mut()
+            .ok_or("invalid Hermes callback reply")?
+            .insert("aw_skill_check".into(), serde_json::json!(skill));
+        output.stdout = serde_json::to_vec(&value)?;
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_active_plan_controls_hermes_skill_admission() {
+        for (supplied, active) in [(json!(null), Some("block")), (json!("block"), None)] {
+            let output = native_reply(
+                "hermes",
+                "tool.before",
+                HookOutput {
+                    exit: NativeExit::Code(0),
+                    stdout: serde_json::to_vec(&json!({"aw_skill_check":supplied})).unwrap(),
+                    stderr: vec![],
+                },
+                active,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output.stdout).unwrap()["aw_skill_check"],
+                json!(active)
+            );
+        }
+    }
 }

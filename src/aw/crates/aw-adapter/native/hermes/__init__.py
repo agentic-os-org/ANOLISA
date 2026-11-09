@@ -93,7 +93,8 @@ def register(ctx: Any) -> None:
         )
         callback = _make_callback(spec)
         if getattr(session, "skills", None) is not None and event == "tool.before":
-            callback = session.skills.callback(callback, hook)
+            callback = (session.skills.dynamic_callback(spec) if launch.get("reloadable")
+                        else session.skills.callback(callback, hook))
         callbacks.append((EVENTS[event], callback))
 
     # Hermes owns callback order, tool concurrency, timeout handling and the

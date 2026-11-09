@@ -77,9 +77,10 @@ def check_submission(launch: dict[str, Any], session: str, text: Any) -> str | N
                     return "AW input check failed; submission blocked"
     finally:
         # Close joins scanner cancellation before the native turn can be dispatched.
-        reply = invoke(hooks[0], close=True)
-        if reply.returncode != 0:
-            raise RuntimeError("AW input event cleanup failed")
+        if not launch.get("reloadable"):
+            reply = invoke(hooks[0], close=True)
+            if reply.returncode != 0:
+                raise RuntimeError("AW input event cleanup failed")
     return None
 
 def main() -> None:
@@ -100,7 +101,7 @@ def main() -> None:
     skills = None
     skill_restore = None
     dispatch_restore = None
-    if any(hook.get("skill_check") for hook in launch["hooks"]):
+    if launch.get("reloadable") or any(hook.get("skill_check") for hook in launch["hooks"]):
         import aw_skill as skills
     original_directives = plugins._get_pre_tool_call_directive_details
     original_execution = middleware.run_tool_execution_middleware
@@ -109,6 +110,8 @@ def main() -> None:
     manager = get_plugin_manager()
     original_discovery = manager.discover_and_load
     executing = 0
+    reload_restore = None
+    reload_runtime = None
 
     def discovery(force: bool = False) -> None:
         if not force:
@@ -150,7 +153,7 @@ def main() -> None:
 
     def execution(tool_name: str, arguments: dict[str, Any],
                   next_call: Callable[[dict[str, Any]], Any], **context: Any) -> Any:
-        with guarded_hooks(), (skills.invocation(tool_name, arguments) if skills else nullcontext()):
+        with guarded_hooks(), (skills.invocation(tool_name, arguments, dynamic=launch.get("reloadable", False)) if skills else nullcontext()):
             # Freeze JSON values before middleware, including nested mutations and
             # type changes that Python equality would treat as unchanged.
             inspected = json.dumps(arguments, sort_keys=True) if before else None
@@ -168,7 +171,8 @@ def main() -> None:
             return original_execution(tool_name, arguments, dispatch, **context)
 
     def prepare(args: Namespace) -> None:
-        nonlocal post_restore, skill_restore, dispatch_restore, input_restore
+        nonlocal post_restore, skill_restore, dispatch_restore, input_restore, reload_restore, reload_runtime
+        admit_reload = None
         if env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("HERMES_SAFE_MODE disables the AW native plugin")
         original(args)
@@ -186,6 +190,15 @@ def main() -> None:
         if receipt != expected or env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("Hermes AW registration does not match this launch")
         require_hooks()
+        if launch.get("reloadable") and reload_restore is None:
+            import cli
+            from aw_reload import Runtime
+            reload_runtime = Runtime(launch, lambda: executing)
+            admit_reload = reload_runtime
+            original_chat = cli.HermesCLI.chat
+            reload_restore = (cli.HermesCLI, original_chat)
+            cli.HermesCLI.chat = lambda client, *args, **kwargs: reload_runtime.chat(
+                original_chat, client, *args, **kwargs)
         if launch.get("submissions") and input_restore is None:
             import cli
             original_main = cli.main
@@ -203,8 +216,12 @@ def main() -> None:
                 require_hooks()
                 if images or image_urls:
                     raise SystemExit("AW input.submit does not support image input")
+                if reload_runtime is not None:
+                    reload_runtime.admit_input()
                 denied = check_submission(launch, client.session_id, effective)
                 if denied is not None:
+                    if reload_runtime is not None:
+                        reload_runtime.cancel_input()
                     print(denied, file=sys.stderr)
                     raise SystemExit(2)
                 return original_images(client, query, effective, images, image_urls)
@@ -222,7 +239,7 @@ def main() -> None:
                 original_dispatch = model_tools.handle_function_call
 
                 def skill_dispatch(function_name, function_args, *values, **options):
-                    with skills.invocation(function_name, function_args):
+                    with skills.invocation(function_name, function_args, dynamic=launch.get("reloadable", False)):
                         return original_dispatch(function_name, function_args, *values, **options)
 
                 model_tools.handle_function_call = skill_dispatch
@@ -234,6 +251,8 @@ def main() -> None:
 
             post_restore = (model_tools, original_post)
             model_tools._emit_post_tool_call_hook = post
+        if admit_reload is not None:
+            admit_reload.ready()
 
     def require_hooks() -> None:
         # Join in-flight native discovery before examining its ownership ledger.
@@ -281,6 +300,8 @@ def main() -> None:
         if skill_restore is not None:
             skill_restore()
         manager.discover_and_load = original_discovery
+        if reload_restore is not None:
+            reload_restore[0].chat = reload_restore[1]
         if input_restore is not None:
             cli, original_main, original_images = input_restore
             cli.main = original_main

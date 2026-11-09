@@ -34,7 +34,9 @@ if args.step == "compress":
 elif args.step == "deny":
     print('{"action":"block","message":"native block"}')
     raise SystemExit(2)
-if args.step == "ask":
+if args.step == "$aw.dispatch":
+    print(json.dumps({"aw_skill_check": os.environ.get("AW_TEST_SKILL_MODE")}))
+elif args.step == "ask":
     print('{"action":"approve","message":"native human approval"}')
 elif args.step == "modify":
     print('{"action":"modify","args":{"command":"printf rewritten > rewritten.txt"}}')

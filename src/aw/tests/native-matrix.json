@@ -1445,7 +1445,7 @@
         "url": "https://github.com/NousResearch/hermes-agent.git",
         "revision": "952c941e741e922a9be8fc403c8944c6e96318bb"
       },
-      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model. Local directory skill_view selection uses the native registry and locator, pins raw manifest text before rendering, and reuses sec-core check_skill. Controlled Ledger CLI/model cases verify instruction withholding; slash/preload and file references remain separate boundaries. Quiet single-query text input includes allow, denial with zero model requests, PII blocking and block/report scanner faults through the real sec-core Provider with a controlled CLI scanner.",
+      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model. Local directory skill_view selection uses the native registry and locator, pins raw manifest text before rendering, and reuses sec-core check_skill. Controlled Ledger CLI/model cases verify instruction withholding; slash/preload and file references remain separate boundaries. Quiet single-query text input includes allow, denial with zero model requests, PII blocking and block/report scanner faults through the real sec-core Provider with a controlled CLI scanner. Explicit venv startup also runs the installed interactive CLI against a local model, verifies same-process idle policy updates, active-turn rejection, actual tool effects and normal exit cleanup.",
       "cases": [
         {
           "name": "dispatcher",
@@ -1459,7 +1459,18 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 43
+          "tests": 44
+        },
+        {
+          "name": "native-lifecycle",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/runtime_reload.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 6
         },
         {
           "name": "chat",
@@ -1537,6 +1548,39 @@
                 "case_count": 10,
                 "bindings": 0,
                 "events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/hermes/native_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--site-packages",
+            "{source}/.venv/lib/python3.14/site-packages",
+            "--output",
+            "{output}/native-start",
+            "--interactive"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "status": "passed",
+                "same_native_process": true,
+                "idle_policy_updates": 2,
+                "allow_marker_present": true,
+                "deny_marker_absent": true,
+                "bindings_after_exit": 0,
+                "events_after_exit": 0,
+                "native_config_preserved": true
               }
             }
           ]

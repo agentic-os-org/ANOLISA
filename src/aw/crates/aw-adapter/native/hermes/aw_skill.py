@@ -6,6 +6,7 @@ from copy import copy
 from functools import wraps
 from pathlib import Path
 import os
+import json
 import stat
 
 
@@ -69,11 +70,12 @@ def verify(selection):
 
 
 @contextmanager
-def invocation(tool_name, arguments):
+def invocation(tool_name, arguments, dynamic=False):
     if tool_name != "skill_view" or _selection.get() is not None:
         yield
         return
     selected = prepare(arguments)
+    selected["checking"] = not dynamic
     token = _selection.set(selected)
     try:
         yield
@@ -92,9 +94,15 @@ def callback(original, hook):
         if selected is not None and selected.get("arguments") == kwargs.get("args"):
             metadata = selected["metadata"]
         result = original(**{**kwargs, "aw_skill": metadata})
+        checking, action = hook.get("skill_check"), hook["on_error"]
+        if hook.get("dynamic"):
+            result, action = result
+            checking = action is not None
+            if selected is not None:
+                selected["checking"] = checking
         if isinstance(result, dict) and result.get("action") == "block":
             return result
-        if not hook.get("skill_check"):
+        if not checking:
             return result
         try:
             if metadata.get("error_code"):
@@ -102,7 +110,7 @@ def callback(original, hook):
             verify(selected or {})
             selected["checked"] = True
         except OSError:
-            if hook["on_error"] == "block":
+            if action == "block":
                 return {"action": "block", "message": "AW Skill source validation failed"}
         return result
     return checked
@@ -118,7 +126,7 @@ def install():
     def selected_source(*args, **kwargs):
         result = locate(*args, **kwargs)
         selected = _selection.get()
-        if selected is not None and "path" in selected:
+        if selected is not None and selected.get("checking", True) and "path" in selected:
             verify(selected)
             if (not selected["checked"] or result[0] is not None or result[1] is None
                     or result[2].resolve() != selected["path"]):
@@ -129,7 +137,7 @@ def install():
     @wraps(read)
     def selected_text(path):
         selected = _selection.get()
-        if selected is not None and Path(path).resolve() == selected.get("path"):
+        if selected is not None and selected.get("checking", True) and Path(path).resolve() == selected.get("path"):
             verify(selected)
             if not selected["checked"]:
                 raise OSError("AW Skill source was not checked")
@@ -140,7 +148,7 @@ def install():
     def selected_entry(name, **options):
         entry = get_entry(name, **options)
         selected = _selection.get()
-        if name == "skill_view" and selected is not None and "entry" in selected:
+        if name == "skill_view" and selected is not None and selected.get("checking", True) and "entry" in selected:
             if entry is None or entry.handler is not selected["entry"].handler:
                 raise OSError("AW Skill tool handler changed after selection")
             return copy(selected["entry"])
@@ -153,3 +161,30 @@ def install():
         native._locate_skill, native._read_skill_text = locate, read
         registry.get_entry = get_entry
     return restore
+
+
+def dynamic_callback(spec):
+    """Consume policy-derived source admission without exporting it to native hooks."""
+    from agent.shell_hooks import _evaluate_result, _serialize_payload, _spawn
+
+    def invoke(**kwargs):
+        response = _spawn(spec, _serialize_payload(spec.event, kwargs))
+        native = _evaluate_result(spec, response)
+        if isinstance(native, dict) and native.get("action") == "block":
+            return native, None
+        try:
+            value = json.loads(response["stdout"])
+            mode = value["aw_skill_check"]
+            if mode not in (None, "report", "block") or response["returncode"] != 0:
+                raise ValueError("invalid Skill admission")
+        except (ValueError, KeyError, TypeError):
+            return {"action": "block", "message": "AW Skill admission is unavailable"}, None
+        return native, mode
+
+    checked = callback(invoke, {"dynamic": True, "on_error": "block"})
+
+    def dispatch(**kwargs):
+        if kwargs.get("tool_name") == "skill_view":
+            return checked(**kwargs)
+        return invoke(**kwargs)[0]
+    return dispatch

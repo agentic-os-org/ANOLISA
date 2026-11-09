@@ -67,3 +67,27 @@ aw run --config /absolute/aw.hermes-submission.yaml --agent hermes \
 配置的 argv 已包含 `chat --oneshot --quiet`。可用 `--query-file /absolute/prompt.txt` 替换 `--query`。策略拒绝以状态码 2 退出 CLI，模型调用为零，受检文本不会进入原生会话。回调故障按 `on_error` 处理，派发或拒绝前关闭待完成的扫描。输入须为非空 UTF-8 文本，编码后的回调数据不超过 256 KiB。
 
 启用 `input.submit` 时要求 quiet 单查询，拒绝交互 chat 和 `--image`。受检对象为原生 query-file 解析后、图片路由前的文本；其后的原生上下文与 Skill 展开沿用各自合同，原生 API request 插件自行负责改写行为。未配置输入步骤时继续保留原有 chat 选项。Python 工厂、gateway 会话和交互 `/steer` 不属于此 CLI 入口。
+
+## 准备原生启动并更新策略
+
+完成插件连接后，将启动模块安装到明确选择的专用 Hermes 虚拟环境。下面以 Python 3.14 为例，需使用该环境实际已有的 `site-packages` 路径。AW 创建三个新文件，遇到已有启动资产时拒绝覆盖。
+
+```bash
+aw instance setup --config /absolute/aw.yaml --agent hermes \
+  --directory /absolute/hermes-venv/lib/python3.14/site-packages \
+  --native-profile /absolute/hermes-profile > hermes-startup.json
+export AW_INSTANCE_BOOTSTRAP="$(python3 -c 'import json; print(json.load(open("hermes-startup.json"))["environment"]["AW_INSTANCE_BOOTSTRAP"])')"
+/absolute/hermes-venv/bin/hermes chat --cli
+```
+
+配置中的目标使用相同的原生参数；参数不一致时在原生分发前终止。准备完成后重启一次。启动模块保留原生 main，在同一进程复用 AW 的登记、参数完整性和完成检查。版本查询和管理命令保留原生行为。准备失败会阻止聊天分发。
+
+```bash
+aw instance update --config /absolute/aw.yaml --agent hermes
+```
+
+更新在确认结束的聊天轮次之间生效。请求占用包括模型调用、工具执行和回调清理。取消后没有回复、异常或仍在执行的回调会保留占用状态，处理原因后需重启进程。这条更新路径的事件预算上限为 12,000 ms，原生插件回调超时至少为 17 秒，或明确设为无限制。
+
+工具观察、阻断和结果替换使用稳定路由。安静单次文本查询还会在 `input.submit` 前登记请求，并将同一占用保留到聊天结束；交互目标拒绝新增输入检查策略。更新路径目前拒绝 Skill 检查，需要该能力时使用现有 `aw run` Skill 接入。
+
+移除原生启动准备前，先停止该专用环境的 Hermes 进程，再仅删除 `setup` 列出的三个文件：`aw-native-bootstrap.pth`、`aw_native_startup.py` 和 `aw-native-bootstrap.json`，保留环境和插件中的其他文件。插件回滚沿用[已有清理步骤](#升级与清理)。
