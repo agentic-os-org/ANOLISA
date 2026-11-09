@@ -54,7 +54,7 @@ Plugin 在每个 Agent 回合结束时（`agent_end` / `on_session_end`）自动
 1. **用户心智匹配** — "回退到上一步"的自然含义是"上一回合结束时"
 2. **快照数可控** — 典型 10-50 回合/会话，配合 auto-cleanup 完全可控
 3. **不和 read-only 纠缠** — per-tool-call 会对 read/search 也建快照，过滤成本高
-4. **避开锁冲突** — `agent_end` 时 tool 已停手，`check_workspace_quiescent` 几乎不冲突
+4. **避开锁冲突** — `agent_end` 时 tool 已停手，`check_workspace_quiescent` 通常不冲突；但它要求最近 200 ms 内没有写相关事件，tool 刚写完时会在持有工作区写锁的情况下多等至多一个窗口，后台写者（dev server、日志追加等）持续写入时本 turn 的快照会以 `WriteLockConflict` 跳过（插件当前不重试）
 
 代价是 **turn 内中间状态不可回退**。这是有意取舍——Agent 的中间状态本来就不稳定(半写完的代码、中途崩溃的 patch),保留意义不大。需要中间状态的用户走 `ws-ckpt-checkpoint` 工具显式建快照。
 

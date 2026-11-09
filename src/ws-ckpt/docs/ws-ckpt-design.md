@@ -461,13 +461,18 @@ ws-ckpt 的写操作会替换工作区 inode（btrfs subvolume + symlink swap）
 
 ### 2. 工作区写锁（inotify）
 
-`fs_watcher::WorkspaceWatcher` 监听工作区 inotify 事件，`snapshot_mgr::checkpoint` 在创建快照前调用 `check_workspace_quiescent` 检查是否有 in-flight 写：
+`fs_watcher::WorkspaceWatcher` 监听工作区 inotify 事件，`snapshot_mgr::checkpoint` 在创建快照前调用 `check_workspace_quiescent`，要求工作区在最近 200 ms（`QUIET_WINDOW_MS`）内没有写相关事件（Create/Modify/Remove/`CLOSE_WRITE`）：
 
 ```rust
-if !state.check_workspace_quiescent(&ws.ws_id).await {
-    return Response::Error { code: WriteLockConflict, .. };
+match state.check_workspace_quiescent(&ws.ws_id, Some(&ws.path)).await {
+    Quiescence::Safe => {}
+    Quiescence::Writing | Quiescence::MonitoringUnavailable => {
+        return Ok(Response::Error { code: WriteLockConflict, .. })
+    }
 }
 ```
+
+每个工作区记录最近一次写相关事件的单调时钟时间戳；任一文件的 `CLOSE_WRITE` 也算活动，不会清掉其他写者的活动（#4048）。新挂上的 watch（daemon 重启恢复、回滚 re-arm）先观察满一个窗口才可能放行。窗口模型无法区分“写者在两次突发之间暂停”与“写者已结束”：写入间隔小于窗口的写者会被拦住，间隔明显大于窗口的突发之间仍可能被快照。
 
 避免在 Agent 工具调用半途切快照导致快照内文件残缺。
 
