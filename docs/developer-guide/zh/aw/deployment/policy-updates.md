@@ -8,14 +8,47 @@
 
 | 模式 | 就绪条件 | 更新前等待 |
 | --- | --- | --- |
-| 普通 Qoder SDK 1.0.56 / Worker 1.1.78 | 受管 `startDaemon()`；无显式 daemon 时须在 30 秒内初始化 `createQuery()` | 全部 Query 完整关闭，回调和租约清理结束 |
-| 普通 AgentScope 2.0.6 工厂 | 首次 `AwBridge.create_agent()` | 全部 reply、工具任务与 Scope 清理结束 |
-| 普通 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App | 受管 App startup | 全部 reply 和清理结束 |
-| Qoder 1.1.73 TUI、上述 SDK / App 的 `--reloadable` 模式 | 原生稳定桥接；SDK 另需显式 daemon 和初始化的 Query | 所有原生请求及后台清理结束 |
-| 外部启动的 Qoder TUI / QwenPaw App | [首请求前 attach](process-attach.md) | 同受限桥接 |
+| 普通或已准备的原生 Qoder SDK 1.0.56 / Worker 1.1.78 | 受管 `startDaemon()`；无显式 daemon 时须在 30 秒内初始化 `createQuery()` | 全部 Query 完整关闭，回调和租约清理结束 |
+| 普通或已准备的原生 AgentScope 2.0.6 工厂 | 首次 `AwBridge.create_agent()` | 全部 reply、工具任务与 Scope 清理结束 |
+| 普通或已准备的原生 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App | 受管 App 插件启动 | 全部 reply 和清理结束 |
+| 已准备的原生 Claude SDK resident 工厂 | 独立进程组内调用 `prepare_native()` | 全部客户端断开，SDK、中继和 MCP 清理确认完成 |
+| 已准备的原生 Pi worker 工厂 | `runNativeWorker()` 接入既有 `createSession` / `runWorker` 工厂 | 全部 Session 关闭，准备、abort 和 dispose 完成 |
+| 已准备的原生 OpenClaw Gateway | 插件在 `gateway_start` 确认 | 成功完成 `agent_end`，工具回调排空 |
+| 已准备的原生 Hermes 本机 chat | 插件已连接，受管 chat 启动 | 轮次完成，回调排空 |
+| 已准备的原生 Qoder CLI（TUI 或 print），以及 `--reloadable`／外部 attach 的 Qoder TUI | 预装启动 Hook 确认每个进程；外部 TUI attach 使用独占 profile，并在[首请求前 attach](process-attach.md) | 所有原生请求及后台清理结束 |
+| Qoder SDK / QwenPaw 的 `--reloadable`，或外部 attach 的 QwenPaw App | 原生稳定桥接；SDK 另需显式 daemon 和初始化的 Query | 同受限桥接 |
 
-普通 Qoder SDK、QwenPaw 保留严格 Post、受管 MCP 和私有执行租约；受限模式不提供 resident 严格 Post 和私有租约。
-其他 Adapter 修改策略需重启。普通 Qoder SDK 的 Query 在轮次之间仍占用实例，关闭后才能更新；预热 worker 应先调用受管 `startDaemon()`。
+先按框架的[启动说明](../native-agents.md)完成一次准备。SDK 应用在自身启动流程中调用
+`aw instance prepare`，保留已有 AW 工厂；OpenClaw、Hermes 和 QwenPaw 安装启动组件并
+重启。准备先创建待就绪实例，原生确认后才就绪。尚未接线的运行中进程无法通过策略更新
+获得 Hook 覆盖。Qoder 可在下次原生启动前安装启动 Hook，已有 TUI 仍可使用首请求前
+attach 的接入方式。
+
+普通 Qoder SDK、QwenPaw 保留严格 Post、受管 MCP 和私有执行租约；受限模式不提供
+resident 严格 Post 和私有租约。Qoder SDK 的 Query 在轮次之间仍占用实例，关闭后才能
+更新；预热 worker 应先调用受管 `startDaemon()`。已准备的 Pi 和 Claude 同样在整个
+Session 或客户端关闭前保留原策略。
+
+已准备的 OpenClaw 事件预算上限为 12,000 ms；Hermes 按指南准备回调超时后，保留
+55,000 ms 上限。原生完成状态不确定时保持 busy，需要重启。OpenClaw 支持 Gateway run，
+`tools.invoke` 在覆盖范围外；Hermes 支持本机 chat，`input.submit` 限于 quiet 单查询文本
+入口。Hermes Skill 检查在策略更新前后沿用相同的来源选择与清单固定合同。
+普通 `aw run` 启动的 Pi、Claude SDK、OpenClaw 和 Hermes 仍沿用原有重启要求。
+其余原生输入与结果限制见各 Agent 指南。
+
+## 使用一份默认配置
+
+在控制端工作目录保存 `aw.yaml`，使用同一配置启动服务。已准备的原生应用报告就绪后，
+暂停新任务派发，修改 `aw.yaml` 的策略，再执行：
+
+```bash
+aw instance update --agent TARGET
+aw status --config aw.yaml
+```
+
+同一目标有多个实例时，用 `--instance ID` 选择。`aw instance update` 复用 `aw update`
+的更新合同，不执行进程发现或附着。后续策略修改沿用已安装的启动接点和原生设置；
+允许更新的策略字段之外的变化需要重启。
 
 ## 应用候选策略
 

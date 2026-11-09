@@ -2,13 +2,50 @@
 
 [中文版](../../../zh/aw/deployment/independent-instances.md)
 
-`aw instance` lets an explicit Adapter prepare an instance on an already running,
-same-user Linux daemon, acknowledge its native wiring, recover its registration
-state and release its resources. The application retains process ownership.
-The first contract supports the ordinary `qoder-sdk` / `sdk-worker` and
-`qwenpaw` / `app` route projections with fixed configuration. Language packages
-and native factory migration are separate delivery work; existing factories
-continue to use their documented `aw run` entrypoints.
+`aw instance` lets applications keep their native startup command while AW owns
+policy preparation, native readiness and resource cleanup. The application keeps
+process ownership. An Adapter connects the supported native entrypoint and
+confirms its callbacks before the instance becomes Ready.
+
+## Prepare native startup
+
+Use the same `aw.yaml` for the service, native startup and later updates. The
+configuration selects the existing executable and native arguments; setup does
+not turn an arbitrary running process into a managed instance.
+
+| Application | Initial connection | Runtime ownership |
+| --- | --- | --- |
+| Qoder SDK, AgentScope, Pi and Claude SDK | Application calls `aw instance prepare --agent TARGET` as a direct child, applies its returned environment and enters the documented AW factory in the same process | Each native task/session uses the existing child Scope contract |
+| QwenPaw App | `aw instance setup` installs a startup component in its dedicated venv; restart the native App once | Existing resident plugin and reply Scopes |
+| OpenClaw Gateway and Hermes local chat | `aw instance setup` installs startup wiring; restart the native command once | Root native bridge reserves complete runs/turns and tracks callback cleanup |
+| Qoder CLI | `aw instance setup` installs native startup Hooks for subsequent TUI or print launches; existing TUI can use [pre-request attachment](process-attach.md) | Each process registers its own root bridge at `SessionStart` |
+
+Follow the [Agent guide](../native-agents.md) for the framework's bootstrap,
+settings and accepted arguments. `setup` writes only its returned file manifest
+and reports the startup environment. It creates no running instance. `prepare`
+performs Adapter validation and registration; its response contains
+`instance_id`, changed `environment`, private `binding`, the prepared `command`
+and `state: pending_ready`. The SDK application or startup module uses those
+assets and confirms the original owner process at the native readiness boundary.
+Do not launch the returned command as an unrelated replacement process.
+
+After readiness, pause new work, edit policy fields in `aw.yaml`, and update:
+
+```bash
+aw instance update --agent TARGET
+aw status --config aw.yaml
+```
+
+A later preparation from the same configuration path reuses the selected daemon
+and validates the edited policy against its startup configuration. The daemon
+keeps its original generation and bootstrap digest; each instance has a separate
+active policy revision. Native inputs, sessions, callbacks and cleanup must drain
+before activation. See [policy updates](policy-updates.md) for each framework's
+boundary and restrictions.
+
+The lower-level JSON protocol below remains available to explicit integrations.
+The supplied startup code owns its calls; ordinary applications can use the
+framework bootstrap without constructing handles or private lifecycle RPCs.
 
 ## Connect and select a generation
 
@@ -82,10 +119,19 @@ objects are:
 
 | Action | Required command fields |
 | --- | --- |
-| `register` | `key`, `target`, `capabilities`, `cwd`, `environment` |
+| `register` | `key`, `target`, `capabilities`, `cwd`, `environment`; optional `config` |
+| `register_native` | Same fields; only the admitted Qoder/OpenClaw/Hermes root bridge |
 | `query` | `key` from the original request |
 | `ready` | Complete returned `handle`, returned `policy_revision` |
 | `release` | Complete returned `handle` |
+
+`register` projects ordinary Qoder SDK, AgentScope, Pi, Claude SDK and QwenPaw
+factory routes into child Scopes. `register_native` selects Qoder/OpenClaw/Hermes root
+callbacks with their stable request and tool lifecycle. Optional `config` is the
+complete YAML or JSON configuration as a string; only Providers, events and the
+default event budget may differ from the daemon's startup configuration. Omitting
+it uses that startup configuration. A candidate changes the instance policy
+revision while the binding retains the daemon's original identity.
 
 `key.request_id` is 1–128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Generate a
 new ID for each intended instance. The returned handle contains the key and the
@@ -102,13 +148,14 @@ Every response contains `api_version`, `service_protocol`, `identity`, `result`,
 
 Registration returns `state: pending_ready`, `handle`, `policy_revision`,
 `routes` (`events` and native `hooks`), `confirmation_timeout_ms: 30000` and the
-remaining confirmation time. The prepared root cannot execute Hook events.
+remaining confirmation time. A pending root cannot execute Hook events.
 Install the returned routes at the actual native entrypoint, then send `ready`
 with the same handle and revision. Ready records an authenticated Adapter
 acknowledgement. The Adapter owns verification that those callbacks are installed
 and their results are adopted; Service cannot infer that from a PID.
 
-A Ready instance admits the existing task-scope protocol. The worker is the owner
+A Ready ordinary factory root admits the existing task-scope protocol; its Hook
+execution still requires a child Scope. The worker is the owner
 or one of its descendants; each task operation must originate from that exact
 worker or its direct CLI child. Use `open_scope` with the root ID and worker
 context, retain the returned task binding, and acknowledge it within five seconds.
@@ -118,6 +165,13 @@ callbacks, validity checks and close. A CLI HookBinding uses the returned root
 binding, socket, Adapter, cwd and `routes.events`, stored in an application-owned
 mode-0600 file. See the runnable fixture below for the complete sequence.
 
+The native root mode uses its admitted stable bridge instead: the original owner
+confirms readiness and process association, then the bridge reserves each native
+run or turn before work and releases it only after confirmed cleanup. Native
+callback peers must belong to the owner's process tree. Pending roots and
+unrelated peers cannot execute callbacks. Root mode is restricted to the admitted
+Qoder/OpenClaw/Hermes entrypoints; it does not grant ordinary SDK roots direct execution.
+
 Keep one task scope for the whole request, including model waits, native tools,
 callbacks and cancellation cleanup. Stop admission and drain original native work
 before closing its task scope or releasing the root. Release cancels and joins
@@ -126,13 +180,20 @@ sibling instance or daemon. An explicit release timeout leaves cleanup pending;
 query the state and retry release after native cleanup. Never dispatch a tool
 because a lifecycle call failed or timed out.
 
+Optional evidence starts after native readiness or task-Scope acknowledgement.
+Each Scope retains its own bounded observation worker and source-session claims;
+closing it drains those reads before releasing the claims. Native startup keeps
+the Adapter's existing source-association coverage, including unverified or
+unavailable sources. Evidence configuration is fixed for the instance lifetime;
+change it through preparation and restart.
+
 ## Recovery and errors
 
 | State | Meaning and next action |
 | --- | --- |
 | `preparing` | The original registration is still running; query again |
 | `pending_ready` | Resources prepared; install routes and confirm before the remaining deadline |
-| `ready` | Ready acknowledged; tasks may be opened |
+| `ready` | Ready acknowledged; the admitted task or native bridge may accept work |
 | `closing` | Admission fenced; cancellation/cleanup is still pending |
 | `released` | The instance's resources have been reclaimed |
 | `expired` | Unconfirmed preparation was reclaimed; use a new request ID for an explicit new attempt |
@@ -188,6 +249,28 @@ Additional socket tests cover a discarded response, Provider preparation failure
 and cancellation of in-flight Provider descendants. Service unit tests advance
 the handoff deadline deterministically and check audit failure.
 These fixtures certify the independent lifecycle contract with simulated native
-boundaries. Real Qoder/QwenPaw factory wiring and business adoption remain separate
-acceptance. To roll back, drain and release independent instances and restore the
-previous AW binary and application entrypoint together.
+boundaries. Framework-specific startup and native acceptance are tracked in the
+[native matrix](../../../../../src/aw/tests/native-matrix.json); their versions and
+limits remain separate from the registration contract.
+
+## Cleanup and rollback
+
+The application stops dispatch, closes its native factory/tasks and invokes
+`aw instance release --binding FILE` directly while the owner is alive. Successful
+release drains its AW resources and removes the exact private `native-*` directory
+returned during preparation. Owner and direct-child checks still apply; another
+controller cannot release the binding by copying its path.
+
+After a crash, owner-loss handling reclaims Service resources, but local staged
+files may remain. Verify the owner identity has exited and its runtime resources
+have drained before removing only that preparation's recorded directory. A dead
+owner's binding cannot be reused to authenticate `release` or a new process.
+Service restart also invalidates old handles.
+
+To remove persistent startup wiring, stop affected native applications, remove
+only the files returned by `setup`, and restore the application's prior startup
+environment. Preserve unrelated `NODE_OPTIONS`, Python startup files and native
+settings. Follow the Agent guide for any separately connected plugin cleanup,
+then restart normally. SDK rollback removes its bootstrap together with the AW
+factory integration after draining work. Restore matching AW and application
+versions together when reverting the integration.

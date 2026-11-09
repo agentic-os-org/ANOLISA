@@ -50,6 +50,9 @@ aw config init --help
 | `aw recover` | Recover interrupted local package operations |
 | `aw commands` | Enumerate public commands; optionally include machine-readable argument metadata |
 | `aw completion` | Print a shell completion script |
+| `aw instance setup` | Install startup assets in an explicitly selected private directory |
+| `aw instance prepare` | Prepare the calling application's native factory and registration |
+| `aw instance release` | Release the owner's registration and staged assets |
 | `aw instance attach` | Attach or remove supported native Hooks on a selected process |
 | `aw instance update` | Apply policy using the shared `aw.yaml` by default |
 | `aw instance` | Register, confirm, query and release application-owned instances through JSON |
@@ -293,6 +296,45 @@ The following hidden commands are generated and called by Adapters, not user set
 
 Internal lifecycle actions and payloads are versioned implementation details. Application integrations use the managed factories in the [Agent guides](../../../developer-guide/en/aw/native-agents.md), which own these calls and their cleanup.
 
+## `aw instance setup`, `prepare` and `release`
+
+These commands retain the application's native startup command after the required
+one-time integration. `setup` installs startup assets for Qoder TUI/print,
+OpenClaw Gateway, Hermes local chat and QwenPaw App. SDK applications call `prepare` directly from
+their startup and enter the existing AW factory in that same process. Follow the
+[framework guide](../../../developer-guide/en/aw/native-agents.md) for the bootstrap
+code and native options; an unprepared running application requires preparation
+and restart before it can report Ready.
+
+| Option | Commands | Meaning |
+| --- | --- | --- |
+| `--config FILE` | `setup`, `prepare` | Defaults to `aw.yaml` in the current directory |
+| `--agent TARGET` | `setup`, `prepare` | Required configured target |
+| `--directory ABS_DIR` | `setup` | Required owned directory with no group/other writes; Qoder requires mode 0700, Python requires the dedicated venv's `site-packages` |
+| `--remove` | Qoder `setup` only | Remove an inactive startup installation while preserving user Hooks; live owners must exit first |
+| `--native-settings FILE`, `--native-state-dir DIR` | OpenClaw setup/preparation | Existing native settings and state directory |
+| `--native-profile DIR` | Hermes setup/preparation | Existing connected native profile |
+| `--binding FILE` | `release` | Required exact private binding returned by `prepare` |
+
+`setup` returns JSON containing `environment` and the exact created `files`.
+It refuses overwrites, preserves existing Python `sitecustomize`, and leaves shell
+profiles and running processes unchanged. Apply the returned environment only to
+the intended application startup, then restart that application. Setup alone
+creates no ready instance.
+
+`prepare` is a direct child of the application owner, with no shell intermediary
+or selectable PID. It follows the configured service startup policy and returns
+JSON containing `instance_id`, `environment`, `binding`, `command` and
+`state: pending_ready`. Apply the environment changes and invoke the documented
+factory/bootstrap in the owner process. Native confirmation establishes readiness;
+printing the preparation response does not enable Hook dispatch.
+
+After native work and cleanup finish, the owner calls
+`aw instance release --binding FILE` as a direct child. Success exits 0 and removes
+that registration's staged directory; it does not stop the application, sibling
+instances or daemon. Keep the binding private. For crash cleanup and removing
+installed startup assets, see [independent instances](../../../developer-guide/en/aw/deployment/independent-instances.md).
+
 ## `aw instance attach` and `aw instance update`
 
 Run these commands from the directory containing your shared `aw.yaml`, or supply
@@ -321,14 +363,14 @@ Without `--policy`, the shared configuration is the candidate. Multiple matching
 instances require `--instance`. Busy or rejected updates retain the active policy;
 an unknown instance is an error and does not trigger attachment.
 
-These commands return the existing attachment/update JSON responses. They do
-not add attachment or update capability to other native entrypoints. The
-application-owned JSON protocol below remains separate and cannot be combined
-with these subcommands.
+These commands return the existing attachment/update JSON responses. Update
+also supports the prepared native modes in the linked guide; attachment remains
+limited to its documented entrypoints. The application-owned JSON protocol below
+cannot be combined with these subcommands.
 
 ## `aw instance`
 
-Explicit Adapters connect to an existing same-user daemon; the first contract supports ordinary Qoder SDK / QwenPaw routes. `--socket PATH` is required. `--connect` discovers service identity without reading stdin. Other calls read registration, Ready, query or release JSON from stdin and always return JSON. `--timeout-ms` defaults to 30000 and accepts 1–60000, covering input, connection and request.
+Explicit Adapters connect to an existing same-user daemon using the registration protocol behind native preparation. `--socket PATH` is required. `--connect` discovers service identity without reading stdin. Other calls read registration, Ready, query or release JSON from stdin and always return JSON. `--timeout-ms` defaults to 30000 and accepts 1–60000, covering input, connection and request.
 
 ```bash
 AW_SOCKET=/absolute/private/state/aw.sock

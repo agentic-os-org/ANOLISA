@@ -198,7 +198,8 @@ aw status --config current.yaml
 更新前暂停派发。模型执行、活跃工具任务和未确认的清理都会保持 busy；
 部分消费的回复流须显式关闭。Scope 打开响应丢失时需重启 worker 后继续；
 子 Scope 已确认关闭但请求占用释放未确认时，下一次回复前重试释放。
-原生 evidence 采集仍不在常驻策略 Scope 范围内。可修改字段与版本选择见
+每个确认就绪的回复 Scope 独立保存有界回调观测，关闭前排空。AgentScope 来源身份
+仍为未核实，覆盖保持未知。可修改字段与版本选择见
 [策略更新](../deployment/policy-updates.md)。
 
 ## 启动多个 OS worker

@@ -219,3 +219,14 @@ monotonic sequence to reject replay. They can continue beyond 1,024 submissions
 without recreating the client. Foreground bindings retain a cumulative 1,024-claim
 limit shared with legacy tool events; create a fresh binding before that limit.
 Active input events and scanner calls are released after each check.
+
+
+## Task observation
+
+With `evidence` enabled, each acknowledged managed session owns a bounded observation
+worker. Configured native Hook calls contribute callback metadata; session close drains
+pending reads and releases its source-session claims. A failed evidence query does not
+block an otherwise admitted tool call. Pi and Claude SDK retain the existing source
+identity limits: callback association remains `unverified`, coverage remains `unknown`,
+and AW does not claim that AgentSight history belongs to this SDK session. Empty tool
+policies do not add synthetic observation callbacks for these adapters.

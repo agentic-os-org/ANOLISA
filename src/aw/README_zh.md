@@ -54,7 +54,7 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 
 使用 `aw instance attach --agent TARGET --pid PID` 接入受支持的原生进程，再用 `aw instance update --agent TARGET` 在空闲时应用策略。两个命令默认读取当前目录的 `aw.yaml`；前提和显式配置选择见[命令参考](../../docs/user-guide/zh/aw/cli-reference.md#aw-instance-attach-与-aw-instance-update)。
 
-显式 Adapter 可通过 `aw instance` 向已有同用户 daemon 独立登记、确认 Ready、查询和释放业务自管实例。首期支持 Qoder SDK / QwenPaw 普通路由，使用固定配置；语言包和原生工厂迁移另行交付。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
+八个受支持 Adapter 完成一次接入后，可通过 `aw instance setup` 或应用自管的 `prepare` 保留原生启动方式。原生就绪确认后完成登记，`aw instance update` 在任务完整结束后更新策略。SDK 工厂和 QwenPaw 使用任务 Scope，Qoder、OpenClaw、Hermes 使用原生请求边界。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
 
 ## Hook 支持矩阵
 

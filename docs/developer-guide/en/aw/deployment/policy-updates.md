@@ -8,14 +8,54 @@ The deployer pauses and resumes task dispatch; AW activates a complete policy af
 
 | Mode | Readiness | Wait before updating |
 | --- | --- | --- |
-| Ordinary Qoder SDK 1.0.56 / Worker 1.1.78 | Managed `startDaemon()`; without an explicit daemon, initialize `createQuery()` within 30 seconds | All Queries fully closed, callbacks and leases cleaned up |
-| Ordinary AgentScope 2.0.6 factory | First `AwBridge.create_agent()` | All replies, tool tasks and Scope cleanup completed |
-| Ordinary QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App | Managed App startup | All replies and cleanup completed |
-| Qoder 1.1.73 TUI and the SDK / App versions above in `--reloadable` mode | Native stable bridge; SDK also needs an explicit daemon and initialized Query | All native requests and background cleanup completed |
-| Externally started Qoder TUI / QwenPaw App | [Attach before the first request](process-attach.md) | Same restricted bridge boundary |
+| Ordinary or prepared native Qoder SDK 1.0.56 / Worker 1.1.78 | Managed `startDaemon()`; without an explicit daemon, initialize `createQuery()` within 30 seconds | All Queries fully closed, callbacks and leases cleaned up |
+| Ordinary or prepared native AgentScope 2.0.6 factory | First `AwBridge.create_agent()` | All replies, tool tasks and Scope cleanup completed |
+| Ordinary or prepared native QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App | Managed App plugin startup | All replies and cleanup completed |
+| Prepared native Claude SDK resident factory | `prepare_native()` in a dedicated process group | Every client disconnected; SDK, relay and MCP cleanup confirmed |
+| Prepared native Pi worker factory | `runNativeWorker()` with existing `createSession` / `runWorker` factory | All sessions closed, including preparation, abort and disposal |
+| Prepared native OpenClaw Gateway | Plugin confirmation at `gateway_start` | Successful `agent_end` and drained tool callbacks |
+| Prepared native Hermes local chat | Connected plugin and guarded chat startup | Completed chat turn and drained callbacks |
+| Prepared native Qoder CLI (TUI or print), or Qoder TUI in `--reloadable` / external attachment mode | Installed startup Hooks confirm each process; external TUI attachment requires [attachment before the first request](process-attach.md) in an exclusive profile | All native requests and background cleanup completed |
+| Qoder SDK / QwenPaw `--reloadable`, or externally attached QwenPaw App | Native stable bridge; SDK also needs an explicit daemon and initialized Query | Same restricted bridge boundary |
 
-Ordinary Qoder SDK and QwenPaw retain strict Post, managed MCP and private execution leases. Restricted mode does not provide resident strict Post or private leases.
-Other Adapters require restart. An ordinary Qoder SDK Query occupies its instance between turns until closed; prewarmed workers should call managed `startDaemon()` first.
+Follow the framework's [startup instructions](../native-agents.md) once. SDK
+applications call `aw instance prepare` from their own startup and retain the
+existing AW factory; OpenClaw, Hermes and QwenPaw install a startup component and
+restart. Preparation creates a pending instance; native confirmation makes it
+ready. A running process without these connections cannot gain Hook coverage
+through a policy update. Qoder can install startup Hooks before its next native
+launch; an existing TUI retains its pre-request attachment route.
+
+Ordinary Qoder SDK and QwenPaw retain strict Post, managed MCP and private execution
+leases. Restricted mode does not provide resident strict Post or private leases.
+A Qoder SDK Query occupies its instance between turns until closed; prewarmed
+workers should call managed `startDaemon()` first. Prepared Pi and Claude clients
+also keep a fixed policy until their whole session or client closes.
+
+Prepared OpenClaw uses event budgets of at most 12,000 ms; Hermes retains its
+55,000 ms limit after the documented callback-timeout preparation. Uncertain
+native completion keeps updates busy and requires restart. OpenClaw supports
+Gateway runs, excluding `tools.invoke`; Hermes supports local chat, with
+`input.submit` limited to quiet single-query text mode. Hermes Skill checks use
+the same source selection and pinned manifest contract across policy updates. Ordinary `aw run` Pi, Claude SDK, OpenClaw and
+Hermes retain their existing restart requirement. See each Agent guide for
+remaining native input and result limits.
+
+## Use one default configuration
+
+Keep `aw.yaml` in the controller's working directory and start the service with
+that configuration. After the prepared native application reports ready, pause
+new work, edit the policy in `aw.yaml`, and run:
+
+```bash
+aw instance update --agent TARGET
+aw status --config aw.yaml
+```
+
+Use `--instance ID` to select one of several instances. `aw instance update` uses
+the same update contract as `aw update`; it does not discover or attach processes.
+The startup connection and native settings remain in place for subsequent policy
+changes. Changes outside the permitted policy fields require restart.
 
 ## Apply a candidate policy
 

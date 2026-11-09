@@ -50,6 +50,9 @@ aw config init --help
 | `aw recover` | 恢复中断的本地包操作 |
 | `aw commands` | 枚举公开命令，可输出机器可读的参数信息 |
 | `aw completion` | 打印 Shell 补全脚本 |
+| `aw instance setup` | 在明确选择的私有目录安装启动组件 |
+| `aw instance prepare` | 准备调用方应用的原生工厂与实例登记 |
+| `aw instance release` | 释放 owner 的登记与临时资产 |
 | `aw instance attach` | 接入或移除选定进程的受支持原生 Hook |
 | `aw instance update` | 默认使用共享 `aw.yaml` 更新策略 |
 | `aw instance` | 使用 JSON 登记、确认、查询和释放业务自管实例 |
@@ -293,6 +296,36 @@ aw completion bash > aw.bash
 
 内部生命周期动作和消息是随版本变化的实现细节。应用集成使用 [Agent 指南](../../../developer-guide/zh/aw/native-agents.md)中的托管工厂，由工厂管理这些调用与清理。
 
+## `aw instance setup`、`prepare` 与 `release`
+
+完成一次接入后，这些命令保留应用原生启动方式。`setup` 为 Qoder TUI/print、OpenClaw Gateway、
+Hermes 本机 chat 和 QwenPaw App 安装启动组件。SDK 应用在自身启动流程中直接调用 `prepare`，
+随后在同一进程进入已有 AW 工厂。启动代码和原生选项见[框架指南](../../../developer-guide/zh/aw/native-agents.md)；
+尚未接线的运行中应用须先完成准备并重启，才能报告 Ready。
+
+| 选项 | 命令 | 含义 |
+| --- | --- | --- |
+| `--config FILE` | `setup`、`prepare` | 默认使用当前目录的 `aw.yaml` |
+| `--agent TARGET` | `setup`、`prepare` | 必填，配置中的目标名 |
+| `--directory ABS_DIR` | `setup` | 必填，当前用户拥有且禁止组和其他用户写入；Qoder 要求 0700，Python 须选择专用 venv 的 `site-packages` |
+| `--remove` | 仅 Qoder `setup` | 移除已停用的启动安装并保留用户 Hook；存活 owner 须先退出 |
+| `--native-settings FILE`、`--native-state-dir DIR` | OpenClaw setup/prepare | 已有原生设置和状态目录 |
+| `--native-profile DIR` | Hermes setup/prepare | 已连接插件的原生 profile |
+| `--binding FILE` | `release` | 必填，`prepare` 返回的准确私有 binding |
+
+`setup` 返回包含 `environment` 与准确创建文件清单 `files` 的 JSON。它拒绝覆盖已有文件，
+保留 Python `sitecustomize`，不修改 shell profile 或运行中进程。将返回的环境用于目标
+应用启动，再重启该应用。仅完成 setup 不会产生就绪实例。
+
+`prepare` 必须由应用 owner 直接启动为子进程，调用链不经过 shell，也不接受指定 PID。
+它遵循配置中的服务启动策略，返回包含 `instance_id`、`environment`、`binding`、`command`
+和 `state: pending_ready` 的 JSON。应用设置返回的环境，在 owner 进程内进入文档规定的
+工厂或启动代码，由原生确认建立就绪状态。准备响应本身不开放 Hook 派发。
+
+原生工作与清理完成后，owner 直接启动 `aw instance release --binding FILE`。
+成功退出码为 0，并删除该登记的临时目录；应用、其他实例和 daemon 继续由各自所有者管理。
+binding 须保持私有。崩溃清理与启动组件移除见[独立实例接入](../../../developer-guide/zh/aw/deployment/independent-instances.md)。
+
 ## `aw instance attach` 与 `aw instance update`
 
 在共享 `aw.yaml` 所在目录执行以下命令，或显式传入 `--config FILE`。当前接入支持
@@ -316,12 +349,12 @@ update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deploymen
 配置作为候选；匹配多个实例时须提供 `--instance`。忙碌或更新被拒绝时保留原策略；
 实例不存在会报错，不会触发自动接入。
 
-这些命令沿用现有接入和更新的 JSON 响应，不增加其他原生入口的接入或更新能力。
-下述业务自管 JSON 协议保持独立，不能与这些子命令混用。
+这些命令沿用现有接入和更新的 JSON 响应。update 也支持链接指南中的已准备原生模式，
+attach 仍限于文档列出的入口。下述业务自管 JSON 协议不能与这些子命令混用。
 
 ## `aw instance`
 
-供显式 Adapter 连接已有同用户 daemon，首期支持 Qoder SDK / QwenPaw 普通路由。`--socket PATH` 必填；`--connect` 只发现服务身份，不读取 stdin。其余调用从 stdin 接收登记、Ready、查询或释放请求，始终输出 JSON。`--timeout-ms` 默认 30000，范围 1–60000，覆盖输入、连接和请求。
+供显式 Adapter 连接已有同用户 daemon，使用原生准备流程复用的登记协议。`--socket PATH` 必填；`--connect` 只发现服务身份，不读取 stdin。其余调用从 stdin 接收登记、Ready、查询或释放请求，始终输出 JSON。`--timeout-ms` 默认 30000，范围 1–60000，覆盖输入、连接和请求。
 
 ```bash
 AW_SOCKET=/absolute/private/state/aw.sock

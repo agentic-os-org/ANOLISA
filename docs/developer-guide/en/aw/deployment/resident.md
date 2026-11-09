@@ -46,9 +46,13 @@ For in-process MCP tools, also import `create_sdk_mcp_server` from `aw_claude` a
 create a fresh server for each client. Keep SDK `tool` definitions and business closures.
 The [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md) covers single successful text replacement, reliable errors and explicit correlation.
 
-Resident Pi and Claude hosts reject enabled AgentSight evidence before publishing
-readiness. Set evidence `mode: off` for resident hosts; legacy task mode continues
-to support evidence.
+Optional evidence belongs to each acknowledged task Scope and drains when that
+Scope closes. Parallel tasks retain separate source claims and buffers. Native
+callback metadata from configured Hooks is recorded even when source identity
+cannot be verified. Pi and Claude retain that unverified coverage; an empty
+policy adds no tool callbacks, and startup integration adds no verified AgentSight
+association. Set evidence `mode: off` to disable source
+I/O.
 
 For Pi, export the existing SDK session factory and a resident host entrypoint:
 

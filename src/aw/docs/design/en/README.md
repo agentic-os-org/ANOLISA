@@ -15,6 +15,7 @@ connect through the process protocol without AW package records.
 | --- | --- |
 | Configuration | [Configuration](configuration/configuration.md) · [Editing and native sources](configuration/configuration-editing.md) |
 | Policy admission | [Core admission](core-admission.md) |
+| Native startup ownership | [Registration and task/root bridges](architecture.md#application-owned-native-startup) · [Application integration](../../../../../docs/developer-guide/en/aw/deployment/independent-instances.md) |
 | Native wiring | [Adapter dispatch](adapters/adapter-dispatch.md) |
 | Runtime | [Service](runtime/local-service.md) · [Policy updates](runtime/policy-reload.md) · [Host](runtime/provider-host.md) · [Bounded execution](runtime/bounded-execution.md) |
 | Capability plans | [Core execution](core-execution.md) |

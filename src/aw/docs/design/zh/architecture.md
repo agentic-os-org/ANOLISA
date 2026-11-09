@@ -124,11 +124,31 @@ Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录
 
 ### 显式策略更新
 
-`aw run --reloadable` 显式预装稳定 Adapter 入口，`aw update` 定位现有实例，
+受支持的常驻工厂和已准备原生启动安装 Adapter 更新边界，`aw run --reloadable`
+选择单独的受限桥接。`aw instance update` 与 `aw update` 定位现有实例，
 由 `aw-service` 在请求准入门外准备新的不可变 Host，再在同一门内最终复查空闲和版本后发布。
 服务保留启动身份，每个实例持有自己的激活策略。原生 Adapter 报告请求/工具生命周期，
 保留调度与效果采纳；Provider 协议和 Core 计划执行不变。
 固定版本、busy 拒绝、进程关联及验收范围见[策略热更新](runtime/policy-reload.md)。
+
+### 业务自管原生启动
+
+`instance setup` 只在明确选择的位置安装启动资产。应用原生启动时，直接创建
+`instance prepare` 子进程，CLI 复用 Adapter 校验、配置与 Service 登记，返回私有
+桥接资产，登记仍保持待就绪状态。原 owner 在派发前确认原生就绪，从 Unix peer、
+进程启动身份到实例形成连续的所有权核验。
+
+普通 SDK 工厂和 QwenPaw 使用子任务 Scope。Qoder、OpenClaw 与 Hermes 使用已准入的
+原生根桥接，通过请求和工具生命周期约束策略更新。根生命周期调用继续核验 owner，
+原生回调须来自 owner 进程树；普通 SDK 根实例仍不能直接执行回调。预装 Qoder TUI/print
+通过 SessionStart 确认原生根；对已有 Qoder TUI 的外部 attach 仍限于首个请求之前。
+
+配置选定的服务身份保持固定，各实例拥有自己的策略版本。以修改后的配置准备实例时，
+先校验允许变化的策略范围，再复用该服务。清理释放实例所属 Provider 工作和临时资产，
+应用进程仍由业务管理。仅安装启动组件或发现进程不能证明 Ready。Provider 协议、Core
+效果准入与 Host 调用链继续共用。
+操作与回退见[业务自管接入](../../../../../docs/developer-guide/zh/aw/deployment/independent-instances.md)，
+各框架清理边界见[策略更新](../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)。
 
 ### `aw-core` 在哪里
 

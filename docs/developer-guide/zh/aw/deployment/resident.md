@@ -40,8 +40,10 @@ finally:
 进程内 MCP 同时从 `aw_claude` 导入 `create_sdk_mcp_server`，每客户端创建新 server，
 保留 SDK tool 定义和业务闭包。[受管 MCP 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-mcp.md) 说明成功单文本替换、可靠错误状态及明确关联。
 
-常驻 Pi 和 Claude host 会在发布 ready 前拒绝启用 AgentSight evidence 的配置。
-常驻 host 可设置 evidence `mode: off`；旧的任务模式继续支持 evidence。
+可选证据采集由每个已确认的任务 Scope 持有，Scope 关闭时排空采集工作。并行任务分别
+持有来源关联与缓冲区。来源身份无法核实时仍记录已配置 Hook 产生的原生回调元数据；Pi 和 Claude 保留
+未核实的覆盖状态，空策略不增加工具回调，启动接入不增加已验证的 AgentSight 关联。设置 evidence
+`mode: off` 可关闭来源 I/O。
 
 Pi 保留已有 SDK session 工厂，增加常驻入口：
 

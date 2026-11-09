@@ -125,7 +125,8 @@ configuration and Provider protocols.
 `own_instance` pins the same-user launcher's PID, start ticks and PID namespace.
 `open_scope` inherits the root's admitted target, capabilities and configuration,
 then runs Provider preparation with the task's own cwd and complete environment.
-Nested scopes, restricted reloadable roots and active observation are rejected.
+Nested scopes and restricted reloadable roots are rejected. Existing root observation
+retains run metadata while each acknowledged task owns independent observation.
 Ordinary resident Qoder SDK/QwenPaw roots may enable idle policy updates; their
 whole-task reservations and immutable child snapshots follow
 [the policy update contract](policy-reload.md#ordinary-resident-task-snapshots). The owning
@@ -462,7 +463,11 @@ and retired-identity protection. Evidence uses the owning Host snapshot.
 The [policy reload design](policy-reload.md) defines the lifecycle, process
 association, pinned entrypoints, manual acceptance and later attach/steer scope.
 
-Owned roots may use observation while no scopes exist. Task scopes and roots with preparing or active scopes reject observation; active root observation rejects opening a scope.
+Roots can start observation before opening task scopes. Once scopes exist, the root
+cannot start a new observer. Acknowledgement starts each task's configured observer
+after its ownership and policy checks; closure drains reads and releases source
+claims. Initialization failure cancels the acknowledged scope for maintenance
+cleanup. Source identity and coverage retain the existing Adapter contract.
 
 ## Independent registration
 
@@ -474,12 +479,16 @@ The stable CLI envelope and integration sequence are defined in the
 
 The request key binds the application PID/start identity and client request ID.
 Service authenticates direct-owner or direct-child Unix peers and retains a digest
-of the complete registration input. A changed target, capability, cwd or environment
-under that key is a conflict. Each fresh key uses the same `bind_id` preparation
+of the complete registration input. A changed target, capability, cwd, environment
+or candidate configuration under that key is a conflict. Each fresh key uses the same `bind_id` preparation
 as `Bind`: Core preflight, Host discovery, Core admission and Host construction
 consume the matching preparation evidence/resources. Configuration digest equality
 does not share prepared resources across instances. The ordinary Adapter route
-projection validates wiring constraints before Provider discovery.
+projection validates wiring constraints before Provider discovery. Optional
+`config` carries complete configuration text validated against the daemon's
+startup policy-update boundary. It selects the new instance's Host revision;
+the binding retains the original service identity. Omitting it uses the daemon's
+startup configuration.
 
 An owned reservation is visible during preparation. Cancellation, owner loss and
 connection loss reach its preparation flag. Successful preparation starts a
@@ -490,12 +499,24 @@ checks the exact immutable policy revision. Repeating the same registration or
 Ready cannot renew its original deadline. Audit failure keeps admission closed
 and the daemon retains its existing fail-stop behavior.
 
-Independent roots only admit task scopes after Ready. Scope workers must descend
-from the root, and Service authenticates the exact worker/direct CLI child for
-every existing instance operation. This check also covers legacy RPC paths, so a
-forwarded handle cannot bypass the independent entrypoint. Fixed scope routes use
-the ordinary resident projection without enabling policy reload. Existing `aw run`
-and attachment contracts retain their admission paths.
+`Register` creates an ordinary factory root. After Ready, it admits task Scopes
+and requires child Scopes for Hook execution. Workers must belong to the owner
+process tree; Service authenticates each exact worker or direct CLI child on
+existing instance operations, including legacy RPC paths. Each task retains an
+immutable ordinary resident route snapshot through native cleanup.
+
+`RegisterNative` is restricted to admitted Qoder/OpenClaw/Hermes command bridges. Ready
+and process association remain owner-authenticated. Root callbacks require a peer
+in that owner's process tree, and the stable bridge reserves complete native
+requests and tools. Pending roots and unrelated callers cannot dispatch events;
+ordinary SDK roots retain their Scope requirement.
+
+Native preparation explicitly enables supported idle policy updates. Actual
+native readiness confirms the bridge before update or work admission, and active
+tasks or unfinished root requests keep updates busy. Registration alone does not
+confirm native wiring or enable execution. Existing `aw run` and attachment
+contracts retain their admission paths. See [native startup ownership](../architecture.md#application-owned-native-startup)
+for the CLI/Adapter/Service preparation flow.
 
 Release fences admission and reuses `release_instance`: cancel sibling scopes,
 wait for Provider workers and descendants, then drop Host resources. Maintenance
