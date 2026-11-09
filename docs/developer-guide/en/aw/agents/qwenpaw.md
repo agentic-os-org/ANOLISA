@@ -73,3 +73,52 @@ The native Hook output dialect and event coverage remain framework-specific.
 An ordinary configuration with no Providers or event steps still installs
 resident admission and cleanup middleware.
 The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.
+
+## Keep the native App startup command
+
+For an initialized QwenPaw installation in a dedicated Python environment, install
+AW's startup module once and restart the App. Configure the `qwenpaw` target's
+`argv` to match the executable and arguments you normally use, including host and
+port. Start the AW service with the same `aw.yaml` first.
+
+Run setup from the directory containing `aw.yaml`. Replace the Python path with
+the interpreter in the dedicated QwenPaw environment:
+
+```bash
+QWENPAW_PYTHON=/absolute/qwenpaw-venv/bin/python
+AW_STARTUP_DIR="$("$QWENPAW_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+aw instance setup --agent qwenpaw --directory "$AW_STARTUP_DIR" > aw-startup.json
+export AW_INSTANCE_BOOTSTRAP="$(python3 -c 'import json; print(json.load(open("aw-startup.json"))["environment"]["AW_INSTANCE_BOOTSTRAP"])')"
+export QWENPAW_WORKING_DIR=/absolute/qwenpaw-home
+qwenpaw app --host 127.0.0.1 --port 8096
+```
+
+Keep the returned startup environment in the application's service or shell
+configuration. Setup creates a `.pth` activation file in the explicitly selected
+environment and preserves any existing `sitecustomize`. The selected directory
+must belong to the current user and disallow group/other writes. Setup refuses
+to overwrite existing activation files. The App prepares its own
+instance, loads the ordinary resident plugin from AW's private assets, and confirms
+readiness after native plugin startup. Requests arriving before that confirmation
+cannot build an Agent. A different native command fails before App startup.
+
+Edit `aw.yaml`, pause dispatch and update from another terminal:
+
+```bash
+aw status --config aw.yaml
+aw instance update --agent qwenpaw
+```
+
+The ordinary input, tool, strict-after and reply cleanup boundaries remain active;
+the native App, user plugins and MCP configuration keep their existing ownership.
+Policy activation waits for replies and cleanup to drain. Graceful shutdown releases the
+instance and its temporary plugin assets. Stop the App before removing the exact
+setup files listed in `aw-startup.json`, then unset `AW_INSTANCE_BOOTSTRAP` and
+restart to remove this integration. This startup route supports one native App
+process; ACP, TUI and multiprocessing require separate integration.
+
+Native MCP connection settings and native permission updates have their own
+lifecycle. Serialize and verify those changes separately: the pinned QwenPaw
+baseline can restore an older native permission policy when an earlier connection
+reload completes after a permission update. AW instance policies retain their
+independent admission boundary.

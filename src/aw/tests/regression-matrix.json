@@ -1098,6 +1098,10 @@
     "pi-native-arguments": {
       "target": "aw-cli/test/pi",
       "test": "native_update::native_entrypoints_preserve_configured_application_arguments"
+    },
+    "qwenpaw-startup-readiness": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "native_startup_fences_requests_until_plugin_ready"
     }
   },
   "agents": {
@@ -1536,7 +1540,8 @@
         "resident-bridge-generation",
         "python-scope-validity",
         "qwenpaw-native-configuration",
-        "qwenpaw-native-terminal-drain"
+        "qwenpaw-native-terminal-drain",
+        "qwenpaw-startup-readiness"
       ],
       "security": [
         "security-retry",

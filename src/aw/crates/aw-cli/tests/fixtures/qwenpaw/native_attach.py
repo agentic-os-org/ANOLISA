@@ -12,11 +12,13 @@ import socket
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sec_core"))
 from agents import configure_qwenpaw
 from runtime import Processes, await_condition, checked, save
+from native_app_config import request as native_request, stage_user_configuration
 
 
 class NativeAttachTests(unittest.TestCase):
@@ -41,6 +43,7 @@ class NativeAttachTests(unittest.TestCase):
                     environment["XDG_RUNTIME_DIR"] = str(case / "runtime")
                     processes = Processes(case, output, environment)
                     argv, native_ports = configure_qwenpaw(case, self.qwenpaw, environment, processes)
+                    stage_user_configuration(case)
                     marker = case / "work/marker"
                     (case / "tool-command.txt").write_text("printf attached > " + shlex.quote(str(marker)))
                     child = processes.start("native-app", argv, native_ports[:1])
@@ -51,8 +54,16 @@ class NativeAttachTests(unittest.TestCase):
                         with socket.socket() as connection:
                             return connection.connect_ex(("127.0.0.1", native_ports[0])) == 0
                     await_condition(listening, 45, "native App startup")
-                    with urllib.request.urlopen(f"http://127.0.0.1:{native_ports[0]}/api/plugins", timeout=5) as response:
-                        response.read()
+                    def plugins_ready():
+                        self.assertFalse(processes.exited(child))
+                        try:
+                            # Plugin listing can scan disk before the loader exists.
+                            return json.loads(native_request(native_ports[0], "plugins/native-observer/status"))["loaded"] is True
+                        except urllib.error.HTTPError as error:
+                            if error.code not in (404, 503):
+                                raise
+                            return False
+                    await_condition(plugins_ready, 45, "native plugin loader readiness")
                 case, processes, environment, child, native_ports, argv = cases[0]
                 other = cases[1][0]
                 unchanged = (other / "home/config.json").read_bytes()
@@ -76,7 +87,7 @@ class NativeAttachTests(unittest.TestCase):
                 def status():
                     return json.loads(checked([aw, "status", "--config", config], env=environment).stdout)["result"]
                 def install(remove=False, success=True):
-                    command = [aw, "install", "--config", config, "--agent", "native", "--pid", str(child.pid)]
+                    command = [aw, "instance", "attach", "--config", config, "--agent", "native", "--pid", str(child.pid)]
                     if remove:
                         command.append("--remove")
                     result = __import__("subprocess").run(list(map(str, command)), env=environment, capture_output=True, timeout=45)
@@ -110,7 +121,7 @@ class NativeAttachTests(unittest.TestCase):
                 allowed = copy.deepcopy(document)
                 allowed["spec"]["events"] = {}
                 save(config, allowed)
-                checked([aw, "update", "--config", config, "--agent", "native"], env=environment)
+                checked([aw, "instance", "update", "--config", config, "--agent", "native"], env=environment)
                 report["checks"].append("single-config-update")
                 (case / "tool-command.txt").write_text("sleep 2; printf attached > " + shlex.quote(str(case / "work/marker")))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

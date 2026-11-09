@@ -290,3 +290,38 @@ fn submit_policy_blocks_before_native_reply_and_preserves_configuration() {
         service.released(&fixture);
     }
 }
+
+#[test]
+fn resident_callbacks_keep_verified_observation_until_scope_cleanup() {
+    let fixture = Fixture::new();
+    let mut document = resident(&fixture, "report");
+    fixture.observation(&mut document, "qwenpaw");
+    let service = Service::start(&fixture, &document);
+    assert_eq!(fixture.successful(launch(&fixture))["failure"], Value::Null);
+    let records: Vec<Value> = fs::read_dir(fixture.root.join("state/journal"))
+        .unwrap()
+        .flat_map(|entry| {
+            fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap()["record"].clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let callbacks: Vec<_> = records
+        .iter()
+        .filter(|record| record["phase"] == "native_callback")
+        .collect();
+    assert_eq!(
+        callbacks.len(),
+        4,
+        "each resident tool callback must be retained"
+    );
+    assert!(callbacks
+        .iter()
+        .all(|record| record["association"]["status"] == "verified"));
+    assert!(records.iter().any(|record| record["phase"] == "closed"));
+    assert_eq!(service.status()["observations"], json!([]));
+    preserved(&fixture);
+    service.released(&fixture);
+}

@@ -2229,7 +2229,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 2
+          "tests": 3
         },
         {
           "name": "native-attach",

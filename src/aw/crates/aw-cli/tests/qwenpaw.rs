@@ -442,15 +442,17 @@ fn native_callback_environment_preserves_profile_changes_without_rebinding_provi
 }
 
 #[test]
-fn resident_observation_is_rejected_before_launch() {
+fn native_startup_fences_requests_until_plugin_ready() {
     let fixture = Fixture::new();
-    let mut document = setup(&fixture);
-    fixture.observation(&mut document, "qwenpaw");
-    let service = Service::start(&fixture, &document);
-    let output = fixture.run(launch(&fixture));
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("resident task scopes do not support native evidence"));
-    preserved(&fixture);
-    service.released(&fixture);
+    let mut command = Command::new(&fixture.python);
+    command.arg(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/qwenpaw/startup_unit.py"
+    ));
+    let result = fixture.run(command);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }

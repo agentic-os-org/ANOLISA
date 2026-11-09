@@ -57,3 +57,42 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 零 Provider、零事件步骤的普通配置也会安装 resident 准入与清理 middleware。
 
 共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。
+
+## 保留原生 App 启动命令
+
+已在独立 Python 环境中初始化 QwenPaw 时，可以一次安装 AW 启动模块，然后重启 App。
+将 `aw.yaml` 中 `qwenpaw` 目标的 `argv` 配置为实际使用的可执行文件和参数，包含 host、port。
+先使用同一份配置启动 AW Service。
+
+在 `aw.yaml` 所在目录执行准备，将 Python 路径换为独立 QwenPaw 环境的解释器：
+
+```bash
+QWENPAW_PYTHON=/absolute/qwenpaw-venv/bin/python
+AW_STARTUP_DIR="$("$QWENPAW_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+aw instance setup --agent qwenpaw --directory "$AW_STARTUP_DIR" > aw-startup.json
+export AW_INSTANCE_BOOTSTRAP="$(python3 -c 'import json; print(json.load(open("aw-startup.json"))["environment"]["AW_INSTANCE_BOOTSTRAP"])')"
+export QWENPAW_WORKING_DIR=/absolute/qwenpaw-home
+qwenpaw app --host 127.0.0.1 --port 8096
+```
+
+将返回的启动环境保存在应用的 service 或 shell 配置中。准备命令在明确选择的 Python
+环境中创建 `.pth` 激活文件，保留已有 `sitecustomize`。目录须归当前用户所有，且禁止组和
+其他用户写入；准备命令拒绝覆盖已有激活文件。App 自行准备实例，从 AW 私有目录加载普通 resident 插件，在原生插件启动完成后确认就绪。此前到达的请求不能构造 Agent；
+实际启动命令与准入目标不一致时，在 App 启动前失败。
+
+修改 `aw.yaml`，暂停任务派发后在另一终端更新：
+
+```bash
+aw status --config aw.yaml
+aw instance update --agent qwenpaw
+```
+
+输入、工具、严格 After 与 reply 清理沿用普通模式的接点；原生 App、用户插件和 MCP
+配置继续由 QwenPaw 管理。策略在回复与清理排空后激活，正常关闭释放实例和临时插件资产。
+移除集成时，先停止 App，删除 `aw-startup.json` 列出的本次准备文件，取消
+`AW_INSTANCE_BOOTSTRAP`，再重新启动。此路径支持单个原生 App 进程；ACP、TUI 和多进程
+需要单独接入。
+
+原生 MCP 连接配置与原生权限策略有各自的更新生命周期，需要串行修改并核验结果。
+固定版本 QwenPaw 中，较早发起的连接重载若在权限更新后完成，可能恢复旧的原生权限策略。
+AW 实例策略仍按独立的准入边界执行。
