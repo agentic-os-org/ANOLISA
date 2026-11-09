@@ -58,10 +58,13 @@ spec:
               # BPF+PERFMON: probe load and uprobe attach. SYS_PTRACE: reading
               # /proc/<pid>/maps of another uid's process requires it once that
               # process is non-dumpable (verified on kernel 6.6: without it the
-              # read is denied and the agent is silently skipped). On platforms
-              # without fine-grained eBPF capabilities, fall back to
-              # `privileged: true` instead.
-              add: ["BPF", "PERFMON", "SYS_PTRACE"]
+              # read is denied and the agent is silently skipped). SYS_RESOURCE:
+              # lets agentsight lift the 64 KiB default RLIMIT_MEMLOCK on kernels
+              # that still charge BPF maps to it (pre-5.11, and vendor 5.10 such
+              # as Alibaba Cloud Linux); without it probe creation fails with
+              # EPERM there. On platforms without fine-grained eBPF capabilities,
+              # fall back to `privileged: true` instead.
+              add: ["BPF", "PERFMON", "SYS_PTRACE", "SYS_RESOURCE"]
           # Mirrors the packaged systemd unit (CPUQuota=30%,
           # MemoryMax=350M); the trace loop is sized for these limits.
           resources:
