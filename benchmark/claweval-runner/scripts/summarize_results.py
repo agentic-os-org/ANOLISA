@@ -75,7 +75,7 @@ def resolve_input(args) -> Path:
         if yaml is None:
             print("Error: pyyaml is required for --config. Install with: pip install pyyaml", file=sys.stderr)
             sys.exit(1)
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         defaults = cfg.get("defaults", {})
         trace_dir_name = defaults.get("trace_dir", "traces")
@@ -99,7 +99,7 @@ def resolve_input(args) -> Path:
 
 
 def load_data(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -117,7 +117,7 @@ def load_reports(report_dir: str | None) -> dict:
         return reports
     for rp in rd.glob("*.json"):
         try:
-            with open(rp) as f:
+            with open(rp, encoding="utf-8") as f:
                 report = json.load(f)
             trace_file = report.get("trace_file", "")
             if trace_file:
@@ -285,7 +285,16 @@ def render_csv(rows):
     return buf.getvalue()
 
 
+def use_utf8_streams() -> None:
+    """Emit UTF-8 summaries regardless of the locale's preferred codec."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def main():
+    use_utf8_streams()
     parser = argparse.ArgumentParser(description="Summarize batch evaluation results.")
     parser.add_argument("--input", "-i", default=None,
                         help="Path to batch_results.json (default: latest trace dir)")
@@ -329,7 +338,12 @@ def main():
         output += f"Trials: {total_trials} total, {passed_trials} passed ({trial_pct:.1f}%)\n"
 
     if args.output:
-        with open(args.output, "w", newline="" if args.format == "csv" else None) as f:
+        with open(
+            args.output,
+            "w",
+            encoding="utf-8",
+            newline="" if args.format == "csv" else None,
+        ) as f:
             f.write(output)
         print(f"Written to {args.output}")
     else:
