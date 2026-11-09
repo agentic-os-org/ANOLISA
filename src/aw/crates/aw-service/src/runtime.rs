@@ -217,12 +217,12 @@ impl Runtime {
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
-        self.check_scope_owner(&instance_id)?;
         let instance = instances
             .get(&instance_id)
             .and_then(Option::as_ref)
             .filter(|instance| !instance.closing)
             .ok_or_else(|| rejected("unknown_or_draining_instance"))?;
+        let execution = self.event_execution(instance, &instance_id, &value)?;
         if native_input.is_none() {
             let mut state = instance
                 .invocations
@@ -310,7 +310,7 @@ impl Runtime {
                             } else {
                                 let _ = ready.send(Ok(json!(handle)));
                             }
-                            runtime.event_loop((&thread_key, &instance_id), &event, (&cancelled, &context), receiver, automatic, ordered);
+                            runtime.event_loop((&thread_key, &instance_id), &event, (&cancelled, &context, execution.as_ref()), receiver, automatic, ordered);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -357,13 +357,13 @@ impl Runtime {
         &self,
         identity: (&str, &str),
         event: &aw_host::Event<'_>,
-        lease: (&AtomicBool, &evidence::Cell),
+        lease: (&AtomicBool, &evidence::Cell, Option<&policy::Execution>),
         receiver: Receiver<Job>,
         automatic: bool,
         ordered: bool,
     ) {
         let (key, instance_id) = identity;
-        let (cancelled, context) = lease;
+        let (cancelled, context, execution) = lease;
         let mut close = None;
         let mut claimed = BTreeSet::new();
         let mut panicked = false;
@@ -415,6 +415,10 @@ impl Runtime {
                             let _ = reply.send(Err(rejected("event_cancelled")));
                             continue;
                         }
+                        if let Err(error) = self.check_execution_admission(instance_id, execution) {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
                         let Some(index) = event
                             .steps()
                             .position(|candidate| candidate.step_id == step)
@@ -456,11 +460,11 @@ impl Runtime {
                                     }
                                     thread::sleep(std::time::Duration::from_millis(2));
                                 }
-                                self.check_scope_owner(instance_id)?;
+                                self.check_execution_admission(instance_id, execution)?;
                                 self.audit
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
                                 // Queueing and durable audit can outlive the admitted owner.
-                                self.check_scope_owner(instance_id)?;
+                                self.check_execution_admission(instance_id, execution)?;
                                 let invocation = match native_environment {
                                     Some(environment) => {
                                         event.invoke_with_native_environment(&step, &environment)

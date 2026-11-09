@@ -135,6 +135,28 @@ fn deadline() -> Instant {
 }
 
 #[test]
+fn ordinary_run_start_replay_remains_invalid() {
+    let fixture = Fixture::new("qoder");
+    let pid = std::process::id();
+    fixture
+        .runtime
+        .report_run(&fixture.id, RunOutcome::Started { pid })
+        .unwrap();
+    assert!(matches!(
+        fixture.runtime.report_run(&fixture.id, RunOutcome::Started { pid }),
+        Err(crate::Error::Rejected(code)) if code == "run_transition_invalid"
+    ));
+    assert_eq!(
+        fixture
+            .records()
+            .iter()
+            .filter(|record| record["data"]["name"] == "instance.started")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn native_metadata_without_sight_is_stable_across_reader_restart() {
     for adapter in ["qoder-sdk", "qwenpaw"] {
         let fixture = Fixture::new(adapter);

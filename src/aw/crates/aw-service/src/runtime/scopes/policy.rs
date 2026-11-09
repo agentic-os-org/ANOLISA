@@ -3,6 +3,11 @@
 use super::*;
 
 impl Runtime {
+    pub(in crate::runtime) fn native_root(&self, id: &str) -> Result<bool> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        Ok(owners.get(id).is_some_and(|owner| owner.native))
+    }
+
     pub(in crate::runtime) fn resident_root(&self, id: &str) -> Result<bool> {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         match owners.get(id) {
@@ -12,7 +17,7 @@ impl Runtime {
                     return Err(rejected("scope_closing"));
                 }
                 owner.process.check()?;
-                Ok(true)
+                Ok(!owner.native)
             }
             None => Ok(false),
         }

@@ -117,6 +117,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             target: target.into(),
             options: aw_adapter::NativeOptions {
                 reloadable: args.flags.contains_key("--reloadable"),
+                resident_policy_reload: false,
                 settings: args.flags.get("--native-settings").cloned(),
                 profile: args.flags.get("--native-profile").cloned(),
                 state_dir: args.flags.get("--native-state-dir").cloned(),
@@ -233,6 +234,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             );
         }
         let hook_binding = HookBinding {
+            registration: None,
             adapter: name.into(),
             reloadable,
             resident_policy_reload,

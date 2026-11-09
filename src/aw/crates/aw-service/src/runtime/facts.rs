@@ -178,6 +178,29 @@ impl Runtime {
                 .and_then(Option::as_mut)
                 .filter(|instance| !instance.closing)
                 .ok_or_else(|| rejected("unknown_instance"))?;
+            if let (Some(RunOutcome::Started { pid: previous }), RunOutcome::Started { pid }) =
+                (&instance.run, &outcome)
+            {
+                // Native readiness can be retried after a lost reply, including
+                // when optional observation is disabled and has no run snapshot.
+                let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+                if let Some(owner) = owners
+                    .get(instance_id)
+                    .filter(|owner| owner.independent && owner.native && owner.parent.is_none())
+                {
+                    if previous == pid
+                        && owner.process.metadata()["pid"] == *pid
+                        && owner.acknowledge_by.is_none()
+                        && !owner.cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        owner.process.check()?;
+                        if !self.audit.healthy() {
+                            return Err(rejected("audit_unavailable"));
+                        }
+                        return Ok(json!({"recorded":true}));
+                    }
+                }
+            }
             let valid = match &outcome {
                 RunOutcome::Started { pid } => instance.run.is_none() && *pid > 0,
                 RunOutcome::Exited { code, signal } => {

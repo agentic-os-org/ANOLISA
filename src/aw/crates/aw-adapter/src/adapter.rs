@@ -46,6 +46,8 @@ pub struct HookEvent {
 pub struct NativeOptions {
     /// Preinstall a stable bridge for explicit idle-only policy updates.
     pub reloadable: bool,
+    /// Prepare application-owned factories with immutable task policy updates.
+    pub resident_policy_reload: bool,
     /// Existing native settings file.
     pub settings: Option<String>,
     /// Existing native profile directory.

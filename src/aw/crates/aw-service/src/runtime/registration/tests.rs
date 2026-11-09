@@ -4,6 +4,8 @@ use super::*;
 use crate::{Capabilities, Operation, RegistrationOwner};
 use std::{collections::BTreeMap, fs, path::Path};
 
+mod native;
+
 struct Fixture {
     runtime: Arc<Runtime>,
     directory: tempfile::TempDir,
@@ -57,6 +59,7 @@ impl Fixture {
     }
     fn command(&self, request: &str) -> RegistrationCommand {
         RegistrationCommand::Register {
+            config: None,
             key: self.key(request),
             target: "target".into(),
             cwd: self.directory.path().to_str().unwrap().into(),
@@ -113,6 +116,160 @@ fn code(result: Result<Value>, expected: &str) {
         matches!(result, Err(Error::Rejected(ref code)) if code == expected),
         "{result:?}"
     );
+}
+
+#[test]
+fn native_factory_lifecycle_requires_confirmation_and_task_scopes() {
+    let f = Fixture::new();
+    let snapshot = f.call(f.command("factory")).unwrap();
+    let h = handle(&snapshot);
+    let id = &h.binding.instance_id;
+    let pid = std::process::id();
+    let peer = Process::read(pid).unwrap();
+    let initialize = Operation::EnableReload {
+        instance_id: id.clone(),
+    };
+    f.runtime
+        .authorize_registration_peer(&initialize, Some(&peer))
+        .unwrap();
+    assert!(f
+        .runtime
+        .authorize_registration_peer(&initialize, None)
+        .is_err());
+    f.runtime.enable_reload(id).unwrap();
+    code(f.runtime.associate_process(id, pid), "scope_unacknowledged");
+    code(
+        f.runtime
+            .lifecycle(id, pid, crate::LifecyclePhase::Ready, ""),
+        "scope_unacknowledged",
+    );
+    f.call(RegistrationCommand::Ready {
+        handle: h.clone(),
+        policy_revision: snapshot["policy_revision"].as_str().unwrap().into(),
+    })
+    .unwrap();
+    f.runtime.associate_process(id, pid).unwrap();
+    code(f.open(id), "request_not_admitted");
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::Ready, "")
+        .unwrap();
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::RequestStart, "turn")
+        .unwrap();
+    let task = f.open(id).unwrap();
+    assert!(task["instance_id"].is_string());
+    code(
+        f.runtime
+            .authorize_registration_peer(
+                &Operation::HookPlan {
+                    instance_id: id.clone(),
+                    event: "tool.before".into(),
+                },
+                Some(&peer),
+            )
+            .map(|()| json!({})),
+        "registration_requires_scope",
+    );
+    let instances = f.runtime.instances.lock().unwrap();
+    code(
+        f.runtime
+            .idle(instances.get(id).unwrap().as_ref().unwrap(), id)
+            .map(|()| json!({})),
+        "busy",
+    );
+    drop(instances);
+    f.call(RegistrationCommand::Release { handle: h }).unwrap();
+}
+
+#[test]
+fn native_roots_require_ready_and_cannot_open_sdk_scopes() {
+    let mut f = Fixture::new();
+    let mut document: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    document["spec"]["agents"]["target"]["adapter"] = json!("openclaw");
+    f.runtime = Runtime::new(
+        serde_json::to_vec(&document).unwrap(),
+        &f.directory.path().join("native-audit"),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    let mut command = serde_json::to_value(f.command("native")).unwrap();
+    command["action"] = json!("register_native");
+    command["capabilities"]["adapter"] = json!("openclaw");
+    command["capabilities"]["version"] = json!("2026.9.6");
+    command["capabilities"]["entrypoint"] = json!("gateway");
+    let snapshot = f.call(serde_json::from_value(command).unwrap()).unwrap();
+    let h = handle(&snapshot);
+    let id = &h.binding.instance_id;
+    let pid = std::process::id();
+    let peer = Process::read(pid).unwrap();
+    f.runtime.enable_reload(id).unwrap();
+    code(
+        f.runtime.check_scope_owner(id).map(|()| json!({})),
+        "scope_unacknowledged",
+    );
+    code(f.runtime.associate_process(id, pid), "scope_unacknowledged");
+    f.call(RegistrationCommand::Ready {
+        handle: h.clone(),
+        policy_revision: snapshot["policy_revision"].as_str().unwrap().into(),
+    })
+    .unwrap();
+    f.runtime.associate_process(id, pid).unwrap();
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::Ready, "")
+        .unwrap();
+    f.runtime.check_scope_owner(id).unwrap();
+    for _ in 0..2 {
+        f.runtime
+            .report_run(id, crate::RunOutcome::Started { pid })
+            .unwrap();
+    }
+    code(
+        f.runtime
+            .report_run(id, crate::RunOutcome::Started { pid: pid + 1 }),
+        "run_transition_invalid",
+    );
+    let starts = fs::read_dir(f.directory.path().join("native-audit"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .flat_map(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .map(|line| serde_json::from_str::<Value>(&line).unwrap())
+        .filter(|record| {
+            record["record"]["plan"]["executionEvent"]["data"]["name"] == "instance.started"
+        })
+        .count();
+    assert_eq!(starts, 1);
+    let operation = Operation::HookPlan {
+        instance_id: id.clone(),
+        event: "tool.before".into(),
+    };
+    f.runtime
+        .authorize_registration_peer(&operation, Some(&peer))
+        .unwrap();
+    code(
+        f.runtime.hook_plan(id, "tool.before"),
+        "request_not_admitted",
+    );
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::RequestStart, "run")
+        .unwrap();
+    f.runtime.hook_plan(id, "tool.before").unwrap();
+    code(f.open(id), "scope_parent_unavailable");
+    f.runtime.report_run(id, crate::RunOutcome::Failed).unwrap();
+    code(
+        f.runtime.report_run(id, crate::RunOutcome::Started { pid }),
+        "run_transition_invalid",
+    );
+    f.call(RegistrationCommand::Release { handle: h }).unwrap();
 }
 
 #[test]
@@ -295,4 +452,51 @@ fn ready_audit_failure_keeps_the_instance_closed_to_tasks() {
     );
     assert!(!f.runtime.audit.healthy());
     assert!(f.open(&h.binding.instance_id).is_err());
+}
+
+#[test]
+fn registration_candidate_pins_policy_without_mutating_service_baseline() {
+    let f = Fixture::new();
+    let baseline = f.runtime.bytes.clone();
+    let original = f.call(f.command("baseline")).unwrap();
+    let mut document: Value = serde_json::from_slice(&baseline).unwrap();
+    document["spec"]["events"] = json!({});
+    document["spec"]["providers"] = json!({});
+    let bytes = serde_json::to_vec(&document).unwrap();
+    let mut command = f.command("candidate");
+    if let RegistrationCommand::Register { config, .. } = &mut command {
+        *config = Some(String::from_utf8(bytes.clone()).unwrap());
+    }
+    let prepared = f.call(command.clone()).unwrap();
+    assert_ne!(prepared["policy_revision"], original["policy_revision"]);
+    assert_eq!(
+        prepared["handle"]["binding"]["identity"],
+        original["handle"]["binding"]["identity"]
+    );
+    assert_eq!(f.call(command).unwrap()["handle"], prepared["handle"]);
+    let h = handle(&prepared);
+    let instances = f.runtime.instances.lock().unwrap();
+    assert_eq!(
+        instances[&h.binding.instance_id].as_ref().unwrap().bytes,
+        bytes
+    );
+    drop(instances);
+    assert_eq!(f.runtime.bytes, baseline);
+    for (name, section, value) in [
+        ("argv", "/spec/agents/target/argv", json!(["/bin/false"])),
+        ("daemon", "/spec/daemon/startup", json!("on_demand")),
+    ] {
+        let mut invalid = document.clone();
+        if invalid.pointer(section) == Some(&value) {
+            *invalid.pointer_mut(section).unwrap() = json!("external");
+        } else {
+            *invalid.pointer_mut(section).unwrap() = value;
+        }
+        let mut command = f.command(name);
+        if let RegistrationCommand::Register { config, .. } = &mut command {
+            *config = Some(invalid.to_string());
+        }
+        assert!(f.call(command).is_err(), "immutable {name} changed");
+        assert_eq!(f.runtime.bytes, baseline);
+    }
 }

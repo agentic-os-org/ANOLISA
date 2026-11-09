@@ -22,10 +22,51 @@ pub(super) struct Instance {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Action {
+    /// Install one-time native startup wiring in an explicit private directory
+    Setup(Setup),
+    /// Prepare bridge assets for the calling application's native factory
+    Prepare(Prepare),
+    /// Release the calling application's registration and staged bridge assets
+    Release(Release),
     /// Install supported native Hooks in an explicitly selected process
     Attach(Attach),
     /// Apply policy to an already connected idle instance
     Update(Update),
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct Prepare {
+    /// Shared configuration
+    #[arg(long, default_value = "aw.yaml", value_name = "FILE")]
+    config: String,
+    /// Target declared in the configuration
+    #[arg(long, value_name = "TARGET")]
+    agent: String,
+    /// Existing native settings file
+    #[arg(long)]
+    native_settings: Option<String>,
+    /// Existing native profile
+    #[arg(long)]
+    native_profile: Option<String>,
+    /// Existing native state directory
+    #[arg(long)]
+    native_state_dir: Option<String>,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct Setup {
+    #[command(flatten)]
+    prepare: Prepare,
+    /// Private startup directory or dedicated venv site-packages
+    #[arg(long, value_name = "ABS_DIR")]
+    directory: String,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct Release {
+    /// Private binding returned to the application by prepare
+    #[arg(long, value_name = "FILE")]
+    binding: String,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -65,6 +106,31 @@ struct Update {
 
 pub(super) fn run(value: Instance) -> Result<Exit> {
     match value.action {
+        Some(Action::Setup(value)) => crate::runtime(
+            "native-setup",
+            &options([
+                ("config", Some(value.prepare.config)),
+                ("agent", Some(value.prepare.agent)),
+                ("directory", Some(value.directory)),
+                ("native-settings", value.prepare.native_settings),
+                ("native-profile", value.prepare.native_profile),
+                ("native-state-dir", value.prepare.native_state_dir),
+            ]),
+        ),
+        Some(Action::Prepare(value)) => crate::runtime(
+            "native-prepare",
+            &options([
+                ("config", Some(value.config)),
+                ("agent", Some(value.agent)),
+                ("native-settings", value.native_settings),
+                ("native-profile", value.native_profile),
+                ("native-state-dir", value.native_state_dir),
+            ]),
+        ),
+        Some(Action::Release(value)) => crate::runtime(
+            "native-release",
+            &options([("binding", Some(value.binding))]),
+        ),
         Some(Action::Attach(value)) => crate::runtime(
             "install",
             &options([
@@ -126,6 +192,21 @@ mod tests {
         };
         assert_eq!(value.config, "aw.yaml");
         assert_eq!(value.instance.as_deref(), Some("one"));
+        let value = parse(&[
+            "aw",
+            "instance",
+            "setup",
+            "--agent",
+            "target",
+            "--directory",
+            "/private",
+        ])
+        .unwrap();
+        let Some(Action::Setup(value)) = value.action else {
+            panic!("expected setup")
+        };
+        assert_eq!(value.prepare.config, "aw.yaml");
+        assert_eq!(value.directory, "/private");
     }
 
     #[test]

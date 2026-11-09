@@ -203,6 +203,7 @@ fn register_direct(fixture: &Fixture) -> aw_service::RegistrationCommand {
     capabilities.version = "1.0.56".into();
     capabilities.entrypoint = "sdk-worker".into();
     aw_service::RegistrationCommand::Register {
+        config: None,
         key: aw_service::RegistrationKey {
             request_id: "direct".into(),
             owner: aw_service::RegistrationOwner {

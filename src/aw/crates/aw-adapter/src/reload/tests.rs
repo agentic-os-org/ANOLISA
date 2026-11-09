@@ -408,3 +408,128 @@ fn policy_updates_use_native_entrypoints_across_framework_releases() {
         }
     }
 }
+
+#[test]
+fn openclaw_dispatch_preserves_first_denial_and_tokenless_fresh_arguments() {
+    let arguments = json!({"command":"rtk git status --short","cwd":"/work tree"});
+    let retry = format!(
+        "[tokenless:rewrite] Retry this tool with arguments: {}",
+        serde_json::to_string(&arguments).unwrap()
+    );
+    for reason in ["Custom security refusal".to_owned(), retry.clone()] {
+        let mut veto = HookOutput {
+            exit: NativeExit::Code(0),
+            stdout: br#"{"block":true,"nativeMetadata":"retained"}"#.to_vec(),
+            stderr: vec![],
+        };
+        adapter::block_reason("openclaw", &mut veto, &reason).unwrap();
+        let output = combine(
+            "openclaw",
+            vec![
+                adopt_step("openclaw", "tool.before", "block", veto).unwrap(),
+                HookOutput {
+                    exit: NativeExit::Code(0),
+                    stdout: br#"{"block":false,"blockReason":"later approval"}"#.to_vec(),
+                    stderr: vec![],
+                },
+                HookOutput {
+                    exit: NativeExit::Code(2),
+                    stdout: br#"{"block":true,"blockReason":"later denial"}"#.to_vec(),
+                    stderr: vec![],
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(output.exit, NativeExit::Code(0)));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["block"], true);
+        assert_eq!(value["blockReason"], reason);
+        assert_eq!(value["nativeMetadata"], "retained");
+        assert!(value.get("params").is_none());
+        if reason == retry {
+            let corrected = reason
+                .strip_prefix("[tokenless:rewrite] Retry this tool with arguments: ")
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(corrected).unwrap(), arguments);
+        }
+    }
+}
+
+#[test]
+fn openclaw_dispatch_failure_without_a_native_reason_keeps_a_block_envelope() {
+    for stdout in [
+        vec![],
+        b"invalid".to_vec(),
+        br#"{"blockReason":" "}"#.to_vec(),
+    ] {
+        let output = combine(
+            "openclaw",
+            vec![HookOutput {
+                exit: NativeExit::Code(2),
+                stdout,
+                stderr: vec![],
+            }],
+        )
+        .unwrap();
+        assert!(matches!(output.exit, NativeExit::Code(0)));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["block"], true);
+        assert_eq!(value["blockReason"], "Tool blocked by AW policy");
+    }
+}
+
+#[test]
+fn native_execution_claims_match_each_bridges_lifecycle_identity() {
+    let native = json!({"native":{"context":{"sessionId":"session","runId":"run"},
+        "event":{"runId":"run"}}});
+    assert_eq!(
+        execution_claim("openclaw", &native).unwrap(),
+        ExecutionClaim::Request(tool_key("session", "run").unwrap())
+    );
+    let mut fallback = native.clone();
+    fallback["native"]["context"]
+        .as_object_mut()
+        .unwrap()
+        .remove("runId");
+    assert_eq!(
+        execution_claim("openclaw", &fallback).unwrap(),
+        ExecutionClaim::Request(tool_key("session", "run").unwrap())
+    );
+    let mut mismatch = native.clone();
+    mismatch["native"]["event"]["runId"] = json!("another-run");
+    assert!(execution_claim("openclaw", &mismatch).is_err());
+    for identity in [Value::Null, json!(""), json!("x".repeat(513))] {
+        let mut invalid = native.clone();
+        invalid["native"]["context"]["sessionId"] = identity;
+        assert!(execution_claim("openclaw", &invalid).is_err());
+    }
+    assert_eq!(
+        execution_claim(
+            "qoder",
+            &json!({"name":"input.submit","session_id":"session"})
+        )
+        .unwrap(),
+        ExecutionClaim::Request("session".into())
+    );
+    for event in ["tool.before", "tool.after"] {
+        assert_eq!(
+            execution_claim(
+                "qoder",
+                &json!({"name":event,"session_id":"session",
+            "tool":{"call_id":"call"}})
+            )
+            .unwrap(),
+            ExecutionClaim::Tool(tool_key("session", "call").unwrap())
+        );
+    }
+    assert!(execution_claim(
+        "qoder",
+        &json!({"name":"tool.before","session_id":"session"})
+    )
+    .is_err());
+    assert_eq!(
+        execution_claim("hermes", &json!({})).unwrap(),
+        ExecutionClaim::SerialRequest
+    );
+    assert!(execution_claim("unsupported", &native).is_err());
+}

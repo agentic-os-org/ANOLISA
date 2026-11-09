@@ -123,7 +123,7 @@ def main():
             record.update(pid=process.pid, stop_worker=f"kill -TERM -- -{process.pid}")
             (output / "process.json").write_text(json.dumps(record))
             expected = (-9 if args.scenario in {"stop-failure", "eof-stop-failure", "drain-timeout"}
-                        else 1 if args.scenario in {"close-timeout", "observation"} else 0)
+                        else 1 if args.scenario == "close-timeout" else 0)
             assert process.wait(timeout=timeout) == expected, (output / "stderr.log").read_text()[-6000:]
         for endpoint in output.glob("*/endpoint.json"):
             with socket.socket() as probe:
@@ -151,11 +151,23 @@ def main():
             assert not list(output.glob("*/effect"))
             (output / "result.json").write_text(json.dumps({"tasks": 1, "passed": True}))
         if args.scenario == "observation":
-            diagnostic = (output / "stderr.log").read_text()
-            assert "does not support AgentSight evidence" in diagnostic, diagnostic
-            assert "native hooks ready" not in diagnostic, diagnostic
-            assert not (output / "application-started").exists()
-            (output / "result.json").write_text(json.dumps({"rejected_before_ready": True, "passed": True}))
+            assert (output / "application-started").exists()
+            observed = []
+            for journal in (state_parent / "s/journal").glob("*.jsonl"):
+                records = [json.loads(line)["record"] for line in journal.read_text().splitlines()]
+                callbacks = [record for record in records if record.get("phase") == "native_callback"]
+                if not callbacks:
+                    continue
+                assert all(record["association"]["status"] == "unverified" for record in callbacks)
+                assert records[-1]["phase"] == "closed"
+                assert records[-1]["coverage"] == "unknown"
+                assert "native_identity_unverified" in records[-1]["gaps"]
+                observed.append(len(callbacks))
+            assert len(observed) >= 2, observed
+            result = json.loads((output / "result.json").read_text())
+            result.update(task_observation=True, source_association="unverified", coverage="unknown",
+                          closed_observation_scopes=len(observed))
+            (output / "result.json").write_text(json.dumps(result))
         status = json.loads(subprocess.check_output([str(aw), "status", "--config", str(config)], env=env, timeout=10))["result"]
         assert status["bindings"] == status["events"] == 0, status
         if args.scenario in {"mcp", "mcp-failure"}:

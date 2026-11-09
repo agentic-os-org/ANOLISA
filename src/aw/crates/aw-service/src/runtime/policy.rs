@@ -5,7 +5,7 @@ use crate::{rejected, Error, LifecyclePhase, Operation, Request, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -15,8 +15,10 @@ use std::{
 
 use super::process::Process;
 
+mod execution;
 #[cfg(test)]
 mod tests;
+pub(super) use execution::Execution;
 
 pub(super) struct Reload {
     pub(super) resident: bool,
@@ -25,8 +27,9 @@ pub(super) struct Reload {
     pending_bridge: Option<u32>,
     process_audit: Option<String>,
     bridge_audit: Option<String>,
-    requests: BTreeSet<String>,
-    tools: BTreeSet<String>,
+    requests: BTreeMap<String, u64>,
+    tools: BTreeMap<String, u64>,
+    next_claim: u64,
     pub(super) preparation_cancelled: Option<Arc<AtomicBool>>,
 }
 
@@ -68,8 +71,9 @@ impl Runtime {
             pending_bridge: None,
             process_audit: None,
             bridge_audit: None,
-            requests: BTreeSet::new(),
-            tools: BTreeSet::new(),
+            requests: BTreeMap::new(),
+            tools: BTreeMap::new(),
+            next_claim: 0,
             preparation_cancelled: None,
         });
         Ok(json!({"reloadable":true,"policy_revision":instance.host.revision()}))
@@ -85,8 +89,8 @@ impl Runtime {
             .reload
             .as_mut()
             .ok_or_else(|| rejected("unsupported"))?;
-        if state.resident {
-            self.check_scope_owner(id)?;
+        if state.resident || self.native_root(id)? {
+            self.check_scope_cleanup(id)?;
             self.corroborate_scope_root(id, pid)?;
         }
         if state.process.is_some() {
@@ -126,8 +130,8 @@ impl Runtime {
             .reload
             .as_mut()
             .ok_or_else(|| rejected("unsupported"))?;
-        if state.resident {
-            self.check_scope_owner(id)?;
+        if state.resident || self.native_root(id)? {
+            self.check_scope_cleanup(id)?;
             self.corroborate_scope_root(id, pid)?;
         }
         if matches!(phase, LifecyclePhase::Ready) && state.process.is_none() {
@@ -165,6 +169,10 @@ impl Runtime {
                 if tool && state.requests.is_empty() {
                     return Err(rejected("request_not_admitted"));
                 }
+                let generation = state
+                    .next_claim
+                    .checked_add(1)
+                    .ok_or_else(|| rejected("lifecycle_identity_exhausted"))?;
                 let claims = if tool {
                     &mut state.tools
                 } else {
@@ -175,9 +183,11 @@ impl Runtime {
                 } else {
                     64
                 };
-                if claims.len() >= limit || !claims.insert(key.into()) {
+                if claims.len() >= limit || claims.contains_key(key) {
                     return Err(rejected("busy"));
                 }
+                claims.insert(key.into(), generation);
+                state.next_claim = generation;
             }
             LifecyclePhase::RequestEnd | LifecyclePhase::ToolEnd => {
                 if !state.ready || key.is_empty() {
@@ -194,12 +204,33 @@ impl Runtime {
         Ok(json!({"policy_revision":instance.host.revision(),"ready":state.ready}))
     }
 
+    // The caller holds the instance gate shared with lifecycle and activation.
+    pub(super) fn execution_admission(&self, instance: &Instance, id: &str) -> Result<()> {
+        self.check_scope_owner(id)?;
+        if self.native_root(id)? {
+            let state = instance
+                .reload
+                .as_ref()
+                .ok_or_else(|| rejected("request_not_admitted"))?;
+            state
+                .process
+                .as_ref()
+                .ok_or_else(|| rejected("process_not_associated"))?
+                .check()?;
+            if !state.ready || (state.requests.is_empty() && state.tools.is_empty()) {
+                return Err(rejected("request_not_admitted"));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn hook_plan(&self, id: &str, event: &str) -> Result<Value> {
         let mut instances = self
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
         let instance = instance(&mut instances, id)?;
+        self.execution_admission(instance, id)?;
         let state = instance
             .reload
             .as_ref()
@@ -252,8 +283,10 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| rejected("process_not_associated"))?
             .check()?;
+        if state.resident || self.native_root(id)? {
+            self.check_scope_cleanup(id)?;
+        }
         if state.resident {
-            self.check_scope_owner(id)?;
             self.no_scope_children(id)?;
         }
         if !state.ready

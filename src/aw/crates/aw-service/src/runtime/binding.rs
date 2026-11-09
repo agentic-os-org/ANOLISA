@@ -24,23 +24,24 @@ impl Runtime {
     ) -> Result<Value> {
         self.bind_id(
             self.identifier()?,
+            &self.bytes,
             target,
             capabilities,
             context,
-            deadline,
-            cancelled,
+            (deadline, cancelled),
         )
     }
 
     pub(super) fn bind_id(
         &self,
         instance_id: String,
+        bytes: &[u8],
         target: String,
         capabilities: Capabilities,
         context: ProcessContext,
-        deadline: Instant,
-        cancelled: &AtomicBool,
+        preparation: (Instant, &AtomicBool),
     ) -> Result<Value> {
+        let (deadline, cancelled) = preparation;
         {
             let mut instances = self
                 .instances
@@ -52,7 +53,7 @@ impl Runtime {
             instances.insert(instance_id.clone(), None);
         }
         let result = self.prepare(
-            &self.bytes,
+            bytes,
             &instance_id,
             &target,
             capabilities,
@@ -78,7 +79,7 @@ impl Runtime {
             Ok(host) => {
                 instances.insert(
                     instance_id.clone(),
-                    Some(Instance::prepared(self.bytes.clone(), context, host)),
+                    Some(Instance::prepared(bytes.to_vec(), context, host)),
                 );
                 Ok(json!(Binding {
                     identity: self.identity.clone(),

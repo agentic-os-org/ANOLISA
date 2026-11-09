@@ -260,6 +260,7 @@ impl Runtime {
                 .and_then(Option::as_ref)
                 .filter(|instance| !instance.closing)
                 .ok_or_else(|| rejected("unknown_instance"))?;
+            self.event_execution(instance, &instance_id, &value)?;
             (
                 Arc::clone(&instance.hooks),
                 Arc::clone(&instance.hook_open),

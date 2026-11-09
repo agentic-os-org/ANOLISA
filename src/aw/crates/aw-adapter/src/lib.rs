@@ -13,6 +13,7 @@ pub mod configuration;
 pub mod projection;
 mod qoder;
 pub mod reload;
+pub mod startup;
 mod version;
 
 pub use adapter::{

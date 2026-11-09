@@ -18,5 +18,6 @@ if request["method"] == "describe":
             time.sleep(0.005)
     reply["operations"] = [{"name": "observe", "events": ["tool.before"], "effects": ["observe"]}]
 elif request["method"] == "invoke":
+    (directory / "invoked").touch()
     reply.update(input_digest=request["input_digest"], effects=[])
 json.dump(reply, sys.stdout)

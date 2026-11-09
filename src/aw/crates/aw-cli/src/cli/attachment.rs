@@ -225,6 +225,7 @@ fn attach(
         files.write(
             "binding.json",
             &serde_json::to_vec(&HookBinding {
+                registration: None,
                 adapter: name.into(),
                 reloadable: true,
                 resident_policy_reload: false,

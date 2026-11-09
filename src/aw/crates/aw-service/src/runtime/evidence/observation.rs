@@ -203,11 +203,16 @@ impl Observation {
             .lock()
             .map_err(|_| rejected("observation_state"))?;
         if !state.closed {
-            runtime.audit.append(&self.key, json!({"phase":"closed", "outcome":state.metadata["run"],
-                "source_state":state.metadata["source_state"],"gaps":state.metadata["gaps"], "coverage":"unknown"}))?;
+            let terminal = runtime.audit.append(&self.key, json!({"phase":"closed", "outcome":state.metadata["run"],
+                "source_state":state.metadata["source_state"],"gaps":state.metadata["gaps"], "coverage":"unknown"}));
             runtime.audit.release(&self.key);
             state.latest = None;
             state.closed = true;
+            // Release still reports the poisoned audit after dropping the Host;
+            // broken storage must not retain Provider or observation ownership.
+            if runtime.audit.healthy() {
+                terminal?;
+            }
         }
         Ok(true)
     }
@@ -358,6 +363,7 @@ impl Runtime {
                 .instances
                 .lock()
                 .map_err(|_| rejected("state_poisoned"))?;
+            self.check_scope_owner(instance_id)?;
             let instance = instances
                 .get(instance_id)
                 .and_then(Option::as_ref)

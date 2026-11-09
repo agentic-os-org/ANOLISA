@@ -60,7 +60,9 @@ impl Runtime {
                 valid,
             } => self.check_scope(&instance_id, pid, &policy_revision, valid),
             Operation::ScopePolicy { instance_id } => self.scope_policy(&instance_id),
-            Operation::AcknowledgeScope { instance_id } => self.acknowledge_scope(&instance_id),
+            Operation::AcknowledgeScope { instance_id } => {
+                self.acknowledge_scope(&instance_id, deadline)
+            }
             Operation::OwnInstance { instance_id, pid } => self.own_instance(&instance_id, pid),
             Operation::OpenScope {
                 parent_id,

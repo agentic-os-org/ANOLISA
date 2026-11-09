@@ -63,7 +63,16 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
     }
     if matches!(
         command,
-        "run" | "hook" | "install" | "policy" | "update" | "bridge" | "scope"
+        "run"
+            | "hook"
+            | "install"
+            | "policy"
+            | "update"
+            | "bridge"
+            | "scope"
+            | "native-setup"
+            | "native-prepare"
+            | "native-release"
     ) {
         return cli::dispatch(command, args);
     }

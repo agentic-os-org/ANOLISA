@@ -247,7 +247,7 @@ pub(super) fn invoke_bound(
     emit(result?)
 }
 
-fn emit(output: HookOutput) -> Result<Exit> {
+pub(super) fn emit(output: HookOutput) -> Result<Exit> {
     std::io::stdout().write_all(&output.stdout)?;
     std::io::stdout().flush()?;
     std::io::stderr().write_all(&output.stderr)?;
