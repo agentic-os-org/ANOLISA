@@ -20,7 +20,12 @@ import tempfile
 import unittest
 import zipfile
 
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "others",
+    "xlsx",
+    "scripts",
+)
 SCRIPT = os.path.join(SCRIPTS_DIR, "style_audit.py")
 
 sys.path.insert(0, SCRIPTS_DIR)
