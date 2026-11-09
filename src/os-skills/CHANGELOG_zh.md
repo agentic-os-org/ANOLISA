@@ -9,7 +9,26 @@
 
 ## [未发布]
 
-## [0.6.4] - 未发布
+## [0.6.5] - 2026-11-09
+
+### 变更
+
+- 从源码安装时改为按有效用户 ID 选择安装位置：root 安装到
+  `/usr/local/share/anolisa/skills`，其他用户安装到原有的
+  `~/.copilot-shell/skills` 目录，使 `build-all` 与升级继续管理同一份技能集合；
+  `make uninstall` 使用相同的布局，`make install AWPRJ=` 选择 cosh 原生的系统资源目录 (#9460)
+- `install-tokenless` Skill 说明 0.9.2 之后的 tokenless 已将 RTK 链接进二进制：
+  npm 包不再单独安装 `rtk`，RTK 以 `tokenless rtk` 运行，源码构建还需要 `git` 与 `patch` (#9461)
+
+### 修复
+
+- `setup-mcp` Skill 中的 `validate_mcp` 会拒绝同时设置多个传输字段的服务，
+  也不再接受根节点不是 `mcpServers` 对象的配置 (#4588)
+- `xlsx` Skill 可识别包含转义单引号的工作表名，引用工作表中的公式会校验到正确的表，
+  不再被误判为错误 (#4210)
+- `install-openclaw` Skill 不再将已废弃的 `ownerDisplay` 字段写入生成的 OpenClaw 配置 (#8798)
+
+## [0.6.4] - 2026-11-03
 
 ### 修复
 

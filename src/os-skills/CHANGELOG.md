@@ -9,7 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.4] - Unreleased
+## [0.6.5] - 2026-11-09
+
+### Changed
+
+- Installing the skills from source picks the profile from the effective user ID:
+  root installs under `/usr/local/share/anolisa/skills`, other users install into
+  the existing `~/.copilot-shell/skills` directory, so `build-all` and upgrades
+  keep managing the same collection; `make uninstall` uses the same layout and
+  `make install AWPRJ=` selects the native cosh resource directories (#9460)
+- The `install-tokenless` skill explains that tokenless releases after 0.9.2 link
+  RTK into the binary: the npm package installs no separate `rtk`, RTK runs as
+  `tokenless rtk`, and a source build also needs `git` and `patch` (#9461)
+
+### Fixed
+
+- `validate_mcp` in the `setup-mcp` skill rejects a server that sets more than one
+  transport field and no longer accepts a configuration whose root is not an
+  `mcpServers` object (#4588)
+- The `xlsx` skill reads sheet names containing escaped apostrophes, so a formula
+  in a quoted sheet is checked against the intended sheet instead of being
+  reported as broken (#4210)
+- The `install-openclaw` skill stops writing the retired `ownerDisplay` key into
+  the generated OpenClaw configuration (#8798)
+
+## [0.6.4] - 2026-11-03
 
 ### Fixed
 
