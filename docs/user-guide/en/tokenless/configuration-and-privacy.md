@@ -372,6 +372,29 @@ usable within this limit. See the [OpenClaw compatibility notes](framework-integ
 for the recommended upstream fix. Set `post_tool_enabled: false` to stop Tokenless from
 registering result middleware while leaving RTK independently configurable.
 
+## Manual dependency arrays
+
+Tool Ready remains hard-disabled. The retained source helper
+`src/tokenless/adapters/tokenless/common/tokenless-env-fix.sh` can also be
+invoked directly with Bash and jq; it is separate from `tokenless env-check`.
+
+For the helper's `fix-all` command, a JSON array can be supplied as the next
+argument or through stdin. A plain string such as `"jq"` uses that name for
+both the binary and package. A constrained string such as `"jq>=1.0.0"`
+uses `jq` for both names and keeps `>=1.0.0` as the version requirement.
+Object entries retain their explicit binary, package, manager, version, and
+fallback fields. The helper's `check` command applies the same string-name
+normalization when listing dependencies from the adjacent
+`tool-ready-spec.json`; the version suffix is not part of the displayed name.
+
+`check` lists specification entries and the detected package manager; it does
+not verify that dependencies are installed. Review the array and manager
+before running `fix-all`, which can install missing or insufficient
+dependencies. Inspect each dependency's output: an individual failure does
+not stop the remaining entries, so command completion alone does not confirm
+that every dependency was fixed. These manual commands do not enable the
+automatic Tool Ready hook.
+
 ## Related documents
 
 - [Measuring savings](measuring-savings.md)

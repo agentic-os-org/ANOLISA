@@ -338,6 +338,25 @@ OpenClaw 2026.6.6 或更高版本，且插件须显式启用。Manifest 声明
 建议的上游修复见 [OpenClaw 兼容说明](framework-integration.md#openclaw)。设置
 `post_tool_enabled: false` 可停止 Tokenless 注册结果 middleware，RTK 仍可独立配置。
 
+## 手动依赖数组
+
+Tool Ready 仍保持硬关闭。保留的源码辅助脚本
+`src/tokenless/adapters/tokenless/common/tokenless-env-fix.sh` 也可以通过 Bash
+和 jq 直接调用，与 `tokenless env-check` 相互独立。
+
+辅助脚本的 `fix-all` 命令可以从下一个参数或 stdin 接收 JSON 数组。
+普通字符串（如 `"jq"`）将同一名称用于 binary 和 package。
+带约束的字符串（如 `"jq>=1.0.0"`）将 `jq` 用于这两个名称，
+并保留 `>=1.0.0` 作为版本要求。Object 条目保留显式的 binary、package、
+manager、version 和 fallback 字段。辅助脚本的 `check` 命令列出相邻
+`tool-ready-spec.json` 中的依赖时，也对字符串名称应用相同的规范化；
+版本后缀不属于显示的名称。
+
+`check` 只列出规范条目和检测到的 package manager，不验证依赖是否已安装。
+运行 `fix-all` 前应检查数组和 manager，因为该命令可以安装缺失或版本不足的依赖。
+应逐项检查依赖输出：单项失败不会停止其余条目，因此命令完成并不表示所有依赖
+都已修复。这些手动命令不会启用自动 Tool Ready Hook。
+
 ## 相关文档
 
 - [效果度量](measuring-savings.md)
