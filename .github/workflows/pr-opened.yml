@@ -49,9 +49,9 @@ jobs:
               rules.push({ prefix, label, type, isGlob });
             }
 
-            // ── Fetch changed files (paginate up to 300) ──────────────────
+            // ── Fetch changed files (GitHub exposes at most 3,000) ──────────────────
             let filenames = [];
-            for (let page = 1; page <= 3; page++) {
+            for (let page = 1; page <= 30; page++) {
               const { data } = await github.rest.pulls.listFiles({
                 owner, repo, pull_number: prNumber, per_page: 100, page
               });

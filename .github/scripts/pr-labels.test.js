@@ -98,3 +98,26 @@ test('pagination still applies a later component match once', async () => {
   files.push('src/os-skills/tests/test_layout.py', '.github/workflows/os-skills-prebuilt-ci.yaml');
   assert.deepEqual(await labelsFor(files), ['component:skill', 'scope:ci']);
 });
+
+test('a real 589-file packaging PR retains components first seen after page three', async () => {
+  const filenames = JSON.parse(fs.readFileSync(
+    path.join(__dirname, 'fixtures/pr-labels-9222-files.json'), 'utf8',
+  ));
+  assert.equal(filenames.length, 589);
+  assert.equal(filenames.indexOf('src/cosh-ng/AGENTS.md'), 454);
+  assert.deepEqual(await labelsFor(filenames), [
+    'component:anolisa',
+    'component:aw',
+    'component:ckpt',
+    'component:cosh-ng',
+    'component:memory',
+    'component:sec-core',
+    'component:sight',
+    'component:skill',
+    'component:skillfs',
+    'component:tokenless',
+    'scope:ci',
+    'scope:documentation',
+    'scope:scripts',
+  ]);
+});
