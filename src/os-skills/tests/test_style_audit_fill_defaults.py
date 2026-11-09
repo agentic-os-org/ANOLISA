@@ -24,7 +24,12 @@ import zipfile
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "others",
+    "xlsx",
+    "scripts",
+)
 SCRIPT = os.path.join(SCRIPTS_DIR, "style_audit.py")
 
 try:
