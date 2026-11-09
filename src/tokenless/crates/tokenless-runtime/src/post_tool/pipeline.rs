@@ -243,6 +243,12 @@ impl PostToolPipeline {
                 allow_toon: config.allow_toon && request.capabilities.replace_with_text,
                 min_toon_chars: config.min_toon_chars,
                 allow_unrecoverable: !config.require_reversibility || !config.compression_enabled,
+                // Rewriting a field keeps the document JSON, so text
+                // replacement is not required. Data printed from a local
+                // file may be edited, so its HTML stays verbatim exactly like
+                // a printed page; Read results never reach this point.
+                embedded_html: config.html_extraction_enabled
+                    && request.content_origin != ContentOrigin::FileRead,
             };
             let outcome = match JsonCompressor::new(config.json.clone())
                 .compress(&request.content, &context)
@@ -451,6 +457,9 @@ fn json_operations(operations: &[JsonOperation]) -> Vec<AppliedOperation> {
             JsonOperation::Cleanup => AppliedOperation::JsonCleanup,
             JsonOperation::RecordReduction => AppliedOperation::JsonRecordReduction,
             JsonOperation::Truncation => AppliedOperation::JsonTruncation,
+            // The response reports the JSON content type, which distinguishes
+            // an embedded fragment from a rendered page.
+            JsonOperation::EmbeddedHtml => AppliedOperation::HtmlExtraction,
             JsonOperation::Toon => AppliedOperation::Toon,
         })
         .collect()
@@ -489,6 +498,7 @@ mod tests {
     include!("tests/tabular_pipeline_tests.rs");
     include!("tests/html_pipeline_tests.rs");
     include!("tests/path_list_pipeline_tests.rs");
+    include!("tests/embedded_html_pipeline_tests.rs");
     fn search_input() -> String {
         (1..30)
             .map(|line| format!("crates/long_directory/src/search_file.rs:{line}:  value  \r\n"))

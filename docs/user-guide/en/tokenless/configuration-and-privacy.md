@@ -125,11 +125,12 @@ tag, such as a status code or the output of a following command, is kept after t
 view. The page is rendered as a Markdown subset: headings, paragraphs, lists, tables,
 fenced code with its language, links with targets, image alt text, quotes, and
 admonitions. MathML formulas render as their TeX annotation or `alttext` between `$`
-signs; cells spanning rows or columns leave empty cells in the slots they cover, and
-rows are not padded to the widest row; paragraph lines that start like a Markdown
-heading, list item, quote, rule or code fence are escaped. The content root is
-`<main>`, an element with `role=main`, or the only outermost `<article>` (articles
-nested inside it, such as comments, do not count); otherwise the whole body.
+signs; cells spanning rows or columns leave empty cells in the slots they cover, rows
+are not padded to the widest row, and a table's first header and footer groups are
+placed where a browser draws them, at the top and bottom; paragraph lines that start
+like a Markdown heading, list item, quote, rule or code fence are escaped. The content
+root is `<main>`, an element with `role=main`, or the only outermost `<article>`
+(articles nested inside it, such as comments, do not count); otherwise the whole body.
 Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
 page-level `header`/`footer`, elements with navigation, banner, contentinfo, or
 complementary roles, form controls (`button`, `input`, `select`, `textarea`,
@@ -159,6 +160,96 @@ and must be retrieved to see its source.
 
 Local rendering and original recovery have been verified on finite samples.
 
+### HTML inside JSON values
+
+The same switch also covers HTML carried inside JSON results, such as an API record
+whose `content` or `body` field holds rich text. Field names play no part: a string
+value is considered when it is at least 256 characters long, starts with a supported
+tag, a comment, or `<!doctype html`, and ends with `>`. Results from printed local
+files (`file_read`) keep their HTML verbatim, as above. A text replacement slot is not
+required, because the result stays JSON. An available Stash and a supported recovery
+method are required.
+
+Only the value changes. Field names, other values, JSON types, exact number literals,
+and the position of the value in its record are kept. The new value starts with a line
+such as `[HTML rendered as Markdown; removed 1 style. If needed, run in shell: tokenless
+retrieve <hash>]`, followed by the Markdown. The instruction retrieves that one value
+exactly as received. Serialized JSON inside a string is never parsed or turned into an
+object.
+
+Unlike a page, a value is rendered whole and nothing visible is removed. Only style
+sheets and comments are removed and counted in the first line, and cosmetic styling
+is not printed. Line breaks from `br` and block elements are kept, also inside code.
+Button labels stay as separate text, images without alt text and links without text
+keep their targets, and a link or image tooltip (`title`) becomes its Markdown title.
+A value passes through unchanged when the view could change what a reader sees or
+lose a fact. Styling cannot be printed, so a value is rewritten only when no text
+the view would show is hidden or illegible on screen:
+
+- Form fields and their state (`input`, `select`, `textarea`, `form`, `label`).
+- Scripts, templates, media, frames, SVG, MathML, and elements outside HTML.
+- Page chrome (`nav`, `header`, `footer`, `aside`, or a navigation, banner,
+  contentinfo, or complementary role).
+- `del`, `ins`, `s`, `sub`, `sup`, `q`, `time`, `data`, `bdo`, `base`, and `link`.
+- Styles in a `style` attribute or a `<style>` sheet of the value that do more than
+  change colors, fonts, alignment, borders, sizes, or spacing. This covers
+  strike-through, raised or lowered text, hidden or generated content, list markers,
+  preserved line breaks, symbol fonts such as Wingdings, negative or very wide letter
+  or word spacing, and properties, values, or functions such as `calc()` that the
+  check cannot read. Selectors are not matched, so a `<style>` rule must pass for any
+  element it could reach. The `hidden` attribute also passes through.
+- Text that its styling makes hard or impossible to see. Colors, sizes, and line
+  heights are followed through the value's inline styles, presentational attributes
+  such as `bgcolor` or a `font` element's `color`, its `<style>` sheets and column
+  backgrounds, and a browser's defaults for links, marks, and buttons. Any text with a
+  contrast ratio below 1.5 against a color it may sit on (white on white, or text the
+  color of the page) passes the value through, as does text over a background image or
+  gradient, smaller than 6 pixels, or with lines closer than half its font size. So do
+  a fixed width or height that text could overflow onto other content, and an inline
+  element's vertical padding or border taller than 8 pixels, or a text decoration with
+  a set thickness, either of which can paint over neighboring lines. The page behind
+  the value is taken to be a browser's default: white, with black 16-pixel text.
+  Stylesheets outside the value, such as those of the application that displays it,
+  its dark mode, or fonts it loads, are unknown and not considered. Margins or padding
+  may move text right or down, where a page scrolls to it; whether the displaying
+  application clips it there is also unknown.
+- Attributes the view cannot show, such as `data-*` values, `aria-*` labels and
+  states, a tooltip on elements other than links and images, `abbr` on table
+  headers, a quote's `cite`, a download file name, or a button's value or state.
+  Text inside an `aria-hidden` element also passes through, because it may be an
+  icon ligature.
+- Metadata the view would drop: a `meta` other than a character set, content type,
+  compatibility mode, viewport, or mail formatting hint (so a description or a
+  refresh passes through), and a `title` outside the head or after the first.
+- Content a browser shows only after the reader acts: the body of a closed
+  `details`. A `details` without a `summary`, or grouped by `name`, also passes
+  through.
+- Ordered lists whose numbers the view could not reproduce: reversed or lettered
+  lists, a `start` other than a plain non-negative number, items with an explicit
+  `value`, empty items, or content between items.
+- Tables nested in a cell, cells containing line breaks, or a row of headers anywhere
+  but the top, such as a second header row or a section label, since a Markdown table
+  has one header row.
+- `javascript:` or `data:` targets, any text or target that would not appear in the
+  view in the order a browser draws it, or text a browser shows apart that the view
+  would run together.
+
+Each rewritten value must save at least 16 estimated tokens in its JSON-escaped form,
+including its first line, and the rewritten document must be smaller than the compact
+JSON or TOON result without rewrites. That comparison happens before the 15% lossless
+threshold ends the search, so compact formatting no longer hides the markup inside
+fields. When the result is also reduced (records omitted or strings bounded), a value
+whose view exceeds the string limit is truncated instead. Work is bounded per result:
+values up to 256 KiB, nested at most 32 levels deep, at most 128 parsed values and
+2 MiB of parsed HTML. The legibility check compares each pair of text and background
+colors once, and a value that needs more than 65,536 distinct comparisons passes
+through. A value repeated in several records is rendered and stashed once.
+
+The response reports `html_extraction` with content type `json` and recoverability
+`retrievable`. Statistics therefore tell embedded fragments (`json`) from rendered
+pages (`html`). These rules have been verified with synthetic fragments and documents;
+they are guards, not proof that every fragment keeps its meaning for a model.
+
 ## Environment variables
 
 ### Common user variables
@@ -173,7 +264,7 @@ Local rendering and original recovery have been verified on finite samples.
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | On by default; `0` disables; explicit SDK options take precedence |
-| `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
+| `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering, including HTML inside JSON values | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 
 ### Adapter and diagnostic variables
 
@@ -223,7 +314,7 @@ them from source control or backups as required by your data policy.
 | Data | Default path | Default content | Retention | Stop new data |
 |------|--------------|-----------------|-----------|---------------|
 | Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | No automatic TTL; retained until cleared | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, and the complete original of rendered HTML pages | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
+| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, the complete original of rendered HTML pages, and each HTML value rendered inside JSON | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
 | Configuration | `~/.tokenless/config.json` | Three Boolean toggles | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 

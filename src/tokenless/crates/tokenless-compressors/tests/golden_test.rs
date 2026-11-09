@@ -339,6 +339,7 @@ fn json_goldens() {
                         allow_toon: operation == Some(JsonOperation::Toon),
                         min_toon_chars: 0,
                         allow_unrecoverable: false,
+                        embedded_html: false,
                     },
                 )
                 .unwrap();

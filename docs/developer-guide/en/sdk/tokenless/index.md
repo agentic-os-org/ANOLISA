@@ -271,12 +271,13 @@ result = await sdk.post_tool(
 
 Set `content_origin` from the tool's registered contract; do not infer it from result text. For a
 shell tool, pass the command line that actually ran (the PreTool result when RTK rewrote it) as
-`command`: Core reports a plain print of local files as `file_read`, so a printed HTML page stays
-verbatim while data in that output still compresses. Leave `command` unset for other tools. Core
-routes Retrieve output, errors, interrupted or denied calls, RTK-optimized output, and ordinary
-successful output. It returns the final output plus disposition, operations, recoverability, token
-counts, Stash keys, and optional diagnostic context. Adapters should pass intermediate streaming
-chunks through and call PostTool only for final model-visible text.
+`command`: Core reports a plain print of local files as `file_read`, so a printed HTML page, and
+HTML inside printed JSON values, stays verbatim while data in that output still compresses. Leave
+`command` unset for other tools. Core routes Retrieve output, errors, interrupted or denied calls,
+RTK-optimized output, and ordinary successful output. It returns the final output plus
+disposition, operations, recoverability, token counts, Stash keys, and optional diagnostic
+context. Adapters should pass intermediate streaming chunks through and call PostTool only for
+final model-visible text.
 
 #### Marker-scoped retrieval
 

@@ -37,7 +37,8 @@ pub struct EntryOptions {
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Enabled by default.
     pub diff_compression_enabled: bool,
-    /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
+    /// Whether complete HTML documents, and HTML inside JSON string values, are rendered as
+    /// Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,

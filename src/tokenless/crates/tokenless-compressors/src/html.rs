@@ -9,6 +9,8 @@ use html5ever::interface::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeS
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::{Attribute, LocalName, Namespace, ParseOpts, QualName, parse_document};
 
+mod fragment;
+
 /// Rendered bodies shorter than this are extraction failures, not pages.
 /// Calibrated on 44 technical-documentation, error and SPA pages: app shells
 /// render 0 chars, nav fragments of truncated pages at most 51, and the
@@ -155,23 +157,7 @@ impl HtmlExtractor {
     #[must_use]
     pub fn render(&self, input: &str) -> Option<HtmlView> {
         let (document, trailer) = split_trailer(input);
-        let mut parser = parse_document(Dom::default(), ParseOpts::default());
-        let mut rest = document;
-        while !rest.is_empty() {
-            let mut cut = PARSE_PIECE_BYTES.min(rest.len());
-            while !rest.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            let (piece, tail) = rest.split_at(cut);
-            parser.process(StrTendril::from_slice(piece));
-            if parser.tokenizer.sink.sink.max_depth.get() > MAX_PARSE_DEPTH {
-                return None;
-            }
-            rest = tail;
-        }
-        // Finishing only closes what is open; it inserts no elements.
-        let dom = parser.finish();
-        let nodes = dom.nodes.into_inner();
+        let nodes = parse(document)?;
         let html = nodes[0]
             .children
             .iter()
@@ -229,11 +215,7 @@ impl HtmlExtractor {
                 .count();
             chain = parent;
         }
-        let mut renderer = Renderer {
-            nodes: &nodes,
-            removed: [0; REMOVED_CATEGORIES],
-            depth: 0,
-        };
+        let mut renderer = Renderer::new(&nodes, false);
         if let Some(head) = head {
             renderer.count_removals(head, false);
         }
@@ -286,6 +268,27 @@ impl HtmlExtractor {
             outside_root,
         })
     }
+}
+
+/// Parses markup into the node arena; index 0 is the document. Returns
+/// `None` once the tree nests deeper than [`MAX_PARSE_DEPTH`].
+fn parse(markup: &str) -> Option<Vec<Node>> {
+    let mut parser = parse_document(Dom::default(), ParseOpts::default());
+    let mut rest = markup;
+    while !rest.is_empty() {
+        let mut cut = PARSE_PIECE_BYTES.min(rest.len());
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (piece, tail) = rest.split_at(cut);
+        parser.process(StrTendril::from_slice(piece));
+        if parser.tokenizer.sink.sink.max_depth.get() > MAX_PARSE_DEPTH {
+            return None;
+        }
+        rest = tail;
+    }
+    // Finishing only closes what is open; it inserts no elements.
+    Some(parser.finish().nodes.into_inner())
 }
 
 /// Splits the input after the first `</html>` end tag that the tokenizer
@@ -775,6 +778,51 @@ fn collapse(text: &str) -> String {
     text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// How [`Renderer::text_lines`] reads newlines inside text nodes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WhiteSpace {
+    /// Newlines are collapsible spaces, as in ordinary flow and inline code.
+    Collapse,
+    /// Newlines end lines, as in `pre`.
+    Preserve,
+}
+
+/// Starts a new line at a block edge unless the current one is still empty,
+/// so adjacent block edges break the line once. With preserved whitespace,
+/// a line that ends with a newline has already ended there: the newline
+/// becomes the break instead of adding a blank line before the block.
+fn break_line(lines: &mut Vec<String>, white_space: WhiteSpace) {
+    let Some(line) = lines.last_mut() else {
+        return;
+    };
+    if white_space == WhiteSpace::Preserve && line.ends_with('\n') {
+        line.pop();
+    } else if line.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+}
+
+/// A link or image `title`, collapsed, when a fragment view prints it.
+fn tooltip(node: &Node) -> Option<String> {
+    node.attr("title")
+        .map(collapse)
+        .filter(|title| !title.is_empty())
+}
+
+/// The `(destination "title")` part of a Markdown link or image. A
+/// fragment view prints a tooltip as the Markdown title, so a fact kept
+/// only in the attribute is not lost.
+fn link_tail(target: &str, title: Option<&str>) -> String {
+    match title {
+        Some(title) => format!(
+            "({target} \"{}\")",
+            title.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
+        None => format!("({target})"),
+    }
+}
+
 // ---- Rendering -----------------------------------------------------------
 
 /// Elements whose `header`/`footer` descendants are section content rather
@@ -802,15 +850,37 @@ struct Renderer<'a> {
     nodes: &'a [Node],
     removed: [usize; REMOVED_CATEGORIES],
     depth: usize,
+    /// Renders a fragment embedded in data: visible controls keep their
+    /// labels and images or links without text keep their targets, because
+    /// nothing visible may be removed from a fragment.
+    fragment: bool,
+    /// Set when structure was flattened (deep nesting, a layout-grid table,
+    /// columns past the alignment cap) or, in a fragment, when ordered-list
+    /// numbers would differ from a browser's or a table has more header
+    /// rows than GFM can show. A page view accepts that; a fragment view is
+    /// rejected instead.
+    lossy: bool,
 }
 
-impl Renderer<'_> {
+impl<'a> Renderer<'a> {
+    fn new(nodes: &'a [Node], fragment: bool) -> Self {
+        Self {
+            nodes,
+            removed: [0; REMOVED_CATEGORIES],
+            depth: 0,
+            fragment,
+            lossy: false,
+        }
+    }
+
     /// Returns the removal category for a node, or `None` when it is content.
     fn removal(&self, node: &Node, in_sectioning: bool) -> Option<Removed> {
         if matches!(node.kind, NodeKind::Comment) {
             return Some(Removed::Comment);
         }
         let category = match node.local_name() {
+            // A button label is visible text; its action has no Markdown form.
+            "button" if self.fragment => return None,
             "script" => Removed::Script,
             "style" => Removed::Style,
             "noscript" => Removed::Noscript,
@@ -850,27 +920,68 @@ impl Renderer<'_> {
         }
     }
 
-    /// Text of a subtree with removable nodes dropped and counted. `sep` goes
-    /// between text nodes: empty for verbatim code, a space when flattening
-    /// markup so words from adjacent elements do not run together.
-    fn text(&mut self, id: usize, in_sectioning: bool, sep: &str) -> String {
-        let mut text = String::new();
-        let mut stack = vec![id];
-        while let Some(id) = stack.pop() {
+    /// Text of a subtree with removable nodes dropped and counted, its lines
+    /// joined by `\n`. See [`Self::text_lines`].
+    fn text(
+        &mut self,
+        id: usize,
+        in_sectioning: bool,
+        sep: &str,
+        white_space: WhiteSpace,
+    ) -> String {
+        self.text_lines(id, in_sectioning, sep, white_space)
+            .join("\n")
+    }
+
+    /// Text of a subtree split where a browser breaks the line: at each `br`
+    /// and at the edges of block-level elements, which carry no text node
+    /// of their own. `sep` goes between text nodes of one line: empty for
+    /// verbatim code, a space when flattening markup so words from adjacent
+    /// elements do not run together. Newlines inside text nodes stay in
+    /// their line; `white_space` says whether they already end it.
+    fn text_lines(
+        &mut self,
+        id: usize,
+        in_sectioning: bool,
+        sep: &str,
+        white_space: WhiteSpace,
+    ) -> Vec<String> {
+        enum Visit {
+            Enter(usize),
+            ExitBlock,
+        }
+        let mut lines = vec![String::new()];
+        let mut stack = vec![Visit::Enter(id)];
+        while let Some(visit) = stack.pop() {
+            let Visit::Enter(id) = visit else {
+                break_line(&mut lines, white_space);
+                continue;
+            };
             let node = &self.nodes[id];
             if let Some(category) = self.removal(node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
-            if let NodeKind::Text(value) = &node.kind {
-                if !text.is_empty() {
-                    text.push_str(sep);
+            match &node.kind {
+                NodeKind::Text(value) => {
+                    if let Some(line) = lines.last_mut() {
+                        if !line.is_empty() {
+                            line.push_str(sep);
+                        }
+                        line.push_str(value);
+                    }
                 }
-                text.push_str(value);
+                // Consecutive breaks leave the blank lines they show.
+                NodeKind::Element { .. } if node.is_element("br") => lines.push(String::new()),
+                NodeKind::Element { .. } if is_block(node) => {
+                    break_line(&mut lines, white_space);
+                    stack.push(Visit::ExitBlock);
+                }
+                _ => {}
             }
-            stack.extend(node.children.iter().rev());
+            stack.extend(node.children.iter().rev().map(|&child| Visit::Enter(child)));
         }
-        text
+        lines
     }
 
     /// Renders the children of a block container as blank-line separated blocks.
@@ -902,7 +1013,8 @@ impl Renderer<'_> {
 
     fn block(&mut self, id: usize, in_sectioning: bool) -> String {
         if self.depth == MAX_DEPTH {
-            return collapse(&self.text(id, in_sectioning, " "));
+            self.lossy = true;
+            return collapse(&self.text(id, in_sectioning, " ", WhiteSpace::Collapse));
         }
         self.depth += 1;
         let rendered = self.block_at_depth(id, in_sectioning);
@@ -942,7 +1054,7 @@ impl Renderer<'_> {
                         })
                     })
                     .unwrap_or("");
-                let code = self.text(id, in_sectioning, "");
+                let code = self.text(id, in_sectioning, "", WhiteSpace::Preserve);
                 let code = code.strip_prefix('\n').unwrap_or(&code);
                 let code = code.trim_end_matches('\n');
                 let fence = "`".repeat((longest_backtick_run(code) + 1).max(3));
@@ -984,14 +1096,20 @@ impl Renderer<'_> {
                 self.removed[category as usize] += 1;
                 continue;
             }
+            let is_item = node.is_element("li");
             // Stray inline content between items renders as its own item.
-            let body = if node.is_element("li") || is_block(node) {
+            let body = if is_item || is_block(node) {
                 self.blocks(child, in_sectioning)
             } else {
                 let mut text = String::new();
                 self.inline(child, &mut text, in_sectioning);
                 text.trim().to_owned()
             };
+            // A browser numbers every `li`, empty or not, and nothing else,
+            // so a fragment view whose numbers would drift is rejected.
+            if self.fragment && ordered && is_item == body.is_empty() {
+                self.lossy = true;
+            }
             if body.is_empty() {
                 continue;
             }
@@ -1024,7 +1142,8 @@ impl Renderer<'_> {
         // Rows still covered by a `rowspan` above, per column.
         let mut pending: Vec<usize> = Vec::new();
         let mut remaining_rows = 0;
-        let mut stack: Vec<usize> = self.nodes[id].children.iter().rev().copied().collect();
+        let mut stack = table_children(self.nodes, id);
+        stack.reverse();
         while let Some(child) = stack.pop() {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
@@ -1076,7 +1195,11 @@ impl Renderer<'_> {
                         header &= cell_node.is_element("th");
                         real_cells += 1;
                         cells.push(self.blocks(cell, in_sectioning));
-                        let columns = span(cell_node, "colspan")
+                        let requested = span(cell_node, "colspan");
+                        if column.saturating_add(requested.max(1)) > MAX_TABLE_COLUMNS {
+                            self.lossy = true;
+                        }
+                        let columns = requested
                             .min(MAX_TABLE_COLUMNS.saturating_sub(column))
                             .max(1);
                         let rowspan = span(cell_node, "rowspan");
@@ -1113,6 +1236,12 @@ impl Renderer<'_> {
         if width == 0 {
             return out.trim_end().to_owned();
         }
+        // GFM has one header row, at the top: any other row of headers,
+        // such as a second header line or a section label further down,
+        // would read as data.
+        if self.fragment && rows.iter().skip(1).any(|(header, _)| *header) {
+            self.lossy = true;
+        }
         // A cell holding block content (a nested table, a list, several
         // paragraphs) cannot sit on one GFM line: the table is a layout grid,
         // so its cells are emitted as consecutive blocks in source order.
@@ -1121,6 +1250,7 @@ impl Renderer<'_> {
             .flat_map(|(_, cells)| cells)
             .any(|cell| cell.contains('\n'))
         {
+            self.lossy = true;
             let blocks: Vec<&str> = rows
                 .iter()
                 .flat_map(|(_, cells)| cells)
@@ -1166,7 +1296,11 @@ impl Renderer<'_> {
 
     fn inline(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
         if self.depth == MAX_DEPTH {
-            push_collapsed(out, &self.text(id, in_sectioning, " "));
+            self.lossy = true;
+            push_collapsed(
+                out,
+                &self.text(id, in_sectioning, " ", WhiteSpace::Collapse),
+            );
             return;
         }
         self.depth += 1;
@@ -1191,7 +1325,13 @@ impl Renderer<'_> {
                 "br" => out.push('\n'),
                 "img" => {
                     let alt = node.attr("alt").map(collapse).unwrap_or_default();
+                    let title = if self.fragment { tooltip(node) } else { None };
                     if alt.is_empty() {
+                        if self.fragment
+                            && let Some(target) = node.attr("src").and_then(destination)
+                        {
+                            let _ = write!(out, "![]{}", link_tail(&target, title.as_deref()));
+                        }
                         return;
                     }
                     if !brackets_balanced(&alt) {
@@ -1200,7 +1340,7 @@ impl Renderer<'_> {
                     }
                     match node.attr("src").and_then(destination) {
                         Some(target) => {
-                            let _ = write!(out, "![{alt}]({target})");
+                            let _ = write!(out, "![{alt}]{}", link_tail(&target, title.as_deref()));
                         }
                         None => {
                             let _ = write!(out, "![{alt}]");
@@ -1210,29 +1350,47 @@ impl Renderer<'_> {
                 "a" => {
                     let mut text = String::new();
                     self.inline_children(id, &mut text, in_sectioning);
-                    let text = text.trim();
+                    let trimmed = text.trim();
+                    // Whitespace at the edges of the link text separates it
+                    // from its neighbours, as `wrapped` keeps it for emphasis.
+                    if text.starts_with(char::is_whitespace) && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
                     match node.attr("href").and_then(destination) {
-                        Some(target) if !text.is_empty() && brackets_balanced(text) => {
-                            let _ = write!(out, "[{text}]({target})");
+                        Some(target)
+                            if (self.fragment || !trimmed.is_empty())
+                                && brackets_balanced(trimmed) =>
+                        {
+                            let title = if self.fragment { tooltip(node) } else { None };
+                            let _ =
+                                write!(out, "[{trimmed}]{}", link_tail(&target, title.as_deref()));
                         }
-                        _ => out.push_str(text),
+                        _ => out.push_str(trimmed),
+                    }
+                    if text.ends_with(char::is_whitespace) && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
                     }
                 }
                 "code" | "kbd" | "samp" => {
-                    let text = collapse(&self.text(id, in_sectioning, ""));
-                    if text.is_empty() {
-                        return;
+                    // A code span cannot hold a line break, so each line a
+                    // `br` or block starts becomes its own span on its own
+                    // line rather than running into its neighbour.
+                    let lines = self.text_lines(id, in_sectioning, "", WhiteSpace::Collapse);
+                    let mut spans = lines
+                        .iter()
+                        .map(|line| collapse(line))
+                        .filter(|line| !line.is_empty());
+                    if let Some(first) = spans.next() {
+                        push_code_span(out, &first);
+                        for line in spans {
+                            out.push('\n');
+                            push_code_span(out, &line);
+                        }
                     }
-                    // A code span is closed by a backtick run of the same
-                    // length as its fence, so the fence must outgrow the
-                    // longest run in the text, exactly like a code block's.
-                    // One linear scan finds that run; probing with
-                    // `contains` for every prefix length is quadratic in
-                    // the run length, which untrusted HTML controls.
-                    let ticks = "`".repeat(longest_backtick_run(&text) + 1);
-                    let _ = write!(out, "{ticks}{text}{ticks}");
                 }
-                "label" => {
+                // A fragment keeps button labels, which a browser draws as
+                // separate boxes; a page view removes buttons before this.
+                "label" | "button" => {
                     // Adjacent labels (content-tab titles) must not run together.
                     if !out.is_empty() && !out.ends_with([' ', '\n']) {
                         out.push(' ');
@@ -1489,11 +1647,43 @@ fn brackets_balanced(text: &str) -> bool {
     depth == 0
 }
 
+/// Children of a `table` in the order a browser draws them: captions above
+/// the table, then the first `thead`, every other child in source order,
+/// and the first `tfoot` last, wherever either sits in the source.
+fn table_children(nodes: &[Node], table: usize) -> Vec<usize> {
+    let children = &nodes[table].children;
+    let first = |name| {
+        children
+            .iter()
+            .copied()
+            .find(|&child| nodes[child].is_element(name))
+    };
+    let (head, foot) = (first("thead"), first("tfoot"));
+    let captions = children
+        .iter()
+        .copied()
+        .filter(|&child| nodes[child].is_element("caption"));
+    let rest = children.iter().copied().filter(|&child| {
+        Some(child) != head && Some(child) != foot && !nodes[child].is_element("caption")
+    });
+    captions.chain(head).chain(rest).chain(foot).collect()
+}
+
 /// A `colspan`/`rowspan` value; missing or unparsable values mean 1.
 fn span(node: &Node, attr: &str) -> usize {
     node.attr(attr)
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(1)
+}
+
+/// Appends `text` as one code span. A code span is closed by a backtick run
+/// of the same length as its fence, so the fence must outgrow the longest
+/// run in the text, exactly like a code block's. One linear scan finds that
+/// run; probing with `contains` for every prefix length is quadratic in the
+/// run length, which untrusted HTML controls.
+fn push_code_span(out: &mut String, text: &str) {
+    let ticks = "`".repeat(longest_backtick_run(text) + 1);
+    let _ = write!(out, "{ticks}{text}{ticks}");
 }
 
 /// Appends text with HTML whitespace collapsing; a run of whitespace becomes

@@ -65,7 +65,8 @@ pub struct RuntimeConfig {
     pub search_path_sharing_enabled: bool,
     /// Whether command-output Git diffs may omit context with original recovery. Enabled by default.
     pub diff_compression_enabled: bool,
-    /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
+    /// Whether complete HTML documents, and HTML inside JSON string values, are rendered as
+    /// Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
 }
 
@@ -1684,6 +1685,134 @@ mod tests {
         assert_eq!(
             records[0].applied_operations,
             Some(vec!["build_log_reduction".to_owned()])
+        );
+    }
+
+    #[test]
+    fn concurrent_sessions_keep_embedded_html_rows_and_attribution_apart() {
+        // Four hook processes sharing one state directory: each session's
+        // document repeats one shared fragment and carries its own, so the
+        // shared row is created by one session and refreshed by the others.
+        let directory = tempfile::tempdir().unwrap();
+        let fragment = |label: &str| {
+            format!(
+                "<div style=\"font-family: Arial, sans-serif; color: #333333\">\
+                 <p style=\"margin: 0 0 8px 0\"><span style=\"font-weight: normal\">{label}: \
+                 approve the refund before</span> <strong>2024-06-01</strong>.</p>\
+                 <ul style=\"padding-left: 16px; margin: 0\"><li style=\"margin: 0\">\
+                 <a href=\"https://example.com/{label}\" target=\"_blank\" \
+                 rel=\"noopener noreferrer\">Reference</a></li></ul></div>"
+            )
+        };
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for session in 0..4 {
+                let (directory, barrier) = (directory.path(), &barrier);
+                scope.spawn(move || {
+                    let runtime = TokenlessRuntime::new(RuntimeConfig {
+                        data_dir: Some(directory.to_path_buf()),
+                        stats_enabled: true,
+                        ..RuntimeConfig::default()
+                    })
+                    .unwrap();
+                    let attribution = ProtocolAttribution {
+                        agent_id: "qwenwork".to_owned(),
+                        session_id: Some(format!("session-{session}")),
+                        tool_use_id: Some(format!("call-{session}")),
+                    };
+                    let own = fragment(&format!("session-{session}"));
+                    let content = serde_json::to_string(&serde_json::json!({
+                        "session": session,
+                        "shared": fragment("shared"),
+                        "own": own,
+                    }))
+                    .unwrap();
+                    barrier.wait();
+                    let response = runtime
+                        .post_tool(
+                            &PostToolRequest {
+                                result_kind: ResultKind::Tool,
+                                tool_name: "fetch_record".to_owned(),
+                                content,
+                                status: ToolResultStatus::Success,
+                                content_origin: ContentOrigin::ApiResponse,
+                                command: None,
+                                output_optimization: OutputOptimization::None,
+                                capabilities: PostToolCapabilities {
+                                    replace_output: true,
+                                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                                    replace_with_text: false,
+                                },
+                            },
+                            &attribution,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        response.applied_operations,
+                        [tokenless_protocol::AppliedOperation::HtmlExtraction]
+                    );
+                    let output: serde_json::Value = serde_json::from_str(&response.output).unwrap();
+                    assert_eq!(output["session"], session);
+                    for (field, expected) in [("shared", fragment("shared")), ("own", own)] {
+                        let text = output[field].as_str().unwrap();
+                        let hash = tokenless_ccr::recovery_hashes(
+                            text,
+                            &tokenless_protocol::RecoveryMethod::Shell,
+                        )[0];
+                        let restored = runtime
+                            .retrieve_authorized(
+                                &RetrieveRequest {
+                                    hash_or_marker: hash.to_owned(),
+                                    visible_markers: vec![text.to_owned()],
+                                },
+                                &attribution,
+                            )
+                            .unwrap();
+                        assert_eq!(restored.payload, expected);
+                    }
+                });
+            }
+        });
+
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        for session in 0..4 {
+            let records = recorder
+                .records_by_session(&format!("session-{session}"), None)
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].tool_use_id.as_deref(),
+                Some(format!("call-{session}").as_str())
+            );
+            assert_eq!(records[0].content_type.as_deref(), Some("json"));
+            assert_eq!(
+                records[0].applied_operations,
+                Some(vec!["html_extraction".to_owned()])
+            );
+        }
+        let connection = rusqlite::Connection::open(directory.path().join("stats.db")).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id, tool_use_id, COUNT(*) FROM retrieve_events \
+                 WHERE outcome = 'hit' GROUP BY session_id, tool_use_id ORDER BY session_id",
+            )
+            .unwrap();
+        let events = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            events,
+            (0..4)
+                .map(|session| (format!("session-{session}"), format!("call-{session}"), 2))
+                .collect::<Vec<_>>()
         );
     }
 
