@@ -50,6 +50,8 @@ aw config init --help
 | `aw recover` | Recover interrupted local package operations |
 | `aw commands` | Enumerate public commands; optionally include machine-readable argument metadata |
 | `aw completion` | Print a shell completion script |
+| `aw instance attach` | Attach or remove supported native Hooks on a selected process |
+| `aw instance update` | Apply policy using the shared `aw.yaml` by default |
 | `aw instance` | Register, confirm, query and release application-owned instances through JSON |
 | `aw audit-export` | Read one retained public audit page without a control connection |
 | `aw request` | Send a service operation from stdin JSON; for integration and diagnostics |
@@ -290,6 +292,39 @@ The following hidden commands are generated and called by Adapters, not user set
 | `aw scope` | Required `--adapter`, `--binding`, `--action`; invocation routes use `--event`, `--step`, `--on-error`, `--close-event true` |
 
 Internal lifecycle actions and payloads are versioned implementation details. Application integrations use the managed factories in the [Agent guides](../../../developer-guide/en/aw/native-agents.md), which own these calls and their cleanup.
+
+## `aw instance attach` and `aw instance update`
+
+Run these commands from the directory containing your shared `aw.yaml`, or supply
+`--config FILE` explicitly. Attachment currently supports Qoder TUI and QwenPaw
+App under the [external-process prerequisites](../../../developer-guide/en/aw/deployment/process-attach.md).
+Pause request dispatch before attaching; wait for native confirmation before
+resuming. The command does not start or restart the Agent.
+
+```bash
+aw instance attach --agent TARGET --pid NATIVE_PID
+aw instance update --agent TARGET
+aw instance update --instance INSTANCE_ID --policy next.yaml
+aw instance attach --agent TARGET --pid NATIVE_PID --remove
+```
+
+Replace `TARGET`, `NATIVE_PID` and `INSTANCE_ID` with your configured target,
+selected process and returned instance ID. Attach verifies the process identity
+and native Hook adoption. Removal retains the native process and unrelated Hooks.
+Both attachment forms accept `--config FILE`, `--agent TARGET` and `--pid PID`;
+`--remove` selects removal.
+
+Update reuses the [idle policy update contract](../../../developer-guide/en/aw/deployment/policy-updates.md).
+It accepts `--config FILE`, `--agent TARGET`, `--instance ID`, `--policy FILE` and
+`--expected-revision SHA256`. Select an agent, an instance, or their intersection.
+Without `--policy`, the shared configuration is the candidate. Multiple matching
+instances require `--instance`. Busy or rejected updates retain the active policy;
+an unknown instance is an error and does not trigger attachment.
+
+These commands return the existing attachment/update JSON responses. They do
+not add attachment or update capability to other native entrypoints. The
+application-owned JSON protocol below remains separate and cannot be combined
+with these subcommands.
 
 ## `aw instance`
 

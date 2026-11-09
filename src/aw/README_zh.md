@@ -52,6 +52,8 @@ sec-core Provider 可在 Qoder SDK 和 QwenPaw 加载本地 Skill 指令前校�
 core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
 工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
 
+使用 `aw instance attach --agent TARGET --pid PID` 接入受支持的原生进程，再用 `aw instance update --agent TARGET` 在空闲时应用策略。两个命令默认读取当前目录的 `aw.yaml`；前提和显式配置选择见[命令参考](../../docs/user-guide/zh/aw/cli-reference.md#aw-instance-attach-与-aw-instance-update)。
+
 显式 Adapter 可通过 `aw instance` 向已有同用户 daemon 独立登记、确认 Ready、查询和释放业务自管实例。首期支持 Qoder SDK / QwenPaw 普通路由，使用固定配置；语言包和原生工厂迁移另行交付。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
 
 ## Hook 支持矩阵
