@@ -667,6 +667,7 @@ dependencies = [
  "asc-pcp",
  "asc-policy-cedar",
  "asc-policy-repository",
+ "asc-policy-repository-sqlite",
  "asc-policy-types",
  "asc-sqlite-kernel",
  "fail",
