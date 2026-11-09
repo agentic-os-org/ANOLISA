@@ -3,8 +3,10 @@
 use aw_exec::PackageLock;
 #[cfg(test)]
 mod faults;
+mod staging;
 #[cfg(test)]
-pub(super) use faults::fail_database_sync;
+pub(super) use faults::{fail_database_sync, fail_staging_sync, fail_staging_write, fail_tmpfile};
+pub(super) use staging::{anonymous, publish, remove_staging, write_bytes};
 
 use crate::store::{require, Error, Payload, Result};
 use serde::{Deserialize, Serialize};
@@ -12,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::{CString, OsStr},
     fs::{File, Metadata},
-    io::{Read, Write},
+    io::Read,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -333,51 +335,6 @@ fn lock_flags(path: &Path, extra: i32) -> Result<PackageLock> {
     Ok(file)
 }
 
-pub(super) fn anonymous(
-    parent: &Path,
-    mode: u32,
-    write: impl FnOnce(&mut File) -> Result<()>,
-) -> Result<(File, Identity)> {
-    let directory = directory(parent)?;
-    let mut file = opened(
-        &directory,
-        OsStr::new("."),
-        libc::O_TMPFILE | libc::O_RDWR,
-        mode,
-    )
-    .map_err(|error| match error {
-        Error::Io(source) => Error::Filesystem {
-            operation: "openat(O_TMPFILE) for anonymous package staging",
-            path: parent.to_owned(),
-            source,
-        },
-        error => error,
-    })?;
-    write(&mut file)?;
-    // SAFETY: the file descriptor is live; mode contains only ordinary permission bits.
-    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    file.sync_all()?;
-    let metadata = file.metadata()?;
-    use std::io::{Seek, SeekFrom};
-    file.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    std::io::copy(&mut file, &mut hash)?;
-    Ok((
-        file,
-        from_metadata(&metadata, format!("{:x}", hash.finalize())),
-    ))
-}
-
-pub(super) fn publish(file: &File, destination: &Path) -> Result<()> {
-    let (parent, name) = parent(destination)?;
-    let name = cstring(name)?;
-    link_descriptor(file, &parent, &name)?;
-    parent.sync_all()?;
-    Ok(())
-}
-
 fn link_descriptor(file: &File, parent: &File, name: &CString) -> Result<()> {
     let descriptor = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
         .map_err(|_| Error::Invalid("invalid descriptor link".into()))?;
@@ -557,11 +514,4 @@ pub(super) fn bytes_payload(bytes: &[u8], mode: u32) -> Payload {
         sha256: format!("{:x}", Sha256::digest(bytes)),
         mode,
     }
-}
-
-pub(super) fn write_bytes(parent: &Path, bytes: &[u8], mode: u32) -> Result<(File, Identity)> {
-    anonymous(parent, mode, |file| {
-        file.write_all(bytes)?;
-        Ok(())
-    })
 }

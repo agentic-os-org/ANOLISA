@@ -129,7 +129,18 @@ fn classify(directory: &Path) -> Result<PendingDirectory> {
     if identity.mode != 0o700 {
         return Ok(PendingDirectory::Conflict);
     }
+    let Some(owner) = directory.file_name().and_then(|name| name.to_str()) else {
+        return Ok(PendingDirectory::Conflict);
+    };
     let entries = fs::entries(directory)?;
+    // A crash between named staging creation and publication leaves only
+    // staging files, and their names carry this transaction id; reclaim them
+    // before deciding, so recovery is not stranded on a synthetic conflict.
+    let entries = if entries.is_empty() || fs::remove_staging(directory, owner)?.is_empty() {
+        entries
+    } else {
+        fs::entries(directory)?
+    };
     if entries.is_empty() {
         // SIGKILL may interrupt mkdir→first journal or final unlink→rmdir. Empty reserved
         // directories contain no evidence to replay; retire only the observed empty inode.
@@ -253,6 +264,11 @@ pub(super) fn finish(
         return Ok(conflicts);
     }
     let workspace = entry.workspace();
+    match fs::remove_staging(&workspace, &entry.transaction_id) {
+        Ok(_) => {}
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     match fs::directory(&workspace) {
         Ok(_) if !fs::rmdir(&workspace, entry.workspace_identity.as_ref())? => {
             conflicts.push(workspace)
@@ -285,6 +301,7 @@ pub(super) fn finish(
         return Ok(conflicts);
     }
     let directory = entry.directory();
+    fs::remove_staging(&directory, &entry.transaction_id)?;
     let extras = fs::entries(&directory)?
         .into_iter()
         .filter(|path| path != &entry.path())

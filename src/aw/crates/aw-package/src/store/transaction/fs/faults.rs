@@ -1,4 +1,4 @@
-//! Thread-local storage faults exercise the rename-visible, directory-sync-failed window.
+//! Thread-local storage faults exercise failure windows without filesystem tricks.
 
 use std::{
     cell::RefCell,
@@ -10,6 +10,7 @@ use std::{
 
 thread_local! {
     static DATABASE_SYNC_FAILURE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TMPFILE_FAILURE: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// Restore the previous fault when the isolated test scope exits, including unwinding.
@@ -41,4 +42,123 @@ pub(super) fn check_database_sync(path: &Path) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Restore the previous fault when the isolated test scope exits, including unwinding.
+pub(crate) struct TmpfileFailure {
+    previous: bool,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for TmpfileFailure {
+    fn drop(&mut self) {
+        TMPFILE_FAILURE.with(|failure| {
+            let _ = failure.replace(self.previous);
+        });
+    }
+}
+
+/// Fail O_TMPFILE staging until the guard drops, forcing the named fallback path.
+pub(crate) fn fail_tmpfile() -> TmpfileFailure {
+    let previous = TMPFILE_FAILURE.with(|failure| failure.replace(true));
+    TmpfileFailure {
+        previous,
+        _same_thread: PhantomData,
+    }
+}
+
+pub(super) fn check_tmpfile() -> Result<(), crate::store::Error> {
+    if TMPFILE_FAILURE.with(|failure| *failure.borrow()) {
+        Err(crate::store::Error::Io(io::Error::from_raw_os_error(
+            libc::EOPNOTSUPP,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+thread_local! {
+    static STAGING_WRITE_FAILURE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static STAGING_SYNC_FAILURE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Restore the previous fault when the isolated test scope exits, including unwinding.
+pub(crate) struct StagingWriteFailure {
+    previous: Option<PathBuf>,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for StagingWriteFailure {
+    fn drop(&mut self) {
+        STAGING_WRITE_FAILURE.with(|failure| {
+            let _ = failure.replace(self.previous.take());
+        });
+    }
+}
+
+/// Fail the next staging write under this test directory, standing in for a
+/// device that reports ENOSPC after the callback already wrote some bytes.
+pub(crate) fn fail_staging_write(root: &Path) -> StagingWriteFailure {
+    let previous = STAGING_WRITE_FAILURE.with(|failure| failure.replace(Some(root.into())));
+    StagingWriteFailure {
+        previous,
+        _same_thread: PhantomData,
+    }
+}
+
+pub(super) fn check_staging_write(parent: &Path) -> Result<(), crate::store::Error> {
+    let armed = STAGING_WRITE_FAILURE.with(|failure| {
+        let mut slot = failure.borrow_mut();
+        let matches = slot.as_deref().is_some_and(|root| parent.starts_with(root));
+        if matches {
+            *slot = None;
+        }
+        matches
+    });
+    if armed {
+        return Err(crate::store::Error::Io(io::Error::from_raw_os_error(
+            libc::ENOSPC,
+        )));
+    }
+    Ok(())
+}
+
+/// Restore the previous fault when the isolated test scope exits, including unwinding.
+pub(crate) struct StagingSyncFailure {
+    previous: Option<PathBuf>,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for StagingSyncFailure {
+    fn drop(&mut self) {
+        STAGING_SYNC_FAILURE.with(|failure| {
+            let _ = failure.replace(self.previous.take());
+        });
+    }
+}
+
+/// Fail the next staging sync under this test directory with EIO.
+pub(crate) fn fail_staging_sync(root: &Path) -> StagingSyncFailure {
+    let previous = STAGING_SYNC_FAILURE.with(|failure| failure.replace(Some(root.into())));
+    StagingSyncFailure {
+        previous,
+        _same_thread: PhantomData,
+    }
+}
+
+pub(super) fn check_staging_sync(parent: &Path) -> Result<(), crate::store::Error> {
+    let armed = STAGING_SYNC_FAILURE.with(|failure| {
+        let mut slot = failure.borrow_mut();
+        let matches = slot.as_deref().is_some_and(|root| parent.starts_with(root));
+        if matches {
+            *slot = None;
+        }
+        matches
+    });
+    if armed {
+        return Err(crate::store::Error::Io(io::Error::from_raw_os_error(
+            libc::EIO,
+        )));
+    }
+    Ok(())
 }

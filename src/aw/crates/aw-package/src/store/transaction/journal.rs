@@ -84,8 +84,10 @@ impl Journal {
             !fs::exists(&next)?,
             "unfinished journal replacement needs recovery",
         )?;
-        let (file, _) = fs::write_bytes(&self.directory(), &bytes, 0o600)?;
-        fs::publish(&file, &next)?;
+        let staged = fs::write_bytes(&self.directory(), &self.transaction_id, &bytes, 0o600)?;
+        #[cfg(test)]
+        checkpoint("journal-staged-unpublished");
+        fs::publish(staged, &next)?;
         fs::replace(&next, &self.path())
     }
 

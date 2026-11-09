@@ -1,7 +1,7 @@
 //! A visible database rename must not retire recovery bytes before directory sync succeeds.
 
 use super::*;
-use crate::store::{NoticeCode, RecoveryState};
+use crate::store::{MutationFailure, NoticeCode, RecoveryState};
 
 fn pending(fixture: &Fixture) -> journal::Journal {
     let mut entries = fs::entries(&fixture.paths.root.join("transactions")).unwrap();
@@ -113,4 +113,191 @@ fn failed_commit_sync_keeps_rollback_material_if_the_old_database_returns() {
     );
     drop(inventory);
     assert_eq!(fixture.recover().rolled_back, 0);
+}
+
+fn is_staging(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".aw-staging-"))
+}
+
+fn staging_failure(fixture: &Fixture, write: bool) -> MutationFailure {
+    let changes = fixture.changes(false);
+    let result = if write {
+        let _fault = fs::fail_staging_write(&fixture.prefix);
+        super::super::apply(&fixture.paths, &changes, &AtomicBool::new(false))
+    } else {
+        let _fault = fs::fail_staging_sync(&fixture.prefix);
+        super::super::apply(&fixture.paths, &changes, &AtomicBool::new(false))
+    };
+    result.unwrap_err()
+}
+
+#[test]
+fn staging_only_transaction_directory_is_retired_without_a_journal() {
+    let fixture = Fixture::new();
+    super::super::apply(
+        &fixture.paths,
+        &fixture.changes(false),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let transactions = fixture.paths.root.join("transactions");
+    assert!(fs::entries(&transactions).unwrap().is_empty());
+
+    let transaction = journal::new_id().unwrap();
+    let directory = transactions.join(&transaction);
+    fixture.directory(&directory);
+    for index in 0..2 {
+        let staging = directory.join(format!(
+            ".aw-staging-{transaction}-{}-{index}",
+            std::process::id()
+        ));
+        fixture.record(&staging, b"partial payload", 0o600);
+    }
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!directory.exists());
+    assert!(fs::entries(&transactions).unwrap().is_empty());
+    let again = fixture.recover();
+    assert!(again.conflicts.is_empty());
+
+    // The retired staging directory must not block later transactions.
+    let removal = crate::store::plan::uninstall(&fixture.paths, &fixture.prefix, &[]).unwrap();
+    assert!(removal.ready(), "{:?}", removal.problems);
+    crate::store::plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap();
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert!(inventory.installations[0].packages.is_empty());
+    assert!(inventory.doctor().unwrap().healthy());
+}
+
+#[test]
+fn staging_cleanup_never_deletes_unrecognized_files() {
+    let fixture = Fixture::new();
+    super::super::apply(
+        &fixture.paths,
+        &fixture.changes(false),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let transactions = fixture.paths.root.join("transactions");
+    let transaction = journal::new_id().unwrap();
+    let directory = transactions.join(&transaction);
+    fixture.directory(&directory);
+    let staging = directory.join(format!(
+        ".aw-staging-{transaction}-{}-0",
+        std::process::id()
+    ));
+    fixture.record(&staging, b"partial payload", 0o600);
+    let unrelated = directory.join("unrelated");
+    fixture.record(&unrelated, b"foreign bytes", 0o600);
+
+    let report = fixture.recover();
+    assert_eq!(report.conflicts, vec![directory.clone()]);
+    assert!(
+        !staging.exists(),
+        "cleanup must drop the owned staging file"
+    );
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"foreign bytes");
+}
+
+#[test]
+fn sigkill_between_journal_staging_creation_and_publication_is_retired() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "journal-staged-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let transactions = fixture.paths.root.join("transactions");
+    let directories = fs::entries(&transactions).unwrap();
+    assert_eq!(directories.len(), 1);
+    let entries = fs::entries(&directories[0]).unwrap();
+    assert!(entries.iter().all(|path| is_staging(path)), "{entries:?}");
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!directories[0].exists());
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert!(inventory.installations.is_empty());
+    assert!(inventory.doctor().unwrap().healthy());
+    drop(inventory);
+    assert_eq!(fixture.recover().conflicts.len(), 0);
+}
+
+#[test]
+fn sigkill_after_workspace_staging_creation_leaves_no_recovery_conflict() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let transactions = fixture.paths.root.join("transactions");
+    let directories = fs::entries(&transactions).unwrap();
+    assert_eq!(directories.len(), 1);
+    let entry = journal::read(&fixture.paths, &directories[0]).unwrap();
+    let workspace = entry.workspace();
+    let leftovers = fs::entries(&workspace).unwrap();
+    assert!(
+        leftovers.iter().any(|path| is_staging(path)),
+        "{leftovers:?}"
+    );
+    assert!(matches!(
+        Inventory::read(&fixture.paths, None),
+        Err(Error::NeedsRecovery(_))
+    ));
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!directories[0].exists());
+    assert!(!workspace.exists());
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert!(inventory.installations.is_empty());
+    assert!(inventory.doctor().unwrap().healthy());
+    drop(inventory);
+    assert_eq!(fixture.recover().rolled_back, 0);
+}
+
+#[test]
+fn staging_failures_leave_no_residue_and_keep_the_database_retryable() {
+    for write in [true, false] {
+        let fixture = Fixture::new();
+        let failure = staging_failure(&fixture, write);
+        assert!(
+            matches!(
+                &failure.error,
+                Error::Io(error)
+                    if error.raw_os_error()
+                        == Some(if write { libc::ENOSPC } else { libc::EIO })
+            ),
+            "{:?}",
+            failure.error
+        );
+        assert!(!failure.report.committed);
+        let transactions = fixture.paths.root.join("transactions");
+        assert!(fs::entries(&transactions).unwrap().is_empty());
+        assert!(
+            !fixture.prefix.exists(),
+            "rolled back prefix must disappear"
+        );
+        let report = fixture.recover();
+        assert_eq!((report.committed, report.rolled_back), (0, 0));
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+        let inventory = Inventory::read(&fixture.paths, None).unwrap();
+        assert!(inventory.installations.is_empty());
+        assert!(inventory.doctor().unwrap().healthy());
+        drop(inventory);
+
+        // A retry planned against the rolled-back database must succeed.
+        let mut retry = fixture.changes(false);
+        retry.database_before = journal::current_database(&fixture.paths).unwrap();
+        super::super::apply(&fixture.paths, &retry, &AtomicBool::new(false)).unwrap();
+        let inventory = Inventory::read(&fixture.paths, None).unwrap();
+        assert_eq!(inventory.installations[0].packages.len(), 1);
+    }
 }
