@@ -382,6 +382,10 @@ For the helper's `fix-all` command, a JSON array can be supplied as the next
 argument or through stdin. A plain string such as `"jq"` uses that name for
 both the binary and package. A constrained string such as `"jq>=1.0.0"`
 uses `jq` for both names and keeps `>=1.0.0` as the version requirement.
+String requirements support only `>=` followed by one to three numeric
+components, such as `1`, `1.0`, or `1.0.0`. Other operators and malformed
+requirements remain unsplit and are rejected by name validation before
+an installation attempt.
 Object entries retain their explicit binary, package, manager, version, and
 fallback fields. The helper's `check` command applies the same string-name
 normalization when listing dependencies from the adjacent
@@ -394,6 +398,9 @@ dependencies. Inspect each dependency's output: an individual failure does
 not stop the remaining entries, so command completion alone does not confirm
 that every dependency was fixed. These manual commands do not enable the
 automatic Tool Ready hook.
+
+The separate spec-driven `fix-tool` command retains its existing parsing
+path; constrained strings there are tracked separately in #9495.
 
 ## Related documents
 

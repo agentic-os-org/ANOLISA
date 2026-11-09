@@ -86,8 +86,9 @@ classify_recent_failure() {
 }
 
 # --- Normalize an array of dependency entries ---
-# String entries share the existing >= constraint contract with env_check.rs.
+# String entries split numeric >= constraints before the existing name validation.
 # Object entries retain their manager, package and fallback fields.
+# fix_tool_from_spec has a separate normalizer tracked by #9495.
 
 normalize_deps() {
   jq -c --arg mgr "$PACKAGE_MANAGER" '[.[] |
@@ -95,9 +96,12 @@ normalize_deps() {
       split(">=") as $parts |
       if ($parts | length) == 1 then
         {binary: ., package: ., manager: $mgr}
-      else
+      elif (($parts[1:] | join(">=")) |
+            test("\\A[0-9]+(\\.[0-9]+){0,2}\\z")) then
         {binary: $parts[0], version: (">=" + ($parts[1:] | join(">="))),
          package: $parts[0], manager: $mgr}
+      else
+        {binary: ., package: ., manager: $mgr}
       end
     else . end]'
 }
