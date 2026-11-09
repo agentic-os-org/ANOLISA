@@ -6,9 +6,9 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
 
 use crate::key::compute_key;
 use crate::store::{MAX_GENERATION, StashError, StashStore, StashWrite};
@@ -20,6 +20,10 @@ const DEFAULT_TTL_SECONDS: u64 = 60 * 60;
 
 /// Default maximum number of live entries before FIFO eviction.
 const DEFAULT_CAPACITY: usize = 10_000;
+
+/// How long one connection waits for locks held by other processes, both
+/// while opening the database and for every later statement.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -71,11 +75,8 @@ impl SqliteStore {
                 })?;
         }
         let mut conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;
-             PRAGMA synchronous=NORMAL;",
-        )?;
+        enable_wal(&conn)?;
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "CREATE TABLE IF NOT EXISTS stash (
@@ -317,6 +318,35 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Switches the connection to WAL within [`BUSY_TIMEOUT`], then leaves that
+/// timeout in place.
+///
+/// Concurrent first openers of a new database can collide while upgrading
+/// journal locks, and SQLite reports that as busy without invoking its busy
+/// handler. Hook processes of concurrent sessions open the stash exactly that
+/// way, and a lost race would leave a process without any stash, so the
+/// switch is retried until the shared deadline.
+fn enable_wal(conn: &Connection) -> Result<(), StashError> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Ok(()) => break,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == ErrorCode::DatabaseBusy && Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +501,30 @@ mod tests {
             h.join().unwrap();
         }
         assert!(store.len() <= 10_000);
+    }
+
+    #[test]
+    fn concurrent_fresh_openers_all_get_a_store() {
+        // Hook processes of concurrent sessions open a new stash database
+        // at the same moment. Every opener must get a store: a lost race
+        // used to fail with "database is locked" and leave that process
+        // without reversible compression.
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("stash.db");
+            let barrier = std::sync::Barrier::new(8);
+            thread::scope(|scope| {
+                for index in 0..8 {
+                    let (path, barrier) = (&path, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let store = SqliteStore::new(path).unwrap();
+                        store.stash(&format!("payload-{index}")).unwrap();
+                    });
+                }
+            });
+            assert_eq!(SqliteStore::new(&path).unwrap().len(), 8);
+        }
     }
 
     #[test]

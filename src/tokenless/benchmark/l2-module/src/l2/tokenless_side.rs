@@ -100,6 +100,7 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         allow_toon: false,
         min_toon_chars: usize::MAX,
         allow_unrecoverable: true,
+        embedded_html: false,
     };
     // Time only the compress call: the envelope handling below is measurement
     // plumbing, not engine work.

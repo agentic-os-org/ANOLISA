@@ -10,11 +10,19 @@
 //! record reduction, truncation, compaction, and Stash payloads with their
 //! spelling and JSON numeric type intact, and no per-number exactness audit
 //! gates the rest of the document.
+//!
+//! String values that carry another content domain, such as an HTML fragment,
+//! can be rewritten in place by that domain's compressor (see [`embedded`]).
+//! The document with those rewrites is a separate candidate, measured before
+//! the lossless early return, so a compact encoding that already saves enough
+//! no longer hides the presentation overhead inside its fields.
 
+mod embedded;
 mod exact;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use embedded::{EmbeddedKind, EmbeddedRouter};
 use exact::{ExactMap, ExactValue};
 use serde_json::Value;
 use tokenless_ccr::{
@@ -69,6 +77,10 @@ pub struct JsonCompressionContext<'a> {
     pub min_toon_chars: usize,
     /// Whether an unrecoverable bounded candidate may displace a lossless one.
     pub allow_unrecoverable: bool,
+    /// Whether HTML embedded in string values may be rendered as Markdown.
+    /// Rewrites also need `stash` and an available `recovery`, because each
+    /// one is backed by the exact original value.
+    pub embedded_html: bool,
 }
 
 /// Stable operations performed inside the JSON domain.
@@ -81,6 +93,9 @@ pub enum JsonOperation {
     RecordReduction,
     /// One or more values were bounded by string, array, or depth limits.
     Truncation,
+    /// String values carrying HTML were rendered as Markdown, each original
+    /// value retrievable from Stash.
+    EmbeddedHtml,
     /// TOON was selected as the final representation.
     Toon,
 }
@@ -93,6 +108,7 @@ impl JsonOperation {
             Self::Cleanup => "json-cleanup",
             Self::RecordReduction => "json-record-reduction",
             Self::Truncation => "json-truncation",
+            Self::EmbeddedHtml => "json-embedded-html",
             Self::Toon => "json-toon",
         }
     }
@@ -122,6 +138,9 @@ pub struct JsonMetrics {
     pub truncations: usize,
     /// Selected truncations without a retrievable marker.
     pub unrecoverable_truncations: usize,
+    /// String values rewritten as an embedded-content view in the selected
+    /// candidate; a value repeated in several slots counts once per slot.
+    pub embedded_rewrites: usize,
 }
 
 /// Complete result of one JSON-domain compression attempt.
@@ -201,17 +220,43 @@ impl JsonCompressor {
         };
 
         let mut full_session = Session::new(&self.config, None, false, context.recovery);
-        let full = build_candidate(
+        let mut lossless = build_candidate(
             source,
             full_session.compress_value(tree, 0),
             &full_session,
             context,
         );
-        if saves_at_least_percent(&full.output, source, LOSSLESS_MIN_SAVINGS_PERCENT) {
-            return Ok(full.into_outcome(Vec::new(), 0));
+
+        // Embedded rewrites omit nothing from the tree, so they extend the
+        // lossless candidate and are weighed before its early return. The
+        // rewritten document must still beat the plain one as a whole, with
+        // every header and recovery instruction counted; when it does not,
+        // its writes become orphans the caller's ledger deletes. Writes are
+        // kept in the order they happened, which the ledger relies on to
+        // tell this run's refreshes from a foreign writer's.
+        let mut router = EmbeddedRouter::new(context);
+        let mut stash_writes = Vec::new();
+        let mut stash_errors = 0;
+        if router.is_some() {
+            let mut session = Session::new(&self.config, None, false, context.recovery);
+            session.embedded = router.take();
+            let transformed = session.compress_value(tree, 0);
+            if session.embedded_rewrites() > 0 {
+                let candidate = build_candidate(source, transformed, &session, context);
+                if strictly_smaller(&candidate.output, &lossless.output) {
+                    lossless = candidate;
+                }
+            }
+            router = session.embedded.take();
+            stash_writes = session.stash_writes;
+            stash_errors = session.stash_errors;
+        }
+        if saves_at_least_percent(&lossless.output, source, LOSSLESS_MIN_SAVINGS_PERCENT) {
+            return Ok(lossless.into_outcome(stash_writes, stash_errors));
         }
 
         let mut bounded_session = Session::new(&self.config, context.stash, true, context.recovery);
+        bounded_session.embedded = router;
         let bounded = build_candidate(
             source,
             bounded_session.compress_value(tree, 0),
@@ -220,17 +265,20 @@ impl JsonCompressor {
         );
         let bounded_is_valid =
             context.allow_unrecoverable || bounded.recoverability != Recoverability::Unrecoverable;
-        let bounded_is_smaller = strictly_smaller(&bounded.output, &full.output);
-        let selected = if bounded_is_smaller && (bounded_is_valid || full.operations.is_empty()) {
+        let bounded_is_smaller = strictly_smaller(&bounded.output, &lossless.output);
+        let selected = if bounded_is_smaller && (bounded_is_valid || lossless.operations.is_empty())
+        {
             // When no lossless operation exists, return the bounded attempt so
             // the outer arbiter can preserve its recoverability-unavailable
             // disposition while still preventing it from reaching the model.
             bounded
         } else {
-            full
+            lossless
         };
 
-        Ok(selected.into_outcome(bounded_session.stash_writes, bounded_session.stash_errors))
+        stash_writes.extend(bounded_session.stash_writes);
+        stash_errors += bounded_session.stash_errors;
+        Ok(selected.into_outcome(stash_writes, stash_errors))
     }
 }
 
@@ -289,6 +337,7 @@ fn build_candidate(
         && !toon_selected
         && session.record_reductions == 0
         && session.truncations == 0
+        && session.embedded_rewrites() == 0
         && compact != baseline
     {
         operations.push(JsonOperation::Cleanup);
@@ -298,6 +347,9 @@ fn build_candidate(
     }
     if transformed_selected && session.truncations > 0 {
         operations.push(JsonOperation::Truncation);
+    }
+    if transformed_selected && session.embedded_html > 0 {
+        operations.push(JsonOperation::EmbeddedHtml);
     }
     if toon_selected {
         operations.push(JsonOperation::Toon);
@@ -311,6 +363,7 @@ fn build_candidate(
             records_omitted: session.records_omitted,
             truncations: session.truncations,
             unrecoverable_truncations: session.unrecoverable_truncations,
+            embedded_rewrites: session.embedded_rewrites(),
         }
     } else {
         JsonMetrics::default()
@@ -597,6 +650,9 @@ struct Session<'a> {
     records_omitted: usize,
     truncations: usize,
     unrecoverable_truncations: usize,
+    /// Routes string values carrying another content domain, when enabled.
+    embedded: Option<EmbeddedRouter<'a>>,
+    embedded_html: usize,
 }
 
 impl<'a> Session<'a> {
@@ -617,16 +673,24 @@ impl<'a> Session<'a> {
             records_omitted: 0,
             truncations: 0,
             unrecoverable_truncations: 0,
+            embedded: None,
+            embedded_html: 0,
         }
     }
 
+    fn embedded_rewrites(&self) -> usize {
+        self.embedded_html
+    }
+
     fn recoverability(&self) -> Recoverability {
-        if self.record_reductions == 0 && self.truncations == 0 {
-            Recoverability::Lossless
-        } else if self.stash.is_some() && self.unrecoverable_truncations == 0 {
+        let bounded = self.record_reductions > 0 || self.truncations > 0;
+        if bounded && (self.stash.is_none() || self.unrecoverable_truncations > 0) {
+            Recoverability::Unrecoverable
+        } else if bounded || self.embedded_rewrites() > 0 {
+            // A rewrite exists only once its original was stashed.
             Recoverability::Retrievable
         } else {
-            Recoverability::Unrecoverable
+            Recoverability::Lossless
         }
     }
 
@@ -660,13 +724,27 @@ impl<'a> Session<'a> {
             // A number is carried through untouched. Its retained literal is the
             // value, so no stage may reserialize it through `serde_json`.
             ExactValue::Null | ExactValue::Bool(_) | ExactValue::Number(_) => value.clone(),
-            ExactValue::String(value) => self.compress_string(value),
+            ExactValue::String(value) => self.compress_string(value, depth),
             ExactValue::Array(value) => self.compress_array(value, depth),
             ExactValue::Object(value) => self.compress_object(value, depth),
         }
     }
 
-    fn compress_string<'doc>(&mut self, value: &str) -> ExactValue<'doc> {
+    fn compress_string<'doc>(&mut self, value: &str, depth: usize) -> ExactValue<'doc> {
+        if let Some(router) = self.embedded.as_mut()
+            && let Some(rewrite) =
+                router.route(value, depth, &mut self.stash_writes, &mut self.stash_errors)
+            // A bounded candidate keeps its string limit. A view over it falls
+            // back to plain truncation, whose marker recovers the original in
+            // one step rather than through a truncated view.
+            && (!self.bounds_enabled
+                || rewrite.value.chars().count() <= self.config.truncate_strings_at)
+        {
+            match rewrite.kind {
+                EmbeddedKind::Html => self.embedded_html += 1,
+            }
+            return ExactValue::String(rewrite.value);
+        }
         if !self.bounds_enabled || value.chars().count() <= self.config.truncate_strings_at {
             return ExactValue::String(value.to_owned());
         }

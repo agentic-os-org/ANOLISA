@@ -514,8 +514,9 @@ pub enum AppliedOperation {
     SearchPathSharing,
     /// Unmodified Git diff context was reduced with the original available in Stash.
     DiffReduction,
-    /// An HTML page was rendered as Markdown with enumerated non-content elements
-    /// removed and the original available in Stash.
+    /// HTML was rendered as Markdown with the original available in Stash: a page,
+    /// with enumerated non-content elements removed, or (with the `json` content
+    /// type) fragments inside JSON string values, with nothing visible removed.
     HtmlExtraction,
     /// JSON was serialized compactly, optionally unwrapping one JSON string
     /// envelope, without omitting payload values.

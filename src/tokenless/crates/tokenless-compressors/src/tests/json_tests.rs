@@ -10,6 +10,7 @@ fn context<'a>(stash: Option<&'a dyn StashStore>) -> JsonCompressionContext<'a> 
         allow_toon: false,
         min_toon_chars: 500,
         allow_unrecoverable: true,
+        embedded_html: false,
     }
 }
 
@@ -1276,6 +1277,7 @@ fn toon_context<'a>(stash: Option<&'a dyn StashStore>) -> JsonCompressionContext
         allow_toon: true,
         min_toon_chars: 0,
         allow_unrecoverable: true,
+        embedded_html: false,
     }
 }
 

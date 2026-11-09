@@ -948,3 +948,41 @@ fn mathml_renders_its_tex_annotation_or_alttext() {
         format!("{PARAGRAPH} Area is $\\pi r^2$ and $x^{{2}}$ and y.")
     );
 }
+
+#[test]
+fn line_breaks_in_code_and_spaces_at_link_edges_keep_words_apart() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><pre>$ make<br>$ make test<br><br>ok</pre>\
+         <pre><div>line one</div><div>line two</div></pre>\
+         <pre><div>a</div>\n<div>b</div></pre><pre>c\n<div>d</div></pre>\
+         <p><kbd>Ctrl<br>Shift</kbd> then click<a href=\"https://example.com/save\" \
+         title=\"Save\"> save</a>.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    // In `pre`, a newline before a block already ends its line: a newline
+    // alone between two blocks shows one blank line, as in a browser.
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n```\n$ make\n$ make test\n\nok\n```\n\n```\nline one\nline two\n```\n\n\
+             ```\na\n\nb\n```\n\n```\nc\nd\n```\n\n\
+             `Ctrl`\n`Shift` then click [save](https://example.com/save)."
+        )
+    );
+}
+
+#[test]
+fn table_footers_render_below_the_body_wherever_they_are_written() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table><tfoot><tr><td>Total</td><td>300</td></tr></tfoot>\
+         <tbody><tr><td>alpha</td><td>100</td></tr></tbody>\
+         <thead><tr><th>Item</th><th>Amount</th></tr></thead></table>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n| Item | Amount |\n| --- | --- |\n| alpha | 100 |\n| Total | 300 |"
+        )
+    );
+}
