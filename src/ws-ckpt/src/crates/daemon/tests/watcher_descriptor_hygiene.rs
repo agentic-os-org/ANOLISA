@@ -19,8 +19,9 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use ws_ckpt_daemon::fs_watcher::WorkspaceWatcher;
+use ws_ckpt_daemon::fs_watcher::{activity_now_ms, WorkspaceWatcher};
 
 const WATCH_LIMIT_PATH: &str = "/proc/sys/fs/inotify/max_user_watches";
 
@@ -117,15 +118,26 @@ fn shape_watch_limit(headroom: u64) -> Option<WatchLimitGuard> {
     })
 }
 
-/// Deadline-poll `flag` until it becomes `want`, panicking after 3s.
-fn eventually_sync(flag: &std::sync::atomic::AtomicBool, want: bool, what: &str) {
-    use std::sync::atomic::Ordering;
+/// Current watermark of `activity`, after waiting until the activity clock
+/// has moved past it: any event observed from now on stamps a strictly
+/// newer value.
+fn baseline(activity: &AtomicU64) -> u64 {
+    let baseline = activity.load(Ordering::Acquire);
+    while activity_now_ms() <= baseline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    baseline
+}
+
+/// Deadline-poll until `activity` moves past `baseline`, panicking after 3s:
+/// the deadline only reports an event that was never delivered.
+fn eventually_past(activity: &AtomicU64, baseline: u64, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while flag.load(Ordering::Acquire) != want {
+    while activity.load(Ordering::Acquire) <= baseline {
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for {what} (flag={})",
-            flag.load(Ordering::Acquire)
+            "timed out waiting for {what} (watermark={}, baseline={baseline})",
+            activity.load(Ordering::Acquire)
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
@@ -199,10 +211,12 @@ async fn failed_outer_registration_keeps_the_nested_watcher_observing() {
     };
     eprintln!("planned failure: {failure:#}");
 
-    // The pre-unwatch survivor latch sets the nested flag `true`; only a
-    // LIVE close observation can clear it again. A write that closes must
-    // therefore end with the flag `false` — proving real event coverage,
-    // not just a published route.
+    // The survivor stamps (before the unwatch and after the re-arm) moved
+    // the nested watermark; only a LIVE event can move it again. A write
+    // that closes must therefore be observed — proving real event
+    // coverage, not just a published route.
+    let nested_activity = nested_watcher.last_activity();
+    let before = baseline(&nested_activity);
     {
         use std::io::Write as _;
         let mut held = fs::OpenOptions::new()
@@ -213,15 +227,15 @@ async fn failed_outer_registration_keeps_the_nested_watcher_observing() {
         held.write_all(b"data").unwrap();
         drop(held);
     }
-    let nested_flag = nested_watcher.is_writing_flag();
-    eventually_sync(
-        &nested_flag,
-        false,
-        "the nested watcher to observe the write close after the failed outer registration",
+    eventually_past(
+        &nested_activity,
+        before,
+        "the nested watcher to observe the write after the failed outer registration",
     );
 
     // And an active writer must not look quiescent through whatever
     // coverage survived the rollback.
+    let before = baseline(&nested_activity);
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let writer = {
         let stop = std::sync::Arc::clone(&stop);
@@ -239,13 +253,12 @@ async fn failed_outer_registration_keeps_the_nested_watcher_observing() {
             }
         })
     };
-    // Wait for the writer's first write to be OBSERVED before probing
-    // quiescence: `check_quiescent` takes a not-writing shortcut to Safe,
-    // and losing the race against the first event delivery would turn the
-    // probe into a flake.
-    eventually_sync(
-        &nested_flag,
-        true,
+    // Wait for the writer to be OBSERVED before probing quiescence, so
+    // the probe exercises live coverage rather than racing the first
+    // event delivery.
+    eventually_past(
+        &nested_activity,
+        before,
         "the nested watcher to observe the active writer",
     );
     let quiescent = nested_watcher.check_quiescent().await;
@@ -328,6 +341,8 @@ async fn failed_survivor_rearm_releases_its_partial_watch_descriptors() {
 
     // The sibling survivor keeps real coverage through the failed
     // re-arm's cleanup: a write that closes must be observed.
+    let b_activity = b_watcher.last_activity();
+    let before = baseline(&b_activity);
     {
         use std::io::Write as _;
         let mut held = fs::OpenOptions::new()
@@ -338,11 +353,10 @@ async fn failed_survivor_rearm_releases_its_partial_watch_descriptors() {
         held.write_all(b"data").unwrap();
         drop(held);
     }
-    let b_flag = b_watcher.is_writing_flag();
-    eventually_sync(
-        &b_flag,
-        false,
-        "the sibling survivor to observe the write close after the failed re-arm cleanup",
+    eventually_past(
+        &b_activity,
+        before,
+        "the sibling survivor to observe the write after the failed re-arm cleanup",
     );
     assert!(
         !b_watcher.is_degraded(),
@@ -384,17 +398,10 @@ async fn failed_ancestor_rearm_keeps_routes_outside_the_original_release_observi
     assert!(p_watcher.is_degraded());
     assert!(!x_watcher.is_degraded());
 
-    // Real coverage, not just a published route: the release latched the
-    // flag, a write close clears it, and a write on a held file sets it.
-    use std::io::Write as _;
-    let x_flag = x_watcher.is_writing_flag();
+    // Real coverage, not just a published route: the release stamped the
+    // watermark synchronously, so only a live event moves it again.
+    let x_activity = x_watcher.last_activity();
+    let before = baseline(&x_activity);
     fs::write(x.join("a.log"), b"data").unwrap();
-    eventually_sync(&x_flag, false, "`x` to observe the write close");
-    let mut held = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(x.join("b.log"))
-        .unwrap();
-    held.write_all(b"data").unwrap();
-    eventually_sync(&x_flag, true, "`x` to observe the held write");
+    eventually_past(&x_activity, before, "`x` to observe the write");
 }

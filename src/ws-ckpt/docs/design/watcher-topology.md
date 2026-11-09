@@ -14,8 +14,10 @@ aimed at maintainers touching `src/crates/daemon/src/fs_watcher.rs` so the
 reasoning does not have to be re-derived from review threads.
 
 Scope note: this is purely the watcher *topology* — how many inotify
-instances exist and how events reach workspaces. The quiescence model (clearable
-latch vs. last-activity window) is a separate concern handled by #4049.
+instances exist and how events reach workspaces. The quiescence model is a
+separate concern (#4049): each route carries a last-activity watermark on a
+monotonic clock, and a check reports `Safe` only after a full 200 ms window
+with no write-relevant event. See "Quiescence model" below.
 
 ## Background and problem
 
@@ -81,9 +83,10 @@ treated as a first-class failure mode, not logged-and-forgotten:
 - **Fail-closed containment.** notify 6.1.1 surfaces `IN_Q_OVERFLOW` as
   `Ok(EventKind::Other)` carrying the rescan flag — it never reaches the
   `Err` arm. `forward_event` detects it, increments the cumulative overflow
-  counter, logs an ERROR, and latches **every** route's write-activity flag to
-  `writing`. Every watched workspace is therefore treated as actively written
-  until quiescence has been re-observed over a fresh quiet period: one noisy
+  counter, logs an ERROR, and stamps **every** route's last-activity
+  watermark with the current time. Every watched workspace is therefore
+  treated as actively written until quiescence has been re-observed over a
+  fresh quiet period: one noisy
   workspace must not be able to make the others look quiescent while the
   kernel was dropping their events.
 - **Observable surface (implemented):**
@@ -120,10 +123,10 @@ With one shared instance that thread serves the whole daemon, so events from
 *every* workspace wait in the kernel queue until the walk finishes.
 
 The hazard is the false `Safe`, not the pause itself. `check_workspace_quiescent`
-decides from what arrived during its final 100 ms quiet period; when that
-window falls inside a walk, the flag keeps the `false` the check itself
-stored and the decision reports `Safe` while the workspace is still being
-written. The per-route coverage epoch cannot detect it: the checked route's
+decides from the events delivered before its quiet window ends; when that
+window falls inside a walk, the watermark stays stale and the decision
+reports `Safe` while the workspace is still being written. The per-route
+coverage epoch cannot detect it: the checked route's
 epoch, degraded mark, and watcher identity are all unchanged, because the
 walk belongs to another workspace.
 
@@ -154,10 +157,10 @@ pause:
   is the barrier that advances the covered sequence. A check refuses to start
   while `auto_add_covered < auto_add_seq`, and a new auto-add event during the
   window voids the decision.
-- **The idle shortcut** (`flag == false` ⇒ `Safe`) is disabled for 250 ms
-  after any registration walk: events generated during the walk may still be
-  queued when the check starts, and silence is not evidence until they have
-  drained.
+- **The idle shortcut** (a full quiet window already elapsed ⇒ `Safe`) is
+  disabled for 250 ms after any registration walk: events generated during
+  the walk may still be queued when the check starts, and silence is not
+  evidence until they have drained.
 
 Both entry points share this observation: `WorkspaceWatcher::check_quiescent`
 and the daemon's `DaemonState::check_workspace_quiescent` call the same
@@ -172,18 +175,51 @@ can still see delayed delivery and, under sustained pressure, the overflow
 handled above. What can no longer happen is a `Safe` decision produced by
 delivery paused for another workspace's walk (#8448).
 
+## Quiescence model (#4049)
+
+Each route carries a last-activity watermark: milliseconds on a monotonic
+clock anchored at process start (`activity_now_ms`), raised with `fetch_max`
+by every Create, Modify, Remove, and `Close(Write)` event. A check is `Safe`
+only when `QUIET_WINDOW_MS` (200 ms) passed since the watermark: it takes
+the idle shortcut when a full window already elapsed, and otherwise sleeps
+one window and re-checks.
+
+- **A close is activity.** The previous model kept one workspace-wide latch
+  that any `CLOSE_WRITE` cleared. When writers overlapped (log rotation or a
+  build step closing a file while an appender kept writing), one close
+  erased the other writer's activity and the next check took the idle
+  shortcut mid-write (#4048).
+- **Checks never mutate the watermark**, so concurrent checks cannot erase
+  each other's evidence.
+- **Monotonic, not wall clock.** A backwards wall-clock step would pin a
+  `fetch_max` watermark in the future (every check refused until the clock
+  catches up); a forwards step would instantly approve an active writer.
+- **Born active.** `WorkspaceWatcher::start` stamps the watermark after the
+  watch is armed, so every creation path (first init, daemon restore,
+  rollback re-arm, heal) observes one full window before its first `Safe`.
+  Writes that landed before the watch existed are invisible to inotify; the
+  first checkpoint after a restart pays one window even when idle.
+- **Residual.** A window cannot tell "a writer paused between bursts" from
+  "a writer finished": write cadences under 200 ms are gated, bursts further
+  apart than a window can be snapshotted between bursts.
+
+The window arithmetic (`observe_once_with`) takes an injected clock and
+wait, so its unit tests run on a test-local manual clock and do not depend
+on how the runtime schedules background tasks. Tests that use real inotify
+only check that an event reaches the watermark.
+
 ## Shared architecture
 
 - **Handle.** `WorkspaceWatcher` owns only its route identity, its
-  write-activity flag, the `(dev, ino)` of the directory the watch was armed
+  last-activity watermark, the `(dev, ino)` of the directory the watch was armed
   on (resolved through the registration symlink before arming — inotify
   watches inodes, so a rollback that swaps the live subvolume behind the path
   is detectable), and a monotonic `watch_seq` for observing re-arms.
-- **Route table.** `routes: RwLock<HashMap<PathBuf, Vec<Arc<AtomicBool>>>>` —
-  a path maps to the flags of the live handles on it (normally one; a re-arm
+- **Route table.** `routes: RwLock<HashMap<PathBuf, Vec<Arc<AtomicU64>>>>` —
+  a path maps to the watermarks of the live handles on it (normally one; a re-arm
   briefly keeps two, which is why the value is a `Vec`). Events are dispatched
   by walking the event path's ancestors, so a write inside an overlapping root
-  flags every containing workspace, matching what per-workspace instances
+  reaches every containing workspace, matching what per-workspace instances
   observed.
 - **Lock discipline.** The `watcher` mutex serializes registration mutations
   and is always acquired before `routes`; `routes` is never write-locked across
@@ -200,16 +236,18 @@ delivery paused for another workspace's walk (#8448).
 - **Overlap-preserving release.** notify 6.1.1 keys one descriptor per path
   and a recursive `unwatch(root)` removes *every* descriptor whose path starts
   with `root` — including descriptors overlapping survivors rely on. Before
-  the first descriptor goes away, `unwatch_preserving_overlaps` latches every
-  overlapping survivor to "writing" and marks its route uncovered; then
-  unwatches; then re-arms each survivor. A failed re-arm keeps the degraded
-  mark (fail closed) and releases its own partial registration with a
-  bounded failure cascade.
+  the first descriptor goes away, `unwatch_preserving_overlaps` stamps every
+  overlapping survivor as just active and marks its route uncovered; then
+  unwatches; then re-arms each survivor. A successful re-arm stamps the
+  survivor again before clearing the mark — like `start`, its quiet window
+  begins only once the recursive walk is done. A failed re-arm keeps the
+  degraded mark (fail closed) and releases its own partial registration with
+  a bounded failure cascade.
 - **Quiescence.** `check_quiescent` fails closed while the route is degraded,
   and snapshots both the per-route coverage epoch and the instance-wide
   registration/auto-add generations before its quiet period: an interruption
   that both started and ended inside the observation window leaves the route
-  healthy again with a silent flag that proves nothing, so any generation
+  healthy again with a stale watermark that proves nothing, so any generation
   moving voids the `Safe` decision. It also refuses to start while a
   registration or auto-add walk is in flight, and disables the idle shortcut
   until queued events have had time to drain.
@@ -224,13 +262,15 @@ Invariants future changes must preserve:
 
 1. All workspace watchers register through the `SharedWatcher`; nothing may
    construct a `notify` watcher for workspace paths directly.
-2. Latch semantics: writing = `true` on Create/Modify/Remove, `false` only on
-   `Close(Write)`.
+2. Activity semantics: Create/Modify/Remove and `Close(Write)` all raise the
+   route's watermark with `fetch_max` on the monotonic `activity_now_ms`
+   clock; nothing lowers or clears it, and a check only reads it.
 3. Fail-closed direction: any doubt about coverage or dropped events resolves
    toward "actively written"; silence must never read as quiescence.
 4. Route publication precedes kernel arming; the last-handle unpublish is
-   atomic with the flag detach.
-5. Any unwatch must preserve overlapping survivors (latch, mark, re-arm).
+   atomic with the watermark detach.
+5. Any unwatch must preserve overlapping survivors (stamp, mark, re-arm,
+   stamp).
 6. `watch_seq` is monotonic per `start`.
 7. `WatcherHealthOk` fields are wire-frozen; changes are additive only.
 8. The `watcher_shared_instance` suite runs in its own test binary on purpose
@@ -253,7 +293,8 @@ Invariants future changes must preserve:
 
 - #7233 — original incident (silent watcher loss at scale).
 - #7669 — per-workspace instances + alert + hard-reject alternative.
-- #4049 — quiescence model (orthogonal to topology).
+- #4048 / #4049 — one writer's close cleared another writer's activity; the
+  last-activity watermark described above.
 - #7592 discussion — same-machine comparison data and the review rounds that
   shaped the overlap and epoch handling.
 - #8448 — false-`Safe` window during registration walks; the registration
