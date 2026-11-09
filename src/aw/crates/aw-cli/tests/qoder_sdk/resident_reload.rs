@@ -87,8 +87,18 @@ fn first_query_policy_update_preserves_launch_receipt() {
 
 #[test]
 fn ordinary_queries_update_hooks_post_and_mcp_after_cleanup() {
+    resident_updates(false);
+}
+
+#[test]
+fn native_application_adopts_resident_policy_without_aw_run() {
+    resident_updates(true);
+}
+
+fn resident_updates(native_start: bool) {
     let f = Fixture::new();
     let mut initial = setup(&f);
+    f.observation(&mut initial, "sdk");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk");
     fs::copy(source.join("resident-reload.mjs"), f.root.join("app.mjs")).unwrap();
     let sdk = f.root.join("node_modules/@qoder-ai/qoder-agent-sdk/dist");
@@ -119,12 +129,43 @@ fn ordinary_queries_update_hooks_post_and_mcp_after_cleanup() {
         json!({"tools":["native:qoder-sdk:mcp__files__read"]});
     save("mcp-deny.json", &mcp);
     let service = Service::start(&f, &initial);
-    let mut command = launch(&f);
+    let mut command = if native_start {
+        fs::copy(
+            source.join("resident-reload.mjs"),
+            f.root.join("resident.mjs"),
+        )
+        .unwrap();
+        fs::copy(source.join("native-start.mjs"), f.root.join("app.mjs")).unwrap();
+        let mut command = Command::new(
+            initial["spec"]["agents"]["sdk"]["argv"][0]
+                .as_str()
+                .unwrap(),
+        );
+        command
+            .arg(f.root.join("app.mjs"))
+            .current_dir(&f.root)
+            .env("HOME", f.root.join("home"))
+            .env("AW_TEST_EXECUTABLE", env!("CARGO_BIN_EXE_aw"))
+            .env("AW_TEST_CONFIG", f.root.join("aw.json"))
+            .env("AW_TEST_WORKER", f.root.join("resident.mjs"));
+        command
+    } else {
+        launch(&f)
+    };
     command
         .env("QODER_TEST_ROOT", &f.root)
         .env("QODER_POST_CASE", "failure");
     assert_eq!(f.successful(command)["passed"], true);
     service.released(&f);
+    if native_start {
+        assert!(!fs::read_dir(f.root.join("state"))
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("native-")));
+    }
 }
 
 #[test]
@@ -199,4 +240,54 @@ fn empty_policies_capture_tool_facts_without_sight_in_both_launch_modes() {
             service.released(&fixture);
         }
     }
+}
+
+#[test]
+fn native_direct_query_and_prewarm_confirm_root_readiness_and_cleanup() {
+    for prewarm_first in [false, true] {
+        native_direct_query(prewarm_first);
+    }
+}
+
+fn native_direct_query(prewarm_first: bool) {
+    let fixture = Fixture::new();
+    let mut document = setup(&fixture);
+    document["spec"]["providers"] = json!({});
+    document["spec"]["events"] = json!({});
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk");
+    fs::copy(
+        source.join("native-start.mjs"),
+        fixture.root.join("app.mjs"),
+    )
+    .unwrap();
+    fs::copy(
+        source.join("native-direct.mjs"),
+        fixture.root.join("direct.mjs"),
+    )
+    .unwrap();
+    let service = Service::start(&fixture, &document);
+    let mut command = Command::new(
+        document["spec"]["agents"]["sdk"]["argv"][0]
+            .as_str()
+            .unwrap(),
+    );
+    command
+        .arg(fixture.root.join("app.mjs"))
+        .current_dir(&fixture.root)
+        .env("HOME", fixture.root.join("home"))
+        .env("AW_TEST_EXECUTABLE", env!("CARGO_BIN_EXE_aw"))
+        .env("AW_TEST_CONFIG", fixture.root.join("aw.json"))
+        .env("AW_TEST_WORKER", fixture.root.join("direct.mjs"));
+    if prewarm_first {
+        command.env("QODER_PREWARM_FIRST", "1");
+    }
+    assert_eq!(fixture.successful(command)["passed"], true);
+    service.released(&fixture);
+    assert!(!fs::read_dir(fixture.root.join("state"))
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("native-")));
 }
