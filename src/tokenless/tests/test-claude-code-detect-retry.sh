@@ -20,7 +20,10 @@
 # first `plugin list`. With settling retries, detect.sh must ride out the
 # race and report ready (exit 0); without retries (scenario 2) the same
 # first execution must fail with exit 2, proving the retries are what fix
-# it. The remaining scenarios pin the plugin probe's retry semantics.
+# it. Both need claude to stay hidden until the provisioner stages it, so
+# a developer host with claude in a system directory skips them (see
+# HOST_CLAUDE). The remaining scenarios pin the plugin probe's retry
+# semantics.
 #
 # GH #3082 reported a second, distinct first-run race: `claude plugin
 # install` writes the marketplace/plugin manifests, but the CLI's plugin
@@ -89,6 +92,15 @@ SLEEP_LOG="$TEST_DIR/sleep-calls.log"
 # Extra seconds the stubbed `sleep` waits beyond what detect.sh asked for
 # (scenario 14: a contended host firing the timer late).
 LATE_WAKE_EXTRA=0
+# The only system directories run_detect lets detect.sh search.
+SYSTEM_PATH="/usr/local/bin:/usr/bin:/bin"
+# Scenarios 1-2 need claude to stay invisible until the provisioner stages the
+# stub. A claude installed in $SYSTEM_PATH cannot be hidden: a system-wide
+# install lands there, and detect.sh prepends /usr/local/bin itself. Resolve
+# it once: a developer host then skips those scenarios instead of failing,
+# while a CI runner fails so that the skip cannot silently drop CI coverage.
+HOST_CLAUDE="$(PATH="$SYSTEM_PATH"; command -v claude || true)"
+SKIP_REASON=""
 
 cleanup() {
     if [ -n "$PROVISIONER_PID" ]; then
@@ -255,11 +267,12 @@ run_detect() { # run_detect <retries> <retry-delay> <plugin-relists> [relist-win
     : >"$CALL_LOG"
     : >"$SLEEP_LOG"
     rm -f "$FLAKY_MARKER" "$LATE_COUNT_FILE"
-    # Inherit only /usr/local/bin:/usr/bin:/bin (detect.sh itself prepends
-    # $HOME/.local/bin): a claude installed elsewhere in the CI PATH must
-    # not leak into the window while the stub is not yet provisioned.
+    # Inherit only $SYSTEM_PATH (detect.sh itself prepends $HOME/.local/bin
+    # and /usr/local/bin): a claude installed elsewhere in the CI PATH must
+    # not leak into the window while the stub is not yet provisioned. One
+    # inside $SYSTEM_PATH cannot be kept out; see HOST_CLAUDE.
     HOME="$FAKE_HOME" \
-    PATH="/usr/local/bin:/usr/bin:/bin" \
+    PATH="$SYSTEM_PATH" \
     CALL_LOG="$CALL_LOG" \
     STUB_MODE_FILE="$STUB_MODE_FILE" \
     FLAKY_MARKER="$FLAKY_MARKER" \
@@ -285,50 +298,58 @@ sleep_calls() {
     grep -c . "$SLEEP_LOG" || true
 }
 
-# --- Scenario 1: the #2512 failure path, with settling retries ------------
-# The claude binary is not yet visible in $HOME/.local/bin when detect.sh
-# starts (first execution right after provisioning); it appears ~0.2s later
-# while detect.sh is still settling (retry delay 0.5s). $HOME/.claude does
-# not exist until the CLI's first `plugin list`. Expect ready (exit 0).
-reset_env
-stage_adapter yes yes
-schedule_claude 0.2
-if ! out="$(run_detect 3 0.5 2)"; then
-    fail "detect.sh should exit 0 (ready) once the settling retries find the claude binary" "$out"
-fi
-finish_provisioner
-grep -qF "installed ($PLUGIN_ID)" <<<"$out" \
-    || fail "plugin should be reported installed after the race settles" "$out"
-grep -qF "claude-code: ready" <<<"$out" \
-    || fail "claude-code should be reported ready after the race settles" "$out"
-# Self-containment: detect.sh must have resolved the isolated stub above,
-# not a runner-installed binary.
-grep -qF "present ($FAKE_BIN/tokenless)" <<<"$out" \
-    || fail "detect.sh should resolve the isolated tokenless stub, not a host binary" "$out"
-# The $HOME/.claude half of the reported race: the config dir is still
-# invisible at probe time. detect.sh must report it as missing without
-# letting that affect readiness (the probe is informational only).
-grep -qF "missing (created on first claude run)" <<<"$out" \
-    || fail "the config-dir probe should have observed the not-yet-created ~/.claude" "$out"
+if [ -n "$HOST_CLAUDE" ]; then
+    # GitHub Actions sets CI=true, on self-hosted runners too.
+    [ -z "${CI:-}" ] \
+        || fail "CI runner has a system-wide claude ($HOST_CLAUDE); scenarios 1-2 would be skipped silently"
+    SKIP_REASON="scenarios 1-2 skipped: host has $HOST_CLAUDE, so the unprovisioned claude cannot be hidden from detect.sh"
+    echo "  skip scenarios 1-2 (host has $HOST_CLAUDE)"
+else
+    # --- Scenario 1: the #2512 failure path, with settling retries ------------
+    # The claude binary is not yet visible in $HOME/.local/bin when detect.sh
+    # starts (first execution right after provisioning); it appears ~0.2s later
+    # while detect.sh is still settling (retry delay 0.5s). $HOME/.claude does
+    # not exist until the CLI's first `plugin list`. Expect ready (exit 0).
+    reset_env
+    stage_adapter yes yes
+    schedule_claude 0.2
+    if ! out="$(run_detect 3 0.5 2)"; then
+        fail "detect.sh should exit 0 (ready) once the settling retries find the claude binary" "$out"
+    fi
+    finish_provisioner
+    grep -qF "installed ($PLUGIN_ID)" <<<"$out" \
+        || fail "plugin should be reported installed after the race settles" "$out"
+    grep -qF "claude-code: ready" <<<"$out" \
+        || fail "claude-code should be reported ready after the race settles" "$out"
+    # Self-containment: detect.sh must have resolved the isolated stub above,
+    # not a runner-installed binary.
+    grep -qF "present ($FAKE_BIN/tokenless)" <<<"$out" \
+        || fail "detect.sh should resolve the isolated tokenless stub, not a host binary" "$out"
+    # The $HOME/.claude half of the reported race: the config dir is still
+    # invisible at probe time. detect.sh must report it as missing without
+    # letting that affect readiness (the probe is informational only).
+    grep -qF "missing (created on first claude run)" <<<"$out" \
+        || fail "the config-dir probe should have observed the not-yet-created ~/.claude" "$out"
 
-# --- Scenario 2 (control): same first execution, retries disabled ---------
-# Without settling retries detect.sh checks once, does not see the binary
-# (provisioning completes only after the check), and must fail exactly like
-# the nightly framework-ready check did: exit 2, missing prerequisites.
-reset_env
-stage_adapter yes yes
-schedule_claude 2
-set +e
-out="$(run_detect 0 0 2)"
-rc=$?
-set -e
-cancel_provisioner
-[ "$rc" -eq 2 ] \
-    || fail "without retries the first execution should exit 2 (missing prerequisites), got $rc" "$out"
-grep -qF "claude CLI" <<<"$out" \
-    || fail "the first execution without retries should mention the claude CLI" "$out"
-grep -qF "missing prerequisites" <<<"$out" \
-    || fail "the first execution without retries should report missing prerequisites" "$out"
+    # --- Scenario 2 (control): same first execution, retries disabled ---------
+    # Without settling retries detect.sh checks once, does not see the binary
+    # (provisioning completes only after the check), and must fail exactly like
+    # the nightly framework-ready check did: exit 2, missing prerequisites.
+    reset_env
+    stage_adapter yes yes
+    schedule_claude 2
+    set +e
+    out="$(run_detect 0 0 2)"
+    rc=$?
+    set -e
+    cancel_provisioner
+    [ "$rc" -eq 2 ] \
+        || fail "without retries the first execution should exit 2 (missing prerequisites), got $rc" "$out"
+    grep -qF "claude CLI" <<<"$out" \
+        || fail "the first execution without retries should mention the claude CLI" "$out"
+    grep -qF "missing prerequisites" <<<"$out" \
+        || fail "the first execution without retries should report missing prerequisites" "$out"
+fi
 
 # --- Scenario 3: absent plugin is reported after bounded re-lists ---------
 # The CLI is installed and `plugin list` works, but the tokenless plugin is
@@ -643,4 +664,8 @@ requested="$(awk '{ total += $1 } END { printf "%.3f", total }' "$SLEEP_LOG")"
 awk -v v="$requested" 'BEGIN { exit !(v <= 3) }' \
     || fail "the 30s backoff should have been clamped to the 3s window (requested ${requested}s)" "$out"
 
-echo "claude-code detect retry test passed"
+if [ -n "$SKIP_REASON" ]; then
+    echo "claude-code detect retry test passed ($SKIP_REASON)"
+else
+    echo "claude-code detect retry test passed"
+fi
