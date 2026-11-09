@@ -1,3 +1,4 @@
+import { registerReload } from './reload.mjs';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -58,9 +59,9 @@ function invoke(api, handler, before, event, context, completion) {
   });
 }
 
-function ready(api, count, degraded) {
+function ready(api, count, degraded, admit) {
   const receipt = api.pluginConfig.ready;
-  api.on('gateway_start', () => {
+  const publish = () => {
     const temporary = `${receipt.path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(temporary, JSON.stringify({
@@ -71,13 +72,18 @@ function ready(api, count, degraded) {
     } finally {
       rmSync(temporary, { force: true });
     }
-  });
+  };
+  api.on('gateway_start', admit ? async () => { await admit(); publish(); } : publish);
 }
 
 export function register(api, sanitizeToolResult) {
   const config = api.pluginConfig;
   if (!config?.binary || !config.binding || !config.ready?.path || !config.ready.token) {
     throw new Error('AW requires a callback binary, binding and readiness receipt');
+  }
+  if (config.reloadable) {
+    ready(api, 2, undefined, registerReload(api, invoke));
+    return;
   }
   let count = 0;
   let degraded;

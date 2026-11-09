@@ -1551,7 +1551,7 @@
       "npm_packages": [
         "openclaw@2026.9.6"
       ],
-      "boundary": "Official plugin loader/SDK/manifest, runtime-scoped result middleware, native policy aliases, Hook ordering and effect adoption; no Gateway or model turn.",
+      "boundary": "Official plugin loader, runtime-scoped result middleware, native policy aliases and Hook adoption. Native Gateway startup uses explicit private preload setup, real local-model tool turns, same-process idle policy updates and confirmed shutdown; no hosted model or messaging consumer.",
       "cases": [
         {
           "name": "hooks",
@@ -1564,6 +1564,52 @@
           "timeout_seconds": 120,
           "report": "tap",
           "tests": 8
+        },
+        {
+          "name": "native-reload",
+          "argv": [
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/openclaw/reload.mjs"
+          ],
+          "timeout_seconds": 120,
+          "report": "tap",
+          "tests": 9
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start",
+            "--model-turn",
+            "--native-start"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "status": "passed",
+                "native_start": true,
+                "model_calls": 4,
+                "proof/idle_policy_updates": 2,
+                "proof/allow_marker_present": true,
+                "proof/deny_marker_absent": true,
+                "bindings_after_exit": 0,
+                "port_closed": true,
+                "original_config_unchanged": true,
+                "persistent_profile_preserved": true
+              }
+            }
+          ]
         }
       ]
     },
