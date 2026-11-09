@@ -22,7 +22,7 @@ on PATH -- no network, no package manager, no root and no real Claude Code
 install. Baseline on a tree without this PR: the python3-less case fails with
 0644 (420 != 384), and so does the backup case.
 
-Usage: python3 src/os-skills/ai/install-claude-code/scripts/test_claude_code_config_permissions.py
+Usage: python3 -m unittest discover -s src/os-skills/tests
 """
 
 import json
@@ -34,7 +34,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-INSTALLER = Path(__file__).resolve().parent / "install-claude-code.sh"
+INSTALLER = (
+    Path(__file__).resolve().parents[1]
+    / "ai"
+    / "install-claude-code"
+    / "scripts"
+    / "install-claude-code.sh"
+)
 
 API_KEY = "sk-test-placeholder-not-a-real-key"
 ROTATED_KEY = "sk-old-placeholder-not-a-real-key"
