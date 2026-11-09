@@ -267,6 +267,49 @@ fn rpm_assets_gate_capability_and_route_lifecycle_through_one_backend() {
 }
 
 #[test]
+fn erase_guard_sees_every_spelling_of_the_cosh_login_shell() {
+    for shell in [
+        "/usr/bin/cosh",
+        "/bin/cosh",
+        "/usr/bin/cosh-login",
+        "/bin/cosh-login",
+    ] {
+        assert!(is_cosh_login_shell(shell), "{shell}");
+        assert!(
+            check_state(&[], &[account(shell)], false).is_err(),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
+fn erase_guard_ignores_unrelated_and_lookalike_shells() {
+    for shell in [
+        "/bin/bash",
+        "/usr/bin/zsh",
+        "/usr/bin/cosh-wrapper",
+        "/usr/bin/cosh-login-wrapper",
+    ] {
+        assert!(!is_cosh_login_shell(shell), "{shell}");
+        assert!(
+            check_state(&[], &[account(shell)], false).is_ok(),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
+fn erase_guard_blocks_when_any_account_uses_a_cosh_login_shell() {
+    let accounts = [
+        account("/bin/bash"),
+        account("/bin/cosh"),
+        account("/usr/bin/cosh-login"),
+    ];
+    assert!(check_state(&[], &accounts, false).is_err());
+    assert!(check_state(&[], &accounts, true).is_ok());
+}
+
+#[test]
 fn unknown_target_refuses_managed_records_before_any_package_transaction() {
     for phase in [Phase::Prepared, Phase::Applied, Phase::Conflict] {
         assert!(check_state(&[record(phase)], &[account(COSH_PATH)], false).is_err());
