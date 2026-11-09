@@ -5,8 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 
-export function configuration() {
-  const config = JSON.parse(readFileSync(process.env.AW_NATIVE_CONFIG, "utf8"));
+export function configuration(config = JSON.parse(readFileSync(process.env.AW_NATIVE_CONFIG, "utf8"))) {
   for (const key of ["executable", "binding", "ready_path", "ready_token"]) {
     if (typeof config[key] !== "string" || !config[key])
       throw new Error(`Missing AW ${key}`);
@@ -127,8 +126,8 @@ function validateReplacement(result, replacement) {
 }
 
 /** Install after createAgentSession returns; resolve durable session identity at each preparation. */
-export function installSessionBridge(session, scope = null) {
-  const config = { ...configuration(), scope };
+export function installSessionBridge(session, scope = null, policy = configuration()) {
+  const config = { ...configuration(policy), scope };
   const agent = session.agent;
   if (!agent || typeof session.sessionManager?.getSessionId !== "function") {
     throw new Error("AW requires a Pi Coding AgentSession");

@@ -1094,6 +1094,10 @@
     "qoder-sdk-native-direct-ready": {
       "target": "aw-cli/test/qoder_sdk",
       "test": "resident_reload::native_direct_query_and_prewarm_confirm_root_readiness_and_cleanup"
+    },
+    "pi-native-arguments": {
+      "target": "aw-cli/test/pi",
+      "test": "native_update::native_entrypoints_preserve_configured_application_arguments"
     }
   },
   "agents": {
@@ -1367,7 +1371,8 @@
         "resident-bridge-expiry",
         "resident-bridge-generation",
         "pi-submission-cancel",
-        "pi-submission-entrypoint"
+        "pi-submission-entrypoint",
+        "pi-native-arguments"
       ],
       "security": [
         "security-retry",
