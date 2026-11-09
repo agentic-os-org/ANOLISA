@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--aw", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--native-start", action="store_true")
     args = parser.parse_args()
     assert version("agentscope") == "2.0.6"
     output = args.output.resolve()
@@ -34,7 +35,7 @@ def main():
                 "daemon": {"startup": "external", "endpoint": "auto", "state_dir": str(root / "state")},
                 "execution": {"guarantee": "native_hook", "default_event_budget_ms": 5000},
                 "audit": {"enabled": True, "payload": "metadata_only"},
-                "agents": {"sdk": {"adapter": "agentscope", "argv": [sys.executable, str(fixture / "idle_worker.py")]}},
+                "agents": {"sdk": {"adapter": "agentscope", "argv": [sys.executable, str(fixture / ("native_start.py" if args.native_start else "idle_worker.py"))]}},
                 "providers": {}, "events": {}}}
         blocked = copy.deepcopy(document)
         blocked["spec"]["providers"]["deny"] = {"protocol": "native-hook/v1alpha1", "transport": {
@@ -56,7 +57,9 @@ def main():
 
         def update(value, busy=False):
             save(candidate, value)
-            completed = subprocess.run([aw, "update", "--config", config, "--agent", "sdk", "--policy", candidate],
+            command = ([aw, "instance", "update", "--instance", status()["instances"][0]["instance_id"]]
+                       if args.native_start else [aw, "update", "--agent", "sdk"])
+            completed = subprocess.run([*command, "--config", config, "--policy", candidate],
                                        env=env, capture_output=True, text=True, timeout=15)
             assert (completed.returncode != 0) == busy, completed
             if busy:
@@ -81,7 +84,11 @@ def main():
         try:
             daemon = processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", root / "state"])
             await_condition(lambda: (root / "state/aw.sock").exists(), 10, "service startup")
-            worker = processes.start("worker", [aw, "run", "--config", config, "--agent", "sdk"])
+            if args.native_start:
+                env.update(AW_TEST_EXECUTABLE=str(aw), AW_TEST_CONFIG=str(config))
+                worker = processes.start("worker", [sys.executable, fixture / "native_start.py"])
+            else:
+                worker = processes.start("worker", [aw, "run", "--config", config, "--agent", "sdk"])
             await_condition(lambda: (root / "worker-ready").exists() or processes.exited(worker), 30, "factory ready")
             assert not processes.exited(worker)
             identity = status()["instances"][0]["process"]
@@ -115,8 +122,10 @@ def main():
             (root / "stop-worker").touch()
             await_condition(lambda: processes.exited(worker), 15, "worker exit")
             assert status()["bindings"] == 0
+            if args.native_start:
+                assert not list((root / "state").glob("native-*"))
             save(output / "result.json", {"sdk_version": version("agentscope"), "turns": 7,
-                "updates": len(results), "busy_rejections": 2, "executed": executed(), "same_worker": True})
+                "updates": len(results), "busy_rejections": 2, "executed": executed(), "same_worker": True, "native_start": args.native_start})
             save(output / "updates.json", results)
         finally:
             processes.close()

@@ -59,6 +59,58 @@ retry avoids double compression even with a new call ID. See [Tokenless behavior
 for text-slot eligibility, failure handling and telemetry configuration. Invalid
 final-response replacement directives report failure and retain the original result.
 
+## Start from the application
+
+A Python application can prepare its own AW instance before importing `AwBridge`
+and continue to use its normal startup command. The existing service must use
+this application's `aw.yaml`, with an `agentscope` target selecting the same
+Python environment and entrypoint. Add this preparation once and restart the
+application:
+
+```python
+import json
+import os
+import subprocess
+import sys
+
+instance = json.loads(subprocess.check_output(
+    ["aw", "instance", "prepare", "--agent", "agentscope"],
+    text=True, timeout=30,
+))
+os.environ.update(instance["environment"])
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+from aw_agentscope import AwBridge
+```
+
+Construct every protected Agent with `AwBridge().create_agent(...)`, as above.
+Readiness follows actual Agent construction; preparation alone does not mark the
+worker ready. Preparation or factory failures must stop protected dispatch.
+
+From the directory containing `aw.yaml`, start the application normally. Use
+another terminal to inspect it and apply changes from the same configuration:
+
+```bash
+python /absolute/application/worker.py
+aw status --config aw.yaml
+aw instance update --agent agentscope
+```
+
+Pause new replies and fully drain active replies before updating. The next reply
+adopts the updated input and tool routes through the existing resident factory.
+For multiple workers, select one with `aw instance update --instance INSTANCE`.
+After all reply streams and execution leases close, release the instance in the
+application's `finally` block:
+
+```python
+subprocess.run(
+    ["aw", "instance", "release", "--binding", instance["binding"]],
+    check=True, timeout=10,
+)
+```
+
+Each OS worker prepares its own instance after fork and constructs its own bridge.
+A bridge or prepared binding inherited from a parent process cannot admit work.
+
 ## Check user input before a reply
 
 Enable `input.submit` in the [lifecycle configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
