@@ -253,6 +253,8 @@ def test_sandbox_manager_can_inject_tokenless_binaries(tmp_path: Path) -> None:
     )
     assert "allow" not in data["plugins"]
     assert data["plugins"]["entries"]["tokenless"]["enabled"] is True
+    # The activation evidence reads markers the plugin prints only when verbose.
+    assert data["plugins"]["entries"]["tokenless"]["config"] == {"verbose": True}
     injected_tokenless = spec.workspace_root / ".runner" / "tokenless" / "bin" / "tokenless"
     assert injected_tokenless.is_file()
     assert not injected_tokenless.is_symlink()
