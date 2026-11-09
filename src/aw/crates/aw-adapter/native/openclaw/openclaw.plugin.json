@@ -8,6 +8,7 @@
     "additionalProperties": false,
     "required": ["binary", "binding", "ready", "hooks"],
     "properties": {
+      "reloadable": { "type": "boolean" },
       "binary": { "type": "string", "minLength": 1 },
       "binding": { "type": "string", "minLength": 1 },
       "ready": {

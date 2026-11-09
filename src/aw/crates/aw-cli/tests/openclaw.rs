@@ -17,6 +17,9 @@ use std::{
 };
 use support::{Fixture, Service};
 
+#[path = "openclaw/native_update.rs"]
+mod native_update;
+
 fn source(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/openclaw")
@@ -357,7 +360,9 @@ fn plugin_node_contract_tests_pass() {
     let mut command = Command::new("node");
     command
         .arg("--test")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/openclaw.mjs"));
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/openclaw.mjs"))
+        .arg(source("startup.mjs"))
+        .arg(source("reload.mjs"));
     let output = fixture.run(command);
     assert!(
         output.status.success(),

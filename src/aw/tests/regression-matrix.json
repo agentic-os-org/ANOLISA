@@ -1102,6 +1102,14 @@
     "qwenpaw-startup-readiness": {
       "target": "aw-cli/test/qwenpaw",
       "test": "native_startup_fences_requests_until_plugin_ready"
+    },
+    "openclaw-native-retry": {
+      "target": "aw-cli/test/openclaw",
+      "test": "native_update::native_gateway_keeps_tokenless_retry_arguments_and_rechecks_fresh_calls"
+    },
+    "openclaw-native-startup-contract": {
+      "target": "aw-cli/test/openclaw",
+      "test": "native_update::native_gateway_checks_launch_identity_and_completed_run_replay"
     }
   },
   "agents": {
@@ -1303,7 +1311,9 @@
         "native-event-generation",
         "native-event-final-admission",
         "native-release-update-race",
-        "native-owner-update-race"
+        "native-owner-update-race",
+        "openclaw-native-retry",
+        "openclaw-native-startup-contract"
       ],
       "security": [
         "security-retry",
@@ -1313,7 +1323,8 @@
       "tokenless": [
         "final-replacement",
         "scope-openclaw-names",
-        "scope-openclaw-completion"
+        "scope-openclaw-completion",
+        "openclaw-native-retry"
       ]
     },
     "pi": {

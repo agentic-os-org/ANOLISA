@@ -18,6 +18,7 @@ pub struct Asset {
 /// Reject SDK factories and native applications without a verified startup seam.
 pub fn asset(adapter: &str) -> Result<Asset> {
     let (bytes, python): (&[u8], bool) = match adapter {
+        "openclaw" => (include_bytes!("../native/openclaw/startup.mjs"), false),
         "qwenpaw" => (include_bytes!("../native/qwenpaw/startup.py"), true),
         _ => return Err("startup setup requires OpenClaw, Hermes or QwenPaw".into()),
     };

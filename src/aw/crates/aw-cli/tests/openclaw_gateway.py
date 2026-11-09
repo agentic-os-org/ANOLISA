@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bound an official Gateway registration and synthetic native dispatch probe.
+"""Run an owned official Gateway with synthetic hooks or local-model Agent turns.
 
-No model, cloud credentials, existing Gateway or messaging consumer is used.
-The native runner receives fixture tool events; this is not a model-turn test.
+Native-start mode additionally verifies policy updates between completed turns.
+No cloud credentials, existing Gateway or messaging consumer is used.
 """
 import argparse
 import json
@@ -22,12 +22,15 @@ import uuid
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", type=Path, required=True)
-    parser.add_argument("--node", type=Path, required=True)
+    parser.add_argument("--node", type=Path, default=Path(shutil.which("node") or "node"))
     parser.add_argument("--aw", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-turn", action="store_true")
     parser.add_argument("--compile-cache", action="store_true")
+    parser.add_argument("--native-start", action="store_true")
     args = parser.parse_args()
+    if args.native_start and not args.model_turn:
+        parser.error("--native-start currently requires --model-turn")
     args.output.mkdir(parents=True, exist_ok=True)
     runtime = Path(tempfile.mkdtemp(prefix="aw-oc-gateway-"))
     records = []
@@ -203,11 +206,22 @@ export default { id:'aw-existing-fixture',register(api){
         while not (state / "aw.sock").exists():
             assert daemon.poll() is None and time.monotonic()<deadline,"fixture daemon did not become ready"
             time.sleep(0.05)
-        gateway = start("gateway",[args.aw,"run","--config",config_file,"--agent","openclaw",
-                         "--native-settings",native_file,"--native-state-dir",profile],environment)
+        if args.native_start:
+            prepared = subprocess.run([str(args.aw), "instance", "setup", "--config", str(config_file),
+                "--agent", "openclaw", "--directory", str(runtime / "startup"),
+                "--native-settings", str(native_file), "--native-state-dir", str(profile)],
+                cwd=runtime, env=environment, capture_output=True, timeout=15, check=True)
+            startup_environment = {**environment, **json.loads(prepared.stdout)["environment"]}
+            gateway = start("gateway", config["spec"]["agents"]["openclaw"]["argv"], startup_environment)
+        else:
+            gateway = start("gateway",[args.aw,"run","--config",config_file,"--agent","openclaw",
+                             "--native-settings",native_file,"--native-state-dir",profile],environment)
         deadline = time.monotonic()+50
-        while ("AW openclaw native hooks ready" not in (args.output / "gateway.log").read_text()
-               or (not args.model_turn and not (runtime / "proof.json").exists())):
+        def ready() -> bool:
+            if args.native_start:
+                return any(state.glob("native-*/ready.json"))
+            return "AW openclaw native hooks ready" in (args.output / "gateway.log").read_text()
+        while not ready() or (not args.model_turn and not (runtime / "proof.json").exists()):
             assert gateway.poll() is None and time.monotonic()<deadline,"fixture Gateway did not become ready and produce a proof"
             time.sleep(0.1)
         if args.model_turn:
@@ -215,6 +229,13 @@ export default { id:'aw-existing-fixture',register(api){
                 client = start("agent-"+label.lower(),[args.node,args.package / "openclaw.mjs","agent","--session-id",str(uuid.uuid4()),
                     "--thinking","off","--timeout","25","--json","--message",label],environment)
                 assert client.wait(timeout=35)==0,"local fixture Agent turn failed"
+                if args.native_start:
+                    config["spec"]["providers"]["policy"]["timeout_ms"] -= 10
+                    write(config_file, config)
+                    update = subprocess.run([str(args.aw), "instance", "update", "--config", str(config_file),
+                        "--agent", "openclaw"], cwd=runtime, env=environment,
+                        capture_output=True, timeout=15, check=False)
+                    assert update.returncode == 0, update.stderr.decode()
             deadline = time.monotonic()+8
             while not (runtime / "barrier-after-two").exists() and time.monotonic()<deadline:
                 time.sleep(0.05)
@@ -228,7 +249,7 @@ export default { id:'aw-existing-fixture',register(api){
             assert len([row for row in native_rows if row["hook"]=="before_tool_call"])==2,native_rows
             assert len([row for row in native_rows if row["hook"]=="after_tool_call"])==4,native_rows
             proof = {"status":"passed","kind":"official Agent turns with a local model fixture","commands":commands,
-                     "cloud_model_calls":0,"native_after_calls":4,"native_before_calls":2,
+                     "cloud_model_calls":0,"native_after_calls":4,"native_before_calls":2,"idle_policy_updates":2 if args.native_start else 0,
                      "allow_marker_present":True,"deny_marker_absent":True}
             write(runtime / "proof.json",proof)
         else:
@@ -251,7 +272,7 @@ export default { id:'aw-existing-fixture',register(api){
             assert probe.connect_ex(("127.0.0.1",port))!=0,"owned Gateway port remains open"
         for name in ("proof.json","existing.jsonl","raw-calls.jsonl"):
             shutil.copyfile(runtime / name,args.output / name)
-        result.update(status="passed",proof=proof,original_config_unchanged=True,
+        result.update(status="passed",proof=proof,native_start=args.native_start,original_config_unchanged=True,
                       persistent_profile_preserved=True,bindings_after_exit=0,port_closed=True)
     finally:
         for child, record in reversed(children):

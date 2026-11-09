@@ -23,7 +23,14 @@ if "method" in request:
                                {"name": "record", "events": ["tool.after"], "effects": ["observe"]}]
     elif request["method"] == "invoke":
         reply["input_digest"] = request["input_digest"]
-        reply["effects"] = [{"type": "block", "reason_code": "fixture"}] if request["event"]["name"] == "tool.before" and "DENY" in request["event"]["tool"]["input"]["command"] else []
+        command = request["event"]["tool"]["input"]["command"]
+        reply["effects"] = [{"type": "block", "reason_code": "fixture"}] if request["event"]["name"] == "tool.before" and "DENY" in command else []
+        if args.behavior == "retry" and command == "original":
+            corrected = {"command": "rtk git status --short", "cwd": "/work tree"}
+            reply["effects"] = [{"type": "block", "reason_code": "tokenless_retry", "text":
+                                "[tokenless:rewrite] Retry this tool with arguments: " + json.dumps(corrected)}]
+        elif args.behavior == "retry-security" and command == "rtk git status --short":
+            reply["effects"] = [{"type": "block", "reason_code": "security_denied", "text": "Corrected call denied by security"}]
     print(json.dumps(reply))
     sys.exit(0)
 

@@ -60,3 +60,46 @@ fn python_setup_is_explicit_private_and_preserves_existing_startup() {
     );
     assert!(!fixture.root.join("state").exists());
 }
+
+#[test]
+fn node_setup_quotes_preload_paths_and_keeps_native_settings() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["agents"] =
+        json!({"native":{"adapter":"openclaw","argv":["openclaw","gateway","run"]}});
+    fixture.save(&document);
+    let settings = fixture.root.join("openclaw.json");
+    fs::write(&settings, "{\"user\":true}\n").unwrap();
+    let state = fixture.root.join("native-state");
+    fs::create_dir(&state).unwrap();
+    let mut command = fixture.command();
+    command
+        .args(["instance", "setup", "--config"])
+        .arg(fixture.root.join("aw.json"))
+        .args(["--agent", "native", "--directory"])
+        .arg(fixture.root.join("startup space"))
+        .arg("--native-settings")
+        .arg(&settings)
+        .arg("--native-state-dir")
+        .arg(&state)
+        .env("NODE_OPTIONS", "--no-warnings");
+    let receipt = fixture.successful(command);
+    let mut node = std::process::Command::new("node");
+    node.arg("--version");
+    for (name, value) in receipt["environment"].as_object().unwrap() {
+        node.env(name, value.as_str().unwrap());
+    }
+    assert!(receipt["environment"]["NODE_OPTIONS"]
+        .as_str()
+        .unwrap()
+        .starts_with("--no-warnings "));
+    let result = fixture.run(node);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_to_string(settings).unwrap(), "{\"user\":true}\n");
+    assert_eq!(fs::read_dir(state).unwrap().count(), 0);
+    assert!(!fixture.root.join("state").exists());
+}

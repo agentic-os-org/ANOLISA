@@ -195,6 +195,10 @@ impl PreparedLaunch for Prepared {
             "openclaw-plugin/openclaw.plugin.json",
             include_bytes!("../../native/openclaw/openclaw.plugin.json"),
         )?;
+        context.files.write(
+            "openclaw-plugin/reload.mjs",
+            include_bytes!("../../native/openclaw/reload.mjs"),
+        )?;
         let ready = context.files.directory().join("ready.json");
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
@@ -265,8 +269,15 @@ impl PreparedLaunch for Prepared {
             json!({"enabled":true,"config":{
                 "binary":context.executable,"binding":context.binding_path,
                 "ready":{"path":ready,"token":token},"hooks":hooks,
+                "reloadable":self.input.options.reloadable,
             }}),
         );
+        if self.input.options.reloadable {
+            // The native request gate is conversation-scoped; only the AW entry
+            // receives permission in this private overlay.
+            entries.get_mut(PLUGIN).ok_or("missing AW plugin entry")?["hooks"] =
+                json!({"allowConversationAccess":true});
+        }
         let settings_path = context
             .files
             .write("openclaw.json", &serde_json::to_vec(&settings)?)?;
@@ -287,6 +298,12 @@ impl PreparedLaunch for Prepared {
             .environment
             .insert("NODE_DISABLE_COMPILE_CACHE".into(), "1".into());
         let provider_environment = command.environment.clone();
+        if self.input.options.reloadable {
+            events = crate::reload::routes();
+            for event in events.values_mut() {
+                event.budget_ms = MAX_BUDGET_MS;
+            }
+        }
         let hook_count = events.values().map(|event| event.steps.len()).sum();
         Ok(LaunchPlan {
             command,
