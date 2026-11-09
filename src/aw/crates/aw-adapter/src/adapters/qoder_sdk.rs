@@ -37,10 +37,6 @@ impl Adapter for QoderSdk {
         input: LaunchInput,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<Box<dyn PreparedLaunch>> {
-        if !input.options.reloadable && adapter::observation_enabled(&input.document, &input.target)
-        {
-            return Err("AW resident Qoder SDK does not support AgentSight evidence; set evidence.mode to off".into());
-        }
         if input.options.settings.is_some()
             || input.options.profile.is_some()
             || input.options.state_dir.is_some()

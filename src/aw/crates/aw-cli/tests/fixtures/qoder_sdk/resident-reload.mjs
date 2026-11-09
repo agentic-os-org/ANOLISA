@@ -19,7 +19,11 @@ const status = () => {
 };
 const update = (name, busy = false) => {
   const previous = status().policy_revision;
-  const result = aw(["update", "--socket", binding.socket, "--agent", "sdk", "--policy", path.resolve(name)]);
+  const command = process.env.AW_TEST_CONFIG
+    ? ["instance", "update", "--config", process.env.AW_TEST_CONFIG,
+      "--instance", binding.binding.instance_id]
+    : ["update", "--socket", binding.socket, "--agent", "sdk"];
+  const result = aw([...command, "--policy", path.resolve(name)]);
   if (busy) {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /busy/);
@@ -42,6 +46,16 @@ try {
   update("deny.json");
   open = await create();
   assert.equal((await runFixture()).denied, true, "new Query must execute newly added scan");
+  const evidenceStatus = JSON.parse(aw(["service", "status", "--socket", binding.socket]).stdout).result;
+  const observed = evidenceStatus.observations.find(item => item.callbacks > 0);
+  assert(observed, "configured resident callbacks must reach task-owned observation");
+  assert.notEqual(observed.instance_id, binding.binding.instance_id);
+  assert.equal(observed.association.status, "verified");
+  assert(observed.association.session_id);
+  assert(observed.association.tool_call_id);
+  assert.equal(observed.coverage, "unknown");
+  assert(observed.gaps.includes("source_process_identity_unavailable"));
+
   assert.equal(state.query.options.hooks.PreToolUse.at(-1).timeout, 5.2,
     "native timeout must use the new 1200ms policy budget");
   await open.close();

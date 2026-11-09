@@ -80,22 +80,13 @@ printf '{"global":{"entry":"%s/sdk.mjs","version":"1.0.57","worker_version":"1.1
 }
 
 #[test]
-fn resident_observation_fails_before_native_preparation() {
+fn resident_observation_preserves_the_resident_factory() {
     for evidence in [json!({}), json!({"mode": "auto"})] {
         let fixture = Fixture::new();
-        let error = QoderSdk
-            .prepare(
-                fixture.input(Some(evidence), false),
-                &AtomicBool::new(false),
-            )
-            .err()
-            .expect("resident evidence must fail admission");
-        assert!(error
-            .to_string()
-            .contains("resident Qoder SDK does not support AgentSight evidence"));
-        assert!(error.to_string().contains("evidence.mode to off"));
-        assert!(!fixture.root.path().join("probed").exists());
-        assert!(!fixture.root.path().join("launch").exists());
+        let config = fixture.prepare_and_configure(Some(evidence), false);
+        assert_eq!(config["resident"], true);
+        assert_eq!(config["reloadable"], false);
+        assert_eq!(config["resident_policy_reload"], true);
     }
 }
 

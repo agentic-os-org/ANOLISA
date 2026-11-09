@@ -89,6 +89,43 @@ Query 尝试过原生 `Read` 后，Worker 可能保留动态发现的 Skill，�
 被拒绝或空闲更新策略的情况。必需检查应新建 Query，或从创建时使用
 `settingSources: ["user"]`。
 
+## 由应用自行启动
+
+Node 应用可以自行准备 AW 实例，保留原来的启动命令。首次接入时，在导入桥接模块、
+创建 daemon 或 Query 前加入以下代码。AW Service 应已使用同一份 `aw.yaml` 启动，
+其中 `sdk` 目标配置本应用的 Node 可执行文件和入口。
+
+```javascript
+import { execFileSync } from "node:child_process";
+
+const instance = JSON.parse(execFileSync("aw", [
+  "instance", "prepare", "--agent", "sdk",
+], { encoding: "utf8", timeout: 30000, maxBuffer: 1048576 }));
+Object.assign(process.env, instance.environment);
+```
+
+接着使用上文的受管工厂。准备阶段返回待就绪实例，`startDaemon()` 或完成初始化的
+`createQuery()` 确认原生接线就绪。准备失败时停止启动。所有受保护的新建、恢复 Query
+均须通过返回的桥接模块创建；尚未接入的运行中应用需要重启一次。
+
+在 `aw.yaml` 所在目录启动应用：
+
+```bash
+node /absolute/application/worker.mjs
+aw status --config aw.yaml
+aw instance update --agent sdk
+```
+
+在另一个终端执行状态和更新命令。修改 `aw.yaml` 后，暂停新建 Query、关闭现有 Query，
+再执行更新。多个 worker 使用 `aw instance update --instance INSTANCE` 明确选择实例。
+两种启动方式沿用相同的常驻策略、原生配置和清理规则。所有 Query 关闭、daemon 停止后，
+在应用的 `finally` 中释放准备的实例：
+
+```javascript
+execFileSync("aw", ["instance", "release", "--binding", instance.binding],
+  { encoding: "utf8", timeout: 10000 });
+```
+
 ## 原生配置
 
 普通常驻 Query 保留原生 user/project/local 配置源、未知字段、插件路径、MCP 配置、

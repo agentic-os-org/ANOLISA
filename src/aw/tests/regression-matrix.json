@@ -1090,6 +1090,10 @@
     "native-owner-update-race": {
       "target": "aw-service/lib/aw_service",
       "test": "runtime::registration::tests::native::native_owner_exit_during_activation_audit_keeps_previous_policy"
+    },
+    "qoder-sdk-native-direct-ready": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "resident_reload::native_direct_query_and_prewarm_confirm_root_readiness_and_cleanup"
     }
   },
   "agents": {
@@ -1617,7 +1621,8 @@
         "resident-policy-deadline",
         "resident-bridge-isolation",
         "resident-bridge-expiry",
-        "resident-bridge-generation"
+        "resident-bridge-generation",
+        "qoder-sdk-native-direct-ready"
       ],
       "security": [
         "security-retry",

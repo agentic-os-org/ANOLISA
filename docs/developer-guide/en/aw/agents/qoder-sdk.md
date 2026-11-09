@@ -92,6 +92,48 @@ With project sources enabled, later Skill checks return `skill_resolution_error`
 including after failed/denied reads or idle policy updates. Start a new Query or
 use `settingSources: ["user"]` from Query creation for required Skill checks.
 
+## Start from the application
+
+A Node application can prepare its own AW instance and keep its normal startup
+command. Add the following once, before importing the bridge and creating a
+daemon or Query. The existing service must use the same `aw.yaml`; its `sdk`
+target must describe this application's Node executable and entrypoint.
+
+```javascript
+import { execFileSync } from "node:child_process";
+
+const instance = JSON.parse(execFileSync("aw", [
+  "instance", "prepare", "--agent", "sdk",
+], { encoding: "utf8", timeout: 30000, maxBuffer: 1048576 }));
+Object.assign(process.env, instance.environment);
+```
+
+Continue through the managed factories above. Preparation returns a pending
+instance; `startDaemon()` or initialized `createQuery()` confirms native readiness.
+Keep preparation failures fatal. Every protected Query must use the returned
+bridge, including new and resumed Queries. An application already running without
+that integration needs one restart.
+
+From the directory containing `aw.yaml`, start and inspect the application:
+
+```bash
+node /absolute/application/worker.mjs
+aw status --config aw.yaml
+aw instance update --agent sdk
+```
+
+Run the status and update commands in another terminal. Edit `aw.yaml` before
+updating; pause Query creation and close active Queries first. Multiple workers
+require `aw instance update --instance INSTANCE` to select one explicitly.
+The same resident policy, native configuration and cleanup rules apply to both
+startup modes. After closing all Queries and stopping the daemon, release the
+prepared instance in the application's `finally` block:
+
+```javascript
+execFileSync("aw", ["instance", "release", "--binding", instance.binding],
+  { encoding: "utf8", timeout: 10000 });
+```
+
 ## Native configuration
 
 Ordinary resident Queries retain native user/project/local settings, unknown keys,
