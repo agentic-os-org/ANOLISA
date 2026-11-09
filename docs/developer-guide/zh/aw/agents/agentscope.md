@@ -50,6 +50,53 @@ sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩�
 故障处理和遥测配置见
 [Tokenless 行为](../../../../user-guide/zh/aw/tokenless.md)。无效的最终响应替换指令会报告故障并保留原结果。
 
+## 由应用自行启动
+
+Python 应用可以在导入 `AwBridge` 前自行准备 AW 实例，保留原来的启动命令。
+AW Service 应已使用本应用的 `aw.yaml` 启动，其中 `agentscope` 目标选择相同的
+Python 环境和入口。首次接入加入以下代码，然后重启应用：
+
+```python
+import json
+import os
+import subprocess
+import sys
+
+instance = json.loads(subprocess.check_output(
+    ["aw", "instance", "prepare", "--agent", "agentscope"],
+    text=True, timeout=30,
+))
+os.environ.update(instance["environment"])
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+from aw_agentscope import AwBridge
+```
+
+按上文使用 `AwBridge().create_agent(...)` 构造每个受保护的 Agent。
+实际 Agent 构造完成后才确认就绪；仅准备实例不会将 worker 标记为 Ready。
+准备或工厂失败时停止受保护任务的调度。
+
+在 `aw.yaml` 所在目录正常启动应用。在另一个终端检查实例，并从同一份配置应用更新：
+
+```bash
+python /absolute/application/worker.py
+aw status --config aw.yaml
+aw instance update --agent agentscope
+```
+
+更新前暂停新回复，并完整排空已有回复。下一次回复通过既有常驻工厂采用更新后的输入和工具路由。
+多个 worker 使用 `aw instance update --instance INSTANCE` 选择一个实例。
+所有回复流和执行租约关闭后，在应用的 `finally` 中释放实例：
+
+```python
+subprocess.run(
+    ["aw", "instance", "release", "--binding", instance["binding"]],
+    check=True, timeout=10,
+)
+```
+
+每个 OS worker 在 fork 后分别准备实例并构造桥接模块。继承父进程的桥接对象或已准备的
+binding 不能用于接收任务。
+
 ## 在回复前检查用户输入
 
 启用[生命周期配置](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)

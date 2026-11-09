@@ -374,6 +374,34 @@
               }
             }
           ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/idle.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start",
+            "--native-start"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "turns": 7,
+                "updates": 4,
+                "busy_rejections": 2,
+                "executed": 5,
+                "same_worker": true,
+                "native_start": true
+              }
+            }
+          ]
         }
       ]
     },
