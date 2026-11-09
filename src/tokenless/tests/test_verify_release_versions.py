@@ -408,5 +408,75 @@ class TestStampedRequirementsPipeline(unittest.TestCase):
         self.assertEqual(text.count("anolisa_tokenless-9.8.7-cp311-abi3-"), 4)
 
 
+@unittest.skipUnless(shutil.which("make"), "the stamping pipeline needs make")
+class TestDecodeGuard(unittest.TestCase):
+    """An unreadable release artifact is reported with its path, not a traceback.
+
+    `verify_versions` reads `Cargo.toml`, the install contract and the stamped
+    QwenPaw requirements through `read_text(encoding="utf-8")`. Decoding happens
+    before parsing, so a non-UTF-8 file raises `UnicodeDecodeError`, which is a
+    `ValueError` and therefore invisible to an `except OSError` guard: the gate
+    exited with a traceback instead of `ERROR: cannot read <path>: ...`. The
+    message has to name the file, because `str(UnicodeDecodeError)` carries only
+    a byte position.
+    """
+
+    VERSION = "9.8.7"
+
+    def stamped_tree(self) -> Path:
+        root, stamped = _stamp_templates(self.VERSION)
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        return root
+
+    def contract_of(self, root: Path) -> Path:
+        return root / "target/packaging/anolisa/component.toml"
+
+    def test_a_readable_tree_is_still_verified(self) -> None:
+        """Control: the harness reaches the reads the other cases corrupt."""
+        root = self.stamped_tree()
+        self.assertEqual(_module.verify_versions(root, self.contract_of(root)), self.VERSION)
+
+    def test_undecodable_cargo_manifest_names_the_file(self) -> None:
+        root = self.stamped_tree()
+        (root / "Cargo.toml").write_bytes(b"[workspace.package]\nversion = \"9.\xff\"\n")
+        with self.assertRaises(SystemExit) as raised:
+            _module.verify_versions(root, self.contract_of(root))
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("Cargo.toml", message)
+        self.assertNotIsInstance(raised.exception, UnicodeDecodeError)
+
+    def test_undecodable_contract_names_the_file(self) -> None:
+        root = self.stamped_tree()
+        contract = self.contract_of(root)
+        contract.write_bytes(b'[component]\nname = "tokenless\xff"\n')
+        with self.assertRaises(SystemExit) as raised:
+            _module.verify_versions(root, contract)
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("component.toml", message)
+
+    def test_undecodable_requirements_names_the_file(self) -> None:
+        root = self.stamped_tree()
+        requirements = root / "adapters/tokenless/qwenpaw/requirements.txt"
+        requirements.write_bytes(b"anolisa-tokenless @ \xff\n")
+        with self.assertRaises(SystemExit) as raised:
+            _module.verify_versions(root, self.contract_of(root))
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("requirements.txt", message)
+
+    def test_undecodable_contract_is_reported_by_the_frameworks_reader(self) -> None:
+        root = self.stamped_tree()
+        contract = self.contract_of(root)
+        contract.write_bytes(b'[component]\nname = "tokenless\xff"\n')
+        with self.assertRaises(SystemExit) as raised:
+            _module.read_contract_frameworks(contract)
+        message = str(raised.exception)
+        self.assertIn("cannot read", message)
+        self.assertIn("component.toml", message)
+
+
 if __name__ == "__main__":
     unittest.main()

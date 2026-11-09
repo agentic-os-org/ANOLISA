@@ -30,7 +30,7 @@ def read_json_version(path: Path) -> str:
     """Read one generated adapter's top-level JSON version."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
     version = document.get("version") if isinstance(document, dict) else None
     if not isinstance(version, str) or not version:
@@ -42,7 +42,7 @@ def read_hermes_version(path: Path) -> str:
     """Read the generated Hermes manifest's simple version field."""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
     match = re.search(r'(?m)^version:\s*["\']?([^"\'\s]+)', text)
     if match is None:
@@ -54,7 +54,7 @@ def read_manifest_targets(path: Path) -> set[str]:
     """Return the framework targets declared by the generated manifest."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
     targets = document.get("targets") if isinstance(document, dict) else None
     if targets is None:
@@ -68,7 +68,7 @@ def read_contract_frameworks(contract: Path) -> set[str]:
     """Return every framework named by an [[adapters]] block in the contract."""
     try:
         text = contract.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise SystemExit(f"ERROR: cannot read {contract}: {error}") from error
     frameworks = set()
     for block in ADAPTER_BLOCK.finditer(text):
@@ -210,11 +210,16 @@ def _verify_requirements_references(relative: str, expected: str, text: str) -> 
 def verify_versions(root: Path, contract: Path) -> str:
     """Return the source version after checking packaged release metadata."""
     cargo_path = root / "Cargo.toml"
+    # Separate handlers so the message names the file: str(UnicodeDecodeError)
+    # carries only a byte position, not the path an OSError would have held.
     try:
         cargo_text = cargo_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise SystemExit(f"ERROR: cannot read {cargo_path}: {error}") from error
+    try:
         contract_text = contract.read_text(encoding="utf-8")
-    except OSError as error:
-        raise SystemExit(f"ERROR: cannot read release metadata: {error}") from error
+    except (OSError, UnicodeDecodeError) as error:
+        raise SystemExit(f"ERROR: cannot read {contract}: {error}") from error
 
     cargo_match = WORKSPACE_VERSION.search(cargo_text)
     if cargo_match is None:
@@ -259,7 +264,10 @@ def verify_versions(root: Path, contract: Path) -> str:
     # The QwenPaw requirements file is stamped too, but as wheel URLs: a
     # stale or unstamped version there only fails inside `qwenpaw plugin install`.
     requirements = adapters / "qwenpaw" / "requirements.txt"
-    text = requirements.read_text(encoding="utf-8")
+    try:
+        text = requirements.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise SystemExit(f"ERROR: cannot read {requirements}: {error}") from error
     _verify_requirements_references(
         str(requirements.relative_to(root)), expected, text
     )
