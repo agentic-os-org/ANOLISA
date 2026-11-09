@@ -37,7 +37,7 @@ def read_sidecar(path: Path, filename: str) -> str:
     """Read a strict sha256sum sidecar for one adjacent file."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         die(f"cannot read checksum sidecar {path}: {error}")
     if len(lines) != 1:
         die(f"checksum sidecar must contain exactly one line: {path}")
@@ -153,7 +153,7 @@ def validate_directory(
         die(f"SBOM checksum mismatch: {sbom}")
     try:
         data = json.loads(sbom.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         die(f"cannot read SBOM {sbom}: {error}")
     if not isinstance(data, dict):
         die(f"SBOM must contain a JSON object: {sbom}")

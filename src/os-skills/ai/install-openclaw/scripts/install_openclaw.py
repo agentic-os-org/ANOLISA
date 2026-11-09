@@ -548,7 +548,7 @@ def apply_config(config, config_path, *, dry_run=False):
         try:
             with config_path.open("r", encoding="utf-8") as fh:
                 existing = json.load(fh)
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SystemExit(f"Invalid JSON in {config_path}: {exc}") from exc
 
     merged = deep_merge(existing, config)
@@ -1056,7 +1056,7 @@ def clear_read_only_operator_pairings(args):
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return
     if not isinstance(data, dict):
         return
@@ -1089,7 +1089,7 @@ def cached_operator_has_write_scope(args):
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
 
     scopes = []
@@ -1108,7 +1108,7 @@ def clear_cached_operator_device_auth(args):
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         backup = path.with_name(path.name + ".bak")
         backup.write_bytes(path.read_bytes())
         # The unreadable-but-retained bytes still carry the operator tokens.
