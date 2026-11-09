@@ -100,8 +100,9 @@ test('pagination still applies a later component match once', async () => {
 });
 
 test('a real 589-file packaging PR retains components first seen after page three', async () => {
+  // Ordered file inventory from PR #9222 (589 files).
   const filenames = JSON.parse(fs.readFileSync(
-    path.join(__dirname, 'fixtures/pr-labels-9222-files.json'), 'utf8',
+    path.join(__dirname, 'fixtures/pr-labels-pagination-regression.json'), 'utf8',
   ));
   assert.equal(filenames.length, 589);
   assert.equal(filenames.indexOf('src/cosh-ng/AGENTS.md'), 454);
