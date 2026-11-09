@@ -41,10 +41,41 @@ function packages(application) {
   return resolved;
 }
 
+/** Run an already prepared native host in its existing process. */
+export async function runNativeWorker({ application, args = [] }) {
+  const resolved = packages(application);
+  const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
+  const startup = configuration();
+  if (!startup.resident_policy_reload)
+    throw new Error("Native Pi startup requires aw instance prepare");
+  if (startup.hooks.some(hook => hook.on_error === "withhold_result") &&
+      (resolved.version !== "0.84.2" || resolved.coreVersion !== "0.84.2"))
+    throw new Error("AW strict Pi output requires pi-coding-agent and pi-agent-core 0.84.2");
+  const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
+  const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
+  if (typeof sdk.AgentSession !== "function" || typeof core.Agent !== "function")
+    throw new Error("AW Pi SDK requires native AgentSession and Agent");
+  const app = await import(pathToFileURL(application).href);
+  if (typeof app.createSession !== "function" ||
+      (typeof app.runWorker !== "function" && typeof app.run !== "function"))
+    throw new Error("Native Pi startup requires createSession and runWorker or run factories");
+  if (typeof app.runWorker === "function" && typeof app.run === "function")
+    throw new Error("Choose runWorker or run, not both");
+  const worker = typeof app.runWorker === "function" ? app : {
+    ...app,
+    async runWorker({ createSession, closeSession }) {
+      const { session } = await createSession();
+      await app.run(session, { args, createSession, closeSession });
+    },
+  };
+  const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
+  await runWorker(worker, sdk, core, args, { sdk: resolved.version, core: resolved.coreVersion });
+}
+
 if (process.env.AW_PI_PROBE === "1") {
   const resolved = packages(process.argv.at(-1));
-  process.stdout.write(`AW Pi SDK ${resolved.version}\n`);
-} else {
+  process.stdout.write(`AW Pi SDK ${resolved.version}:${resolved.coreVersion}\n`);
+} else if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [application, ...args] = process.argv.slice(2);
   const resolved = packages(application);
   const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
@@ -67,7 +98,7 @@ if (process.env.AW_PI_PROBE === "1") {
   if (typeof app.runWorker === "function") {
     if (typeof app.run === "function") throw new Error("Choose runWorker or run, not both");
     const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
-    await runWorker(app, sdk, core, args);
+    await runWorker(app, sdk, core, args, { sdk: resolved.version, core: resolved.coreVersion });
   } else {
   if (configuration().hooks.some(hook => hook.event === "input.submit"))
     throw new Error("AW Pi input.submit requires the runWorker factory");

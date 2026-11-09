@@ -2114,6 +2114,38 @@
               }
             }
           ]
+        },
+        {
+          "name": "native-start",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start/result.json",
+              "values": {
+                "passed": true,
+                "versions/pi-coding-agent": "0.84.2",
+                "versions/pi-agent-core": "0.84.2",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup"
+                ]
+              }
+            }
+          ]
         }
       ]
     },

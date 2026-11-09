@@ -64,6 +64,35 @@ AW 每次生成 invocation UUID 配对，原工具 ID 保留于 `native`，提�
 文本；扫描故障丢弃完整结果并返回固定占位文本，同一会话可继续后续输入。
 未配置严格路由的目标保留原生流及 Tokenless report 行为。
 
+## 原生启动与空闲策略更新
+
+原生 Node 宿主可以在启动时准备 AW，再在自身进程中运行已有
+`createSession`/`runWorker` 工厂。工作目录中的 `aw.yaml` 以 `pi` 指定工厂应用及其
+已安装 SDK。将下面的准备代码加入宿主，重启一次，随后使用
+`node native-host.mjs` 启动。
+
+```javascript
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const aw = "aw";
+const prepared = JSON.parse(execFileSync(aw,
+  ["instance", "prepare", "--agent", "pi"], { encoding: "utf8" }));
+Object.assign(process.env, prepared.environment);
+try {
+  const { runNativeWorker } = await import(pathToFileURL(prepared.command.args[0]));
+  await runNativeWorker({ application: prepared.command.args[1], args: prepared.command.args.slice(2) });
+} finally {
+  execFileSync(aw, ["instance", "release", "--binding", prepared.binding]);
+}
+```
+
+宿主报告 Ready 后，在配置目录执行 `aw instance update --agent pi`。
+每个会话在 prompt、工具回调与销毁期间保留同一份策略。会话未关闭、工厂正在准备
+或清理尚未确认时，更新会被拒绝；关闭全部会话后再更新。新建会话采用新策略，
+包括输入和 Skill 检查。严格结果控制仍要求两个 Pi 包均为 0.84.2。
+准备失败时不会开放任务派发，全部会话关闭后才能释放实例。原生启动接入要求常驻工厂。
+
 ## 检查用户输入
 
 [Pi 输入检查示例](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)

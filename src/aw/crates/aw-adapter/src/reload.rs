@@ -58,7 +58,7 @@ pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
             capabilities.adapter.as_str(),
             capabilities.entrypoint.as_str()
         ),
-        ("agentscope", "factory")
+        ("agentscope", "factory") | ("pi", "sdk")
     ) {
         return Ok(());
     }
@@ -100,6 +100,7 @@ pub fn scope_policy(
         "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
         "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, true)?,
         "agentscope" => crate::adapters::agentscope::event_routes(document, steps)?,
+        "pi" => crate::adapters::pi::routes(document, steps)?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
     Ok(json!({"events": events, "hooks": hooks}))

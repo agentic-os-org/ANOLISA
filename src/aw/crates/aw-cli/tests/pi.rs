@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, process::Command};
 use support::{Fixture, Service};
 
+#[path = "pi/native_update.rs"]
+mod native_update;
+
 #[path = "pi/submission.rs"]
 mod submission;
 
@@ -73,7 +76,7 @@ fn foreground_factory_installs_both_hooks_and_releases_binding() {
 }
 
 #[test]
-fn resident_observation_is_rejected_before_ready_but_off_is_allowed() {
+fn resident_observation_retains_unknown_coverage_without_source_identity() {
     for mode in ["auto", "off"] {
         let fixture = Fixture::new();
         let mut document = setup(&fixture);
@@ -87,18 +90,8 @@ fn resident_observation_is_rejected_before_ready_but_off_is_allowed() {
         let service = Service::start(&fixture, &document);
         let output = fixture.run(launch(&fixture));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if mode == "auto" {
-            assert!(!output.status.success());
-            assert!(
-                stderr.contains("AW resident Pi does not support AgentSight evidence"),
-                "{stderr}"
-            );
-            assert!(!stderr.contains("native hooks ready"));
-            assert!(!fixture.root.join("worker-started").exists());
-        } else {
-            assert!(output.status.success(), "{stderr}");
-            assert!(fixture.root.join("worker-started").exists());
-        }
+        assert!(output.status.success(), "{stderr}");
+        assert!(fixture.root.join("worker-started").exists());
         service.released(&fixture);
     }
 }
@@ -391,7 +384,10 @@ fn strict_output_rejects_unverified_versions_before_application_import() {
         let output = fixture.run(launch(&fixture));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success());
-        assert!(stderr.contains("AW strict Pi output requires"), "{stderr}");
+        assert!(
+            stderr.contains("policy admission rejected: failure action"),
+            "{stderr}"
+        );
         assert!(!stderr.contains("business module imported"), "{stderr}");
         service.released(&fixture);
     }

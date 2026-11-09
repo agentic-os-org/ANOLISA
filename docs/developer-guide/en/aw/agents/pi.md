@@ -75,6 +75,39 @@ scanner faults discard the full result and return a fixed placeholder. The same
 session can continue after a scanner fault. Targets without strict routes retain
 native streaming and report-mode Tokenless.
 
+## Native startup and idle policy updates
+
+A native Node host can prepare AW once at startup, then run the existing
+`createSession`/`runWorker` factory in its own process. Keep `aw.yaml` in its
+working directory; target `pi` must identify the factory application and its
+installed SDK packages. Add the following bootstrap to the native host and
+restart it once. Run the host with `node native-host.mjs`.
+
+```javascript
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const aw = "aw";
+const prepared = JSON.parse(execFileSync(aw,
+  ["instance", "prepare", "--agent", "pi"], { encoding: "utf8" }));
+Object.assign(process.env, prepared.environment);
+try {
+  const { runNativeWorker } = await import(pathToFileURL(prepared.command.args[0]));
+  await runNativeWorker({ application: prepared.command.args[1], args: prepared.command.args.slice(2) });
+} finally {
+  execFileSync(aw, ["instance", "release", "--binding", prepared.binding]);
+}
+```
+
+After the host reports Ready, use `aw instance update --agent pi` from the
+configuration directory. Each session retains one immutable policy through
+its prompts, tool callbacks and disposal. Updates reject an open session,
+application factory preparation or unconfirmed cleanup; close every session
+before updating. Newly created sessions adopt the new policy, including
+input and Skill checks. Strict output updates still require both Pi packages
+at 0.84.2. A preparation failure leaves dispatch disabled; release only after
+all sessions have closed. Native startup requires the resident factory.
+
 ## Check user submissions
 
 Use the [Pi submission example](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
