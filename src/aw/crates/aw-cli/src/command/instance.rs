@@ -60,6 +60,9 @@ struct Setup {
     /// Private startup directory or dedicated venv site-packages
     #[arg(long, value_name = "ABS_DIR")]
     directory: String,
+    /// Remove an inactive Qoder startup installation, preserving user Hooks
+    #[arg(long)]
+    remove: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -112,6 +115,7 @@ pub(super) fn run(value: Instance) -> Result<Exit> {
                 ("config", Some(value.prepare.config)),
                 ("agent", Some(value.prepare.agent)),
                 ("directory", Some(value.directory)),
+                ("remove", value.remove.then(|| "true".into())),
                 ("native-settings", value.prepare.native_settings),
                 ("native-profile", value.prepare.native_profile),
                 ("native-state-dir", value.prepare.native_state_dir),

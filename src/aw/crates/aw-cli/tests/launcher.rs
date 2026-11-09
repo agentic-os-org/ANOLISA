@@ -11,6 +11,8 @@ mod command_policy;
 mod hermes_trust;
 #[path = "launcher/policy_update.rs"]
 mod policy_update;
+#[path = "launcher/qoder_bootstrap.rs"]
+mod qoder_bootstrap;
 #[path = "launcher/qoder_version.rs"]
 mod qoder_version;
 #[path = "launcher/registration_packages.rs"]
@@ -21,7 +23,6 @@ mod runtime_policy;
 mod single_config;
 #[path = "launcher/support.rs"]
 mod support;
-
 use serde_json::{json, Value};
 use std::{
     fs,

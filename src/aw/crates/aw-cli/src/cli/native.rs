@@ -45,6 +45,20 @@ impl Drop for Files {
 }
 
 pub(super) fn prepare(args: &Arguments) -> Result<Exit> {
+    prepare_with(args, None, &mut |value| {
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, value)?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+        Ok(())
+    })
+}
+
+pub(super) fn prepare_with(
+    args: &Arguments,
+    command_override: Option<CommandSpec>,
+    publish: &mut dyn FnMut(&serde_json::Value) -> Result<()>,
+) -> Result<Exit> {
     args.check(
         &[
             "--config",
@@ -63,7 +77,7 @@ pub(super) fn prepare(args: &Arguments) -> Result<Exit> {
     let name = agent["adapter"]
         .as_str()
         .ok_or("configured Agent target not found")?;
-    let native = matches!(name, "openclaw" | "hermes");
+    let native = matches!(name, "openclaw" | "hermes" | "qoder");
     if !native
         && !matches!(
             name,
@@ -94,6 +108,12 @@ pub(super) fn prepare(args: &Arguments) -> Result<Exit> {
         cwd: cwd.clone(),
         environment: environment.clone(),
     };
+    if name == "qoder" {
+        command = command_override
+            .ok_or("Qoder preparation requires its installed native startup Hook")?;
+    } else if command_override.is_some() {
+        return Err("native command override is Qoder-only".into());
+    }
     super::run::install_signals()?;
     let executable = std::env::current_exe()?;
     let _core_lease = PackageLeases::for_paths([executable.clone()])?;
@@ -239,15 +259,9 @@ pub(super) fn prepare(args: &Arguments) -> Result<Exit> {
                 ))
             })
             .collect::<Result<_>>()?;
-        let mut stdout = std::io::stdout().lock();
-        serde_json::to_writer(
-            &mut stdout,
-            &json!({"instance_id":binding.binding.instance_id,
+        publish(&json!({"instance_id":binding.binding.instance_id,
             "environment":changes,"binding":binding_path,
-            "command":{"program":plan.command.program,"args":plan.command.args.iter().map(|arg| arg.to_str().ok_or("non-UTF-8 native argument")).collect::<std::result::Result<Vec<_>, _>>()?},"state":"pending_ready"}),
-        )?;
-        writeln!(stdout)?;
-        stdout.flush()?;
+            "command":{"program":plan.command.program,"args":plan.command.args.iter().map(|arg| arg.to_str().ok_or("non-UTF-8 native argument")).collect::<std::result::Result<Vec<_>, _>>()?},"state":"pending_ready"}))?;
         Ok(())
     })();
     if result.is_err() {
@@ -335,8 +349,32 @@ pub(super) fn release(args: &Arguments) -> Result<Exit> {
     args.check(&["--binding"], false)?;
     let path = Path::new(args.required("--binding")?);
     let root = HookBinding::read(args.required("--binding")?)?;
+    let directory = owned_directory(&root, path)?;
     let registration = root
         .registration
+        .as_ref()
+        .ok_or("not an application-owned binding")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let client = Client::connect(&root.socket, deadline)?;
+    if client.identity() != &root.binding.identity {
+        return Err("stale native service".into());
+    }
+    client.call(
+        Operation::Registration {
+            command: RegistrationCommand::Release {
+                handle: registration.handle.clone(),
+            },
+        },
+        deadline,
+    )?;
+    fs::remove_dir_all(directory)?;
+    Ok(Exit::Code(0))
+}
+
+pub(super) fn owned_directory(root: &HookBinding, path: &Path) -> Result<PathBuf> {
+    let registration = root
+        .registration
+        .as_ref()
         .ok_or("not an application-owned binding")?;
     if serde_json::to_value(&registration.handle.binding)? != serde_json::to_value(&root.binding)? {
         return Err("registration binding mismatch".into());
@@ -357,19 +395,5 @@ pub(super) fn release(args: &Arguments) -> Result<Exit> {
     {
         return Err("unsafe native asset directory".into());
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let client = Client::connect(&root.socket, deadline)?;
-    if client.identity() != &root.binding.identity {
-        return Err("stale native service".into());
-    }
-    client.call(
-        Operation::Registration {
-            command: RegistrationCommand::Release {
-                handle: registration.handle,
-            },
-        },
-        deadline,
-    )?;
-    fs::remove_dir_all(directory)?;
-    Ok(Exit::Code(0))
+    Ok(directory.to_owned())
 }

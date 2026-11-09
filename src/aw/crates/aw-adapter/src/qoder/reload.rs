@@ -4,7 +4,7 @@ use crate::{HookEvent, Result};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
-pub(super) fn generate(
+pub(crate) fn generate(
     mut settings: Value,
     executable: &Path,
     binding: &Path,
@@ -43,8 +43,11 @@ pub(super) fn generate(
         "PostToolUseFailure",
         "PermissionDenied",
     ] {
+        // Submission includes 2s admission, 59s dispatch and two 2s cleanup calls.
+        // Leave native delivery margin after all phases can finish.
+        let timeout = if native == "UserPromptSubmit" { 70 } else { 4 };
         let mut group = json!({"hooks":[{"type":"command","command":executable,
-            "args":["bridge","--adapter","qoder","--binding",binding],"timeout":4}]});
+            "args":["bridge","--adapter","qoder","--binding",binding],"timeout":timeout}]});
         if native == "Notification" {
             group["matcher"] = json!("idle_prompt");
         }
@@ -101,6 +104,25 @@ fn check_scheduling(settings: &Value, sequential: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn submission_timeout_includes_dispatch_and_both_cleanup_phases() {
+        let (settings, _) =
+            generate(json!({}), Path::new("/aw"), Path::new("/binding"), None).unwrap();
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"],
+            70
+        );
+        for native in [
+            "SessionStart",
+            "SessionEnd",
+            "Notification",
+            "PostToolUseFailure",
+            "PermissionDenied",
+        ] {
+            assert_eq!(settings["hooks"][native][0]["hooks"][0]["timeout"], 4);
+        }
+    }
+
     #[test]
     fn stable_group_preserves_native_scheduling_and_rejects_ambiguous_parallelism() {
         let native = json!({"hooks":{"PreToolUse":[{"sequential":true,"hooks":[]}]}});

@@ -40,6 +40,12 @@ fn invoke(args: &Arguments) -> Result<Exit> {
         super::attachment::confirm::confirm(&binding, path, &native, deadline)?;
         return Ok(Exit::Code(0));
     }
+    invoke_bound(binding, bytes)
+}
+
+pub(super) fn invoke_bound(binding: HookBinding, bytes: Vec<u8>) -> Result<Exit> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let native: serde_json::Value = serde_json::from_slice(&bytes)?;
     let (phase, key, pid) = if binding.adapter == "qoder" {
         let (phase, key) = aw_adapter::reload::qoder_lifecycle(&binding.native_context(), &native)?;
         // SAFETY: getppid reads the native exec-form callback's parent process.

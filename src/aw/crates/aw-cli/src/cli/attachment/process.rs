@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) struct NativeProcess {
+pub(in crate::cli) struct NativeProcess {
     pub identity: ProcessIdentity,
     pub command: CommandSpec,
     pub scope: PathBuf,
@@ -111,6 +111,12 @@ fn executable(path: &Path) -> bool {
 
 impl NativeProcess {
     pub fn read(pid: u32, adapter: &str, configured_program: &str) -> Result<Self> {
+        let native = Self::read_identity(pid, adapter, configured_program)?;
+        native.exclusive()?;
+        Ok(native)
+    }
+
+    pub fn read_identity(pid: u32, adapter: &str, configured_program: &str) -> Result<Self> {
         if !matches!(adapter, "qoder" | "qwenpaw") {
             return Err("external attachment supports Qoder TUI and QwenPaw App only".into());
         }
@@ -192,7 +198,6 @@ impl NativeProcess {
             script,
             adapter: adapter.into(),
         };
-        native.exclusive()?;
         native.identity.check()?;
         Ok(native)
     }

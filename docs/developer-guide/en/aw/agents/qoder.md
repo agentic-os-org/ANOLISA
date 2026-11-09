@@ -69,10 +69,42 @@ after recording a check failure.
 The native `session_id` and `request_set_id` identify one submission across
 parallel or sequential AW steps. Missing identities fail according to the
 step's failure action. Existing native Hooks remain enabled; their subsequent
-context additions are outside the submitted-text snapshot. Reloadable and
-attached routes do not yet support this input event. Ordinary CLI bindings
+context additions are outside the submitted-text snapshot. Reloadable and attached TUI routes also dispatch this event before the model
+request. The stable callback uses the active policy while the request keeps
+its revision until native idle confirmation. Ordinary CLI bindings
 retain replay records for at most 1,024 distinct checked submissions; start a
 new CLI session before that limit.
+
+## Manage a native terminal session
+
+For Qoder CLI 1.1.73, start the terminal normally with an exclusive private HOME
+profile, then attach before its first request. Set the matching executable in
+`spec.agents.qoder.argv` in `aw.yaml`. From the directory containing that file:
+
+```bash
+aw instance attach --agent qoder --pid "$QODER_PID"
+aw instance update --agent qoder
+```
+
+Set `QODER_PID` to the terminal process you started. Attachment verifies its
+start identity and native settings adoption before marking the instance Ready.
+Edit only policy fields in `aw.yaml`, then run the update command between
+requests. Active requests, tools and uncertain cleanup reject updates. With
+multiple instances, use `--instance INSTANCE_ID` to select one explicitly.
+
+This route supports `input.submit`, `tool.before` and `tool.after`. Print mode,
+headless fast hooks and a profile shared by another Qoder process are rejected.
+The automated attachment fixture covers adding and removing input denial before
+model dispatch; authenticated Qoder TUI acceptance remains separate.
+
+Remove the attachment after the terminal is idle:
+
+```bash
+aw instance attach --agent qoder --pid "$QODER_PID" --remove
+```
+
+AW restores only its owned settings entries. See [policy updates](../deployment/policy-updates.md)
+for revision checks and recovery after an interrupted attachment.
 
 ## Keep existing Hooks and scheduling
 
