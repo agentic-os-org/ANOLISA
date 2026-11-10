@@ -183,8 +183,8 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 `command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
 `nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
 改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样，
-且跳过新增的纯路径列表策略。原生搜索别名（`Grep`、`grep`、`grep_code`、`grep_search`、
-`search_files`）及通过 `command` 识别出的原生 `grep`、`rg` 输出只允许进入无损的 Search
+且跳过新增的纯路径列表策略。精确名称 `Grep`、宿主声明了 `search_listing` 的结果，以及通过
+`command` 识别出的原生 `grep`、`rg` 输出，只允许进入无损的 Search
 Results 路径共享；支持文本替换的宿主把搜索命中文本声明为 `api_response`（文件读取保持
 `file_content` 逐字节透传）。格式识别由统一搜索压缩入口负责；关闭搜索压缩、
 格式不支持或无收益时原样返回，即使设置 `force_json` 也不会转入其他压缩器。
@@ -196,7 +196,7 @@ Results 路径共享；支持文本替换的宿主把搜索命中文本声明为
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无；字符串值中的 HTML 另需 HTML 转写开启、来源不是 `file_read`、Stash 与恢复路径可用 | `JsonCompressor`：Record Reduction、截断、Compact JSON、可选 TOON，以及字符串值中 HTML 的就地转写 | 启用 |
 | `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：SGR Cleanup、pnpm 无需恢复的布局压紧、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
-| `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
+| `search_results` | 宿主支持文本替换；精确名称 `Grep`、声明了 `search_listing` 的结果或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
 

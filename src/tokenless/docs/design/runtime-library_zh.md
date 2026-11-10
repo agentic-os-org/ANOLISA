@@ -240,14 +240,18 @@ Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 同一路径在非连续位置出现时会生成新的文件头。
 
 解包的 Grep 列表在统计中记作 `api_response`，而非 `file_content`，因为它是筛选后的工具响应，
-不是权威文件副本。按来源分组的历史查询因此存在版本边界。Core 将原生搜索别名家族
-（`Grep`、`grep`、`grep_code`、`grep_search`、`search_files`）视为仅适用搜索压缩的工具；
-即使搜索路径共享关闭，也不会转入 JSON、表格或日志压缩。支持文本替换的宿主把搜索文本槽位
+不是权威文件副本。按来源分组的历史查询因此存在版本边界。精确名称 `Grep` 和每个由宿主声明
+`search_listing` 的结果都是仅适用搜索压缩的：即使搜索路径共享关闭，也不会转入 JSON、表格或
+日志压缩。未带该声明的搜索形工具名保持原有领域（各 Adapter 仍从别名名单 `Grep`、`grep`、
+`grep_code`、`grep_search`、`search_files` 推导 `search_listing`，但 Core 本身除保留名 `Grep`
+外不做任何名称匹配）。支持文本替换的宿主把搜索文本槽位
 （宿主文本即命中列表时为整个结果）声明为 `api_response` 而非 `file_content`，因此同一段搜索
-文本经搜索工具与经 Shell 的压缩行为一致；文件读取保持 `file_content` 并逐字节保留。SDK 调用者
-仅应对符合此搜索契约的工具使用这些名称。只有 Claude Code Adapter 保留上下文选项前置条件；
+文本经搜索工具与经 Shell 的压缩行为一致；文件读取保持 `file_content` 并逐字节保留。SDK 集成
+不应依赖工具名称来实现这一契约：请在结果上声明 `search_listing`（参见 AgentScope/QwenPaw 的
+`_contracts.py`）。只有 Claude Code Adapter 保留上下文选项前置条件；
 其他替换宿主允许上下文列表进入搜索路由，压缩器会拒绝任何不符合 `路径:行号:正文` 形状的行并
-原样返回输入。
+原样返回输入（恰好符合该形状的行无论来源都会被折叠进文件分组，因此搜索输出可能缺失行号的宿主
+不应声明 `search_listing`）。
 
 ## Stats 查询
 

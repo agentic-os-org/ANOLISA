@@ -1735,6 +1735,7 @@ mod tests {
                         .post_tool(
                             &PostToolRequest {
                                 result_kind: ResultKind::Tool,
+                                search_listing: false,
                                 tool_name: "fetch_record".to_owned(),
                                 content,
                                 status: ToolResultStatus::Success,

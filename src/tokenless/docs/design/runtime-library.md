@@ -279,15 +279,21 @@ It preserves host metadata, including any limits; completeness means all receive
 possible matches before host truncation. Other Grep modes and hosts keep their existing route.
 Unwrapped Grep listings are recorded as `api_response` in statistics, rather than `file_content`:
 they are filtered tool responses, not authoritative file copies. Historical origin-grouped queries
-therefore have a version boundary. Core treats the native search alias family (`Grep`, `grep`,
-`grep_code`, `grep_search`, `search_files`) as search-only tools: they cannot enter JSON, table,
-or log compressors, even when search path sharing is disabled. Replacement hosts declare the
+therefore have a version boundary. The exact name `Grep` and every result the host declares with
+`search_listing` are search-only: they cannot enter JSON, table, or log compressors, even when
+search path sharing is disabled. Search-shaped tool names without that declaration keep their
+normal domains (the adapters do derive `search_listing` from the alias names — `Grep`, `grep`,
+`grep_code`, `grep_search`, `search_files` — but the Core itself never name-matches beyond the
+reserved `Grep`). Replacement hosts declare the
 search text slot — or the whole result when the host's text is the listing — as `api_response`
 instead of `file_content`, so identical search text compresses identically through a search tool
-and through the shell; file reads keep `file_content` and stay byte-for-byte. SDK callers should
-use those names only for this search contract. Only the Claude Code adapter keeps the context-option
+and through the shell; file reads keep `file_content` and stay byte-for-byte. SDK integrations
+must not rely on tool names for this contract: declare `search_listing` on the result instead
+(see the AgentScope/QwenPaw `_contracts.py`). Only the Claude Code adapter keeps the context-option
 precondition; the other replacement hosts admit context listings into the search route, where the
-compressor rejects any row outside the `path:number:text` shape and returns the input unchanged.
+compressor rejects any row outside the `path:number:text` shape and returns the input unchanged
+(rows that happen to be inside that shape are folded into file groups whatever they came from,
+so a host whose search output can be unnumbered must not declare `search_listing`).
 
 RTK ownership is provisional until execution completes. PreTool atomically stores the original and exact executed commands
 and assigns each rewritten RTK invocation a generation and ordinal in `rtk-outcomes.db` under
