@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import resource
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +28,34 @@ import httpx
 from ._common import (_PYTHON, init_config_defaults, is_sandbox_task,
                        load_task_yaml, log)
 from .tool_injector import ToolInjector
+
+# Address-space ceiling for one mock service, in bytes.
+MOCK_SERVICE_RLIMIT_AS = 512 * 1024 * 1024
+
+# Applied by the child before it execs the service. Kept as a one-liner command
+# instead of a `preexec_fn` callback: `Popen` runs such a callback between fork
+# and exec, where a process with live threads can deadlock, and this module
+# starts the batch orphan sweep thread before launching services.
+#
+# The two `signal.signal` calls repeat what `Popen` would have done. CPython
+# ignores SIGPIPE and SIGXFSZ at startup, and an ignored disposition survives
+# `execvp`, so a service launched through this shim would otherwise run with
+# both ignored -- while the same service launched directly by `Popen` runs with
+# them restored, because `restore_signals` defaults to true. The shim is itself
+# that child, so it has to restore them before handing the process over.
+_RLIMIT_SHIM = (
+    "import os, resource, signal, sys;"
+    f"resource.setrlimit(resource.RLIMIT_AS, ({MOCK_SERVICE_RLIMIT_AS},"
+    f" {MOCK_SERVICE_RLIMIT_AS}));"
+    "[signal.signal(s, signal.SIG_DFL) for s in"
+    " (signal.SIGPIPE, getattr(signal, 'SIGXFSZ', signal.SIGPIPE))];"
+    "os.execvp(sys.argv[1], sys.argv[1:])"
+)
+
+
+def limited_command(cmd: list[str]) -> list[str]:
+    """Wrap *cmd* so the child caps its own address space, then execs it."""
+    return [_PYTHON, "-c", _RLIMIT_SHIM, *cmd]
 
 PORT_STRIDE = 50  # port gap between adjacent worker slots
 
@@ -99,10 +126,8 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
             env[k] = v
 
         subprocess.Popen(
-            cmd, env=env, cwd=project_root,
+            limited_command(cmd), env=env, cwd=project_root,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            preexec_fn=lambda: resource.setrlimit(
-                resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024)),
         )
 
         # Wait for health
