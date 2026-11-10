@@ -1069,9 +1069,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         shutil.copy2(self.bin / "tokenless", private)
         key = "abcdef0123456789abcdef01"
         payload = self.payload("", "Bash")
-        with mock.patch.dict(
-            os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}
-        ), mock.patch.object(sys, "platform", "darwin"):
+        with mock.patch.dict(os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}):
             self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
             qwenwork_adapter.prepare_input(payload)
             self.assertTrue(qwenwork_adapter.recovery_available())
@@ -1094,13 +1092,26 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
             ):
                 self.assertIsNone(qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": command}))
                 self.assertFalse(qwenwork_adapter.is_retrieve_result("Bash", {"command": command}))
-            with mock.patch.object(sys, "platform", "win32"):
+            with mock.patch.object(qwenwork_adapter.os, "name", "nt"):
                 # Without the managed-engine compatibility flag, Windows keeps
                 # the POSIX rewrite: the legacy engine runs Git Bash, whose
                 # /usr/bin/env prefix works. The binary name changes to .exe.
                 with mock.patch.dict(os.environ, {"QWENWORK_PLUGIN_HOOK_COMPATIBILITY": ""}):
-                    qwenwork_adapter.prepare_input(payload)
+                    shutil.copy2(self.bin / "tokenless", self.target / "bin/tokenless.exe")
+                    # A POSIX interpreter cannot query a process token; the
+                    # configured data directory also mirrors the live
+                    # installation, which always sets one.
+                    with mock.patch.dict(
+                        os.environ, {"TOKENLESS_DATA_DIR": str(self.root / "win databases")}
+                    ), mock.patch.object(
+                        qwenwork_adapter, "Path", PosixPath
+                    ), mock.patch.object(qwenwork_adapter.hook_utils, "Path", PosixPath):
+                        qwenwork_adapter.prepare_input(payload)
                     self.assertTrue(qwenwork_adapter.recovery_available())
+                    self.assertTrue(
+                        qwenwork_adapter._QWENWORK_RECOVERY["binary"].endswith("tokenless.exe"),
+                        qwenwork_adapter._QWENWORK_RECOVERY["binary"],
+                    )
                     legacy = qwenwork_adapter.rewrite_qwenwork_retrieve(
                         "Bash", {"command": f"tokenless retrieve {key}"}
                     )
@@ -1111,9 +1122,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                         legacy["command"],
                     )
                     self.assertTrue(qwenwork_adapter.is_retrieve_result("Bash", legacy))
-            with mock.patch.object(sys, "platform", "win32"), mock.patch.object(
-                qwenwork_adapter.os, "name", "nt"
-            ):
+            with mock.patch.object(qwenwork_adapter.os, "name", "nt"):
                 # The managed Windows engine calls its shell "Bash" but runs
                 # PowerShell; the rewrite must use the PowerShell contract.
                 with mock.patch.dict(
@@ -1135,7 +1144,8 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                         "Bash", {"command": f"tokenless retrieve {key}"}
                     )
                     self.assertIsNotNone(managed)
-                    self.assertTrue(managed["command"].startswith("$env:TOKENLESS_AGENT_ID = "))
+                    self.assertIn("$env:TOKENLESS_AGENT_ID = ", managed["command"])
+                    self.assertIn("finally {", managed["command"])
                     self.assertIn(
                         f"& {_quote_ps(qwenwork_adapter._QWENWORK_RECOVERY['binary'])} retrieve {key}",
                         managed["command"],
@@ -1184,6 +1194,131 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
             self.assertIsNone(
                 qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": f"tokenless retrieve {key}"})
             )
+
+    def test_windows_installed_hook_shape_enables_the_bridge_and_rewrites_powershell(self) -> None:
+        # The Windows installer rewrites every registered hook command into
+        # the PowerShell form `& '<python>' -X utf8 -B
+        # "${env:QODER_PLUGIN_ROOT}/hooks/shared/rewrite_hook.py"` and adds
+        # PowerShell to the PreToolUse matcher (lifecycle.py's Windows
+        # branch). Both shapes must enable the bridge, and a PowerShell
+        # event must receive the PowerShell retrieve form with or without
+        # the managed flag — the same signal the RTK rewrite keys on.
+        self.prepare_detached_plugin()
+        # `_QWENWORK_RECOVERY` is a module global shared across tests; reset
+        # it so a later test cannot inherit state pointing into this sandbox.
+        self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
+        private_bin = self.target / "bin"
+        private_bin.mkdir(exist_ok=True)
+        _create_mock_tokenless(str(private_bin))
+        (self.target / "bin/tokenless.exe").write_text(
+            "#!/usr/bin/env python3\nprint('win')\n"
+        )
+        os.chmod(self.target / "bin/tokenless.exe", 0o755)
+        key = "abcdef0123456789abcdef01"
+        payload = {
+            "tool_name": "Bash",
+            "tool_response": "", "tool_input": {"command": "echo hi"},
+            "session_id": "win-session", "cwd": str(self.root),
+        }
+        windows_hooks = json.loads((self.target / "hooks/hooks.json").read_text())
+        for event, groups in windows_hooks["hooks"].items():
+            for group in groups:
+                if event == "PreToolUse":
+                    group["matcher"] = f"{group['matcher']}|PowerShell"
+                script = (
+                    "rewrite_hook.py" if event == "PreToolUse" else "compress_response_hook.py"
+                )
+                python = sys.executable.replace("'", "''")
+                for hook in group["hooks"]:
+                    hook["shell"] = "powershell"
+                    hook["command"] = (
+                        f"& '{python}' -X utf8 -B "
+                        f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/{script}" --agent-id qwenwork'
+                    )
+        (self.target / "hooks/hooks.json").write_text(
+            json.dumps(windows_hooks, indent=2) + "\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            qwenwork_adapter, "Path", PosixPath
+        ), mock.patch.object(qwenwork_adapter.hook_utils, "Path", PosixPath), mock.patch.object(
+            qwenwork_adapter.os, "name", "nt"
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "TOKENLESS_DATA_DIR": str(self.root / "win databases"),
+                "QODER_PLUGIN_ROOT": str(self.target),
+            },
+        ):
+            qwenwork_adapter.prepare_input(
+                {**payload, "tool_use_id": "call-win", "tool_input": {}}
+            )
+            self.assertTrue(
+                qwenwork_adapter.recovery_available(),
+                "the installed Windows hooks.json shape must enable the bridge",
+            )
+            # A native PowerShell event (managed flag absent) still gets the
+            # PowerShell command form, matching the RTK rewrite contract.
+            for tool, expected_shell in (("PowerShell", "$env:"), ("Bash", "/usr/bin/env")):
+                with self.subTest(tool=tool):
+                    rewritten = qwenwork_adapter.rewrite_qwenwork_retrieve(
+                        tool, {"command": f"tokenless retrieve {key}"}
+                    )
+                    self.assertIsNotNone(rewritten)
+                    self.assertIn(expected_shell, rewritten["command"])
+                    self.assertNotIn(
+                        "/usr/bin/env" if tool == "PowerShell" else "$env:",
+                        rewritten["command"],
+                    )
+                    self.assertTrue(qwenwork_adapter.is_retrieve_result(tool, rewritten))
+            # With the managed flag, a Bash event renames to PowerShell and
+            # the rewrite follows.
+            with mock.patch.dict(
+                os.environ, {"QWENWORK_PLUGIN_HOOK_COMPATIBILITY": "managed-tool-hooks-v1"}
+            ):
+                name, rewritten = qwenwork_adapter.pre_tool_input(
+                    {**payload, "tool_input": {"command": f"tokenless retrieve {key}"}}
+                )
+                self.assertEqual(name, "PowerShell")
+                self.assertIsNotNone(rewritten)
+                self.assertIn("$env:TOKENLESS_AGENT_ID = ", rewritten["command"])
+                self.assertIn("finally {", rewritten["command"])
+                self.assertTrue(
+                    qwenwork_adapter.is_retrieve_result("PowerShell", rewritten)
+                )
+        # The Windows bridge does not require run-hook.sh: the installer
+        # rewrites hook commands to call Python directly under PowerShell,
+        # so the POSIX launcher is never executed there.
+        (self.target / "hooks/run-hook.sh").unlink()
+        with mock.patch.object(
+            qwenwork_adapter, "Path", PosixPath
+        ), mock.patch.object(qwenwork_adapter.hook_utils, "Path", PosixPath), mock.patch.object(
+            qwenwork_adapter.os, "name", "nt"
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "TOKENLESS_DATA_DIR": str(self.root / "win databases"),
+                "QODER_PLUGIN_ROOT": str(self.target),
+            },
+        ):
+            qwenwork_adapter.prepare_input(
+                {**payload, "tool_use_id": "call-win", "tool_input": {}}
+            )
+            self.assertTrue(
+                qwenwork_adapter.recovery_available(),
+                "the bridge must enable without run-hook.sh on Windows",
+            )
+
+    def test_pre_tool_input_fails_open_on_non_string_tool_name(self) -> None:
+        # A malformed payload must never crash the host's PreToolUse hook
+        # (fail-open contract, `test_malformed_hook_stdin_passes_through`).
+        self.prepare_detached_plugin()
+        for bad in (None, 123, {"a": 1}):
+            with self.subTest(tool_name=bad):
+                name, rewritten = qwenwork_adapter.pre_tool_input(
+                    {"tool_name": bad, "tool_input": {"command": "echo hi"}}
+                )
+                self.assertEqual(name, "")
+                self.assertIsNone(rewritten)
 
     def test_registered_array_and_pretool_attribution(self) -> None:
         self.prepare_detached_plugin()
