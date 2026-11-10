@@ -283,8 +283,10 @@ heuristic command normalizations, for example:
 
 - Bare `pip install` / `pip3 install` -> `uv pip install`; interpreter-specific
   `python -m pip` calls and installs with `--user` stay unchanged because uv
-  does not support user-site installs. Bare invocations use a conservative
-  command-position heuristic rather than a complete shell parser; unfinished
+  does not support user-site installs. `PIP_USER` in the mount environment or
+  preceding text on the same line also keeps pip, as do known pip-only options
+  such as `--root` (see the [user guide](../../docs/user-guide/en/skillfs/index.md#read-time-transforms)).
+  Bare invocations use a conservative command-position heuristic; unfinished
   arguments, including line continuations and command substitutions, stay unchanged.
   Descriptor redirections do not end the argument scan. Inline code spans in lists
   or prose are independent; trailing parenthetical notes do not prevent rewriting.

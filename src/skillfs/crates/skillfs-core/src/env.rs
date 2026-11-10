@@ -77,6 +77,7 @@ const ENV_VAR_WHITELIST: &[&str] = &[
     "PATH",
     "SHELL",
     "VIRTUAL_ENV",
+    "PIP_USER",
     "CONDA_DEFAULT_ENV",
     "NODE_ENV",
     "GOPATH",
@@ -227,6 +228,15 @@ mod tests {
         assert_eq!(OsKind::Linux.as_str(), "linux");
         assert_eq!(OsKind::Windows.as_str(), "windows");
         assert_eq!(OsKind::Unknown("freebsd".to_string()).as_str(), "freebsd");
+    }
+
+    #[test]
+    fn test_capture_pip_user() {
+        assert!(ENV_VAR_WHITELIST.contains(&"PIP_USER"));
+        assert_eq!(
+            capture_env_vars().get("PIP_USER"),
+            std::env::var("PIP_USER").ok().as_ref()
+        );
     }
 
     #[test]
