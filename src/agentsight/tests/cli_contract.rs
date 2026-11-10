@@ -390,6 +390,108 @@ fn now_ns() -> i64 {
         .as_nanos() as i64
 }
 
+#[test]
+fn serve_malformed_json_uses_defaults_and_keeps_health_available() {
+    struct KillOnDrop(std::process::Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = fixture_dir("serve_malformed_json");
+    let config = dir.join("config.json");
+    let malformed = "{ \"schema_version\": 6, this is not json\n";
+    std::fs::write(&config, malformed).expect("write malformed config");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let log_path = dir.join("serve.log");
+    let log_file = std::fs::File::create(&log_path).expect("create server log");
+    let db = dir.join("genai_events.db");
+    let child = agentsight()
+        .args([
+            "serve",
+            "--config",
+            config.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(log_file))
+        .spawn()
+        .expect("start agentsight serve");
+    let mut child = KillOnDrop(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let url = format!("http://127.0.0.1:{port}/health");
+    let mut health_status = None;
+    let mut early_exit = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = child.0.try_wait().expect("poll server") {
+            early_exit = Some(status);
+            break;
+        }
+        match ureq::get(&url)
+            .timeout(std::time::Duration::from_millis(200))
+            .call()
+        {
+            Ok(response) => {
+                health_status = Some(response.status());
+                break;
+            }
+            Err(ureq::Error::Status(status, _)) => {
+                health_status = Some(status);
+                break;
+            }
+            Err(ureq::Error::Transport(_)) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+    if early_exit.is_none() {
+        let _ = child.0.kill();
+    }
+    let _ = child.0.wait();
+    let logs = std::fs::read_to_string(&log_path).expect("read server log");
+    let preserved = std::fs::read_to_string(&config).expect("read preserved config");
+    let backups = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("config.json.bak.")
+        })
+        .count();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        health_status,
+        Some(200),
+        "server exited early: {early_exit:?}; logs: {logs}"
+    );
+    assert!(early_exit.is_none(), "logs: {logs}");
+    assert_eq!(preserved, malformed);
+    assert_eq!(backups, 0, "malformed JSON must not trigger schema backup");
+    assert!(logs.contains("invalid JSON"), "logs: {logs}");
+    assert!(logs.contains("key must be a string"), "logs: {logs}");
+    assert!(
+        logs.contains("Tokenless integration disabled"),
+        "logs: {logs}"
+    );
+    assert!(
+        !logs.contains("Server error: invalid Tokenless query configuration or filters"),
+        "logs: {logs}"
+    );
+}
+
 /// Insert one interruption in `dir/interruption_events.db` and return the
 /// path together with the id the store generated.
 fn interruption_fixture(dir: &std::path::Path) -> (PathBuf, String) {
