@@ -124,6 +124,9 @@ class PackagingLayout(unittest.TestCase):
                 self.destination / "usr/share/owner/adapters/ws-ckpt/hermes/install-hermes.sh"
             ).is_file()
         )
+        hermes = self.destination / "usr/share/owner/plugins/ws-ckpt/hermes"
+        self.assertTrue((hermes / "plugin.yaml").is_file())
+        self.assertFalse((hermes / "tests").exists())
         self.assertFalse((self.destination / "usr/bin").exists())
         self.assertFalse((self.destination / "usr/lib/systemd").exists())
         self.assertFalse((self.destination / "usr/share/owner/skills/ws-ckpt").exists())

@@ -89,7 +89,8 @@ install-plugin-files:
 	install -d -m 0755 "$(DESTDIR)$(PLUGINS_DIR)/hermes"
 	cp -pr src/plugins/hermes/. "$(DESTDIR)$(PLUGINS_DIR)/hermes/"
 	find "$(DESTDIR)$(PLUGINS_DIR)/hermes" \
-		\( -type d -name __pycache__ -o -type f -name '*.pyc' \) \
+		\( -type d -name __pycache__ -o -type d -name tests \
+		   -o -type f -name '*.pyc' -o -type f -name '.coverage' \) \
 		-exec rm -rf {} +
 
 install-skills-files:
