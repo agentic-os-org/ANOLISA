@@ -18,7 +18,10 @@ AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](
 
 Rust V2 supports `agent-sec-cli sandbox run --permissions permissions.json -- command`
 for local execution with explicit filesystem and network permissions, without a
-daemon. See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
+daemon. `--permissions` accepts the existing OS permission JSON or Cedar source;
+Cedar is projected to coarse process-tree permissions. The same input can generate
+each PDP permission request through `PermissionInput` or the Cosh sandbox Hook.
+See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
 for the permission format, runtime requirements and isolation boundaries.
 Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
 using PAP-managed Cedar policies selected by daemon `--authorization-config`.

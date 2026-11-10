@@ -605,7 +605,11 @@ version = "1.2.0"
 dependencies = [
  "asc-daemon-client",
  "asc-daemon-protocol",
+ "asc-pdp-runtime",
+ "asc-policy-cedar",
+ "asc-policy-types",
  "asc-sandbox-types",
+ "cedar-policy",
  "clap",
  "linux-sandbox",
  "rustix",

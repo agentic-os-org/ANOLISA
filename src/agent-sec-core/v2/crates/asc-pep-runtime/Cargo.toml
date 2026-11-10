@@ -12,6 +12,9 @@ publish.workspace = true
 asc-sandbox-types = { workspace = true }
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
+asc-policy-cedar = { workspace = true }
+asc-policy-types = { workspace = true }
+cedar-policy = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 rustix = { workspace = true }
@@ -23,6 +26,7 @@ linux-sandbox = { workspace = true }
 [dev-dependencies]
 clap = { workspace = true }
 tempfile = { workspace = true }
+asc-pdp-runtime = { workspace = true }
 
 [lints]
 workspace = true

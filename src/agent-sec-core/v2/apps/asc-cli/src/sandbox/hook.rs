@@ -9,8 +9,8 @@ use asc_daemon_protocol::authorization::{
     ExecutionSpec,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, DaemonAuthorizationClient, FixedPermissions, PepError, PepRuntime,
-    SandboxBackend, prepare_launch,
+    ApprovalHandler, DaemonAuthorizationClient, PepError, PepRuntime, SandboxBackend,
+    prepare_launch,
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -24,7 +24,7 @@ mod message;
 pub enum HookCommand {
     /// Authorize the Hook JSON from stdin without executing the target.
     Prepare {
-        /// Explicit requested OS permissions, including runtime dependencies.
+        /// OS permission JSON or Cedar request source, including runtime dependencies.
         #[arg(long)]
         permissions: PathBuf,
     },
@@ -158,7 +158,7 @@ fn prepare(permissions: &Path, client: &DaemonAuthorizationClient) -> Result<u8,
             agent_type: "cosh".into(),
         },
         launch,
-        &FixedPermissions(read_permissions(permissions)?),
+        &read_permissions(permissions)?,
         client,
     )?;
     let output = if matches!(

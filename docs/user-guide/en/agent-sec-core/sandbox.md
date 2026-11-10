@@ -53,6 +53,87 @@ cat report.txt
 arguments after `--`. The command uses the caller's working directory and
 environment; environment names and values must be valid UTF-8.
 
+## Cedar input
+
+The same `--permissions` option also accepts raw Cedar using `seccore.system`
+schema revision 1, or the existing `{"language":"cedar","content":{"schema":
+{"schemaId":"seccore.system","revision":1},"text":"..."}}` source envelope.
+Format detection uses the contents, not the filename. OS permission JSON retains
+its existing behavior. Cedar input does not enable PDP calls or start a daemon.
+
+For example, save the following as `permissions.cedar` after creating `/tmp/asc-demo`:
+
+```cedar
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource)
+when { resource.path == "/tmp/asc-demo" || resource.path like "/tmp/asc-demo/*" };
+```
+
+```bash
+agent-sec-cli sandbox run --permissions permissions.cedar -- /bin/sh -c 'printf "sandbox\n" > /tmp/asc-demo/report.txt'
+```
+
+This example grants broad host reads and disables IP networking. A Cosh invocation
+uses the same option followed by `-- cosh`; explicitly include its writable state
+paths and `network.use` if its model provider needs networking. Dependencies are
+never added automatically.
+
+The conversion produces a coarse permission request, not equivalent enforcement
+of every Cedar condition:
+
+- File reads and writes use literal paths, directory-prefix `/*` patterns and
+  Boolean combinations. Include both directory equality and its child pattern to
+  authorize a complete directory tree. Exact file grants are checked against the
+  local object; point-only or descendants-only directory grants are rejected.
+- Any allowed write operation (`write`, `create`, `delete`, `rename`, `setattr`)
+  maps to `write`, including reads and deletion. A delete-only forbid therefore
+  does not remove a write grant when another mutation remains allowed.
+- File `context.input.program` equality/inequality conditions are projected across
+  matching programs; the resulting access applies to the entire process tree.
+  Path exclusions and unconditional forbids remain effective.
+- `network.use` maps to whole-network `full` or `off`. With only forbids, no
+  positive permission is inferred.
+- If invocation rules are present, `file.exec` and `process.spawn` check the
+  initial command and its arguments. They do not restrict every descendant launch
+  or generate noexec rules. Continue using OS permission JSON for explicit noexec.
+  In the PDP flow, these input checks run before the authorization request. They
+  are not checked again against a command transformed by an authorized `MODIFY`
+  or `STEP_UP` decision; the PDP authorizes that final command, and `STEP_UP`
+  additionally requires approval of the returned decision.
+
+Subject-specific rules, advice, unsupported file conditions (such as a particular
+chmod mode), arbitrary globs and unrepresentable regions are rejected. Input is
+bounded to 4 MiB, 1,024 policies and a region budget that also accounts for condition
+size. Distinct path/program limits are checked during collection, before selecting
+representatives or evaluating regions. Cedar file-permission path/program literals
+are limited to 4,095 UTF-8 bytes. Captured paths and ancestors have a separate 4 MiB total string
+budget, checked before copying each distinct path. Intention
+candidate envelopes are not permission files: select their Cedar text only after
+handling unresolved requirements and candidate validity.
+
+Cedar file read/write path literals must already exist. Preparation retains all paths, including
+exclusions, resolves file and directory symlinks (also in intermediate components),
+then evaluates and compacts permissions using canonical paths. An allow through an
+alias cannot discard a forbid on its target. Readable aliases are retained for the
+command; aliases with a writable ancestor are rejected because that ancestor could
+retarget the link after installation. Uninstallable overlapping aliases are also
+rejected by the backend. Explicit Cedar paths to files with multiple hardlinks are
+rejected before compaction, since canonicalization cannot identify their other names.
+The initial executable and working directory must match
+the captured paths, and captured identities are checked again before execution.
+
+For applications preparing PDP requests, parse the current source with
+`asc_pep_runtime::PermissionInput::parse(text)` and pass it as the existing
+`PermissionProvider` to `PepRuntime::authorize` or `run`. Both JSON and Cedar
+produce `requested_permissions`; the daemon policy still determines the final
+`effective_permissions`. The input is not uploaded to PAP as an authorization
+policy. `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` accepts the same formats and rereads
+its file for each Hook preparation. A changed source affects the next request,
+not an already prepared decision or running sandbox.
+Both runtime entrypoints call `PermissionProvider::prepare` to bind paths before
+execution or authorization. `PermissionInput::resolve` is only a lexical preview;
+it does not produce a bound execution plan.
+
 ## Permission format
 
 | Field | Behavior |
