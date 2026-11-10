@@ -141,8 +141,18 @@ category. Pages whose
 rendered body is shorter than 64 characters, such as application shells, pass through,
 and so do pages whose markup nests deeper than 512 elements: HTML parsing time grows
 quadratically with nesting depth, so such pages are not parsed at all.
-It only adopts output when both characters decrease and the heuristic token estimate
-saves at least 16 tokens, including the notice and recovery instruction.
+The extractor only adopts output when both characters decrease and the heuristic
+token estimate saves at least 16 tokens, including the notice and recovery instruction.
+
+Ordered-list support checks HTML numbering attributes for ascending decimal markers
+of at most nine digits; CSS list styles and counters are not interpreted, so
+CSS-driven numbering is outside this guarantee. If a rendered list uses `reversed`,
+any `li value` (even a redundant one), a `type` value other than exactly `1`, an invalid
+or unsupported `start`, or contains an empty/removed item or non-item text that would
+change its numbering, the complete received page passes through unchanged. An item
+whose content is entirely dropped (such as an alt-less image, form control, media,
+or SVG) counts as empty. Pages with supported lists remain eligible; lists outside
+the selected content root do not block rendering.
 
 The emitted operation is `html_extraction` and recoverability is `retrievable`, not
 `lossless`: markup and the removed elements are not in the visible output. Follow the
