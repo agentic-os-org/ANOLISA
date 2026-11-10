@@ -22,6 +22,7 @@ GOLDENS_DIR = os.path.join(CONTRACT_DIR, "goldens")
 RESPONSE_HOOK = os.path.join(HOOKS_DIR, "compress_response_hook.py")
 SCHEMA_HOOK = os.path.join(HOOKS_DIR, "compress_schema_hook.py")
 PRE_TOOL_HOOK = os.path.join(HOOKS_DIR, "rewrite_hook.py")
+PRE_TOOL_COMMAND = "compress --rewrite-child" if os.name == "posix" else "compress"
 
 DEBUG_TOKENLESS_BIN = os.path.join(REPO_ROOT, "target", "debug", "tokenless")
 

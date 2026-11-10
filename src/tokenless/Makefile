@@ -286,6 +286,7 @@ test-qwenwork-hooks:
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_hook_contract.py
 	python3 tests/test_rewrite_hook.py
+	python3 tests/test_rewrite_benchmark.py
 	python3 tests/test_resolve_agent_id.py
 
 test-qwenwork-install:

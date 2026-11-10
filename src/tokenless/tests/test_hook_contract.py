@@ -99,7 +99,7 @@ class PreToolHookContract(unittest.TestCase):
             with self.subTest(agent=agent):
                 result = self.run_case(agent, "applied")
                 self.assertEqual(result.envelope, expected)
-                self.assertEqual(result.spawns, ["compress"])
+                self.assertEqual(result.spawns, [corpus.PRE_TOOL_COMMAND])
                 self.assertEqual(result.requests[0]["operation"], "pre_tool")
 
     def test_fail_open_classes_pass_through(self):
@@ -108,7 +108,7 @@ class PreToolHookContract(unittest.TestCase):
                 with self.subTest(agent=agent, behavior=behavior):
                     result = self.run_case(agent, behavior)
                     self.assertEqual(result.envelope, {})
-                    self.assertEqual(result.spawns, ["compress"])
+                    self.assertEqual(result.spawns, [corpus.PRE_TOOL_COMMAND])
 
     def test_missing_binary_passes_through_without_spawning(self):
         for agent in PRE_TOOL_AGENTS:

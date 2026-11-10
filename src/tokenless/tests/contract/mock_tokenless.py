@@ -181,7 +181,11 @@ def main() -> int:
             log.write(" ".join(sys.argv[1:]) + "\n")
 
     behavior = os.environ.get("TOKENLESS_MOCK_BEHAVIOR", "applied")
-    if sys.argv[1:] != ["compress"]:
+    if sys.argv[1:] not in (["compress"], ["compress", "--rewrite-child"]):
+        return 2
+    if "--rewrite-child" in sys.argv and (
+        os.name != "posix" or os.getpgrp() != os.getpid()
+    ):
         return 2
     raw = sys.stdin.read()
 

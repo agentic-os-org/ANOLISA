@@ -49,8 +49,8 @@ enum Commands {
         /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
-        /// Set only for the child that `compress` starts for a PreTool rewrite;
-        /// that child leads a process group of its own.
+        /// Set by `compress` or a POSIX Hook supervising a PreTool rewrite;
+        /// the caller must start this process in a group of its own.
         #[arg(long = rewrite_deadline::CHILD_FLAG, hide = true)]
         rewrite_child: bool,
     },

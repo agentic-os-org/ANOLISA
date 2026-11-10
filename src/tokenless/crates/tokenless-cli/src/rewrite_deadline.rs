@@ -4,13 +4,14 @@
 //! this bound a stalled `git` would hold PreTool until the caller gives up, and
 //! would outlive a caller that stops only this process.
 //!
-//! On Unix the rewrite runs in a child of `compress` that leads a new process
-//! group, and the deadline ends that group. Callers end only `compress`, so the
-//! child's deadline covers its whole run. `compress` cannot use a group of its
-//! own: when it already leads one, as the first command of a job-control
-//! pipeline does, it cannot start another, and that group holds the rest of the
-//! pipeline. On Windows the rewrite stays in `compress`, inside a job that holds
-//! only this process and what it starts, and that ends with this process.
+//! On Unix the rewrite runs in its own process group, started by `compress` or
+//! directly by a POSIX Hook, and the deadline ends that group. CLI callers end
+//! only `compress`, so the child's deadline covers its whole run. `compress`
+//! cannot use a group of its own: when it already leads one, as the first
+//! command of a job-control pipeline does, it cannot start another, and that
+//! group holds the rest of the pipeline. On Windows the rewrite stays in
+//! `compress`, inside a job that holds only this process and what it starts,
+//! and that ends with this process.
 //! Without that group or job no rewrite runs, as a timeout could not end what
 //! RTK started.
 
@@ -213,7 +214,7 @@ mod tree {
 
     impl Tree {
         pub(super) fn own() -> io::Result<Self> {
-            // `compress` starts the rewrite child as the leader of a new group,
+            // The supervisor starts the rewrite child as the leader of a new group,
             // so a group this process leads holds nothing of the caller's. A
             // process that leads no group was not started that way, and its
             // group holds the caller.

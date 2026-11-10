@@ -31,3 +31,8 @@ Each layer also keeps its results in its own `reports/` directory
 never mix. Both directories are gitignored: benchmark reports are
 run/machine-specific artifacts and are never committed — regenerate them
 locally or attach them to the PR as CI artifacts.
+
+For QwenWork macOS Hook overhead, use the standalone
+[PreTool rewrite latency benchmark](rewrite-latency/README.md). It compares
+staged plugins with identical inputs and verifies actual rewrites separately
+from passthroughs before reporting timings.
