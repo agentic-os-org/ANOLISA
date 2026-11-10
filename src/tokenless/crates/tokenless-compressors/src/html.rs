@@ -1083,20 +1083,46 @@ impl<'a> Renderer<'a> {
     }
 
     fn list(&mut self, id: usize, in_sectioning: bool) -> String {
-        let ordered = self.nodes[id].is_element("ol");
-        let start = self.nodes[id]
+        let list = &self.nodes[id];
+        let ordered = list.is_element("ol");
+        // A reversed list counts down, by default to 1 at its last item.
+        let step: i64 = if list.attr("reversed").is_some() {
+            -1
+        } else {
+            1
+        };
+        let item_count = list
+            .children
+            .iter()
+            .filter(|&&child| self.nodes[child].is_element("li"))
+            .count();
+        let mut number = list
             .attr("start")
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(1);
+            .and_then(parse_integer)
+            .unwrap_or(if step < 0 {
+                i64::try_from(item_count).unwrap_or(i64::MAX)
+            } else {
+                1
+            });
         let mut items = Vec::new();
-        let mut number = start;
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
+            let is_item = node.is_element("li");
+            // As in a browser, every `li` takes a number, whether or not the
+            // view shows the item, an item's `value` restarts the count, and
+            // nothing else is numbered.
+            let ordinal = (ordered && is_item).then(|| {
+                if let Some(value) = node.attr("value").and_then(parse_integer) {
+                    number = value;
+                }
+                let ordinal = number;
+                number = number.saturating_add(step);
+                ordinal
+            });
             if let Some(category) = self.removal(node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
-            let is_item = node.is_element("li");
             // Stray inline content between items renders as its own item.
             let body = if is_item || is_block(node) {
                 self.blocks(child, in_sectioning)
@@ -1105,23 +1131,26 @@ impl<'a> Renderer<'a> {
                 self.inline(child, &mut text, in_sectioning);
                 text.trim().to_owned()
             };
-            // A browser numbers every `li`, empty or not, and nothing else,
-            // so a fragment view whose numbers would drift is rejected.
+            // An empty item leaves a gap in the numbers, and content
+            // between items has none: a fragment view shows neither.
             if self.fragment && ordered && is_item == body.is_empty() {
                 self.lossy = true;
             }
+            let marker = match ordinal {
+                Some(ordinal) => format!("{ordinal}. "),
+                None if ordered => String::new(),
+                None => "- ".to_owned(),
+            };
             if body.is_empty() {
                 continue;
             }
-            let marker = if ordered {
-                let marker = format!("{number}. ");
-                number += 1;
-                marker
+            // Content between items is indented to stay inside the list.
+            let pad = " ".repeat(if marker.is_empty() { 3 } else { marker.len() });
+            let mut item = if marker.is_empty() {
+                pad.clone()
             } else {
-                "- ".to_owned()
+                marker
             };
-            let pad = " ".repeat(marker.len());
-            let mut item = marker;
             for (index, line) in body.lines().enumerate() {
                 if index > 0 {
                     item.push('\n');
@@ -1464,6 +1493,7 @@ fn is_block(node: &Node) -> bool {
             | "article"
             | "blockquote"
             | "body"
+            | "center"
             | "dd"
             | "details"
             | "div"
@@ -1493,6 +1523,22 @@ fn is_block(node: &Node) -> bool {
             | "table"
             | "ul"
     )
+}
+
+/// Reads an attribute as the HTML standard's rules for parsing integers
+/// do: optional whitespace and sign, then digits, with anything after them
+/// ignored. `None` without digits or outside `i32`, where browsers fall
+/// back to the default.
+fn parse_integer(value: &str) -> Option<i64> {
+    let value = value.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let end = digits.bytes().take_while(u8::is_ascii_digit).count();
+    let number = digits[..end].parse::<i32>().ok().map(i64::from)?;
+    Some(if negative { -number } else { number })
 }
 
 fn flush_inline(blocks: &mut Vec<String>, inline: &mut String, open: &mut bool) {

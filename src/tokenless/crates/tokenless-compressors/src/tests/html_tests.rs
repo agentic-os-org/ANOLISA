@@ -465,6 +465,68 @@ fn lists_nest_and_ordered_lists_honor_start() {
 }
 
 #[test]
+fn ordered_lists_number_their_items_as_a_browser_does() {
+    let body = |list: &str| {
+        let html = page(&format!("<p>{PARAGRAPH}</p>{list}"));
+        let view = HtmlExtractor.render(&html).unwrap();
+        body_of(&view)
+            .strip_prefix(&format!("{PARAGRAPH}\n\n"))
+            .unwrap()
+            .to_owned()
+    };
+    // A sign and trailing characters are read as a browser reads them.
+    assert_eq!(
+        body("<ol start=\"-1\"><li>a</li><li>b</li><li>c</li></ol>"),
+        "-1. a\n0. b\n1. c"
+    );
+    assert_eq!(
+        body("<ol start=\" 5th\"><li>a</li><li>b</li></ol>"),
+        "5. a\n6. b"
+    );
+    assert_eq!(
+        body("<ol start=\"x\"><li>a</li><li>b</li></ol>"),
+        "1. a\n2. b"
+    );
+    // An empty item still takes its number; content between items takes none.
+    assert_eq!(body("<ol><li>a</li><li></li><li>c</li></ol>"), "1. a\n3. c");
+    assert_eq!(
+        body("<ol><li>a</li><p>note</p><li>b</li></ol>"),
+        "1. a\n   note\n2. b"
+    );
+    // `value` restarts the count, and `reversed` counts down.
+    assert_eq!(
+        body("<ol><li>a</li><li value=\"7\">b</li><li>c</li></ol>"),
+        "1. a\n7. b\n8. c"
+    );
+    assert_eq!(
+        body("<ol reversed><li>a</li><li>b</li><li>c</li></ol>"),
+        "3. a\n2. b\n1. c"
+    );
+    assert_eq!(
+        body("<ol reversed start=\"10\"><li>a</li><li>b</li></ol>"),
+        "10. a\n9. b"
+    );
+    // An item the view removes still takes its number and applies its `value`.
+    assert_eq!(
+        body("<ol reversed><li role=\"navigation\">Nav</li><li>Keep</li></ol>"),
+        "1. Keep"
+    );
+    assert_eq!(
+        body("<ol><li role=\"navigation\">Nav</li><li>Keep</li></ol>"),
+        "2. Keep"
+    );
+    assert_eq!(
+        body("<ol><li>a</li><li role=\"navigation\" value=\"7\">Nav</li><li>b</li></ol>"),
+        "1. a\n8. b"
+    );
+    // A `center` is a block, so it does not run into the text before it.
+    assert_eq!(
+        body("<div><span>Total</span><center>125.50</center></div>"),
+        "Total\n\n125.50"
+    );
+}
+
+#[test]
 fn links_images_emphasis_and_admonitions_render() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><p>See <a href=\"https://x.y/z\">docs</a>, <a href=\"javascript:void(0)\">\

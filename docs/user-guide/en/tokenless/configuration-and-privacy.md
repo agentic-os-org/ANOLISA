@@ -127,10 +127,12 @@ fenced code with its language, links with targets, image alt text, quotes, and
 admonitions. MathML formulas render as their TeX annotation or `alttext` between `$`
 signs; cells spanning rows or columns leave empty cells in the slots they cover, rows
 are not padded to the widest row, and a table's first header and footer groups are
-placed where a browser draws them, at the top and bottom; paragraph lines that start
-like a Markdown heading, list item, quote, rule or code fence are escaped. The content
-root is `<main>`, an element with `role=main`, or the only outermost `<article>`
-(articles nested inside it, such as comments, do not count); otherwise the whole body.
+placed where a browser draws them, at the top and bottom; ordered lists keep the
+numbers a browser shows, following `start`, `reversed` and an item's `value`;
+paragraph lines that start like a Markdown heading, list item, quote, rule or code
+fence are escaped. The content root is `<main>`, an element with `role=main`, or the
+only outermost `<article>` (articles nested inside it, such as comments, do not
+count); otherwise the whole body.
 Scripts, styles, `noscript`, templates, SVG, iframes, comments, `nav`, `aside`,
 page-level `header`/`footer`, elements with navigation, banner, contentinfo, or
 complementary roles, form controls (`button`, `input`, `select`, `textarea`,

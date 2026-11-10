@@ -572,12 +572,11 @@ fn text_a_browser_shows_apart_stays_apart() {
         markdown("<p><a href=\"https://example.com/docs\">https://example.com/docs</a></p>"),
         "[https://example.com/docs](https://example.com/docs)"
     );
-    // A separation the renderer does not reproduce rejects the fragment:
-    // `center` is a block in a browser but flows inline in the view, unless
-    // the parser has already closed a paragraph before it.
+    // `center` is a block in a browser, with or without a paragraph the
+    // parser closes before it.
     assert_eq!(
-        HtmlExtractor.render_fragment("<span>Total</span><center>125.50</center>"),
-        None
+        markdown("<span>Total</span><center>125.50</center>"),
+        "Total\n\n125.50"
     );
     assert_eq!(
         markdown("<p><span>Total</span><center>125.50</center></p>"),
