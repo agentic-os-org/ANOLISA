@@ -41,7 +41,29 @@ PAP CREATE/UPDATE 接受 Cedar 源码并保存版本，PDP 按配置选择基线
 generate_requested_permissions(task, state, launch) → OsPermissionSet
 ```
 
-默认读取固定配置，保留按任务与状态生成申请范围的接口；意图识别生成的动态策略通过 PAP 管理并进入 PDP。申请范围仍须 PDP 授权。申请范围由 PEP 在调用 evaluate 前确定并规范化路径；不新增服务，也不动态修改运行中权限。
+默认读取固定配置；`PermissionInput` 接受 OS permission JSON、原始 Cedar 或现有 Cedar
+source 封装，并实现 `PermissionProvider`，支持每次按任务与状态提供新文本生成申请范围。
+Cedar 输入用于生成申请时不发布到 PAP；作为授权规则使用的动态策略仍通过 PAP 管理并进入
+PDP。申请范围仍须 PDP 授权，由 PEP 在调用 evaluate 前确定并规范化路径；不新增服务，也不动态修改运行中权限。
+
+Cedar 申请转换使用共享前端及官方求值器，按字面路径和目录前缀划分有限区域。任一获准修改
+操作合并为 write（包含读和删除）；文件 program 条件按可获准程序投影为进程树权限。
+因此“允许修改但禁删”和“仅指定程序可读”不再保留操作或程序级限制，代码对应位置明确说明。
+路径排除、无条件禁止及 default deny 保留；不支持的条件、advice、主体约束和不可表示区域
+被拒绝。出现 file.exec/process.spawn 规则时只在请求 PDP 前校验初始调用，不生成后代执行限制。
+PDP 的 MODIFY/STEP_UP 改写结果由 PDP 授权，输入 Cedar 不会再独立复查；STEP_UP 仍须批准最终决定。
+
+`PermissionProvider::prepare` 为直接执行与 PDP 请求共用的绑定入口；默认实现保持原 JSON
+准备行为，Cedar 实现先捕获全部路径边界及祖先的 canonical 路径、类型、device/inode，
+包括尚未形成 OS deny 条目的排除项。只在官方 PST 中替换已支持的文件路径字面量，仍由官方
+Authorizer 求值后合并规则，不引入集合编译器。可读别名留作挂载别名；可写祖先下的别名拒绝。
+显式文件边界若有多个硬链接，在合并前拒绝，避免丢弃排除项后绕过后端已有的硬链接限制。
+Cedar 文件读写条件中的路径/程序字面量限制为 4,095 UTF-8 字节；祖先展开逐项去重，
+在分配前检查条数和 4 MiB 累计字符串预算，避免小输入通过长祖先链放大内存。
+初始程序和 cwd 的已解析路径必须与捕获结果一致，后续身份变化由现有执行检查拒绝。
+`resolve` 只提供词法预览；自定义动态 Cedar provider 应将 `prepare` 委托给当次解析的
+`PermissionInput`。路径和程序在收集时限量，区域数乘条件规模在探测前检查预算；代表路径
+使用有序集合的前缀查询，N 次候选碰撞为 O(N log N)，不反复扫描全体边界。
 
 授权复用现有 daemon 通信；策略更新经现有 PAP CRUD 接入：
 
@@ -265,7 +287,9 @@ daemon 的 `--authorization-config <file>` 只配置 baseline_policy、可选 ta
 agent-sec-cli sandbox run --permissions permissions.json -- python3 agent.py
 ```
 
-`--permissions` 必填，文件内容为第 3 节的 `OsPermissionSet`；`--` 后是目标命令及参数。CLI 校验输入，安装约束、运行命令并返回结果，不生成申请权限、不调用 PDP、不 ask、不上报 PDP 回执，也不要求 Decision。缺少权限或无法准确实施时直接失败，不自动补权限。
+`--permissions` 必填，接受第 3 节的 `OsPermissionSet` JSON 或上述 Cedar 申请输入；`--` 后是目标命令及参数。
+CLI 将输入解析或转换成 OS 权限，安装约束、运行命令并返回结果；不调用 PDP、不 ask、不上报
+PDP 回执，也不要求 Decision。安装的是转换后的粗粒度权限；缺少权限或后端无法实施时失败，不自动补权限。
 
 上层 PEP 将获准的命令和 `effective_permissions` 传给同一执行入口，无须借道 CLI。直接调用 CLI 的权限由调用方提供，不代表已经 PDP 授权。两条路径共用 adaptor、supervisor 和 `linux-sandbox`；授权应用通过库接入，不新增执行 CLI 或服务。旧底层 CLI/JSON 接口继续保留。
 

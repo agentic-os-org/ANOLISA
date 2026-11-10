@@ -1,10 +1,12 @@
 //! Direct sandbox execution and optional PDP-driven authorization.
 
 pub mod linux_sandbox;
+pub mod permissions;
 pub mod runtime;
 pub mod supervisor;
 
 pub use linux_sandbox::{SandboxBackend, execute, prepare_launch, prepare_path_facts};
+pub use permissions::PermissionInput;
 pub use runtime::{
     ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, FixedPermissions, PepOutcome,
     PepRuntime, PermissionProvider, PreparedInvocation,
@@ -13,6 +15,9 @@ pub use runtime::{
 /// Failures before a backend outcome is available.
 #[derive(Debug, thiserror::Error)]
 pub enum PepError {
+    /// A permission source could not be converted into an OS permission request.
+    #[error(transparent)]
+    PermissionInput(#[from] permissions::PermissionInputError),
     /// Invalid or unsupported permission contract.
     #[error("invalid sandbox input: {0}")]
     Validation(#[from] asc_sandbox_types::ValidationError),

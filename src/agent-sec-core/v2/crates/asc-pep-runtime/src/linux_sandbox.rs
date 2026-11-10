@@ -62,14 +62,20 @@ impl SandboxBackend {
         launch: LaunchSpec,
         permissions: OsPermissionSet,
     ) -> Result<ExecutionResult, PepError> {
-        let facts = prepare_path_facts(&launch, &permissions, &[])?;
-        self.execute_bound(&ExecutionSpec {
-            version: 1,
-            launch,
-            permissions,
-            path_facts: facts,
-            mount_aliases: Vec::new(),
-        })
+        self.execute_with_provider(launch, &crate::FixedPermissions(permissions))
+    }
+
+    /// Resolves a permission source and binds its path constraints before direct execution.
+    ///
+    /// # Errors
+    /// Rejects invalid sources, changed path types and backend preparation failures.
+    pub fn execute_with_provider(
+        &self,
+        launch: LaunchSpec,
+        provider: &dyn crate::PermissionProvider,
+    ) -> Result<ExecutionResult, PepError> {
+        let prepared = provider.prepare(&launch)?;
+        self.execute_bound(&ExecutionSpec { launch, ..prepared })
     }
 
     /// Executes a previously prepared invocation without refreshing its identity.

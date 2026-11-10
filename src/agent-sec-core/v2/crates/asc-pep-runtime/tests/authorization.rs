@@ -6,8 +6,8 @@ use asc_daemon_protocol::authorization::{
     OsPermissionSet, ReceiptAck,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, AuthorizationClient, FixedPermissions, PepError, PepRuntime,
-    PreparedInvocation, SandboxBackend, prepare_launch,
+    ApprovalHandler, AuthorizationClient, FixedPermissions, PepError, PepRuntime, PermissionInput,
+    PermissionProvider, PreparedInvocation, SandboxBackend, prepare_launch,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -277,21 +277,34 @@ fn authorized_modify_and_approval_execute_without_a_second_evaluation() {
         }
     }
     for verdict in [DecisionVerdict::Modify, DecisionVerdict::StepUp] {
-        let (_directory, mut runtime, launch, permissions) = fixture();
-        let client = TransformClient(client(verdict));
-        let result = runtime
-            .run(
-                &principal(),
-                launch,
-                &permissions,
-                &client,
-                Some(&mut FinalApproval),
-            )
+        for cedar_input in [false, true] {
+            let (_directory, mut runtime, launch, permissions) = fixture();
+            let cedar = PermissionInput::parse(&format!(
+                r#"permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.exec", resource)
+when {{ resource.path == {} && context.input.arg_count == 0 }};"#,
+                serde_json::json!(launch.resolved_program)
+            ))
             .unwrap();
-        assert!(result.result.started, "{:?}", result.result.error);
-        assert_eq!(result.decision.launch.args, vec!["authorized"]);
-        assert_eq!(client.0.calls.get(), 1);
-        assert_eq!(client.0.receipts.borrow().len(), 1);
+            let provider: &dyn PermissionProvider = if cedar_input { &cedar } else { &permissions };
+            let mut transformed = launch.clone();
+            transformed.args = vec!["authorized".into()];
+            assert!(cedar.resolve(&transformed).is_err());
+            let client = TransformClient(client(verdict));
+            let result = runtime
+                .run(
+                    &principal(),
+                    launch,
+                    provider,
+                    &client,
+                    Some(&mut FinalApproval),
+                )
+                .unwrap();
+            assert!(result.result.started, "{:?}", result.result.error);
+            assert_eq!(result.decision.launch.args, vec!["authorized"]);
+            assert_eq!(client.0.calls.get(), 1);
+            assert_eq!(client.0.receipts.borrow().len(), 1);
+        }
     }
 }
 

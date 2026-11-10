@@ -46,6 +46,64 @@ cat report.txt
 `--permissions` 必填，最多读取 4 MiB。程序与参数放在 `--` 后。
 命令使用调用方的工作目录和环境变量；环境变量名称和值必须是有效 UTF-8。
 
+## Cedar 输入
+
+同一个 `--permissions` 参数也接受使用 `seccore.system` schema revision 1 的原始 Cedar
+文本，或现有 `{"language":"cedar","content":{"schema":{"schemaId":"seccore.system",
+"revision":1},"text":"..."}}` 源码封装。格式按内容识别，不依赖文件名。原有 OS permission
+JSON 行为不变；使用 Cedar 不会启用 PDP 调用或启动 daemon。
+
+例如，创建 `/tmp/asc-demo` 后，将以下内容保存为 `permissions.cedar`：
+
+```cedar
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource)
+when { resource.path == "/tmp/asc-demo" || resource.path like "/tmp/asc-demo/*" };
+```
+
+```bash
+agent-sec-cli sandbox run --permissions permissions.cedar -- /bin/sh -c 'printf "sandbox\n" > /tmp/asc-demo/report.txt'
+```
+
+此示例允许广泛读取宿主文件，禁止 IP 联网。启动 Cosh 时使用相同参数，后接 `-- cosh`；
+需要明确包含其可写状态目录，模型提供方需要联网时还须允许 `network.use`。不会自动补充运行依赖。
+
+转换结果是粗粒度权限申请，不代表所有 Cedar 条件均得到等价执行：
+
+- 文件读写支持字面路径、目录前缀 `/*` 模式及布尔组合。完整目录树须同时包含目录自身的
+  等值条件及其后代模式。精确文件授权会检查本地对象；仅目录自身或仅目录后代的授权被拒绝。
+- 任一获准写操作（`write`、`create`、`delete`、`rename`、`setattr`）映射为 `write`，
+  包括读取与删除。因此，在仍有其他获准修改操作时，仅禁止 delete 不会移除 write 申请。
+- 文件的 `context.input.program` 等值或不等值条件按满足条件的程序投影，所得访问权限
+  适用于整个进程树。路径排除与无条件禁止仍然生效。
+- `network.use` 映射为全网络 `full` 或 `off`。只有 forbid 时，不推导任何正向授权。
+- 存在调用规则时，`file.exec` 和 `process.spawn` 检查初始命令及参数，不逐次限制后代
+  程序启动，也不生成 noexec 规则。需要显式 noexec 时继续使用 OS permission JSON。
+  在 PDP 流程中，这些输入检查发生在发送授权请求之前；PDP 通过 `MODIFY` 或 `STEP_UP`
+  改写命令后，不再用输入 Cedar 重查改写结果。最终命令由 PDP 授权，`STEP_UP` 还须批准返回的决定。
+
+主体特定规则、advice、不支持的文件条件（例如特定 chmod mode）、任意通配符和不可表示的
+路径区域会被拒绝。输入上限为 4 MiB、1,024 条策略；区域求值预算同时计入条件大小。
+收集路径和程序时即检查不同值的数量上限，先检查预算，再选择代表值和求值。
+Cedar 文件读写条件中的路径和程序字面量最多为 4,095 个 UTF-8 字节；捕获路径及其祖先
+另有 4 MiB 字符串总预算，每个不同路径均在复制前检查。意图候选封装不是权限文件：
+须先处理 unresolved 要求及候选有效性，再选取其中的 Cedar 文本。
+
+Cedar 文件读写条件中的路径字面量必须已经存在。准备时保留全部路径（包括排除项），解析文件、目录及
+中间路径分量中的符号链接，再按 canonical 路径求值并合并权限。经别名的 allow 不会丢弃
+对其目标的 forbid。可读别名保留给命令使用；若别名存在可写祖先则拒绝，因为祖先目录可被用于
+在安装后重定向链接。后端仍拒绝无法安全安装的重叠别名。Cedar 显式路径指向多硬链接文件时，
+会在合并权限前拒绝，因为 canonical 路径无法识别这些其他名称。初始程序与工作目录必须和捕获的路径
+一致；执行前再次核验已捕获的对象身份。
+
+准备 PDP 请求的应用可用 `asc_pep_runtime::PermissionInput::parse(text)` 解析当次输入，
+作为现有 `PermissionProvider` 传给 `PepRuntime::authorize` 或 `run`。JSON 与 Cedar 均
+生成 `requested_permissions`；daemon 策略仍决定最终 `effective_permissions`。输入不会
+作为授权策略上传到 PAP。`AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接受相同格式，每次 Hook
+准备请求时重新读取文件。输入变化影响下一次请求，不改变已准备的决定或运行中的沙箱。
+两个运行入口均通过 `PermissionProvider::prepare` 先绑定路径，再执行或请求授权。
+`PermissionInput::resolve` 仅用于词法预览，不生成绑定对象的执行计划。
+
 ## 权限格式
 
 | 字段 | 行为 |

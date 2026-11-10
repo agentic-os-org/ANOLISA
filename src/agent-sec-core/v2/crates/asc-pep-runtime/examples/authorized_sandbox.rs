@@ -1,17 +1,17 @@
 //! An explicit upper-PEP consumer; the product sandbox CLI remains daemon-independent.
 
 use std::collections::BTreeMap;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use asc_daemon_protocol::authorization::{
-    AgentPrincipal, AuthorizationRequest, Decision, ExecutionReceipt, OsPermissionSet, ReceiptAck,
+    AgentPrincipal, AuthorizationRequest, Decision, ExecutionReceipt, ReceiptAck,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, FixedPermissions, PepError,
-    PepRuntime, SandboxBackend, prepare_launch,
+    ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, PepError, PepRuntime,
+    PermissionInput, SandboxBackend, prepare_launch,
 };
 use clap::Parser;
 
@@ -24,7 +24,7 @@ struct Options {
     /// Root-owned daemon socket.
     #[arg(long)]
     socket: PathBuf,
-    /// JSON OS permission request, including runtime dependencies.
+    /// OS permission JSON or Cedar request source, including runtime dependencies.
     #[arg(long)]
     permissions: PathBuf,
     /// Logical Agent identity supplied by the embedding application.
@@ -78,8 +78,11 @@ impl ApprovalHandler for LocalApproval {
 }
 
 fn run(options: Options) -> Result<u8, Box<dyn std::error::Error>> {
-    let permissions: OsPermissionSet =
-        serde_json::from_reader(std::fs::File::open(options.permissions)?)?;
+    let mut text = String::new();
+    std::fs::File::open(options.permissions)?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_string(&mut text)?;
+    let permissions = PermissionInput::parse(&text)?;
     let (program, args) = options
         .command
         .split_first()
@@ -116,7 +119,7 @@ fn run(options: Options) -> Result<u8, Box<dyn std::error::Error>> {
             agent_type: options.agent_type,
         },
         launch,
-        &FixedPermissions(permissions),
+        &permissions,
         &client,
         channel,
     )?;

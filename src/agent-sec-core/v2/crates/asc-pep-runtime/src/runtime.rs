@@ -17,6 +17,36 @@ pub trait PermissionProvider {
     /// # Errors
     /// Returns an error when no valid permission request can be prepared.
     fn permissions(&self, launch: &LaunchSpec) -> Result<OsPermissionSet, PepError>;
+
+    /// Binds source constraints before permissions can reach either execution or the PDP.
+    ///
+    /// # Errors
+    /// Rejects invalid permissions, unresolved objects and changed source constraints.
+    fn prepare(&self, launch: &LaunchSpec) -> Result<ExecutionSpec, PepError> {
+        let permissions = self.permissions(launch)?;
+        let path_facts = prepare_path_facts(launch, &permissions, &[])?;
+        self.validate_path_facts(launch, &permissions, &path_facts)?;
+        Ok(ExecutionSpec {
+            version: 1,
+            launch: launch.clone(),
+            permissions,
+            path_facts,
+            mount_aliases: Vec::new(),
+        })
+    }
+
+    /// Checks source-specific constraints against the same object facts retained for execution.
+    ///
+    /// # Errors
+    /// Rejects facts that would widen the prepared permission source.
+    fn validate_path_facts(
+        &self,
+        _launch: &LaunchSpec,
+        _permissions: &OsPermissionSet,
+        _facts: &[PathFact],
+    ) -> Result<(), PepError> {
+        Ok(())
+    }
 }
 
 /// Default provider for an explicit fixed permission set.
@@ -117,8 +147,9 @@ impl PreparedInvocation {
             Path::new(&launch.cwd),
             launch.env,
         )?;
-        let mut permissions = provider.permissions(&launch)?;
-        let path_facts = prepare_path_facts(&launch, &permissions, &[])?;
+        let prepared = provider.prepare(&launch)?;
+        let mut permissions = prepared.permissions;
+        let path_facts = prepared.path_facts;
         let mount_aliases = permissions
             .filesystem
             .rules
@@ -130,6 +161,7 @@ impl PreparedInvocation {
                     .any(|f| f.path == rule.path && f.path != f.canonical_path)
             })
             .map(|rule| rule.path.clone())
+            .chain(prepared.mount_aliases)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
