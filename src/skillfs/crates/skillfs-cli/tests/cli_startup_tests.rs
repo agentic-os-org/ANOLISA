@@ -3123,6 +3123,171 @@ fn managed_mount_reuses_a_legacy_underscore_instance() {
 }
 
 #[test]
+fn managed_stop_and_orphan_cleanup_spare_same_named_processes() {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    fn bounded(command: &mut Command) -> (std::process::ExitStatus, String) {
+        let log = tempfile::NamedTempFile::new().expect("command log");
+        let mut child = command
+            .stdout(log.reopen().expect("stdout log"))
+            .stderr(log.reopen().expect("stderr log"))
+            .spawn()
+            .expect("spawn lifecycle command");
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            if let Some(status) = child.try_wait().expect("command status") {
+                return (
+                    status,
+                    std::fs::read_to_string(log.path()).expect("read log"),
+                );
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("managed lifecycle command timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    struct Cleanup {
+        mount: PathBuf,
+        runtime: PathBuf,
+        victim: Child,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = bounded(
+                Command::new(bin_path())
+                    .arg("stop")
+                    .arg(&self.mount)
+                    .env("XDG_RUNTIME_DIR", &self.runtime),
+            );
+            force_unmount(&self.mount);
+            let _ = self.victim.kill();
+            let _ = self.victim.wait();
+        }
+    }
+
+    for legacy in [false, true] {
+        for operation in ["stop-worker", "stop-supervisor", "orphan"] {
+            if operation == "orphan" && !fuse_available() {
+                eprintln!("SKIP: FUSE unavailable; cannot test orphan replacement");
+                continue;
+            }
+            let temp = tempfile::tempdir().expect("same-name process fixture");
+            let mount = temp.path().join("mount");
+            let source = temp.path().join("source");
+            let runtime = temp.path().join("runtime");
+            let state_dir = runtime.join("skillfs");
+            std::fs::create_dir(&mount).expect("mountpoint");
+            std::fs::create_dir(&source).expect("source");
+            std::fs::create_dir_all(&state_dir).expect("runtime");
+            let executable = temp.path().join("skillfs");
+            std::fs::copy("/usr/bin/sleep", &executable).expect("copy same-named executable");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let victim = loop {
+                match Command::new(&executable).arg("300").spawn() {
+                    Ok(child) => break child,
+                    // Parallel forks can briefly inherit the copy's writable fd.
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ETXTBSY)
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("spawn victim: {error}"),
+                }
+            };
+            let mut cleanup = Cleanup {
+                mount,
+                runtime,
+                victim,
+            };
+            let pid = cleanup.victim.id();
+            let recorded = std::fs::metadata(bin_path()).expect("recorded executable metadata");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let exe = std::fs::read_link(format!("/proc/{pid}/exe")).expect("victim exe");
+                if exe == executable {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "victim must finish exec before testing"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let actual = std::fs::metadata(format!("/proc/{pid}/exe")).expect("victim identity");
+            assert_ne!(
+                (recorded.dev(), recorded.ino()),
+                (actual.dev(), actual.ino())
+            );
+            let normalized = cleanup.mount.canonicalize().expect("normalized mount");
+            let id = legacy_instance_id(&normalized);
+            let mut state = serde_json::json!({
+                "schema_version": 1,
+                "instance_id": id,
+                "mountpoint": normalized,
+                "source": source,
+                "worker_program": bin_path(),
+                "worker_args": [],
+                "desired_state": "mounted"
+            });
+            if !legacy {
+                state["worker_identity"] = serde_json::json!({
+                    "device": recorded.dev(), "inode": recorded.ino()
+                });
+            }
+            let state_path = state_dir.join(format!("{id}.state.json"));
+            std::fs::write(&state_path, state.to_string()).expect("seed retained state");
+            let role = if operation == "stop-supervisor" {
+                "supervisor"
+            } else {
+                "worker"
+            };
+            std::fs::write(state_dir.join(format!("{id}.{role}.pid")), pid.to_string())
+                .expect("seed recycled pid");
+            assert!(
+                state_path.exists(),
+                "identity checking requires retained state"
+            );
+
+            let mut command = Command::new(bin_path());
+            command.env("XDG_RUNTIME_DIR", &cleanup.runtime);
+            if operation == "orphan" {
+                command
+                    .args(["mount", "--managed"])
+                    .arg(&source)
+                    .arg(&cleanup.mount);
+            } else {
+                command.arg("stop").arg(&cleanup.mount);
+            }
+            let (status, output) = bounded(&mut command);
+            assert!(status.success(), "legacy={legacy} {operation}: {output}");
+            assert!(
+                cleanup.victim.try_wait().expect("victim status").is_none(),
+                "legacy={legacy} {operation} must preserve a same-named unrelated process"
+            );
+            if operation == "orphan" {
+                assert!(output.contains("managed mount ready"), "{output}");
+                assert!(is_mounted(&cleanup.mount));
+                let replacement: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(&state_path).expect("replacement state"),
+                )
+                .expect("parse replacement state");
+                assert_eq!(replacement["worker_identity"]["device"], recorded.dev());
+                assert_eq!(replacement["worker_identity"]["inode"], recorded.ino());
+            } else {
+                assert!(!state_path.exists(), "stop must clean stale state");
+            }
+        }
+    }
+}
+
+#[test]
 fn managed_mount_parses_and_rejects_missing_source() {
     // `--managed` must parse, and the managed client must fail fast with a
     // clear source error before detaching a supervisor — proving the flag is
