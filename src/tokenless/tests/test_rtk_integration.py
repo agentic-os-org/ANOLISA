@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_hermes_lifecycle import _load_plugin
+import path_list_view
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKENLESS = Path(
@@ -428,11 +429,8 @@ class RtkIntegrationTest(unittest.TestCase):
             })
             slot = result["hookSpecificOutput"]
             view = slot.get("updatedToolOutput", slot.get("updatedToolResponse"))
-            data = json.loads(view.split("\n", 1)[1])
-            paths = [data["base"] + path for path in data["paths"]]
-            restored = data["line_ending"].join(paths)
-            if data["trailing_newline"]:
-                restored += data["line_ending"]
+            restored = path_list_view.restore(view)
+            paths = restored.splitlines()
             self.assertEqual(restored, executed.stdout)
             self.assertEqual(len(paths), 60)
             for path in paths:

@@ -182,7 +182,7 @@ PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `
 的目录链时（例如排序后的相对路径树），分组能进一步压缩：
 
 ```text
-[Paths grouped by directory; full path = base + Dir + entry; CRLF; no final newline]
+[Paths grouped by directory; full path = base + Dir + entry; entries LF-separated; restore with CRLF; no final newline]
 Base="src/tokenless/crates/"
 Dir="tokenless-ccr/"
 Cargo.toml
@@ -197,10 +197,12 @@ lib.rs
 
 分组视图只在相邻条目之间共享目录：`Base=` 行存放以 `/` 结尾的公共前缀（JSON 引号编码），
 每个 `Dir=` 行存放相对 `base` 的目录（JSON 引号编码），其余行是该目录下的条目，按接收顺序排列。
-行尾与末尾换行状态在声明中记录一次（`CRLF; final newline`、`CRLF; no final newline`
-或 `no final newline`；未标注即表示 LF 且带末尾换行）。条目若作为裸行会产生歧义——为空，
-或以 `Base=`、`Dir=`、`"` 开头——则与声明一样使用 JSON 引号编码。还原时，将 `base` +
-当前 `Dir` + 各条目依次拼接，以记录的行尾连接，仅当声明记录了末尾换行时补充行尾。
+条目之间始终以 LF 分隔；声明中的 `restore with` 从句记录原始输入使用的行尾（CRLF 或 LF），
+`final newline` 从句记录输入是否以行尾结束（`CRLF; final newline`、
+`CRLF; no final newline` 或 `restore with LF; no final newline`；两个从句均未标注即表示
+LF 且带末尾换行）。条目若作为裸行会产生歧义——为空，或以 `Base=`、`Dir=`、`"` 开头——
+则与声明一样使用 JSON 引号编码。还原时，将 `base` + 当前 `Dir` + 各条目依次拼接，
+以记录的行尾连接，仅当声明记录了末尾换行时补充行尾。
 仲裁会在两个候选中选择较小者，且候选只有逐字节还原输入、并同时减少字节数与估算 Token
 时才会输出；没有目录局部性的列表（例如按修改时间乱序排列）保持公共前缀视图或原样通过。
 资格判定、路由、`search_path_sharing` 开关、统计上报与可恢复性均不变；两种格式在统计中

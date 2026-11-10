@@ -17,19 +17,83 @@ fn path_lists_route_by_content_and_origin_without_a_command_name() {
             let concrete = Arc::new(CountingStore::default());
             let store: Arc<dyn StashStore> = concrete.clone();
             let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
-            assert_eq!(run.response.disposition, Disposition::Applied, "{tool} {origin:?}");
+            assert_eq!(
+                run.response.disposition,
+                Disposition::Applied,
+                "{tool} {origin:?}"
+            );
             assert_eq!(run.response.content_type, Some(ContentType::SearchResults));
-            assert_eq!(run.response.applied_operations, [AppliedOperation::SearchPathSharing]);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::SearchPathSharing]
+            );
             assert_eq!(run.response.recoverability, Recoverability::Lossless);
             assert!(run.response.stash_keys.is_empty());
             assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
-            let (_, encoded) = run.response.output.split_once('\n').unwrap();
-            let data: Value = serde_json::from_str(encoded).unwrap();
-            let paths = data["paths"].as_array().unwrap();
-            assert_eq!(paths.len(), 60);
-            let restored: String = paths.iter().map(|path| {
-                format!("{}{}{}", data["base"].as_str().unwrap(), path.as_str().unwrap(), data["line_ending"].as_str().unwrap())
-            }).collect();
+            // The pipeline arbitrates between the JSON prefix view and the
+            // grouped view, so the test restores through whichever header won.
+            let restored = if let Some(encoded) = run.response.output.strip_prefix(
+                "[Path list; all received paths retained; full path = base + each paths entry]\n",
+            ) {
+                let data: Value = serde_json::from_str(encoded).unwrap();
+                let paths = data["paths"].as_array().unwrap();
+                assert_eq!(paths.len(), 60);
+                let mut restored = paths
+                    .iter()
+                    .map(|path| {
+                        format!(
+                            "{}{}",
+                            data["base"].as_str().unwrap(),
+                            path.as_str().unwrap()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(data["line_ending"].as_str().unwrap());
+                if data["trailing_newline"].as_bool().unwrap() {
+                    restored.push_str(data["line_ending"].as_str().unwrap());
+                }
+                restored
+            } else {
+                let header = run.response.output.split('\n').next().unwrap().to_owned();
+                assert!(
+                    header.starts_with("[Paths grouped by directory"),
+                    "{header}"
+                );
+                let lines: Vec<&str> = run.response.output.split('\n').collect();
+                let base: String =
+                    serde_json::from_str(lines[1].strip_prefix("Base=").unwrap()).unwrap();
+                let (ending, trailing) = if header.contains("CRLF; final newline") {
+                    ("\r\n", true)
+                } else if header.contains("CRLF; no final newline") {
+                    ("\r\n", false)
+                } else if header.contains("no final newline") {
+                    ("\n", false)
+                } else {
+                    ("\n", true)
+                };
+                let mut dir = String::new();
+                let mut parts: Vec<String> = Vec::new();
+                // The fixture ends with a newline, so the final split segment
+                // is empty and is not a record.
+                for line in &lines[2..lines.len() - 1] {
+                    if let Some(quoted) = line.strip_prefix("Dir=") {
+                        dir = serde_json::from_str(quoted).unwrap();
+                        continue;
+                    }
+                    let entry: String = if line.starts_with('"') {
+                        serde_json::from_str(line).unwrap()
+                    } else {
+                        (*line).to_owned()
+                    };
+                    parts.push(format!("{base}{dir}{entry}"));
+                }
+                assert_eq!(parts.len(), 60, "{parts:?}");
+                let mut restored = parts.join(ending);
+                if trailing {
+                    restored.push_str(ending);
+                }
+                restored
+            };
             assert_eq!(restored, input);
         }
     }
@@ -75,7 +139,10 @@ fn path_list_switch_does_not_disable_file_read_json_or_build_logs() {
             let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
             let run = PostToolPipeline::run(&req, &config, Some(&store));
             assert_eq!(run.response.disposition, Disposition::Applied);
-            assert!(!run.response.applied_operations.contains(&AppliedOperation::SearchPathSharing));
+            assert!(!run
+                .response
+                .applied_operations
+                .contains(&AppliedOperation::SearchPathSharing));
         }
     }
 }
@@ -123,31 +190,43 @@ fn path_lists_cross_the_detection_byte_limit_without_losing_records() {
         let head = format!("/workspace/project with spaces/中文/file.json{ending}").repeat(60);
         let prefix = "/workspace/";
         let padding = crate::post_tool::content::MAX_SCAN_BYTES - head.len() - prefix.len() - 1;
-        let input = format!("{head}{prefix}{}{boundary}{remaining}{head}", "a".repeat(padding));
+        let input = format!(
+            "{head}{prefix}{}{boundary}{remaining}{head}",
+            "a".repeat(padding)
+        );
         for origin in [ContentOrigin::CommandOutput, ContentOrigin::ApiResponse] {
             let mut req = request(&input);
             req.content_origin = origin;
             let run = PostToolPipeline::run(&req, &build_log_config(), None);
             assert_eq!(run.response.disposition, Disposition::Applied);
             assert_eq!(run.response.content_type, Some(ContentType::SearchResults));
-            let restored = if let Some(encoded) = run
-                .response
-                .output
-                .strip_prefix("[Path list; all received paths retained; full path = base + each paths entry]\n")
-            {
+            let restored = if let Some(encoded) = run.response.output.strip_prefix(
+                "[Path list; all received paths retained; full path = base + each paths entry]\n",
+            ) {
                 let data: Value = serde_json::from_str(encoded).unwrap();
                 let paths = data["paths"].as_array().unwrap();
                 assert_eq!(paths.len(), 121);
-                let mut restored = paths.iter().map(|path| {
-                    format!("{}{}", data["base"].as_str().unwrap(), path.as_str().unwrap())
-                }).collect::<Vec<_>>().join(data["line_ending"].as_str().unwrap());
+                let mut restored = paths
+                    .iter()
+                    .map(|path| {
+                        format!(
+                            "{}{}",
+                            data["base"].as_str().unwrap(),
+                            path.as_str().unwrap()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(data["line_ending"].as_str().unwrap());
                 if data["trailing_newline"].as_bool().unwrap() {
                     restored.push_str(data["line_ending"].as_str().unwrap());
                 }
                 restored
             } else {
                 let header = run.response.output.split('\n').next().unwrap().to_owned();
-                assert!(header.starts_with("[Paths grouped by directory"), "{header}");
+                assert!(
+                    header.starts_with("[Paths grouped by directory"),
+                    "{header}"
+                );
                 let lines: Vec<&str> = run.response.output.split('\n').collect();
                 let base: String =
                     serde_json::from_str(lines[1].strip_prefix("Base=").unwrap()).unwrap();

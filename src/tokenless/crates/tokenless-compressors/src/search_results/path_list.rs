@@ -57,16 +57,14 @@ fn is_path(path: &str) -> bool {
 /// Encodes an exact common-prefix view only when the whole view saves tokens.
 pub(super) fn compress(input: &str) -> Option<String> {
     let list = parse(input)?;
-    let prefix_view = prefix_view(&list);
-    let grouped_view = grouped_view(&list);
-    // Never worse: emit the smaller candidate, or none when neither saves.
-    [prefix_view, grouped_view]
+    [prefix_view(&list), grouped_view(&list)]
         .into_iter()
         .flatten()
-        .min_by_key(|output| (output.len(), estimate_tokens(output)))
         .filter(|output| {
             output.len() < input.len() && estimate_tokens(output) < estimate_tokens(input)
         })
+        // Tokens are the objective; bytes are only a proxy for them.
+        .min_by_key(|output| (estimate_tokens(output), output.len()))
 }
 
 /// Shares the longest common directory prefix as compact JSON.
@@ -125,10 +123,16 @@ fn grouped_view(list: &PathList<'_>) -> Option<String> {
     let base = &list.paths[0][..base_end];
     let mut output = String::from(GROUPED_HEADER);
     match (list.line_ending, list.trailing_newline) {
-        ("\r\n", true) => output.push_str("; CRLF; final newline]\n"),
-        ("\r\n", false) => output.push_str("; CRLF; no final newline]\n"),
-        ("\n", false) => output.push_str("; no final newline]\n"),
-        _ => output.push_str("]\n"),
+        ("\r\n", true) => {
+            output.push_str("; entries LF-separated; restore with CRLF; final newline]\n")
+        }
+        ("\r\n", false) => {
+            output.push_str("; entries LF-separated; restore with CRLF; no final newline]\n")
+        }
+        ("\n", false) => {
+            output.push_str("; entries LF-separated; restore with LF; no final newline]\n")
+        }
+        _ => output.push_str("; entries LF-separated; restore with LF; final newline]\n"),
     }
     output.push_str(&format!(
         "Base={}\n",
@@ -137,9 +141,12 @@ fn grouped_view(list: &PathList<'_>) -> Option<String> {
     let mut current_dir = None;
     for path in &list.paths {
         let entry = &path[base_end..];
-        let dir_end = entry.rfind('/').map_or(entry.len(), |index| index + 1);
+        // Entries directly under the base have no directory of their own;
+        // they stay under the implicit empty Dir so `Dir=` always holds a
+        // directory (ending in `/`), never a bare filename.
+        let dir_end = entry.rfind('/').map_or(0, |index| index + 1);
         let dir = &entry[..dir_end];
-        if current_dir != Some(dir) {
+        if current_dir != Some(dir) && !(dir.is_empty() && current_dir.is_none()) {
             output.push_str(&format!(
                 "Dir={}\n",
                 serde_json::Value::String(dir.to_owned())
@@ -378,16 +385,65 @@ mod tests {
         assert_eq!(restore(&candidate), input);
 
         // A single directory below the base restores byte for byte whichever
-        // view wins; the grouped form has exactly one Dir record.
+        // view wins.
         let single_dir: Vec<_> = (0..30)
             .map(|i| format!("/workspace/project/shared_directory/file_{i:03}.rs"))
             .collect();
         let input = format!("{}\n", single_dir.join("\n"));
         let candidate = compress(&input).unwrap();
         assert_eq!(restore(&candidate), input);
-        if candidate.starts_with(GROUPED_HEADER) {
-            assert_eq!(candidate.matches("Dir=").count(), 1, "{candidate}");
+    }
+
+    #[test]
+    fn entries_directly_under_base_never_make_dir_hold_a_filename() {
+        // Every entry sits directly under Base: each Dir= value must remain
+        // a directory (ending in '/'), the grouped view must win over the
+        // prefix view, and the view restores byte for byte.
+        let paths: Vec<_> = (0..30)
+            .map(|i| format!("/workspace/project/file_{i:03}.rs"))
+            .collect();
+        for ending in ["\n", "\r\n"] {
+            for trailing in [true, false] {
+                let input = format!(
+                    "{}{}",
+                    paths.join(ending),
+                    if trailing { ending } else { "" }
+                );
+                let candidate = compress(&input).unwrap();
+                assert_eq!(restore(&candidate), input);
+                assert!(
+                    candidate.starts_with(GROUPED_HEADER),
+                    "grouping must win on flat listings: {candidate}"
+                );
+                for line in candidate.lines() {
+                    if let Some(quoted) = line.strip_prefix("Dir=") {
+                        let dir: String = serde_json::from_str(quoted).unwrap();
+                        assert!(
+                            dir.is_empty() || dir.ends_with('/'),
+                            "Dir= must hold a directory, got {dir:?}"
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    #[test]
+    fn grouped_view_wins_on_a_single_flat_directory() {
+        // Regression for review finding 1: flat listings used to lose
+        // arbitration because each entry emitted its own filename Dir= line.
+        let paths: Vec<_> = (0..30)
+            .map(|i| format!("/workspace/project/shared_directory/file_{i:03}.rs"))
+            .collect();
+        let input = format!("{}\n", paths.join("\n"));
+        let candidate = compress(&input).unwrap();
+        assert!(
+            candidate.starts_with(GROUPED_HEADER),
+            "single-directory lists must group: {candidate}"
+        );
+        // The single directory IS the base, so no explicit Dir= line at all.
+        assert!(!candidate.contains("Dir="), "{candidate}");
+        assert_eq!(restore(&candidate), input);
     }
 
     #[test]
