@@ -98,6 +98,9 @@ export async function handleRollback(
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
   }
+  if (typeof preview !== "boolean") {
+    return { text: "'preview' must be a boolean", isError: true };
+  }
   const trimmed = target?.trim();
 
   if (trimmed && numAncestors !== undefined) {
