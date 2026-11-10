@@ -65,7 +65,7 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 修复保留该拓扑,让静默期观察在暂停周围自行作废:
 
 - **由我们驱动的注册**(`add_route`、重叠释放/re-arm)包在实例级注册 epoch 与 in-flight 计数之间。`watch()` 只在 notify 的 walk 完成后返回,因此区间是精确的。检查开始时若有注册在途则返回 `false`;静默期跨越 epoch 变化则作废。
-- **notify 内部的 auto-add** 由触发它的事件识别——`CreateKind::Folder`,或目录的 `RenameMode::To/Both`——并递增实例级 auto-add 序列。回调运行在 notify 的 `handle_inotify` 处理批次内、该批次处理累积的 `add_watches` 之前;因此在回调期间由另一线程发出的控制消息(对一条从未注册的路径执行 `unwatch`)只会在该批次——包括其 walk——结束后才被应答。该应答就是推进 covered 序列的屏障。检查在 `auto_add_covered < auto_add_seq` 时拒绝开始;窗口内出现新的 auto-add 事件则作废决策。
+- **notify 内部的 auto-add** 由触发它的事件识别——`CreateKind::Folder`,或目录的 `RenameMode::To/Both`——并递增实例级 auto-add 序列。回调运行在 notify 的 `handle_inotify` 处理批次内、该批次处理累积的 `add_watches` 之前;因此在回调期间由另一线程发出的控制消息(对一条从未注册的路径执行 `unwatch`)只会在该批次——包括其 walk——结束后才被应答。该应答就是推进 covered 序列的屏障。屏障线程 spawn 失败时由 quiescence 检查侧重新挂起,恢复不依赖后续目录事件到达。检查在 `auto_add_covered < auto_add_seq` 时拒绝开始;窗口内出现新的 auto-add 事件则作废决策。
 - **idle 快捷路径**(已经过完整静默窗口 ⇒ `Safe`)在任意注册 walk 结束后 250 ms 内禁用:walk 期间产生的事件可能仍在队列里,排空前静默不能作为证据。
 
 两个入口共享这套观察:`WorkspaceWatcher::check_quiescent` 与 daemon 的 `DaemonState::check_workspace_quiescent` 调用同一个 `observe_once`、使用同一份证据,因此 guarded checkpoint、guarded rollback 与常规 snapshot 三条路径不会同 watcher helper 产生偏差。daemon 侧保留自己的 stale-watch heal 与 watcher 身份校验,并在兄弟操作(例如 heal 重挂 watch 与相邻检查交错)作废窗口时先重新观察一次,再判为活跃。
