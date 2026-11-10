@@ -56,14 +56,14 @@ try {
   assert.equal(observed.coverage, "unknown");
   assert(observed.gaps.includes("source_process_identity_unavailable"));
 
-  assert.equal(state.query.options.hooks.PreToolUse.at(-1).timeout, 5.2,
-    "native timeout must use the new 1200ms policy budget");
+  assert.equal(state.query.options.hooks.PreToolUse.at(-1).timeout, 7.2,
+    "native timeout must include the new 1200ms policy budget plus cleanup/reply headroom");
   await open.close();
   open = null;
   update("empty.json");
   open = await create();
   assert.equal((await runFixture()).denied, false, "removed scan must not remain attached");
-  assert.equal(state.query.options.hooks.PreToolUse[0].timeout, 9,
+  assert.equal(state.query.options.hooks.PreToolUse[0].timeout, 11,
     "removed policy retains the bounded metadata callback");
   let releaseClose, enteredClose;
   const entered = new Promise(resolve => { enteredClose = resolve; });

@@ -148,7 +148,8 @@ pub(super) fn invoke_bound(
         )?)?;
         let mut outputs = Vec::new();
         let mut blocked = false;
-        for group in plan.groups {
+        let mut groups = plan.groups.into_iter().peekable();
+        while let Some(group) = groups.next() {
             let results = std::thread::scope(|scope| {
                 let children = group
                     .iter()
@@ -165,16 +166,19 @@ pub(super) fn invoke_bound(
                                 deadline,
                             );
                             match result {
-                                Ok(output) => output,
+                                Ok(output) => (output, false),
                                 Err(_) => {
-                                    let mut output = adapter.reply(
-                                        matches!(event, "input.submit" | "tool.before")
-                                            && step.on_error == "block",
-                                    );
+                                    let block = matches!(event, "input.submit" | "tool.before")
+                                        && step.on_error == "block";
+                                    let mut output = adapter.reply(block);
+                                    if block {
+                                        // Keep native JSON vetoes visible to group scheduling.
+                                        output.exit = NativeExit::Code(2);
+                                    }
                                     output.stderr.extend_from_slice(
                                         b"AW step failed; query instance audit for metadata\n",
                                     );
-                                    output
+                                    (output, true)
                                 }
                             }
                         })
@@ -187,8 +191,9 @@ pub(super) fn invoke_bound(
             })?;
             blocked |= results
                 .iter()
-                .any(|output| matches!(output.exit, NativeExit::Code(2)));
-            outputs.extend(results);
+                .any(|(output, _)| matches!(output.exit, NativeExit::Code(2)));
+            let failed = results.iter().any(|(_, failed)| *failed);
+            outputs.extend(results.into_iter().map(|(output, _)| output));
             if matches!(event, "input.submit" | "tool.before")
                 && blocked
                 && matches!(
@@ -203,13 +208,27 @@ pub(super) fn invoke_bound(
                         session_id: raw["session_id"].as_str().ok_or("missing session")?.into(),
                         call_id: raw["tool_use_id"].as_str().ok_or("missing call")?.into(),
                     }
-                } else {
+                } else if groups.peek().is_some() || failed {
                     Operation::CloseEvent {
                         event_id: handle.event_id.clone(),
                         instance_id: id.clone(),
                     }
+                } else {
+                    // Only successful final calls establish automatic completion.
+                    break;
                 };
-                client.call(close, deadline)?;
+                if let Err(error) = client.call(close, Instant::now() + Duration::from_secs(2)) {
+                    if binding.adapter == "qoder-sdk"
+                        || !matches!(error, aw_service::Error::Rejected(ref code) if code == "unknown_event")
+                    {
+                        // Cleanup uncertainty must retain the native veto and its reason.
+                        if let Some(output) = outputs.last_mut() {
+                            output.stderr.extend_from_slice(
+                                b"AW event cleanup failed; query instance audit for metadata\n",
+                            );
+                        }
+                    }
+                }
                 break;
             }
         }
@@ -301,6 +320,10 @@ fn native_reply(
     }
     Ok(output)
 }
+
+#[cfg(test)]
+#[path = "dispatch/closure_tests.rs"]
+mod closure_tests;
 
 #[cfg(test)]
 mod tests {

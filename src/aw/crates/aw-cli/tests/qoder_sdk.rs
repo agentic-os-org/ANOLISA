@@ -181,6 +181,34 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
 }
 
 #[test]
+fn callback_deadlines_preserve_late_denials_and_cleanup_diagnostics() {
+    let f = Fixture::new();
+    let mut command = Command::new("node");
+    command
+        .current_dir(&f.root)
+        .args(["--test", "--test-reporter=tap"])
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/qoder_sdk/deadline.test.mjs"),
+        )
+        .env("AW_DEADLINE_TEST_EXECUTABLE", env!("CARGO_BIN_EXE_aw"));
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(30));
+    let evidence = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{evidence}");
+    assert!(evidence.contains("# pass 2"), "{evidence}");
+    assert_eq!(
+        evidence.matches("AW event cleanup failed").count(),
+        2,
+        "{evidence}"
+    );
+    assert!(!evidence.contains("callback_timeout"), "{evidence}");
+}
+
+#[test]
 fn existing_queries_update_only_after_native_cleanup() {
     reload_queries(false);
 }
