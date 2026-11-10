@@ -1,19 +1,15 @@
 //! PAP-backed Scope lifecycle, credential administration and data-plane publication.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read as _;
 use std::ops::RangeInclusive;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use asc_credential_store::{
-    CredentialId, CredentialState, CredentialStore, MAX_SECRET_BYTES, ScopeId, Secret,
+    CredentialId, CredentialState, CredentialStore, PairInput, ScopeId, read_token_file,
 };
-use asc_gateway_plan::{
-    Plan, compile_scope, credential_environment_variables, github_credential_spec,
-};
+use asc_gateway_plan::{Plan, compile_scope};
 use asc_pap::PapRepository;
 use asc_policy_types::binding::BindingStatus;
 use asc_policy_types::identifiers::ResourceId;
@@ -70,16 +66,6 @@ impl GatewayConfig {
     }
 }
 
-/// Root-only credential import; it grants no Scope authorization.
-#[derive(Debug, Clone)]
-pub struct KeyRequest {
-    /// Managed credential identifier, currently `github`.
-    pub credential: String,
-    /// Absolute root-owned regular file, unreadable by group and others.
-    pub secret_file: PathBuf,
-    /// Kernel-authenticated caller UID.
-    pub caller_uid: u32,
-}
 /// Value-free gateway health and execution projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,15 +100,12 @@ pub struct KeyList {
     /// Currently imported credential identifiers.
     pub credentials: Vec<CredentialId>,
 }
-/// Complete startup environment, returned only after generation and CA readiness.
-/// No Debug implementation because the environment contains usable fakes.
-#[derive(Clone, PartialEq, Eq, Serialize)]
+/// Shared public trust bundle, available only while the data plane is ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CredentialGrant {
-    /// Canonical assignment identity.
-    pub scope_id: ScopeId,
-    /// Fake credentials and public CA bundle variables.
-    pub environment: BTreeMap<String, String>,
+pub struct CaBundle {
+    /// Public CA bundle on the daemon host, shared by all Scopes.
+    pub ca_bundle_path: PathBuf,
 }
 
 pub(crate) struct Inner {
@@ -138,14 +121,6 @@ pub struct GatewayService {
     pub(crate) repository: Arc<dyn PapRepository>,
     inner: Mutex<Inner>,
 }
-const CA_VARIABLES: [&str; 6] = [
-    "SSL_CERT_FILE",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
-    "GIT_SSL_CAINFO",
-    "NODE_EXTRA_CA_CERTS",
-    "DENO_CERT",
-];
 
 impl GatewayService {
     /// Loads the execution projection without host mutation or authorization on success.
@@ -209,15 +184,64 @@ impl GatewayService {
         self.check_owner(uid, self.account()?)?;
         Ok(plan)
     }
-    /// Durably projects an active assignment and issues its fakes without starting agents.
+    pub(crate) fn validate_scope_pairs(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
+        let mut plan = self.check_scope(scope)?;
+        let existing = match self.repository.get_scope(&scope.scope_id) {
+            Ok(current) if current == *scope && current.status == ScopeStatus::Active => true,
+            Ok(_) => {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::Conflict,
+                    "Scope snapshot is not canonical",
+                ));
+            }
+            Err(asc_pap::PapError::NotFound) => false,
+            Err(error) => return Err(error.into()),
+        };
+        let mut inner = self.lock();
+        let store = self.store(&mut inner, false)?;
+        let summaries = store.list();
+        if existing {
+            let retired: BTreeSet<_> = summaries
+                .iter()
+                .filter(|record| record.state == CredentialState::Retired)
+                .map(|record| &record.id)
+                .collect();
+            plan.credentials.retain(|id| !retired.contains(id));
+        }
+        store.validate_scope_pairs(&plan.credentials)?;
+        if !existing {
+            let active: BTreeSet<_> = self
+                .canonical_assignments()?
+                .into_iter()
+                .flat_map(|(_, ids)| ids)
+                .collect();
+            if summaries.iter().any(|record| {
+                plan.credentials.contains(&record.id)
+                    && !record.fakes.is_empty()
+                    && !active.contains(&record.id)
+            }) {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::Conflict,
+                    "pair's last canonical Scope has closed; pending revocation cannot grant a new Scope",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Durably projects an active assignment using its registered fakes without starting agents.
     /// Disabled gateways can prepare; credentials remain unavailable until CA/generation readiness.
     /// Startup recovery of an admitted Scope uses [`Self::restore_scope`] instead.
     /// # Errors
-    /// Rejects stale canonical snapshots, retired assignments or credentials that cannot
-    /// issue a fake.
+    /// Rejects stale canonical snapshots, retired assignments or credentials without
+    /// an active registered fake.
     pub fn prepare_scope(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
         let mut inner = self.lock();
-        let plan = self.prepare_locked(&mut inner, scope)?;
+        let plan = self
+            .canonical(scope)
+            .and_then(|()| self.sync_credential_scopes(&mut inner))
+            .and_then(|()| self.prepare_locked(&mut inner, scope))
+            .map_err(|error| self.fail_closed(error))?;
         self.verify_issued_fakes(&mut inner, scope, &plan)?;
         self.publish_prepared(&mut inner, scope)
     }
@@ -231,7 +255,10 @@ impl GatewayService {
     /// Rejects stale canonical snapshots or assignments that cannot be projected.
     pub fn restore_scope(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
         let mut inner = self.lock();
-        self.prepare_locked(&mut inner, scope)?;
+        self.canonical(scope)
+            .and_then(|()| self.sync_credential_scopes(&mut inner))
+            .and_then(|()| self.prepare_locked(&mut inner, scope))
+            .map_err(|error| self.fail_closed(error))?;
         self.publish_prepared(&mut inner, scope)
     }
 
@@ -264,7 +291,7 @@ impl GatewayService {
                 return Err(GatewayError::new(
                     GatewayErrorKind::Conflict,
                     format!(
-                        "credential {credential} is retired for this Scope; create a new Scope after importing its key"
+                        "credential {credential} is retired for this Scope; register a new real/fake pair and create a new Scope"
                     ),
                 ));
             }
@@ -307,21 +334,16 @@ impl GatewayService {
             );
             inner.state.save(&self.config.state_dir)?;
         }
+        let store = self.store(inner, false)?;
+        let retired: BTreeSet<_> = store
+            .list()
+            .into_iter()
+            .filter(|record| record.state == CredentialState::Retired)
+            .map(|record| record.id)
+            .collect();
         for credential in &plan.credentials {
-            self.canonical(scope)?;
-            let store = self.store(inner, true)?;
-            // Retirement is irreversible for this assignment, including after key reimport.
-            // An initial failed issue can retry, but a tombstone must never become a new grant.
-            let retired = store.list().iter().any(|record| {
-                record.id == *credential
-                    && (record.state == CredentialState::Retired
-                        || record
-                            .fakes
-                            .iter()
-                            .any(|fake| fake.scope_id == id && fake.retired))
-            });
-            if !retired {
-                store.issue_fake(credential, &id)?;
+            if !retired.contains(credential) && store.fake(credential, &id).is_none() {
+                return Err(GatewayError::unavailable("Scope pair has no active fake"));
             }
         }
         self.canonical(scope)
@@ -338,6 +360,7 @@ impl GatewayService {
         // must withdraw the previously published authorization.
         let result = (|| {
             self.revoke_locked(&mut inner, scope)?;
+            self.sync_credential_scopes(&mut inner)?;
             if inner.state.enabled {
                 self.apply(&mut inner)?;
             }
@@ -357,25 +380,7 @@ impl GatewayService {
         if let Some(domain) = inner.state.scopes.get_mut(&id) {
             domain.revoked = true;
         }
-        inner.state.save(&self.config.state_dir)?;
-        if self.config.store_dir.exists() {
-            let store = self.store(inner, false)?;
-            let credentials: Vec<_> = store
-                .list()
-                .into_iter()
-                .filter(|record| {
-                    record
-                        .fakes
-                        .iter()
-                        .any(|fake| fake.scope_id == id && !fake.retired)
-                })
-                .map(|record| record.id)
-                .collect();
-            for credential in credentials {
-                store.retire_fake(&credential, &id)?;
-            }
-        }
-        Ok(())
+        inner.state.save(&self.config.state_dir)
     }
     /// Releases even an empty Scope after all canonical Binding cleanup is complete.
     /// # Errors
@@ -438,7 +443,51 @@ impl GatewayService {
         let result = self.recover_locked(&mut inner);
         result.map_err(|error| self.fail_closed(error))
     }
+    fn canonical_assignments(&self) -> Result<Vec<(ScopeId, Vec<CredentialId>)>, GatewayError> {
+        let mut after = None;
+        let mut assignments = Vec::new();
+        loop {
+            let scopes = self.repository.scan_scopes(after.as_ref(), 128)?;
+            if scopes.is_empty() {
+                break;
+            }
+            for scope in &scopes {
+                if scope.status == ScopeStatus::Active && scope.uses_credentials() {
+                    assignments.push((
+                        ScopeId::new(scope.scope_id.as_str())?,
+                        compile_scope(scope)?.credentials,
+                    ));
+                }
+            }
+            after = scopes.last().map(|scope| scope.scope_id.clone());
+        }
+        Ok(assignments)
+    }
+
+    fn sync_credential_scopes(&self, inner: &mut Inner) -> Result<(), GatewayError> {
+        let retired: BTreeSet<_> = if self.config.store_dir.exists() {
+            self.store(inner, false)?
+                .list()
+                .into_iter()
+                .filter(|record| record.state == CredentialState::Retired)
+                .map(|record| record.id)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let mut assignments = self.canonical_assignments()?;
+        for (_, ids) in &mut assignments {
+            // Canonical snapshots outlive global key retirement; tombstones grant nothing.
+            ids.retain(|id| !retired.contains(id));
+        }
+        if !assignments.is_empty() || self.config.store_dir.exists() {
+            self.store(inner, false)?.sync_scopes(&assignments)?;
+        }
+        Ok(())
+    }
+
     fn recover_locked(&self, inner: &mut Inner) -> Result<(), GatewayError> {
+        self.sync_credential_scopes(inner)?;
         let mut after = None;
         let mut canonical_ids = BTreeSet::new();
         loop {
@@ -451,7 +500,7 @@ impl GatewayService {
                 if !scope
                     .policy_snapshots
                     .iter()
-                    .any(|policy| policy.template.uses_credentials())
+                    .any(asc_policy_types::policy::PreparedPolicy::uses_credentials)
                 {
                     continue;
                 }
@@ -535,30 +584,6 @@ impl GatewayService {
         });
         status
     }
-    /// Imports the GitHub credential without replacing an existing value or granting access.
-    /// # Errors
-    /// Rejects nonroot callers, unsupported credential IDs and unsafe secret files.
-    pub fn add_key(&self, request: &KeyRequest) -> Result<KeyOutcome, GatewayError> {
-        if request.caller_uid != 0 {
-            return Err(GatewayError::new(
-                GatewayErrorKind::PermissionDenied,
-                "only root can import credentials",
-            ));
-        }
-        let spec = github_credential_spec();
-        if request.credential != spec.id.as_str() {
-            return Err(GatewayError::invalid("unsupported managed credential"));
-        }
-        let secret = read_secret_file(&request.secret_file, 0)?;
-        let mut inner = self.lock();
-        let credential = spec.id.clone();
-        self.store(&mut inner, true)?.put(spec, secret)?;
-        if inner.state.enabled {
-            self.apply(&mut inner)
-                .map_err(|error| self.fail_closed(error))?;
-        }
-        Ok(KeyOutcome { credential })
-    }
     /// Globally retires a credential, preserving every other credential grant.
     /// The principal boundary must restrict this administrator operation to root.
     /// # Errors
@@ -592,70 +617,19 @@ impl GatewayService {
         };
         Ok(KeyList { credentials })
     }
-    /// Returns a ready environment for an exact active canonical Scope.
+    /// Returns the shared public CA only while the current generation is ready.
     /// # Errors
-    /// Rejects foreign UIDs, inactive Scopes, missing fakes, unloaded generations or absent CA.
-    pub fn credentials(
-        &self,
-        caller_uid: u32,
-        scope_id: &str,
-    ) -> Result<CredentialGrant, GatewayError> {
-        let mut inner = self.lock();
-        let id = ResourceId::new(scope_id)
-            .map_err(|_| GatewayError::invalid("invalid Scope identity"))?;
-        let scope = self.repository.get_scope(&id)?;
-        self.canonical(&scope)?;
-        let plan = self.check_scope(&scope)?;
-        if caller_uid != 0 && scope.owner_uid != Some(caller_uid) {
-            return Err(GatewayError::new(
-                GatewayErrorKind::PermissionDenied,
-                "caller does not own the Scope",
+    /// Rejects disabled, unloaded or otherwise unready data planes.
+    pub fn ca(&self) -> Result<CaBundle, GatewayError> {
+        let inner = self.lock();
+        if !self.status_of(&inner.state).ready {
+            return Err(GatewayError::unavailable(
+                "gateway generation or CA is not ready",
             ));
         }
-        let id = ScopeId::new(scope_id)?;
-        let domain = inner
-            .state
-            .scopes
-            .get(&id)
-            .ok_or_else(|| GatewayError::unavailable("Scope is not prepared"))?;
-        if domain.revoked {
-            return Err(GatewayError::new(
-                GatewayErrorKind::Conflict,
-                "Scope is retired",
-            ));
-        }
-        self.host.check_cgroup_v2()?;
         let runtime = self.runtime(self.account()?);
-        if !inner.state.enabled
-            || !self.host.unit_active(&self.config.unit)
-            || runtime.health().loaded_generation != Some(inner.state.generation)
-        {
-            return Err(GatewayError::unavailable("gateway generation is not ready"));
-        }
-        let bundle = runtime.published_ca_bundle()?;
-        let mut environment = BTreeMap::new();
-        let store = self.store(&mut inner, false)?;
-        for credential in plan.credentials {
-            let fake = store
-                .fake(&credential, &id)
-                .ok_or_else(|| GatewayError::unavailable("Scope credential has no active fake"))?;
-            let variables = credential_environment_variables(&credential);
-            if variables.is_empty() {
-                return Err(GatewayError::unavailable(
-                    "credential startup environment is not supported",
-                ));
-            }
-            for variable in variables {
-                environment.insert((*variable).to_owned(), fake.to_owned());
-            }
-        }
-        for variable in CA_VARIABLES {
-            environment.insert(variable.to_owned(), bundle.display().to_string());
-        }
-        self.canonical(&scope)?;
-        Ok(CredentialGrant {
-            scope_id: id,
-            environment,
+        Ok(CaBundle {
+            ca_bundle_path: runtime.published_ca_bundle()?,
         })
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -996,83 +970,76 @@ fn withdraw_on_failure(
     }
 }
 
-fn read_secret_file(path: &Path, owner: u32) -> Result<Secret, GatewayError> {
-    if !path.is_absolute() {
-        return Err(GatewayError::invalid("secret file path must be absolute"));
+fn registration_failure(error: &asc_credential_store::CredentialStoreError) -> asc_pap::PapError {
+    use asc_credential_store::CredentialStoreError;
+    match error {
+        CredentialStoreError::Invalid { .. }
+        | CredentialStoreError::Conflict(_)
+        | CredentialStoreError::DuplicateValue(_)
+        | CredentialStoreError::Retired(_) => asc_pap::PapError::InvalidCedar(error.to_string()),
+        _ => asc_pap::PapError::Persistence,
     }
-    let flags = rustix::fs::OFlags::NOFOLLOW.union(rustix::fs::OFlags::NONBLOCK);
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(flags.bits().cast_signed())
-        .open(path)
-        .map_err(|_| GatewayError::invalid("cannot open secret file"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| GatewayError::invalid("cannot inspect secret file"))?;
-    if !metadata.is_file()
-        || metadata.uid() != owner
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
-        return Err(GatewayError::invalid(
-            "secret file must be root-owned, regular, single-link and private",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_SECRET_BYTES as u64 + 3)
-        .read_to_end(&mut bytes)
-        .map_err(|_| GatewayError::invalid("cannot read secret file"))?;
-    if bytes.len() > MAX_SECRET_BYTES + 2 {
-        return Err(GatewayError::invalid("secret file is too large"));
-    }
-    if bytes.ends_with(b"\n") {
-        bytes.pop();
-        if bytes.ends_with(b"\r") {
-            bytes.pop();
-        }
-    }
-    Ok(Secret::new(String::from_utf8(bytes).map_err(|_| {
-        GatewayError::invalid("secret is not text")
-    })?)?)
 }
 
-#[cfg(test)]
-mod secret_file_tests {
-    use std::fs;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
-    use std::path::Path;
+impl asc_pap::CredentialRegistration for GatewayService {
+    fn register(
+        &self,
+        source: &asc_policy_types::cedar::CedarPolicySource,
+    ) -> Result<Vec<asc_policy_types::policy::CredentialBinding>, asc_pap::PapError> {
+        use sha2::{Digest as _, Sha256};
 
-    use super::read_secret_file;
-
-    #[test]
-    fn secret_files_require_private_single_link_regular_files_owned_by_the_expected_uid() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("token");
-        let uid = rustix::process::geteuid().as_raw();
-        fs::write(&path, "private-token\r\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(
-            read_secret_file(&path, uid).unwrap().expose(),
-            "private-token"
-        );
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-        assert!(read_secret_file(&path, uid).is_err());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(read_secret_file(&path, uid ^ 1).is_err());
-
-        let link = root.path().join("link");
-        symlink(&path, &link).unwrap();
-        assert!(read_secret_file(&link, uid).is_err());
-        fs::remove_file(&link).unwrap();
-        fs::hard_link(&path, &link).unwrap();
-        assert!(read_secret_file(&path, uid).is_err());
-        fs::remove_file(&link).unwrap();
-        assert_eq!(
-            read_secret_file(&path, uid).unwrap().expose(),
-            "private-token"
-        );
-        assert!(read_secret_file(root.path(), uid).is_err());
-        assert!(read_secret_file(Path::new("token"), uid).is_err());
+        let rules = asc_policy_cedar::credential_rules(source)
+            .map_err(|error| asc_pap::PapError::InvalidCedar(error.diagnostic()))?;
+        let source_bytes =
+            serde_json::to_vec(source).map_err(|_| asc_pap::PapError::Persistence)?;
+        let key = format!("{:x}", Sha256::digest(&source_bytes));
+        let mut inner = self.lock();
+        let cached = if self.config.store_dir.exists() {
+            self.store(&mut inner, false)
+                .map_err(|_| asc_pap::PapError::Persistence)?
+                .lookup_registration(&key)
+                .map_err(|error| registration_failure(&error))?
+        } else {
+            None
+        };
+        let pairs = if let Some(pairs) = cached {
+            pairs
+        } else {
+            let inputs = rules
+                .iter()
+                .map(|rule| {
+                    let real = read_token_file(Path::new(&rule.real_token_file), 0)?;
+                    let fake = read_token_file(Path::new(&rule.fake_token_file), 0)?;
+                    asc_credential_store::validate_pair(real.expose(), fake.expose())?;
+                    Ok(PairInput {
+                        real,
+                        fake: fake.expose().to_owned(),
+                    })
+                })
+                .collect::<Result<Vec<_>, asc_credential_store::CredentialStoreError>>()
+                .map_err(|_| {
+                    asc_pap::PapError::InvalidCedar(
+                        "unsafe token file or invalid credential pair".into(),
+                    )
+                })?;
+            self.store(&mut inner, true)
+                .map_err(|_| asc_pap::PapError::Persistence)?
+                .register_policy_pairs(&key, inputs)
+                .map_err(|error| registration_failure(&error))?
+        };
+        if inner.state.enabled {
+            self.apply(&mut inner).map_err(|error| {
+                self.fail_closed(error);
+                asc_pap::PapError::Unavailable
+            })?;
+        }
+        Ok(rules
+            .into_iter()
+            .zip(pairs)
+            .map(|(rule, pair)| asc_policy_types::policy::CredentialBinding {
+                rule_id: rule.rule_id,
+                pair_id: pair.as_str().to_owned(),
+            })
+            .collect())
     }
 }

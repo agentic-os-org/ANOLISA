@@ -70,6 +70,9 @@ pub(crate) fn read_scope(
             status,
         };
         scope.validate().map_err(|_| StoreError::Corrupt)?;
+        for policy in &scope.policy_snapshots {
+            asc_pap::validate_policy_snapshot(policy).map_err(|_| StoreError::Corrupt)?;
+        }
         let execution_pending = assignment
             .execution_pending
             .unwrap_or_else(|| scope.uses_credentials());
@@ -177,7 +180,7 @@ pub(crate) fn read_policy(
         let last_allocated_revision = Revision::new(head).map_err(|_| StoreError::Corrupt)?;
         let current: Option<PreparedPolicy> = current.map(|v| decode(&v)).transpose()?;
         if let Some(policy) = &current {
-            policy.validate().map_err(|_| StoreError::Corrupt)?;
+            asc_pap::validate_policy_snapshot(policy).map_err(|_| StoreError::Corrupt)?;
             if policy.policy_id != *key || policy.revision != last_allocated_revision {
                 return Err(StoreError::Corrupt.into());
             }
@@ -221,6 +224,7 @@ pub(crate) fn read_binding(
         .validate()
         .map_err(|_| StoreError::Corrupt)?;
     let spec = &snapshot.binding.spec;
+    asc_pap::validate_policy_snapshot(&spec.policy).map_err(|_| StoreError::Corrupt)?;
     let process = &spec.scope.process;
     if spec.binding_id != *key
         || snapshot.status_version < 1

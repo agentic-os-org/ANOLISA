@@ -5,8 +5,8 @@
 //! local peer; the query family is additionally row-scoped to the caller's
 //! owner by the handler. Secret-gateway administration retains Policy
 //! administrator metadata and additionally requires authenticated UID 0 in the
-//! gateway handler. Status and credentials accept local peers; the runtime
-//! scopes non-root queries to domains owned by the peer's UID. The closed
+//! gateway handler. Status and CA queries accept local peers; the runtime
+//! scopes non-root status to domains owned by the peer's UID. The closed
 //! inventory rejects unregistered methods before authorization rather than
 //! defaulting into a family.
 
@@ -88,24 +88,21 @@ pub const GATEWAY_ENABLE: &str = "gateway.enable";
 pub const GATEWAY_DISABLE: &str = "gateway.disable";
 /// Report gateway execution state without credential values.
 pub const GATEWAY_STATUS: &str = "gateway.status";
-/// Import a credential without replacing an active value or granting access.
-pub const GATEWAY_KEY_ADD: &str = "gateway.key.add";
-/// Globally retire a credential and revoke its grants.
+/// Globally retire a credential pair and revoke its grants.
 pub const GATEWAY_KEY_REMOVE: &str = "gateway.key.remove";
-/// List protected credentials without values.
+/// List protected pair identifiers without values.
 pub const GATEWAY_KEY_LIST: &str = "gateway.key.list";
-/// Return an authorized Scope's fake credentials.
-pub const GATEWAY_CREDENTIALS: &str = "gateway.credentials";
+/// Return the shared public CA bundle path while the gateway is ready.
+pub const GATEWAY_CA: &str = "gateway.ca";
 
 /// Complete secret-gateway method inventory for this protocol version.
-pub const GATEWAY_METHODS: [&str; 7] = [
+pub const GATEWAY_METHODS: [&str; 6] = [
     GATEWAY_ENABLE,
     GATEWAY_DISABLE,
     GATEWAY_STATUS,
-    GATEWAY_KEY_ADD,
     GATEWAY_KEY_REMOVE,
     GATEWAY_KEY_LIST,
-    GATEWAY_CREDENTIALS,
+    GATEWAY_CA,
 ];
 
 /// Return the dashboard summary of the caller's own security events.
@@ -262,14 +259,12 @@ pub enum GatewayMethod {
     Disable,
     /// Value-free report.
     Status,
-    /// Protect a credential.
-    KeyAdd,
-    /// Withdraw a credential.
+    /// Withdraw a credential pair.
     KeyRemove,
-    /// List credentials.
+    /// List pair identifiers.
     KeyList,
-    /// Query an authorized Scope's fake credentials.
-    Credentials,
+    /// Query the shared public CA bundle path.
+    Ca,
 }
 
 /// Closed daemon method identity.
@@ -326,7 +321,6 @@ impl MethodId {
             | Self::Gateway(
                 GatewayMethod::Enable
                 | GatewayMethod::Disable
-                | GatewayMethod::KeyAdd
                 | GatewayMethod::KeyRemove
                 | GatewayMethod::KeyList,
             ) => Metadata {
@@ -336,12 +330,12 @@ impl MethodId {
             // queries share one access policy: any kernel-authenticated local
             // peer. The query family adds row-level owner scoping inside its
             // handler, derived from the transport-authenticated principal
-            // rather than from the request. Gateway query ownership is enforced
-            // by the runtime using the authenticated peer UID.
+            // rather than from the request. Gateway status uses the authenticated
+            // peer UID; the shared public CA query carries no Scope authority.
             Self::Health
             | Self::IntentPropose
             | Self::IntentProposeCommand
-            | Self::Gateway(GatewayMethod::Status | GatewayMethod::Credentials)
+            | Self::Gateway(GatewayMethod::Status | GatewayMethod::Ca)
             | Self::Authorization(_)
             | Self::Action(_)
             | Self::ObservabilityRecord
@@ -390,10 +384,9 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         GATEWAY_ENABLE => Some(MethodId::Gateway(GatewayMethod::Enable)),
         GATEWAY_DISABLE => Some(MethodId::Gateway(GatewayMethod::Disable)),
         GATEWAY_STATUS => Some(MethodId::Gateway(GatewayMethod::Status)),
-        GATEWAY_KEY_ADD => Some(MethodId::Gateway(GatewayMethod::KeyAdd)),
         GATEWAY_KEY_REMOVE => Some(MethodId::Gateway(GatewayMethod::KeyRemove)),
         GATEWAY_KEY_LIST => Some(MethodId::Gateway(GatewayMethod::KeyList)),
-        GATEWAY_CREDENTIALS => Some(MethodId::Gateway(GatewayMethod::Credentials)),
+        GATEWAY_CA => Some(MethodId::Gateway(GatewayMethod::Ca)),
         SEC_SUMMARY => Some(MethodId::Query(QueryMethod::Summary)),
         SEC_EVENTS_LIST => Some(MethodId::Query(QueryMethod::EventsList)),
         SEC_EVENTS_GET => Some(MethodId::Query(QueryMethod::EventsGet)),

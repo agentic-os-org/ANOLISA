@@ -333,8 +333,8 @@ semantic equivalence is not an acceptance goal here.
 
 This section records the current local design. Earlier discussion is in
 [SecCore Cedar integration: remaining design questions and options](https://alidocs.dingtalk.com/i/nodes/gvNG4YZ7Jnxop15OCoadooMLW2LD0oRE).
-The architecture includes a request-decision path that is not implemented.
-Section 8.6 describes the library today; section 8.9 gives the integration order.
+The OS sandbox request-decision path is connected; broader PIP and dynamic
+constraint mapping remain target designs. Section 8.6 describes the library.
 
 ### 8.1 Component responsibilities and two processing paths
 
@@ -350,7 +350,7 @@ application workflows belong to the integration. See
 |---|---|---|
 | Policy frontends and shared schema | Deserialize native JSON; parse Cedar, validate types and check the common subset; define action/resource/context contracts | `asc-policy-types`, `asc-policy-cedar`; PAP uses Cedar admission |
 | PAP policy management | Store source and revision, associate Scope and retain assignment/Binding snapshots | `asc-pap` and repository manage both source formats; composition remains open |
-| PDP request decisions | Load applicable policies, receive concrete requests, obtain PIP information as needed and authorize | Target design; may share the SecCore daemon with PAP while remaining a separate logical responsibility |
+| PDP request decisions | Load applicable policies, receive concrete requests, obtain PIP information as needed and authorize | `asc-pdp-runtime` and daemon sandbox authorization use PAP-selected policies; HTTP credential injection stays in the Gateway compiler/data plane |
 | Deployment orchestration | Create/update Bindings, select targets and use Reconciler for installation, update, revocation and recovery | Existing Scope/Binding and `asc-pcp`; mapping authorization results to deployment inputs remains open |
 | Backend adaptation | Translator checks capabilities and translates; Deployment Client handles backend protocols and deployment calls | Native DSL and Cedar structured deletion/ordinary-write/exact-file read translation; target capabilities checked by Client |
 | PEP and backend PDP | PEP intercepts requests and enforces decisions; some backends also contain a PDP for continuous system-operation checks | Depends on Hook, sandbox, system-call interception or other scenarios; schema support does not establish backend support |
@@ -454,6 +454,7 @@ pub struct PreparedPolicy {
     pub policy_name: String,
     pub revision: Revision,
     pub template: PolicySource,
+    pub credential_bindings: Vec<CredentialBinding>,
 }
 ```
 
@@ -520,8 +521,11 @@ explicit parsing and execution support.
 `authoring::source_serde` reads bare `PolicyTemplate` or `language/content` at
 CLI, RPC and snapshot boundaries. Native output retains its historical shape;
 Cedar uses the envelope. Typed decoding rejects duplicate fields and unknown
-languages. All three old snapshot locations remain readable without rewriting;
-SQLite storage version stays at 1. Older binaries cannot read new Cedar records,
+languages. Historical file-policy snapshots at all three locations remain readable
+without rewriting; SQLite storage version stays at 1. HTTP snapshots additionally
+pin server-owned `credentialBindings: [{ruleId,pairId}]`, omitted when empty for file
+policies; authoring requests cannot supply them. Legacy Gateway credential snapshots
+are explicitly rejected without migration (see §8.6.1). Older binaries cannot read new Cedar records,
 so rollback requires a pre-upgrade database backup. SQL `phase` values appear
 in CHECK constraints, so changing them
 requires storage migration; changing Cedar `WriteOperation` is a different contract.
@@ -656,9 +660,13 @@ This is a V2 frontend and policy-management contract. PAP/RPC and source snapsho
 are connected. The existing PEP Adapter translates a Cedar forbid subset for deletion, ordinary
 writes and exact-file read denial; the Client submits structured protection rules. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
 Sandbox runtime requests use schema revision 1.
-Validation establishes frontend acceptance only. The SDK stack-overflow limit
-for deeply nested input remains unresolved; use administrator-reviewed policies
-and add protection before admitting untrusted generated input.
+Validation establishes frontend acceptance only. Before SDK parsing, a non-recursive
+scanner bounds source to 256 KiB, nesting and consecutive prefix operators to 64,
+and each statement to 64 `if` tokens and 512 tokens. Strings and comments do not
+contribute to structural counts; flat binary conditions are bounded by tokens,
+not by an operator-count limit.
+Credential lowering separately bounds the resulting AST to 16 levels/4096 nodes;
+these limits do not establish runtime authorization.
 
 Acceptance is exercised by
 [`tests/validation.rs`](../../v2/crates/asc-policy-cedar/tests/validation.rs):
@@ -695,6 +703,100 @@ can add grants, and matching forbids override permits across the set. See the
 [sandbox guide](../../../../docs/user-guide/en/agent-sec-core/sandbox.md) for configuration
 and migration, and [sandbox authorization](LINUX_SANDBOX_PEP_DESIGN_zh.md) for decisions
 and receipts.
+
+### 8.6.1 HTTP injection extension
+
+The V2 HTTP frontend preserves `seccore.system@1`, native JSON **file** authoring and the
+existing OS PDP. Revision 2 (`schema/seccore-v2.cedarschema`) adds
+`SecCore::HttpEndpoint {host: String}`, `HttpRequestContext.input` with actual
+`scheme/method/path`, and `SecCore::Action::"network.send"`. Resolve both revisions
+exactly; never silently upgrade saved revision 1 references. HTTP injection lowers
+to Gateway plans, not the OS PDP or a general network allow/deny service.
+
+Each injection permit requires these six annotations:
+
+```cedar
+@modify("inject_credential")
+@real_token_file("/secure/github-real")
+@fake_token_file("/secure/github-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+```
+
+`auto` requires one complete fake in the specified header; `basic` matches the
+decoded password and preserves the username; other formats must be whole-value
+templates with exactly one `{fake}`, such as `Bearer {fake}`. Header and format
+have no defaults. `@response_rewrite` requires exactly the annotation string
+`"true"` or `"false"`, lowered to a required JSON boolean in Plan/Decision.
+Reject missing, empty, legacy `buffered/none` and other values, orphan annotations,
+inline Tokens and unknown combinations. Shared frontend support for `@id`, principal
+conditions and valid permit `@advice` remains; Gateway separately rejects principal
+constraints/references, advice, forbid, slots and any unconsumed condition.
+
+This internal target combines ANOLISA `89fe4fec0` with the `46738d58d` Cedar
+injection design and preserves `46e2a8682` streaming behavior. When enabled, only
+injected response headers, identity bodies and trailers are rewritten; identity
+matches span chunks with bounded pending suffixes. Gzip and other encoded bodies
+pass through unchanged and may expose real credentials. When disabled, all response
+fields pass through unchanged; request injection is independent. Fixed chunk and
+HTTP/2 queue limits abort failed or over-budget injected flows, with no unchecked
+fallback, whole-body buffering or new configurable limits. Already-sent bytes
+cannot be recalled. See the [response contract](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写).
+Gateway is not publicly available; this is not a runtime-validation result.
+
+Gateway accepts only bounded conjunctions of exact host, HTTPS scheme, method
+literal equality/fixed-set contains and path literal equality/Cedar like. Exact
+host is mandatory; omitted method allows the six existing methods, and omitted
+path adds no restriction. It never supplies GET or `/` as request defaults.
+Cedar `*` spans `/`; it is not native segmented glob. Actual path ambiguity,
+HTTPS, Host/SNI/authority and retirement checks remain independent of the permit.
+Same effective pair/header/format/response candidates deduplicate; different
+instructions conflict, with no first-rule precedence or recursive rewriting.
+No managed credential means safe unchanged forwarding; an unauthorized managed
+fake is rejected even on an unmatched host/header/format. No fake means no injection.
+
+Validation is pure. Both file annotations must contain normalized absolute paths
+on the daemon host; reject relative paths, `~`, environment expansion, NUL and
+`.`/`..` before I/O. Only after full admission and root authorization does management
+safely read root-owned private regular single-link files and register pairs once.
+Store registration is atomic; PAP saves trusted non-secret rule-to-opaque-pair-ID
+associations, and Scope/Binding save those associations with source snapshots.
+Author inputs cannot supply derived associations. Paths are import sources, not
+identity or rotation triggers. Deployment/recovery never reread source files;
+CAS retries and missing receipts require authoritative revision/association checks,
+not deletion of concurrently shared pairs or an assumed successful result.
+
+Scopes may explicitly share a supplied fake. Revoking one leaves other Active
+Scopes usable; the last Active Scope deletion permanently tombstones it, including
+zero-instance Scopes. Recovery first checks all canonical associations, then rebuilds
+cached memberships. Generation and registration share equal-length visible-ASCII
+validation: `mismatch_count * 5 >= length * 4` over the whole string, including
+prefixes and punctuation. Local `key generate-fake` defaults to `--format auto`,
+uses exclusive 0600 output and prints no Token; unknown heuristics fail explicitly.
+
+Native credential execution, KeyAdd, `gateway credentials` and corresponding RPCs
+are removed. Old Gateway policy/Store/plan/snapshot data is explicitly rejected;
+there is no migration, overwrite or inferred conversion. Root pair list/remove uses
+opaque IDs. Scope-free `gateway ca` returns only `{caBundlePath}` for one shared
+public CA after actual Gateway readiness checks; no GitHub environment mapping.
+Pair removal returns `{pairid}`, and listing returns `{pairids: string[]}`.
+The sole `github.cedar` asset covers eight auto/basic REST/Smart HTTP rules;
+source/raw/RPM deliver no `github.json` or `github-policy.json` wrapper. Rewriting
+is enabled for all eight rules, including streaming git-upload-pack responses.
+This source asset is not automatically registered. `PolicyInput::template()` in
+[`policy.rs`](../../v2/apps/asc-cli/src/commands/policy.rs) defaults to raw Cedar
+for Policy create/update (`--language cedar`), regardless of the file extension,
+preserving UTF-8 source text in a Cedar envelope. Optional `--schema-id` and
+`--schema-revision` select its schema; omitted values use
+`embedded_reference()` (`seccore.system`, revision 1). HTTP credential Policy input
+uses `--file github.cedar --schema-revision 2`; revision 2 is not selected implicitly.
+Invalid UTF-8 is rejected, and both raw and JSON file reads remain bounded to 4 MiB.
+`--language json` selects native JSON templates or Cedar envelopes; either schema
+option is rejected, and typed `source_serde::from_slice` decoding retains duplicate-key rejection.
+[`PermissionInput::parse`](../../v2/crates/asc-pep-runtime/src/permissions.rs) remains
+a separate revision 1 OS permission input path. See the
+[Gateway contract](V2_SECRET_GATEWAY_DESIGN_zh.md).
 
 ### 8.7 Schema versioning and policy loading
 
@@ -783,8 +885,8 @@ need semantic and deployment validation for the selected backends.
 
 | Part | Current status | Next step |
 |---|---|---|
-| Types and Cedar frontend | Source union; embedded revision 1; `validate` returns non-blocking warnings, `pst` validates and returns SDK PST | Schema-file metadata and loading; retain common-subset diagnostics |
-| Policy/PAP/RPC/SQLite | `template: PolicySource`; Cedar admission and source persistence; old requests and three snapshot locations remain compatible | Preserve version and snapshot contracts |
+| Types and Cedar frontend | Source union; exact embedded revisions 1 and 2; `validate` returns non-blocking warnings, `pst` validates and returns SDK PST; revision 2 HTTP injection target uses the two-value response switch | Schema-file metadata and loading; retain common-subset diagnostics; verify the final HTTP implementation separately |
+| Policy/PAP/RPC/SQLite | `template: PolicySource`; Cedar admission and source persistence; historical file requests and three file snapshot locations remain compatible; HTTP snapshots pin pair associations and reject legacy Gateway data without migration | Preserve version and snapshot contracts |
 | Policy loading and translation | Saved Cedar source is loaded through `pst`; deletion/ordinary-write/exact-file read translation and Client deployment are connected for the existing PEP Adapter | Validate live backend enforcement within the documented limits; declare support for other targets |
 | Sandbox runtime authorization | Current PAP reads, OS authorization PDP, five-state decisions, local PEP approval/execution and checked receipts | Confirm Linux and CI results for the final revision; retain separate Binding deployment semantics |
 | Agent Hook/PIP | Not supported by the embedded schema | Define resources, actions, request fields and detection contracts separately, then publish a corresponding schema revision |

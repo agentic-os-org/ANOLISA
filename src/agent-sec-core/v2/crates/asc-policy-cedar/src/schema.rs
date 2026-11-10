@@ -12,6 +12,10 @@ pub const SCHEMA_ID: &str = "seccore.system";
 pub const SCHEMA_REVISION: u32 = 1;
 /// Cedar definitions shared by frontend validation and runtime request mapping.
 pub const SCHEMA_TEXT: &str = include_str!("../schema/seccore.cedarschema");
+/// HTTP-capable revision, leaving the default reference pinned to revision 1.
+pub const HTTP_SCHEMA_REVISION: u32 = 2;
+/// Revision 2 extends system actions with the HTTP endpoint/request contract.
+pub const HTTP_SCHEMA_TEXT: &str = include_str!("../schema/seccore-v2.cedarschema");
 
 /// Embedded schema identity and immutable revision as a source reference.
 ///
@@ -26,17 +30,21 @@ pub fn embedded_reference() -> CedarSchemaReference {
     }
 }
 
-/// Resolves exactly the embedded schema revision without falling back to another.
+/// Resolves exactly embedded revision 1 or 2 without falling back to another.
 ///
 /// # Errors
 /// Rejects unknown identities/revisions and malformed embedded definitions.
 pub fn load_schema(reference: &CedarSchemaReference) -> Result<Schema, CedarError> {
-    if reference.schema_id.as_str() != SCHEMA_ID || reference.revision.get() != SCHEMA_REVISION {
-        return Err(CedarError::UnsupportedSchema {
-            schema_id: reference.schema_id.to_string(),
-            revision: reference.revision.get(),
-        });
-    }
-    let (schema, _) = Schema::from_cedarschema_str(SCHEMA_TEXT).map_err(Box::new)?;
+    let text = match (reference.schema_id.as_str(), reference.revision.get()) {
+        (SCHEMA_ID, SCHEMA_REVISION) => SCHEMA_TEXT,
+        (SCHEMA_ID, HTTP_SCHEMA_REVISION) => HTTP_SCHEMA_TEXT,
+        _ => {
+            return Err(CedarError::UnsupportedSchema {
+                schema_id: reference.schema_id.to_string(),
+                revision: reference.revision.get(),
+            });
+        }
+    };
+    let (schema, _) = Schema::from_cedarschema_str(text).map_err(Box::new)?;
     Ok(schema)
 }

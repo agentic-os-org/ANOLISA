@@ -1,47 +1,55 @@
 use asc_credential_store::ScopeId;
-use asc_policy_types::authoring::{PolicySource as AuthoredPolicySource, PolicyTemplate, Resource};
+use asc_policy_types::authoring::PolicySource as AuthoredPolicySource;
+use asc_policy_types::cedar::CedarPolicySource;
 use asc_policy_types::identifiers::{ResourceId, Revision};
-use asc_policy_types::policy::PreparedPolicy;
+use asc_policy_types::policy::{CredentialBinding, PreparedPolicy};
 use asc_policy_types::scope::PreparedScope;
 use serde_json::{Value, json};
 
-use crate::{Plan, PlanError, compile_scope, github_credential_spec};
+use crate::{Plan, PlanError, compile_scope};
 
-const GITHUB_POLICY: &str = include_str!("../policies/github.json");
+const GITHUB_CEDAR: &str = include_str!("../policies/github.cedar");
 const GITHUB_PLAN: &str = include_str!("../../../fixtures/gateway/github-dev-agent.plan.json");
 const DECISIONS: &str = include_str!("../../../fixtures/gateway/decisions.json");
 const SCOPE_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 fn github_policy() -> PreparedPolicy {
+    let source = CedarPolicySource {
+        schema: asc_policy_types::cedar::CedarSchemaReference {
+            schema_id: ResourceId::new(asc_policy_cedar::schema::SCHEMA_ID).unwrap(),
+            revision: Revision::new(asc_policy_cedar::schema::HTTP_SCHEMA_REVISION).unwrap(),
+        },
+        text: GITHUB_CEDAR.into(),
+    };
+    let credential_bindings = asc_policy_cedar::credential_rules(&source)
+        .unwrap()
+        .into_iter()
+        .map(|rule| CredentialBinding {
+            rule_id: rule.rule_id,
+            pair_id: "github".into(),
+        })
+        .collect();
     PreparedPolicy {
         policy_id: ResourceId::new("policy:github").unwrap(),
         policy_name: "GitHub".into(),
         revision: Revision::new(7).unwrap(),
-        template: AuthoredPolicySource::SecCore(serde_json::from_str(GITHUB_POLICY).unwrap()),
+        template: AuthoredPolicySource::Cedar(source),
+        credential_bindings,
     }
 }
 
-fn native_template(source: &AuthoredPolicySource) -> &PolicyTemplate {
-    let AuthoredPolicySource::SecCore(template) = source else {
-        panic!("expected native test policy");
+fn cedar_mut(policy: &mut PreparedPolicy) -> &mut CedarPolicySource {
+    let AuthoredPolicySource::Cedar(source) = &mut policy.template else {
+        panic!("expected Cedar test policy");
     };
-    template
-}
-
-fn native_template_mut(source: &mut AuthoredPolicySource) -> &mut PolicyTemplate {
-    let AuthoredPolicySource::SecCore(template) = source else {
-        panic!("expected native test policy");
-    };
-    template
+    source
 }
 
 fn scope(policies: &[PreparedPolicy]) -> PreparedScope {
     serde_json::from_value(json!({
-        "scopeId": SCOPE_ID,
-        "ownerUid": 1000,
+        "scopeId": SCOPE_ID, "ownerUid": 1000,
         "selector": {"kind":"process","match":{"processName":"agent"}},
-        "policySnapshots": policies,
-        "status":"ACTIVE"
+        "policySnapshots": policies, "status":"ACTIVE"
     }))
     .unwrap()
 }
@@ -51,7 +59,52 @@ fn github_plan() -> Plan {
 }
 
 fn fixture_value() -> Value {
-    serde_json::from_str(GITHUB_PLAN).unwrap()
+    // Independent expected endpoint/carrier matrix, in canonical Cedar ID order.
+    let matrix = [
+        (
+            "github.com",
+            Some("/*/git-receive-pack"),
+            "POST",
+            "auto",
+            true,
+        ),
+        (
+            "github.com",
+            Some("/*/git-receive-pack"),
+            "POST",
+            "basic",
+            true,
+        ),
+        ("github.com", Some("/*/info/refs"), "GET", "auto", true),
+        ("github.com", Some("/*/info/refs"), "GET", "basic", true),
+        ("api.github.com", Some("/*"), "ALL", "auto", true),
+        ("api.github.com", Some("/*"), "ALL", "basic", true),
+        (
+            "github.com",
+            Some("/*/git-upload-pack"),
+            "POST",
+            "auto",
+            true,
+        ),
+        (
+            "github.com",
+            Some("/*/git-upload-pack"),
+            "POST",
+            "basic",
+            true,
+        ),
+    ];
+    let rules: Vec<_> = matrix.into_iter().enumerate().map(|(index, (host, path, method, format, rewrite))| json!({
+        "source": {"policyId":"policy:github", "policyRevision":7, "ruleIndex":index},
+        "match": {"scheme":"https", "host":host,
+            "path":path.map(|value| json!({"kind":"like", "value":value})),
+            "methods":if method == "ALL" { vec!["GET","HEAD","POST","PUT","PATCH","DELETE"] } else { vec![method] },
+            "credentialId":"github"},
+        "header":"Authorization", "format":format, "responseRewrite":rewrite,
+        "because":"Credential use allowed by policy"
+    })).collect();
+    json!({"format":"agent-sec-gateway-plan/v2", "scopeId":SCOPE_ID,
+        "policies":[{"id":"policy:github","revision":7}], "credentials":["github"], "rules":rules})
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,23 +128,32 @@ fn mutated(edit: impl FnOnce(&mut Value)) -> Result<Plan, PlanDecodeError> {
 }
 
 #[test]
-fn native_github_policy_compiles_to_the_shared_gateway_fixture() {
+fn cedar_github_policy_compiles_all_eight_endpoint_carrier_rules() {
     let compiled = github_plan();
     assert_eq!(
         serde_json::from_slice::<Value>(&compiled.to_json()).unwrap(),
         fixture_value()
     );
-    assert_eq!(decode_plan(GITHUB_PLAN.as_bytes()).unwrap(), compiled);
+    assert_eq!(decode_plan(&compiled.to_json()).unwrap(), compiled);
+    let policy = github_policy();
+    let AuthoredPolicySource::Cedar(source) = policy.template else {
+        panic!("expected Cedar");
+    };
+    assert_eq!(source.text, GITHUB_CEDAR);
+    // The shared addon fixture may order rules differently; its v2 wire contract must still decode.
+    decode_plan(GITHUB_PLAN.as_bytes()).unwrap();
     let decisions: Value = serde_json::from_str(DECISIONS).unwrap();
     assert_eq!(decisions["plan"], "github-dev-agent.plan.json");
     assert_eq!(decisions["listeners"][0]["scopeId"], SCOPE_ID);
-    let spec = github_credential_spec();
-    for entry in decisions["secrets"]["entries"].as_array().unwrap() {
-        assert_eq!(entry["credential"], spec.id.as_str());
-        assert_eq!(
-            entry["carriers"],
-            serde_json::to_value(&spec.carriers).unwrap()
-        );
+    let encoded = String::from_utf8(compiled.to_json()).unwrap();
+    for forbidden in [
+        "/secure/",
+        "realTokenFile",
+        "fakeTokenFile",
+        "policyName",
+        "credentialBindings",
+    ] {
+        assert!(!encoded.contains(forbidden), "{forbidden}");
     }
 }
 
@@ -101,30 +163,14 @@ fn compilation_aggregates_snapshots_canonically_and_preserves_each_rule_source()
     let mut second = first.clone();
     second.policy_id = ResourceId::new("policy:other").unwrap();
     second.revision = Revision::new(9).unwrap();
-    let second_template = native_template_mut(&mut second.template);
-    second_template.rules.truncate(1);
-    second_template.rules[0].because = None;
-    let Resource::HttpRequest {
-        credential_id,
-        methods,
-        ..
-    } = &mut second_template.rules[0].target
-    else {
-        panic!("expected HTTP target");
-    };
-    *credential_id = "other-token".into();
-    methods.reverse();
+    for binding in &mut second.credential_bindings {
+        binding.pair_id = "other-token".into();
+    }
+    second.credential_bindings.reverse();
     let file = PreparedPolicy {
-        policy_id: ResourceId::new("policy:file").unwrap(),
-        policy_name: "Files".into(),
-        revision: Revision::new(1).unwrap(),
-        template: AuthoredPolicySource::SecCore(
-            serde_json::from_value(json!({"specVersion":"0.1","rules":[{
-                "effect":"block","category":"file","action":"read",
-                "target":{"type":"file","path":"/secret"}
-            }]}))
-            .unwrap(),
-        ),
+        policy_id: ResourceId::new("policy:file").unwrap(), policy_name: "Files".into(), revision: Revision::new(1).unwrap(),
+        template: serde_json::from_value(json!({"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"forbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/secret\" };"}})).unwrap(),
+        credential_bindings: vec![],
     };
     let plan = compile_scope(&scope(&[second.clone(), file.clone(), first.clone()])).unwrap();
     assert_eq!(
@@ -142,7 +188,7 @@ fn compilation_aggregates_snapshots_canonically_and_preserves_each_rule_source()
             crate::PolicySource {
                 id: second.policy_id.clone(),
                 revision: second.revision
-            },
+            }
         ]
     );
     assert_eq!(
@@ -152,17 +198,23 @@ fn compilation_aggregates_snapshots_canonically_and_preserves_each_rule_source()
             .collect::<Vec<_>>(),
         ["github", "other-token"]
     );
+    for (index, rule) in plan.rules.iter().take(8).enumerate() {
+        assert_eq!(
+            rule.source,
+            crate::RuleSource {
+                policy_id: first.policy_id.clone(),
+                policy_revision: first.revision,
+                rule_index: index
+            }
+        );
+    }
     assert_eq!(
         plan.rules.last().unwrap().source,
         crate::RuleSource {
             policy_id: second.policy_id,
             policy_revision: second.revision,
-            rule_index: 0,
+            rule_index: 7
         }
-    );
-    assert_eq!(
-        plan.rules.last().unwrap().because,
-        "Credential use allowed by policy"
     );
     let mut projected = plan.clone();
     projected.rules.remove(0);
@@ -172,84 +224,63 @@ fn compilation_aggregates_snapshots_canonically_and_preserves_each_rule_source()
     projected.rules.clear();
     projected.credentials.clear();
     projected.validate().unwrap();
-    for (index, rule) in plan
-        .rules
-        .iter()
-        .enumerate()
-        .take(native_template(&first.template).rules.len())
-    {
-        assert_eq!(
-            rule.source,
-            crate::RuleSource {
-                policy_id: first.policy_id.clone(),
-                policy_revision: first.revision,
-                rule_index: index,
-            }
-        );
-    }
 }
 
 #[test]
-fn cedar_sources_are_not_compiled_as_gateway_policies() {
-    let cedar = PreparedPolicy {
-        policy_id: ResourceId::new("policy:cedar").unwrap(),
-        policy_name: "Cedar".into(),
-        revision: Revision::new(1).unwrap(),
-        template: serde_json::from_value(json!({
-            "language": "cedar",
-            "content": {
-                "schema": {"schemaId": "seccore.system", "revision": 1},
-                "text": "permit(principal, action, resource);"
-            }
-        }))
-        .unwrap(),
-    };
+fn independent_noncredential_sources_are_skipped_but_cedar_still_validates() {
+    let mut file = github_policy();
+    file.policy_id = ResourceId::new("policy:file").unwrap();
+    file.credential_bindings.clear();
+    file.template = AuthoredPolicySource::SecCore(serde_json::from_value(json!({"specVersion":"0.1","rules":[{
+        "effect":"block","category":"file","action":"read","target":{"type":"file","path":"/secret"}
+    }]})).unwrap());
     assert_eq!(
-        compile_scope(&scope(&[cedar, github_policy()])).unwrap(),
+        compile_scope(&scope(&[file.clone(), github_policy()])).unwrap(),
         github_plan()
     );
-}
-
-#[test]
-fn invalid_or_mixed_policy_never_compiles_a_partial_plan() {
-    for edit in [
-        (|template: &mut PolicyTemplate| {
-            template.rules[1].effect = asc_policy_types::authoring::Effect::Block;
-        }) as fn(&mut PolicyTemplate),
-        |template: &mut PolicyTemplate| {
-            template.rules[1].action = asc_policy_types::authoring::Action::Read;
-        },
-        |template: &mut PolicyTemplate| {
-            template.rules[1].target = Resource::File {
-                path: "/secret".into(),
-            };
-        },
-    ] {
-        let mut policy = github_policy();
-        edit(native_template_mut(&mut policy.template));
-        assert!(matches!(
-            compile_scope(&scope(&[policy])),
-            Err(PlanError::Policy(_))
-        ));
-    }
-    let mut policy = github_policy();
-    let template = native_template_mut(&mut policy.template);
-    template.rules[1] = serde_json::from_value(json!({
-        "effect":"block","category":"file","action":"read","target":{"type":"file","path":"/secret"}
-    }))
-    .unwrap();
     assert!(matches!(
-        compile_scope(&scope(&[policy.clone()])),
-        Err(PlanError::Policy(_))
-    ));
-    let template = native_template_mut(&mut policy.template);
-    template.rules = vec![template.rules[1].clone()];
-    assert!(matches!(
-        compile_scope(&scope(&[policy])),
+        compile_scope(&scope(&[file])),
         Err(PlanError::Invalid {
             field: "policies",
             ..
         })
+    ));
+    let mut cedar = github_policy();
+    cedar.policy_id = ResourceId::new("policy:invalid-cedar").unwrap();
+    cedar.credential_bindings.clear();
+    cedar_mut(&mut cedar).text =
+        "permit(principal, action, resource) when { context.typo };".into();
+    assert!(matches!(
+        compile_scope(&scope(&[cedar, github_policy()])),
+        Err(PlanError::Cedar(_))
+    ));
+}
+
+#[test]
+fn invalid_or_mixed_policy_never_compiles_a_partial_plan() {
+    for (from, to) in [
+        ("permit(", "forbid("),
+        ("network.send", "file.read"),
+        (
+            "resource is SecCore::HttpEndpoint",
+            "resource is SecCore::File",
+        ),
+        (
+            "context.input.method == \"POST\"",
+            "context.input.method == \"OPTIONS\"",
+        ),
+    ] {
+        let mut policy = github_policy();
+        cedar_mut(&mut policy).text = cedar_mut(&mut policy).text.replacen(from, to, 1);
+        assert!(compile_scope(&scope(&[policy])).is_err(), "{from} -> {to}");
+    }
+    let mut policy = github_policy();
+    cedar_mut(&mut policy)
+        .text
+        .push_str("\nforbid(principal, action == SecCore::Action::\"file.read\", resource);");
+    assert!(matches!(
+        compile_scope(&scope(&[policy])),
+        Err(PlanError::Cedar(_))
     ));
     let mut selected = scope(&[github_policy()]);
     selected.selector = asc_policy_types::scope::ScopeSelector::Pid { pid: 4242 };
@@ -260,39 +291,88 @@ fn invalid_or_mixed_policy_never_compiles_a_partial_plan() {
 }
 
 #[test]
-fn compiler_enforces_aggregate_gateway_limits() {
+fn bindings_are_complete_unique_and_joined_by_rule_id_not_position() {
     let mut policy = github_policy();
-    let template = native_template_mut(&mut policy.template);
-    template.rules = vec![template.rules[0].clone(); 256];
+    for (index, binding) in policy.credential_bindings.iter_mut().enumerate() {
+        binding.pair_id = format!("pair-{index}");
+    }
+    let expected = compile_scope(&scope(std::slice::from_ref(&policy))).unwrap();
+    policy.credential_bindings.reverse();
     assert_eq!(
-        compile_scope(&scope(&[policy.clone()]))
+        compile_scope(&scope(std::slice::from_ref(&policy))).unwrap(),
+        expected
+    );
+    for (index, rule) in expected.rules.iter().enumerate() {
+        assert_eq!(rule.matcher.credential_id.as_str(), format!("pair-{index}"));
+    }
+    for edit in [
+        (|p: &mut PreparedPolicy| {
+            p.credential_bindings.pop();
+        }) as fn(&mut PreparedPolicy),
+        |p: &mut PreparedPolicy| {
+            p.credential_bindings.push(CredentialBinding {
+                rule_id: "extra".into(),
+                pair_id: "extra".into(),
+            });
+        },
+        |p: &mut PreparedPolicy| {
+            p.credential_bindings[0].rule_id = "unknown".into();
+        },
+        |p: &mut PreparedPolicy| {
+            p.credential_bindings[0].rule_id = p.credential_bindings[1].rule_id.clone();
+        },
+        |p: &mut PreparedPolicy| {
+            p.credential_bindings[0].pair_id = "Bad/Pair".into();
+        },
+    ] {
+        let mut policy = github_policy();
+        edit(&mut policy);
+        assert!(compile_scope(&scope(&[policy])).is_err());
+    }
+    let mut file = github_policy();
+    cedar_mut(&mut file).text = "permit(principal, action, resource);".into();
+    assert!(compile_scope(&scope(&[file])).is_err());
+}
+
+fn repeated_policy(count: usize, policy_index: usize, unique_pairs: bool) -> PreparedPolicy {
+    let mut policy = github_policy();
+    policy.policy_id = ResourceId::new(format!("policy:{policy_index}")).unwrap();
+    let annotations = "@modify(\"inject_credential\") @real_token_file(\"/secure/real\") @fake_token_file(\"/secure/fake\") @inject_header(\"Authorization\") @inject_format(\"auto\") @response_rewrite(\"true\")";
+    cedar_mut(&mut policy).text = format!("{annotations} permit(principal, action == SecCore::Action::\"network.send\", resource is SecCore::HttpEndpoint) when {{ resource.host == \"api.example.com\" && context.input.scheme == \"https\" }};").repeat(count);
+    let rules = asc_policy_cedar::credential_rules(cedar_mut(&mut policy)).unwrap();
+    policy.credential_bindings = rules
+        .into_iter()
+        .enumerate()
+        .map(|(i, rule)| CredentialBinding {
+            rule_id: rule.rule_id,
+            pair_id: if unique_pairs {
+                format!("c-{policy_index}-{i}")
+            } else {
+                "github".into()
+            },
+        })
+        .collect();
+    policy
+}
+
+#[test]
+fn compiler_enforces_aggregate_gateway_limits() {
+    let policy = repeated_policy(256, 0, false);
+    assert_eq!(
+        compile_scope(&scope(std::slice::from_ref(&policy)))
             .unwrap()
             .rules
             .len(),
         256
     );
-    let template = native_template_mut(&mut policy.template);
-    template.rules.push(template.rules[0].clone());
+    let other = repeated_policy(1, 1, false);
     assert!(matches!(
-        compile_scope(&scope(&[policy])),
+        compile_scope(&scope(&[policy, other])),
         Err(PlanError::Invalid { field: "rules", .. })
     ));
-    let mut policies = Vec::new();
-    for index in 0..17 {
-        let mut policy = github_policy();
-        policy.policy_id = ResourceId::new(format!("policy:{index}")).unwrap();
-        for (rule_index, rule) in native_template_mut(&mut policy.template)
-            .rules
-            .iter_mut()
-            .enumerate()
-        {
-            let Resource::HttpRequest { credential_id, .. } = &mut rule.target else {
-                panic!("expected HTTP target");
-            };
-            *credential_id = format!("c-{index}-{rule_index}");
-        }
-        policies.push(policy);
-    }
+    let policies: Vec<_> = (0..17)
+        .map(|index| repeated_policy(4, index, true))
+        .collect();
     assert!(matches!(
         compile_scope(&scope(&policies)),
         Err(PlanError::Invalid {
@@ -300,6 +380,10 @@ fn compiler_enforces_aggregate_gateway_limits() {
             ..
         })
     ));
+    let policies: Vec<_> = (0..33)
+        .map(|index| repeated_policy(1, index, false))
+        .collect();
+    assert!(compile_scope(&scope(&policies)).is_err());
 }
 
 #[test]
@@ -307,9 +391,13 @@ fn plan_uses_exact_snapshots_not_policy_names_or_description() {
     let expected = github_plan();
     let mut policy = github_policy();
     policy.policy_name = "synthetic-private-context".into();
-    native_template_mut(&mut policy.template).description =
-        Some("synthetic-private-context".into());
-    assert_eq!(compile_scope(&scope(&[policy.clone()])).unwrap(), expected);
+    cedar_mut(&mut policy)
+        .text
+        .insert_str(0, "// synthetic-private-context\n");
+    assert_eq!(
+        compile_scope(&scope(std::slice::from_ref(&policy))).unwrap(),
+        expected
+    );
     policy.revision = policy.revision.checked_next().unwrap();
     assert_ne!(compile_scope(&scope(&[policy])).unwrap(), expected);
 }
@@ -317,19 +405,41 @@ fn plan_uses_exact_snapshots_not_policy_names_or_description() {
 #[test]
 fn unknown_fields_and_formats_are_rejected() {
     for edit in [
-        (|plan: &mut Value| plan["extra"] = true.into()) as fn(&mut Value),
-        |plan: &mut Value| plan["format"] = "agent-sec-gateway-plan/v2".into(),
-        |plan: &mut Value| plan["rules"][0]["match"]["methods"] = json!(["OPTIONS"]),
-        |plan: &mut Value| plan["rules"][0]["match"]["scheme"] = "http".into(),
+        (|p: &mut Value| p["extra"] = true.into()) as fn(&mut Value),
+        |p: &mut Value| p["format"] = "agent-sec-gateway-plan/v3".into(),
+        |p: &mut Value| p["rules"][0]["match"]["methods"] = json!(["OPTIONS"]),
+        |p: &mut Value| p["rules"][0]["match"]["scheme"] = "http".into(),
+        |p: &mut Value| p["rules"][0]["match"]["path"] = "/**".into(),
+        |p: &mut Value| p["rules"][0]["responseRewrite"] = "buffered".into(),
+        |p: &mut Value| p["rules"][0]["responseRewrite"] = "none".into(),
+        |p: &mut Value| p["rules"][0]["responseRewrite"] = "true".into(),
+        |p: &mut Value| p["rules"][0]["responseRewrite"] = Value::Null,
+        |p: &mut Value| {
+            p["rules"][0].as_object_mut().unwrap().remove("header");
+        },
+        |p: &mut Value| {
+            p["rules"][0].as_object_mut().unwrap().remove("format");
+        },
+        |p: &mut Value| {
+            p["rules"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("responseRewrite");
+        },
     ] {
         assert!(matches!(mutated(edit), Err(PlanDecodeError::Decode(_))));
     }
-    let duplicated = GITHUB_PLAN.replacen(
+    assert!(matches!(
+        mutated(|p| p["format"] = "agent-sec-gateway-plan/v1".into()),
+        Err(PlanDecodeError::Validation(_))
+    ));
+    let encoded = fixture_value().to_string();
+    let duplicated = encoded.replacen(
         "\"scopeId\":",
-        "\"scopeId\": \"other-scope\", \"scopeId\":",
+        "\"scopeId\":\"other-scope\",\"scopeId\":",
         1,
     );
-    assert_ne!(duplicated, GITHUB_PLAN);
+    assert_ne!(duplicated, encoded);
     assert!(matches!(
         decode_plan(duplicated.as_bytes()),
         Err(PlanDecodeError::Decode(_))
@@ -338,10 +448,17 @@ fn unknown_fields_and_formats_are_rejected() {
 
 #[test]
 fn rule_constraints_are_enforced() {
-    for host in ["*.github.com", "GitHub.com", "localhost", "a..b", "-a.com"] {
+    for host in [
+        "*.github.com",
+        "GitHub.com",
+        "localhost",
+        "a..b",
+        "-a.com",
+        "127.0.0.1",
+    ] {
         assert!(
             matches!(
-                mutated(|plan| plan["rules"][0]["match"]["host"] = host.into()),
+                mutated(|p| p["rules"][0]["match"]["host"] = host.into()),
                 Err(PlanDecodeError::Validation(PlanError::InvalidRule {
                     field: "match.host",
                     ..
@@ -350,18 +467,31 @@ fn rule_constraints_are_enforced() {
             "{host}"
         );
     }
-    for path in ["repos", "/a/../b", "/a//b", "/a%2fb", "/a/", "/a*b"] {
-        assert!(
-            matches!(
-                mutated(|plan| plan["rules"][0]["match"]["path"] = path.into()),
-                Err(PlanDecodeError::Validation(PlanError::InvalidRule {
-                    field: "match.path",
-                    ..
-                }))
-            ),
-            "{path}"
-        );
+    for path in [
+        json!({"kind":"eq","value":"repos"}),
+        json!({"kind":"glob","value":"/*"}),
+        json!({"kind":"like","value":"/a\nb"}),
+        json!({"kind":"like","value":"/a\\"}),
+        json!({"kind":"like","value":"/a\\x"}),
+    ] {
+        assert!(matches!(
+            mutated(|p| p["rules"][0]["match"]["path"] = path),
+            Err(PlanDecodeError::Validation(PlanError::InvalidRule {
+                field: "match.path",
+                ..
+            }))
+        ));
     }
+    for path in [
+        Value::Null,
+        json!({"kind":"eq","value":"/a*b"}),
+        json!({"kind":"like","value":"/a*b/**"}),
+    ] {
+        mutated(|p| p["rules"][0]["match"]["path"] = path).unwrap();
+    }
+    let disabled = mutated(|p| p["rules"][0]["responseRewrite"] = false.into()).unwrap();
+    assert!(!disabled.rules[0].response_rewrite);
+    assert_eq!(decode_plan(&disabled.to_json()).unwrap(), disabled);
     for (field, edit) in [
         (
             "match.methods",
@@ -376,6 +506,12 @@ fn rule_constraints_are_enforced() {
         }),
         ("match.credentialId", |p: &mut Value| {
             p["rules"][0]["match"]["credentialId"] = "other".into();
+        }),
+        ("header/format", |p: &mut Value| {
+            p["rules"][0]["header"] = "Host".into();
+        }),
+        ("header/format", |p: &mut Value| {
+            p["rules"][0]["format"] = "{fake}{fake}".into();
         }),
         ("because", |p: &mut Value| {
             p["rules"][0]["because"] = "line\nbreak".into();
@@ -401,20 +537,21 @@ fn rule_constraints_are_enforced() {
 
 #[test]
 fn plan_level_constraints_are_enforced() {
-    assert!(matches!(
-        mutated(|p| p["credentials"] = json!(["a", "a"])),
-        Err(PlanDecodeError::Validation(PlanError::Invalid {
-            field: "credentials",
-            ..
-        }))
-    ));
-    assert!(matches!(
-        mutated(|p| p["policies"] = json!([])),
-        Err(PlanDecodeError::Validation(PlanError::Invalid {
-            field: "policies",
-            ..
-        }))
-    ));
+    for (field, edit) in [
+        (
+            "credentials",
+            (|p: &mut Value| p["credentials"] = json!(["a", "a"])) as fn(&mut Value),
+        ),
+        ("policies", |p: &mut Value| p["policies"] = json!([])),
+        ("policies", |p: &mut Value| {
+            let policy = p["policies"][0].clone();
+            p["policies"] = json!([policy.clone(), policy]);
+        }),
+    ] {
+        assert!(
+            matches!(mutated(edit), Err(PlanDecodeError::Validation(PlanError::Invalid { field:actual, .. })) if actual == field)
+        );
+    }
     assert!(matches!(
         mutated(|p| p["scopeId"] = "Dev".into()),
         Err(PlanDecodeError::Decode(_))

@@ -210,14 +210,45 @@ fn credential_scope_release_responsibility_survives_restart_with_zero_or_last_bi
         ))
         .unwrap();
         let mut policy = fixture.policy;
-        policy.template = asc_policy_types::authoring::PolicySource::SecCore(
-            serde_json::from_value(serde_json::json!({
-                "specVersion":"0.1","rules":[{"effect":"allow","category":"network","action":"use_credential",
-                    "target":{"type":"http_request","credentialId":"github","scheme":"https",
-                        "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":true}}]
-            }))
-            .unwrap(),
-        );
+        let source = asc_policy_types::cedar::CedarPolicySource {
+            schema: asc_policy_types::cedar::CedarSchemaReference {
+                schema_id: ResourceId::new("seccore.system").unwrap(),
+                revision: Revision::new(2).unwrap(),
+            },
+            text: r#"@modify("inject_credential")
+@real_token_file("/secure/github-real")
+@fake_token_file("/secure/github-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when { resource.host == "api.github.com" && context.input.method == "GET" && context.input.path like "/repos/*" };"#.into(),
+        };
+        policy.credential_bindings = asc_policy_cedar::credential_rules(&source)
+            .unwrap()
+            .into_iter()
+            .map(|rule| asc_policy_types::policy::CredentialBinding {
+                rule_id: rule.rule_id,
+                pair_id: "pair-one".into(),
+            })
+            .collect();
+        policy.template = asc_policy_types::authoring::PolicySource::Cedar(source);
+        for binding in [None, Some("unrelated-rule")] {
+            let mut invalid = policy.clone();
+            if let Some(rule_id) = binding {
+                invalid.credential_bindings[0].rule_id = rule_id.into();
+            } else {
+                invalid.credential_bindings.clear();
+            }
+            assert!(matches!(
+                repo.put_policy(&invalid),
+                Err(PapError::InvalidCedar(_))
+            ));
+            assert_eq!(
+                repo.get_policy(&policy.policy_id, policy.revision),
+                Err(PapError::NotFound)
+            );
+        }
         repo.put_policy(&policy).unwrap();
         let scope = PreparedScope {
             scope_id: fixture.scope.scope_id,
@@ -1058,10 +1089,10 @@ fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_sche
         unreachable!()
     };
     assert!(pst(&invalid).is_ok());
-    invalid.schema.revision = Revision::new(2).unwrap();
+    invalid.schema.revision = Revision::new(3).unwrap();
     assert!(matches!(
         pst(&invalid),
-        Err(asc_policy_cedar::CedarError::UnsupportedSchema { revision: 2, .. })
+        Err(asc_policy_cedar::CedarError::UnsupportedSchema { revision: 3, .. })
     ));
 }
 

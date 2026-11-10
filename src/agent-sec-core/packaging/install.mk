@@ -285,7 +285,8 @@ install-gateway: ## Install prebuilt gateway assets without activation or mitmpr
 	install -d -m 0755 "$(DESTDIR)$(GATEWAY_DATADIR)"
 	install -m 0644 "$(GATEWAY_SOURCE_DIR)/asc_gateway_addon.py" \
 		"$(GATEWAY_SOURCE_DIR)/asc_gateway_policy.py" "$(GATEWAY_SOURCE_DIR)/mitmproxy.provenance" \
-		"$(GATEWAY_SOURCE_DIR)/github-policy.json" "$(DESTDIR)$(GATEWAY_DATADIR)/"
+		"$(GATEWAY_SOURCE_DIR)/github.cedar" \
+		"$(DESTDIR)$(GATEWAY_DATADIR)/"
 	install -m 0755 "$(GATEWAY_SOURCE_DIR)/install-mitmproxy.sh" "$(DESTDIR)$(GATEWAY_DATADIR)/"
 	install -d -m 0755 "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d"
 	sed -e 's|{datadir}|$(GATEWAY_DATADIR)|g' "$(GATEWAY_SOURCE_DIR)/agent-sec-gateway.service.in" \

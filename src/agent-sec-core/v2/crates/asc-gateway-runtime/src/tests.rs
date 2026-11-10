@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use asc_credential_store::{CredentialId, CredentialStore, ScopeId, Secret};
-use asc_gateway_plan::github_credential_spec;
+use asc_credential_store::{CredentialId, CredentialStore, PairInput, ScopeId, Secret};
 use asc_pap::PapRepository;
 use asc_policy_repository::{BindingStateRepository, BindingStateWrite, WriteResult};
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
@@ -26,11 +25,12 @@ use asc_policy_types::target::{FailureKind, PreparedApply, TargetBindingPlan};
 
 use crate::{
     GATEWAY_BINDING_FORMAT, GatewayAccount, GatewayBindingClient, GatewayConfig, GatewayError,
-    GatewayErrorKind, GatewayService, Host, KeyRequest, ProcessIdentity,
+    GatewayErrorKind, GatewayService, Host, ProcessIdentity,
 };
 
 const REAL: &str = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
 const OTHER_REAL: &str = "ghp_9999999999abcdefghijABCDEFGHIJ012345";
+const FAKE: &str = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 const UID: u32 = 4001;
 const CA: &str = "-----BEGIN CERTIFICATE-----\ngateway\n-----END CERTIFICATE-----\n";
 
@@ -362,6 +362,7 @@ struct Fixture {
     config: GatewayConfig,
     plane: DataPlane,
     root: tempfile::TempDir,
+    pair: Mutex<Option<CredentialId>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -390,6 +391,7 @@ impl Fixture {
             config,
             plane,
             root,
+            pair: Mutex::default(),
         }
     }
     fn service(&self) -> Arc<GatewayService> {
@@ -412,8 +414,36 @@ impl Fixture {
         } else {
             CredentialStore::create(&self.config.store_dir)?
         };
-        store.put(github_credential_spec(), Secret::new(real.to_owned())?)?;
+        let pairs = store.register_pairs(vec![PairInput {
+            real: Secret::new(real.to_owned())?,
+            fake: FAKE.into(),
+        }])?;
+        *self.pair.lock().unwrap() = Some(pairs[0].clone());
         Ok(())
+    }
+    fn pair_id(&self) -> CredentialId {
+        self.pair
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| CredentialId::new("pair-unregistered").unwrap())
+    }
+    fn source(&self) -> PolicySource {
+        PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
+            schema: asc_policy_types::cedar::CedarSchemaReference {
+                schema_id: ResourceId::new("seccore.system").unwrap(),
+                revision: Revision::new(2).unwrap(),
+            },
+            text: include_str!("../../asc-gateway-plan/policies/github.cedar")
+                .replace(
+                    "/secure/github-real",
+                    self.root.path().join("real").to_str().unwrap(),
+                )
+                .replace(
+                    "/secure/github-fake",
+                    self.root.path().join("fake").to_str().unwrap(),
+                ),
+        })
     }
     fn old_publication(&mut self) {
         self.key(REAL);
@@ -452,14 +482,25 @@ impl Fixture {
     }
     fn scope(&self, name: &str, policies: usize) -> PreparedScope {
         let policy = |index: usize| -> PreparedPolicy {
-            let document = serde_json::json!({"policyId": format!("policy:{name}-{index}"), "revision": 1,
-            "policyName": format!("{name}-{index}"), "template": {"specVersion": "0.1", "rules": [{
-                "effect": "allow", "category": "network", "action": "use_credential", "target": {
-                    "type": "http_request", "credentialId": "github", "scheme": "https",
-                    "host": "api.github.com", "path": format!("/policy-{index}/**"), "methods": ["GET"], "responseRewrite": true
-                }, "because": "credential execution contract"
-            }]}});
-            serde_json::from_value(document).unwrap()
+            let template = self.source();
+            let PolicySource::Cedar(source) = &template else {
+                unreachable!()
+            };
+            let credential_bindings = asc_policy_cedar::credential_rules(source)
+                .unwrap()
+                .into_iter()
+                .map(|rule| asc_policy_types::policy::CredentialBinding {
+                    rule_id: rule.rule_id,
+                    pair_id: self.pair_id().as_str().into(),
+                })
+                .collect();
+            PreparedPolicy {
+                policy_id: ResourceId::new(format!("policy:{name}-{index}")).unwrap(),
+                revision: Revision::new(1).unwrap(),
+                policy_name: format!("{name}-{index}"),
+                template,
+                credential_bindings,
+            }
         };
         let policies: Vec<_> = (0..policies).map(policy).collect();
         for policy in &policies {
@@ -605,12 +646,12 @@ fn initialization_and_empty_recovery_are_pure_and_import_does_not_authorize_or_i
         serde_json::json!({"enabled": false, "ready": false, "scopes": []})
     );
     assert_eq!(
-        serde_json::to_value(service.list_keys().unwrap()).unwrap(),
-        serde_json::json!({"credentials": ["github"]})
+        service.list_keys().unwrap().credentials,
+        vec![fixture.pair_id()]
     );
     assert_eq!(
-        service.credentials(UID, "unprepared").err().unwrap().kind(),
-        GatewayErrorKind::NotFound
+        service.ca().unwrap_err().kind(),
+        GatewayErrorKind::Unavailable
     );
     assert!(fixture.host.log().moves.is_empty() && fixture.host.log().operations.is_empty());
 }
@@ -848,7 +889,7 @@ fn initialization_failure_attempts_all_fences_and_reports_each_cleanup_failure()
     }
 }
 #[test]
-fn preparation_is_durable_without_pid_or_proxy_and_credentials_require_ready_generation_and_ca() {
+fn preparation_is_durable_without_pid_or_proxy_and_public_ca_requires_ready_generation() {
     let fixture = Fixture::new();
     let service = fixture.service();
     fixture.key(REAL);
@@ -866,7 +907,7 @@ fn preparation_is_durable_without_pid_or_proxy_and_credentials_require_ready_gen
             "scopes": [{"scopeId": "prepared", "bindings": []}]})
     );
     assert_eq!(
-        service.credentials(UID, "prepared").err().unwrap().kind(),
+        service.ca().err().unwrap().kind(),
         GatewayErrorKind::Unavailable
     );
     fs::write(
@@ -880,32 +921,25 @@ fn preparation_is_durable_without_pid_or_proxy_and_credentials_require_ready_gen
         serde_json::json!({"enabled": true, "ready": true,
             "scopes": [{"scopeId": "prepared", "bindings": []}]})
     );
-    let grant = service.credentials(UID, "prepared").unwrap();
+    let grant = service.ca().unwrap();
     let grant_json = serde_json::to_value(&grant).unwrap();
     assert_eq!(
         grant_json,
-        serde_json::json!({"scopeId": "prepared", "environment": grant.environment})
+        serde_json::json!({"caBundlePath": fixture.config.runtime_dir.join("ca-bundle.pem")})
     );
     assert!(!grant_json.to_string().contains(REAL));
-    assert_ne!(grant.environment["GH_TOKEN"], REAL);
-    assert_eq!(
-        grant.environment["GH_TOKEN"],
-        grant.environment["GITHUB_TOKEN"]
-    );
-    assert_eq!(
-        service.credentials(4002, "prepared").err().unwrap().kind(),
-        GatewayErrorKind::PermissionDenied
-    );
+    assert!(!grant_json.to_string().contains(FAKE));
+    assert_eq!(service.ca().unwrap(), grant);
 }
 #[test]
-fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
+fn readiness_and_public_ca_reject_unavailable_ca_generation_or_proxy() {
     let mut fixture = Fixture::new();
     let service = fixture.service();
     fixture.key(REAL);
     let scope = fixture.scope("prepared", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
-    let grant = service.credentials(UID, "prepared").unwrap();
+    let grant = service.ca().unwrap();
     // Stop the writer before injecting health/CA faults so observations cannot race a repair.
     fixture.plane.stop();
     let bundle = fixture.config.runtime_dir.join("ca-bundle.pem");
@@ -913,7 +947,7 @@ fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
     let certificate = fixture.config.runtime_dir.join("status/ca-cert.pem");
     fs::remove_file(&certificate).unwrap();
     assert!(!service.status(UID).ready);
-    assert!(service.credentials(UID, "prepared").is_err());
+    assert!(service.ca().is_err());
     fs::write(&certificate, CA).unwrap();
     assert!(service.status(UID).ready);
     for invalid in [
@@ -923,7 +957,7 @@ fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
         fs::write(&bundle, invalid).unwrap();
         assert!(!service.status(UID).ready);
         assert_eq!(
-            service.credentials(UID, "prepared").err().unwrap().kind(),
+            service.ca().err().unwrap().kind(),
             GatewayErrorKind::Unavailable
         );
         assert_eq!(fs::read(&bundle).unwrap(), invalid.as_bytes());
@@ -931,13 +965,13 @@ fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
     fs::remove_file(&bundle).unwrap();
     assert!(!service.status(UID).ready);
     assert_eq!(
-        service.credentials(UID, "prepared").err().unwrap().kind(),
+        service.ca().err().unwrap().kind(),
         GatewayErrorKind::Unavailable
     );
     assert!(!bundle.exists());
     symlink(&fixture.config.system_ca_bundles[0], &bundle).unwrap();
     assert!(!service.status(UID).ready);
-    assert!(service.credentials(UID, "prepared").is_err());
+    assert!(service.ca().is_err());
     assert!(
         fs::symlink_metadata(&bundle)
             .unwrap()
@@ -947,10 +981,7 @@ fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
     fs::remove_file(&bundle).unwrap();
     fs::write(&bundle, &published).unwrap();
     fs::remove_file(&fixture.config.system_ca_bundles[0]).unwrap();
-    assert_eq!(
-        service.credentials(UID, "prepared").unwrap().environment,
-        grant.environment
-    );
+    assert_eq!(service.ca().unwrap(), grant);
     assert_eq!(fs::read(&bundle).unwrap(), published);
     assert!(service.status(UID).ready);
     let health_path = fixture.config.runtime_dir.join("status/health.json");
@@ -962,21 +993,21 @@ fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
     )
     .unwrap();
     assert!(!service.status(UID).ready);
-    assert!(service.credentials(UID, "prepared").is_err());
+    assert!(service.ca().is_err());
     fs::remove_file(&health_path).unwrap();
     assert!(!service.status(UID).ready);
-    assert!(service.credentials(UID, "prepared").is_err());
+    assert!(service.ca().is_err());
     fs::write(&health_path, health).unwrap();
     assert!(service.status(UID).ready);
     fixture.host.log().active = false;
     assert!(!service.status(UID).ready);
-    assert!(service.credentials(UID, "prepared").is_err());
+    assert!(service.ca().is_err());
     fixture.host.log().active = true;
     assert!(service.status(UID).ready);
     service.disable().unwrap();
     assert!(!service.status(UID).enabled && !service.status(UID).ready);
     assert!(!fixture.host.log().active);
-    assert!(service.credentials(UID, "prepared").is_err());
+    assert!(service.ca().is_err());
 }
 #[test]
 fn unsupported_cgroup_v2_refuses_empty_enable_without_host_or_state_mutation() {
@@ -996,7 +1027,7 @@ fn unsupported_cgroup_v2_refuses_empty_enable_without_host_or_state_mutation() {
     assert!(!fixture.host.log().active);
 }
 #[test]
-fn readiness_and_credentials_recheck_cgroup_v2_and_recovery_fails_closed() {
+fn readiness_and_public_ca_recheck_cgroup_v2_and_recovery_fails_closed() {
     let fixture = Fixture::new();
     let service = fixture.service();
     fixture.key(REAL);
@@ -1008,11 +1039,7 @@ fn readiness_and_credentials_recheck_cgroup_v2_and_recovery_fails_closed() {
     let responsibilities = service.status(UID).scopes;
     assert!(!service.status(UID).ready);
     assert_eq!(
-        service
-            .credentials(UID, "cgroup-health")
-            .err()
-            .unwrap()
-            .kind(),
+        service.ca().err().unwrap().kind(),
         GatewayErrorKind::Unavailable
     );
     assert!(fixture.host.log().active);
@@ -1036,9 +1063,9 @@ fn readiness_validates_ca_owned_by_the_actual_gateway_account() {
     let actual_uid = account().uid;
     fixture.host.log().account_uid = Some(if actual_uid == 65534 { 65533 } else { 65534 });
     assert!(!service.status(UID).ready);
-    assert!(service.credentials(UID, "gateway-owner").is_err());
+    assert!(service.ca().is_err());
     fixture.host.log().account_uid = Some(actual_uid);
-    assert!(service.credentials(UID, "gateway-owner").is_ok());
+    assert!(service.ca().is_ok());
     assert!(service.status(UID).ready);
     fixture.host.log().account = false;
     assert!(!service.status(UID).ready);
@@ -1140,7 +1167,8 @@ fn shared_process_multi_policy_is_idempotent_and_cleanup_preserves_other_instanc
     assert!(client.delete(&targets[1..2]).error.is_none());
     assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
     assert!(fixture.host.log().processes.contains_key(&77));
-    assert!(service.credentials(UID, "shared").is_ok());
+    assert_eq!(fixture.secrets()["entries"][0]["fake"], FAKE);
+    assert!(service.ca().is_ok());
     assert!(fixture.secrets()["retired"].as_array().unwrap().is_empty());
     fixture.host.log().processes.remove(&88);
     service.recover().unwrap();
@@ -1194,7 +1222,7 @@ fn overlapping_scope_instances_preserve_ownership_routes_and_shared_cleanup_in_b
         let paths: std::collections::BTreeSet<_> = cgroups.values().cloned().collect();
         drop(log);
         assert_cgroup_routes(&fixture, &paths, paths.len());
-        let grant = service.credentials(UID, "overlap").unwrap();
+        let grant = fixture.secrets()["entries"].clone();
         let unrelated = fixture.instance(&scope, 99, &discovered).remove(0);
         let prepared = Fixture::prepared(&client, &unrelated);
         assert!(client.create(&prepared).error.is_none());
@@ -1207,7 +1235,7 @@ fn overlapping_scope_instances_preserve_ownership_routes_and_shared_cleanup_in_b
         drop(service);
         let service = fixture.service();
         service.recover().unwrap();
-        assert!(service.credentials(UID, "overlap").unwrap() == grant);
+        assert!(fixture.secrets()["entries"].clone() == grant);
         assert_eq!(
             fixture.rules().matches("counter redirect").count(),
             paths.len() + 1
@@ -1235,7 +1263,7 @@ fn overlapping_scope_instances_preserve_ownership_routes_and_shared_cleanup_in_b
             }
         }
         assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
-        assert!(service.credentials(UID, "overlap").unwrap() == grant);
+        assert!(fixture.secrets()["entries"].clone() == grant);
         assert!(fixture.secrets()["retired"].as_array().unwrap().is_empty());
         assert_cgroups_preserved(&fixture.host, &cgroups, 4);
     }
@@ -1277,7 +1305,7 @@ fn multiple_groups_survive_either_cleanup_order_and_restart_after_child_root_exi
             .map(|(pid, process)| (*pid, process.cgroup.clone()))
             .collect();
         assert_ne!(before[&78], before[&79]);
-        let grant = service.credentials(UID, "overlap-cleanup").unwrap();
+        let grant = fixture.secrets()["entries"].clone();
         fixture.transition(&bindings[&first], BindingStatus::Deleting);
         let report = client.delete(std::slice::from_ref(&targets[&first]));
         assert!(report.error.is_none(), "first={first}: {:?}", report.error);
@@ -1293,7 +1321,7 @@ fn multiple_groups_survive_either_cleanup_order_and_restart_after_child_root_exi
         let service = fixture.service();
         service.recover().unwrap();
         assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
-        assert!(service.credentials(UID, "overlap-cleanup").unwrap() == grant);
+        assert!(fixture.secrets()["entries"].clone() == grant);
         assert!(
             fixture
                 .rules()
@@ -1326,7 +1354,7 @@ fn multiple_groups_survive_either_cleanup_order_and_restart_after_child_root_exi
             fixture.remove_record(&bindings[&pid]);
         }
         assert_eq!(fixture.rules().matches("counter redirect").count(), 0);
-        assert!(service.credentials(UID, "overlap-cleanup").unwrap() == grant);
+        assert!(fixture.secrets()["entries"].clone() == grant);
         let expected = before
             .into_iter()
             .filter(|(pid, _)| first != 79 || *pid != 79)
@@ -1468,7 +1496,7 @@ fn overlapping_attachment_faults_preserve_sources_across_restart_and_retry() {
         }
         let binding = fixture.instance(&scope, 77, &discovered).remove(0);
         let prepared = Fixture::prepared(&client, &binding);
-        let grant = service.credentials(UID, "overlap-retry").unwrap();
+        let grant = fixture.secrets()["entries"].clone();
         let state_file = fixture.config.state_dir.join("state.json");
         let retained = fixture.root.path().join("retained-state.json");
         if fault == "persist" {
@@ -1538,7 +1566,7 @@ fn overlapping_attachment_faults_preserve_sources_across_restart_and_retry() {
         drop(service);
         let service = fixture.service();
         service.recover().unwrap();
-        assert!(service.credentials(UID, "overlap-retry").unwrap() == grant);
+        assert!(fixture.secrets()["entries"].clone() == grant);
         assert_eq!(
             fixture.rules().matches("counter redirect").count(),
             sources.len()
@@ -2243,26 +2271,29 @@ fn scope_deletion_retires_fakes_before_binding_cleanup_and_requires_explicit_rel
     let client = GatewayBindingClient::new(service.clone());
     let prepared = Fixture::prepared(&client, &binding);
     assert!(client.create(&prepared).error.is_none());
-    let fake = service.credentials(UID, "retired").unwrap().environment["GH_TOKEN"].clone();
+    let fake = fixture.secrets()["entries"][0]["fake"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let deleting = fixture
         .repository
         .begin_scope_delete(&scope.scope_id)
         .unwrap()
         .unwrap();
     service.revoke_scope(&deleting).unwrap();
-    assert_eq!(
-        service.credentials(UID, "retired").err().unwrap().kind(),
-        GatewayErrorKind::Conflict
+    assert!(
+        service.ca().is_ok(),
+        "CA is public and not scoped to credential authority"
     );
     let snapshot = fixture.secrets();
     assert_eq!(snapshot["entries"], serde_json::json!([]));
     assert_eq!(
         snapshot["retired"],
-        serde_json::json!([{"fake": fake, "credential": "github", "scopeId": "retired"}])
+        serde_json::json!([{"fake": fake, "credential": fixture.pair_id()}])
     );
     assert_eq!(
         service.list_keys().unwrap().credentials,
-        vec![CredentialId::new("github").unwrap()]
+        Vec::<CredentialId>::new()
     );
     assert!(!fixture.rules().contains("counter redirect"));
     assert!(service.release_scope(&scope.scope_id).is_err());
@@ -2346,8 +2377,8 @@ fn empty_scope_and_rejected_revocation_retain_durable_retirement_fence() {
     let restarted = fixture.service();
     assert!(restarted.lock().state.scopes[&ScopeId::new("empty").unwrap()].revoked);
     assert_eq!(
-        restarted.credentials(UID, "empty").err().unwrap().kind(),
-        GatewayErrorKind::Conflict
+        restarted.ca().unwrap_err().kind(),
+        GatewayErrorKind::Unavailable
     );
     assert!(!fixture.host.log().active);
     assert!(!fixture.config.runtime_dir.exists());
@@ -2474,116 +2505,382 @@ fn orphan_scope_release_requires_revocation_and_no_local_or_canonical_bindings()
     }
 }
 #[test]
-fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retired_scope() {
+fn conflicting_pair_registration_and_global_removal_preserve_permanent_tombstone() {
     let fixture = Fixture::new();
-    let service = fixture.service();
     fixture.key(REAL);
+    let service = fixture.service();
     let scope = fixture.scope("import", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
-    let grant = service.credentials(UID, "import").unwrap();
-    let fake = grant.environment["GH_TOKEN"].clone();
     let snapshot = fixture.secrets();
-    assert_eq!(snapshot["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(snapshot["entries"][0]["fake"], fake);
-    assert_eq!(snapshot["entries"][0]["real"], REAL);
-    assert_eq!(snapshot["retired"], serde_json::json!([]));
-
+    assert_eq!(
+        snapshot["entries"],
+        serde_json::json!([{
+            "fake": FAKE, "real": REAL, "credential": fixture.pair_id(), "scopeIds": ["import"]
+        }])
+    );
     drop(service);
     let error = fixture.put_key(OTHER_REAL).unwrap_err();
-    assert_eq!(error.kind(), GatewayErrorKind::Conflict);
-    for secret in [REAL, OTHER_REAL, fake.as_str()] {
+    for secret in [REAL, OTHER_REAL, FAKE] {
         assert!(!error.to_string().contains(secret));
     }
-    let service = fixture.service();
-    assert!(service.credentials(UID, "import").unwrap() == grant);
-    assert_eq!(fixture.secrets(), snapshot);
-    assert!(fixture.host.log().active);
-    assert!(service.status(UID).ready);
-
-    drop(service);
     fixture.key(REAL);
     let service = fixture.service();
-    assert!(service.credentials(UID, "import").unwrap() == grant);
-    let unchanged = fixture.secrets();
-    assert_eq!(unchanged["entries"], snapshot["entries"]);
-    assert_eq!(unchanged["retired"], snapshot["retired"]);
-
+    assert_eq!(fixture.secrets(), snapshot);
+    assert!(service.status(UID).ready);
     assert_eq!(
-        serde_json::to_value(service.remove_key("github").unwrap()).unwrap(),
-        serde_json::json!({"credential": "github"})
+        service
+            .remove_key(fixture.pair_id().as_str())
+            .unwrap()
+            .credential,
+        fixture.pair_id()
     );
-    assert_eq!(
-        serde_json::to_value(service.list_keys().unwrap()).unwrap(),
-        serde_json::json!({"credentials": []})
-    );
-    assert_eq!(
-        service.credentials(UID, "import").err().unwrap().kind(),
-        GatewayErrorKind::Unavailable
-    );
-    let retired = serde_json::json!([
-        {"fake": fake, "credential": "github", "scopeId": "import"}
-    ]);
-    let removed = fixture.secrets();
-    assert_eq!(removed["entries"], serde_json::json!([]));
-    assert_eq!(removed["retired"], retired);
-
+    assert!(service.list_keys().unwrap().credentials.is_empty());
+    let retired = serde_json::json!([{"fake": FAKE, "credential": fixture.pair_id()}]);
+    assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
+    assert_eq!(fixture.secrets()["retired"], retired);
+    assert!(service.ca().is_ok());
     drop(service);
-    fixture.key(OTHER_REAL);
-    let service = fixture.service();
+    for real in [REAL, OTHER_REAL] {
+        assert!(
+            fixture.put_key(real).is_err(),
+            "retired fake cannot acquire a new owner"
+        );
+    }
+    let restarted = fixture.service();
     assert_eq!(
-        service.prepare_scope(&scope).err().unwrap().kind(),
+        restarted.prepare_scope(&scope).unwrap_err().kind(),
         GatewayErrorKind::Conflict
     );
+    restarted.restore_scope(&scope).unwrap();
+    restarted.recover().unwrap();
+    assert!(restarted.list_keys().unwrap().credentials.is_empty());
+    assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
+    assert_eq!(fixture.secrets()["retired"], retired);
+}
+
+#[derive(Default)]
+struct DiscoveryRecorder(Mutex<Vec<ResourceId>>);
+
+impl asc_pap::ScopeDiscovery for DiscoveryRecorder {
+    fn start(&self, seed: &asc_pap::ScopeDiscoverySeed) -> Result<(), asc_pap::PapError> {
+        self.0.lock().unwrap().push(seed.scope.scope_id.clone());
+        Ok(())
+    }
+    fn stop(&self, _: &ResourceId) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn pap_restores_discovery_and_remaining_pair_after_global_retirement() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let remaining = {
+        let mut store = CredentialStore::open(&fixture.config.store_dir).unwrap();
+        store
+            .register_pairs(vec![PairInput {
+                real: Secret::new("Z".repeat(40)).unwrap(),
+                fake: "Y".repeat(40),
+            }])
+            .unwrap()
+            .remove(0)
+    };
+    let first = fixture.scope("retired-only", 1);
+    let mut other = first.policy_snapshots[0].clone();
+    other.policy_id = ResourceId::new("policy:remaining").unwrap();
+    for binding in &mut other.credential_bindings {
+        binding.pair_id = remaining.as_str().into();
+    }
+    fixture.repository.put_policy(&other).unwrap();
+    let mixed = fixture
+        .repository
+        .put_scope(&PreparedScope {
+            scope_id: ResourceId::new("mixed-retirement").unwrap(),
+            policy_snapshots: vec![first.policy_snapshots[0].clone(), other],
+            ..first.clone()
+        })
+        .unwrap();
+    let service = fixture.service();
+    service.prepare_scope(&mixed).unwrap();
+    service.enable().unwrap();
+    service.remove_key(fixture.pair_id().as_str()).unwrap();
+    let discovery = Arc::new(DiscoveryRecorder::default());
+    let pap = asc_pap::PapService::new(fixture.repository.clone())
+        .with_scope_execution(service.clone())
+        .with_scope_discovery(discovery.clone());
+    pap.recover_scopes().unwrap();
+    assert_eq!(
+        discovery
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first.scope_id.clone(), mixed.scope_id.clone()])
+    );
+    discovery.0.lock().unwrap().clear();
+    assert_eq!(
+        pap.retry_scope(&mixed.scope_id),
+        Err(asc_pap::PapError::Conflict)
+    );
+    assert_eq!(*discovery.0.lock().unwrap(), vec![mixed.scope_id.clone()]);
+    assert_eq!(
+        fixture.secrets()["entries"],
+        serde_json::json!([{
+            "fake": "Y".repeat(40), "real": "Z".repeat(40), "credential": remaining,
+            "scopeIds": [mixed.scope_id]
+        }])
+    );
+    assert_eq!(
+        fixture.secrets()["retired"],
+        serde_json::json!([{
+            "fake": FAKE, "credential": fixture.pair_id()
+        }])
+    );
+}
+
+#[test]
+fn failed_last_scope_revocation_cannot_transfer_its_live_cached_fake_to_new_admission() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let first = fixture.scope("last-failed-revoke", 1);
+    let service = fixture.service();
+    service.prepare_scope(&first).unwrap();
+    let deleting = fixture
+        .repository
+        .begin_scope_delete(&first.scope_id)
+        .unwrap()
+        .unwrap();
+    let saved = fixture.root.path().join("saved-projection");
+    fs::rename(&fixture.config.state_dir, &saved).unwrap();
+    fs::write(&fixture.config.state_dir, b"not a directory").unwrap();
+    assert!(service.revoke_scope(&deleting).is_err());
+    let pap = asc_pap::PapService::new(fixture.repository.clone())
+        .with_scope_execution(service.clone())
+        .with_scope_discovery(Arc::new(DiscoveryRecorder::default()));
+    let references = [asc_policy_types::scope::PolicyReference {
+        policy_id: first.policy_snapshots[0].policy_id.clone(),
+        policy_revision: first.policy_snapshots[0].revision,
+    }];
+    assert_eq!(
+        pap.create_scope_assignment(&first.selector, &references, Some(UID)),
+        Err(asc_pap::PapError::Conflict)
+    );
+    assert_eq!(
+        fixture.repository.list_scopes(10, 0).unwrap().items,
+        vec![deleting]
+    );
+    assert_eq!(
+        service.list_keys().unwrap().credentials,
+        vec![fixture.pair_id()]
+    );
+    fs::remove_file(&fixture.config.state_dir).unwrap();
+    fs::rename(saved, &fixture.config.state_dir).unwrap();
+    service.recover().unwrap();
+    assert!(service.list_keys().unwrap().credentials.is_empty());
+    assert!(
+        pap.create_scope_assignment(&first.selector, &references, Some(UID))
+            .is_err()
+    );
+}
+
+#[test]
+fn shared_pair_tracks_all_canonical_scopes_and_retires_only_after_last_deletion() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let first = fixture.scope("shared-a", 1);
+    let second = fixture.scope("shared-b", 1);
+    // Preparing just one projection must not retire or omit another canonical owner.
+    service.prepare_scope(&first).unwrap();
+    drop(service);
+    let store = CredentialStore::open(&fixture.config.store_dir).unwrap();
+    for scope in [&first, &second] {
+        assert_eq!(
+            store.fake(
+                &fixture.pair_id(),
+                &ScopeId::new(scope.scope_id.as_str()).unwrap()
+            ),
+            Some(FAKE)
+        );
+    }
+    drop(store);
+    let service = fixture.service();
+    service.enable().unwrap();
+    let ca = service.ca().unwrap();
+    assert_eq!(
+        fixture.secrets()["entries"],
+        serde_json::json!([{
+            "fake": FAKE, "real": REAL, "credential": fixture.pair_id(), "scopeIds": ["shared-a", "shared-b"]
+        }])
+    );
+    let deleting = fixture
+        .repository
+        .begin_scope_delete(&first.scope_id)
+        .unwrap()
+        .unwrap();
+    service.revoke_scope(&deleting).unwrap();
+    assert_eq!(
+        fixture.secrets()["entries"][0]["scopeIds"],
+        serde_json::json!(["shared-b"])
+    );
+    assert_eq!(fixture.secrets()["retired"], serde_json::json!([]));
+    assert_eq!(
+        service.list_keys().unwrap().credentials,
+        vec![fixture.pair_id()]
+    );
+    fixture
+        .repository
+        .finish_scope_discovery(&first.scope_id)
+        .unwrap();
+    service.release_scope(&first.scope_id).unwrap();
+    fixture
+        .repository
+        .finish_scope_execution(&first.scope_id)
+        .unwrap();
     drop(service);
     let restarted = fixture.service();
     restarted.recover().unwrap();
+    assert_eq!(fixture.secrets()["entries"][0]["fake"], FAKE);
+    assert_eq!(restarted.ca().unwrap(), ca);
+    let deleting = fixture
+        .repository
+        .begin_scope_delete(&second.scope_id)
+        .unwrap()
+        .unwrap();
+    restarted.revoke_scope(&deleting).unwrap();
+    assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
     assert_eq!(
-        restarted.list_keys().unwrap().credentials,
-        vec![CredentialId::new("github").unwrap()]
+        fixture.secrets()["retired"],
+        serde_json::json!([{"fake": FAKE, "credential": fixture.pair_id()}])
     );
-    assert_eq!(
-        restarted.credentials(UID, "import").err().unwrap().kind(),
-        GatewayErrorKind::Unavailable
-    );
-    let reimported = fixture.secrets();
-    assert_eq!(reimported["entries"], serde_json::json!([]));
-    assert_eq!(reimported["retired"], retired);
+    assert!(restarted.list_keys().unwrap().credentials.is_empty());
+    assert_eq!(restarted.ca().unwrap(), ca);
+    drop(restarted);
+    assert!(fixture.put_key(REAL).is_err());
 }
 #[test]
-fn scope_preparation_rejects_retired_credentials_until_a_new_scope_is_created() {
+fn scope_preparation_rejects_retired_pairs_until_a_new_pair_and_scope_are_created() {
     let fixture = Fixture::new();
-    let service = fixture.service();
     fixture.key(REAL);
+    let original_pair = fixture.pair_id();
+    let service = fixture.service();
     let original = fixture.scope("original", 1);
     service.prepare_scope(&original).unwrap();
     service.enable().unwrap();
-    let original_fake =
-        service.credentials(UID, "original").unwrap().environment["GH_TOKEN"].clone();
+    let ca = service.ca().unwrap();
 
-    service.remove_key("github").unwrap();
+    service.remove_key(original_pair.as_str()).unwrap();
     // A Scope admitted after global retirement must not report a successful
     // preparation while it cannot hold a fake.
     let rejected = fixture.scope("rejected", 1);
     assert_eq!(
-        service.prepare_scope(&rejected).err().unwrap().kind(),
+        service.prepare_scope(&rejected).unwrap_err().kind(),
         GatewayErrorKind::Conflict
     );
+    assert_eq!(service.ca().unwrap(), ca);
 
     drop(service);
-    fixture.key(OTHER_REAL);
+    assert!(fixture.put_key(OTHER_REAL).is_err());
+    let fresh_pair = {
+        let mut store = CredentialStore::open(&fixture.config.store_dir).unwrap();
+        store
+            .register_pairs(vec![PairInput {
+                real: Secret::new(OTHER_REAL.to_owned()).unwrap(),
+                fake: "Y".repeat(40),
+            }])
+            .unwrap()
+            .remove(0)
+    };
+    *fixture.pair.lock().unwrap() = Some(fresh_pair.clone());
     let service = fixture.service();
-    // Reimport never revives the retired assignment.
+    // Registering another pair never revives a pinned retired assignment.
     assert_eq!(
-        service.prepare_scope(&original).err().unwrap().kind(),
+        service.prepare_scope(&original).unwrap_err().kind(),
         GatewayErrorKind::Conflict
     );
-    // A new Scope under the reimported key receives a fresh fake.
     let fresh = fixture.scope("fresh", 1);
     service.prepare_scope(&fresh).unwrap();
-    let fresh_fake = service.credentials(UID, "fresh").unwrap().environment["GH_TOKEN"].clone();
-    assert_ne!(fresh_fake, original_fake);
+    assert_eq!(
+        fixture.secrets()["entries"],
+        serde_json::json!([{
+            "fake": "Y".repeat(40), "real": OTHER_REAL, "credential": fresh_pair,
+            "scopeIds": [fresh.scope_id]
+        }])
+    );
+    assert_eq!(
+        fixture.secrets()["retired"],
+        serde_json::json!([{"fake": FAKE, "credential": original_pair}])
+    );
+    assert_eq!(service.ca().unwrap(), ca);
 }
+
+fn prepare_mixed_scope_with_failed_file_binding(
+    fixture: &Fixture,
+    pap: &asc_pap::PapService<SqlitePolicyRepository>,
+) -> (PreparedScope, PreparedBinding) {
+    let template = fixture.source();
+    let PolicySource::Cedar(source) = &template else {
+        unreachable!()
+    };
+    let credential_bindings = asc_policy_cedar::credential_rules(source)
+        .unwrap()
+        .into_iter()
+        .map(|rule| asc_policy_types::policy::CredentialBinding {
+            rule_id: rule.rule_id,
+            pair_id: fixture.pair_id().as_str().into(),
+        })
+        .collect();
+    // Seed the already registered snapshot without invoking root-only token-file import.
+    let credential = fixture
+        .repository
+        .put_policy(&PreparedPolicy {
+            policy_id: ResourceId::new("policy:mixed-credential").unwrap(),
+            policy_name: "credential".into(),
+            revision: Revision::new(1).unwrap(),
+            template,
+            credential_bindings,
+        })
+        .unwrap();
+    let file: PolicySource = PolicySource::SecCore(
+        serde_json::from_value(serde_json::json!({
+            "specVersion": "0.1",
+            "rules": [{
+                "effect": "block", "category": "file", "action": "write",
+                "target": {"type": "file", "path": "/work"},
+                "where": {"operation": {"eq": "delete"}}
+            }]
+        }))
+        .unwrap(),
+    );
+    let file = pap.create_policy("file", &file).unwrap();
+    let selector = ScopeSelector::Process {
+        matcher: ProcessMatcher::Name {
+            process_name: "worker".into(),
+        },
+    };
+    let references = |policy: &PreparedPolicy| PolicyReference {
+        policy_id: policy.policy_id.clone(),
+        policy_revision: policy.revision,
+    };
+    let scope = pap
+        .create_scope_assignment(
+            &selector,
+            &[references(&credential), references(&file)],
+            Some(UID),
+        )
+        .unwrap();
+    let binding = fixture
+        .instance(&scope, 77, &[])
+        .into_iter()
+        .find(|binding| binding.policy.policy_id == file.policy_id)
+        .unwrap();
+    fixture.transition(&binding, BindingStatus::ApplyFailed);
+    (scope, binding)
+}
+
 #[test]
 fn startup_recovery_resumes_mixed_scope_discovery_after_credential_retirement() {
     use asc_pap::{PapService, ScopeDiscovery, ScopeDiscoverySeed};
@@ -2612,62 +2909,15 @@ fn startup_recovery_resumes_mixed_scope_discovery_after_credential_retirement() 
     let pap = PapService::new(fixture.repository.clone())
         .with_scope_execution(service.clone() as Arc<dyn asc_pap::ScopeExecution>)
         .with_scope_discovery(discovery.clone() as Arc<dyn ScopeDiscovery>);
-    let credential: PolicySource = PolicySource::SecCore(
-        serde_json::from_value(serde_json::json!({
-            "specVersion": "0.1",
-            "rules": [{
-                "effect": "allow", "category": "network", "action": "use_credential",
-                "target": {
-                    "type": "http_request", "credentialId": "github", "scheme": "https",
-                    "host": "api.github.com", "path": "/repos/**", "methods": ["GET"],
-                    "responseRewrite": true
-                },
-                "because": "credential execution contract"
-            }]
-        }))
-        .unwrap(),
-    );
-    let file: PolicySource = PolicySource::SecCore(
-        serde_json::from_value(serde_json::json!({
-            "specVersion": "0.1",
-            "rules": [{
-                "effect": "block", "category": "file", "action": "write",
-                "target": {"type": "file", "path": "/work"},
-                "where": {"operation": {"eq": "delete"}}
-            }]
-        }))
-        .unwrap(),
-    );
-    let credential = pap.create_policy("credential", &credential).unwrap();
-    let file = pap.create_policy("file", &file).unwrap();
-    let selector = ScopeSelector::Process {
-        matcher: ProcessMatcher::Name {
-            process_name: "worker".into(),
-        },
-    };
-    let references = |policy: &PreparedPolicy| PolicyReference {
-        policy_id: policy.policy_id.clone(),
-        policy_revision: policy.revision,
-    };
-    let scope = pap
-        .create_scope_assignment(
-            &selector,
-            &[references(&credential), references(&file)],
-            Some(UID),
-        )
-        .unwrap();
-    let binding = fixture.instance(&scope, 77, &[]).remove(0);
-    fixture.transition(&binding, BindingStatus::ApplyFailed);
+    let (scope, binding) = prepare_mixed_scope_with_failed_file_binding(&fixture, &pap);
     service.enable().unwrap();
-    service.remove_key("github").unwrap();
+    service.remove_key(fixture.pair_id().as_str()).unwrap();
+    assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
     assert_eq!(
-        service
-            .credentials(UID, scope.scope_id.as_str())
-            .err()
-            .unwrap()
-            .kind(),
-        GatewayErrorKind::Unavailable
+        fixture.secrets()["retired"],
+        serde_json::json!([{"fake": FAKE, "credential": fixture.pair_id()}])
     );
+    let ca = service.ca().unwrap();
 
     drop(pap);
     drop(service);
@@ -2685,13 +2935,10 @@ fn startup_recovery_resumes_mixed_scope_discovery_after_credential_retirement() 
     );
     assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
     assert_eq!(
-        restarted
-            .credentials(UID, scope.scope_id.as_str())
-            .err()
-            .unwrap()
-            .kind(),
-        GatewayErrorKind::Unavailable
+        fixture.secrets()["retired"],
+        serde_json::json!([{"fake": FAKE, "credential": fixture.pair_id()}])
     );
+    assert_eq!(restarted.ca().unwrap(), ca);
     // Explicit retry still surfaces the retired assignment, but it must also
     // retry the failed file Binding instead of stranding it behind the tombstone.
     discovery.scopes.lock().unwrap().clear();
@@ -2713,13 +2960,10 @@ fn startup_recovery_resumes_mixed_scope_discovery_after_credential_retirement() 
     );
     assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
     assert_eq!(
-        restarted
-            .credentials(UID, scope.scope_id.as_str())
-            .err()
-            .unwrap()
-            .kind(),
-        GatewayErrorKind::Unavailable
+        fixture.secrets()["retired"],
+        serde_json::json!([{"fake": FAKE, "credential": fixture.pair_id()}])
     );
+    assert_eq!(restarted.ca().unwrap(), ca);
 }
 #[test]
 fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_overlap() {
@@ -2738,10 +2982,10 @@ fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_
     );
     let mut newer = scope.policy_snapshots[0].clone();
     newer.revision = Revision::new(2).unwrap();
-    let PolicySource::SecCore(template) = &mut newer.template else {
-        panic!("expected native test policy");
+    let PolicySource::Cedar(source) = &mut newer.template else {
+        panic!("expected Cedar test policy");
     };
-    template.rules[0].because = Some("new revision".into());
+    source.text = source.text.replace("api.github.com", "uploads.github.com");
     fixture.repository.put_policy(&newer).unwrap();
     service.enable().unwrap();
     let generation = service.lock().state.generation;
@@ -2755,23 +2999,31 @@ fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_
         .unwrap(),
     )
     .unwrap();
+    assert_eq!(plan["format"], "agent-sec-gateway-plan/v2");
+    assert_eq!(plan["scopeId"], "pinned");
     assert_eq!(
-        plan,
-        serde_json::json!({
-            "format": "agent-sec-gateway-plan/v1",
-            "scopeId": "pinned",
-            "policies": [{"id": scope.policy_snapshots[0].policy_id, "revision": 1}],
-            "credentials": ["github"],
-            "rules": [{
-                "source": {"policyId": scope.policy_snapshots[0].policy_id,
-                    "policyRevision": 1, "ruleIndex": 0},
-                "match": {"scheme": "https", "host": "api.github.com", "path": "/policy-0/**",
-                    "methods": ["GET"], "credentialId": "github"},
-                "responseRewrite": true,
-                "because": "credential execution contract"
-            }]
-        })
+        plan["policies"],
+        serde_json::json!([{"id": scope.policy_snapshots[0].policy_id, "revision": 1}])
     );
+    assert_eq!(plan["credentials"], serde_json::json!([fixture.pair_id()]));
+    let rules = plan["rules"].as_array().unwrap();
+    assert!(
+        rules
+            .iter()
+            .any(|rule| rule["match"]["host"] == "api.github.com")
+    );
+    assert!(
+        rules
+            .iter()
+            .all(|rule| rule["match"]["host"] != "uploads.github.com")
+    );
+    assert!(
+        rules
+            .iter()
+            .all(|rule| rule["source"]["policyRevision"] == 1)
+    );
+    assert!(!plan.to_string().contains(REAL));
+    assert!(!plan.to_string().contains(FAKE));
     let other = fixture.scope("other", 1);
     service.prepare_scope(&other).unwrap();
     let other_binding = fixture.instance(&other, 77, &[]).remove(0);
@@ -2784,77 +3036,150 @@ fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_
     );
     assert_eq!(fixture.host.log().moves, before);
 }
+fn register_after_unsafe_pair_rejections(
+    fixture: &Fixture,
+    pap: &asc_pap::PapService<SqlitePolicyRepository>,
+    source: &PolicySource,
+    real: &Path,
+    fake: &Path,
+) -> PreparedPolicy {
+    for fault in ["readable", "symlink", "equal", "length", "similar"] {
+        match fault {
+            "readable" => fs::set_permissions(fake, fs::Permissions::from_mode(0o640)).unwrap(),
+            "symlink" => {
+                fs::remove_file(fake).unwrap();
+                symlink(real, fake).unwrap();
+            }
+            "equal" => fs::write(fake, REAL).unwrap(),
+            "length" => fs::write(fake, "short").unwrap(),
+            "similar" => fs::write(fake, OTHER_REAL).unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(pap.create_policy("invalid", source).is_err(), "{fault}");
+        assert!(pap.list_policies(100, 0).unwrap().items.is_empty());
+        assert!(!fixture.config.store_dir.exists());
+        fs::remove_file(fake).unwrap();
+        fs::write(fake, FAKE).unwrap();
+        fs::set_permissions(fake, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let saved = pap.create_policy("credential", source).unwrap();
+    asc_pap::validate_policy_snapshot(&saved).unwrap();
+    let pair = CredentialId::new(&saved.credential_bindings[0].pair_id).unwrap();
+    assert!(
+        saved
+            .credential_bindings
+            .iter()
+            .all(|binding| binding.pair_id == pair.as_str())
+    );
+    *fixture.pair.lock().unwrap() = Some(pair);
+    saved
+}
+
 #[test]
-#[ignore = "root-only credential file import integration; run explicitly as root"]
-fn root_import_enforces_private_files_and_preserves_ready_grants_on_conflict() {
+#[ignore = "root-only credential file registration integration; run explicitly as root"]
+fn root_registration_rejects_unsafe_pairs_before_policy_commit_and_recovery_never_reads_files() {
     assert_eq!(rustix::process::geteuid().as_raw(), 0, "requires root");
     let fixture = Fixture::new();
     let service = fixture.service();
-    let path = fixture.root.path().join("token");
-    fs::write(&path, REAL).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-    let mut request = KeyRequest {
-        credential: "github".into(),
-        secret_file: path.clone(),
-        caller_uid: 0,
+    let files = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+    let real = files.path().join("real");
+    let fake = files.path().join("fake");
+    fs::write(&real, REAL).unwrap();
+    fs::write(&fake, FAKE).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o600)).unwrap();
+    let pap = asc_pap::PapService::new(fixture.repository.clone())
+        .with_credential_registration(service.clone());
+    let mut source = fixture.source();
+    let PolicySource::Cedar(cedar) = &mut source else {
+        unreachable!()
     };
-    assert_eq!(
-        service.add_key(&request).unwrap_err().kind(),
-        GatewayErrorKind::InvalidArgument
+    cedar.text = cedar.text.replace(
+        fixture.root.path().to_str().unwrap(),
+        files.path().to_str().unwrap(),
     );
-    assert!(!fixture.config.store_dir.exists());
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let link = fixture.root.path().join("link");
-    symlink(&path, &link).unwrap();
-    request.secret_file = link;
-    assert!(service.add_key(&request).is_err());
-    request.secret_file = path.clone();
-    assert_eq!(
-        serde_json::to_value(service.add_key(&request).unwrap()).unwrap(),
-        serde_json::json!({"credential": "github"})
-    );
-    assert!(!fixture.config.state_dir.exists());
-    assert!(!fixture.config.runtime_dir.exists());
+    let saved = register_after_unsafe_pair_rejections(&fixture, &pap, &source, &real, &fake);
     let scope = fixture.scope("root-import", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
-    let grant = service.credentials(UID, "root-import").unwrap();
     let snapshot = fixture.secrets();
-    fs::write(&path, OTHER_REAL).unwrap();
-    let error = service.add_key(&request).unwrap_err();
-    assert_eq!(error.kind(), GatewayErrorKind::Conflict);
-    for secret in [REAL, OTHER_REAL, grant.environment["GH_TOKEN"].as_str()] {
-        assert!(!error.to_string().contains(secret));
+    fs::write(&real, OTHER_REAL).unwrap();
+    let repeated = pap.create_policy("repeated", &source).unwrap();
+    assert_eq!(repeated.credential_bindings, saved.credential_bindings);
+    let policies = pap.list_policies(100, 0).unwrap();
+    let mut changed = source.clone();
+    let PolicySource::Cedar(cedar) = &mut changed else {
+        unreachable!()
+    };
+    cedar.text = cedar.text.replace("api.github.com", "uploads.github.com");
+    let error = pap.create_policy("conflicting", &changed).unwrap_err();
+    for value in [REAL, OTHER_REAL, FAKE] {
+        assert!(!error.to_string().contains(value));
     }
-    assert_eq!(fixture.secrets(), snapshot);
-    assert!(service.credentials(UID, "root-import").unwrap() == grant);
+    assert_eq!(pap.list_policies(100, 0).unwrap(), policies);
+    for field in ["entries", "retired", "unavailable"] {
+        assert_eq!(fixture.secrets()[field], snapshot[field]);
+    }
+    let extra_real = files.path().join("extra-real");
+    let extra_fake = files.path().join("extra-fake");
+    fs::write(&extra_real, "a".repeat(40)).unwrap();
+    fs::write(&extra_fake, "b".repeat(40)).unwrap();
+    for path in [&extra_real, &extra_fake] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut pending_source = source.clone();
+    let PolicySource::Cedar(cedar) = &mut pending_source else {
+        unreachable!()
+    };
+    cedar.text = cedar
+        .text
+        .replace(real.to_str().unwrap(), extra_real.to_str().unwrap())
+        .replace(fake.to_str().unwrap(), extra_fake.to_str().unwrap());
+    fixture.plane.reject.store(true, Ordering::SeqCst);
+    assert_eq!(
+        pap.create_policy("pending", &pending_source),
+        Err(asc_pap::PapError::Unavailable)
+    );
+    assert_eq!(pap.list_policies(100, 0).unwrap(), policies);
+    assert!(!service.status(UID).ready);
+    assert!(!fixture.config.runtime_dir.exists());
+    fs::remove_file(&extra_real).unwrap();
+    fs::remove_file(&extra_fake).unwrap();
+    fixture.plane.reject.store(false, Ordering::SeqCst);
+    let pending = pap.create_policy("pending", &pending_source).unwrap();
     assert!(service.status(UID).ready);
-    fs::write(&path, REAL).unwrap();
-    service.add_key(&request).unwrap();
-    assert!(service.credentials(UID, "root-import").unwrap() == grant);
-    let unchanged = fixture.secrets();
-    assert_eq!(unchanged["entries"], snapshot["entries"]);
-    assert_eq!(unchanged["retired"], snapshot["retired"]);
+    assert_eq!(fixture.secrets()["entries"], snapshot["entries"]);
+    assert_eq!(
+        fixture.secrets()["unavailable"],
+        serde_json::json!([{
+            "fake": "b".repeat(40), "credential": pending.credential_bindings[0].pair_id
+        }])
+    );
+    fs::remove_file(&real).unwrap();
+    fs::remove_file(&fake).unwrap();
+    assert_eq!(
+        pap.update_policy(&saved.policy_id, "credential", &source)
+            .unwrap(),
+        saved
+    );
+    drop(pap);
+    drop(service);
+    let restarted = fixture.service();
+    let replay = asc_pap::PapService::new(fixture.repository.clone())
+        .with_credential_registration(restarted.clone())
+        .create_policy("after-restart", &source)
+        .unwrap();
+    assert_eq!(replay.credential_bindings, saved.credential_bindings);
+    restarted.recover().unwrap();
+    assert!(restarted.status(UID).ready);
+    assert_eq!(fixture.secrets()["entries"], snapshot["entries"]);
+    assert_eq!(fixture.secrets()["retired"], snapshot["retired"]);
 }
+
 #[test]
-fn nonroot_import_and_disable_order_preserve_security_boundaries() {
+fn disable_withdraws_routes_before_proxy_and_retains_public_ca() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    let path = fixture.root.path().join("token");
-    fs::write(&path, REAL).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(
-        service
-            .add_key(&KeyRequest {
-                credential: "github".into(),
-                secret_file: path,
-                caller_uid: UID,
-            })
-            .unwrap_err()
-            .kind(),
-        GatewayErrorKind::PermissionDenied
-    );
-    assert!(!fixture.config.store_dir.exists());
     fixture.key(REAL);
     service.enable().unwrap();
     let ca = fs::read(fixture.config.runtime_dir.join("ca-bundle.pem")).unwrap();
@@ -2865,6 +3190,7 @@ fn nonroot_import_and_disable_order_preserve_security_boundaries() {
         fs::read(fixture.config.runtime_dir.join("ca-bundle.pem")).unwrap(),
         ca
     );
+    assert!(service.ca().is_err());
 }
 #[test]
 fn failed_enable_persists_disabled_intent_before_restart_and_explicit_retry() {
@@ -2925,7 +3251,7 @@ fn failed_enable_persists_disabled_intent_before_restart_and_explicit_retry() {
         assert!(!restarted.status(0).enabled, "{fault}");
         assert!(!fixture.host.log().active, "{fault}");
         assert!(!fixture.rules().contains("counter redirect"), "{fault}");
-        assert!(restarted.credentials(UID, "enable-retry").is_err());
+        assert!(restarted.ca().is_err());
         restarted.enable().unwrap();
         assert!(restarted.status(0).ready, "{fault}");
         assert_eq!(
@@ -2977,7 +3303,7 @@ fn disable_failures_preserve_host_fences_and_persist_disabled_after_runtime_clea
             restarted.recover().unwrap();
             assert_eq!(fixture.host.log().operations, before);
             assert!(!fixture.host.log().active);
-            assert!(restarted.credentials(UID, "disable-retry").is_err());
+            assert!(restarted.ca().is_err());
             assert!(runtime.join("active.json").exists());
             fs::remove_file(runtime).unwrap();
             fs::rename(&retained, runtime).unwrap();
@@ -2992,7 +3318,7 @@ fn disable_failures_preserve_host_fences_and_persist_disabled_after_runtime_clea
         assert_eq!(fs::read(runtime.join("ca-bundle.pem")).unwrap(), ca);
         assert_eq!(
             restarted.list_keys().unwrap().credentials,
-            vec![CredentialId::new("github").unwrap()]
+            vec![fixture.pair_id()]
         );
     }
 }

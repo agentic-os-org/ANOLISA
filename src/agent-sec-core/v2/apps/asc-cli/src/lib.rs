@@ -17,7 +17,7 @@ use clap::Parser;
 use commands::Command;
 pub use commands::{
     CapabilitiesCommand, DefaultPolicy, EventsCommand, EventsRunError, EventsTransport,
-    IntentFailure, PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
+    IntentFailure, KeyCommand, LocalCommand, PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
 };
 
 /// Parsed invocation for one CLI command.
@@ -35,8 +35,8 @@ pub struct Cli {
 pub enum Plan<'a> {
     /// Run a direct sandbox or the internal host authorization handoff.
     Sandbox(&'a sandbox::SandboxCommand),
-    /// Rendered from the process environment without any daemon involvement.
-    Local(&'a CapabilitiesCommand),
+    /// Approved local operation without any daemon involvement.
+    Local(LocalCommand<'a>),
     /// Rendered from the embedded default policy without any daemon involvement.
     PolicyDefault(&'a DefaultPolicy),
     /// Generate the observability record schema without a daemon endpoint.
@@ -664,14 +664,26 @@ mod tests {
     }
 
     #[test]
-    fn the_capability_view_parses_without_any_deployment_endpoint() {
+    fn approved_local_commands_parse_without_any_deployment_endpoint() {
         for socket_env in [None, Some(OsStr::new("relative")), Some(OsStr::new(""))] {
-            let cli =
-                Cli::parse_from_with_socket_env(["agent-sec-cli", "capabilities"], socket_env)
-                    .expect("the capability view never needs a daemon");
-            assert_eq!(cli.socket(), None);
-            assert!(matches!(cli.plan(), Plan::Local(_)));
-            assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+            for arguments in [
+                vec!["agent-sec-cli", "capabilities"],
+                vec![
+                    "agent-sec-cli",
+                    "key",
+                    "generate-fake",
+                    "--real-token-file",
+                    "/missing-real",
+                    "--output",
+                    "/missing-fake",
+                ],
+            ] {
+                let cli = Cli::parse_from_with_socket_env(arguments, socket_env)
+                    .expect("approved local commands never need a daemon");
+                assert_eq!(cli.socket(), None);
+                assert!(matches!(cli.plan(), Plan::Local(_)));
+                assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+            }
         }
     }
 }

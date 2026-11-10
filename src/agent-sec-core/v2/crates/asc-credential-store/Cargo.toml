@@ -1,6 +1,6 @@
 [package]
 name = "asc-credential-store"
-description = "Root-only credential store and fake issuance for the AgentSecCore V2 secret gateway"
+description = "Explicit real/fake pair storage for the AgentSecCore V2 secret gateway"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

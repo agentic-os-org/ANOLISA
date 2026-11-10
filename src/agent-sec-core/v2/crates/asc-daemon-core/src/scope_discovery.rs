@@ -280,15 +280,26 @@ mod tests {
     fn credential_owner_changes_invalidate_matches_without_changing_file_selection() {
         let mut assigned = scope();
         assigned.owner_uid = Some(1000);
-        assigned.policy_snapshots[0].template =
-            asc_policy_types::authoring::PolicySource::SecCore(
-                serde_json::from_value(serde_json::json!({
-                    "specVersion":"0.1", "rules":[{"effect":"allow","category":"network","action":"use_credential",
-                        "target":{"type":"http_request","credentialId":"github","scheme":"https",
-                            "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":true}}]
-                }))
-                .unwrap(),
-            );
+        assigned.policy_snapshots[0].template = serde_json::from_value(serde_json::json!({
+            "language": "cedar", "content": {
+                "schema": {"schemaId": "seccore.system", "revision": 2},
+                "text": r#"@id("owner-selection")
+@modify("inject_credential")
+@real_token_file("/tmp/asc-discovery-real")
+@fake_token_file("/tmp/asc-discovery-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when { resource.host == "api.github.com" && context.input.scheme == "https" };"#
+            }
+        }))
+        .unwrap();
+        assigned.policy_snapshots[0].credential_bindings =
+            vec![asc_policy_types::policy::CredentialBinding {
+                rule_id: "owner-selection".into(),
+                pair_id: "pair-owner-selection".into(),
+            }];
         let mut credentials = ScopeDiscoveryState::for_scope(assigned).unwrap();
         let mut file = state();
         let present = BTreeSet::from([10]);

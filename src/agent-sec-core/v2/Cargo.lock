@@ -234,6 +234,7 @@ dependencies = [
  "asc-capability-pii-scan",
  "asc-capability-prompt-scan",
  "asc-capability-skill-sec",
+ "asc-credential-store",
  "asc-daemon",
  "asc-daemon-client",
  "asc-daemon-core",
@@ -473,6 +474,7 @@ name = "asc-gateway-plan"
 version = "1.2.1"
 dependencies = [
  "asc-credential-store",
+ "asc-policy-cedar",
  "asc-policy-types",
  "serde",
  "serde_json",
@@ -486,6 +488,7 @@ dependencies = [
  "asc-credential-store",
  "asc-gateway-plan",
  "asc-pap",
+ "asc-policy-cedar",
  "asc-policy-repository",
  "asc-policy-repository-sqlite",
  "asc-policy-target-contracts",
@@ -494,6 +497,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tracing",

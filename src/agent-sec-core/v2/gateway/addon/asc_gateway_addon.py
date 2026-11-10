@@ -127,7 +127,10 @@ def _injected(flow: http.HTTPFlow) -> policy.Decision | None:
 
 def _rewrite_fields(headers: http.Headers, decision: policy.Decision) -> None:
     fields = tuple(
-        (name, policy.rewrite_bytes(value, decision.replacements))
+        (
+            policy.rewrite_bytes(name, decision.replacements),
+            policy.rewrite_bytes(value, decision.replacements),
+        )
         for name, value in headers.fields
     )
     if fields != headers.fields:
@@ -432,8 +435,8 @@ class SecretGateway:
             return
         flow.metadata[METADATA_KEY] = decision
         if decision.action == policy.ACTION_INJECT:
-            assert decision.authorization is not None
-            request.headers["Authorization"] = decision.authorization
+            assert decision.header is not None and decision.header_value is not None
+            request.headers[decision.header] = decision.header_value
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         response = flow.response

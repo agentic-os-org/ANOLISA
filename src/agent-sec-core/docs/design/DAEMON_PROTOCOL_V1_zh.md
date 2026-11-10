@@ -1062,54 +1062,65 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
 
 `gateway.*` 是 V2 method family。设计见 [V2 Secret Gateway 设计](V2_SECRET_GATEWAY_DESIGN_zh.md)，
 进程与权限见 [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)。
-七个方法的清单、分发与访问级别由 `asc-daemon-protocol` 和 `pap_contract.rs` 对照。
+Cedar HTTP 网关六个方法的清单、
+分发与访问级别由 `asc-daemon-protocol` 和 `pap_contract.rs` 对照；
+`gateway.key.add`/KeyAdd、`gateway.credentials`/CredentialGrant 删除，旧名称无别名。
 
 | method | 访问级别 | params | result |
 | --- | --- | --- | --- |
 | `gateway.enable` | UID 0 | 无 | `{}` |
 | `gateway.disable` | UID 0 | 无 | `{}` |
 | `gateway.status` | LocalUser，owner UID 隔离 | 无 | `GatewayStatus` |
-| `gateway.key.add` | UID 0 | `{credential, secretFile}` | `KeyOutcome` |
-| `gateway.key.remove` | UID 0 | `{credential}` | `KeyOutcome` |
+| `gateway.key.remove` | UID 0 | `{pairid}` | `KeyOutcome` |
 | `gateway.key.list` | UID 0 | 无 | `KeyList` |
-| `gateway.credentials` | LocalUser，owner UID 隔离 | `{scopeId}` | `CredentialGrant` |
+| `gateway.ca` | LocalUser，认证本机 peer，无 owner 限制 | 无 | `{caBundlePath}` |
 
 - 无参数方法只接受省略、`null` 或 `{}`；有参数方法拒绝未知字段。
-- 管理方法要求内核认证的 UDS peer UID 0，非 root PolicyAdministrator 不获得管理权。
-  `scopeId` 只选择既有 Scope，不能选择调用者 UID；ownerUid 是 assignment 的目标身份约束，
-  不替代 peer 身份。
-- `credential` 当前支持 `github`。`key.add` 只导入，不创建 Scope 或授权；相同 secret 幂等
-  成功，不同值报错且不覆盖。更换 key 必须先 `key.remove` 再 `key.add`，不自动轮换。
-  `key.remove` 全局退役该真实凭据和全部 Scope fake，不影响其他凭据；旧 fake 永久退役，
-  重新导入后需新 Scope 和新的 Agent 配置。真实值只在 root 拥有、单硬链接、普通且
-  group/other 无权限的 `secretFile` 中，由 daemon 读取，不进入 params/result。
-- 权限复用既有 `policy.templates.*`、`policy.scopes.*` 与 Binding lifecycle。原生
-  `specVersion=0.1` 的凭据规则是 `allow/network/use_credential`，target `http_request` 包含
-  `credentialId/scheme/host/path/methods/responseRewrite`。响应开关要求
-  `responseRewrite` 必填且仅为 JSON bool `true/false`；缺失、null、数字、字符串（含旧
-  `buffered/none`）均拒绝，不默认、不兼容旧值。`true` 重写注入后响应的 headers、未压缩
-  正文与 trailers；`false` 全部不重写，与旧 `none` 仍替换 headers/trailers 的行为不同。
-  请求 Authorization 注入独立，不检查请求 body。凭据 Policy 不混合 file、不支持
-  where/previous。凭据 Scope 要求非 root ownerUid 与持续 process selector，固定 Policy
-  revision 快照；只对凭据 Policy/Scope 增加 root 限制，不改变普通 file 用法、权限或快照。
-- `policy.scopes.create` 可在无匹配进程时准备 fake/port/plan。先 enable、owner 查询、配置
-  Agent 后再自主启动，由 discovery 自动建立实例 Binding。查询不迁移进程或修改环境，
-  必须满足下述 gateway readiness 条件后返回，否则明确失败。
-- 同 Scope 多实例与重启共享稳定 fake；实例退出仅清理自身 Binding。Scope 删除先关闭
-  admission 并撤销该 Scope fake，包括空 Scope，保留清理责任到完成，不删除 real、不停止
-  Agent。恢复重新核对 canonical Scope/Binding 和完整实例身份，不单凭 PID 授权。
+- 管理方法要求内核认证的 UDS peer UID 0，非 root PolicyAdministrator 不获得凭据管理权。
+  ownerUid 是 assignment 的目标身份约束，不替代 peer 身份。共享公开 CA 不是秘密，
+  `gateway.ca` 不接受 Scope/UID 参数，不返回 fake/Token/环境变量映射，也不表示 Scope CA 隔离。
+- `pairid` 是 Store 分配的 opaque pair ID，不是 `github`、文件路径或秘密摘要。
+  `key.remove` 全局退役该配对及引用授权，不影响其他配对；旧 fake 永久退役不可重导入复活。
+  real/fake 在 root 提交 Cedar Policy 后自动登记，不提供单独 key add。
+- `policy.templates.create/update` 仍接收 `PolicySource`。HTTP Cedar 引用精确
+  `seccore.system@2`，注入 permit 的 `@modify`、`@real_token_file`、`@fake_token_file`、
+  `@inject_header`、`@inject_format`、`@response_rewrite` 均必填；最后一个仅接受精确
+  `"true"` / `"false"` 字符串并降低为 bool，不接受旧 `buffered/none` 或缺省值。
+  两个 token_file 是 daemon 主机的不同规范绝对路径，CLI/RPC 原样传递；相对、
+  home/env 展开、NUL、`.`/`..` 在读文件前拒绝。先纯校验及 root 授权，再安全读取
+  private/root-owned/regular/single-link 文件；Store 原子登记，策略只保存可信非秘密
+  规则→pair ID 关联，作者不能提交派生关联。生成/登记共用等长整串至少 80% 差异校验。
+- 原生 JSON 文件策略、schema revision 1 和既有 OS PDP 不变；原生凭据执行删除。
+  HTTP 不接入 OS PDP。发现旧 Gateway 数据明确拒绝，不迁移、不覆盖、不推断转换。
+  只有凭据 Policy/Scope 额外要求 root，普通 file 用法、权限及快照不变；不同 file/credential
+  Policy 可在同一个 Scope 分别执行，单 Policy 不混合。
+- 凭据 Scope 固定 Policy revision 和 pair 关联、非 root ownerUid 与持续 process selector。
+  无进程时也可准备已登记 fake/port/plan。先 enable、查询共享 CA、自行加载 fake 文件
+  后再启动 Agent；discovery 自动建立 Binding，不保证 first packet。查询不迁移或修改环境。
+- 多 Scope 可显式共用指定 fake；删除一个仅撤销该 Scope 授权，其他 Active Scope 仍有效。
+  最后 Active Scope 删除全局永久 tombstone，包括空 Scope；实例退出不退役。
+  恢复全量核对 canonical Scope/Binding/关联及身份，不单凭 PID 或重读源文件恢复。
+- `agent-sec-cli key generate-fake --real-token-file ... --output ... --format auto`
+  为批准的纯本地入口（默认 auto），没有 RPC、不登记或授权。未知启发式明确失败，
+  以 O_EXCL 创建 0600 输出，不打印 Token；不是 daemon 失联 fallback。
 
-响应修订的完整语义见 [网关设计 §4.3](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)。
-开启时未压缩正文有界流式替换，压缩 body 原样透传，仍可能把 real 返回 Agent；仅
-headers/trailers 替换无法补救。Plan 与作者字段同样严格为 bool。
+本节是未开放 Gateway 的内部终态契约，以 ANOLISA `89fe4fec0` 为基线，结合
+`46738d58d` Cedar 注入设计；响应算法沿用 `46e2a8682`。完整语义见
+[网关设计 §4.3](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)：开启时重写实际注入响应
+的 headers、未压缩连续正文及 trailers，跨 chunk 匹配有界；gzip 等压缩 body 原样透传，
+仍可能把 real 返回 Agent。关闭时三者均不改写，请求注入独立。
+Cedar 注解是 `"true"` / `"false"` 字符串，Plan/Decision 是必填 JSON bool，拒绝缺失、null、
+数字及字符串，不混用两者。保留固定队列限制、EOF/framing 和故障 fail-closed 边界，
+不恢复整包缓存，不增加可配置参数，也不保证已发响应可撤回。
 
-这也是内嵌 JSON 状态格式的不兼容修订：旧 `PreparedPolicy`、Scope `policySnapshots`、
-Binding 内嵌 Policy 与 pinnedScope 中的字符串不能直接读取。不能携带旧策略滚动升级，
-必须另行备份、显式转换或按生命周期清理并重建全部相关记录及固定 Scope 快照；仅更新
-latest Policy 不会更新 Scope，不得偷偷覆盖不可变快照。迁移与回退边界见
-[网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
-响应验收使用内部 mock，外部 API 不作为验收条件；测试结果不替代最终安装制品与存量
-数据迁移的验证。
+这是旧 Gateway 内嵌数据的不兼容修订：旧 `PreparedPolicy`、Scope `policySnapshots`、
+Binding 内嵌 Policy、pinnedScope、Store/Plan/投影及旧注解模式均明确拒绝；旧原生凭据
+规则即使含 bool，也不是新 Cedar 配对策略。本次无旧数据迁移或滚动升级支持，不推断
+转换、不丢弃秘密/tombstone，也不覆盖不可变快照；仅更新 latest Policy 不会更新 Scope。
+内部旧环境先备份、在旧版本按生命周期撤销和清理，再显式登记新配对及新 Policy/Scope。
+回退边界见 [网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
+响应验收使用内部 mock，外部 API 不作为验收条件；源码检查或测试矩阵不证明最终安装
+制品通过，不提供旧数据已迁移的保证。
 
 批准的 result 契约使用 camelCase：
 
@@ -1120,10 +1131,11 @@ latest Policy 不会更新 Scope，不得偷偷覆盖不可变快照。迁移与
   网关 ready 不替代实例 Binding `READY` 与引流完成的等待。
 - `ScopeStatusView`：`{scopeId, bindings}`。bindings 为绑定责任 ID 数组；空数组不代表 Scope
   无授权，其 fake/plan 可先于进程准备。
-- `KeyOutcome`：`{credential}`，例如 `{"credential":"github"}`，用于 add/remove 成功结果。
-- `KeyList`：`{credentials: string[]}`，只列 active 凭据 ID，例如 `{"credentials":["github"]}`。
-- `CredentialGrant`：`{scopeId, environment}`。包含 Scope fake 与 ready CA bundle 路径，供 Agent
-  自身配置加载；查询重新检查 cgroup v2，无 active fake 或 readiness 未达成时不返回部分 grant。
+- remove 成功结果：`{pairid}`，值为 opaque pair ID。
+- list 成功结果：`{pairids: string[]}`，只列 active opaque pair IDs，不输出秘密或摘要。
+- CA 查询：仅 `{caBundlePath: string}`，为各 Scope 共用的公开 CA bundle 绝对路径。
+  每次重新检查 enabled、cgroup v2、unit、loaded generation 与 CA ready；未就绪明确失败，
+  不需要 active Scope 或凭据 owner，不返回部分环境配置。
 
 cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SUPER_MAGIC`，
 且 daemon 自身 `/proc/self/cgroup` 视图有 `0::` 条目；证据不可读或非 v2 时失败。
@@ -1136,12 +1148,12 @@ cgroup v2 检查要求 Linux `/sys/fs/cgroup` 的 `statfs` 类型为 `CGROUP2_SU
 
 | code | 场景 |
 | --- | --- |
-| `invalid_argument` | 参数、credential ID、Scope ID 或 secret 文件不合格 |
-| `not_found` | canonical Scope 或 credential 不存在 |
-| `conflict` | 已有 credential 的 secret 不同，禁止覆盖；canonical Scope 已关闭或快照/执行身份不一致；真实值与其他真实值/fake 冲突 |
-| `permission_denied` | 非 root 管理或越过 owner UID 查询 |
+| `invalid_argument` | 参数、pair ID、Scope ID、Cedar 注解或配对文件不合格 |
+| `not_found` | canonical Scope 或 pair 不存在 |
+| `conflict` | canonical Scope 已关闭或快照/关联/执行身份不一致；fake/real/tombstone 冲突 |
+| `permission_denied` | 非 root 凭据管理或越过 owner UID 的 status 查询；公开 CA 无 owner 限制 |
 | `resource_exhausted` | 监听端口或 fake 等有界容量耗尽 |
-| `unavailable` | gateway 未配置/禁用、Scope 未准备、无活跃 fake、账户缺失、cgroup 挂载不可检查或非 v2、CA 或 generation 未 ready |
+| `unavailable` | gateway 未配置/禁用、账户缺失、cgroup 不可检查或非 v2、unit/CA/generation 未 ready |
 | `internal` | 数据面 generation 拒绝、存储损坏或宿主操作失败 |
 
 gateway dispatch 预算为 45 秒，CLI 默认 60 秒，generation 加载最长 20 秒。错误可以含路径、

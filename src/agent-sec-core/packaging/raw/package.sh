@@ -98,8 +98,9 @@ stage_payload() {
     install -p -m 0644 "$ROOT/LICENSE" "$stage/share/doc/sec-core/LICENSE"
     install -d -m 0755 "$stage/share/anolisa/sec-core/gateway"
     install -p -m 0644 "$BUILD_DIR/gateway/asc_gateway_addon.py" \
-        "$BUILD_DIR/gateway/asc_gateway_policy.py" "$BUILD_DIR/gateway/github-policy.json" \
-        "$BUILD_DIR/gateway/mitmproxy.provenance" "$stage/share/anolisa/sec-core/gateway/"
+        "$BUILD_DIR/gateway/asc_gateway_policy.py" \
+        "$BUILD_DIR/gateway/github.cedar" "$BUILD_DIR/gateway/mitmproxy.provenance" \
+        "$stage/share/anolisa/sec-core/gateway/"
     install -p -m 0755 "$BUILD_DIR/gateway/install-mitmproxy.sh" \
         "$stage/share/anolisa/sec-core/gateway/"
     sed 's|{datadir}/asc_gateway_addon.py|"{datadir}/sec-core/gateway/asc_gateway_addon.py"|g' \

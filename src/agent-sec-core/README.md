@@ -104,51 +104,15 @@ supports native JSON file-deletion block rules. Policy create/update reads raw C
 default and saves them with an exact schema reference; `--language json` keeps native JSON
 templates and Cedar source envelopes. Cedar admission and source persistence are
 available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed.
-Non-credential native JSON requests and saved snapshots retain their format; the approved
-Secret Gateway transition below is incompatible. Scopes save immutable Policy snapshots and
+Native JSON file-policy requests and saved snapshots retain their format.
+Scopes save immutable Policy snapshots and
 own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI
 callers, configure the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
 
 **Breaking change:** `scope create --cgroup-id` has been removed because cgroup
 assignments were not supported. Update scripts to select the intended processes
-with `--pid`, `--process-name`, or `--executable`.
-
-The V2 **Secret Gateway preview** supplies fake GitHub credentials to Agent processes
-and injects real values into authorized HTTPS requests; it is not a complete response-leakage guarantee.
-The V2 `agent-sec-core` RPM starts the base daemon automatically but leaves the gateway off; root installs
-mitmproxy explicitly. Raw packages include the same gateway assets but start neither service; the daemon
-alone controls the gateway lifecycle, and uninstall refuses to proceed if routing withdrawal fails.
-`gateway key add github --secret-file /root/github.token` imports without granting access: the same
-secret is idempotent, and a different value is rejected without overwrite.
-Replacement requires remove then add, a new Scope and updated Agent configuration; old fakes are
-permanently retired, with no automatic rotation. Existing native Policy JSON authorizes `network/use_credential` HTTPS
-requests, and a Scope pins that Policy revision with a non-root owner and process selector.
-Prepare the Scope, enable the gateway, query `gateway credentials --scope <scopeId>` as its owner,
-and configure the Agent's fake and CA before starting it. Discovery automatically attaches matching
-instances; it does not guarantee first-packet protection. Instance restarts retain the Scope fake;
-Scope deletion revokes only its fakes, while `gateway key remove github` retires the credential globally.
-Read-only status and credential queries are UID-scoped: status returns `{enabled, ready, scopes}`
-with `{scopeId, bindings}` entries, and credentials returns `{scopeId, environment}`. `ready` requires
-an enabled gateway, a passing read-only cgroup v2 check, active proxy unit, matching loaded generation
-and available CA. Enable checks cgroup v2 before changing enabled state; publication (including enabled
-recovery), enabled status queries and credential queries recheck it. Default-off recovery skips this
-preflight. No cgroup v1 fallback or mount changes occur; nftables `socket cgroupv2` is checked only by
-actual rule application, not an independent preflight. Wait separately for instance Binding `READY`.
-Key list returns active IDs only (`{"credentials":["github"]}`); add/remove return `{"credential":"github"}` and
-successful enable/disable return `{}`. See the
-[Secret Gateway design (Chinese)](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md).
-
-**Breaking response-contract change:** `responseRewrite` is a required JSON bool;
-old `buffered/none` values are rejected. When enabled, response headers, uncompressed bodies and
-trailers are rewritten; bodies use bounded streaming, not whole-response buffering. Compressed
-bodies pass through unchanged and can return real keys to the Agent. See
-[response coverage and streaming boundaries](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写).
-Old `PreparedPolicy`, Scope/Binding snapshots and pinnedScope require a separate backed-up
-conversion or complete rebuild of all related records; do not perform a rolling upgrade with old
-policies or silently overwrite immutable snapshots. See the
-[migration boundary](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界).
-Validation uses internal mock upstreams, not external APIs; published support depends on the
-corresponding release artifacts.
+with `--pid`, `--process-name`, `--executable`, or `--cmdline-arg`.
+The last selector matches a complete command-line argument for interpreter-hosted processes.
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an

@@ -1377,7 +1377,19 @@ async fn unavailable_preflight_returns_wire_error_without_creating_binding() {
     reason = "the authorization sequence preserves captured policy and scope identities across permitted and denied mutations"
 )]
 fn credential_administration_requires_authenticated_root_and_scope_owner_is_not_authority() {
-    struct Execution;
+    struct Execution(Arc<AtomicU64>);
+    impl asc_pap::CredentialRegistration for Execution {
+        fn register(
+            &self,
+            _: &asc_policy_types::cedar::CedarPolicySource,
+        ) -> Result<Vec<asc_policy_types::policy::CredentialBinding>, asc_pap::PapError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![asc_policy_types::policy::CredentialBinding {
+                rule_id: "credential-auth".into(),
+                pair_id: "pair-auth".into(),
+            }])
+        }
+    }
     impl asc_pap::ScopeExecution for Execution {
         fn validate(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
             Ok(())
@@ -1395,8 +1407,12 @@ fn credential_administration_requires_authenticated_root_and_scope_owner_is_not_
             Ok(())
         }
     }
-    let pap = PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap()))
-        .with_scope_execution(Arc::new(Execution))
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let registrations = Arc::new(AtomicU64::new(0));
+    let execution = Arc::new(Execution(registrations.clone()));
+    let pap = PapService::new(repository.clone())
+        .with_credential_registration(execution.clone())
+        .with_scope_execution(execution)
         .with_scope_discovery(Arc::new(Discovery));
     let handler = DaemonDispatcher::new(
         pap,
@@ -1414,31 +1430,63 @@ fn credential_administration_requires_authenticated_root_and_scope_owner_is_not_
         ))
         .unwrap()
     };
-    let template = json!({"specVersion":"0.1","rules":[{
-        "effect":"allow","category":"network","action":"use_credential",
-        "target":{"type":"http_request","credentialId":"github","scheme":"https",
-            "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":true}}]});
+    let root = std::env::temp_dir().join("asc-protocol-credential-fixture");
+    let text = format!(
+        r#"@id("credential-auth")
+@modify("inject_credential")
+@real_token_file({real})
+@fake_token_file({fake})
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when {{ resource.host == "api.github.com" && context.input.scheme == "https" }};"#,
+        real = serde_json::to_string(&root.join("real")).unwrap(),
+        fake = serde_json::to_string(&root.join("fake")).unwrap()
+    );
+    let template = json!({"language":"cedar", "content": {
+        "schema":{"schemaId":"seccore.system", "revision":2}, "text": text
+    }});
     let file = serde_json::to_value(file_policy(vec!["/protected".into()])).unwrap();
-    for authored in [
-        template.clone(),
-        json!({"specVersion":"0.1","rules":[{
-        "effect":"block","category":"network","action":"write","target":{"type":"file","path":"/file"}}]}),
-    ] {
+    assert_eq!(
+        call(
+            1000,
+            "policy.templates.create",
+            json!({"policyName":"credential","template":template})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(registrations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        asc_pap::PapRepository::list_policies(repository.as_ref(), 100, 0)
+            .unwrap()
+            .total,
+        0
+    );
+    let mut malformed = template.clone();
+    malformed["content"]["text"] = json!("// @modify(\"inject_credential\")\nnot Cedar");
+    for uid in [0, 1000] {
         assert_eq!(
             call(
-                1000,
+                uid,
                 "policy.templates.create",
-                json!({"policyName":"credential","template":authored})
+                json!({"policyName":"invalid","template":malformed})
             )["error"]["code"],
-            "permission_denied"
+            "invalid_argument"
         );
     }
+    assert_eq!(registrations.load(Ordering::SeqCst), 0);
     let created = call(
         0,
         "policy.templates.create",
         json!({"policyName":"credential","template":template}),
     );
     let id = created["result"]["policyId"].as_str().unwrap();
+    assert_eq!(registrations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        created["result"]["credentialBindings"],
+        json!([{"ruleId":"credential-auth", "pairId":"pair-auth"}])
+    );
     for replacement in [file.clone(), template.clone()] {
         assert_eq!(
             call(

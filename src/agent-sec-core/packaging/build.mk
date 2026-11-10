@@ -150,8 +150,8 @@ stage-gateway: ## Stage static secret gateway assets without installing mitmprox
 		v2/gateway/addon/asc_gateway_policy.py v2/gateway/mitmproxy.provenance \
 		packaging/gateway/agent-sec-gateway.service.in packaging/gateway/gateway.conf \
 		"$(BUILD_DIR)/gateway/"
-	install -m 0644 v2/crates/asc-gateway-plan/policies/github.json \
-		"$(BUILD_DIR)/gateway/github-policy.json"
+	install -m 0644 v2/crates/asc-gateway-plan/policies/github.cedar \
+		"$(BUILD_DIR)/gateway/github.cedar"
 	install -m 0755 packaging/gateway/install-mitmproxy.sh "$(BUILD_DIR)/gateway/"
 
 .PHONY: build-all-v2

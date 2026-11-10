@@ -318,7 +318,11 @@ where
         template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        require_credential_authority(principal, template.uses_credentials())?;
+        require_credential_authority(
+            principal,
+            PapService::<R>::source_uses_credentials(template)
+                .map_err(|error| project_pap_error(error, None))?,
+        )?;
         PapService::create_policy(self, policy_name, template)
             .map_err(|error| project_pap_error(error, None))
     }
@@ -331,7 +335,11 @@ where
         template: &PolicySource,
     ) -> Result<PreparedPolicy, PolicyAdministrationError> {
         require_policy_administrator(principal)?;
-        require_credential_authority(principal, template.uses_credentials())?;
+        require_credential_authority(
+            principal,
+            PapService::<R>::source_uses_credentials(template)
+                .map_err(|error| project_pap_error(error, None))?,
+        )?;
         let result = if principal.peer().uid() == 0 {
             PapService::update_policy(self, policy_id, policy_name, template)
         } else {
@@ -373,7 +381,7 @@ where
         require_policy_administrator(principal)?;
         let policy = PapService::get_policy(self, id, revision)
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::PolicyRevision)))?;
-        require_credential_authority(principal, policy.template.uses_credentials())?;
+        require_credential_authority(principal, policy.uses_credentials())?;
         PapService::delete_policy_revision(self, id, revision)
             .map_err(|error| project_pap_error(error, Some(NotFoundResource::PolicyRevision)))
     }
@@ -392,7 +400,7 @@ where
                     .map_err(|error| {
                         project_pap_error(error, Some(NotFoundResource::ReferencedPolicyRevision))
                     })?;
-            require_credential_authority(principal, policy.template.uses_credentials())?;
+            require_credential_authority(principal, policy.uses_credentials())?;
         }
         PapService::create_scope_assignment(self, selector, policies, owner_uid)
             .map_err(|error| project_pap_error(error, None))

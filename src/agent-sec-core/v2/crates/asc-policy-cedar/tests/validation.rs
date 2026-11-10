@@ -1,5 +1,7 @@
-use asc_policy_cedar::schema::{SCHEMA_ID, SCHEMA_REVISION, SCHEMA_TEXT};
-use asc_policy_cedar::{CedarError, pst, validate};
+use asc_policy_cedar::schema::{
+    HTTP_SCHEMA_REVISION, HTTP_SCHEMA_TEXT, SCHEMA_ID, SCHEMA_REVISION, SCHEMA_TEXT,
+};
+use asc_policy_cedar::{CedarError, credential_rules, pst, validate};
 use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use cedar_policy::{
@@ -77,7 +79,11 @@ fn schema_has_no_warnings_and_accepts_action_specific_fields() {
         r#"forbid(principal, action, resource) when { { Var: "principal" }.Var == "principal" };"#,
         r#"permit(principal, action == SecCore::Action::"file.read", resource) when { false };"#,
     ] {
-        validate(&source(text)).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        for revision in [SCHEMA_REVISION, HTTP_SCHEMA_REVISION] {
+            let mut input = source(text);
+            input.schema.revision = Revision::new(revision).unwrap();
+            validate(&input).unwrap_or_else(|error| panic!("schema {revision}: {text}: {error:?}"));
+        }
     }
 }
 
@@ -99,7 +105,7 @@ fn validate_returns_non_blocking_warnings_with_policy_identity() {
 #[test]
 fn validate_and_pst_enforce_the_same_admission_contract() {
     let mut unknown_schema = source(DELETE_POLICY);
-    unknown_schema.schema.revision = Revision::new(SCHEMA_REVISION + 1).unwrap();
+    unknown_schema.schema.revision = Revision::new(HTTP_SCHEMA_REVISION + 1).unwrap();
     for input in [
         source(DELETE_POLICY),
         source(""),
@@ -136,7 +142,7 @@ fn unknown_schema_versions_never_fall_back_to_the_builtin() {
         Err(CedarError::UnsupportedSchema { .. })
     ));
     input.schema.schema_id = ResourceId::new(SCHEMA_ID).unwrap();
-    input.schema.revision = Revision::new(SCHEMA_REVISION + 1).unwrap();
+    input.schema.revision = Revision::new(HTTP_SCHEMA_REVISION + 1).unwrap();
     assert!(matches!(
         validate(&input),
         Err(CedarError::UnsupportedSchema { .. })
@@ -398,4 +404,532 @@ when { context.input.tool_name == "read_file" };
         .unwrap();
     let validation = Validator::new(schema).validate(&policies, ValidationMode::Strict);
     assert!(validation.validation_passed(), "{validation:?}");
+}
+
+fn http_source(annotations: &str, condition: &str) -> CedarPolicySource {
+    let mut input = source(&format!(
+        "{annotations}\npermit(principal, action == SecCore::Action::\"network.send\", resource is SecCore::HttpEndpoint)\nwhen {{ {condition} }};"
+    ));
+    input.schema.revision = Revision::new(HTTP_SCHEMA_REVISION).unwrap();
+    input
+}
+
+const CREDENTIAL_ANNOTATIONS: &str = r#"
+@modify("inject_credential")
+@real_token_file("/secure/real")
+@fake_token_file("/secure/fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+"#;
+const HTTP_CONDITION: &str =
+    r#"resource.host == "api.example.com" && context.input.scheme == "https""#;
+
+#[test]
+fn credential_rules_share_admission_and_do_not_read_token_files() {
+    use asc_policy_cedar::http::{CredentialPath, CredentialRule};
+    use asc_policy_types::authoring::HttpMethod;
+    let input = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    assert!(validate(&input).is_ok());
+    assert!(pst(&input).is_ok());
+    assert_eq!(
+        credential_rules(&input).unwrap(),
+        vec![CredentialRule {
+            rule_id: "policy0".into(),
+            real_token_file: "/secure/real".into(),
+            fake_token_file: "/secure/fake".into(),
+            header: "Authorization".into(),
+            format: "auto".into(),
+            response_rewrite: true,
+            host: "api.example.com".into(),
+            methods: vec![
+                HttpMethod::Get,
+                HttpMethod::Head,
+                HttpMethod::Post,
+                HttpMethod::Put,
+                HttpMethod::Patch,
+                HttpMethod::Delete
+            ],
+            path: None,
+        }]
+    );
+    let disabled = http_source(
+        &CREDENTIAL_ANNOTATIONS.replace(
+            r#"@response_rewrite("true")"#,
+            r#"@response_rewrite("false")"#,
+        ),
+        HTTP_CONDITION,
+    );
+    let mut expected = credential_rules(&input).unwrap();
+    expected[0].response_rewrite = false;
+    assert_eq!(credential_rules(&disabled).unwrap(), expected);
+    for (expression, expected) in [
+        (
+            r#"context.input.path == "/api/a*b""#,
+            CredentialPath {
+                kind: "eq".into(),
+                value: "/api/a*b".into(),
+            },
+        ),
+        (
+            r#"context.input.path like "/a*b/*""#,
+            CredentialPath {
+                kind: "like".into(),
+                value: "/a*b/*".into(),
+            },
+        ),
+        (
+            r#"context.input.path like "/literal\*/*""#,
+            CredentialPath {
+                kind: "like".into(),
+                value: r"/literal\*/*".into(),
+            },
+        ),
+    ] {
+        let input = http_source(
+            CREDENTIAL_ANNOTATIONS,
+            &format!("{HTTP_CONDITION} && {expression}"),
+        );
+        assert_eq!(credential_rules(&input).unwrap()[0].path, Some(expected));
+    }
+    assert!(credential_rules(&source(DELETE_POLICY)).unwrap().is_empty());
+}
+
+#[test]
+fn method_constraints_and_custom_authentication_formats_lower_exactly() {
+    use asc_policy_types::authoring::HttpMethod;
+    for (condition, methods) in [
+        (r#"context.input.method == "POST""#, vec![HttpMethod::Post]),
+        (
+            r#"["DELETE", "GET", "PATCH"].contains(context.input.method)"#,
+            vec![HttpMethod::Get, HttpMethod::Patch, HttpMethod::Delete],
+        ),
+    ] {
+        for format in [
+            "auto",
+            "basic",
+            "Bearer {fake}",
+            "{fake}",
+            "prefix-{fake}-suffix",
+        ] {
+            let annotations = CREDENTIAL_ANNOTATIONS
+                .replace("\"auto\"", &serde_json::to_string(format).unwrap())
+                .replace("Authorization", "X-Api-Key");
+            let input = http_source(&annotations, &format!("{HTTP_CONDITION} && {condition}"));
+            let rules = credential_rules(&input).unwrap();
+            assert_eq!(rules[0].methods, methods);
+            assert_eq!(rules[0].header, "X-Api-Key");
+            assert_eq!(rules[0].format, format);
+        }
+    }
+}
+
+#[test]
+fn credential_annotation_combinations_and_paths_are_checked_by_every_frontend() {
+    let mut annotations = Vec::new();
+    for name in [
+        "modify",
+        "real_token_file",
+        "fake_token_file",
+        "inject_header",
+        "inject_format",
+        "response_rewrite",
+    ] {
+        annotations.push(
+            CREDENTIAL_ANNOTATIONS
+                .lines()
+                .filter(|line| !line.starts_with(&format!("@{name}(")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    for path in [
+        "relative",
+        "~/real",
+        "/$HOME/real",
+        "/a/./b",
+        "/a/../b",
+        "/a//b",
+        "/a/",
+        "/",
+        "/a\0b",
+        "/a\nb",
+        "/secure/fake",
+    ] {
+        annotations.push(
+            CREDENTIAL_ANNOTATIONS
+                .replace("\"/secure/real\"", &serde_json::to_string(path).unwrap()),
+        );
+    }
+    for path in ["relative", "/a//b", "/$TOKEN/fake", "/a\0b"] {
+        annotations.push(
+            CREDENTIAL_ANNOTATIONS
+                .replace("\"/secure/fake\"", &serde_json::to_string(path).unwrap()),
+        );
+    }
+    for header in [
+        "Host",
+        "host",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "TE",
+        "Trailer",
+        "Upgrade",
+        "Proxy-Connection",
+        "Keep-Alive",
+        "Expect",
+        "bad header",
+        "X-Key\r\nHost",
+        "",
+    ] {
+        annotations.push(
+            CREDENTIAL_ANNOTATIONS
+                .replace("\"Authorization\"", &serde_json::to_string(header).unwrap()),
+        );
+    }
+    for format in [
+        "",
+        "Bearer",
+        "{real}",
+        "{fake}{fake}",
+        "{fake}{other}",
+        "{fake}\n",
+        "{fake}\0",
+    ] {
+        annotations.push(
+            CREDENTIAL_ANNOTATIONS.replace("\"auto\"", &serde_json::to_string(format).unwrap()),
+        );
+    }
+    annotations.push(CREDENTIAL_ANNOTATIONS.replace("inject_credential", "other"));
+    for rewrite in [
+        "buffered",
+        "none",
+        "streaming",
+        "True",
+        "False",
+        "1",
+        "",
+        " true ",
+    ] {
+        annotations.push(CREDENTIAL_ANNOTATIONS.replace(
+            r#"@response_rewrite("true")"#,
+            &format!(
+                "@response_rewrite({})",
+                serde_json::to_string(rewrite).unwrap()
+            ),
+        ));
+    }
+    for annotations in annotations {
+        let input = http_source(&annotations, HTTP_CONDITION);
+        assert!(validate(&input).is_err(), "{annotations}");
+        assert!(pst(&input).is_err(), "{annotations}");
+        assert!(credential_rules(&input).is_err(), "{annotations}");
+    }
+}
+
+#[test]
+fn credentials_reject_mixed_rules_principals_and_every_unconsumed_condition() {
+    let valid = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    let variants = [
+        valid.text.replace("permit(", "forbid("),
+        valid
+            .text
+            .replace("principal,", r#"principal == SecCore::Subject::"worker","#),
+        valid
+            .text
+            .replace("principal,", "principal is SecCore::Subject,"),
+        valid.text.replace("network.send", "network.use"),
+        valid
+            .text
+            .replace("resource is SecCore::HttpEndpoint", "resource"),
+        valid.text.replace("when", "unless"),
+        format!(r#"@advice("{{\"verdict\":\"warn\"}}") {}"#, valid.text),
+        format!("{}\n{DELETE_POLICY}", valid.text),
+        format!("{}\npermit(principal, action, resource);", valid.text),
+        valid.text.replace("api.example.com", "Api.example.com"),
+        valid.text.replace("api.example.com", "*.example.com"),
+        valid.text.replace("api.example.com", "127.0.0.1"),
+        valid.text.replace("https", "http"),
+    ];
+    for text in variants {
+        let mut input = valid.clone();
+        input.text = text;
+        assert!(validate(&input).is_err(), "{}", input.text);
+        assert!(pst(&input).is_err(), "{}", input.text);
+        assert!(credential_rules(&input).is_err(), "{}", input.text);
+    }
+    for extra in [
+        "true",
+        "false",
+        "principal has agent_type",
+        r#"principal == SecCore::Subject::"worker""#,
+        r#"context.input.path != "/secret""#,
+        r#"context.input.path like "relative*""#,
+        r#"context.input.path == "/a%2fb""#,
+        r#"context.input.path == "/a%5Cb""#,
+        r#"context.input.path == "/a%2eb""#,
+        r#"context.input.path == "/a/../b""#,
+        r#"context.input.path == "/a?x""#,
+        r#"context.input.path == "/a#x""#,
+        r#"context.input.path == "/a%xx""#,
+        r#"context.input.path == "/a//b""#,
+        r#"context.input.method == "OPTIONS""#,
+        "[].contains(context.input.method)",
+        r#"["GET", "GET"].contains(context.input.method)"#,
+        "[context.input.method].contains(context.input.method)",
+        r#"(context.input.method == "GET" || context.input.method == "POST")"#,
+        r#"!(context.input.method == "POST")"#,
+        r#"if true then context.input.method == "GET" else false"#,
+        r#"resource.host == "api.example.com""#,
+        r#"context.input.scheme == "https""#,
+        r#"{r: resource}.r.host == "api.example.com""#,
+        r#"context.input.method == "GET" && context.input.method == "POST""#,
+        r#"context.input.path == "/a" && context.input.path like "/*""#,
+    ] {
+        let input = http_source(
+            CREDENTIAL_ANNOTATIONS,
+            &format!("{HTTP_CONDITION} && {extra}"),
+        );
+        assert!(credential_rules(&input).is_err(), "{extra}");
+        assert!(validate(&input).is_err(), "{extra}");
+        assert!(pst(&input).is_err(), "{extra}");
+    }
+    assert!(
+        credential_rules(&http_source(
+            CREDENTIAL_ANNOTATIONS,
+            r#"context.input.scheme == "https""#
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        credential_rules(&http_source(
+            CREDENTIAL_ANNOTATIONS,
+            r#"resource.host == "api.example.com""#
+        ))
+        .unwrap(),
+        credential_rules(&valid).unwrap(),
+    );
+}
+
+#[test]
+fn rule_identity_is_stable_across_sdk_and_text_order_and_rejects_collisions() {
+    let a = http_source(
+        &format!("@id(\"a\")\n{CREDENTIAL_ANNOTATIONS}"),
+        HTTP_CONDITION,
+    );
+    let b = http_source(
+        &format!(
+            "@id(\"b\")\n{}",
+            CREDENTIAL_ANNOTATIONS
+                .replace("auto", "basic")
+                .replace("/secure/real", "/secure/other-real")
+        ),
+        HTTP_CONDITION,
+    );
+    let mut input = a.clone();
+    input.text = format!("{}\n{}", b.text, a.text);
+    let expected = credential_rules(&input).unwrap();
+    input.text = format!("{}\n{}", a.text, b.text);
+    assert_eq!(credential_rules(&input).unwrap(), expected);
+    assert_eq!(expected[0].rule_id, "a");
+    assert_eq!(expected[0].format, "auto");
+    assert_eq!(expected[1].rule_id, "b");
+    assert_eq!(expected[1].real_token_file, "/secure/other-real");
+    input.text = format!("{}\n{}", a.text, a.text);
+    assert!(credential_rules(&input).is_err());
+    let anonymous = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    input.text = format!(
+        "{}\n{}",
+        a.text.replace("@id(\"a\")", "@id(\"policy1\")"),
+        anonymous.text
+    );
+    assert!(credential_rules(&input).is_err());
+}
+
+#[test]
+fn credential_ast_limits_reject_the_whole_set_not_a_partial_lowering() {
+    let base = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    let mut input = base.clone();
+    input.text = base.text.repeat(256);
+    assert_eq!(credential_rules(&input).unwrap().len(), 256);
+    input.text.push_str(&base.text);
+    assert!(credential_rules(&input).is_err());
+    let large = http_source(
+        CREDENTIAL_ANNOTATIONS,
+        &format!(
+            r#"{HTTP_CONDITION} && ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].contains(context.input.method)"#
+        ),
+    );
+    input.text = large.text.repeat(256);
+    assert!(matches!(
+        credential_rules(&input),
+        Err(CedarError::Unsupported {
+            reason: "credential AST exceeds 16 levels or 4096 nodes",
+            ..
+        })
+    ));
+    let mut condition = HTTP_CONDITION.to_owned();
+    for _ in 0..17 {
+        condition = format!(r#"({condition}) && context.input.method == "GET""#);
+    }
+    assert!(matches!(
+        credential_rules(&http_source(CREDENTIAL_ANNOTATIONS, &condition)),
+        Err(CedarError::Unsupported { .. })
+    ));
+    for condition in [
+        format!("{}{}{}", "(".repeat(65), HTTP_CONDITION, ")".repeat(65)),
+        format!("{}true", "!".repeat(65)),
+        format!("{}true", "!".repeat(1000)),
+        format!(
+            "{}true{}",
+            "if true then ".repeat(65),
+            " else false".repeat(65)
+        ),
+        "a".repeat(256 * 1024 + 1),
+    ] {
+        let input = http_source(CREDENTIAL_ANNOTATIONS, &condition);
+        for result in [
+            validate(&input).map(|_| ()),
+            pst(&input).map(|_| ()),
+            credential_rules(&input).map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(CedarError::Unsupported { .. })));
+        }
+    }
+    input = base.clone();
+    input.text = format!("// {}\n{}", "(".repeat(1000), base.text);
+    assert_eq!(
+        credential_rules(&input).unwrap(),
+        credential_rules(&base).unwrap()
+    );
+}
+
+#[test]
+fn shared_source_budget_accepts_boundary_inputs_and_rejects_overflow() {
+    let paths: Vec<_> = (0..242).map(|index| format!("/p{index}")).collect();
+    let text = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ {}.contains(resource.path) }};"#,
+        json!(paths),
+    );
+    for revision in [SCHEMA_REVISION, HTTP_SCHEMA_REVISION] {
+        let mut input = source(&text);
+        input.schema.revision = Revision::new(revision).unwrap();
+        input.text.push_str(&" ".repeat(256 * 1024 - text.len()));
+        assert!(validate(&input).is_ok());
+        assert!(pst(&input).is_ok());
+        assert!(credential_rules(&input).unwrap().is_empty());
+        let overflow = text.replace("].contains", ",\"/overflow\"].contains");
+        for text in [format!("{} ", input.text), overflow] {
+            input.text = text;
+            for result in [
+                validate(&input).map(|_| ()),
+                pst(&input).map(|_| ()),
+                credential_rules(&input).map(|_| ()),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(CedarError::Unsupported { reason, .. }) if reason.contains("source exceeds")
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn schema_two_adds_http_without_changing_schema_one_or_existing_advice() {
+    let (_, warnings) = Schema::from_cedarschema_str(HTTP_SCHEMA_TEXT).unwrap();
+    assert_eq!(warnings.count(), 0);
+    assert_eq!(
+        asc_policy_cedar::schema::embedded_reference()
+            .revision
+            .get(),
+        1
+    );
+    let mut input = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    input.schema.revision = Revision::new(1).unwrap();
+    assert!(credential_rules(&input).is_err());
+    let original = source(
+        r#"@id("file") @advice("{\"verdict\":\"escalate\",\"reason\":\"approval_required\"}") permit(principal == SecCore::Subject::"worker", action == SecCore::Action::"process.spawn", resource) when { resource.program == "gh" };"#,
+    );
+    let mut newer = original.clone();
+    newer.schema.revision = Revision::new(2).unwrap();
+    assert_eq!(pst(&original).unwrap(), pst(&newer).unwrap());
+    assert!(credential_rules(&newer).unwrap().is_empty());
+    let action: EntityUid = r#"SecCore::Action::"network.send""#.parse().unwrap();
+    let schema = asc_policy_cedar::schema::load_schema(&newer.schema).unwrap();
+    let context = Context::from_json_value(
+        json!({"input":{"scheme":"https","method":"GET","path":"/a/b"}}),
+        Some((&schema, &action)),
+    )
+    .unwrap();
+    let request = Request::new(
+        r#"SecCore::Subject::"worker""#.parse().unwrap(),
+        action.clone(),
+        r#"SecCore::HttpEndpoint::"endpoint""#.parse().unwrap(),
+        context,
+        Some(&schema),
+    );
+    assert!(request.is_ok());
+    assert!(
+        Context::from_json_value(
+            json!({"input":{"scheme":"https","method":"GET"}}),
+            Some((&schema, &action))
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn shared_gateway_path_matrix_agrees_with_sdk_authorization() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/gateway/decisions.json")).unwrap();
+    for case in cases["pathCases"].as_array().unwrap() {
+        let kind = case["constraint"]["kind"].as_str().unwrap();
+        let value = case["constraint"]["value"].as_str().unwrap();
+        let literal = if kind == "like" {
+            format!("\"{}\"", value.replace('"', "\\\""))
+        } else {
+            serde_json::to_string(value).unwrap()
+        };
+        let operator = if kind == "like" { "like" } else { "==" };
+        let source = http_source(
+            CREDENTIAL_ANNOTATIONS,
+            &format!("{HTTP_CONDITION} && context.input.path {operator} {literal}"),
+        );
+        let policies = PolicySet::from_pst(pst(&source).unwrap()).unwrap();
+        let schema = asc_policy_cedar::schema::load_schema(&source.schema).unwrap();
+        let action: EntityUid = r#"SecCore::Action::"network.send""#.parse().unwrap();
+        let entities = Entities::from_json_value(
+            json!([{
+                "uid": {"type": "SecCore::HttpEndpoint", "id": "endpoint"},
+                "attrs": {"host": "api.example.com"}, "parents": []
+            }]),
+            Some(&schema),
+        )
+        .unwrap();
+        let context = Context::from_json_value(
+            json!({"input": {
+                "scheme": "https", "method": "GET", "path": case["path"]
+            }}),
+            Some((&schema, &action)),
+        )
+        .unwrap();
+        let request = Request::new(
+            r#"SecCore::Subject::"worker""#.parse().unwrap(),
+            action,
+            r#"SecCore::HttpEndpoint::"endpoint""#.parse().unwrap(),
+            context,
+            Some(&schema),
+        )
+        .unwrap();
+        let response = Authorizer::new().is_authorized(&request, &policies, &entities);
+        assert_eq!(response.diagnostics().errors().count(), 0, "{case}");
+        assert_eq!(
+            response.decision() == Decision::Allow,
+            case["matches"].as_bool().unwrap(),
+            "{case}"
+        );
+    }
 }

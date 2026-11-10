@@ -73,7 +73,7 @@ DELIVERY_CORE_INPUTS = \
 	--target-file "$(DELIVERY_UNITDIR)/agent-sec-core.service" \
 	--target-file "$(DELIVERY_CONFIGDIR)/skillsec.json" \
 	--target-file "$(DELIVERY_DATADIR)/LICENSE" \
-	$(foreach file,asc_gateway_addon.py asc_gateway_policy.py mitmproxy.provenance github-policy.json install-mitmproxy.sh,--file "$(DELIVERY_BUILD_OUTPUT)/gateway/$(file)" --target-file "$(DELIVERY_DATADIR)/gateway/$(file)") \
+	$(foreach file,asc_gateway_addon.py asc_gateway_policy.py mitmproxy.provenance github.cedar install-mitmproxy.sh,--file "$(DELIVERY_BUILD_OUTPUT)/gateway/$(file)" --target-file "$(DELIVERY_DATADIR)/gateway/$(file)") \
 	--executable "$(DELIVERY_BUILD_OUTPUT)/gateway/install-mitmproxy.sh" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/gateway/agent-sec-gateway.service.in" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/gateway/gateway.conf" \

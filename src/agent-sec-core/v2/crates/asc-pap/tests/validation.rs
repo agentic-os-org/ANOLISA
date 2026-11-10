@@ -173,7 +173,7 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
     );
     for (text, revision, expected) in [
         ("not a Cedar policy", 1, "syntax"),
-        ("forbid(principal, action, resource);", 2, "revision 2"),
+        ("forbid(principal, action, resource);", 3, "revision 3"),
         (
             "forbid(principal, action == SecCore::Action::\"file.unknown\", resource);",
             1,
@@ -227,6 +227,47 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
             .get(),
         2
     );
+}
+
+#[test]
+fn retired_native_credentials_and_malformed_cedar_cannot_bypass_admission() {
+    use asc_policy_types::authoring::PolicySource;
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository.clone());
+    let saved = pap
+        .create_policy("file", &binding().policy.template)
+        .unwrap();
+    let native = PolicySource::SecCore(serde_json::from_value(serde_json::json!({
+        "specVersion": "0.1", "rules": [{
+            "effect": "allow", "category": "network", "action": "use_credential",
+            "target": {"type": "http_request", "credentialId": "github", "scheme": "https",
+                "host": "api.github.com", "path": "/repos/**", "methods": ["GET"], "responseRewrite": true}
+        }]
+    })).unwrap());
+    for source in [
+        native,
+        runtime_cedar("// @modify(\"inject_credential\")\nnot Cedar"),
+    ] {
+        assert!(PapService::<SqlitePolicyRepository>::source_uses_credentials(&source).is_err());
+        for result in [
+            pap.create_policy("invalid", &source),
+            pap.update_policy(&saved.policy_id, "invalid", &source),
+        ] {
+            assert!(result.is_err());
+        }
+        assert_eq!(
+            repository.list_policies(100, 0).unwrap().items,
+            vec![saved.clone()]
+        );
+        assert_eq!(
+            repository
+                .get_policy_revision_state(&saved.policy_id)
+                .unwrap()
+                .unwrap()
+                .last_allocated_revision,
+            saved.revision
+        );
+    }
 }
 
 fn runtime_cedar(text: &str) -> asc_policy_types::authoring::PolicySource {
@@ -309,13 +350,7 @@ fn mixed_headers_reject_whole_policy_at_admission_and_resolution() {
 
 #[test]
 fn invalid_stored_sources_or_schema_never_produce_a_partial_set() {
-    for (text, revision) in [
-        ("not cedar", 1),
-        (
-            "permit(principal is SecCore::Subject, action, resource);",
-            2,
-        ),
-    ] {
+    for revision in [1, 3] {
         let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
         let pap = PapService::new(repository.clone());
         pap.create_policy(
@@ -324,15 +359,34 @@ fn invalid_stored_sources_or_schema_never_produce_a_partial_set() {
         )
         .unwrap();
         let mut stored = binding().policy;
-        stored.template = runtime_cedar(text);
-        let asc_policy_types::authoring::PolicySource::Cedar(source) = &mut stored.template else {
-            unreachable!()
-        };
-        source.schema.revision = asc_foundation_types::Revision::new(revision).unwrap();
+        stored.policy_name = "corrupt".into();
+        stored.template = runtime_cedar("permit(principal is SecCore::Subject, action, resource);");
+        // Corruption happens after admission; normal repository writes must still reject it.
+        SqlitePolicyRepository::before_next_commit_for_test(if revision == 1 {
+            |tx| {
+                tx.execute(
+                    "UPDATE policies SET current_json = json_set(current_json,
+                     '$.template.content.text', 'not cedar')
+                     WHERE json_extract(current_json, '$.policyName') = 'corrupt'",
+                    [],
+                )
+                .unwrap();
+            }
+        } else {
+            |tx| {
+                tx.execute(
+                    "UPDATE policies SET current_json = json_set(current_json,
+                     '$.template.content.schema.revision', 3)
+                     WHERE json_extract(current_json, '$.policyName') = 'corrupt'",
+                    [],
+                )
+                .unwrap();
+            }
+        });
         repository.put_policy(&stored).unwrap();
         assert!(matches!(
             pap.authorization_policies(),
-            Err(PapError::InvalidCedar(_))
+            Err(PapError::Persistence)
         ));
     }
 }

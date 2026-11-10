@@ -319,7 +319,7 @@ def verify_raw_payload(payload_root: Path) -> None:
     for name in (
         "asc_gateway_addon.py",
         "asc_gateway_policy.py",
-        "github-policy.json",
+        "github.cedar",
         "mitmproxy.provenance",
         "install-mitmproxy.sh",
     ):

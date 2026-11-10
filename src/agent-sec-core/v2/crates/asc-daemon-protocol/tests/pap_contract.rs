@@ -541,10 +541,9 @@ fn gateway_method_inventory_matches_dispatch_and_access() {
         (GatewayMethod::Enable, AccessPolicy::PolicyAdministrator),
         (GatewayMethod::Disable, AccessPolicy::PolicyAdministrator),
         (GatewayMethod::Status, AccessPolicy::LocalUser),
-        (GatewayMethod::KeyAdd, AccessPolicy::PolicyAdministrator),
         (GatewayMethod::KeyRemove, AccessPolicy::PolicyAdministrator),
         (GatewayMethod::KeyList, AccessPolicy::PolicyAdministrator),
-        (GatewayMethod::Credentials, AccessPolicy::LocalUser),
+        (GatewayMethod::Ca, AccessPolicy::LocalUser),
     ];
     assert_eq!(method::GATEWAY_METHODS.len(), expected.len());
     for (wire, (gateway, access)) in method::GATEWAY_METHODS.into_iter().zip(expected) {
@@ -552,27 +551,23 @@ fn gateway_method_inventory_matches_dispatch_and_access() {
         assert_eq!(method::metadata(wire).unwrap().access, access);
     }
     assert_eq!(
-        round_trip::<asc_daemon_protocol::GatewayKeyAddParams>(
-            json!({"credential": "github", "secretFile": "/root/token"})
-        ),
-        json!({"credential": "github", "secretFile": "/root/token"})
+        round_trip::<asc_daemon_protocol::GatewayKeyRemoveParams>(json!({"pairid": "pair-1"})),
+        json!({"pairid": "pair-1"})
     );
-    assert!(
-        serde_json::from_value::<asc_daemon_protocol::GatewayKeyAddParams>(
-            json!({"credential": "github", "secret": "dummy"})
-        )
-        .is_err()
-    );
-    assert_eq!(
-        round_trip::<asc_daemon_protocol::GatewayScopeParams>(json!({"scopeId": "scope-1"})),
-        json!({"scopeId": "scope-1"})
-    );
-    assert!(
-        serde_json::from_value::<asc_daemon_protocol::GatewayScopeParams>(
-            json!({"scopeId": "scope-1", "uid": 0})
-        )
-        .is_err()
-    );
+    for params in [
+        json!({"pairid":"pair-1","secret":"dummy"}),
+        json!({"pairid":"pair-1","uid":0}),
+        json!({"credential":"github"}),
+    ] {
+        assert!(
+            serde_json::from_value::<asc_daemon_protocol::GatewayKeyRemoveParams>(params).is_err()
+        );
+    }
+    for retired in ["gateway.key.add", "gateway.credentials"] {
+        assert!(method::resolve(retired).is_none());
+        assert!(method::metadata(retired).is_none());
+        assert!(!method::GATEWAY_METHODS.contains(&retired));
+    }
 }
 
 #[test]

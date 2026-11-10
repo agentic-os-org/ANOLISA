@@ -103,15 +103,19 @@ try:
         environment = os.environ.copy()
         if request.get("refresh", True):
             grant = subprocess.run(
-                [cli, "gateway", "credentials", "--scope", scope_id],
+                [cli, "gateway", "ca"],
                 capture_output=True, text=True, check=False, timeout=30,
             )
             if grant.returncode:
                 print(json.dumps({"returncode": grant.returncode,
                                   "stdout": grant.stdout, "stderr": grant.stderr,
-                                  "stage": "credentials"}), flush=True)
+                                  "stage": "ca"}), flush=True)
                 continue
-            environment.update(json.loads(grant.stdout)["environment"])
+            ca = json.loads(grant.stdout)
+            assert set(ca) == {"caBundlePath"}
+            for variable in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+                             "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
+                environment[variable] = ca["caBundlePath"]
         if request.get("probe"):
             descendant = subprocess.run(
                 ["/usr/bin/python3", "-c",
@@ -491,7 +495,7 @@ def host():
     # Global import/retirement must never modify operator Scopes or an active key.
     assert not status["enabled"] and not status["scopes"], "requires an unused gateway"
     assert gateway(cli, "key", "list") == {
-        "credentials": []
+        "pairids": []
     }, "requires a host without active managed credentials"
     assert pwd.getpwnam(user).pw_uid != 0
     return cli, user
@@ -539,20 +543,86 @@ def upstream(host):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def owner_grant(cli, user, scope_id, check=True):
-    result = command(
-        "runuser",
-        "-u",
-        user,
-        "--",
-        cli,
-        "gateway",
-        "credentials",
-        "--scope",
-        scope_id,
-        check=check,
-    )
+def public_ca(cli, user, check=True):
+    result = command("runuser", "-u", user, "--", cli, "gateway", "ca", check=check)
     return json.loads(result.stdout) if result.returncode == 0 else result
+
+
+def agent_environment(ca, fake):
+    """Only harness-generated fake values enter the Agent; CA has no credential data."""
+    assert set(ca) == {"caBundlePath"}
+    assert Path(ca["caBundlePath"]).is_file()
+    return {
+        "environment": {
+            "GH_TOKEN": fake,
+            "GITHUB_TOKEN": fake,
+            **{
+                variable: ca["caBundlePath"]
+                for variable in (
+                    "SSL_CERT_FILE",
+                    "REQUESTS_CA_BUNDLE",
+                    "CURL_CA_BUNDLE",
+                    "GIT_SSL_CAINFO",
+                )
+            },
+        }
+    }
+
+
+def render_policy(template, real_file, fake_file):
+    """Render raw Cedar with protected daemon-host absolute token-file paths."""
+    source = template.read_text()
+    for annotation, original, path in (
+        ("real_token_file", "/secure/github-real", real_file),
+        ("fake_token_file", "/secure/github-fake", fake_file),
+    ):
+        assert path.is_absolute() and path == path.resolve(strict=True)
+        metadata = path.stat()
+        assert metadata.st_uid == 0 and metadata.st_mode & 0o777 == 0o600
+        assert metadata.st_nlink == 1 and path.is_file()
+        marker = f"@{annotation}({json.dumps(original)})"
+        assert marker in source
+        source = source.replace(marker, f"@{annotation}({json.dumps(str(path))})")
+    return source
+
+
+def pair_id(policy):
+    bindings = policy["credentialBindings"]
+    assert bindings and all(set(item) == {"ruleId", "pairId"} for item in bindings)
+    identifiers = {item["pairId"] for item in bindings}
+    assert len(identifiers) == 1
+    return identifiers.pop()
+
+
+def published_snapshot():
+    """Inspect the actual Rust-to-addon contract, not a copied test plan."""
+    manifest = json.loads((RUNTIME / "active.json").read_text())
+    path = RUNTIME / manifest["secrets"]
+    snapshot = json.loads(path.read_text())
+    assert path.stat().st_uid == 0 and path.stat().st_mode & 0o777 == 0o640
+    assert snapshot["version"] == 2
+    assert snapshot["generation"] == manifest["generation"]
+    assert all(
+        set(entry) == {"fake", "credential", "scopeIds", "real"}
+        for entry in snapshot["entries"]
+    )
+    assert all(set(entry) == {"fake", "credential"} for entry in snapshot["retired"])
+    for listener in manifest["listeners"]:
+        plan = json.loads((RUNTIME / listener["plan"]).read_text())
+        assert plan["format"] == "agent-sec-gateway-plan/v2"
+        assert plan["scopeId"] == listener["scopeId"]
+        assert all(
+            rule["header"] == "Authorization"
+            and rule["format"] in ("auto", "basic")
+            and rule["responseRewrite"] is True
+            for rule in plan["rules"]
+        )
+        encoded = json.dumps(plan)
+        assert all(
+            entry["fake"] not in encoded and entry["real"] not in encoded
+            for entry in snapshot["entries"]
+        )
+    return path, snapshot
 
 
 def wait_bindings(cli, scope_id, pids, timeout=45):
@@ -593,44 +663,60 @@ def delete_scope(cli, scope_id):
 
 
 @contextlib.contextmanager
-def protected_token(cli, user, agents=(AGENT,), foreign_user=None):
-    """Prepares canonical assignments and owner environments before starting workers."""
-    template = Path("/usr/share/anolisa/sec-core/gateway/github-policy.json")
+def protected_token(cli, user, agents=(AGENT,), foreign_user=None, shared_pair=False):
+    """Register private test files through root Policy admission before discovery."""
+    template = Path("/usr/share/anolisa/sec-core/gateway/github.cedar")
     assert template.is_file(), f"installed GitHub policy asset is missing: {template}"
     alphabet = string.ascii_letters + string.digits
     real = "ghp_" + "".join(secrets.choice(alphabet) for _ in range(36))
-    domains, scopes = {}, {}
-    policy = None
-    imported = False
+    domains, scopes, policies = {}, {}, []
     with tempfile.TemporaryDirectory(prefix="asc-gw-workers-", dir="/run") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve(strict=True)
         root.chmod(0o755)
-        secret_file = root / "github.token"
+        secret_file = root / "github-real"
         secret_file.write_text(real + "\n")
         secret_file.chmod(0o600)
         try:
-            outcome = gateway(
-                cli, "key", "add", "github", "--secret-file", str(secret_file)
-            )
-            imported = True
-            assert outcome == {"credential": "github"}
-            assert gateway(cli, "status")["scopes"] == []
-            assert gateway(cli, "key", "list") == {"credentials": ["github"]}
-            policy = cli_json(
-                cli,
-                "policy",
-                "create",
-                "--name",
-                "asc-gateway-e2e",
-                "--language",
-                "json",
-                "--file",
-                str(template),
-            )
             names = (*agents, OTHER_AGENT) if foreign_user else agents
             preparations = {}
             for name in names:
                 owner = foreign_user if foreign_user and name == OTHER_AGENT else user
+                if shared_pair and policies:
+                    policy, fake_file, envelope = preparations[names[0]][2:]
+                else:
+                    fake_file = root / f"{name}-fake"
+                    generated = command(
+                        cli,
+                        "key",
+                        "generate-fake",
+                        "--real-token-file",
+                        str(secret_file),
+                        "--output",
+                        str(fake_file),
+                    )
+                    fake = fake_file.read_text().rstrip("\n")
+                    assert real not in generated.stdout + generated.stderr
+                    assert fake not in generated.stdout + generated.stderr
+                    assert len(fake) == len(real) and fake.startswith("ghp_")
+                    assert sum(a != b for a, b in zip(real, fake)) * 5 >= len(real) * 4
+                    envelope = root / f"{name}-policy.cedar"
+                    envelope.write_text(render_policy(template, secret_file, fake_file))
+                    envelope.chmod(0o644)
+                    policy = cli_json(
+                        cli,
+                        "policy",
+                        "create",
+                        "--name",
+                        f"asc-gateway-e2e-{name}",
+                        "--file",
+                        str(envelope),
+                        "--schema-revision",
+                        "2",
+                    )
+                    policies.append(policy)
+                    encoded = json.dumps(policy)
+                    assert real not in encoded and fake not in encoded
+                    assert pair_id(policy) in gateway(cli, "key", "list")["pairids"]
                 executable = root / name
                 shutil.copyfile(Path(shutil.which("python3")).resolve(), executable)
                 executable.chmod(0o755)
@@ -648,38 +734,57 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None):
                     str(policy["revision"]),
                 )
                 scopes[name] = scope["scopeId"]
-                preparations[name] = (owner, executable)
+                preparations[name] = (owner, executable, policy, fake_file, envelope)
                 assert scope["policySnapshots"] == [policy]
-                # A disabled/unloaded generation cannot provide startup CA/fake config.
-                denied = owner_grant(cli, owner, scope["scopeId"], check=False)
+                denied = public_ca(cli, owner, check=False)
                 assert denied.returncode != 0
                 assert "unavailable" in (denied.stdout + denied.stderr)
                 wait_bindings(cli, scope["scopeId"], [])
             assert gateway(cli, "enable") == {}
             wait_loaded(cli)
-            for name, (owner, executable) in preparations.items():
+            ca = gateway(cli, "ca")
+            for name, preparation in preparations.items():
+                owner, executable, policy, fake_file, envelope = preparation
                 scope_id = scopes[name]
-                grant = owner_grant(cli, owner, scope_id)
-                assert set(grant) == {"scopeId", "environment"}
-                assert grant["scopeId"] == scope_id
-                assert Path(grant["environment"]["GIT_SSL_CAINFO"]).is_file()
-                assert real not in json.dumps(grant)
+                assert public_ca(cli, owner) == ca
+                fake = fake_file.read_text().rstrip("\n")
+                grant = agent_environment(ca, fake)
                 wait_bindings(cli, scope_id, [])
                 domain = Agent(cli, owner, scope_id, executable, grant)
+                domain.policy, domain.envelope = policy, envelope
+                domain.real_file, domain.fake_file = secret_file, fake_file
                 domains[name] = domain
                 wait_bindings(cli, scope_id, [domain.ready["pid"]])
                 for snapshot in (False, True):
                     probe = domain.request(probe=True, refresh=False, snapshot=snapshot)
                     assert "/agentsec.slice/" in probe["cgroup"]
                     assert probe["descendantCgroup"] == probe["cgroup"]
+            _, snapshot = published_snapshot()
+            expected = {}
+            for domain in domains.values():
+                identity = pair_id(domain.policy)
+                entry = expected.setdefault(
+                    identity,
+                    {
+                        "credential": identity,
+                        "real": real,
+                        "fake": domain.fake_file.read_text().rstrip("\n"),
+                        "scopeIds": [],
+                    },
+                )
+                entry["scopeIds"].append(domain.scope_id)
+            for entry in expected.values():
+                entry["scopeIds"].sort()
+            assert sorted(snapshot["entries"], key=lambda item: item["credential"]) == [
+                expected[identity] for identity in sorted(expected)
+            ]
             yield real, domains
         finally:
             # Cleanup every resource even if an earlier cleanup fails.
             with contextlib.ExitStack() as cleanup:
                 cleanup.callback(gateway, cli, "disable")
-                if imported:
-                    cleanup.callback(gateway, cli, "key", "remove", "github")
-                if policy is not None:
+                for policy in policies:
+                    cleanup.callback(gateway, cli, "key", "remove", pair_id(policy))
                     cleanup.callback(
                         cli_json,
                         cli,
@@ -708,9 +813,10 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
     assert nobody.pw_uid not in (0, pwd.getpwnam(user).pw_uid)
     with protected_token(cli, user, foreign_user=nobody.pw_name) as (real, domains):
         agent, foreign = domains[AGENT], domains[OTHER_AGENT]
-        grant = gateway(cli, "credentials", "--scope", agent.scope_id)
-        assert set(grant) == {"scopeId", "environment"}
-        assert grant["scopeId"] == agent.scope_id
+        ca = gateway(cli, "ca")
+        assert set(ca) == {"caBundlePath"}
+        assert public_ca(cli, nobody.pw_name) == ca
+        assert real not in json.dumps(ca) and fake_of(agent) not in json.dumps(ca)
         for snapshot in (False, True):
             probe = agent.request(probe=True, refresh=False, snapshot=snapshot)
             assert "/agentsec.slice/" in probe["cgroup"]
@@ -718,7 +824,9 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
             environment = probe["environment"]
             fake = environment["GITHUB_TOKEN"]
             assert (
-                fake == environment["GH_TOKEN"] == grant["environment"]["GITHUB_TOKEN"]
+                fake
+                == environment["GH_TOKEN"]
+                == agent.fake_file.read_text().rstrip("\n")
             )
             assert fake != real and fake.startswith("ghp_") and len(fake) == len(real)
             assert real not in json.dumps(environment)
@@ -728,16 +836,14 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
                 "CURL_CA_BUNDLE",
                 "GIT_SSL_CAINFO",
             ):
-                assert environment[variable] == grant["environment"][variable]
+                assert environment[variable] == ca["caBundlePath"]
                 assert Path(environment[variable]).is_file()
         before = agent.request(probe=True, refresh=False)["cgroup"]
-        own = agent.execute(
-            [cli, "gateway", "credentials", "--scope", agent.scope_id], refresh=False
-        )
+        own = agent.execute([cli, "gateway", "ca"], refresh=False)
         assert own.returncode == 0, own.stderr
-        assert json.loads(own.stdout) == grant
+        assert json.loads(own.stdout) == ca
         assert agent.request(probe=True, refresh=False)["cgroup"] == before
-        # Ownership, not cgroup membership, authorizes this read-only startup query.
+        # Public CA queries neither require Scope ownership nor move the caller.
         outside = command(
             "runuser",
             "-u",
@@ -751,26 +857,64 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
             "assert before==Path('/proc/self/cgroup').read_text(); sys.exit(p.returncode)",
             cli,
             "gateway",
-            "credentials",
-            "--scope",
-            agent.scope_id,
+            "ca",
         )
-        assert json.loads(outside.stdout) == grant
+        assert json.loads(outside.stdout) == ca
+        rpc_source = (
+            "import json,socket,sys; "
+            "s=socket.socket(socket.AF_UNIX); s.settimeout(10); "
+            "s.connect('/run/agent-sec-core/daemon.sock'); "
+            "s.sendall((sys.argv[1]+'\\n').encode()); "
+            "print(s.makefile().readline()); s.close()"
+        )
+        for method, params, code in (
+            ("gateway.credentials", {"scopeId": agent.scope_id}, "unknown_method"),
+            ("gateway.key.add", {"secretFile": str(agent.real_file)}, "unknown_method"),
+            ("gateway.ca", {"scopeId": agent.scope_id}, "invalid_argument"),
+        ):
+            request = json.dumps({"method": method, "params": params})
+            response = agent.execute(
+                ["python3", "-c", rpc_source, request], refresh=False
+            )
+            assert response.returncode == 0, response.stderr
+            assert json.loads(response.stdout)["error"]["code"] == code
+        snapshot_path, _ = published_snapshot()
+        for path in (agent.real_file, agent.fake_file, snapshot_path):
+            denied = agent.execute(
+                [
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).read_bytes()",
+                    str(path),
+                ],
+                refresh=False,
+            )
+            assert denied.returncode != 0 and "PermissionError" in denied.stderr
         for args in (
             ["gateway", "enable"],
             ["gateway", "disable"],
             ["gateway", "key", "list"],
-            ["gateway", "key", "remove", "github"],
-            ["gateway", "key", "add", "github", "--secret-file", "/does-not-exist"],
+            ["gateway", "key", "remove", pair_id(agent.policy)],
+            [
+                "policy",
+                "create",
+                "--name",
+                "non-root-credential",
+                "--file",
+                str(agent.envelope),
+                "--schema-revision",
+                "2",
+            ],
             ["scope", "delete", "--scope-id", agent.scope_id],
         ):
             denied = agent.execute([cli, *args], refresh=False)
             assert denied.returncode != 0, args
             assert "permission_denied" in (denied.stdout + denied.stderr), args
         for caller, target in ((agent, foreign), (foreign, agent)):
+            public = caller.execute([cli, "gateway", "ca"], refresh=False)
+            assert public.returncode == 0 and json.loads(public.stdout) == ca
             denied = caller.execute(
-                [cli, "gateway", "credentials", "--scope", target.scope_id],
-                refresh=False,
+                [cli, "scope", "delete", "--scope-id", target.scope_id], refresh=False
             )
             assert denied.returncode != 0
             assert "permission_denied" in (denied.stdout + denied.stderr)
@@ -791,6 +935,9 @@ def test_rest_requests_carry_the_real_token_upstream(host, upstream):
     with protected_token(cli, user) as (real, domains):
         agent = domains[AGENT]
         fake = fake_of(agent)
+        assert pwd.getpwnam("nobody").pw_uid != pwd.getpwnam(user).pw_uid
+        # An authenticated non-root peer needs no credential Scope to read public CA.
+        assert public_ca(cli, "nobody") == gateway(cli, "ca")
         for snapshot in (False, True):
             echoed = curl(agent, "https://api.github.com/user", snapshot=snapshot)
             assert seen[-1] == (
@@ -898,11 +1045,12 @@ def test_misused_credentials_are_rejected_before_the_upstream(host, upstream):
             (curl(agent, api, token=real), "real_credential_exposed"),
             (curl(other, api, token=fake), "subject_mismatch"),
         ]
-        # Scope deletion retires only its fake, not the shared real credential.
+        # Distinct explicit pairs may share a real, but not each other's Scope authority.
         delete_scope(cli, agent.scope_id)
         cases.append((curl(other, api, token=fake), "retired_credential"))
-        revoked = agent.request(argv=["true"])
-        assert revoked["returncode"] != 0 and revoked["stage"] == "credentials"
+        public = agent.request(argv=[cli, "gateway", "ca"])
+        assert public["returncode"] == 0
+        assert json.loads(public["stdout"]) == gateway(cli, "ca")
         for snapshot in (False, True):
             probe = agent.request(probe=True, refresh=False, snapshot=snapshot)
             expected = agent.ready["child"]["pid"] if snapshot else agent.ready["pid"]
@@ -916,7 +1064,7 @@ def test_misused_credentials_are_rejected_before_the_upstream(host, upstream):
         echoed = curl(other, api)
         assert seen[-1][4] == f"Bearer {real}"
         assert echoed["authorization"] == f"Bearer {fake_of(other)}"
-        assert gateway(cli, "key", "list") == {"credentials": ["github"]}
+        assert gateway(cli, "key", "list") == {"pairids": [pair_id(other.policy)]}
 
 
 def test_traffic_outside_the_domain_bypasses_the_gateway(host, upstream):
@@ -950,48 +1098,113 @@ def test_traffic_outside_the_domain_bypasses_the_gateway(host, upstream):
 def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, upstream):
     cli, user = host
     seen = upstream["seen"]
-    with protected_token(cli, user, agents=(AGENT, OTHER_AGENT)) as (real, domains):
-        fakes = {name: fake_of(agent) for name, agent in domains.items()}
-        assert len(set(fakes.values())) == 2
-        replacement = "ghp_" + secrets.token_hex(18)
-        assert replacement != real
-        with tempfile.TemporaryDirectory(
-            prefix="asc-gw-reimport-", dir="/run"
-        ) as directory:
-            root = Path(directory)
-            root.chmod(0o755)
-            path = root / "import.token"
-            path.write_text(real)
-            path.chmod(0o600)
-            assert gateway(cli, "key", "add", "github", "--secret-file", str(path)) == {
-                "credential": "github"
-            }
-            path.write_text(replacement)
-            conflict = gateway(
-                cli, "key", "add", "github", "--secret-file", str(path), check=False
+    with protected_token(cli, user, agents=(AGENT, OTHER_AGENT), shared_pair=True) as (
+        real,
+        domains,
+    ):
+        agent = domains[AGENT]
+        fake = fake_of(agent)
+        identity = pair_id(agent.policy)
+        assert {fake_of(domain) for domain in domains.values()} == {fake}
+        policies = []
+        try:
+            # Pair identity follows values, not authoring file paths.
+            root = agent.envelope.parent
+            copied_real, copied_fake = root / "copied-real", root / "copied-fake"
+            for source, target in (
+                (agent.real_file, copied_real),
+                (agent.fake_file, copied_fake),
+            ):
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+            duplicate_envelope = root / "duplicate-policy.cedar"
+            template = Path("/usr/share/anolisa/sec-core/gateway/github.cedar")
+            duplicate_envelope.write_text(
+                render_policy(template, copied_real, copied_fake)
             )
-            assert conflict.returncode != 0
-            assert conflict.stdout == ""
-            assert json.loads(conflict.stderr)["error"]["code"] == "conflict"
-            assert gateway(cli, "key", "list") == {"credentials": ["github"]}
-            # Neither import changes an existing fake or the upstream real value.
-            for name, agent in domains.items():
-                assert fake_of(agent) == fakes[name]
-                for snapshot in (False, True):
-                    echoed = curl(
-                        agent, "https://api.github.com/user", snapshot=snapshot
-                    )
+            duplicate = cli_json(
+                cli,
+                "policy",
+                "create",
+                "--name",
+                "same-pair",
+                "--file",
+                str(duplicate_envelope),
+                "--schema-revision",
+                "2",
+            )
+            policies.append(duplicate)
+            assert pair_id(duplicate) == identity
+            assert gateway(cli, "key", "list") == {"pairids": [identity]}
+            replacement = "ghp_" + "".join(
+                "A" if character != "A" else "B" for character in fake[4:]
+            )
+            assert replacement != real
+            agent.real_file.write_text(replacement + "\n")
+            # Exact source replay consumes its saved binding, not mutated authoring files.
+            replay = cli_json(
+                cli,
+                "policy",
+                "create",
+                "--name",
+                "same-source-replay",
+                "--file",
+                str(agent.envelope),
+                "--schema-revision",
+                "2",
+            )
+            policies.append(replay)
+            assert replay["credentialBindings"] == agent.policy["credentialBindings"]
+            assert pair_id(replay) == identity
+            assert gateway(cli, "key", "list") == {"pairids": [identity]}
+            # A new source forces file import; the same fake cannot bind a new real.
+            conflicting_real = root / "conflicting-real"
+            conflicting_real.write_text(replacement + "\n")
+            conflicting_real.chmod(0o600)
+            conflict_source = root / "conflicting-policy.cedar"
+            conflict_source.write_text(
+                render_policy(template, conflicting_real, agent.fake_file)
+            )
+            conflict = cli_json(
+                cli,
+                "policy",
+                "create",
+                "--name",
+                "conflicting-pair",
+                "--file",
+                str(conflict_source),
+                "--schema-revision",
+                "2",
+                check=False,
+            )
+            assert conflict.returncode != 0 and conflict.stdout == ""
+            assert gateway(cli, "key", "list") == {"pairids": [identity]}
+            assert real not in conflict.stderr and replacement not in conflict.stderr
+            # File mutation cannot alter execution or restart recovery.
+            for unit in (None, DAEMON_UNIT, UNIT):
+                if unit is not None:
+                    command("systemctl", "restart", unit)
+                    wait_loaded(cli)
+                for domain in domains.values():
+                    wait_bindings(cli, domain.scope_id, [domain.ready["pid"]])
+                    assert fake_of(domain) == fake
+                    echoed = curl(domain, "https://api.github.com/user")
                     assert seen[-1][4] == f"Bearer {real}"
-                    assert echoed["authorization"] == f"Bearer {fakes[name]}"
-            assert gateway(cli, "key", "remove", "github") == {"credential": "github"}
-            assert gateway(cli, "key", "list") == {"credentials": []}
-            for name, agent in domains.items():
-                denied = owner_grant(cli, user, agent.scope_id, check=False)
-                assert denied.returncode != 0
-                assert "unavailable" in (denied.stdout + denied.stderr)
+                    assert echoed["authorization"] == f"Bearer {fake}"
+            delete_scope(cli, agent.scope_id)
+            survivor = domains[OTHER_AGENT]
+            assert gateway(cli, "key", "list") == {"pairids": [identity]}
+            assert (
+                curl(survivor, "https://api.github.com/user")["authorization"]
+                == f"Bearer {fake}"
+            )
+            assert seen[-1][4] == f"Bearer {real}"
+            assert gateway(cli, "key", "remove", identity) == {"pairid": identity}
+            assert gateway(cli, "key", "list") == {"pairids": []}
+            for domain in domains.values():
+                # Retirement withdraws routing; retained fakes never become real values.
                 before = len(seen)
-                # Retirement withdraws routing: retained fakes never become real values.
-                direct = agent.execute(
+                direct = domain.execute(
                     [
                         "curl",
                         "-q",
@@ -1004,76 +1217,44 @@ def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, ups
                         str(upstream["ca"]),
                         *resolve_flags(),
                         "-H",
-                        f"Authorization: Bearer {fakes[name]}",
+                        f"Authorization: Bearer {fake}",
                         "https://api.github.com/user",
                     ],
                     refresh=False,
                 )
                 assert direct.returncode == 0, direct.stderr
                 assert seen[before:] == [
-                    ("https", "api.github.com", "GET", "/user", f"Bearer {fakes[name]}")
+                    ("https", "api.github.com", "GET", "/user", f"Bearer {fake}")
                 ]
-                assert (
-                    json.loads(direct.stdout)["authorization"]
-                    == f"Bearer {fakes[name]}"
-                )
-            assert gateway(cli, "key", "add", "github", "--secret-file", str(path)) == {
-                "credential": "github"
-            }
-            assert gateway(cli, "key", "list") == {"credentials": ["github"]}
-            policy = cli_json(
-                cli, "scope", "get", "--scope-id", domains[AGENT].scope_id
-            )["policySnapshots"][0]
-            executable = root / "new-agent"
-            shutil.copyfile(Path(shutil.which("python3")).resolve(), executable)
-            executable.chmod(0o755)
-            scope = cli_json(
+                assert json.loads(direct.stdout)["authorization"] == f"Bearer {fake}"
+            agent.real_file.write_text(real + "\n")
+            retired = cli_json(
                 cli,
-                "scope",
+                "policy",
                 "create",
-                "--executable",
-                str(executable),
-                "--owner-uid",
-                str(pwd.getpwnam(user).pw_uid),
-                "--policy-id",
-                policy["policyId"],
-                "--policy-revision",
-                str(policy["revision"]),
+                "--name",
+                "cannot-resurrect",
+                "--file",
+                str(agent.envelope),
+                "--schema-revision",
+                "2",
+                check=False,
             )
-            new_agent = None
-            try:
-                scope_id = scope["scopeId"]
-                grant = owner_grant(cli, user, scope_id)
-                new_fake = grant["environment"]["GITHUB_TOKEN"]
-                assert new_fake not in {*fakes.values(), real, replacement}
-                new_agent = Agent(cli, user, scope_id, executable, grant)
-                wait_bindings(cli, scope_id, [new_agent.ready["pid"]])
-                for unit in (None, DAEMON_UNIT, UNIT):
-                    if unit is not None:
-                        command("systemctl", "restart", unit)
-                        wait_loaded(cli)
-                        wait_bindings(cli, scope_id, [new_agent.ready["pid"]])
-                    for agent in domains.values():
-                        denied = owner_grant(cli, user, agent.scope_id, check=False)
-                        assert denied.returncode != 0
-                        assert "unavailable" in (denied.stdout + denied.stderr)
-                    assert fake_of(new_agent) == new_fake
-                    before = len(seen)
-                    for fake in fakes.values():
-                        assert curl(
-                            new_agent, "https://api.github.com/user", token=fake
-                        ) == {
-                            "error": "retired_credential",
-                            "source": "agent-sec-gateway",
-                        }
-                    assert len(seen) == before
-                    echoed = curl(new_agent, "https://api.github.com/user")
-                    assert seen[-1][4] == f"Bearer {replacement}"
-                    assert echoed["authorization"] == f"Bearer {new_fake}"
-            finally:
-                if new_agent is not None:
-                    new_agent.close()
-                delete_scope(cli, scope["scopeId"])
+            assert retired.returncode != 0 and retired.stdout == ""
+            assert gateway(cli, "key", "list") == {"pairids": []}
+        finally:
+            with contextlib.ExitStack() as cleanup:
+                for policy in policies:
+                    cleanup.callback(
+                        cli_json,
+                        cli,
+                        "policy",
+                        "delete",
+                        "--policy-id",
+                        policy["policyId"],
+                        "--revision",
+                        str(policy["revision"]),
+                    )
         logs = command("journalctl", "--no-pager", "-u", UNIT, "-u", DAEMON_UNIT).stdout
         assert replacement not in logs
 
@@ -1088,7 +1269,7 @@ def test_multiple_instances_and_restarts_retain_the_scope_fake(host, upstream):
             user,
             first.scope_id,
             first.executable,
-            owner_grant(cli, user, first.scope_id),
+            agent_environment(public_ca(cli, user), fake),
         )
         try:
             wait_bindings(
@@ -1114,7 +1295,7 @@ def test_multiple_instances_and_restarts_retain_the_scope_fake(host, upstream):
                 user,
                 first.scope_id,
                 first.executable,
-                owner_grant(cli, user, first.scope_id),
+                agent_environment(public_ca(cli, user), fake),
             )
             domains[AGENT] = restarted
             assert restarted.ready["pid"] != old_pid
@@ -1131,14 +1312,15 @@ def test_multiple_instances_and_restarts_retain_the_scope_fake(host, upstream):
             second.close()
 
 
-def test_empty_scope_deletion_retires_its_fake_without_removing_real(host, upstream):
+def test_empty_scope_deletion_retires_the_last_shared_pair(host, upstream):
     cli, user = host
-    with protected_token(cli, user) as (real, domains):
-        agent = domains[AGENT]
-        policy = cli_json(cli, "scope", "get", "--scope-id", agent.scope_id)[
-            "policySnapshots"
-        ][0]
-        with tempfile.TemporaryDirectory(prefix="asc-gw-empty-") as directory:
+    with protected_token(cli, user, agents=(AGENT, OTHER_AGENT)) as (real, domains):
+        agent, other = domains[AGENT], domains[OTHER_AGENT]
+        policy = agent.policy
+        fake, identity = fake_of(agent), pair_id(policy)
+        with tempfile.TemporaryDirectory(
+            prefix="asc-gw-empty-", dir="/run"
+        ) as directory:
             empty = cli_json(
                 cli,
                 "scope",
@@ -1155,47 +1337,61 @@ def test_empty_scope_deletion_retires_its_fake_without_removing_real(host, upstr
             try:
                 scope_id = empty["scopeId"]
                 wait_bindings(cli, scope_id, [])
-                grant = owner_grant(cli, user, scope_id)
-                empty_fake = grant["environment"]["GITHUB_TOKEN"]
-                assert empty_fake != fake_of(agent)
-                assert cli_json(cli, "scope", "delete", "--scope-id", scope_id) == {
-                    "scopeId": scope_id,
-                    "completed": True,
-                }
-                wait_status(
-                    cli,
-                    lambda status: scope_id
-                    not in {entry["scopeId"] for entry in status["scopes"]},
-                )
-                assert owner_grant(cli, user, scope_id, check=False).returncode != 0
-                assert gateway(cli, "key", "list") == {"credentials": ["github"]}
+                assert empty["policySnapshots"] == [policy]
+                assert public_ca(cli, user) == gateway(cli, "ca")
+                agent.close()
+                wait_bindings(cli, agent.scope_id, [])
+                # Zero instances do not revoke; the final Active Scope owns retirement.
+                assert identity in gateway(cli, "key", "list")["pairids"]
+                delete_scope(cli, agent.scope_id)
+                assert identity in gateway(cli, "key", "list")["pairids"]
                 before = len(upstream["seen"])
-                assert curl(agent, "https://api.github.com/user", token=empty_fake) == {
-                    "error": "retired_credential",
+                assert curl(other, "https://api.github.com/user", token=fake) == {
+                    "error": "subject_mismatch",
                     "source": "agent-sec-gateway",
                 }
                 assert len(upstream["seen"]) == before
-                assert (
-                    curl(agent, "https://api.github.com/user")["authorization"]
-                    == f"Bearer {fake_of(agent)}"
+                delete_scope(cli, scope_id)
+                assert gateway(cli, "key", "list") == {
+                    "pairids": [pair_id(other.policy)]
+                }
+                for unit in (None, DAEMON_UNIT, UNIT):
+                    if unit is not None:
+                        command("systemctl", "restart", unit)
+                        wait_loaded(cli)
+                        wait_bindings(cli, other.scope_id, [other.ready["pid"]])
+                    _, snapshot = published_snapshot()
+                    assert {"fake": fake, "credential": identity} in snapshot["retired"]
+                    assert all(
+                        entry["credential"] != identity for entry in snapshot["entries"]
+                    )
+                    before = len(upstream["seen"])
+                    assert curl(other, "https://api.github.com/user", token=fake) == {
+                        "error": "retired_credential",
+                        "source": "agent-sec-gateway",
+                    }
+                    assert len(upstream["seen"]) == before
+                    assert (
+                        curl(other, "https://api.github.com/user")["authorization"]
+                        == f"Bearer {fake_of(other)}"
+                    )
+                    assert upstream["seen"][-1][4] == f"Bearer {real}"
+                rejected = cli_json(
+                    cli,
+                    "policy",
+                    "create",
+                    "--name",
+                    "last-scope-retired",
+                    "--file",
+                    str(agent.envelope),
+                    "--schema-revision",
+                    "2",
+                    check=False,
                 )
-                assert upstream["seen"][-1][4] == f"Bearer {real}"
+                assert rejected.returncode != 0 and rejected.stdout == ""
+                assert identity not in gateway(cli, "key", "list")["pairids"]
             finally:
                 delete_scope(cli, empty["scopeId"])
-        fake = fake_of(agent)
-        agent.close()
-        wait_bindings(cli, agent.scope_id, [])
-        # Last-instance exit leaves the assignment's grant intact; deletion owns retirement.
-        assert (
-            owner_grant(cli, user, agent.scope_id)["environment"]["GITHUB_TOKEN"]
-            == fake
-        )
-        delete_scope(cli, agent.scope_id)
-        assert owner_grant(cli, user, agent.scope_id, check=False).returncode != 0
-        inventory = gateway(cli, "key", "list")
-        assert inventory == {"credentials": ["github"]}
-        assert gateway(cli, "status")["scopes"] == []
-        assert real not in json.dumps(inventory)
 
 
 def test_credential_survives_daemon_and_gateway_restarts(host, upstream):
@@ -1204,6 +1400,26 @@ def test_credential_survives_daemon_and_gateway_restarts(host, upstream):
     with protected_token(cli, user) as (real, domains):
         agent = domains[AGENT]
         fake = fake_of(agent)
+        ca = gateway(cli, "ca")
+        try:
+            command("systemctl", "stop", UNIT)
+            wait_status(cli, lambda status: not status["ready"])
+            # An existing public bundle is not proof of live unit/generation readiness.
+            assert Path(ca["caBundlePath"]).is_file()
+            for denied in (
+                gateway(cli, "ca", check=False),
+                public_ca(cli, user, check=False),
+            ):
+                assert denied.returncode != 0
+                assert "unavailable" in denied.stdout + denied.stderr
+            denied = agent.request(argv=["true"])
+            assert denied["returncode"] != 0 and denied["stage"] == "ca"
+        finally:
+            command("systemctl", "start", UNIT)
+            wait_loaded(cli)
+        # Recovery consumes registered pair snapshots, never rereads authoring files.
+        agent.real_file.unlink()
+        agent.fake_file.unlink()
         for unit in (DAEMON_UNIT, UNIT):
             previous = json.loads((RUNTIME / "status" / "health.json").read_text())[
                 "loadedGeneration"
@@ -1212,6 +1428,7 @@ def test_credential_survives_daemon_and_gateway_restarts(host, upstream):
             # Daemon recovery must publish anew, not merely expose the proxy's old health.
             wait_loaded(cli, after_generation=previous if unit == DAEMON_UNIT else None)
             wait_bindings(cli, agent.scope_id, [agent.ready["pid"]])
+            assert public_ca(cli, user) == ca
             assert fake_of(agent) == fake
             echoed = curl(agent, "https://api.github.com/user")
             assert seen[-1][4] == f"Bearer {real}", unit

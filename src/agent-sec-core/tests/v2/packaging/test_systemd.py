@@ -152,7 +152,7 @@ def test_gateway_stages_unit_drop_in_and_data_plane_files(tmp_path):
     assert sorted(path.name for path in datadir.iterdir()) == [
         "asc_gateway_addon.py",
         "asc_gateway_policy.py",
-        "github-policy.json",
+        "github.cedar",
         "install-mitmproxy.sh",
         "mitmproxy.provenance",
     ]

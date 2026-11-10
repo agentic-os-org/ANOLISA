@@ -37,7 +37,7 @@ impl<R: BindingStateRepository> ReconcileAttempt for GatewayAdmission<R> {
             .repository
             .get_binding_state(id)?
             .is_some_and(|record| {
-                record.binding.spec.policy.template.uses_credentials()
+                record.binding.spec.policy.uses_credentials()
                     || record
                         .deployments
                         .iter()
@@ -107,7 +107,7 @@ fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 's
         factories.insert("gateway".into(), factory);
     }
     let adapter = |binding: &PreparedBinding| {
-        if binding.policy.template.uses_credentials() {
+        if binding.policy.uses_credentials() {
             binding.validate().map_err(|_| AdapterFault {
                 code: "GATEWAY_INVALID_BINDING".into(),
             })?;
@@ -136,7 +136,7 @@ fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 's
             },
         )?
         .with_route_selector(|binding| {
-            if binding.policy.template.uses_credentials() {
+            if binding.policy.uses_credentials() {
                 "gateway".into()
             } else {
                 "agentsight".into()
@@ -271,17 +271,29 @@ mod tests {
         .unwrap();
         spec.policy.policy_id = ResourceId::new(format!("policy:{name}")).unwrap();
         if credential {
-            spec.policy.template = asc_policy_types::authoring::PolicySource::SecCore(
-                serde_json::from_value(serde_json::json!({
-                    "specVersion":"0.1", "rules":[{
-                        "effect":"allow", "category":"network", "action":"use_credential",
-                        "target":{"type":"http_request", "credentialId":"github",
-                            "scheme":"https", "host":"api.github.com", "path":"/repos/**",
-                            "methods":["GET"], "responseRewrite":true}
-                    }]
-                }))
-                .unwrap(),
-            );
+            spec.policy.template = serde_json::from_value(serde_json::json!({
+                "language": "cedar",
+                "content": {
+                    "schema": {"schemaId": "seccore.system", "revision": 2},
+                    "text": r#"@id("reconciliation-credential")
+@modify("inject_credential")
+@real_token_file("/secure/github-real")
+@fake_token_file("/secure/github-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when {
+    resource.host == "api.github.com" && context.input.scheme == "https" &&
+    context.input.method == "GET" && context.input.path like "/repos/*"
+};"#
+                }
+            }))
+            .unwrap();
+            spec.policy.credential_bindings = vec![asc_policy_types::policy::CredentialBinding {
+                rule_id: "reconciliation-credential".into(),
+                pair_id: "pair-fixture".into(),
+            }];
         }
         repository.put_policy(&spec.policy).unwrap();
         let scope = repository
@@ -388,7 +400,7 @@ mod tests {
             )
             .unwrap()
             .with_route_selector(|binding| {
-                if binding.policy.template.uses_credentials() {
+                if binding.policy.uses_credentials() {
                     "gateway".into()
                 } else {
                     "agentsight".into()
