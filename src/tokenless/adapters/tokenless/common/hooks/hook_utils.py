@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -609,16 +610,50 @@ def forward_stderr(proc: subprocess.CompletedProcess) -> None:
         warn(proc.stderr.rstrip())
 
 
-def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.CompletedProcess | None:
+def _run_in_group(
+    args: list[str], input_data: str, timeout: int
+) -> subprocess.CompletedProcess:
+    # The rewrite child requires its own group. Its watchdog survives a killed
+    # Hook; if our outer timeout fires first, we must end that entire group.
+    with subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as child:
+        try:
+            stdout, stderr = child.communicate(input_data, timeout=timeout)
+        except BaseException:
+            # communicate has not reaped a timed-out child, so its PID still
+            # reserves the group. Never signal a group after reaping its leader.
+            if child.returncode is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            # An escaped descendant may retain a pipe; reap without awaiting EOF.
+            child.wait()
+            raise
+        return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+
+
+def run(
+    args: list[str], input_data: str, timeout: int = 3, *, isolated: bool = False
+) -> subprocess.CompletedProcess | None:
     """Run a subprocess with input data, returning None on failure."""
     try:
-        proc = subprocess.run(
-            args,
-            input=input_data,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        if isolated:
+            proc = _run_in_group(args, input_data, timeout)
+        else:
+            proc = subprocess.run(
+                args,
+                input=input_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         forward_stderr(proc)
         return proc
     except Exception:
@@ -743,10 +778,18 @@ def run_compress(
     Fail-open: a dead binary, non-zero exit, or malformed stdout all
     return None so the caller passes the original through.
     """
+    # Python already collects the complete response before emitting a Hook
+    # result. On POSIX it can supervise the isolated rewrite directly, avoiding
+    # the CLI's additional relay process. Windows keeps the CLI's job ownership.
+    isolated = os.name == "posix" and expected_operation == "pre_tool"
+    args = [tokenless_bin, "compress"]
+    if isolated:
+        args.append("--rewrite-child")
     proc = run(
-        [tokenless_bin, "compress"],
+        args,
         json.dumps(request, ensure_ascii=False),
         timeout=timeout,
+        isolated=isolated,
     )
     if proc is None or proc.returncode != 0 or not proc.stdout.strip():
         if proc is not None and proc.returncode != 0:
