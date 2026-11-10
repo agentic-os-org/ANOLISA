@@ -166,8 +166,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             )
             .map_err(RunError::Output);
         }
-        // An empty batch means the caller passed a blank --text: nothing to
-        // scan, success, matching the V1 silent exit.
+        // Every input source rejects an empty selection, so the batch always
+        // holds at least one request and each response prints a verdict.
         let mut exit_code = 0;
         for request in &run.requests {
             let response = asc_daemon_client::call(socket, request, cli.timeout())
