@@ -402,13 +402,19 @@ class TestHandlers:
         assert result["success"] is True
         assert "--preview" in mock_cmd.call_args[0][0]
 
-    @pytest.mark.parametrize("preview", ["maybe", 2, {}])
+    @pytest.mark.parametrize("preview", [None, "", "   ", "\t", "maybe", 2, {}])
     def test_rollback_ambiguous_preview_is_rejected(self, preview):
-        with patch("hermes.tools._run_ws_ckpt_cmd") as mock_cmd:
+        with (
+            patch("hermes.tools._resolve_workspace", return_value=("/ws", None)) as mock_workspace,
+            patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None),
+            patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back")) as mock_cmd,
+            patch("hermes.tools.get_manager") as mock_manager,
+        ):
             result = json.loads(handle_ws_ckpt_rollback({"target": "snap1", "preview": preview}))
-        assert result["success"] is False
-        assert "boolean" in result["error"]
+        assert result == {"success": False, "error": "'preview' must be a boolean"}
+        mock_workspace.assert_not_called()
         mock_cmd.assert_not_called()
+        mock_manager.assert_not_called()
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "snap1 created"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)

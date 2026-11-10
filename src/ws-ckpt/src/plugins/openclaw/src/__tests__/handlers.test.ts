@@ -902,6 +902,15 @@ describe("handleRollback — numAncestors", () => {
     expect(r.text).toContain("mutually exclusive");
   });
 
+  it.each(["", "   ", "\t", "true", 0, null])("rejects invalid preview %j before rollback", async (preview) => {
+    mockManager.rollback.mockResolvedValue({ success: true, message: "rolled back" });
+    const result = await handleRollback("snap1", undefined, undefined, preview as unknown as boolean);
+    expect(result).toEqual({ text: "'preview' must be a boolean", isError: true });
+    expect(mockManager.getWorkspacePath).not.toHaveBeenCalled();
+    expect(mockManager.rollback).not.toHaveBeenCalled();
+    expect(promisifiedMock).not.toHaveBeenCalled();
+  });
+
   describe.each([
     { workspace: undefined, preview: false },
     { workspace: undefined, preview: true },

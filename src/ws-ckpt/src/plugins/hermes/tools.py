@@ -704,8 +704,6 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     target = (args.get("target") or "").strip()
     num_ancestors = args.get("num_ancestors")
     preview_arg = args.get("preview", False)
-    if preview_arg is None:
-        preview_arg = False
     if isinstance(preview_arg, str):
         # Tool callers serialize booleans too; an unrecognised spelling must
         # not fall through to False, because False performs the rollback the
@@ -713,7 +711,7 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
         normalized = preview_arg.strip().lower()
         if normalized in ("true", "1", "yes", "on"):
             preview_arg = True
-        elif normalized in ("false", "0", "no", "off", ""):
+        elif normalized in ("false", "0", "no", "off"):
             preview_arg = False
         else:
             return _err("'preview' must be a boolean")
