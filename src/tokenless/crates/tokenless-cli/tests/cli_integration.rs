@@ -2589,6 +2589,85 @@ fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
 }
 
 #[test]
+fn pnpm_post_tool_compacts_layout_and_recovers_progress_through_protocol() {
+    let input =
+        include_str!("../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt");
+    for (recovery, after_tokens) in [
+        (serde_json::json!({"kind": "none"}), 256),
+        (serde_json::json!({"kind": "shell"}), 184),
+        (
+            serde_json::json!({"kind": "tool", "name": "tokenless_retrieve"}),
+            188,
+        ),
+    ] {
+        let fixture = TempDataDir::new().expect("isolated CLI data directory");
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "pnpm-install")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery.clone();
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["before_tokens"], 332);
+        assert_eq!(result["after_tokens"], after_tokens);
+        if recovery["kind"] == "none" {
+            assert_eq!(result["recoverability"], "lossless");
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["build_log_reduction"])
+            );
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+        let retrieve = serde_json::json!({
+            "protocol_version": 2,
+            "operation": "retrieve",
+            "attribution": request["attribution"],
+            "input": {
+                "hash_or_marker": result["stash_keys"][0],
+                "visible_markers": result["stash_keys"],
+            },
+        });
+        let output = spawn_with_stdin(&mut fixture.command(), &["compress"], &retrieve.to_string());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recovered: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            recovered["result"]["payload"],
+            input
+                .split_inclusive('\n')
+                .skip(12)
+                .take(7)
+                .collect::<String>()
+        );
+    }
+}
+
+#[test]
 fn compress_before_model_and_retrieve_operations_are_dispatched() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -3208,6 +3287,23 @@ fn compress_exit_contract_rejects_v1_and_operation_failures() {
     let output = spawn_with_stdin(&mut tokenless_bin(), &["compress"], v1);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
+
+    for version in [1, 3] {
+        let mut request: serde_json::Value = serde_json::from_str(&post_tool_request_json(
+            "original output",
+            false,
+            "version-mismatch",
+        ))
+        .unwrap();
+        request["protocol_version"] = serde_json::json!(version);
+        let output = spawn_with_stdin(&mut tokenless_bin(), &["compress"], &request.to_string());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("unsupported protocol_version {version}"))
+        );
+    }
 
     let unauthorized = serde_json::json!({
         "protocol_version": 2,

@@ -35,7 +35,9 @@ def envelope(request: dict, result: dict) -> None:
     print(
         json.dumps(
             {
-                "protocol_version": 2,
+                "protocol_version": {"old_response": 1, "future_response": 3}.get(
+                    os.environ.get("TOKENLESS_MOCK_BEHAVIOR"), 2
+                ),
                 "operation": request["operation"],
                 "attribution": request["attribution"],
                 "result": result,
@@ -206,6 +208,8 @@ def main() -> int:
         or set(request) != {"protocol_version", "operation", "attribution", "input"}
     ):
         return 3
+    if behavior in {"old_response", "future_response"}:
+        behavior = "applied"
     if request["operation"] == "before_model":
         return respond_before_model(request, behavior)
     if request["operation"] == "pre_tool":

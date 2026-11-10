@@ -399,7 +399,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Rewrites with RTK and submits shell input that runs through `tokenless rtk` when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
@@ -521,6 +521,39 @@ backslash-newline continuations are supported; custom `hooks.transparent_prefixe
 and may still allow wrapped calls to be rewritten. Disabling path sharing retains the built-in protection so complete matches and paths remain
 available for subsequent reads. Mixed or unprofitable native output may therefore remain uncompressed.
 Whole-task savings depend on the workload; smaller search results do not guarantee lower total token use.
+
+### pnpm install output
+
+For recognized raw pnpm output reaching PostTool, BuildLog reports layout compaction
+and progress reduction under the existing `build_log_reduction` label. Both can apply
+to the same result. Layout compaction requires no recovery: it removes only a complete
+recognized update box's borders/padding, an exact count-matched decorative bar after
+`Packages: +/-N`, and repeated dependency-column wording when the whole category becomes smaller.
+It preserves notification text, versions, links and commands; every dependency's
+category, sign, name, version, available version, order and duplicates; package totals,
+`done`, final duration and pnpm version. A missing `available` column means the input
+printed no such annotation, not that the package has no update. This is semantic
+`lossless` compaction, not byte-reversible reconstruction of the original layout.
+
+Only complete LF records are eligible. After existing SGR color cleanup, any non-SGR
+control, CRLF, bare CR or TAB suppresses the new pnpm transformations. The first
+warning, script header or unknown body preserves the entire remaining suffix;
+blank lines or later progress-looking text do not restart parsing. Incomplete boxes,
+unsupported dependency syntax and ambiguous records stay unchanged.
+
+With a supported recovery path and Stash, progress reduction can also omit the middle
+of a run of at least nine consecutive progress records, keeping the first and last
+two. Results containing omissions report `retrievable` under the same operation label.
+Any counter decrease starts a new run; summaries and layout boundaries split runs
+before rendering. Each omission must save characters and estimated tokens
+including its actual recovery instruction. Retrieve restores the omitted SGR-cleaned
+records. With recovery `none` (including OpenClaw and the AW Provider), only cleanup
+and layout are eligible, with no Stash writes. Overall output must still be smaller.
+
+`pnpm install` is not newly exempted from PreTool RTK rewriting; existing ownership,
+status, origin and adapter size gates still apply. This is not universal pnpm-version
+or script-output coverage, nor evidence of whole-task billing savings. The existing
+Protocol v2 [CLI contract](cli-reference.md#compress) remains unchanged.
 
 ### CSV/TSV compaction preserves complete tables
 

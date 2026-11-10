@@ -1,10 +1,9 @@
 //! Build and test log compression for PostTool command output.
 //!
-//! The compressor keeps diagnostics, summaries, phase boundaries, stack
-//! traces, and unknown lines. Only recognized runs of routine progress are
-//! reduced, with every omission backed by an in-place retrieval marker.
+//! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod pnpm;
 mod template;
 mod trace;
 
@@ -30,8 +29,8 @@ const GENERIC_TEMPLATE_MIN_LINES: usize = 9;
 pub enum BuildLogOperation {
     /// ANSI SGR presentation sequences were removed.
     TerminalCleanup,
-    /// Repeated routine progress was replaced by retrievable markers.
-    ProgressReduction,
+    /// Recognized layout or routine progress was reduced under the recovery policy.
+    Reduction,
 }
 
 impl BuildLogOperation {
@@ -40,7 +39,7 @@ impl BuildLogOperation {
     pub fn id(self) -> &'static str {
         match self {
             Self::TerminalCleanup => "terminal-cleanup",
-            Self::ProgressReduction => "build-log-progress-reduction",
+            Self::Reduction => "build-log-reduction",
         }
     }
 }
@@ -98,39 +97,59 @@ impl BuildLogCompressor {
     ) -> BuildLogOutcome {
         let cleaned = clean_terminal(input);
         let cleanup_changed = cleaned != input;
-        let cleanup_operations = cleanup_changed
+        let mut lossless_operations = cleanup_changed
             .then_some(BuildLogOperation::TerminalCleanup)
             .into_iter()
             .collect::<Vec<_>>();
-
-        let Some(store) = stash.filter(|_| recovery.is_available()) else {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
-        };
+        let store = stash.filter(|_| recovery.is_available());
         let Some(format) = detect_format(&cleaned) else {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
+            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
+        if format != BuildLogFormat::Pnpm && store.is_none() {
+            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
+        }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
         let stripped = lines
             .iter()
             .map(|line| line.trim_end_matches('\n').to_owned())
             .collect::<Vec<_>>();
-        let generic_templates = dominant_generic_templates(format, &stripped);
-        let mut roles = stripped
-            .iter()
-            .map(|line| classify(line, format, &generic_templates))
-            .collect::<Vec<_>>();
+        let (mut roles, run_starts, mut layouts) = if format == BuildLogFormat::Pnpm {
+            let plan = pnpm::plan(&lines);
+            (plan.roles, plan.run_starts, plan.layouts)
+        } else {
+            let templates = dominant_generic_templates(format, &stripped);
+            (
+                stripped
+                    .iter()
+                    .map(|line| classify(line, format, &templates))
+                    .collect::<Vec<_>>(),
+                HashSet::new(),
+                Vec::new(),
+            )
+        };
         for region in trace_regions(&stripped) {
             for role in &mut roles[region] {
                 *role = LineRole::Diagnostic;
             }
         }
-
-        let Some(plans) = omission_plans(&lines, &roles, recovery) else {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
+        layouts.retain(|edit| !roles[edit.start..edit.end].contains(&LineRole::Diagnostic));
+        let layout_output = render_reduced(&lines, &[], &[], recovery, &layouts);
+        let lossless = if saves_both(&cleaned, &layout_output) {
+            lossless_operations.push(BuildLogOperation::Reduction);
+            layout_output
+        } else {
+            layouts.clear();
+            cleaned.clone()
+        };
+        let Some(store) = store else {
+            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
+        };
+        let Some(plans) = omission_plans(&lines, &roles, &run_starts, recovery) else {
+            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         };
         if plans.is_empty() {
-            return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
+            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         }
 
         let mut writes = Vec::with_capacity(plans.len());
@@ -149,16 +168,18 @@ impl BuildLogCompressor {
             }
         }
         if stash_errors > 0 {
-            return lossless_outcome(cleaned, cleanup_operations, writes, stash_errors);
+            return lossless_outcome(lossless, lossless_operations, writes, stash_errors);
         }
 
-        let reduced = render_reduced(&lines, &plans, &keys, recovery);
-        if !saves_both(&cleaned, &reduced) {
-            return lossless_outcome(cleaned, cleanup_operations, writes, 0);
+        let reduced = render_reduced(&lines, &plans, &keys, recovery, &layouts);
+        if !saves_both(&lossless, &reduced) {
+            return lossless_outcome(lossless, lossless_operations, writes, 0);
         }
 
-        let mut operations = cleanup_operations;
-        operations.push(BuildLogOperation::ProgressReduction);
+        let mut operations = lossless_operations;
+        if !operations.contains(&BuildLogOperation::Reduction) {
+            operations.push(BuildLogOperation::Reduction);
+        }
         let omitted_lines = plans.iter().map(|plan| plan.end - plan.start).sum();
         BuildLogOutcome {
             output: reduced,
@@ -207,6 +228,7 @@ fn saves_both(original: &str, candidate: &str) -> bool {
 fn omission_plans(
     lines: &[&str],
     roles: &[LineRole],
+    run_starts: &HashSet<usize>,
     recovery: &RecoveryMethod,
 ) -> Option<Vec<OmissionPlan>> {
     let mut plans = Vec::new();
@@ -217,7 +239,10 @@ fn omission_plans(
             continue;
         };
         let mut end = index + 1;
-        while end < roles.len() && roles[end] == LineRole::Routine(family) {
+        while end < roles.len()
+            && roles[end] == LineRole::Routine(family)
+            && !run_starts.contains(&end)
+        {
             end += 1;
         }
         if end - index >= MIN_ROUTINE_RUN_LINES {
@@ -252,20 +277,35 @@ fn render_reduced(
     plans: &[OmissionPlan],
     keys: &[String],
     recovery: &RecoveryMethod,
+    layouts: &[pnpm::LayoutEdit],
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0;
-    for (plan, key) in plans.iter().zip(keys) {
-        output.push_str(&lines[cursor..plan.start].concat());
-        output.push_str(&render_marker(
-            plan.family,
-            plan.end - plan.start,
-            key,
-            recovery,
-        ));
-        cursor = plan.end;
+    let mut omissions = plans.iter().zip(keys).peekable();
+    let mut layouts = layouts.iter().peekable();
+    while cursor < lines.len() {
+        if let Some((plan, key)) = omissions.peek()
+            && plan.start == cursor
+        {
+            output.push_str(&render_marker(
+                plan.family,
+                plan.end - plan.start,
+                key,
+                recovery,
+            ));
+            cursor = plan.end;
+            omissions.next();
+        } else if let Some(layout) = layouts.peek()
+            && layout.start == cursor
+        {
+            output.push_str(&layout.replacement);
+            cursor = layout.end;
+            layouts.next();
+        } else {
+            output.push_str(lines[cursor]);
+            cursor += 1;
+        }
     }
-    output.push_str(&lines[cursor..].concat());
     output
 }
 
@@ -284,6 +324,9 @@ fn render_marker(
 
 fn detect_format(input: &str) -> Option<BuildLogFormat> {
     let sample = sample_lines(input);
+    if pnpm::detect(&sample) {
+        return Some(BuildLogFormat::Pnpm);
+    }
     let formats = [
         BuildLogFormat::Cargo,
         BuildLogFormat::Pytest,
@@ -356,27 +399,37 @@ fn sample_lines(input: &str) -> Vec<String> {
     let mut sampled = Vec::new();
     let mut seen = HashSet::new();
     let mut head_bytes = 0;
+    let mut head_end = 0;
     for line in input.lines().take(SAMPLE_LINES_PER_END) {
         if head_bytes + line.len() > SAMPLE_BYTES_PER_END {
             break;
         }
         head_bytes += line.len();
+        head_end = line.as_ptr() as usize - input.as_ptr() as usize + line.len();
         seen.insert((line.as_ptr() as usize, line.len()));
         sampled.push(clean_terminal(line));
     }
 
     let mut tail = Vec::new();
     let mut tail_bytes = 0;
+    let mut tail_start = None;
     for line in input.lines().rev().take(SAMPLE_LINES_PER_END) {
         if tail_bytes + line.len() > SAMPLE_BYTES_PER_END {
             break;
         }
         tail_bytes += line.len();
         if !seen.contains(&(line.as_ptr() as usize, line.len())) {
+            tail_start = Some(line.as_ptr() as usize - input.as_ptr() as usize);
             tail.push(clean_terminal(line));
         }
     }
     tail.reverse();
+    if !sampled.is_empty()
+        && tail_start.is_some_and(|start| !matches!(&input[head_end..start], "\n" | "\r\n"))
+    {
+        // Multi-line detectors must not join separated sampling windows.
+        sampled.push("\0".into());
+    }
     sampled.extend(tail);
     sampled
 }
@@ -385,4 +438,10 @@ fn sample_lines(input: &str) -> Vec<String> {
 mod tests {
     use super::*;
     include!("tests/build_log_tests.rs");
+}
+
+#[cfg(test)]
+mod pnpm_tests {
+    use super::*;
+    include!("tests/pnpm_tests.rs");
 }

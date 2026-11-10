@@ -131,6 +131,8 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             AppliedOperation("build_log_reduction"),
             AppliedOperation.BUILD_LOG_REDUCTION,
         )
+        with self.assertRaises(ValueError):
+            AppliedOperation("unknown_operation")
 
     async def test_before_model_compresses_schema_and_scopes_retrieve(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
@@ -623,6 +625,77 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(json.loads(restored.payload), records)
+
+    async def test_pnpm_layout_compaction_preserves_dependency_rows_without_recovery(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        # Synthetic dependency list: repeated rows and removals must retain their order.
+        rows = [
+            ("+", "@types/node", "25.9.9", "26.6.6"),
+            ("+", "typescript", "5.9.3", "7.0.2"),
+            ("-", "vitest", "3.2.7", "5.1.0"),
+            ("+", "typescript", "5.9.3", "7.0.2"),
+            ("+", "esbuild", "0.28.2", None),
+        ]
+        original = "devDependencies:\n" + "".join(
+            f"{sign} {name} {version}"
+            + (f" ({available} is available)" if available else "")
+            + "\n"
+            for sign, name, version, available in rows
+        ) + "\nDone in 13.8s using pnpm v10.33.4\n"
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="shell",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.COMMAND_OUTPUT,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(True, RecoveryMethod(), True),
+                attribution=Attribution("sdk-agent", "sdk-session", "pnpm-layout"),
+            )
+        )
+        self.assertEqual(result.disposition.value, "applied")
+        self.assertEqual(result.content_type, ContentType.BUILD_LOG)
+        self.assertEqual(result.applied_operations, (AppliedOperation.BUILD_LOG_REDUCTION,))
+        self.assertEqual(result.recoverability.value, "lossless")
+        self.assertEqual(result.stash_keys, ())
+        self.assertLess(len(result.output), len(original))
+        self.assertLess(result.after_tokens, result.before_tokens)
+        self.assertEqual(
+            result.output,
+            "devDependencies (version; available):\n" + "".join(
+                f"{sign} {name} {version}" + (f"; {available}" if available else "") + "\n"
+                for sign, name, version, available in rows
+            ) + "\nDone in 13.8s using pnpm v10.33.4\n",
+        )
+
+    async def test_post_tool_rejects_unknown_applied_operations(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="shell",
+            content="original output",
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.COMMAND_OUTPUT,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(True, RecoveryMethod(), True),
+            attribution=Attribution("sdk-agent", "sdk-session", "unknown-operation"),
+        )
+        with patch.object(sdk, "runtime") as runtime:
+            runtime._post_tool_json.return_value = json.dumps({
+                "output": "compact",
+                "disposition": "applied",
+                "content_type": "build_log",
+                "applied_operations": ["build_log_reduction", "unknown_operation"],
+                "recoverability": "lossless",
+                "before_tokens": 20,
+                "after_tokens": 2,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+            })
+            with self.assertRaisesRegex(ValueError, "unknown_operation"):
+                await sdk.post_tool(request)
+            runtime._post_tool_json.assert_called_once()
 
     async def test_search_path_sharing_exposes_the_typed_operation(self) -> None:
         sdk = self.sdk(rtk_enabled=False)

@@ -35,17 +35,18 @@ writeFileSync(
     '  const request = JSON.parse(input);\n' +
     '  appendFileSync(process.env.TOKENLESS_TEST_LOG, JSON.stringify({ argv: process.argv.slice(2), dataDir: process.env.TOKENLESS_DATA_DIR, statsDb: process.env.TOKENLESS_STATS_DB, stashDb: process.env.TOKENLESS_STASH_DB, request }) + "\\n");\n' +
     '  const mode = process.env.TOKENLESS_TEST_MODE;\n' +
+    '  if (request.protocol_version !== 2) process.exit(2);\n' +
     '  if (mode === "fail") process.exit(7);\n' +
     '  if (mode === "timeout") { setTimeout(() => {}, 10000); return; }\n' +
     '  if (mode === "invalid") { process.stdout.write("{"); return; }\n' +
     '  const result = request.operation === "pre_tool"\n' +
     '    ? { arguments: { ...request.input.arguments, command: "tokenless rtk git status" }, action: "block_and_suggest", output_optimization: "rtk" }\n' +
-    '    : mode === "applied"\n' +
+    '    : ["applied", "wrong-version", "future-version"].includes(mode)\n' +
     '    ? { output: "{\\"ok\\":true}", disposition: "applied" }\n' +
     '    : mode === "tool-error"\n' +
     '      ? { output: request.input.content, disposition: "tool_error", additional_context: "Install the missing dependency and retry." }\n' +
     '      : { output: request.input.content, disposition: "passthrough" };\n' +
-    '  process.stdout.write(JSON.stringify({ protocol_version: mode === "wrong-version" ? 1 : 2, operation: mode === "wrong-operation" ? "invalid" : request.operation, attribution: request.attribution, result }));\n' +
+    '  process.stdout.write(JSON.stringify({ protocol_version: mode === "wrong-version" ? 1 : mode === "future-version" ? 3 : 2, operation: mode === "wrong-operation" ? "invalid" : request.operation, attribution: request.attribution, result }));\n' +
     '});\n',
 )
 chmodSync(binary, 0o755)
@@ -675,13 +676,18 @@ assert.equal(disabledFailure.additionalContexts.length, 1)
 async function failOpen(mode, callback = listener) {
   process.env.TOKENLESS_TEST_MODE = mode
   clearRequests()
-  const decision = { kind: 'accept', content: success().content }
-  const actual = await callback(exec, success(), async () => decision)
+  const original = success()
+  const snapshot = structuredClone(original)
+  const decision = { kind: 'accept', content: original.content }
+  const actual = await callback(exec, original, async () => decision)
   assert.strictEqual(actual, decision)
+  assert.deepEqual(original, snapshot)
+  assert.deepEqual(decision.content, snapshot.content)
 }
 await failOpen('fail')
 await failOpen('invalid')
 await failOpen('wrong-version')
+await failOpen('future-version')
 await failOpen('wrong-operation')
 const timeoutListener = register({ tokenlessBin: binary, timeoutMs: 20 })
 await failOpen('timeout', timeoutListener)

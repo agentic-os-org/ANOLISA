@@ -504,7 +504,7 @@ pub enum AppliedOperation {
     SchemaCompression,
     /// ANSI SGR presentation sequences were removed from a build log.
     TerminalCleanup,
-    /// Repeated build/test progress was reduced behind retrieval markers.
+    /// Reduced build-log layout or progress; [`PostToolResponse::recoverability`] states recovery guarantees.
     BuildLogReduction,
     /// CSV/TSV quoting and record terminators changed with all cells retained.
     TabularCompaction,

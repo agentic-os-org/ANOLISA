@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给六个领域之一：JSON、Build Log、Tabular、Search Results 路径共享与 HTML 页面转写默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器只处理成功的 `command_output`，先清理终端控制输出，再对已识别构建与测试日志中的重复常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略。这两个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给六个领域之一：JSON、Build Log、Tabular、Search Results 路径共享与 HTML 页面转写默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功的 `command_output` 或 `file_read`，沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略。这两个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。
 
 ## 二、压缩规则与保留约定
 
@@ -56,27 +56,53 @@ compress_value(value, depth)
 
 ### Build Log 领域
 
-`BuildLogCompressor` 识别 Cargo/rustc、pytest、unittest/Django、npm/Jest、Go、Make/C，以及具有明确 Shell
-边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各 100 行、总计最多 64 KiB；
-证据不足时直接透传，避免把普通 prose、源码或未知日志误判为 Build Log。
+`BuildLogCompressor` 识别 Cargo/rustc、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C，
+以及具有明确 Shell 边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各 100 行、
+每端最多 32 KiB，不依赖请求中的 command；证据不足时透传。pnpm 需要完整完成行加配套进度、
+完整通知或依赖区段，或者至少三条完整进度加 `Packages:` 行；孤立关键词、加号或框线不足以识别。
 
-处理先生成无损 Terminal Cleanup Candidate；有可用 Stash 且格式证据充分时，继续在清理后
-文本上生成 Progress Reduction Candidate，再选择更小的合法结果。压缩器按方言把每行分类为
-Diagnostic、Summary、Phase、Routine Progress 或 Unknown，并使用 Python、JavaScript、Java、
-Rust、Go 和 .NET Stack Trace 状态机保护完整异常区间。只有同一 Progress Family 连续至少 9
-行时才考虑缩减：保留前 2 行和后 2 行，中间每个连续遗漏区间写入一个 Stash Entry 并插入
-Retrieve Marker。Diagnostic、Summary、Phase、Unknown 和 Stack Trace 原样保留。
+处理沿用 SGR 颜色清理，然后在原始行坐标上规划互不重叠的布局替换与进度省略，一次渲染。
+布局压紧和进度缩减可同时生效，共用现有 `build_log_reduction` 标签，每次结果只报告一次。
+操作与恢复等级分别记录：
 
-方言规则只吸收可从原生输出可靠识别的语义，例如 Cargo 编译及成功测试进度、pytest verbose
-及 quiet 进度，以及 unittest/Django verbose 输出中以 `... ok` 结束的单行测试记录。
-unittest/Django 的失败、错误、跳过、预期失败和意外成功记录、最终测试汇总、数据库准备输出
-及带多行描述的测试记录完整保留。npm Warning、Make 目录边界和非普通测试结果仍保持可见；压缩器不会为了获得
-结构化输出而修改命令参数，也不采用固定行数截断。
+| 操作 | 内容 | 恢复要求 |
+|---|---|---|
+| `terminal_cleanup` | 清理已有契约允许的 SGR 颜色序列 | `lossless`，无需 Stash |
+| `build_log_reduction` | pnpm 已识别通知、依赖清单和装饰条的布局压紧，以及连续常规进度中间部分的省略 | 仅布局为语义 `lossless`，无需 Stash/恢复提示，不保证全文字节可逆；包含进度省略时为 `retrievable`，要求 Stash 与恢复路径均可用 |
 
-单个日志出现超过 8 个遗漏区间时，压缩器在写 Stash 前放弃 Reduction Candidate，防止输出被
-过多 Marker 切碎。每个区间还必须同时减少字符和估算 Token；无可用 Stash 时只允许 Terminal
-Cleanup。Runtime 最后仍只执行一次全局字符/Token 仲裁和一次 Stash Commit/Rollback。Tool Error
-不进入内容压缩 Pipeline，Core 保留原始工具输出并追加环境诊断信息。
+pnpm 只处理完整 LF 记录。CRLF、裸 CR、TAB、OSC、光标控制或残缺 ESC 会停用 pnpm 新转换，
+只保留既有 SGR cleanup-only 行为。进度和依赖行必须位于原始顶层列；不把脚本、引用、代码围栏
+或 Trace 中看似进度的文本提升为 pnpm 记录。扫描遇到警告、脚本头或未知正文后，保留从该处
+到结尾的完整后缀（仍沿用 SGR 清理），不靠空行或后续进度文本恢复解析。
+
+- 只拆完整、已识别的七行更新通知模板，保留三行正文及版本、链接、命令和内部空格。
+  缺边框、嵌套或额外正文不拆；内部行宽不齐本身不使模板无效。
+- 只删除原始相邻 `Packages: +N`/`Packages: -N` 后恰好 N 个同号字符的完整条形图；
+  数量、正负号保留，孤立、混合、缩放或数量不符的条形图不删。
+- `dependencies`、`devDependencies`、`optionalDependencies` 在类别内共享 `version; available`
+  列说明，保留全部包名、版本、可升级版本、正负号、顺序和重复项。无第二列仅表示原文未打印
+  available 注释。只接受完整包名/版本行；别名、路径依赖、未知注释或异常续行使整个类别保持原样。
+  类别须明确结束，且完整替换同时减少字符与估算 Token 才采用。
+
+同一 Progress Family 连续至少 9 行时才考虑缩减：保留前 2 行和后 2 行，中间每个遗漏区间
+写入一个 Stash Entry 并插入真实恢复路径的 Marker。pnpm 四个计数中任一个回退都会开启新段；
+`done`、包总数、通知、依赖类别和其他边界分隔进度，先按原始相邻关系分段，不因拆框或删条拼接。
+`done`、包总数、最终耗时和 pnpm 版本保持可见。省略正文可逐字恢复为 SGR 清理后的进度记录。
+
+其他方言仍保护 Diagnostic、Summary、Phase、Unknown 以及 Python、JavaScript、Java、Rust、Go
+和 .NET Stack Trace。Cargo 编译及成功测试进度、pytest verbose/quiet 进度、unittest/Django
+以 `... ok` 结束的单行测试记录可缩减；失败、跳过、测试汇总、数据库准备、多行描述、npm Warning
+与 Make 目录边界保持可见。不会为了压缩而修改命令参数或宿主成功/失败状态。
+
+超过 8 个遗漏区间时，在写 Stash 前放弃进度省略。每个区间计入真实恢复提示后必须同时减少字符
+与估算 Token，不用布局收益补贴省略开销。无 Stash 或 `recovery: none` 时仍可返回布局候选且零写入。
+省略不划算或写入失败时，压缩器返回布局候选及全部 tentative writes/错误计数；但 Runtime 入口
+仍将 Stash 错误提升为操作错误，宿主可能保留原输出，不能宣称此时布局已生效。
+Runtime 只执行一次全局字符/Token 仲裁和 Stash Commit/Rollback，保留 dry-run、时限与归属保护。
+Tool Error 不进入内容压缩 Pipeline，Core 保留原始工具输出并追加环境诊断信息。
+
+两种转换内部统一为 `BuildLogOperation::Reduction`，映射到现有 `AppliedOperation::BuildLogReduction`。
+Wire 保持 Protocol v2，不新增 SDK 枚举；标签简化不改变算法、`done` 边界或 Stash key。
 
 为避免两个组件依次改写同一输出，PreTool 对明确的 Cargo、pytest、npm/Jest、Go 和 Make
 构建/测试命令直接返回 `passthrough` 与 `output_optimization: "none"`，不调用 RTK；其原生输出
@@ -87,7 +113,8 @@ Core 才恢复原命令并继续原有管线；Token 估算持平不代表
 内容未变。已有改写、回执缺失或过期、旧版 RTK 及状态失败均保留旁路。原命令用于保留本地
 HTML 等文件来源保护；命令匹配可防止重试失效操作失败时误用旧回执。目前 PreTool 没有声明
 宿主 PostTool 替换与恢复能力，因此这项命令所有权选择对所有宿主一致；无法应用 Build Log
-缩减的宿主可能暂时原样接收这些命令的输出。
+缩减的宿主可能暂时原样接收这些命令的输出。`pnpm install` 不在本轮新增原生命令豁免范围，
+仍可能被 RTK 改写；pnpm 能力只处理按既有归属规则实际进入 PostTool 的原始内容。
 
 ## 四、集成路径
 
@@ -165,7 +192,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | ContentType | 前提 | 领域处理 | 默认 |
 |------|------|------|------|
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：Record Reduction、截断、Compact JSON 与可选 TOON | 启用 |
-| `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
+| `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：SGR Cleanup、pnpm 无需恢复的布局压紧、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
 | `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭 |

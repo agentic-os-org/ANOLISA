@@ -45,7 +45,7 @@ for the remaining host restrictions.
 |---|---|---|
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
 | Content-aware response compression | workload-dependent | Routes successful JSON through `JsonCompressor`; complete candidates retain all fields and empty values; those saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
-| Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, unittest/Django, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
+| Build-log compression | workload-dependent | Cleans SGR colors and reduces retrievable routine progress in recognized Cargo, pytest, unittest/Django, npm/Jest, pnpm, Go, Make/C, and generic command logs; pnpm also compacts recognized notification, dependency-list and decorative-bar layouts without recovery, retaining all task-relevant facts |
 | Search path sharing | workload-dependent | Enabled by default: API search records and recognized native shell searches share consecutive paths; pure path lists from commands or APIs share a directory prefix, retaining every received path and byte. File reads skip the path-list strategy. Disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` |
 | Git Diff context cropping | workload-dependent | Enabled by default; disable with `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` or SDK `diff_compression_enabled=False`; preserves all changed lines, reduces context per hunk, and provides original recovery. Stable whole-Agent token savings have not been established |
 | HTML page rendering | workload-dependent | Enabled by default: renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; file reads pass through |
@@ -66,6 +66,16 @@ for the remaining host restrictions.
 | DeepSeek Harness plugin | — | RTK retry suggestions ✅, Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
+
+pnpm layout compaction retains notification text, all dependency facts, package counts
+and completion information without recovery; only omitted progress needs Stash/retrieve.
+Warnings, scripts and unknown text stop pnpm parsing for the remaining suffix.
+This does not exempt `pnpm install` from PreTool RTK rewriting: it applies only to raw
+output reaching PostTool under the existing ownership rules. See
+[pnpm install output](../../docs/user-guide/en/tokenless/index.md#pnpm-install-output).
+Layout compaction and progress reduction can coexist and share the existing
+`build_log_reduction` label; `recoverability` distinguishes `lossless` layout-only
+output from `retrievable` omissions. Protocol v2 and SDK enums remain unchanged.
 
 The schema, response, and TOON figures above are isolated results on the
 repository's committed reference fixtures; they are neither a
