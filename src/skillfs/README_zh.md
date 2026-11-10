@@ -259,7 +259,9 @@ Linux 上直接检查 `PATH` 中的可执行文件，无需额外安装 `which`�
 
 - 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的
   `python -m pip` 调用以及带 `--user` 的安装命令，因为 uv 不支持用户目录安装。
-  独立调用使用保守的命令位置启发式判断，不是完整的 shell 语法解析；未结束的
+  挂载环境或同一行调用前的文本中出现 `PIP_USER` 时，以及使用 `--root` 等已知
+  pip 专属选项时，也保留 pip，详见[用户手册](../../docs/user-guide/zh/skillfs/index.md#读时转换)。
+  独立调用使用保守的命令位置启发式判断；未结束的
   参数（包括续行和命令替换）保持原样。文件描述符重定向不会终止参数检查。
   列表或散文中的行内代码片段单独处理；命令后的括号说明不会阻止改写。
 - `python -m venv` -> `uv venv`

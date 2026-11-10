@@ -326,7 +326,12 @@ fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> Str
         // Each line keeps its own terminator, so a file whose lines are not
         // rewritten comes back byte-identical (CRLF sources included).
         let (body, terminator) = split_line_terminator(line);
-        output.push_str(&normalize_line(body, has_uv, &node_pm));
+        output.push_str(&normalize_line(
+            body,
+            has_uv,
+            &node_pm,
+            env.has_env("PIP_USER"),
+        ));
         output.push_str(terminator);
     }
 
@@ -716,10 +721,35 @@ fn inline_code_delimiter(prefix: &str) -> Option<usize> {
     delimiter
 }
 
-// uv has no user-site installation mode. Inspect only this invocation's
-// arguments, preserving quoting and command boundaries in the output. An
-// unfinished token can continue on the next line, so leave it to pip as well.
+// These pip options either fail in uv or request behavior uv cannot preserve.
+// Match the whole option name, including its --option=value spelling.
+fn pip_option_requires_pip(word: &str) -> bool {
+    let option = word.split_once('=').map_or(word, |(name, _)| name);
+    matches!(
+        option,
+        "--user"
+            | "--root"
+            | "--report"
+            | "--platform"
+            | "--implementation"
+            | "--abi"
+            | "--upgrade-strategy"
+    )
+}
+
+// Inspect only this invocation's arguments, preserving quoting and command
+// boundaries in the output. An unfinished token can continue on the next line,
+// so leave it to pip as well.
 fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
+    // uv ignores PIP_USER. Keep pip whenever the preceding shell text mentions
+    // it, including assignments, exports and wrapper arguments. Evaluating
+    // values, overrides and conditional shell state is beyond this heuristic.
+    if prefix
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .any(|word| word == "PIP_USER")
+    {
+        return false;
+    }
     let mut word = String::new();
     let mut quote = None;
     let mut escaped = false;
@@ -742,8 +772,8 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
         } else {
             match ch {
                 '\'' | '"' => quote = Some(ch),
-                ';' | '|' | ')' => return word != "--user",
-                '&' if chars.peek() != Some(&'>') => return word != "--user",
+                ';' | '|' | ')' => return !pip_option_requires_pip(&word),
+                '&' if chars.peek() != Some(&'>') => return !pip_option_requires_pip(&word),
                 '#' if word.is_empty() => return true,
                 '`' => {
                     let mut length = 1;
@@ -752,14 +782,14 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
                         length += 1;
                     }
                     // Stop at this span, not at a later span or trailing prose.
-                    return word != "--user" && inline_delimiter == Some(length);
+                    return !pip_option_requires_pip(&word) && inline_delimiter == Some(length);
                 }
                 // Bare parentheses delimit prose; substitutions can supply
                 // unknown arguments and must retain the original installer.
                 '$' if chars.peek() == Some(&'(') => return false,
-                '(' => return word != "--user",
+                '(' => return !pip_option_requires_pip(&word),
                 '<' | '>' => {
-                    if word == "--user" || chars.peek() == Some(&'(') {
+                    if pip_option_requires_pip(&word) || chars.peek() == Some(&'(') {
                         return false;
                     }
                     word.clear();
@@ -770,7 +800,7 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
                     }
                 }
                 ch if ch.is_whitespace() || ch == '&' => {
-                    if word == "--user" {
+                    if pip_option_requires_pip(&word) {
                         return false;
                     }
                     word.clear();
@@ -779,7 +809,7 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
             }
         }
     }
-    !escaped && quote.is_none() && word != "--user"
+    !escaped && quote.is_none() && !pip_option_requires_pip(&word)
 }
 
 /// Normalize `python -m venv` / `python3 -m venv` without changing prose or
@@ -802,13 +832,15 @@ fn rewrite_python_venv_invocations(line: &str) -> String {
 }
 
 /// Apply heuristic substitutions to a single line.
-fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
+fn normalize_line(line: &str, has_uv: bool, node_pm: &str, has_pip_user: bool) -> String {
     let mut result = line.to_string();
 
     if has_uv {
         // Preserve `python -m pip`: uv availability does not imply that
         // the selected interpreter can import the uv Python module.
-        result = rewrite_pip_install_invocations(&result);
+        if !has_pip_user {
+            result = rewrite_pip_install_invocations(&result);
+        }
 
         // python -m venv / python3 -m venv → uv venv — only when it is the
         // command being invoked, like the virtualenv form below.
@@ -1315,6 +1347,125 @@ Run: pip install requests
         );
         assert_eq!(compile(content, &env), content);
         assert_eq!(compile(content, &env_linux_no_uv()), content);
+    }
+
+    #[test]
+    fn test_heuristic_pip_preserves_pip_user_prefixes() {
+        let env = env_darwin_uv();
+        let pipeline = crate::transform::TransformPipeline::directive_only(env.clone());
+        for input in [
+            "PIP_USER=1 pip install requests\n",
+            "PIP_USER='true' pip3 install requests\r\n",
+            "PIP_USER=$INSTALL_USER pip install requests",
+            "env PIP_USER=1 timeout 30 pip install requests\n",
+            "env 'PIP_USER=1' pip install requests\n",
+            "export PIP_USER=1; pip install requests\n",
+            "export PIP_USER=yes && pip3 install requests\n",
+            "PIP_USER=1; export PIP_USER; pip install requests\n",
+            "Run: PIP_USER=1 pip install requests\n",
+            "`PIP_USER=1 pip install requests`\n",
+            // Preserve uncertain shell state rather than evaluating overrides.
+            "PIP_USER=0 pip install requests\n",
+            "export PIP_USER=1; unset PIP_USER; pip install requests\n",
+        ] {
+            assert_eq!(compile(input, &env), input, "{input}");
+            assert_eq!(pipeline.run(input), input, "read-time pipeline: {input}");
+        }
+        for (input, expected) in [
+            (
+                "pip install a; export PIP_USER=1; pip3 install b\n",
+                "uv pip install a; export PIP_USER=1; pip3 install b\n",
+            ),
+            (
+                "OTHER_PIP_USER=1 pip install requests\n",
+                "OTHER_PIP_USER=1 uv pip install requests\n",
+            ),
+        ] {
+            assert_eq!(compile(input, &env), expected);
+            assert_eq!(compile(expected, &env), expected);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_pip_preserves_pip_user_environment() {
+        let input = "pip install requests\r\nRun: pip3 install pandas";
+        for value in ["1", "true", "yes", "0", "", "$INSTALL_USER"] {
+            let mut env = env_darwin_uv();
+            env.env_vars.insert("PIP_USER".into(), value.into());
+            assert_eq!(compile(input, &env), input, "PIP_USER={value}");
+            let pipeline = crate::transform::TransformPipeline::directive_only(env.clone());
+            assert_eq!(pipeline.run(input), input, "PIP_USER={value}");
+            // PIP_USER only constrains pip normalization.
+            assert_eq!(compile("python -m venv .venv\n", &env), "uv venv .venv\n");
+        }
+        let mut env = env_node_pnpm();
+        env.env_vars.insert("PIP_USER".into(), "1".into());
+        assert_eq!(compile("npm install\n", &env), "pnpm install\n");
+    }
+
+    #[test]
+    fn test_heuristic_pip_preserves_pip_only_options() {
+        let env = env_darwin_uv();
+        let pipeline = crate::transform::TransformPipeline::directive_only(env.clone());
+        for option in [
+            "--root",
+            "--report",
+            "--platform",
+            "--implementation",
+            "--abi",
+            "--upgrade-strategy",
+        ] {
+            for input in [
+                format!("pip install {option} value requests\n"),
+                format!("pip3 install requests {option}=value"),
+                format!("sudo pip install '{option}=value' requests\r\n"),
+                format!("pip install requests 2>&1 {option} value\n"),
+                format!("Run: pip install requests {option}=value\n"),
+                format!("Use `pip install requests {option}=value` now\n"),
+            ] {
+                assert_eq!(compile(&input, &env), input, "{input}");
+                assert_eq!(pipeline.run(&input), input, "read-time pipeline: {input}");
+                assert_eq!(compile(&input, &env_linux_no_uv()), input);
+            }
+        }
+        for (input, expected) in [
+            (
+                "pip install --root=/tmp a && pip3 install b\n",
+                "pip install --root=/tmp a && uv pip install b\n",
+            ),
+            (
+                "pip install a; pip3 install b --root /tmp\n",
+                "uv pip install a; pip3 install b --root /tmp\n",
+            ),
+            (
+                "pip install a | echo --root /tmp",
+                "uv pip install a | echo --root /tmp",
+            ),
+            (
+                "pip install a # --root /tmp",
+                "uv pip install a # --root /tmp",
+            ),
+            (
+                "pip install './--root=example'",
+                "uv pip install './--root=example'",
+            ),
+            (
+                "pip install --rooted-package",
+                "uv pip install --rooted-package",
+            ),
+            (
+                "pip install --root>log /tmp a",
+                "pip install --root>log /tmp a",
+            ),
+            (
+                "Use `pip install a` then `pip install --root=/tmp b`.",
+                "Use `uv pip install a` then `pip install --root=/tmp b`.",
+            ),
+        ] {
+            assert_eq!(compile(input, &env), expected, "{input}");
+            assert_eq!(pipeline.run(input), expected, "read-time pipeline: {input}");
+            assert_eq!(compile(expected, &env), expected, "idempotence: {input}");
+        }
     }
 
     #[test]

@@ -358,6 +358,17 @@ uv 可用时，启发式归一化保留 `pip install --user` 和 `pip3 install -
 检查。指定解释器的 `python -m pip` 调用保持不变。未结束的参数、续行和命令
 替换也会保留原始 pip 调用。
 
+挂载启动时的环境快照中存在 `PIP_USER`，或同一行调用前的文本引用了该变量时，
+也会保留 pip，包括 `PIP_USER=1 pip install requests` 和
+`export PIP_USER=1; pip install requests`。此检查采用保守策略：空值、假值、
+覆盖赋值或 `unset` 后仍保留 pip，不求解 shell 状态。更改挂载进程的环境后需重新
+挂载；文档前面行中的赋值不在此检查范围内。
+
+已知 pip 专属选项 `--root`、`--report`、`--platform`、`--implementation`、
+`--abi` 和 `--upgrade-strategy` 也会保留 pip，同时支持 `--option value` 和
+`--option=value` 写法。例如，`pip install --root=/tmp/rootz requests` 保持不变。
+这些选项按每次调用的参数范围检查，相邻命令中的普通安装仍可使用 uv。
+
 启发式归一化选择 Yarn 时，仅把不带参数的 `npm install` 改写成 `yarn install`。
 带包名、选项或重定向的安装命令保持原样：Yarn 使用 `add` 添加依赖，并不支持所有 npm
 选项。例如，`npm install lodash` 保持不变；如果技能要求使用 Yarn，请直接写出对应命令。
