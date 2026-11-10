@@ -46,10 +46,10 @@ _QWENWORK_RECOVERY: dict[str, str] | None = None
 def _prepare_qwenwork_recovery(
     plugin_root: str, payload: dict
 ) -> dict[str, str] | None:
-    if sys.platform != "darwin" or not os.path.isabs(plugin_root):
+    if not os.path.isabs(plugin_root):
         return None
     root = Path(plugin_root)
-    binary = root / "bin/tokenless"
+    binary = root / "bin/tokenless.exe" if os.name == "nt" else root / "bin/tokenless"
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return None
     required = (root / "hooks/run-hook.sh", root / "hooks/shared/rewrite_hook.py")
@@ -100,19 +100,43 @@ def _prepare_qwenwork_recovery(
     }
 
 
+_QWENWORK_RETRIEVE_ENV = (
+    "TOKENLESS_AGENT_ID",
+    "TOKENLESS_SESSION_ID",
+    "TOKENLESS_TOOL_USE_ID",
+    "TOKENLESS_DATA_DIR",
+    "TOKENLESS_STASH_DB",
+    "DSH_TOKENLESS_STASH_DB",
+)
+
+
+def _powershell_quote(value: str) -> str:
+    """Single-quote a value for PowerShell; only '' escapes a quote."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _qwenwork_retrieve_command(key: str) -> str | None:
     if _QWENWORK_RECOVERY is None:
         return None
     runtime = _QWENWORK_RECOVERY
-    arguments = ["/usr/bin/env"]
-    for name in (
-        "TOKENLESS_AGENT_ID",
-        "TOKENLESS_SESSION_ID",
-        "TOKENLESS_TOOL_USE_ID",
-        "TOKENLESS_DATA_DIR",
-        "TOKENLESS_STASH_DB",
-        "DSH_TOKENLESS_STASH_DB",
+    if os.name == "nt" and (
+        os.environ.get("QWENWORK_PLUGIN_HOOK_COMPATIBILITY") == "managed-tool-hooks-v1"
     ):
+        # Managed Windows engines run shell tools in PowerShell, which has no
+        # /usr/bin/env and no per-command environment prefix. Each tool call
+        # executes in a fresh powershell process, so $env: assignments carry
+        # the same overrides as the POSIX form for this one command.
+        return " ".join(
+            [
+                *(
+                    f"$env:{name} = {_powershell_quote(runtime[name])};"
+                    for name in _QWENWORK_RETRIEVE_ENV
+                ),
+                f"& {_powershell_quote(runtime['binary'])} retrieve {key}",
+            ]
+        )
+    arguments = ["/usr/bin/env"]
+    for name in _QWENWORK_RETRIEVE_ENV:
         arguments.append(f"{name}={runtime[name]}")
     arguments.extend((runtime["binary"], "retrieve", key))
     return " ".join(shlex.quote(argument) for argument in arguments)
