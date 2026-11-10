@@ -1333,11 +1333,8 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
 
 /// Load a session's ATIF trajectory, trying every data source the deployment
 /// exposes in order: eBPF genai events first (richest signal, already
-/// normalized), then the collector's `trajectories.db`, then any sibling DB
-/// that passes the ATIF-JSON schema probe (covers macOS builds that ship
-/// `~/Library/Application Support/agentsight/trajectories.db` with a
-/// non-standard column name, and Linux deployments that colocate an
-/// `agentsight.db` next to `genai_events.db`).
+/// normalized), then the collector's `trajectories.db`, then compatible
+/// sibling trajectory stores with non-standard ATIF column names.
 fn load_trajectory(
     db_path: &std::path::Path,
     session_id: &str,
@@ -1385,7 +1382,7 @@ fn load_trajectory(
     // handles the §2.1 "don't assume fixed table/column names" requirement:
     // we enumerate tables, enumerate TEXT columns, and take the first row
     // whose value parses as ATIF JSON for the requested session.
-    let candidate_files = ["trajectories.db", "agentsight.db", "collected.db"];
+    let candidate_files = ["trajectories.db", "collected.db"];
     let base_dir = db_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -1458,8 +1455,8 @@ fn probe_atif_column(
 
             // The sample parses as JSON — assume this column holds ATIF.
             // Prefer equality lookup on a session_id column when one exists;
-            // otherwise scan every row (bounded by small dataset sizes
-            // typical of local trajectory stores).
+            // otherwise inspect rows one at a time so a large TEXT column
+            // cannot accumulate in memory.
             let session_column = find_session_column(&conn, &table)?;
             let rows_sql = match session_column.as_deref() {
                 Some(col) => format!("SELECT \"{column}\" FROM \"{table}\" WHERE \"{col}\" = ?1",),
@@ -1469,22 +1466,19 @@ fn probe_atif_column(
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let values: Vec<String> = if session_column.is_some() {
-                rows.query_map([session_id], |r| r.get::<_, String>(0))
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| r.ok())
-                    .collect()
+            let query_result = if session_column.is_some() {
+                rows.query([session_id])
             } else {
-                rows.query_map([], |r| r.get::<_, String>(0))
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| r.ok())
-                    .collect()
+                rows.query([])
             };
-            for value in values {
+            let mut values = match query_result {
+                Ok(values) => values,
+                Err(_) => continue,
+            };
+            while let Some(row) = values.next().map_err(|e| e.to_string())? {
+                let Ok(value) = row.get::<_, String>(0) else {
+                    continue;
+                };
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value) {
                     // `scoped`: the SQL above filtered by the session column,
                     // so a document without a session_id field is still known
