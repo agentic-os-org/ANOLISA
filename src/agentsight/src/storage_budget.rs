@@ -6,12 +6,12 @@
 //! is assigned to the largest databases first, so every store keeps its own
 //! safe-deletion rules while the group converges back under the limit.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::{
     CAUSAL_DB_NAME, ENFORCEMENT_DB_NAME, REUSE_DB_NAME, SECURITY_AUDIT_DB_NAME, StorageConfig,
+    write_config_atomically,
 };
 use crate::database::DatabaseId;
 
@@ -212,30 +212,8 @@ pub(crate) fn write_total_size_limit(
         );
 
     let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
-    // Each save must own its staging file. A shared `config.json.tmp` can be
-    // renamed by another worker while it is still being written, exposing
-    // partial JSON as the live configuration and making the second save fail.
-    let tmp_path = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".agentsight-storage-{}.tmp", uuid::Uuid::new_v4()));
-    let mut temporary = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)
-        .map_err(|error| format!("cannot write config file: {error}"))?;
-    let written = temporary
-        .write_all(pretty.as_bytes())
-        .map_err(|error| format!("cannot write config file: {error}"));
-    drop(temporary);
-    let result = written.and_then(|()| {
-        std::fs::rename(&tmp_path, config_path)
-            .map_err(|error| format!("cannot replace config file: {error}"))
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
+    write_config_atomically(config_path, &pretty)
+        .map_err(|error| format!("cannot write config file: {error}"))
 }
 
 #[cfg(test)]

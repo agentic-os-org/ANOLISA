@@ -850,7 +850,7 @@ pub fn parse_json_rules(
     Ok(extract_rules(&parsed))
 }
 
-fn write_config_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_config_atomically(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
