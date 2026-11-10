@@ -27,6 +27,8 @@
     "aw-provider-semantic-arbiter/bin/aw-provider-semantic-arbiter",
     "aw-provider-semantic-arbiter/test/provider",
     "aw-provider-semantic-arbiter/test/session_parallel",
+    "aw-provider-semantic-arbiter/test/session_task",
+    "aw-provider-semantic-arbiter/test/shell_command",
     "aw-provider-semantic-arbiter/test/storage_deadline",
     "aw-provider-tokenless/test/linked_rtk",
     "aw-provider-tokenless/test/pretool",
@@ -95,9 +97,25 @@
       "target": "aw-provider-semantic-arbiter/test/provider",
       "test": "unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint"
     },
+    "semantic-bash-command": {
+      "target": "aw-provider-semantic-arbiter/test/shell_command",
+      "test": "shell_commands_project_named_targets_and_leave_the_rest_to_the_model"
+    },
     "semantic-task-capture": {
+      "target": "aw-provider-semantic-arbiter/test/session_task",
+      "test": "session_turns_join_in_order_and_redelivery_is_ignored"
+    },
+    "semantic-task-missing": {
+      "target": "aw-provider-semantic-arbiter/test/session_task",
+      "test": "missing_or_oversized_session_task_is_uncovered_without_model"
+    },
+    "semantic-submit-context": {
+      "target": "aw-provider-semantic-arbiter/test/session_task",
+      "test": "submission_context_is_checked_before_capture"
+    },
+    "semantic-scenarios": {
       "target": "aw-provider-semantic-arbiter/test/provider",
-      "test": "operator_task_capture_is_recorded_and_never_upgrades_the_ingress"
+      "test": "preservation_scenario_is_refused_until_its_verifier_is_wired"
     },
     "semantic-uncovered": {
       "target": "aw-provider-semantic-arbiter/test/provider",
@@ -149,7 +167,7 @@
     },
     "semantic-parallel-tasks": {
       "target": "aw-provider-semantic-arbiter/test/session_parallel",
-      "test": "parallel_distinct_aw_tasks_keep_text_provenance_and_versions_isolated"
+      "test": "parallel_distinct_session_prompts_keep_text_and_versions_isolated"
     },
     "semantic-context-revisions": {
       "target": "aw-provider-semantic-arbiter/test/session_parallel",
@@ -1756,7 +1774,11 @@
       "semantic-authority",
       "semantic-preserve",
       "semantic-derived-identity",
+      "semantic-bash-command",
       "semantic-task-capture",
+      "semantic-task-missing",
+      "semantic-submit-context",
+      "semantic-scenarios",
       "semantic-uncovered",
       "semantic-size",
       "semantic-errors",

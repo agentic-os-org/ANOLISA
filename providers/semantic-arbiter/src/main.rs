@@ -1,12 +1,14 @@
 //! One AW request per process; semantic recommendations never become AW effects.
 
+mod command;
 mod config;
 mod evaluate;
 mod mapping;
+mod session;
 mod storage;
 // Feeds the deterministic preservation check, which this observe-only shadow evaluation does
-// not request yet: mapping projects TaskScope alone with a zero evidence budget. Registered
-// here so the criterion is built and tested against real repositories before it is wired.
+// not request yet: config rejects the preservation scenario and evidence budget is zero.
+// Registered here so the criterion is built and tested against real repositories first.
 #[allow(dead_code)]
 mod verifier;
 
@@ -53,7 +55,7 @@ fn execute(ingress: Ingress) -> Value {
     let response = match request["method"].as_str() {
         Some("describe") => json!({
             "api_version":"aw-provider/v1alpha1", "request_id":id, "status":"ok",
-            "operations":[{"name":"evaluate_task_scope","events":["tool.before"],"effects":["observe"]}]
+            "operations":[{"name":"evaluate_task_scope","events":["input.submit","tool.before"],"effects":["observe"]}]
         }),
         Some("validate_config") => match config::Config::decode(&request["config"]) {
             Ok(_) => json!({"api_version":"aw-provider/v1alpha1","request_id":id,"status":"ok"}),

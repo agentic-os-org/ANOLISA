@@ -30,20 +30,15 @@ spec:
       max_output_bytes: 65536
       config:
         version: 1
+        scenarios: [task_scope]
         task:
-          version: task-v1
-          text: Update the synthetic greeting, preserving the synthetic reference file.
-          provenance:
-            source: user_prompt_verbatim
-            captured_by: synthetic-operator
-            captured_at_ms: 1700000000000
-            text_sha256: sha256:9a0389a1d4bee901bd97beb46425ecb2ee97f848f9e94b25cd206bef10136ba9
           allowed_resource_ids: []
           preserve_resource_ids: []
         adapter: qoder
         workspace_path: /absolute/synthetic-workspace
         workspace_id: synthetic-workspace
         tools:
+          Bash: {command_pointer: /command}
           Edit: {operation: replace, path_pointer: /file_path}
           Write: {operation: replace, path_pointer: /file_path}
         resources: {}
@@ -60,8 +55,17 @@ spec:
           transport: loopback_test
         record_dir: /absolute/private-shadow-records
         max_records: 100
-        max_storage_bytes: 419430400
+        max_storage_bytes: 432537600
   events:
+    # Records each prompt for its session; tool.before judges calls against it.
+    input.submit:
+      enabled: true
+      steps:
+        - id: semantic-shadow
+          provider: semantic
+          operation: evaluate_task_scope
+          effects: [observe]
+          on_error: report
     tool.before:
       enabled: true
       steps:

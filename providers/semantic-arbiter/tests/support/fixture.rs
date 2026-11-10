@@ -22,13 +22,11 @@ pub const KEY: &str = "synthetic-only-not-a-real-credential";
 pub const BINARY: &str = env!("CARGO_BIN_EXE_aw-provider-semantic-arbiter");
 pub const TASK_TEXT: &str = "Update the synthetic greeting only.";
 
-/// Operator capture metadata an operator could reproduce with `sha256sum`.
-pub fn provenance(text: &str) -> Value {
-    let digest = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
-    json!({
-        "source":"user_prompt_verbatim", "captured_by":"synthetic-operator",
-        "captured_at_ms":1_700_000_000_000u64, "text_sha256":digest
-    })
+/// Digest the Provider uses as task version: plain `sha256sum` of the joined text.
+// Each test crate compiles this module and uses only a subset of helpers.
+#[allow(dead_code)]
+pub fn digest(text: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(text.as_bytes()))
 }
 
 pub struct Fixture {
@@ -48,9 +46,7 @@ impl Fixture {
     pub fn config(&self, endpoint: &str) -> Value {
         json!({
             "version":1,
-            "task":{"version":"v1", "text":TASK_TEXT,
-                "provenance":provenance(TASK_TEXT),
-                "allowed_resource_ids":["greeting"],"preserve_resource_ids":[]},
+            "task":{"allowed_resource_ids":["greeting"],"preserve_resource_ids":[]},
             "adapter":"qoder", "workspace_path":self.root.path(), "workspace_id":"synthetic-workspace",
             "tools":{"Write":{"operation":"replace","path_pointer":"/file_path"},
                 "Edit":{"operation":"replace","path_pointer":"/file_path"}},
@@ -58,7 +54,7 @@ impl Fixture {
                 self.root.path().join("private.txt").to_str().unwrap():"private"},
             "model":{"config_revision":"aw_request","backend":{"kind":"bailian","endpoint_url":endpoint,
                 "model":"synthetic-model","key_env":KEY_ENV},"timeout_ms":2000,"max_response_bytes":4096,"transport":"loopback_test"},
-            "record_dir":self.records,"max_records":20,"max_storage_bytes":83886080u64
+            "record_dir":self.records,"max_records":20,"max_storage_bytes":88080384u64
         })
     }
 
@@ -72,10 +68,32 @@ impl Fixture {
                 "native":{"cwd":self.root.path(),"synthetic_extension":{"retained":true}}}})
     }
 
+    /// Mirrors the AW Qoder adapter's `input.submit` shape for the session of `request`.
+    // Each test crate compiles this module and uses only a subset of helpers.
+    #[allow(dead_code)]
+    pub fn submit(&self, request: &Value, turn: &str, text: &str) -> Value {
+        let mut submit = request.clone();
+        let event = &request["event"];
+        submit["event"] = json!({"name":"input.submit","agent":event["agent"],
+            "session_id":event["session_id"],"turn_id":turn,"input":{"text":text},
+            "native":{"cwd":event["native"]["cwd"],"hook_event_name":"UserPromptSubmit"}});
+        submit
+    }
+
+    /// Captures `TASK_TEXT` as the only turn of the session `request` belongs to.
+    // Each test crate compiles this module and uses only a subset of helpers.
+    #[allow(dead_code)]
+    pub fn capture(&self, request: &Value) {
+        let (_, diagnostic) = invoke(self, self.submit(request, "turn/+1", TASK_TEXT), false);
+        assert_eq!(diagnostic["code"], "task_captured");
+    }
+
+    /// Evaluation record directories, excluding the captured-session store.
     pub fn records(&self) -> Vec<PathBuf> {
         let mut paths: Vec<_> = fs::read_dir(&self.records)
             .unwrap()
             .map(|e| e.unwrap().path())
+            .filter(|path| path.file_name().unwrap() != "sessions")
             .collect();
         paths.sort();
         paths

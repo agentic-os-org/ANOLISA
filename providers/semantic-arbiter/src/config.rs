@@ -2,17 +2,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use semantic_arbiter::{config::ModelConfig, contract::Operation};
+use semantic_arbiter::config::ModelConfig;
+use semantic_arbiter::contract::{Operation, Scenario};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
-use crate::storage::{open_root, RESERVE_BYTES};
+use crate::storage::{open_root, RESERVE_BYTES, SESSION_RESERVE};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     pub version: u32,
+    #[serde(default = "default_scenarios")]
+    pub scenarios: Vec<Scenario>,
     pub task: TaskConfig,
     pub adapter: String,
     pub workspace_path: String,
@@ -25,54 +27,39 @@ pub(crate) struct Config {
     pub max_storage_bytes: u64,
 }
 
+/// Operator resource constraints; the task text itself comes from `input.submit`.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TaskConfig {
-    pub version: String,
-    pub text: String,
-    pub provenance: TaskProvenance,
     pub allowed_resource_ids: Vec<String>,
     pub preserve_resource_ids: Vec<String>,
 }
 
-/// How the operator obtained the task text, recorded so a reviewer can recheck it.
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TaskSource {
-    /// The operator wrote the text themselves.
-    OperatorAuthored,
-    /// The operator transcribed a native user prompt without rewording it.
-    UserPromptVerbatim,
+fn default_scenarios() -> Vec<Scenario> {
+    vec![Scenario::TaskScope]
 }
 
-/// Operator-asserted capture metadata; neither variant authenticates an ingress.
+/// Operator-declared input contract for one native tool name.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ToolMapping {
+    File(FileMapping),
+    Command(CommandMapping),
+}
+
+/// A tool whose input names exactly one file.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TaskProvenance {
-    pub source: TaskSource,
-    pub captured_by: String,
-    pub captured_at_ms: u64,
-    /// Digest of the exact `task.text` bytes, so plumbing cannot alter the capture unnoticed.
-    pub text_sha256: String,
-}
-
-impl TaskConfig {
-    /// Digest of the task text actually projected into an evaluation.
-    ///
-    /// Deliberately a plain digest of the text bytes, not a domain-separated one,
-    /// so an operator can reproduce it with `sha256sum` over the captured text.
-    pub(crate) fn text_digest(&self) -> String {
-        let mut hash = Sha256::new();
-        hash.update(self.text.as_bytes());
-        format!("sha256:{:x}", hash.finalize())
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ToolMapping {
+pub(crate) struct FileMapping {
     pub operation: Operation,
     pub path_pointer: String,
+}
+
+/// A shell tool whose command string is analyzed lexically.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CommandMapping {
+    pub command_pointer: String,
 }
 
 impl Config {
@@ -83,22 +70,25 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
+        let repeated = (1..self.scenarios.len())
+            .any(|index| self.scenarios[..index].contains(&self.scenarios[index]));
+        if self.scenarios.is_empty() || repeated {
+            return Err("invalid_config");
+        }
+        // Preservation needs local evidence this Provider does not collect yet;
+        // refuse it at startup rather than silently evaluating task scope only.
+        if self.scenarios.contains(&Scenario::Preservation) {
+            return Err("unsupported_scenario");
+        }
         if self.version != 1
             || !["qoder", "openclaw", "hermes", "qwenpaw", "pi", "claude-sdk", "qoder-sdk", "agentscope"]
                 .contains(&self.adapter.as_str())
-            || !id(&self.task.version)
             || !id(&self.workspace_id)
-            || self.task.text.trim().is_empty()
-            || self.task.text.len() > 16_384
-            // A capture the operator cannot reproduce is not provenance; reject it
-            // offline rather than recording an unverifiable claim.
-            || self.task.provenance.text_sha256 != self.task.text_digest()
-            || !text(&self.task.provenance.captured_by, 128)
-            || !(1_000_000_000_000..=4_000_000_000_000).contains(&self.task.provenance.captured_at_ms)
             || !absolute(&self.workspace_path)
             || !absolute(&self.record_dir)
             || !(1..=10_000).contains(&self.max_records)
-            || !(RESERVE_BYTES..=1024 * 1024 * 1024).contains(&self.max_storage_bytes)
+            // Every evaluated call needs one captured session and one record.
+            || !(RESERVE_BYTES + SESSION_RESERVE..=1024 * 1024 * 1024).contains(&self.max_storage_bytes)
             || self.tools.is_empty()
             || self.tools.len() > 6
             || self.resources.len() > 64
@@ -110,14 +100,22 @@ impl Config {
         }
         self.model.validate().map_err(|_| "invalid_config")?;
         for (name, mapping) in &self.tools {
-            let operation = match name.as_str() {
-                "Edit" | "Write" | "edit" | "write" => Operation::Replace,
-                "Delete" | "delete" => Operation::Delete,
-                _ => return Err("invalid_config"),
+            let valid = match mapping {
+                ToolMapping::File(file) => {
+                    let operation = match name.as_str() {
+                        "Edit" | "Write" | "edit" | "write" => Operation::Replace,
+                        "Delete" | "delete" => Operation::Delete,
+                        _ => return Err("invalid_config"),
+                    };
+                    file.operation == operation
+                        && ["/file_path", "/path"].contains(&file.path_pointer.as_str())
+                }
+                ToolMapping::Command(command) => {
+                    ["Bash", "bash"].contains(&name.as_str())
+                        && command.command_pointer == "/command"
+                }
             };
-            if mapping.operation != operation
-                || !["/file_path", "/path"].contains(&mapping.path_pointer.as_str())
-            {
+            if !valid {
                 return Err("invalid_config");
             }
         }
@@ -128,6 +126,7 @@ impl Config {
             if !within(path, &self.workspace_path)
                 || !id(resource)
                 || resource.starts_with(DERIVED_PREFIX)
+                || resource.starts_with(COMMAND_PREFIX)
                 || !seen.insert(resource)
             {
                 return Err("invalid_config");
@@ -159,10 +158,6 @@ fn id(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-:@".contains(&b))
-}
-
-fn text(value: &str, limit: usize) -> bool {
-    !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
 }
 
 pub(crate) fn absolute(path: &str) -> bool {
@@ -206,6 +201,9 @@ pub(crate) fn resolve(path: &str, workspace: &str) -> Option<String> {
 /// Namespace reserved for identities derived from a workspace-relative path.
 pub(crate) const DERIVED_PREFIX: &str = "path:";
 
+/// Namespace reserved for shell writes the lexer cannot attribute to a named path.
+pub(crate) const COMMAND_PREFIX: &str = "command:";
+
 /// Derive a readable resource identity so an operator need not enumerate resources.
 pub(crate) fn derive(resolved: &str, workspace: &str) -> Option<String> {
     let relative = resolved
@@ -219,7 +217,7 @@ pub(crate) fn derive(resolved: &str, workspace: &str) -> Option<String> {
     id(&derived).then_some(derived)
 }
 
-pub(crate) fn single_file_input(name: &str, mapping: &ToolMapping, input: &Value) -> bool {
+pub(crate) fn single_file_input(name: &str, mapping: &FileMapping, input: &Value) -> bool {
     let Some(fields) = input.as_object() else {
         return false;
     };

@@ -52,15 +52,32 @@ fn private_files_and_fixed_reserve_enforce_both_quotas() {
         let fixture = Fixture::new();
         let mut config = fixture.config("http://127.0.0.1:1");
         if byte_quota {
-            config["max_storage_bytes"] = json!(4 * 1024 * 1024);
+            // One session reservation plus one record reservation.
+            config["max_storage_bytes"] = json!(4 * 1024 * 1024 + 128 * 1024);
         } else {
             config["max_records"] = json!(1);
         }
-        let (_, first) = invoke(&fixture, fixture.request(config.clone()), false);
+        let request = fixture.request(config.clone());
+        fixture.capture(&request);
+        let (_, first) = invoke(&fixture, request.clone(), false);
         assert_eq!(first["code"], "missing_credentials");
         let (_, second) = invoke(&fixture, fixture.request(config), false);
         assert_eq!(second["code"], "record_unavailable");
         assert_eq!(fixture.records().len(), 1);
+        let mut other = request.clone();
+        other["event"]["session_id"] = json!("another-native-session");
+        let (_, third) = invoke(
+            &fixture,
+            fixture.submit(&other, "turn/+1", TASK_TEXT),
+            false,
+        );
+        assert_eq!(third["code"], "record_unavailable");
+        assert_eq!(
+            fs::read_dir(fixture.records.join("sessions"))
+                .unwrap()
+                .count(),
+            1
+        );
         let dir = &fixture.records()[0];
         assert_eq!(
             fs::metadata(dir).unwrap().permissions().mode() & 0o7777,
@@ -91,7 +108,9 @@ fn record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve() {
     assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_UN) }, 0);
     let mut config = fixture.config("http://127.0.0.1:1");
     config["max_records"] = json!(1);
-    let request = bind(fixture.request(config));
+    let request = fixture.request(config);
+    fixture.capture(&request);
+    let request = bind(request);
     let children: Vec<_> = (0..8).map(|_| spawn(fixture.root.path(), false)).collect();
     let outputs: Vec<_> = std::thread::scope(|scope| {
         let handles: Vec<_> = children
@@ -118,10 +137,11 @@ fn record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve() {
 fn released_record_lock_allows_inference_with_remaining_budget() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::ZERO);
+    let request = fixture.request(fixture.config(&server.endpoint));
+    fixture.capture(&request);
     let root = File::open(&fixture.records).unwrap();
     // SAFETY: flock only accesses the live descriptor.
     assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_EX) }, 0);
-    let request = fixture.request(fixture.config(&server.endpoint));
     std::thread::scope(|scope| {
         let pending = scope.spawn(|| invoke(&fixture, request, true));
         assert!(matches!(
@@ -146,7 +166,9 @@ fn released_record_lock_allows_inference_with_remaining_budget() {
 fn input_and_model_projection_survive_killed_process() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::from_millis(200));
-    let request = bind(fixture.request(fixture.config(&server.endpoint)));
+    let request = fixture.request(fixture.config(&server.endpoint));
+    fixture.capture(&request);
+    let request = bind(request);
     let mut child = spawn(fixture.root.path(), true);
     child
         .stdin
@@ -175,7 +197,9 @@ fn input_and_model_projection_survive_killed_process() {
 fn pinned_root_ignores_path_replacement_during_inference() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::from_millis(200));
-    let request = bind(fixture.request(fixture.config(&server.endpoint)));
+    let request = fixture.request(fixture.config(&server.endpoint));
+    fixture.capture(&request);
+    let request = bind(request);
     let mut child = spawn(fixture.root.path(), true);
     child
         .stdin
@@ -206,7 +230,9 @@ fn pinned_root_ignores_path_replacement_during_inference() {
 fn atomic_publication_never_overwrites_existing_result() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::from_millis(200));
-    let request = bind(fixture.request(fixture.config(&server.endpoint)));
+    let request = fixture.request(fixture.config(&server.endpoint));
+    fixture.capture(&request);
+    let request = bind(request);
     let mut child = spawn(fixture.root.path(), true);
     child
         .stdin
@@ -260,6 +286,7 @@ fn slow_http_keeps_budget_failure_and_no_effects() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::from_millis(400));
     let mut request = fixture.request(fixture.config(&server.endpoint));
+    fixture.capture(&request);
     request["budget_ms"] = json!(150);
     let start = Instant::now();
     invoke(&fixture, request, true);
@@ -296,11 +323,9 @@ fn process_cwd_mismatch_is_uncovered_and_candidate_symlink_is_not_read() {
     let target = fixture.root.path().join("private-target");
     fs::write(&target, "never-read-secret-marker").unwrap();
     symlink(&target, fixture.root.path().join("greeting.txt")).unwrap();
-    invoke(
-        &fixture,
-        fixture.request(fixture.config(&server.endpoint)),
-        true,
-    );
+    let request = fixture.request(fixture.config(&server.endpoint));
+    fixture.capture(&request);
+    invoke(&fixture, request, true);
     let body = server
         .received
         .recv_timeout(Duration::from_secs(1))

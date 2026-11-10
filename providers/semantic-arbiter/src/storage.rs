@@ -13,8 +13,12 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::config::Config;
+use crate::session::SessionTask;
 
 pub(crate) const RESERVE_BYTES: u64 = 4 * 1024 * 1024;
+/// Fixed reservation per captured session; a session file never exceeds it.
+pub(crate) const SESSION_RESERVE: u64 = 128 * 1024;
+const SESSIONS: &str = "sessions";
 const FILE_LIMIT: usize = 1100 * 1024;
 const FILES: &[&str] = &[
     "00-input.json",
@@ -121,71 +125,281 @@ fn open_record_entry(dir: &File, name: &str) -> io::Result<File> {
     })
 }
 
-fn check_existing(root: &File, config: &Config) -> io::Result<()> {
-    let mut count = 0u64;
+fn quota() -> io::Error {
+    io::Error::other("quota")
+}
+
+fn check_file(file: &File, limit: u64) -> io::Result<fs::Metadata> {
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.mode() & 0o7777 != 0o600 || meta.len() > limit {
+        return Err(denied());
+    }
+    Ok(meta)
+}
+
+struct Usage {
+    records: u64,
+    sessions: u64,
+}
+
+impl Usage {
+    fn bytes(&self) -> u64 {
+        self.records
+            .saturating_mul(RESERVE_BYTES)
+            .saturating_add(self.sessions.saturating_mul(SESSION_RESERVE))
+    }
+}
+
+/// Validates every existing entry; scanning stops once either count is over quota.
+fn scan(root: &File, config: &Config) -> io::Result<Usage> {
+    let mut usage = Usage {
+        records: 0,
+        sessions: 0,
+    };
     for entry in entries(root)? {
-        count += 1;
-        if count >= config.max_records || (count + 1) * RESERVE_BYTES > config.max_storage_bytes {
-            return Err(io::Error::other("quota"));
-        }
         let name = entry?.file_name();
         let name = name.to_str().ok_or_else(denied)?;
+        if name == SESSIONS {
+            usage.sessions = scan_sessions(root, config)?;
+            continue;
+        }
         if !name.starts_with("record-") {
             return Err(denied());
         }
-        let dir = open_at(root, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
-        private_dir(&dir)?;
-        let mut bytes = 0u64;
-        let mut files = BTreeSet::new();
-        for (index, child) in entries(&dir)?.enumerate() {
-            if index >= FILES.len() * 2 {
-                return Err(denied());
-            }
-            let name = child?.file_name();
-            let name = name.to_str().ok_or_else(denied)?;
-            let base = name.strip_suffix(".pending").unwrap_or(name);
-            if !FILES.contains(&base) {
-                return Err(denied());
-            }
-            let file = open_record_entry(&dir, name)?;
-            let meta = file.metadata()?;
-            if !meta.is_file() || meta.mode() & 0o7777 != 0o600 || meta.len() > FILE_LIMIT as u64 {
-                return Err(denied());
-            }
-            if !files.insert((meta.dev(), meta.ino())) {
-                continue;
-            }
-            bytes = bytes.saturating_add(meta.len());
-            if bytes > RESERVE_BYTES {
-                return Err(denied());
-            }
+        usage.records += 1;
+        if usage.records > config.max_records {
+            return Err(quota());
+        }
+        check_record(root, name)?;
+    }
+    Ok(usage)
+}
+
+fn check_record(root: &File, name: &str) -> io::Result<()> {
+    let dir = open_at(root, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+    private_dir(&dir)?;
+    let mut bytes = 0u64;
+    let mut files = BTreeSet::new();
+    for (index, child) in entries(&dir)?.enumerate() {
+        if index >= FILES.len() * 2 {
+            return Err(denied());
+        }
+        let name = child?.file_name();
+        let name = name.to_str().ok_or_else(denied)?;
+        let base = name.strip_suffix(".pending").unwrap_or(name);
+        if !FILES.contains(&base) {
+            return Err(denied());
+        }
+        let meta = check_file(&open_record_entry(&dir, name)?, FILE_LIMIT as u64)?;
+        if !files.insert((meta.dev(), meta.ino())) {
+            continue;
+        }
+        bytes = bytes.saturating_add(meta.len());
+        if bytes > RESERVE_BYTES {
+            return Err(denied());
         }
     }
     Ok(())
 }
 
+/// Session files are only written under the root lock, so no entry vanishes mid-scan.
+fn scan_sessions(root: &File, config: &Config) -> io::Result<u64> {
+    let dir = open_at(root, SESSIONS, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+    private_dir(&dir)?;
+    let mut keys = BTreeSet::new();
+    for entry in entries(&dir)? {
+        let name = entry?.file_name();
+        let name = name.to_str().ok_or_else(denied)?;
+        let key = name.strip_suffix(".pending").unwrap_or(name);
+        if !session_key(key) {
+            return Err(denied());
+        }
+        check_file(
+            &open_at(&dir, name, libc::O_RDONLY | libc::O_NONBLOCK, 0)?,
+            SESSION_RESERVE,
+        )?;
+        keys.insert(key.to_owned());
+        if keys.len() as u64 > config.max_records {
+            return Err(quota());
+        }
+    }
+    Ok(keys.len() as u64)
+}
+
+fn session_key(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn session_name(session_id: &str) -> io::Result<&str> {
+    session_id
+        .strip_prefix("sha256:")
+        .filter(|key| session_key(key))
+        .ok_or_else(denied)
+}
+
+fn read_bounded(mut file: File, limit: u64) -> io::Result<Vec<u8>> {
+    check_file(&file, limit)?;
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(&mut file, limit + 1), &mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(denied());
+    }
+    Ok(bytes)
+}
+
+fn missing(error: io::Error) -> io::Result<Option<File>> {
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
+fn open_sessions(root: &File) -> io::Result<Option<File>> {
+    match open_at(root, SESSIONS, libc::O_RDONLY | libc::O_DIRECTORY, 0) {
+        Ok(dir) => {
+            private_dir(&dir)?;
+            Ok(Some(dir))
+        }
+        Err(error) => missing(error),
+    }
+}
+
+fn load_session(dir: &File, name: &str) -> io::Result<Option<SessionTask>> {
+    let file = match open_at(dir, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
+        Ok(file) => file,
+        Err(error) => return missing(error).map(|_| None),
+    };
+    let bytes = read_bounded(file, SESSION_RESERVE)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| denied())
+}
+
+fn storage_code(error: io::Error) -> &'static str {
+    if error.kind() == io::ErrorKind::TimedOut {
+        "budget_exceeded"
+    } else {
+        "record_unavailable"
+    }
+}
+
+/// Applies `update` to one session's stored task under the root lock.
+///
+/// The replacement is published by rename, so readers without the lock see
+/// either the previous or the new complete file. `update` returns whether it
+/// changed the task; an unchanged task is not rewritten.
+///
+/// # Errors
+///
+/// `budget_exceeded` when the lock or write cannot finish before `deadline`;
+/// `record_unavailable` for quota exhaustion or any unsafe directory state.
+pub(crate) async fn update_session(
+    config: &Config,
+    session_id: &str,
+    deadline: Instant,
+    update: impl FnOnce(&mut SessionTask) -> bool,
+) -> Result<(), &'static str> {
+    update_session_io(config, session_id, deadline, update)
+        .await
+        .map_err(storage_code)
+}
+
+async fn update_session_io(
+    config: &Config,
+    session_id: &str,
+    deadline: Instant,
+    update: impl FnOnce(&mut SessionTask) -> bool,
+) -> io::Result<()> {
+    let name = session_name(session_id)?;
+    let root = open_root(&config.record_dir)?;
+    let _lock = Lock::acquire(&root, deadline).await?;
+    let usage = scan(&root, config)?;
+    let dir = match open_sessions(&root)? {
+        Some(dir) => dir,
+        None => {
+            let c_name = cstr(SESSIONS)?;
+            // SAFETY: live root descriptor and NUL-terminated relative basename.
+            if unsafe { libc::mkdirat(root.as_raw_fd(), c_name.as_ptr(), 0o700) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            root.sync_all()?;
+            open_sessions(&root)?.ok_or_else(denied)?
+        }
+    };
+    let existing = load_session(&dir, name)?;
+    if existing.is_none()
+        && (usage.sessions + 1 > config.max_records
+            || usage.bytes().saturating_add(SESSION_RESERVE) > config.max_storage_bytes)
+    {
+        return Err(quota());
+    }
+    let mut task = existing.unwrap_or_default();
+    if !update(&mut task) {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&task)?;
+    if bytes.len() as u64 > SESSION_RESERVE {
+        return Err(quota());
+    }
+    if Instant::now() >= deadline {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    let temp = format!("{name}.pending");
+    let from = cstr(&temp)?;
+    // SAFETY: the lock excludes other writers, so a pending name is a killed
+    // writer's leftover inside this pinned directory.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), from.as_ptr(), 0) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+    }
+    let mut file = open_at(
+        &dir,
+        &temp,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o600,
+    )?;
+    check_file(&file, SESSION_RESERVE)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    let to = cstr(name)?;
+    // SAFETY: both basenames refer to this pinned directory; replacing the
+    // previous session file is the intended publication.
+    if unsafe { libc::renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    dir.sync_all()
+}
+
 pub(crate) struct Record {
-    // Keep the root pinned for the lifetime of this invocation as well.
-    _root: File,
+    // Keep the root pinned so the session task is read from the same tree.
+    root: File,
     dir: File,
     used: Mutex<u64>,
 }
 
 impl Record {
     pub(crate) async fn create(config: &Config, deadline: Instant) -> Result<Self, &'static str> {
-        Self::create_io(config, deadline).await.map_err(|error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                "budget_exceeded"
-            } else {
-                "record_unavailable"
-            }
-        })
+        Self::create_io(config, deadline)
+            .await
+            .map_err(storage_code)
     }
 
     async fn create_io(config: &Config, deadline: Instant) -> io::Result<Self> {
         let root = open_root(&config.record_dir)?;
         let lock = Lock::acquire(&root, deadline).await?;
-        check_existing(&root, config)?;
+        let usage = scan(&root, config)?;
+        if usage.records + 1 > config.max_records
+            || usage.bytes().saturating_add(RESERVE_BYTES) > config.max_storage_bytes
+        {
+            return Err(quota());
+        }
         if Instant::now() >= deadline {
             return Err(io::ErrorKind::TimedOut.into());
         }
@@ -217,10 +431,31 @@ impl Record {
         root.sync_all()?;
         drop(lock);
         Ok(Self {
-            _root: root,
+            root,
             dir,
             used: Mutex::new(0),
         })
+    }
+
+    /// Reads the captured task of one session from the pinned root.
+    ///
+    /// # Errors
+    ///
+    /// `task_unavailable` when no prompt was captured for the session;
+    /// `record_unavailable` when the stored file is unsafe or malformed.
+    pub(crate) fn session_task(&self, session_id: &str) -> Result<SessionTask, &'static str> {
+        let load = || -> io::Result<Option<SessionTask>> {
+            let name = session_name(session_id)?;
+            match open_sessions(&self.root)? {
+                Some(dir) => load_session(&dir, name),
+                None => Ok(None),
+            }
+        };
+        match load() {
+            Ok(Some(task)) => Ok(task),
+            Ok(None) => Err("task_unavailable"),
+            Err(_) => Err("record_unavailable"),
+        }
     }
 
     pub(crate) fn save(&self, name: &str, value: &impl Serialize) -> Result<(), &'static str> {

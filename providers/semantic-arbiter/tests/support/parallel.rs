@@ -16,13 +16,13 @@ use aw_host::{AdapterCapabilities, Host, ProcessContext, StepOutput};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::fixture::{read, Fixture, BINARY, KEY, KEY_ENV};
+use crate::fixture::{digest, read, Fixture, BINARY, KEY, KEY_ENV, TASK_TEXT};
 
 /// Retain the shared sessionless config with enough budget for a timed overlap wave.
 pub fn config(fixture: &Fixture, endpoint: &str) -> Value {
     let mut config = fixture.config(endpoint);
     assert_eq!(config["version"], 1);
-    assert!(config["task"].get("session_id").is_none());
+    assert!(config["task"].get("text").is_none());
     config["model"]["timeout_ms"] = json!(6000);
     config
 }
@@ -40,9 +40,13 @@ pub fn prepare(fixture: &Fixture, config: &Value, target: &str, name: &str) -> H
             "providers":{"semantic":{"protocol":"aw-provider/v1alpha1",
                 "transport":{"type":"stdio","location":"agent","argv":[BINARY]},
                 "timeout_ms":8000,"max_output_bytes":65536,"config":config}},
-            "events":{"tool.before":{"enabled":true,"steps":[{"id":"shadow",
-                "provider":"semantic","operation":"evaluate_task_scope",
-                "effects":["observe"],"on_error":"report"}]}}
+            "events":{
+                "input.submit":{"enabled":true,"steps":[{"id":"shadow",
+                    "provider":"semantic","operation":"evaluate_task_scope",
+                    "effects":["observe"],"on_error":"report"}]},
+                "tool.before":{"enabled":true,"steps":[{"id":"shadow",
+                    "provider":"semantic","operation":"evaluate_task_scope",
+                    "effects":["observe"],"on_error":"report"}]}}
         }
     });
     let cancelled = AtomicBool::new(false);
@@ -54,7 +58,10 @@ pub fn prepare(fixture: &Fixture, config: &Value, target: &str, name: &str) -> H
             version: "fixture".into(),
             entrypoint: "fixture".into(),
             failure_actions: Default::default(),
-            events: BTreeMap::from([("tool.before".into(), vec!["observe".into()])]),
+            events: BTreeMap::from([
+                ("input.submit".into(), vec!["observe".into()]),
+                ("tool.before".into(), vec!["observe".into()]),
+            ]),
         },
         ProcessContext {
             cwd: fixture.root.path().to_path_buf(),
@@ -83,6 +90,19 @@ pub fn event(
     event["agent"]["instance_id"] = json!(instance);
     event["session_id"] = json!(session);
     event
+}
+
+/// Mirror the Qoder `UserPromptSubmit` normalization for the same native context.
+pub fn submission(event: &Value, turn: &str, text: &str) -> Value {
+    json!({"name":"input.submit","agent":event["agent"],"session_id":event["session_id"],
+        "turn_id":turn,"input":{"text":text},
+        "native":{"cwd":event["native"]["cwd"],"hook_event_name":"UserPromptSubmit"}})
+}
+
+/// Capture the default prompt for the session of a later `tool.before` event.
+pub fn capture_host(host: &Host, event: &Value) {
+    let submit = submission(event, "turn/+1", TASK_TEXT);
+    assert_eq!(invoke_host(host, &submit), "task_captured");
 }
 
 /// Require an observe-only public response and return its sanitized diagnostic code.
@@ -178,6 +198,18 @@ pub fn no_secrets(fixture: &Fixture) {
 
 /// Check the complete task/context projection and every successful inference stage.
 pub fn evaluated(fixture: &Fixture, event: &Value, config: &Value, body: &Value) -> Value {
+    evaluated_text(fixture, event, config, body, TASK_TEXT, 1)
+}
+
+/// Check the projection of one specific captured session prompt.
+pub fn evaluated_text(
+    fixture: &Fixture,
+    event: &Value,
+    config: &Value,
+    body: &Value,
+    text: &str,
+    turns: usize,
+) -> Value {
     let dir = record(fixture, event);
     let input = read(&dir.join("00-input.json"));
     assert_eq!(input["filesystem_attested"], false);
@@ -197,7 +229,7 @@ pub fn evaluated(fixture: &Fixture, event: &Value, config: &Value, body: &Value)
         )
     );
     assert_eq!(binding["workspace_id"], config["workspace_id"]);
-    assert_eq!(binding["task_version"], config["task"]["version"]);
+    assert_eq!(binding["task_version"], digest(text));
     assert_eq!(
         binding["config_revision"],
         identity(
@@ -217,26 +249,20 @@ pub fn evaluated(fixture: &Fixture, event: &Value, config: &Value, body: &Value)
         )
     );
     let task = json!({
-        "session_id":session(event),"version":config["task"]["version"],"origin":"operator",
-        "text":config["task"]["text"],"allowed_resource_ids":config["task"]["allowed_resource_ids"],
+        "session_id":session(event),"version":digest(text),"origin":"native_user",
+        "text":text,"allowed_resource_ids":config["task"]["allowed_resource_ids"],
         "preserve_resource_ids":config["task"]["preserve_resource_ids"]
     });
     assert_eq!(evaluation["task"], task);
     assert_eq!(evaluation["task"]["session_id"], binding["session_id"]);
-    let text = config["task"]["text"].as_str().unwrap();
-    let digest = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
     assert_eq!(
         read(&dir.join("05-task.json")),
         json!({
-            "version":1,"origin":"operator","native_session_id":event["session_id"],
+            "version":1,"origin":"native_user","native_session_id":event["session_id"],
             "session_id":binding["session_id"],"adapter":event["agent"]["adapter"],
             "binding_id":event["agent"]["binding_id"],"instance_id":event["agent"]["instance_id"],
-            "config_revision":binding["config_revision"],"task_version":config["task"]["version"],
-            "source":config["task"]["provenance"]["source"],
-            "captured_by":config["task"]["provenance"]["captured_by"],
-            "captured_at_ms":config["task"]["provenance"]["captured_at_ms"],
-            "declared_text_sha256":config["task"]["provenance"]["text_sha256"],
-            "evaluated_text_sha256":digest,"text_bytes":text.len()
+            "config_revision":binding["config_revision"],"task_version":digest(text),
+            "turns":turns,"text_bytes":text.len()
         })
     );
     let candidate = json!({"operation":"replace","resource_id":"greeting",

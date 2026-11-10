@@ -13,7 +13,7 @@ use semantic_arbiter::model::{
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-use crate::{config::Config, mapping, storage::Record};
+use crate::{config::Config, mapping, session, storage::Record};
 
 struct RecordingBackend {
     backend: HttpBackend,
@@ -84,6 +84,9 @@ impl ModelBackend for RecordingBackend {
 }
 
 pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) -> &'static str {
+    if request["event"]["name"] == "input.submit" {
+        return session::capture(request, &config, ingress).await;
+    }
     let budget = match mapping::budget(request, &config, ingress) {
         Ok(budget) => budget,
         Err(code) => return code,
@@ -110,6 +113,8 @@ pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) ->
                 "unsupported_operation",
                 "oversized_candidate",
                 "candidate_invalid",
+                "task_unavailable",
+                "task_too_large",
             ]
             .contains(&code)
             {
@@ -138,7 +143,9 @@ async fn run(
 ) -> Result<Value, &'static str> {
     // Mapping checks context before the public candidate revision size limit;
     // uncovered contexts stay uncovered even when their payload is oversized.
-    let evaluation = mapping::project(request, &config, ingress)?;
+    let (evaluation, turns) = mapping::project(request, &config, ingress, |session_id| {
+        record.session_task(session_id)?.task()
+    })?;
     let encoded = serde_json::to_vec(&evaluation).map_err(|_| "mapping_failed")?;
     if encoded.len() > semantic_arbiter::protocol::MAX_MESSAGE_BYTES {
         return Err("oversized_candidate");
@@ -146,19 +153,15 @@ async fn run(
     record.save(
         "05-task.json",
         &json!({
-            "version":1, "origin":"operator",
+            "version":1, "origin":"native_user",
             "native_session_id":request["event"]["session_id"],
             "session_id":evaluation.binding.session_id,
             "adapter":request["event"]["agent"]["adapter"],
             "binding_id":request["event"]["agent"]["binding_id"],
             "instance_id":request["event"]["agent"]["instance_id"],
             "config_revision":evaluation.binding.config_revision,
-            "task_version":config.task.version, "source":config.task.provenance.source,
-            "captured_by":config.task.provenance.captured_by,
-            "captured_at_ms":config.task.provenance.captured_at_ms,
-            "declared_text_sha256":config.task.provenance.text_sha256,
-            "evaluated_text_sha256":config.task.text_digest(),
-            "text_bytes":config.task.text.len()
+            "task_version":evaluation.binding.task_version, "turns":turns,
+            "text_bytes":evaluation.task.as_ref().map_or(0, |task| task.text.len())
         }),
     )?;
     record.save("10-evaluation.json", &evaluation)?;

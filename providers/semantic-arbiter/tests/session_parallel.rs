@@ -70,6 +70,10 @@ fn same_aw_instance_parallel_sessions_share_task_without_identity_collision() {
             )
         })
         .collect();
+    for event in &events {
+        capture_host(&host, event);
+    }
+    assert!(fixture.records().is_empty());
     let jobs: Vec<_> = events.iter().map(|event| (&host, event)).collect();
     concurrent(&jobs);
     let bodies = server.finish();
@@ -121,6 +125,9 @@ fn same_native_session_parallel_aw_instances_are_isolated() {
             )
         })
         .collect();
+    for (host, event) in hosts.iter().zip(&events) {
+        capture_host(host, event);
+    }
     concurrent(&hosts.iter().zip(&events).collect::<Vec<_>>());
     let bodies = server.finish();
     let evaluations: Vec<_> = events
@@ -157,6 +164,9 @@ fn same_native_session_parallel_adapter_and_binding_domains_are_isolated() {
         .iter()
         .map(|(config, target)| event(&fixture, config, target, "same-instance", "same-session"))
         .collect();
+    for (host, event) in hosts.iter().zip(&events) {
+        capture_host(host, event);
+    }
     concurrent(&hosts.iter().zip(&events).collect::<Vec<_>>());
     let bodies = server.finish();
     let evaluations: Vec<_> = specs
@@ -184,6 +194,7 @@ fn same_session_later_call_keeps_task_session_and_changes_candidate() {
     let config = config(&fixture, &server.endpoint);
     let host = prepare(&fixture, &config, "target", "later-call");
     let first = event(&fixture, &config, "target", "same-instance", "same-session");
+    capture_host(&host, &first);
     assert_eq!(invoke_host(&host, &first), "shadow_evaluated");
     let first_evaluation = evaluated(&fixture, &first, &config, &received(&server));
     let mut later = first.clone();
@@ -215,54 +226,49 @@ fn same_session_later_call_keeps_task_session_and_changes_candidate() {
 }
 
 #[test]
-fn parallel_distinct_aw_tasks_keep_text_provenance_and_versions_isolated() {
+fn parallel_distinct_session_prompts_keep_text_and_versions_isolated() {
     let fixture = Fixture::new();
     let server = ParallelServer::new(3, 3);
-    let configs: Vec<_> = (0..3)
+    let config = config(&fixture, &server.endpoint);
+    let host = prepare(&fixture, &config, "target", "isolated-tasks");
+    let cases: Vec<_> = (0..3)
         .map(|index| {
-            let mut config = config(&fixture, &server.endpoint);
-            let text = format!("Update the synthetic greeting for isolated task {index} only.");
-            config["task"]["text"] = json!(text);
-            config["task"]["version"] = json!(format!("task-v{index}"));
-            config["task"]["provenance"] = provenance(&text);
-            config["task"]["provenance"]["captured_by"] =
-                json!(format!("synthetic-operator-{index}"));
-            config["task"]["provenance"]["captured_at_ms"] = json!(1_700_000_000_000u64 + index);
-            config
-        })
-        .collect();
-    let hosts: Vec<_> = configs
-        .iter()
-        .map(|config| prepare(&fixture, config, "target", "isolated-tasks"))
-        .collect();
-    assert!(fixture.records().is_empty());
-    let events: Vec<_> = configs
-        .iter()
-        .enumerate()
-        .map(|(index, config)| {
-            event(
+            let event = event(
                 &fixture,
-                config,
+                &config,
                 "target",
                 &format!("aw-instance-{index}"),
                 "same-native-session",
+            );
+            let text = format!("Update the synthetic greeting for isolated task {index} only.");
+            let submit = submission(&event, "turn/+1", &text);
+            assert_eq!(invoke_host(&host, &submit), "task_captured");
+            (event, text)
+        })
+        .collect();
+    assert!(fixture.records().is_empty());
+    let events: Vec<_> = cases.iter().map(|(event, _)| event.clone()).collect();
+    concurrent(
+        &events
+            .iter()
+            .map(|event| (&host, event))
+            .collect::<Vec<_>>(),
+    );
+    let bodies = server.finish();
+    let evaluations: Vec<_> = cases
+        .iter()
+        .map(|(event, text)| {
+            evaluated_text(
+                &fixture,
+                event,
+                &config,
+                model_body(&bodies, event),
+                text,
+                1,
             )
         })
         .collect();
-    concurrent(&hosts.iter().zip(&events).collect::<Vec<_>>());
-    let bodies = server.finish();
-    let evaluations: Vec<_> = configs
-        .iter()
-        .zip(&events)
-        .map(|(config, event)| evaluated(&fixture, event, config, model_body(&bodies, event)))
-        .collect();
-    for field in [
-        "session_id",
-        "instance_id",
-        "config_revision",
-        "task_version",
-        "candidate_id",
-    ] {
+    for field in ["session_id", "instance_id", "task_version", "candidate_id"] {
         assert_eq!(
             evaluations
                 .iter()
@@ -281,23 +287,36 @@ fn aw_revision_task_version_and_workspace_changes_keep_context_distinct() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::ZERO);
     let base = config(&fixture, &server.endpoint);
-    let mut task = base.clone();
-    task["task"]["version"] = json!("v2");
     let mut workspace = base.clone();
     workspace["workspace_id"] = json!("other-synthetic-workspace");
     let cases = [
         (&base, "original"),
         (&base, "revision-only"),
-        (&task, "task-version"),
+        (&base, "task-version"),
         (&workspace, "workspace"),
     ];
     let mut evaluations = Vec::new();
+    let (mut text, mut turns) = (TASK_TEXT.to_owned(), 1);
     for (config, name) in cases {
         let host = prepare(&fixture, config, "target", name);
         let mut event = event(&fixture, config, "target", "same-instance", "same-session");
         event["native"]["synthetic_extension"]["case"] = json!(name);
+        if name == "original" {
+            capture_host(&host, &event);
+        }
+        // A later turn in the same session changes the judged task.
+        if name == "task-version" {
+            let later = "Also keep the greeting short.";
+            let submit = submission(&event, "turn/+2", later);
+            assert_eq!(invoke_host(&host, &submit), "task_captured");
+            text = format!("{text}\n\n{later}");
+            turns = 2;
+        }
         assert_eq!(invoke_host(&host, &event), "shadow_evaluated");
-        evaluations.push(evaluated(&fixture, &event, config, &received(&server)));
+        let body = received(&server);
+        evaluations.push(evaluated_text(
+            &fixture, &event, config, &body, &text, turns,
+        ));
     }
     for value in &evaluations[1..] {
         for field in [
@@ -358,6 +377,7 @@ fn unsupported_first_event_does_not_bind_task_and_later_valid_event_evaluates() 
         "same-instance",
         "later-legal-session",
     );
+    capture_host(&host, &legal);
     assert_eq!(invoke_host(&host, &legal), "shadow_evaluated");
     evaluated(&fixture, &legal, &config, &received(&server));
     assert_eq!(fixture.records().len(), 2);
@@ -389,6 +409,7 @@ fn rejected_first_context_and_size_do_not_publish_task_or_poison_later_calls() {
         let config = config(&fixture, &server.endpoint);
         let host = prepare(&fixture, &config, "target", "rejected-first");
         let legal = event(&fixture, &config, "target", "same-instance", "same-session");
+        capture_host(&host, &legal);
         let mut first = legal.clone();
         *first.pointer_mut(pointer).unwrap() = value;
         assert_eq!(invoke_host(&host, &first), code);
@@ -430,6 +451,7 @@ fn schema_permitted_malformed_sessions_reject_before_task_publication_and_networ
             "same-instance",
             &native_session,
         );
+        capture_host(&host, &legal);
         assert_eq!(invoke_host(&host, &legal), "shadow_evaluated");
         evaluated(&fixture, &legal, &config, &received(&server));
     }

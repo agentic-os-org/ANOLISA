@@ -46,8 +46,11 @@ fn public_aw_host_admits_and_invokes_observe_only_provider() {
                 "providers":{"semantic":{"protocol":"aw-provider/v1alpha1",
                     "transport":{"type":"stdio","location":"agent","argv":[BINARY]},
                     "timeout_ms":3000,"max_output_bytes":65536,"config":fixture.config(&server.endpoint)}},
-                "events":{"tool.before":{"enabled":true,"steps":[{"id":"shadow","provider":"semantic",
-                    "operation":"evaluate_task_scope","effects":["observe"],"on_error":"report"}]}}
+                "events":{
+                    "input.submit":{"enabled":true,"steps":[{"id":"shadow","provider":"semantic",
+                        "operation":"evaluate_task_scope","effects":["observe"],"on_error":"report"}]},
+                    "tool.before":{"enabled":true,"steps":[{"id":"shadow","provider":"semantic",
+                        "operation":"evaluate_task_scope","effects":["observe"],"on_error":"report"}]}}
             }
         });
         let bytes = serde_json::to_vec(&document).unwrap();
@@ -61,7 +64,10 @@ fn public_aw_host_admits_and_invokes_observe_only_provider() {
                 version: "fixture".into(),
                 entrypoint: "fixture".into(),
                 failure_actions: Default::default(),
-                events: BTreeMap::from([("tool.before".into(), vec!["observe".into()])]),
+                events: BTreeMap::from([
+                    ("input.submit".into(), vec!["observe".into()]),
+                    ("tool.before".into(), vec!["observe".into()]),
+                ]),
             },
             ProcessContext {
                 cwd: fixture.root.path().to_path_buf(),
@@ -74,8 +80,20 @@ fn public_aw_host_admits_and_invokes_observe_only_provider() {
         .unwrap();
         assert_eq!(host.preparation().len(), 2);
         assert!(fixture.records().is_empty());
-        let mut event = fixture.request(fixture.config(&server.endpoint))["event"].clone();
-        event["agent"]["binding_id"] = json!("target");
+        let mut request = fixture.request(fixture.config(&server.endpoint));
+        request["event"]["agent"]["binding_id"] = json!("target");
+        let submit = fixture.submit(&request, "turn/+1", TASK_TEXT)["event"].clone();
+        let captured = host
+            .event(submit, Instant::now() + Duration::from_secs(3), &cancelled)
+            .unwrap()
+            .invoke("shadow")
+            .unwrap();
+        let StepOutput::Provider(outcome) = captured.result.unwrap() else {
+            panic!("expected Provider output");
+        };
+        assert_eq!(outcome.as_value()["effects"], json!([]));
+        assert!(fixture.records().is_empty());
+        let event = request["event"].clone();
         let selected = host
             .event(event, Instant::now() + Duration::from_secs(3), &cancelled)
             .unwrap();
@@ -101,7 +119,6 @@ use std::time::Duration;
 
 use fixture::*;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 #[test]
 fn describe_and_offline_closed_config() {
@@ -124,7 +141,7 @@ fn describe_and_offline_closed_config() {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         response["operations"],
-        json!([{"name":"evaluate_task_scope","events":["tool.before"],"effects":["observe"]}])
+        json!([{"name":"evaluate_task_scope","events":["input.submit","tool.before"],"effects":["observe"]}])
     );
     let config = fixture.config("http://127.0.0.1:1/no-network");
     let request = json!({"api_version":"aw-provider/v1alpha1","request_id":"config","method":"validate_config","config":config});
@@ -152,22 +169,27 @@ fn invalid_config_and_duplicate_fields_are_sanitized() {
             json!({"operation":"replace","path_pointer":"/command"}),
         ),
         ("/tools/Write/path_pointer", json!("/paths/0")),
+        ("/tools/Bash", json!({"command_pointer":"/cmd"})),
+        ("/tools/Write", json!({"command_pointer":"/command"})),
+        (
+            "/tools/Bash",
+            json!({"command_pointer":"/command","operation":"replace"}),
+        ),
+        (
+            "/resources",
+            json!({fixture.root.path().join("build.sh").to_str().unwrap():"command:unresolved"}),
+        ),
         ("/model/credential", json!("private-config-marker")),
         ("/model/config_revision", json!("unrelated")),
         ("/max_storage_bytes", json!(1)),
-        // The declared capture must match the text that would be judged, so
-        // editing either side alone is rejected before any evaluation.
-        (
-            "/task/text",
-            json!("Delete the synthetic reference instead."),
-        ),
-        (
-            "/task/provenance/text_sha256",
-            json!(format!("sha256:{}", "0".repeat(64))),
-        ),
-        ("/task/provenance/source", json!("native_transcript")),
-        ("/task/provenance/captured_by", json!("  ")),
-        ("/task/provenance/captured_at_ms", json!(0)),
+        // A session reservation is needed besides the record reservation.
+        ("/max_storage_bytes", json!(4 * 1024 * 1024)),
+        // Task text only comes from captured prompts, never from config.
+        ("/task/text", json!("Update the synthetic greeting only.")),
+        ("/task/version", json!("v1")),
+        ("/scenarios", json!([])),
+        ("/scenarios", json!(["task_scope", "task_scope"])),
+        ("/scenarios", json!(["unknown"])),
         (
             "/model/backend/endpoint_url",
             json!("http://not-loopback.example/"),
@@ -205,6 +227,7 @@ fn full_candidate_normal_and_denial_never_emit_effects() {
         let fixture = Fixture::new();
         let server = Server::new(probability, 200, Duration::ZERO);
         let request = fixture.request(fixture.config(&server.endpoint));
+        fixture.capture(&request);
         let (_, diagnostic) = invoke(&fixture, request.clone(), true);
         assert_eq!(diagnostic["code"], "shadow_evaluated");
         let received = server
@@ -217,7 +240,7 @@ fn full_candidate_normal_and_denial_never_emit_effects() {
         );
         assert_eq!(
             received["state"]["authoritative_task"]["origin"],
-            "operator"
+            "native_user"
         );
         let dir = &fixture.records()[0];
         let input = read(&dir.join("00-input.json"));
@@ -242,27 +265,38 @@ fn full_candidate_normal_and_denial_never_emit_effects() {
 }
 
 #[test]
-fn operator_task_capture_is_recorded_and_never_upgrades_the_ingress() {
+fn preservation_scenario_is_refused_until_its_verifier_is_wired() {
     let fixture = Fixture::new();
-    let server = Server::new("0.99", 200, Duration::ZERO);
-    let request = fixture.request(fixture.config(&server.endpoint));
-    let (_, diagnostic) = invoke(&fixture, request, true);
-    assert_eq!(diagnostic["code"], "shadow_evaluated");
-    let dir = fixture.records().pop().unwrap();
-    let task = read(&dir.join("05-task.json"));
-    let digest = format!("sha256:{:x}", Sha256::digest(TASK_TEXT.as_bytes()));
-    assert_eq!(task["source"], "user_prompt_verbatim");
-    assert_eq!(task["captured_by"], "synthetic-operator");
-    assert_eq!(task["captured_at_ms"], 1_700_000_000_000u64);
-    assert_eq!(task["declared_text_sha256"], digest);
-    assert_eq!(task["evaluated_text_sha256"], digest);
-    assert_eq!(task["text_bytes"], TASK_TEXT.len());
-    // A verbatim transcription is still operator ingress; it grants no authority.
-    assert_eq!(task["origin"], "operator");
-    assert!(task.get("text").is_none());
-    let evaluation = read(&dir.join("10-evaluation.json"));
-    assert_eq!(evaluation["task"]["text"], TASK_TEXT);
-    assert_eq!(evaluation["task"]["origin"], "operator");
+    for (scenarios, status, code) in [
+        (json!(["task_scope"]), "ok", Value::Null),
+        (
+            json!(["preservation"]),
+            "error",
+            json!("unsupported_scenario"),
+        ),
+        (
+            json!(["task_scope", "preservation"]),
+            "error",
+            json!("unsupported_scenario"),
+        ),
+    ] {
+        let mut config = fixture.config("http://127.0.0.1:1/no-network");
+        config["scenarios"] = scenarios;
+        let request = json!({"api_version":"aw-provider/v1alpha1","request_id":"config","method":"validate_config","config":config});
+        let output = finish(
+            spawn(fixture.root.path(), false),
+            request.to_string().as_bytes(),
+        );
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["status"], status);
+        assert_eq!(response["error_code"], code);
+    }
+    let mut config = fixture.config("http://127.0.0.1:1/no-network");
+    config["scenarios"] = json!(["preservation"]);
+    let request = fixture.request(config);
+    let (_, diagnostic) = invoke(&fixture, fixture.submit(&request, "turn", TASK_TEXT), false);
+    assert_eq!(diagnostic["code"], "unsupported_scenario");
+    assert!(!fixture.records.join("sessions").exists());
 }
 
 #[test]
@@ -287,6 +321,7 @@ fn explicit_single_path_delete_is_advisory_and_rejects_extra_targets() {
         if extra {
             request["event"]["tool"]["input"]["paths"] = json!(["private.txt"]);
         }
+        fixture.capture(&request);
         let (_, diagnostic) = invoke(&fixture, request, true);
         let dir = &fixture.records()[0];
         if extra {
@@ -313,6 +348,7 @@ fn integral_decimal_and_exponent_budgets_follow_aw_protocol() {
         let fixture = Fixture::new();
         let server = Server::new("0.99", 200, Duration::ZERO);
         let mut request = fixture.request(fixture.config(&server.endpoint));
+        fixture.capture(&request);
         request["budget_ms"] = serde_json::from_str(budget).unwrap();
         let (_, diagnostic) = invoke(&fixture, request, true);
         assert_eq!(diagnostic["code"], "shadow_evaluated", "{budget}");
@@ -331,6 +367,7 @@ fn explicit_permissions_are_not_candidate_derived() {
     let server = Server::new("0.99", 200, Duration::ZERO);
     let mut request = fixture.request(fixture.config(&server.endpoint));
     request["event"]["tool"]["input"]["file_path"] = json!("private.txt");
+    fixture.capture(&request);
     let (_, diagnostic) = invoke(&fixture, request, true);
     assert_eq!(diagnostic["code"], "shadow_evaluated");
     let result = read(&fixture.records()[0].join("40-result.json"));
@@ -351,7 +388,9 @@ fn preserve_overrides_allowance_without_model_call() {
     let server = Server::new("0.99", 200, Duration::ZERO);
     let mut config = fixture.config(&server.endpoint);
     config["task"]["preserve_resource_ids"] = json!(["greeting"]);
-    invoke(&fixture, fixture.request(config), true);
+    let request = fixture.request(config);
+    fixture.capture(&request);
+    invoke(&fixture, request, true);
     let result = read(&fixture.records()[0].join("40-result.json"));
     assert_eq!(
         result["evaluation"]["outcome"]["control"]["candidate"],
@@ -440,6 +479,7 @@ fn unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint() {
     let fixture = Fixture::new();
     let server = Server::new("0.99", 200, Duration::ZERO);
     let derived = "path:nested:report.txt";
+    fixture.capture(&fixture.request(fixture.config(&server.endpoint)));
     for (allowed, preserve, code, status) in [
         (vec![], vec![], "shadow_evaluated", "evaluated"),
         (vec![derived], vec![], "shadow_evaluated", "evaluated"),
@@ -489,11 +529,9 @@ fn credentials_and_remote_failures_remain_sanitized_shadow_results() {
     for key in [false, true] {
         let fixture = Fixture::new();
         let server = Server::new("0.99", 500, Duration::ZERO);
-        let (_, diagnostic) = invoke(
-            &fixture,
-            fixture.request(fixture.config(&server.endpoint)),
-            key,
-        );
+        let request = fixture.request(fixture.config(&server.endpoint));
+        fixture.capture(&request);
+        let (_, diagnostic) = invoke(&fixture, request, key);
         let dir = &fixture.records()[0];
         if key {
             assert_eq!(diagnostic["code"], "shadow_evaluated");
@@ -523,6 +561,7 @@ fn changed_content_and_complete_native_ids_change_bindings() {
         let mut request = fixture.request(fixture.config(&server.endpoint));
         request["event"]["agent"]["instance_id"] = json!(format!("{}+{index}", "a".repeat(300)));
         request["event"]["tool"]["input"]["content"] = json!(format!("new content {index}"));
+        fixture.capture(&request);
         invoke(&fixture, request, true);
         let dir = fixture.records().pop().unwrap();
         let evaluation = read(&dir.join("10-evaluation.json"));
@@ -540,6 +579,7 @@ fn edit_and_absolute_path_keep_full_replacement_text() {
     let mut request = fixture.request(fixture.config(&server.endpoint));
     request["event"]["tool"]["native_name"] = json!("Edit");
     request["event"]["tool"]["input"] = json!({"file_path":fixture.root.path().join("greeting.txt"),"old_string":"old","new_string":"new","replace_all":false});
+    fixture.capture(&request);
     invoke(&fixture, request.clone(), true);
     let received = server
         .received
