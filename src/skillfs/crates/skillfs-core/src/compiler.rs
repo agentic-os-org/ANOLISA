@@ -37,6 +37,8 @@
 
 use crate::env::EnvironmentProfile;
 
+mod shell;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -322,24 +324,23 @@ fn apply_heuristic_normalization(content: &str, env: &EnvironmentProfile) -> Str
     }
 
     let mut output = String::with_capacity(content.len());
-    let mut continued = false;
+    let mut shell = shell::MultilineGuard::default();
 
     for line in content.split_inclusive('\n') {
         // Each line keeps its own terminator, so a file whose lines are not
         // rewritten comes back byte-identical (CRLF sources included).
         let (body, terminator) = split_line_terminator(line);
-        if continued {
-            output.push_str(body);
-        } else {
+        if shell.can_normalize(body) {
             output.push_str(&normalize_line(
                 body,
                 has_uv,
                 &node_pm,
                 env.has_env("PIP_USER"),
             ));
+        } else {
+            output.push_str(body);
         }
         output.push_str(terminator);
-        continued = body.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1;
     }
 
     output
@@ -1205,6 +1206,177 @@ Run: pip install requests
     // -----------------------------------------------------------------------
     // Heuristic normalization tests
     // -----------------------------------------------------------------------
+
+    // Check the same bytes through the mounted-read pipeline, and verify that
+    // normalization resumes immediately after each protected shell region.
+    fn assert_multiline_preserved(region: &str) {
+        let env = env_uv_pnpm();
+        for ending in ["\n", "\r\n"] {
+            let region = region.replace('\n', ending);
+            let control = format!("pip install control{ending}npm test{ending}");
+            let expected_control = format!("uv pip install control{ending}pnpm test{ending}");
+            let input = format!("{control}{region}{control}");
+            let expected = format!("{expected_control}{region}{expected_control}");
+            let pipeline = crate::transform::TransformPipeline::directive_only(env.clone());
+            assert_eq!(compile(&input, &env), expected, "{input:?}");
+            assert_eq!(pipeline.run(&input), expected, "pipeline: {input:?}");
+            assert_eq!(compile(&expected, &env), expected, "idempotence");
+            assert_eq!(compile(&input, &env_linux_no_uv()), input);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_preserves_heredoc_data() {
+        for header in [
+            "cat > notes.txt <<EOF",
+            "cat <<'EOF'",
+            "cat <<\"EOF\"",
+            "cat <<E\\OF",
+            "cat <<E'OF'",
+        ] {
+            assert_multiline_preserved(&format!(
+                "{header}\npip install requests\nnpm test\npython -m venv .venv\nvirtualenv env\nEOF\n"
+            ));
+        }
+        assert_multiline_preserved("cat <<-EOF\n\tpip install requests\n\tEOF\n");
+        assert_multiline_preserved(
+            "cat <<FIRST <<'SECOND'\npip install a\nFIRST\npip install b\nSECOND\n",
+        );
+        assert_multiline_preserved("cat <<EOF \\\n> notes.txt\npip install requests\nEOF\n");
+        // Body text, including shell syntax and fence markers, is opaque.
+        assert_multiline_preserved(
+            "cat <<EOF\ncat <<OTHER\n```\necho '\npip install requests\nEOF\n",
+        );
+    }
+
+    #[test]
+    fn test_heuristic_preserves_uncertain_heredoc_headers() {
+        for header in [
+            "cat << \\\nEOF\n",
+            "cat <<- \\\n'EOF'\n",
+            "cat <<EO\\\nF\n",
+            "cat <<'EO\nF'\n",
+            "cat <<FIRST << \\\nSECOND\n",
+            "cat <<\n",
+        ] {
+            let body = format!("{header}pip install requests\nnpm test\nEOF\n");
+            // An unknown delimiter protects through EOF when no Markdown
+            // boundary can delimit the shell example.
+            let pipeline = crate::transform::TransformPipeline::directive_only(env_uv_pnpm());
+            assert_eq!(pipeline.run(&body), body, "{header:?}");
+            for fence in ["```", "~~~"] {
+                let region = format!("{fence}sh\n{body}{fence}\n");
+                assert_multiline_preserved(&region);
+            }
+        }
+    }
+
+    #[test]
+    fn test_heuristic_preserves_continued_arguments() {
+        for region in [
+            "echo hello \\\npip install requests\n",
+            "echo hello \\\nnpm test \\\nvirtualenv env\n",
+            "pip install \\\npip install requests\n",
+            "python -m venv \\\nvirtualenv env\n",
+            "npm install \\\nnpm test\n",
+        ] {
+            assert_multiline_preserved(region);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_preserves_multiline_quotes_and_substitutions() {
+        for region in [
+            "echo \"hello\npip install requests\n\"\n",
+            "echo 'hello\npip install requests\n'\n",
+            "echo `printf hello\npip install requests\n`\n",
+            "echo $(printf hello\npip install requests\n)\n",
+            "echo \"$(printf '%s' \"hello\npip install requests\n\")\"\n",
+            "echo \"hello\n\npip install requests\n\"; pip install tail\n",
+        ] {
+            assert_multiline_preserved(region);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_preserves_unclosed_shell_regions() {
+        for region in [
+            "cat <<EOF\npip install requests",
+            "echo \\\npip install requests",
+            "echo \"\npip install requests",
+            "echo '\npip install requests",
+            "echo `\npip install requests",
+            "echo $(\npip install requests",
+        ] {
+            let pipeline = crate::transform::TransformPipeline::directive_only(env_uv_pnpm());
+            assert_eq!(pipeline.run(region), region, "{region:?}");
+        }
+    }
+
+    #[test]
+    fn test_heuristic_heredoc_delimiters_are_exact() {
+        for region in [
+            "cat <<EOF\n EOF\nEOF \npip install requests\nEOF\n",
+            "cat <<-EOF\n EOF\npip install requests\n\tEOF\n",
+            "cat <<'pip install'\npip install requests\npip install\n",
+            "cat <<'结束'\npip install requests\n结束\n",
+            "cat <<''\npip install requests\n\n",
+            "cat <<EOF\nhello \\\nEOF\npip install requests\nEOF\n",
+            "cat <<EOF\npip install requests\nE\\\nOF\n",
+            "cat <<'EOF'\nhello \\\nEOF\n",
+        ] {
+            assert_multiline_preserved(region);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_multiline_markdown_examples() {
+        for fence in ["```", "~~~", "````"] {
+            let region = format!("{fence}sh\necho \"\npip install requests\n\"\n{fence}\n");
+            assert_multiline_preserved(&region);
+            let input = format!("{fence}sh\necho \"\n{fence}\npip install control\n");
+            let expected = input.replace("pip install control", "uv pip install control");
+            assert_eq!(compile(&input, &env_uv_pnpm()), expected);
+        }
+        assert_eq!(
+            compile(
+                "Use `echo \"` as an example.\npip install a\n",
+                &env_uv_pnpm()
+            ),
+            "Use `echo \"` as an example.\nuv pip install a\n"
+        );
+        assert_eq!(
+            compile(
+                "Don't change the example.\n```sh\npip install a\n```\n",
+                &env_uv_pnpm()
+            ),
+            "Don't change the example.\n```sh\nuv pip install a\n```\n"
+        );
+        // Quotes can begin in the middle of a shell word as well.
+        assert_multiline_preserved("echo a'b\npip install requests\n'\n");
+    }
+
+    #[test]
+    fn test_heuristic_shell_markers_in_data_do_not_start_regions() {
+        for line in [
+            "echo '<<EOF'",
+            "echo \"<<EOF\"",
+            "echo \\<\\<EOF",
+            "cat <<<EOF",
+            "# cat <<EOF and an unclosed '\\",
+            "echo done # cat <<EOF",
+            r"echo done # trailing \",
+            r"echo \\",
+            "echo $((1 << 2))",
+            "((value = 1 << 2))",
+            "echo '(unterminated prose'",
+            "Use ``echo '\"`` as an example.",
+        ] {
+            let input = format!("{line}\npip install control\n");
+            let expected = format!("{line}\nuv pip install control\n");
+            assert_eq!(compile(&input, &env_uv_pnpm()), expected, "{line}");
+        }
+    }
 
     #[test]
     fn test_heuristic_pip_to_uv_pip() {
