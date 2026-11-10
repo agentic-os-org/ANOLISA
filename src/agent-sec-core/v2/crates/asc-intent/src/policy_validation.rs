@@ -45,6 +45,9 @@ pub enum PolicyError {
     /// A path is not canonical and absolute, or uses an expression that cannot be checked.
     #[error("policy paths must use canonical absolute literals or directory subtree patterns")]
     InvalidPath,
+    /// An equality literal ends with `/*`, which only a `like` pattern may express.
+    #[error("equality compares a concrete path; write a directory subtree as like \"<dir>/*\"")]
+    WildcardLiteral,
     /// Unbound templates, self-declared identities or contract-less annotations cannot become a
     /// candidate.
     #[error("policy contains unsupported templates, identity references or annotations")]
@@ -148,8 +151,15 @@ fn check_expression(value: &Value, depth: usize) -> Result<(), PolicyError> {
     if let Some(attribute) = value["."]["attr"].as_str() {
         let canonical = match attribute {
             "path" => value["."]["left"] == json!({"Var": "resource"}),
-            "cwd" | "program" => {
+            "cwd" => {
                 value["."]["left"] == json!({".": {"left": {"Var": "context"}, "attr": "input"}})
+            }
+            // `SecCore::Process.program` is a plain entity attribute holding a command name;
+            // only the request context's `program` is an executable path.
+            "program" => {
+                value["."]["left"] == json!({"Var": "resource"})
+                    || value["."]["left"]
+                        == json!({".": {"left": {"Var": "context"}, "attr": "input"}})
             }
             _ => true,
         };
@@ -168,7 +178,15 @@ fn check_expression(value: &Value, depth: usize) -> Result<(), PolicyError> {
                 None
             };
             if let Some(literal) = literal {
-                return if literal["Value"].as_str().is_some_and(absolute_path) {
+                // A trailing `/*` belongs to a `like` pattern; as an equality literal it names no
+                // concrete path and the projection cannot express it, so the model must retry.
+                let Some(value) = literal["Value"].as_str() else {
+                    return Err(PolicyError::InvalidPath);
+                };
+                if value.ends_with("/*") {
+                    return Err(PolicyError::WildcardLiteral);
+                }
+                return if absolute_path(value) {
                     Ok(())
                 } else {
                     Err(PolicyError::InvalidPath)
@@ -206,6 +224,12 @@ fn check_expression(value: &Value, depth: usize) -> Result<(), PolicyError> {
 }
 
 fn check_pattern(value: &Value) -> Result<(), PolicyError> {
+    pattern_scope(value).map(|_| ())
+}
+
+/// Decodes a `like` pattern into its canonical absolute prefix and whether a single trailing
+/// wildcard covers the remaining subtree.
+pub(crate) fn pattern_scope(value: &Value) -> Result<(String, bool), PolicyError> {
     let elements = value.as_array().ok_or(PolicyError::InvalidPath)?;
     let mut prefix = String::new();
     let mut wildcard = false;
@@ -227,7 +251,7 @@ fn check_pattern(value: &Value) -> Result<(), PolicyError> {
         &prefix
     };
     if absolute_path(path) {
-        Ok(())
+        Ok((path.to_owned(), wildcard))
     } else {
         Err(PolicyError::InvalidPath)
     }
@@ -235,7 +259,7 @@ fn check_pattern(value: &Value) -> Result<(), PolicyError> {
 
 /// Accepts canonical absolute paths only; relative and aliased forms must be rewritten by the
 /// model or moved into unresolved.
-fn absolute_path(path: &str) -> bool {
+pub(crate) fn absolute_path(path: &str) -> bool {
     path.len() <= 4096
         && (path == "/"
             || path.strip_prefix('/').is_some_and(|p| {

@@ -68,6 +68,9 @@ pub const DAEMON_HEALTH: &str = "daemon.health";
 /// Propose an initial task candidate without granting approval.
 pub const INTENT_PROPOSE: &str = "intent.propose";
 
+/// Generates unapproved Cedar from command/cwd without modifying existing policies.
+pub const INTENT_PROPOSE_COMMAND: &str = "intent.propose_command";
+
 /// Scan one Bash or Python snippet for pre-execution security issues.
 pub const ACTION_CODE_SCAN: &str = "action.code_scan";
 /// Detect personal information and credentials without authorizing an operation.
@@ -274,6 +277,8 @@ pub enum GatewayMethod {
 pub enum MethodId {
     /// Local-peer proposals over submitted materials, without authorization or publication.
     IntentPropose,
+    /// Derives Cedar requirements for one command; no authorization or publication side effects.
+    IntentProposeCommand,
     /// Runtime authorization and owner-bound execution reporting.
     Authorization(AuthorizationMethod),
     /// Process health for any authenticated local peer.
@@ -335,6 +340,7 @@ impl MethodId {
             // by the runtime using the authenticated peer UID.
             Self::Health
             | Self::IntentPropose
+            | Self::IntentProposeCommand
             | Self::Gateway(GatewayMethod::Status | GatewayMethod::Credentials)
             | Self::Authorization(_)
             | Self::Action(_)
@@ -352,6 +358,7 @@ pub fn resolve(method: &str) -> Option<MethodId> {
     match method {
         DAEMON_HEALTH => Some(MethodId::Health),
         INTENT_PROPOSE => Some(MethodId::IntentPropose),
+        INTENT_PROPOSE_COMMAND => Some(MethodId::IntentProposeCommand),
         AUTHORIZATION_EVALUATE => Some(MethodId::Authorization(AuthorizationMethod::Evaluate)),
         AUTHORIZATION_REPORT => Some(MethodId::Authorization(AuthorizationMethod::Report)),
         AUTHORIZATION_CLAIM => Some(MethodId::Authorization(AuthorizationMethod::Claim)),

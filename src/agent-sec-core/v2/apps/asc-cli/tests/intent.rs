@@ -173,6 +173,18 @@ impl Server {
 }
 
 fn cli(socket: &Path, directory: &Path, task: &str) -> Command {
+    let mut cli = base_cli(socket, directory);
+    cli.args(["intent", "propose", "--task", task]);
+    cli
+}
+
+fn cli_command(socket: &Path, directory: &Path, command: &str) -> Command {
+    let mut cli = base_cli(socket, directory);
+    cli.args(["intent", "propose-command", "--command", command]);
+    cli
+}
+
+fn base_cli(socket: &Path, directory: &Path) -> Command {
     let copied = directory.join("agent-sec-cli");
     let binary = if copied.exists() {
         copied
@@ -188,8 +200,7 @@ fn cli(socket: &Path, directory: &Path, task: &str) -> Command {
         .env("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK", "1")
         .current_dir(directory)
         .arg("--socket")
-        .arg(socket)
-        .args(["intent", "propose", "--task", task]);
+        .arg(socket);
     // `cargo llvm-cov` instruments the CLI child through this path, which carries `%p` so
     // concurrent children keep separate counters; `env_clear` must not hide them from the gate.
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
@@ -737,4 +748,207 @@ async fn uds_timeout_does_not_release_actual_execution_capacity() {
         assert!(Instant::now() < deadline);
     }
     server.stop().await;
+}
+
+const COMMAND: &str = "read -r line < report.csv";
+const COMMAND_POLICY: &str = "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/work/report.csv\" };";
+const COMMAND_CAVEAT: &str = "cat resolved through PATH, exec target unknown";
+
+/// Answers only the two command fixtures; any other command would change the wire contract.
+struct CommandReplay {
+    calls: AtomicUsize,
+    cwd: String,
+}
+impl ModelProvider for CommandReplay {
+    fn complete(
+        &self,
+        model: &str,
+        system: &str,
+        input: &str,
+        _: Instant,
+    ) -> Result<String, ProviderError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(model, "fixture");
+        assert!(system.contains(asc_intent::CEDAR_SCHEMA));
+        assert!(!system.contains("PRIVATE_FILE_BYTES"));
+        let input: Value = serde_json::from_str(input).unwrap();
+        let keys: Vec<_> = input
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["command", "cwd"]);
+        assert_eq!(input["cwd"], self.cwd);
+        match input["command"].as_str().unwrap() {
+            COMMAND => Ok(
+                json!({"policy":COMMAND_POLICY,"unresolved":[],"caveats":[COMMAND_CAVEAT]})
+                    .to_string(),
+            ),
+            "deploy --env prod" => {
+                Ok(json!({"policy":"","unresolved":["deployment target and runtime dependencies need confirmation"]}).to_string())
+            }
+            other => unreachable!("unexpected command {other}"),
+        }
+    }
+}
+
+fn command_provider(directory: &Path) -> Arc<CommandReplay> {
+    let cwd = fs::canonicalize(directory).unwrap();
+    Arc::new(CommandReplay {
+        calls: AtomicUsize::new(0),
+        cwd: cwd.to_str().unwrap().to_owned(),
+    })
+}
+
+/// The command path sends the hook's own fields and nothing else, and a candidate stays unapproved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_proposals_send_only_command_and_cwd() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let cwd = fs::canonicalize(&directory.0).unwrap();
+    let provider = command_provider(&directory.0);
+    let server = Server::start(&socket, provider.clone(), None).await;
+    let candidate = output_json(
+        &cli_command(&socket, &directory.0, COMMAND)
+            .output()
+            .unwrap(),
+        0,
+    );
+    assert_eq!(candidate["outcome"], "candidate");
+    assert_eq!(candidate["policy"], COMMAND_POLICY);
+    assert_eq!(candidate["caveats"], json!([COMMAND_CAVEAT]));
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+    {
+        let requests = server.requests.lock().unwrap();
+        let request = &requests.last().unwrap().1;
+        assert_eq!(request["method"], "intent.propose_command");
+        let params = &request["params"];
+        let keys: Vec<_> = params
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["format_version", "command", "cwd"]);
+        assert_eq!(params["format_version"], "asc.intent.command.request.v1");
+        assert_eq!(params["command"], COMMAND);
+        assert_eq!(params["cwd"], cwd.to_str().unwrap());
+    }
+    let text = String::from_utf8(
+        cli_command(&socket, &directory.0, COMMAND)
+            .args(["--format", "text"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(text.contains("not approved or effective"), "{text}");
+    assert!(text.contains("What the candidate would allow"), "{text}");
+    assert!(text.contains("/work/report.csv"), "{text}");
+    assert!(text.contains("network"), "{text}");
+    assert!(text.contains("Not covered by this candidate"), "{text}");
+    assert!(text.contains(COMMAND_CAVEAT), "{text}");
+    assert!(!text.contains("permit("), "{text}");
+    let cedar = String::from_utf8(
+        cli_command(&socket, &directory.0, COMMAND)
+            .args(["--format", "cedar"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(cedar.contains("// Not covered:"), "{cedar}");
+    server.stop().await;
+}
+
+/// A clarification and a locally rejected input both end without any Cedar to apply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_clarification_and_invalid_input_emit_no_cedar() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let server = Server::start(&socket, command_provider(&directory.0), None).await;
+    let output = cli_command(&socket, &directory.0, "deploy --env prod")
+        .args(["--format", "cedar"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Needs clarification"), "{text}");
+    assert!(!text.contains("permit("), "{text}");
+    server.stop().await;
+    // These inputs are refused before any request exists, so the stopped socket is never reached.
+    for cwd in ["/nonexistent-command-cwd", "relative/missing"] {
+        let output = cli_command(&socket, &directory.0, COMMAND)
+            .args(["--cwd", cwd])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{cwd}");
+        assert!(output.stdout.is_empty(), "{cwd}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("working directory"),
+            "{cwd}"
+        );
+    }
+    for command in ["", "  "] {
+        let output = cli_command(&socket, &directory.0, command)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{command:?}");
+        assert!(output.stdout.is_empty(), "{command:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("non-empty"),
+            "{command:?}"
+        );
+    }
+    let oversized = "x".repeat(asc_intent::MAX_COMMAND_BYTES + 1);
+    let output = cli_command(&socket, &directory.0, &oversized)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("64 KiB"));
+}
+
+/// Results that this build cannot reproduce as Cedar or explain are refused, not rendered.
+#[test]
+fn command_results_are_reverified_before_rendering() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::unix::net::UnixListener;
+    let directory = common::Directory::new();
+    for (case, result) in [
+        (
+            "relative_policy",
+            json!({"outcome":"candidate","policy":"permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"relative\" };"}),
+        ),
+        (
+            "no_reasons",
+            json!({"outcome":"needs_clarification","reasons":[]}),
+        ),
+        (
+            "mixed",
+            json!({"outcome":"candidate","policy":"","reasons":["why"]}),
+        ),
+    ] {
+        let socket = directory.0.join(format!("{case}.sock"));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut bytes =
+            serde_json::to_vec(&json!({"requestId":"fixture", "result":result})).unwrap();
+        bytes.push(b'\n');
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "intent.propose_command");
+            stream.write_all(&bytes).unwrap();
+        });
+        let output = cli_command(&socket, &directory.0, COMMAND)
+            .output()
+            .unwrap();
+        responder.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        assert!(output.stdout.is_empty(), "{case}");
+    }
 }

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub use asc_intent::{CommandInput, CommandPolicyOutcome};
 use asc_intent::{
     IntentError, PolicyError, ProposalContext, ProposalError, ProposalOutcome, TaskInput,
     propose_task,
@@ -159,6 +160,52 @@ impl IntentService {
             return Err(IntentServiceError::DeadlineExceeded);
         }
         Ok(outcome)
+    }
+
+    /// Proposes Cedar for one command, sharing the per-UID and global limits of task proposals.
+    ///
+    /// The peer must come from an authenticated transport; no PAP read, PDP call, execution or
+    /// persisted policy. A blocked model call keeps its slot; results are dropped on cancellation
+    /// or timeout.
+    ///
+    /// # Errors
+    /// Invalid input, exhausted limits, service failures, cancellation and timeouts all return no
+    /// candidate.
+    pub fn propose_command(
+        &self,
+        peer: PeerCredentials,
+        input: &CommandInput,
+        deadline: Instant,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<CommandPolicyOutcome, IntentServiceError> {
+        let check = || {
+            if Instant::now() >= deadline || cancelled() {
+                Err(IntentServiceError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        if input.command.len() > asc_intent::MAX_COMMAND_BYTES
+            || input.cwd.len() > asc_intent::MAX_CWD_BYTES
+        {
+            return Err(IntentServiceError::ResourceExhausted);
+        }
+        input
+            .validate()
+            .map_err(|_| IntentServiceError::InvalidArgument)?;
+        if self.model.trim().is_empty()
+            || self.model.len() > 256
+            || self.model.chars().any(char::is_control)
+        {
+            return Err(IntentServiceError::Unavailable);
+        }
+        let _permit = self.acquire(peer.uid())?;
+        check()?;
+        let result =
+            asc_intent::propose_command(self.provider.as_ref(), &self.model, input, deadline);
+        check()?;
+        result.map_err(|error| proposal_error(&error))
     }
 
     fn acquire(&self, uid: u32) -> Result<ExecutionPermit<'_>, IntentServiceError> {

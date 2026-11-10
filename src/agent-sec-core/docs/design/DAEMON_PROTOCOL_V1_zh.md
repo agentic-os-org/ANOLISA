@@ -1207,6 +1207,80 @@ CLI 只渲染候选，不交互、不产生请求，也不产生授权；任务�
 以及失败隔离、并发名额、过期及输出检查。
 实际进程、路径别名、rename 两端与参数索引等事实仍由未来执行端保证；这些测试不是执行拦截证据。
 
+### 19.1 [TARGET V2，已实现] 单次命令 Cedar API
+
+`intent.propose_command` 面向 hook 集成方，仅从已有的 `tool_input.command` 和 `cwd`
+推导单次命令所需权限的 Cedar 候选。它不是 `intent.propose` 的 task/TTL 接口，也不是
+基于 base policy 的更新接口；不改变 CURRENT V1 清单。
+
+```json
+{"method":"intent.propose_command","params":{"format_version":"asc.intent.command.request.v1","command":"read -r line < report.csv","cwd":"/work"}}
+```
+
+`params` 仅接受这三个必填字段，拒绝未知字段与版本。`command` 为非空 UTF-8 shell 文本，
+最多 64 KiB，不含 NUL；`cwd` 为最多 4096 字节的规范绝对路径，不含控制字符、反斜杠、
+`.`/`..` 路径分量、重复 `/` 或非根尾部 `/`。cwd 是路径解释基准，不是允许访问的范围。
+不要求宿主增加 task context，不采集文件正文、路径元数据或环境变量。
+
+沿用 V2 `{requestId,result|error}` 信封，`result` 只有以下两种结构：
+
+```json
+{"outcome":"candidate","policy":"permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/work/report.csv\" };","caveats":[]}
+```
+
+```json
+{"outcome":"needs_clarification","reasons":["需要确认运行依赖"]}
+```
+
+示例仅演示结构，不承诺模型对该命令一定返回相同策略。`policy` 是 Cedar 文本，不是
+`permission.json` 或完整候选信封；命令很短也应有策略，只有命令完全没有文件、进程、网络
+动作（如 `true`、`:`、`pwd`、`echo`、`date`）时才是空文本。程序沿用原生 parser、路径检查与 Strict 校验 ，不追加规则。
+
+`caveats` 是候选已知但未覆盖的部分，例如 PATH 未解析导致 `file.exec` 目标无法确定、
+脚本内部行为未知或管道数据流无法推导；它不阻断候选，但审批与后续 PDP 映射必须一并查看，
+不得当成已授权。空 `policy` 是合法候选：命令没有文件、进程、网络动作时授权为空，
+`caveats` 随候选返回，沙箱只差运行依赖。任何模型 `unresolved` 仍转成 `needs_clarification`
+并丢弃部分策略；只有命令语义本身无法表达、给不出任何有意义权限时才使用它。非规范路径或
+不支持的身份、模板、注解同样要求澄清。语法或类型错误返回 `internal`。空 `unresolved`
+和 Strict 均不能证明需求完整、最小权限或审批。提示词要求可确定部分照常输出、不确定部分
+写入 `caveats`，不得以根目录、整个 cwd 或全网络权限兜底；没有语义完备性证明器。
+
+Rust 入口为 `asc_intent::propose_command(provider, model, &CommandInput, deadline)`。
+调用链为 dispatcher → `asc_daemon_core::intent::IntentService::propose_command` → 意图模块。
+认证、模型配置及错误分类沿用本节规则；与 `intent.propose` 共享每 UID 一个、全局四个实际执行额度。
+完整请求含 LF 最多 256 KiB；模型响应最多 16 KiB，原因最多 128 项，每项最多 4096 字节。
+超限不截断。UDS 派发预算 35 秒，模型及校验最多 30 秒，并受调用方更早期限限制。
+没有 TTL、策略 revision、base policy 或候选持久化；取消或过期后丢弃结果。
+
+需在 daemon 启动环境显式启用 Intent 并配置本节的模型凭据。command/cwd 会发往该模型服务，
+可能包含敏感信息并产生费用。本接口不读取或改写 PAP/base policy，不计算 effective，也不执行命令。
+PDP 仍负责把候选与 `environment_permissions`（部署基线）及 Cedar 策略求交；CLI 的
+`--format cedar` 输出未审批候选原文，审批与执行不在本接口范围内。程序、cwd 与 loader
+不在候选中，需执行侧显式补齐，CLI 不做隐式补齐。
+停用 Intent 并重启可关闭入口，无状态迁移或策略回滚需求。
+
+候选是**命令自身**的需求集，不是完整沙箱视图：程序、loader 与 PATH 目录不在候选中，
+`sandbox run` 要求 program 与 cwd 显式可读，需执行侧补齐。最终仍由 PDP 与
+`environment_permissions` 和策略层求交：
+`effective = 请求 ∩ environment_permissions ∩ 策略`，默认 deny、deny 优先。因此 不写 `/usr`
+的 `file.exec` 不代表缺失，而代表基线已覆盖；副作用是若发布侧未授予某类系统路径 ，命令在求交后
+会被拒绝，而不是在候选生成时被拦截。
+
+CLI 不再提供 `--format permission` 投影。
+
+CLI 通过 `agent-sec-cli intent propose-command --command <文本> [--cwd <目录>]
+[--format json|text|cedar]` 暴露该 RPC。它只发送这两个业务字段；`--cwd` 缺省为 CLI
+进程的当前工作目录，并在本地解析为规范绝对路径，不读取命令目标。默认输出 JSON 便于 hook 解析；
+`--format text` 汇总权限并列出未覆盖项，`--format cedar` 把 `caveats` 写成注释，澄清时只输出注释；
+CLI 在渲染前对返回的 Cedar 重新执行一次本地校验。两种结果退出码为 `0`，
+本地可判定为非法的输入退出 `2` 且不发出请求。该子命令不执行命令，也不接入 sandbox。
+
+可执行契约为 `v2/crates/asc-daemon-handler/src/intent.rs` 中的两个 `command_api_*` 测试和
+`v2/apps/asc-cli/tests/intent.rs` 中的 `command_*` 测试：分别使用内存 fake provider，
+经实际 dispatcher 和实际 CLI/UDS 链路，覆盖输入透传、两种结果、
+版本/字段/路径/预算拒绝、异常模型响应、客户端复核及取消/过期结果丢弃。
+测试不调用真实模型或执行 sandbox，不构成模型推导质量或完整运行链路的证据。
+
 ## V2 sandbox 授权扩展
 
 `authorization.evaluate`、`authorization.claim` 与 `authorization.report` 使用现有 UDS、JSON 信封和 peer UID，

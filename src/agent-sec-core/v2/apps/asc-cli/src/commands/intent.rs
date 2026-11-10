@@ -1,6 +1,7 @@
-//! Daemon-only task-to-Cedar proposals; every outcome is an unapproved candidate, never an
-//! approval.
+//! Daemon-only task- and command-to-Cedar proposals; every outcome is an unapproved candidate,
+//! never an approval.
 
+mod command;
 mod render;
 
 use std::io::{self, Write as _};
@@ -42,6 +43,8 @@ impl Drop for Interrupt {
 pub(crate) enum IntentCommand {
     /// Generates a direct Cedar candidate; only the task text is sent to the configured model.
     Propose(Propose),
+    /// Derives the Cedar a single hook-observed command needs; sends only command and cwd.
+    ProposeCommand(command::ProposeCommand),
 }
 
 #[derive(Debug, Args)]
@@ -73,6 +76,9 @@ pub enum IntentFailure {
     /// The candidate had already expired when it was received.
     #[error("{0}")]
     Clarification(&'static str),
+    /// A command proposal was rejected locally; no request reached the daemon.
+    #[error("invalid command proposal: {0}")]
+    Input(&'static str),
     /// Local daemon transport failed; no local fallback is enabled.
     #[error("intent daemon transport failed; no candidate or local fallback")]
     Transport,
@@ -99,7 +105,7 @@ impl IntentFailure {
     /// Returns 2 for clarification, 130 for interruption and 1 for other execution errors.
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::Clarification(_) => 2,
+            Self::Clarification(_) | Self::Input(_) => 2,
             Self::Interrupted => 130,
             _ => 1,
         }
@@ -114,10 +120,12 @@ impl From<io::Error> for IntentFailure {
 
 impl IntentCommand {
     pub(crate) fn run(&self, socket: &Path, timeout: Duration) -> Result<u8, IntentFailure> {
-        let Self::Propose(options) = self;
         let interrupted = Arc::new(AtomicBool::new(false));
         let signal = Interrupt::register(Arc::clone(&interrupted))?;
-        let result = options.run(socket, timeout, &interrupted);
+        let result = match self {
+            Self::Propose(options) => options.run(socket, timeout, &interrupted),
+            Self::ProposeCommand(options) => options.run(socket, timeout, &interrupted),
+        };
         drop(signal);
         check_interrupt(&interrupted)?;
         result

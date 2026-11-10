@@ -186,6 +186,67 @@ agent-sec-cli intent propose \
 `arg_count` 一致、属性值有效。本命令不证明这些条件
 已经实现，因此不能声称 `rm` 已被拦截。
 
+### 单次命令候选（hook 集成）
+
+`agent-sec-cli intent propose-command --command "<命令文本>" [--cwd <目录>]` 面向
+hook 集成：只发送 hook 已有的 `command` 与 `cwd`，返回该条命令的未审批 Cedar。
+输入是任意可执行命令行，不只 shell 内建：`python3 train.py`、`node app.js` 与
+`rm -rf build` 同等处理，差别只在命令本身。
+入口只有 `PreToolUse` 中带命令行文本的 shell 类工具：cosh-ng 的
+`run_shell_command`/`shell`（`cosh-extension.json` 中 `sandbox-guard` 的 matcher
+`^(run_shell_command|shell)$`）、Qoder 与 Codex 的 `Bash`、Qwen Code 的
+`run_shell_command`；Python 脚本没有独立的工具入口，也经它提交。payload 提供
+`tool_input.command`；cosh-ng 另提供 `tool_name` 与会话 `cwd`，未提供 `cwd` 的宿主
+需显式传 `--cwd`。
+
+以 cosh-ng 为例，该 hook 点目前能拿到的字段里，只有 `command` 与 `cwd` 会进入候选：
+
+| 字段 | 用途 |
+|------|------|
+| `tool_input.command` | 命令文本，唯一的策略来源；不含 argv、环境变量或 `PATH` 解析结果 |
+| `cwd` | 解释相对路径并解析为规范绝对路径，不是授权范围 |
+| `tool_name` | 识别 shell 类工具，不写入候选 |
+| `session_id`、`run_id`、`tool_use_id` | 会话与调用关联，供日志和审计使用 |
+| `hook_event_name`、`timestamp`、`transcript_path`、`skill_context` | 协议字段；cosh-ng 的 `transcript_path` 仅为占位 |
+
+payload 没有 argv、进程环境、`PATH` 解析结果、真实可执行文件绝对路径、重定向目标和网络
+端点，所以候选只能表达命令字面量能确定的部分。需要这些信息时必须修改 hook 实现（在 hook
+内解析命令行、读取环境或解析链接后传入新字段）；本接口不做补齐，CLI 也不在本地推断。
+
+其它 `PreToolUse` 调用不适用：`Read`/`Write`/`Edit`/`Grep`/`Glob`/`Skill`/`Task`/MCP
+等传入的是结构化参数，没有命令行，需要“工具参数 → 请求权限”的单独映射，本接口未提供，
+后续会提供；用户输入、工具执行后、会话结束等 hook 点也没有命令文本。
+若同一链路上在前的 hook 已改写 `tool_input.command`（例如 sandbox 包装），
+应传入改写前的原始命令。
+`--cwd` 默认为 CLI 进程的当前工作目录，并解析为规范绝对路径；它只用于解释相对路径，
+不是授权范围。命令不会被执行，也不读取文件正文。
+
+```bash
+agent-sec-cli intent propose-command \
+  --command 'read -r line < report.csv' \
+  --cwd /work
+```
+
+因为调用方解析该输出，默认格式为 JSON：
+`{"outcome":"candidate","policy":"Cedar 文本","caveats":["..."]}` 或
+`{"outcome":"needs_clarification","reasons":["..."]}`。`caveats` 是不阻断候选的
+已知缺口，例如 PATH 未解析或脚本内部行为未知，审批时必须一并查看；没有缺口时为空数组。
+`--format text` 把候选按 read/write/exec/spawn/network 分组列出路径，未出现的类别显示
+`none`，并在末尾单列 `Not covered by this candidate`；策略含无法摘要的条件时回退为原始
+Cedar。`--format cedar` 把 `caveats` 写成 `// Not covered:` 注释；澄清时只输出注释，
+不会把 permit 误当成结果。
+只有命令语义本身无法表达时才返回澄清，不输出部分策略；命令很短也应有策略，只有完全没有
+文件、进程、网络动作（如 `pwd`、`echo`、`date`）时才为空。空策略是合法候选：授权为空、
+`caveats` 随候选返回，沙箱只差运行依赖；CLI 在渲染前重新执行一次 Cedar 校验。
+两种结果退出码均为 `0`；daemon 会拒绝的输入在本地退出 `2`，不发出请求。
+
+`--format cedar` 输出未审批候选原文，审批与执行不在本子命令范围内。候选只含命令自身需求，
+program、cwd 与 loader 路径不在其中，需执行侧显式补齐；CLI 不做隐式补齐。实际生效仍由 PDP
+与发布的 `environment_permissions` 和策略层求交：
+`effective = 请求 ∩ environment_permissions ∩ 策略`。
+
+本路径不读取或改写 base policy，不在本地计算 `effective`，也不执行命令。
+
 ## 管理 Policy
 
 准备 JSON 模板文件，例如 `policy.json`：
