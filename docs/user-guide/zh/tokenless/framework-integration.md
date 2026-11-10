@@ -47,7 +47,7 @@ HTML 和 Diff 裁剪。内容来源、可恢复性和收益门禁仍然生效，
 | Cosh-NG／旧版 Copilot Shell | Cosh-NG 能替换受支持的结果，但 Common BeforeModel Hook 无法发布可执行的静态恢复工具。旧版 Copilot Shell 不能替换 PostTool 结果。 |
 | OpenCode V1 插件 | `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，且不覆盖 MCP 定义，因此 Schema 保持原样。OpenCode V2 插件 API 需要单独迁移，当前 V1 Adapter 不支持；这不表示 V2 协议无法支持 Schema 压缩。 |
 | Qoder、千问办公、Hermes、DSH | 当前集成接口没有同时提供可修改的模型工具 Schema 列表和静态恢复授权。Hermes、DSH 的 RTK 使用阻止后建议重试；DSH 在 pre-execute 前已冻结并审计参数，禁止直接修改。 |
-| 千问办公 Shell 恢复 | macOS 恢复 Hook 使用随插件提供的 CLI 和同一份 Stash。此路径不可用时，工作区 Shell 和使用插件私有 CLI 的环境仅接受无损候选。 |
+| 千问办公工作区 Shell 或插件私有 CLI | macOS 和 Windows 的完整恢复桥接会把 Marker 命令改写为插件私有二进制，并携带匹配的状态和归属信息（Windows 安装器会把 Hook 命令改写为 PowerShell 形式，二进制为 `bin/tokenless.exe`）。缺少桥接时仅接受无损候选。 |
 | QwenPaw／AgentScope | 已接入全部现有 Core 领域，包括 Schema 和静态恢复。中间流式 Chunk 与非文本块保持不变；AgentScope 自定义工具需要明确的内容来源契约。 |
 
 OpenClaw 恢复授权来自当前历史中的 Marker 和刚交付的压缩结果，按会话 UUID 隔离。
@@ -64,8 +64,8 @@ OpenClaw 恢复授权来自当前历史中的 Marker 和刚交付的压缩结果
 
 Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode 各自的 PostTool 适配器会向 `tokenless compress`
 发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
-解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容。
-没有恢复路径时，Core 只接受无损候选。
+解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；千问办公也可使用经验证的
+macOS 和 Windows 私有恢复桥接。没有恢复路径时，Core 只接受无损候选。
 所有非 `applied` Disposition 都保留原文。当前路由如下：
 
 | 内容 | 当前共享 Hook 行为 |
@@ -192,6 +192,12 @@ Hook 进程在权限允许时写入压缩统计。安装和检测会显示各自
 升级后，如果 Stash 最后由旧版写入端关闭，SQLite 的 WAL 辅助文件可能已被清理。
 若工具 Shell 无法写入该目录，先让更新后的插件完成一次向同一份 Stash 写入原文的压缩，
 再使用升级前的恢复提示。更新后的写入端关闭时会保留两个辅助文件。
+
+独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。macOS 和 Windows 上完整的 PreTool
+桥接会将独立的 `tokenless retrieve` 命令改写为私有二进制，并携带相同的数据目录、Stash 选择、
+会话和调用归属；Windows 桥接对 PowerShell 事件输出 PowerShell 形式（`$env:` 赋值加
+`& '<tokenless.exe>' retrieve <HASH>`）。精确匹配的恢复结果跳过压缩；桥接不可用时，
+这些私有运行时路径只接受无损压缩。
 
 先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
 和 Tokenless 二进制。请在实际使用插件的桌面会话中确认这些二进制可用。
