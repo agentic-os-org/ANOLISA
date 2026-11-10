@@ -1421,7 +1421,7 @@ impl SkillFs {
                 // (inbox <-> /skills) renames were rejected with EXDEV above,
                 // so old and new are both in or both out of the inbox here.
                 let old_type = old_path_type.clone();
-                let new_type = new_path_type.clone();
+                let mut new_type = new_path_type.clone();
                 match (&old_type, &new_type) {
                     (
                         PathType::SkillDir {
@@ -1524,6 +1524,31 @@ impl SkillFs {
                             }
                         }
                     }
+                    (
+                        PathType::Passthrough { .. }
+                        | PathType::NestedPassthrough { .. }
+                        | PathType::CategoryPassthrough { .. }
+                        | PathType::HermesMetaChild { .. },
+                        PathType::SkillDir { .. }
+                        | PathType::NestedSkillDir { .. }
+                        | PathType::CategoryDir { .. }
+                        | PathType::HermesMeta { .. },
+                    )
+                    | (
+                        PathType::SkillDir { .. } | PathType::NestedSkillDir { .. },
+                        PathType::CategoryDir { .. } | PathType::HermesMeta { .. },
+                    ) => {
+                        // A fresh Hermes root slot is not classified as a
+                        // skill until the directory has landed. Inspect the
+                        // destination rather than trusting its old label.
+                        self.sync_promoted_skill(&old_physical, &new_physical);
+                        if matches!(
+                            new_type,
+                            PathType::CategoryDir { .. } | PathType::HermesMeta { .. }
+                        ) {
+                            new_type = self.parse_fuse_path(Path::new(&new_path));
+                        }
+                    }
                     _ => {
                         // File-level rename inside a skill — trigger re-parse
                         // if SKILL.md is involved.
@@ -1623,15 +1648,11 @@ impl SkillFs {
                             category,
                             skill_name,
                         } => Some(Self::hermes_skill_id(category, skill_name)),
-                        // H3: Hermes top-level staging rename — the new
-                        // top-level skill id is the bare name, whether the
-                        // target parsed as a category, as a HermesMeta
-                        // (in-place fresh name), or as an existing
-                        // top-level Skill, and whether the staging root
-                        // came from the mount root or from a category
-                        // (the category → root completion). Matches
-                        // enumerate_hermes_top_level_skills and the
-                        // resolver key used for mixed-layout skills.
+                        // H3: top-level staging IDs use the bare name.
+                        // Category moves retain their pre-rename target
+                        // labels, including HermesMeta for an in-place
+                        // fresh slot; promotions reclassified as SkillDir
+                        // are handled by the first arm above.
                         PathType::CategoryDir { category } => Some(category.clone()),
                         PathType::HermesMeta { name } => Some(name.clone()),
                         _ => None,
@@ -1912,7 +1933,7 @@ impl SkillFs {
         // The mount's ceiling, not the default: reads, listings and the
         // sync-worker reparses all refuse over-limit manifests, so the
         // rename refresh must refuse exactly the same files.
-        let mut new_entry =
+        let new_entry =
             match parser::parse_skill_file_with_limit(&md_path, self.max_skill_size as usize) {
                 Ok(entry) => entry,
                 Err(_) => {
@@ -1932,8 +1953,47 @@ impl SkillFs {
                     }
                 }
             };
+        self.insert_renamed_skill(new_entry, new_name)
+    }
+
+    fn sync_promoted_skill(&self, old_physical: &Path, new_physical: &Path) {
+        if let Some(old_name) = old_physical.file_name().and_then(|name| name.to_str()) {
+            if self.store_entry_backs_manifest(old_name, &old_physical.join("SKILL.md")) {
+                self.store.write().remove(old_name);
+            }
+        }
+        let Some(new_name) = new_physical.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let source = self.source_base();
+        // Non-dot staging names retain their store identity for completion
+        // renames, as in discovery. Listings keep those entries private.
+        let loadable = if new_physical.parent() == Some(source.as_path()) {
+            !new_name.starts_with('.') && skillfs_core::store::has_regular_skill_md(new_physical)
+        } else {
+            skillfs_core::store::is_loadable_categorized_skill(&source, new_physical)
+        };
+        if !loadable {
+            return;
+        }
+        let md_path = new_physical.join("SKILL.md");
+        match parser::parse_skill_file_with_limit(&md_path, self.max_skill_size as usize) {
+            Ok(entry) => {
+                self.insert_renamed_skill(entry, new_name);
+            }
+            Err(error) => {
+                warn!(path = %md_path.display(), %error, "rename: promoted skill parse failed");
+            }
+        }
+    }
+
+    fn insert_renamed_skill(
+        &self,
+        mut new_entry: skillfs_core::SkillEntry,
+        new_name: &str,
+    ) -> Option<skillfs_core::store::LoadError> {
         adopt_directory_name(&mut new_entry, new_name);
-        // Both branches above record the manifest under the write path's
+        // Rename parsing records the manifest under the write path's
         // physical spelling, which addresses the source through the
         // in-place fd alias. Store identity and ordering must use the
         // canonical source-root spelling the initial scan recorded, or
