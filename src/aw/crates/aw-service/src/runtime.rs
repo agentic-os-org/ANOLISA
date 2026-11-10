@@ -23,6 +23,7 @@ use std::{
 mod binding;
 mod dispatch;
 mod evidence;
+mod expired;
 pub(crate) mod facts;
 mod hooks;
 mod invocations;
@@ -84,6 +85,7 @@ pub(crate) struct Runtime {
     pub(crate) audit: Audit,
     instances: Mutex<BTreeMap<String, Option<Instance>>>,
     events: Mutex<BTreeMap<String, EventEntry>>,
+    expired: Mutex<BTreeMap<String, expired::ExpiredEvent>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     next: AtomicU64,
     calls: AtomicU64,
@@ -124,6 +126,7 @@ impl Runtime {
             audit: Audit::new(directory)?,
             instances: Mutex::new(BTreeMap::new()),
             events: Mutex::new(BTreeMap::new()),
+            expired: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(Vec::new()),
             next: AtomicU64::new(1),
             calls: AtomicU64::new(0),
@@ -252,7 +255,14 @@ impl Runtime {
             if cancelled.load(Ordering::Acquire) {
                 return Err(rejected("event_cancelled"));
             }
-            if events.len() >= self.limits.events {
+            if events.len()
+                + self
+                    .expired
+                    .lock()
+                    .map_err(|_| rejected("state_poisoned"))?
+                    .len()
+                >= self.limits.events
+            {
                 return Err(self.overload("event_limit"));
             }
             events.insert(
@@ -489,11 +499,27 @@ impl Runtime {
             }
         });
         context.close();
-        let completed = self.audit.append(key, json!({"phase": "closed", "status": if panicked { "worker_failed" } else if close.is_some() { "closed" } else if automatic && completed_steps.load(Ordering::Acquire) == step_count { "completed" } else if self.stopped.load(Ordering::Acquire) { "stopped" } else if Instant::now() >= event.deadline() { "expired" } else { "cancelled" }, "attempted_steps": claimed.len()}));
-        // Release registry membership before acknowledging close so immediate unbind works.
-        if let Ok(mut events) = self.events.lock() {
-            events.remove(key);
-        }
+        let status = if panicked {
+            "worker_failed"
+        } else if close.is_some() {
+            "closed"
+        } else if automatic && completed_steps.load(Ordering::Acquire) == step_count {
+            "completed"
+        } else if self.stopped.load(Ordering::Acquire) {
+            "stopped"
+        } else if Instant::now() >= event.deadline() {
+            "expired"
+        } else {
+            "cancelled"
+        };
+        let completed = self.retire_event(
+            (key, instance_id),
+            event,
+            &claimed,
+            status,
+            automatic,
+            execution,
+        );
         if let Some(reply) = close {
             let _ =
                 reply.send(completed.map(|evidence| json!({"closed": true, "evidence": evidence})));
@@ -515,6 +541,10 @@ impl Runtime {
             }
             // Dropping registry senders wakes idle event workers; in-flight handlers are bounded.
             events.clear();
+            self.expired
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?
+                .clear();
         }
         if shutdown {
             self.stop_observations()?;

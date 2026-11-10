@@ -94,8 +94,14 @@ impl Runtime {
                 .map_err(|_| rejected("state_poisoned"))?
                 .len();
         }
+        let events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
+        let expired = self
+            .expired
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?;
         Ok(json!({"limits":self.limits, "usage":{
             "bindings":instances.len(), "invocations":invocations, "correlations":correlations,
+            "event_slots":events.len() + expired.len(), "expired_events":expired.len(),
             "calls":self.calls.load(Ordering::Relaxed),
             "connections":self.resources.connections.load(Ordering::Relaxed)},
             "peak_invocations_per_binding":self.resources.peak_invocations.load(Ordering::Relaxed),

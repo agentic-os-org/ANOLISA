@@ -3,6 +3,7 @@
 use super::*;
 use aw_adapter::reload::ExecutionClaim;
 
+#[derive(Clone)]
 pub(in crate::runtime) struct Execution {
     claim: ExecutionClaim,
     generation: u64,

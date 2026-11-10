@@ -1187,6 +1187,22 @@
     "qoder-sdk-callback-deadline": {
       "target": "aw-cli/test/qoder_sdk",
       "test": "callback_deadlines_preserve_late_denials_and_cleanup_diagnostics"
+    },
+    "service-expired-failure-actions": {
+      "target": "aw-cli/test/service",
+      "test": "expired::expired_events_preserve_event_and_default_budget_failure_actions"
+    },
+    "service-expired-capacity": {
+      "target": "aw-cli/test/service",
+      "test": "expired::expired_handles_are_bounded_instance_scoped_and_reclaimed_by_close_or_unbind"
+    },
+    "service-expired-native-cleanup": {
+      "target": "aw-cli/test/service",
+      "test": "expired::expired_native_results_and_correlated_close_release_retained_capacity"
+    },
+    "service-expired-handoff": {
+      "target": "aw-service/lib/aw_service",
+      "test": "runtime::expired::tests::queued_requests_survive_expiry_retirement"
     }
   },
   "agents": {
@@ -1230,7 +1246,11 @@
         "submit-agentscope",
         "sdk-scope-observation-isolation",
         "sdk-scope-observation-owner-exit",
-        "sdk-scope-observation-failure"
+        "sdk-scope-observation-failure",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1307,7 +1327,11 @@
         "claude-submission-cleanup",
         "sdk-scope-observation-isolation",
         "sdk-scope-observation-owner-exit",
-        "sdk-scope-observation-failure"
+        "sdk-scope-observation-failure",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1358,7 +1382,11 @@
         "native-event-generation",
         "native-event-final-admission",
         "native-release-update-race",
-        "native-owner-update-race"
+        "native-owner-update-race",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1403,7 +1431,11 @@
         "native-event-final-admission",
         "native-release-update-race",
         "native-owner-update-race",
-        "openclaw-native-startup-contract"
+        "openclaw-native-startup-contract",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1482,7 +1514,11 @@
         "sdk-scope-observation-isolation",
         "sdk-scope-observation-owner-exit",
         "sdk-scope-observation-failure",
-        "pi-native-arguments"
+        "pi-native-arguments",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1558,7 +1594,11 @@
         "native-event-generation",
         "native-event-final-admission",
         "native-release-update-race",
-        "native-owner-update-race"
+        "native-owner-update-race",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1658,7 +1698,11 @@
         "sdk-scope-observation-isolation",
         "sdk-scope-observation-owner-exit",
         "sdk-scope-observation-failure",
-        "qwenpaw-startup-readiness"
+        "qwenpaw-startup-readiness",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",
@@ -1754,7 +1798,11 @@
         "sdk-scope-observation-owner-exit",
         "sdk-scope-observation-failure",
         "qoder-sdk-native-direct-ready",
-        "qoder-sdk-callback-deadline"
+        "qoder-sdk-callback-deadline",
+        "service-expired-failure-actions",
+        "service-expired-capacity",
+        "service-expired-native-cleanup",
+        "service-expired-handoff"
       ],
       "security": [
         "security-retry",

@@ -197,7 +197,7 @@ impl Contexts {
             constraints,
             association,
             deadline,
-            deadline_ns: deadline::encode(deadline)?.to_string(),
+            deadline_ns: deadline::recorded(deadline)?.to_string(),
             received_at_ms: now_ms()?,
             after: event["name"] == "tool.after",
         })

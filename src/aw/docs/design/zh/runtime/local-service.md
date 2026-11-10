@@ -147,9 +147,15 @@ worker 可以是 launcher 自身或其后代；fork worker 在 fork 后创建独
 清理超时保留 draining 状态并返回错误，
 维护循环继续进行有界回收。
 
-并发预算通过 spec.daemon.limits 配置：默认 64 个 binding（含根）、128 个 live event、
+并发预算通过 spec.daemon.limits 配置：默认 64 个 binding（含根）、128 个事件槽位、
 64 个 Provider call、128 条连接、每 binding 256 个活动 invocation，各字段范围为 1..4096。
 status 展示用量、峰值和拒绝原因。准备中、空闲和排空中的 binding 都占容量。
+事件在步骤被领取前过期时，只保留该步骤的失败回复和原策略错误动作，释放 worker、事件正文及额外的 Host 引用。
+活动事件与保留的过期句柄共享事件槽位上限；status 通过 `resources.usage.event_slots` 和
+`resources.usage.expired_events` 展示占用。每个步骤的失败回复只能领取一次。
+显式 `close_event` 或 unbind 回收句柄；原生事件在全部失败回复被领取或原生关联关闭后也会回收。
+终结审计记录 `expired` 及保留步骤的错误动作。过期句柄不计入策略空闲更新的活动工作量。
+已关闭或未知句柄继续返回 `unknown_event`。
 Pi/Claude 常驻生产接点与普通 Qoder SDK 生产接点按严格递增序号登记 invocation。
 每个普通 Qoder Query 持有一个已确认的子 scope；原生命令队列和原始回调排空后才回收
 invocation 并释放 scope。协议启用和旧事件准入共享同一把锁，

@@ -41,3 +41,33 @@ pub(crate) fn decode(value: u64) -> Result<Instant> {
         .ok_or_else(|| rejected("deadline_range"))?;
     Ok(instant + remaining)
 }
+
+// Evidence records may describe an already elapsed deadline. RPC admission must
+// continue using encode/decode; execution checks the original Instant directly.
+pub(crate) fn recorded(value: Instant) -> Result<u64> {
+    let clock = monotonic()?;
+    let reference = Instant::now();
+    let timestamp = if let Some(remaining) = value.checked_duration_since(reference) {
+        clock.checked_add(u64::try_from(remaining.as_nanos()).map_err(|_| rejected("clock_range"))?)
+    } else {
+        clock.checked_sub(
+            u64::try_from(reference.duration_since(value).as_nanos())
+                .map_err(|_| rejected("clock_range"))?,
+        )
+    };
+    timestamp.ok_or_else(|| rejected("clock_range"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_metadata_deadlines_do_not_become_admissible_rpc_deadlines() {
+        let expired = Instant::now() - Duration::from_millis(5);
+        let timestamp = recorded(expired).unwrap();
+        assert!(monotonic().unwrap() - timestamp >= 5_000_000);
+        assert!(encode(expired).is_err());
+        assert!(decode(timestamp).is_err());
+    }
+}
