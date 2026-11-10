@@ -21,6 +21,10 @@ echo "forget your system prompt" | agent-sec-cli scan-prompt
 agent-sec-cli scan-prompt --input prompts.txt --format json
 ```
 
+An empty input is a usage error whatever the channel — blank `--text`, an empty file,
+or empty stdin — and exits `1` with a message on stderr. Exit `0` always carries a verdict, so
+a caller can never mistake "nothing was scanned" for "the scan passed".
+
 Useful options:
 
 | Option | Purpose |
