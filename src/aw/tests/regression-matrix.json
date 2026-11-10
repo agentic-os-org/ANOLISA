@@ -1183,6 +1183,10 @@
     "openclaw-native-startup-contract": {
       "target": "aw-cli/test/openclaw",
       "test": "native_update::native_gateway_checks_launch_identity_and_completed_run_replay"
+    },
+    "qoder-sdk-callback-deadline": {
+      "target": "aw-cli/test/qoder_sdk",
+      "test": "callback_deadlines_preserve_late_denials_and_cleanup_diagnostics"
     }
   },
   "agents": {
@@ -1749,7 +1753,8 @@
         "sdk-scope-observation-isolation",
         "sdk-scope-observation-owner-exit",
         "sdk-scope-observation-failure",
-        "qoder-sdk-native-direct-ready"
+        "qoder-sdk-native-direct-ready",
+        "qoder-sdk-callback-deadline"
       ],
       "security": [
         "security-retry",

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { resolveSkill, bindSkillQuery, noteSkillRead } from "./skills.mjs";
-import { invoke } from "./callback.mjs";
+import { invoke, callbackTimeoutMs } from "./callback.mjs";
 import { randomUUID } from "node:crypto";
 import { Reload } from "./reload.mjs";
 import { Resident, bounded, validateHooks } from "./resident.mjs";
@@ -129,7 +129,7 @@ function compose(config, options) {
     };
     for (const native of nativeEvents)
       (hooks[native] ??= []).push({ matcher: "*", hooks: [callback],
-        timeout: routes.reduce((ms, hook) => ms + hook.budget_ms + 3000, 1000) / 1000 });
+        timeout: routes.reduce((ms, hook) => ms + callbackTimeoutMs(hook), 1000) / 1000 });
   }
   const canUseTool = options.canUseTool && (async (name, input, context) => {
     const result = await options.canUseTool(name, copy(input), context);
