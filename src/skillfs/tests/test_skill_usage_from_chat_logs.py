@@ -29,7 +29,7 @@ TS = "2026-01-01T00:00:00Z"
 
 
 def event(parts):
-    return json.dumps({"timestamp": TS, "message": {"parts": parts}})
+    return json.dumps({"timestamp": TS, "message": {"parts": parts}}, ensure_ascii=False)
 
 
 def skill_call(name):
@@ -58,6 +58,27 @@ class ChatLogsTestCase(unittest.TestCase):
 
 
 class TestMalformedEntries(ChatLogsTestCase):
+    def test_non_utf8_records_are_skipped(self):
+        valid = [
+            event([skill_call("alpha")]).encode("utf-8"),
+            event([skill_call("béta")]).encode("utf-8"),
+        ]
+        corrupt = event([skill_call("bad")]).encode("utf-8").replace(b"bad", b"bad\xff")
+        for bad_line in (b"\xff\xfe", corrupt, b"\xe2\x82"):
+            for position in range(3):
+                with self.subTest(bad_line=bad_line, position=position):
+                    lines = valid.copy()
+                    lines.insert(position, bad_line)
+                    self.log.write_bytes(b"\n".join(lines))
+                    proc = self.run_cli("--all-tools")
+                    self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+                    self.assertEqual(proc.stderr, "")
+                    self.assertIn("2 tool calls total", proc.stdout)
+                    self.assertIn("skill: 2", proc.stdout)
+                    self.assertIn("alpha: 1", proc.stdout)
+                    self.assertIn("béta: 1", proc.stdout)
+                    self.assertIn("Total skill invocations: 2", proc.stdout)
+
     def test_unhashable_name_and_skill_do_not_abort(self):
         self.write_log(
             [
