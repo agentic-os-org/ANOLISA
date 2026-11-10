@@ -197,6 +197,7 @@ fn direct_cedar_generation_and_model_boundaries() {
     literal_and_root_paths();
     condition_and_exclusive_boundaries();
     invalid_and_unsupported();
+    process_program_attribute();
     unresolved_is_not_a_completeness_proof();
     exact_delete_matrix();
     input_budgets_and_deadlines();
@@ -434,6 +435,44 @@ fn invalid_and_unsupported() {
     assert!(matches!(
         prepare_policy(&"permit(principal, action, resource);\n".repeat(1025)),
         Err(PolicyError::TooLarge)
+    ));
+}
+
+fn process_program_attribute() {
+    // A `like` pattern written as an equality literal names no concrete path and would not
+    // project, so it gets its own reason the model can act on.
+    for expression in ["resource.path == \"/a/*\"", "resource.path != \"/a/*\""] {
+        let policy = format!(
+            "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when {{ {expression} }};"
+        );
+        assert!(
+            matches!(prepare_policy(&policy), Err(PolicyError::WildcardLiteral)),
+            "{policy}"
+        );
+    }
+    // `SecCore::Process.program` is a command name supplied by the request, not a path, so it
+    // keeps no absolute-literal rule; only a projection through a record hides the receiver.
+    for policy in [
+        "permit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process)\nwhen { resource.program == \"git\" };"
+            .to_owned(),
+        "permit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process)\nwhen { resource.program != \"git\" };".to_owned(),
+        "permit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process)\nwhen { resource.resolved_program == \"/usr/bin/git\" };".to_owned(),
+    ] {
+        assert!(prepare_policy(&policy).is_ok(), "{policy}");
+    }
+    let projected = "{r: resource}.r.program == \"git\"";
+    let policy = format!(
+        "permit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process) when {{ {projected} }};"
+    );
+    assert!(
+        matches!(prepare_policy(&policy), Err(PolicyError::InvalidPath)),
+        "{policy}"
+    );
+    // The request context program stays an executable path and keeps the absolute-literal rule.
+    let context_program = "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File)\nwhen { context.input.program == \"git\" };";
+    assert!(matches!(
+        prepare_policy(context_program),
+        Err(PolicyError::InvalidPath)
     ));
 }
 

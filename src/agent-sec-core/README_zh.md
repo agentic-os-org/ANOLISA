@@ -140,6 +140,12 @@ CLI 与 daemon 须同步升级为 request v1/candidate v1，其它版本不兼�
 候选不会批准、安装或执行策略。详见
 [Intent 命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#intent从任务生成待审候选)。
 
+源码中的 V2 API `intent.propose_command` 面向 hook 集成，接收 `command` 和 `cwd`，
+返回 Cedar 候选或澄清原因；CLI 通过 `agent-sec-cli intent propose-command` 暴露该接口。
+两者都不更新 base policy、不映射 OS 权限，也不执行命令；
+PDP 映射与 sandbox 接入由后续工作负责。详见
+[单次命令 Cedar API](docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)。
+
 ## 安全防护架构
 
 ```

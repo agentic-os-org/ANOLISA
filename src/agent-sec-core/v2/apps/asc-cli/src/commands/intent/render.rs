@@ -256,7 +256,7 @@ fn terminal_json(value: &Value) -> Result<String, IntentFailure> {
         .collect())
 }
 /// Returns model text unchanged for pipes and files, escaped when a terminal would interpret it.
-fn display(text: &str, terminal: bool) -> Cow<'_, str> {
+pub(super) fn display(text: &str, terminal: bool) -> Cow<'_, str> {
     if terminal {
         Cow::Owned(escape(text))
     } else {

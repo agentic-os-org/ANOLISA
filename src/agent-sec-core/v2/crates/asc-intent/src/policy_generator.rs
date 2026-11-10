@@ -10,10 +10,8 @@
 //! run, and every stage stops at the earliest of the caller deadline, the candidate TTL and
 //! [`INTENT_BUDGET`].
 //!
-//! Generation covers a task before it starts only: `intent.propose` always yields a fresh
-//! candidate and tracks no policy revision, so a running task cannot have its policy updated.
-//! TODO(asc-intent maintainers): add that update path together with a trusted current revision;
-//! approval, publication and enforcement stay downstream.
+//! Tasks and single commands only create new candidates; existing policies are neither read nor
+//! rewritten, and permission mapping, intersection and execution stay downstream.
 
 use std::time::{Duration, Instant};
 
@@ -129,6 +127,107 @@ pub enum ProposalOutcome {
     },
 }
 
+/// Cedar derived for one command; not an approval or an effective permission.
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CommandPolicyOutcome {
+    /// Passed the Cedar syntax, path and Strict-type checks; completeness is still unproven.
+    Candidate {
+        /// Raw Cedar text with no added rules; an empty string requests no permission.
+        policy: String,
+        /// Known but uncovered parts, such as an unresolved PATH lookup or script behavior; never
+        /// treat them as authorized.
+        caveats: Vec<String>,
+    },
+    /// Required information or expressiveness is missing; no partial policy is returned, so it
+    /// cannot be mistaken for a complete request.
+    NeedsClarification {
+        /// Reasons reported by the model or found by the program checks.
+        reasons: Vec<String>,
+    },
+}
+
+/// Maximum model attempts for one command proposal; a single retry repairs the syntax and
+/// Strict-typing mistakes models make often enough that failing the hook is worse.
+const COMMAND_ATTEMPTS: u8 = 2;
+
+/// Generates Cedar from a hook command/cwd; it reads no base policy and computes no effective
+/// permission.
+///
+/// Reads no file and runs no command. Only a model-reported unresolved item yields no candidate;
+/// caveats travel with the candidate. Syntax, Strict-typing and path-literal rejections are
+/// retried once with the local reason; unsupported-policy features are never retried. After the
+/// retry a syntax or typing failure is an error, while a persistent path rejection becomes a
+/// clarification. Validation proves Cedar syntax and types only, never command completeness or
+/// minimality.
+///
+/// # Errors
+/// Returns an error for invalid input or model output, invalid Cedar syntax or types, and
+/// timeouts or exceeded limits.
+pub fn propose_command(
+    provider: &dyn ModelProvider,
+    model: &str,
+    input: &crate::CommandInput,
+    deadline: Instant,
+) -> Result<CommandPolicyOutcome, ProposalError> {
+    let deadline = deadline.min(Instant::now() + INTENT_BUDGET);
+    check_deadline(deadline)?;
+    let mut attempt = 1;
+    let mut rejection: Option<String> = None;
+    loop {
+        let response = crate::intent_extraction::generate_command_response(
+            provider,
+            model,
+            input,
+            deadline,
+            rejection.as_deref(),
+        )?;
+        if !response.unresolved.is_empty() {
+            check_deadline(deadline)?;
+            return Ok(CommandPolicyOutcome::NeedsClarification {
+                reasons: response.unresolved,
+            });
+        }
+        // An empty policy is the answer for a command with no file, process or network action:
+        // it grants nothing, so `prepare_policy` admits it and the caveats stay attached.
+        match prepare_policy(&response.policy) {
+            Ok(artifact) => {
+                check_deadline(deadline)?;
+                return Ok(CommandPolicyOutcome::Candidate {
+                    policy: artifact.text,
+                    caveats: response.caveats,
+                });
+            }
+            // A rejected draft is retried once with the local reason, so the model can repair a
+            // non-canonical path, a wildcard path literal or a schema mismatch instead of the run
+            // terminating on it.
+            Err(
+                error @ (PolicyError::InvalidPath
+                | PolicyError::WildcardLiteral
+                | PolicyError::Syntax
+                | PolicyError::Validation),
+            ) if attempt < COMMAND_ATTEMPTS => {
+                check_deadline(deadline)?;
+                rejection = Some(error.to_string());
+                attempt += 1;
+            }
+            // After the single retry, a persistent path rejection describes the command, not a
+            // transient mistake, so it becomes a clarification reason rather than an error.
+            Err(
+                error @ (PolicyError::InvalidPath
+                | PolicyError::WildcardLiteral
+                | PolicyError::UnsupportedPolicy),
+            ) => {
+                check_deadline(deadline)?;
+                return Ok(CommandPolicyOutcome::NeedsClarification {
+                    reasons: vec![error.to_string()],
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// Orchestration errors carry no task body or model output.
 #[derive(Debug, Error)]
 pub enum ProposalError {
@@ -168,7 +267,11 @@ pub fn propose_task(
     let draft = generate_policy_draft(provider, model, task, deadline)?;
     let artifact = match prepare_policy(draft.policy()) {
         Ok(artifact) => artifact,
-        Err(error @ (PolicyError::InvalidPath | PolicyError::UnsupportedPolicy)) => {
+        Err(
+            error @ (PolicyError::InvalidPath
+            | PolicyError::WildcardLiteral
+            | PolicyError::UnsupportedPolicy),
+        ) => {
             check_deadline(deadline)?;
             return Ok(ProposalOutcome::NeedsClarification {
                 draft: Box::new(draft),

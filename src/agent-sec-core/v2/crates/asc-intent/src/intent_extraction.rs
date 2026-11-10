@@ -18,6 +18,7 @@ pub const PROMPT_VERSION: &str = "cedar-policy@1";
 pub const DRAFT_VERSION: &str = "asc.intent.draft.v1";
 
 const SYSTEM_PROMPT: &str = include_str!("../prompts/policy-generation.md");
+const COMMAND_SYSTEM_PROMPT: &str = include_str!("../prompts/command-proposal.md");
 
 /// Raw task plus its source label; the label does not prove an authorized identity.
 #[derive(Deserialize)]
@@ -27,6 +28,79 @@ pub struct TaskInput {
     pub source_id: String,
     /// Unmodified task text, non-empty and at most 64 KiB.
     pub text: String,
+}
+
+/// Raw input of a single hook command; cwd only supplies path context, not an authorization scope.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandInput {
+    /// Raw shell command; non-empty, at most 64 KiB, without NUL.
+    pub command: String,
+    /// Canonical absolute working directory, at most 4096 bytes; no filesystem lookup happens.
+    pub cwd: String,
+}
+
+/// UTF-8 byte limit of one command.
+pub const MAX_COMMAND_BYTES: usize = 64 * 1024;
+/// UTF-8 byte limit of a working directory.
+pub const MAX_CWD_BYTES: usize = 4096;
+
+impl CommandInput {
+    /// Checks the input shape; it runs no command, expands no variable and reads no path metadata.
+    ///
+    /// # Errors
+    /// Returns an error when the command is empty, over a limit or contains NUL, or when cwd is
+    /// not a canonical absolute path.
+    pub fn validate(&self) -> Result<(), IntentError> {
+        if self.command.trim().is_empty()
+            || self.command.len() > MAX_COMMAND_BYTES
+            || self.command.contains('\0')
+            || self.cwd.len() > MAX_CWD_BYTES
+            || !crate::policy_validation::absolute_path(&self.cwd)
+        {
+            return Err(IntentError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
+/// The command prompt's output wrapper; `caveats` records gaps that do not block a candidate.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandResponse {
+    /// Raw Cedar text; empty only when the command triggers no file, process or network action.
+    pub policy: String,
+    /// Ambiguities that make the whole command inexpressible; non-empty means no candidate.
+    pub unresolved: Vec<String>,
+    /// Known coverage gaps of an otherwise usable candidate, such as an unresolved PATH lookup.
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
+/// `rejection` replays the local check that refused the previous answer, so a retry is not blind.
+pub(crate) fn generate_command_response(
+    provider: &dyn ModelProvider,
+    model: &str,
+    input: &CommandInput,
+    deadline: Instant,
+    rejection: Option<&str>,
+) -> Result<CommandResponse, IntentError> {
+    check_deadline(deadline)?;
+    input.validate()?;
+    if model.trim().is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+        return Err(IntentError::InvalidInput);
+    }
+    let mut payload = serde_json::to_string(input).map_err(|_| IntentError::InvalidInput)?;
+    if let Some(rejection) = rejection {
+        payload =
+            format!("{payload}\n上次输出被本地校验拒绝：{rejection}。请只输出修正后的 JSON。");
+    }
+    let system = format!("{COMMAND_SYSTEM_PROMPT}\n```cedar\n{CEDAR_SCHEMA}\n```\n");
+    let content = provider.complete(model, &system, &payload, deadline)?;
+    check_deadline(deadline)?;
+    let response = validate_command_response(&content)?;
+    check_deadline(deadline)?;
+    Ok(response)
 }
 
 /// The model's only output wrapper; carries no approval state or trusted identity claims.
@@ -73,8 +147,8 @@ impl PolicyDraft {
 /// Generation failures expose no task body, raw model response or secret.
 #[derive(Debug, Error)]
 pub enum IntentError {
-    /// Task source ID, task text or model name is empty, has control characters or is oversized.
-    #[error("task source ID, task text or model name is invalid")]
+    /// The task, command context or model name violates the input constraints.
+    #[error("intent input or model name is invalid")]
     InvalidInput,
     /// The effective deadline had already passed when the result arrived.
     #[error("intent generation deadline exceeded")]
@@ -151,15 +225,40 @@ pub fn validate_policy_response(content: &str) -> Result<PolicyResponse, IntentE
     }
     let response: PolicyResponse =
         serde_json::from_str(content).map_err(|_| IntentError::InvalidDraft)?;
+    if response.policy.len() > MAX_CONTENT_BYTES || !reasons_valid(&response.unresolved) {
+        return Err(IntentError::InvalidDraft);
+    }
+    Ok(response)
+}
+
+/// Validates the command wrapper, which also carries non-blocking caveats.
+fn validate_command_response(content: &str) -> Result<CommandResponse, IntentError> {
+    if content.len() > MAX_CONTENT_BYTES {
+        return Err(IntentError::InvalidResponse);
+    }
+    let response: CommandResponse =
+        serde_json::from_str(content).map_err(|_| IntentError::InvalidDraft)?;
     if response.policy.len() > MAX_CONTENT_BYTES
-        || response.unresolved.len() > 128
-        || response.unresolved.iter().any(|reason| {
-            reason.trim().is_empty() || reason.len() > 4096 || reason.chars().any(char::is_control)
-        })
+        || !reasons_valid(&response.unresolved)
+        || !reasons_valid(&response.caveats)
     {
         return Err(IntentError::InvalidDraft);
     }
     Ok(response)
+}
+
+/// Bounds model-reported reasons and caveats, so a shared budget keeps the daemon's input checks
+/// and the CLI's revalidation in step; see `docs/design/DAEMON_PROTOCOL_V1_zh.md` §19.
+///
+/// Returns false for more than 128 items, blank items, items longer than 4096 bytes, or items
+/// containing control characters.
+pub fn reasons_valid(reasons: &[String]) -> bool {
+    reasons.len() <= 128
+        && reasons.iter().all(|reason| {
+            !reason.trim().is_empty()
+                && reason.len() <= 4096
+                && !reason.chars().any(char::is_control)
+        })
 }
 
 fn check_deadline(deadline: Instant) -> Result<(), IntentError> {

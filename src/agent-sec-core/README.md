@@ -168,6 +168,12 @@ Upgrade CLI and daemon together for request v1/candidate v1; other versions are
 incompatible. Candidates do not approve, install or enforce policies. See the
 [Intent reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task).
 
+For hook integration, the source-tree V2 API `intent.propose_command` accepts
+`command` and `cwd`, returning a Cedar candidate or clarification reasons; the
+`agent-sec-cli intent propose-command` subcommand exposes it to hook callers. Neither
+updates base policies, maps OS permissions or executes commands; PDP mapping and
+sandbox integration remain separate. See the [Command Cedar API](v2/README.md#command-cedar-api).
+
 ## Security Architecture
 
 ```

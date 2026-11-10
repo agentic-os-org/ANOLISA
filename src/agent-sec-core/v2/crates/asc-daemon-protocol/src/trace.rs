@@ -104,7 +104,10 @@ pub fn request_fits_budget(bytes: &[u8]) -> Result<bool, serde_json::Error> {
     let fields: BTreeMap<String, &serde_json::value::RawValue> = serde_json::from_slice(bytes)?;
     let length = bytes.len() + usize::from(bytes.last() != Some(&b'\n'));
     if let Some(method) = fields.get("method")
-        && serde_json::from_str::<String>(method.get())? == crate::method::INTENT_PROPOSE
+        && matches!(
+            serde_json::from_str::<String>(method.get())?.as_str(),
+            crate::method::INTENT_PROPOSE | crate::method::INTENT_PROPOSE_COMMAND
+        )
         && length > crate::intent::INTENT_REQUEST_BYTES
     {
         return Ok(false);

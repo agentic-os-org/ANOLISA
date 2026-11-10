@@ -146,7 +146,7 @@ The current crates are:
   injects concrete adapters into the daemon service.
 - `asc-model-client`: shared loopback client for local inference (Ollama),
   plus an explicitly configured HTTPS OpenAI-compatible provider for Intent.
-- `asc-intent`: task-to-Cedar generation against the unified schema with official
+- `asc-intent`: task/command-to-Cedar generation against the unified schema with official
   parsing, canonical absolute-path checks and Strict validation. It does not
   approve, persist, deploy or enforce candidates.
 - `asc-capability-prompt-scan`: prompt injection/jailbreak scanner combining
@@ -175,7 +175,7 @@ which directly returns Cedar against the unified schema. The response
 is exactly `{"policy":"...","unresolved":[]}`. The unconfirmed draft preserves
 that response and task provenance; it does not grant authorization.
 
-There are no path inputs: the request carries only the task text and a TTL.
+The task proposal has no path inputs: its request carries only the task text and a TTL.
 No file contents, directory listings or Git changes are read, and the daemon does
 not open caller paths. The model resolves absolute paths from the task itself; a
 relative or ambiguous target goes into `unresolved`. Nothing is appended to the
@@ -213,14 +213,56 @@ downstream; this path does not connect to PAP.
 See [the Intent reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task)
 for configuration, constraints and output semantics.
 
+### Command Cedar API
+
+For hook integrations, `intent.propose_command` accepts existing command/cwd values
+and returns unapproved Cedar, without requiring a base policy or changing the hook.
+This is a V2 API addition in the source tree, not an integrated sandbox workflow.
+
+```json
+{"method":"intent.propose_command","params":{"format_version":"asc.intent.command.request.v1","command":"read -r line < report.csv","cwd":"/work"}}
+```
+
+The result is `{"outcome":"candidate","policy":"Cedar text"}` or
+`{"outcome":"needs_clarification","reasons":["missing information"]}`. Any
+model-reported ambiguity discards the partial policy. Empty Cedar requests no permissions.
+The API validates Cedar syntax, paths and types, but cannot prove that the model
+identified every required operation or chose minimal permissions. The API itself emits no
+`requested_permissions`, reads or rewrites no base policy, and calculates no effective
+permissions. It publishes no policy and executes no command either, so PDP mapping, approval
+and hook/sandbox integration remain separate work.
+
+The Rust entry point is `asc_intent::propose_command` with `CommandInput { command, cwd }`.
+The RPC uses the existing Intent model configuration, authenticated LocalUser access,
+shared per-UID/global concurrency limits and 35-second dispatch budget. Command/cwd
+are sent to the configured model service and can contain sensitive data or incur charges.
+`agent-sec-cli intent propose-command --command <text> [--cwd <dir>]` wraps the RPC for
+hook callers, defaults to JSON output and keeps `--format text|cedar`; `--format text`
+groups permissions as read/write/exec/spawn/network and falls back to the exact Cedar
+when a condition cannot be summarized. `--format cedar` prints the unapproved candidate with
+its caveats as comments, and that text is the artifact a later approval step consumes. The
+candidate covers only the command's own demand, so the program, cwd and loader paths are still
+not included; the CLI adds none of them.
+The PDP still intersects every request with `environment_permissions` and the policy layers.
+A candidate returns determinable permissions
+plus non-blocking `caveats` for gaps such as an unresolved PATH lookup or unknown
+script behavior; only an inexpressible command yields a clarification, and an empty policy is a
+candidate as well: a command with no file, process or network action grants nothing and keeps
+its caveats instead of becoming a question. There is no TTL.
+See the
+[command contract (Chinese)](../docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)
+for field budgets and errors, plus the offline `command_api_*` daemon and `command_*`
+CLI tests.
+
 ### Intent source layout
 
-`asc-intent/src/` contains four Rust files:
+`asc-intent/src/` contains five Rust files:
 
 - `lib.rs`: public entry points and module declarations.
-- `intent_extraction.rs`: task-only model input, response parsing and traceable Cedar draft.
+- `intent_extraction.rs`: task or command/cwd model input, command prompt, response parsing and task drafts.
 - `policy_validation.rs`: native Cedar/path checks, escaping and Strict validation.
-- `policy_generator.rs`: orchestration, candidate TTL, complete hashes and safety notes.
+- `policy_summary.rs`: read/write/exec/spawn/network summary for `--format text`; presentation only, never an authorization result.
+- `policy_generator.rs`: command outcomes and task candidate orchestration, TTL, hashes and safety notes.
 
 The generation instructions in `asc-intent/prompts/policy-generation.md` are
 embedded at build time. Entity, action and field semantics come from the embedded

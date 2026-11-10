@@ -233,6 +233,82 @@ attribute values.
 This command does not establish these conditions and must not be described as
 blocking `rm`.
 
+### Propose for a single hook command
+
+`agent-sec-cli intent propose-command --command "<command text>" [--cwd <dir>]` serves
+hook integration: it sends only the hook's own `command` and `cwd` and returns the
+unapproved Cedar for that one command. The input is any executable command line, not
+only shell built-ins: `python3 train.py` and `node app.js` are analyzed like
+`rm -rf build`, and only the command text differs.
+The entry point is a `PreToolUse` call from the shell-class tool, whose input carries
+that command line: `run_shell_command`/`shell` in cosh-ng (`sandbox-guard` with matcher
+`^(run_shell_command|shell)$` in `cosh-extension.json`), `Bash` in Qoder and Codex, and
+`run_shell_command` in Qwen Code. Python has no separate tool entry and is submitted
+through it as well. These payloads supply `tool_input.command`; cosh-ng also supplies
+`tool_name` and the session `cwd`, while a host without `cwd` must pass `--cwd`
+explicitly.
+
+For cosh-ng, these are the fields this hook point carries today, and only `command` and
+`cwd` reach the candidate:
+
+| Field | Use |
+|-------|-----|
+| `tool_input.command` | The command text and the only policy source; it carries no argv, environment or `PATH` lookup result |
+| `cwd` | Explains relative paths and is resolved to a canonical absolute path; it is not a permission scope |
+| `tool_name` | Identifies the shell-class tool and is not written to the candidate |
+| `session_id`, `run_id`, `tool_use_id` | Correlate the call for logging and audit |
+| `hook_event_name`, `timestamp`, `transcript_path`, `skill_context` | Protocol fields; cosh-ng's `transcript_path` is a placeholder |
+
+The payload carries no argv, process environment, `PATH` lookup result, absolute
+executable path, redirection target or network endpoint, so the candidate can only
+state what the command literal determines. Obtaining more requires changing the hook
+implementation (parse the command line, read the environment or resolve links in the
+hook and pass new fields); this interface does not fill the gap, and the CLI does not
+infer it locally.
+
+Other `PreToolUse` calls do not apply: `Read`/`Write`/`Edit`/`Grep`/`Glob`/`Skill`/
+`Task`/MCP tools pass structured arguments with no command line and need a separate
+tool-argument-to-permission mapping that this interface does not provide yet but is
+planned; user-prompt, post-tool and session-end hook points carry no command text either.
+If an earlier hook in the same chain rewrote `tool_input.command`, for example a
+sandbox wrapper, pass the original command instead.
+`--cwd` defaults to the CLI process's current working directory and is resolved to a canonical
+absolute path; it explains relative paths and is not a permission scope. The command is never
+executed and no file content is read.
+
+```bash
+agent-sec-cli intent propose-command \
+  --command 'read -r line < report.csv' \
+  --cwd /work
+```
+
+Output is JSON by default because callers parse this stream:
+`{"outcome":"candidate","policy":"Cedar text","caveats":["..."]}` or
+`{"outcome":"needs_clarification","reasons":["..."]}`. `caveats` lists known gaps
+that do not block the candidate, such as an unresolved PATH lookup or unknown script
+behavior, and approval must review them; the array is empty when there are none.
+`--format text` groups the candidate by read/write/exec/spawn/network with `none` for
+absent categories, then lists `Not covered by this candidate`, and falls back to the
+exact Cedar when a condition cannot be summarized. `--format cedar` writes `caveats` as
+`// Not covered:` comments; a clarification prints only comments, so no permit can be
+mistaken for a result. A clarification is returned only when the command itself cannot
+be expressed, never with a partial policy; even a short command carries a policy, and the
+text is empty only when the command has no file, process or network action (`true`, `pwd`,
+`echo`, `date`). An empty policy is a candidate too: it grants nothing, keeps its `caveats`,
+and needs only runtime dependencies to run in the sandbox. The CLI
+re-runs Cedar validation before rendering. Both outcomes exit `0`; an input the daemon
+would reject exits `2` without a request.
+
+The `--format cedar` output is the unapproved candidate text; approval and execution stay
+outside this subcommand. The candidate covers only the command's own demand, so the program,
+cwd and loader paths are not included and a caller must add them explicitly; the CLI adds
+nothing implicitly. Enforcement still comes from the PDP intersecting the request with the
+published `environment_permissions` and the policy layers, i.e.
+`effective = request ∩ environment_permissions ∩ policies`.
+
+This path does not read or rewrite base policies, does not compute `effective` locally, and
+does not execute the command.
+
 ## Manage Policies
 
 Create a JSON template file such as `policy.json`:

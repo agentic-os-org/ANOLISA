@@ -1,5 +1,5 @@
-//! Task-text intent proposal protocol; carries only the task text and a TTL, with no caller
-//! path metadata, content snapshots, identity, or approval claims.
+//! Intent protocol: task proposals carry task/TTL, command proposals carry command/cwd.
+//! Both return unapproved Cedar and accept no identity, approval or base-policy claim.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,6 +42,42 @@ pub enum IntentProposeResult {
         /// Raw Cedar draft.
         draft: Value,
         /// Reasons reported by the program checks.
+        reasons: Vec<String>,
+    },
+}
+
+/// Separate version for one command; the existing task/TTL contract is unchanged.
+pub const INTENT_COMMAND_REQUEST_VERSION: &str = "asc.intent.command.request.v1";
+
+/// Fields the hook already has, so no host input extension or base-policy submission is needed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntentCommandParams {
+    /// Must equal asc.intent.command.request.v1.
+    pub format_version: String,
+    /// Raw shell command; non-empty, at most 64 KiB, without NUL.
+    pub command: String,
+    /// Canonical absolute working directory, at most 4096 bytes; not an authorization scope.
+    pub cwd: String,
+}
+
+/// Cedar candidate for one command; permission mapping, adjudication and execution stay outside
+/// this API.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IntentCommandResult {
+    /// Passed the Cedar checks; completeness and approval are still unproven.
+    Candidate {
+        /// Cedar text; an empty string requests no permission.
+        policy: String,
+        /// Known but uncovered parts such as an unresolved PATH lookup or script behavior; never
+        /// treat them as authorized.
+        #[serde(default)]
+        caveats: Vec<String>,
+    },
+    /// Required information or expressiveness is missing; carries no partial policy.
+    NeedsClarification {
+        /// Non-empty clarification reasons.
         reasons: Vec<String>,
     },
 }
