@@ -216,6 +216,28 @@ fn bom_prefixed_config_loads_like_its_unmarked_twin() {
 }
 
 #[test]
+fn malformed_json_disables_tokenless_without_rewriting_config() {
+    let directory = std::env::temp_dir().join(format!("tokenless-json-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let configuration = directory.join("config.json");
+    let malformed = "{ \"schema_version\": 6, this is not json\n";
+    std::fs::write(&configuration, malformed).unwrap();
+
+    let client = QueryClient::from_config_path(Some(&configuration)).unwrap();
+
+    assert!(client.is_none());
+    assert_eq!(std::fs::read_to_string(&configuration).unwrap(), malformed);
+    assert!(!std::fs::read_dir(&directory).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("config.json.bak.")
+    }));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn detail_store_failures_map_to_client_or_server_errors() {
     use crate::storage::sqlite::genai::TokenlessRecordError;
 

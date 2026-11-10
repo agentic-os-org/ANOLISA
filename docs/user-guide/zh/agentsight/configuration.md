@@ -349,7 +349,9 @@ systemctl is-active agentsight.service
 sudo agentsight summary --last 1
 ```
 
-如果服务起不来，多半是 JSON 写坏了：
+JSON 语法错误不会阻止 `trace` 或 `serve` 运行。AgentSight 会记录解析错误，不修改原文件、不生成
+schema 备份，并使用内嵌默认配置；`serve` 同时禁用可选的 `tokenless_api` 集成。其他启动错误
+（包括非法的 `tokenless_api` 设置）仍可能阻止服务启动。可用以下命令检查文件和启动告警：
 
 ```bash
 python3 -m json.tool /etc/agentsight/config.json > /dev/null && echo "JSON ok"
@@ -366,5 +368,6 @@ journalctl -u agentsight.service -n 30 --no-pager
 ```
 
 凭据文件保存与 `tokenless stats serve` 相同的 Bearer token。使用私有网络或 HTTPS
-代理。服务在启动时读取文件；修改后需重启 AgentSight。凭据仅保存在后端，非法配置
-会阻止启动。不配置此项时，保留现有的本地数据库集成方式。
+代理。服务在启动时读取文件；修改后需重启 AgentSight。凭据仅保存在后端，非法的
+`tokenless_api` 设置会阻止启动；共享文件整体存在 JSON 语法错误时则按上述契约降级。
+不配置此项时，保留现有的本地数据库集成方式。

@@ -306,7 +306,9 @@ including loopback requests. The query deduplicates IDs and shares a 5-second, 1
 8-MiB budget across source requests. A failed or oversized refresh returns an error without saving
 a partial batch or presenting cached rows as current. Source records absent from this response are
 excluded from current totals; saved records remain available through the records API. Without
-`tokenless_api`, the existing local-database behavior is unchanged.
+`tokenless_api`, the existing local-database behavior is unchanged. If the shared configuration is
+malformed JSON, `serve` continues with embedded defaults but disables the Tokenless API integration;
+see [configuration recovery](configuration.md#verify-a-change).
 
 Historical call IDs remain available for compounding calculations. Source lookup batches at most
 128 IDs per request, so a long session with few matching records can complete without discarding
