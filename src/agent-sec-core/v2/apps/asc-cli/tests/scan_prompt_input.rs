@@ -16,6 +16,26 @@ fn run_closed_stdin(args: &[&str]) -> Output {
         .expect("run the CLI")
 }
 
+/// Runs the CLI with *input* piped to stdin.
+fn run_with_stdin(args: &[&str], input: &str) -> Output {
+    use std::io::Write as _;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-sec-cli"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the CLI");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("collect the CLI output")
+}
+
 /// Asserts the shared empty-input contract: exit 1, empty stdout, and a usage
 /// error naming the channel on stderr.
 fn assert_empty_input_failure(output: &Output, channel: &str, hint: &str) {
@@ -64,4 +84,21 @@ fn every_empty_input_channel_exits_1_without_a_verdict() {
     for (channel, args, hint) in cases {
         assert_empty_input_failure(&run_closed_stdin(&args), channel, hint);
     }
+
+    // A blank --text keeps its precedence over the other channels: it is
+    // rejected even when a populated --input file or stdin could have been
+    // scanned instead of silently falling back to one of them.
+    let populated_file = directory.path().join("populated.txt");
+    std::fs::write(&populated_file, "hello\n").expect("write the populated file");
+    let populated_path = populated_file.to_str().expect("utf-8 temporary path");
+    assert_empty_input_failure(
+        &run_closed_stdin(&["scan-prompt", "--text", " ", "--input", populated_path]),
+        "blank --text with a populated --input",
+        "--text",
+    );
+    assert_empty_input_failure(
+        &run_with_stdin(&["scan-prompt", "--text", ""], "hello"),
+        "blank --text with populated stdin",
+        "--text",
+    );
 }

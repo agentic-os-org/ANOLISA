@@ -21,7 +21,8 @@ agent-sec-cli scan-prompt --input prompts.txt --format json
 ```
 
 无论走哪种通道，空输入都算参数错误：空白 `--text`、空文件、空 stdin 一律以 `1` 退出并在
-stderr 给出提示。退出码 `0` 一定带 verdict，调用方不会把“没有扫描”误判成“扫描通过”。
+stderr 给出提示。成功扫描时退出码 `0` 一定带 verdict（`scan-prompt warmup` 例外，只输出就绪
+信息），调用方不会把“没有扫描”误判成“扫描通过”。
 
 常用选项：
 
