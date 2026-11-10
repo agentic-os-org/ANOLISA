@@ -51,7 +51,8 @@ def tool_call(command):
         {
             "timestamp": TS,
             "message": {"content": [{"type": "toolCall", "arguments": {"command": command}}]},
-        }
+        },
+        ensure_ascii=False,
     )
 
 
@@ -74,6 +75,43 @@ class SessionLogsTestCase(unittest.TestCase):
             text=True,
             timeout=60,
         )
+
+
+class TestLogDecoding(SessionLogsTestCase):
+    def test_non_utf8_records_are_skipped(self):
+        workspace = self.logs_dir / "workspace-é"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        header = json.dumps({"cwd": str(workspace)}, ensure_ascii=False).encode("utf-8")
+        call = tool_call(f"cat {workspace}/skills/web/SKILL.md").encode("utf-8")
+        corrupt = call.replace(b"cat", b"cat\xff")
+        output = self.logs_dir / "usage.json"
+        for bad_line in (b"\xff\xfe", corrupt, b"\xe2\x82"):
+            for position in range(3):
+                with self.subTest(bad_line=bad_line, position=position):
+                    lines = [call, call]
+                    lines.insert(position, bad_line)
+                    self.log.write_bytes(b"\n".join([header, *lines]))
+                    proc = self.run_cli("--mode", "all", "--output", str(output))
+                    self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+                    self.assertEqual(proc.stderr, "")
+                    self.assertNotIn("Error reading", proc.stdout)
+                    self.assertIn("Total skill calls: 2", proc.stdout)
+                    report = json.loads(output.read_text(encoding="utf-8"))
+                    self.assertEqual(report["workspaces"], {"agent-1": str(workspace)})
+                    self.assertEqual(report["by_agent"], {"agent-1": {"web": 2}})
+                    self.assertEqual(report["by_date"], {"2026-01-01": {"web": 2}})
+                    self.assertEqual(len(report["by_session"]), 1)
+                    self.assertEqual(report["by_session"][0]["skills"], {"web": 2})
+                    self.assertEqual(report["by_session"][0]["calls"], 2)
+
+    def test_non_utf8_header_keeps_later_calls(self):
+        call = tool_call("cat /skills/web/SKILL.md").encode("utf-8")
+        self.log.write_bytes(b'{"cwd":"/bad\xff"}\n' + call + b"\n" + call)
+        proc = self.run_cli("--mode", "all")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertNotIn("Error reading", proc.stdout)
+        self.assertIn("web: 2", proc.stdout)
+        self.assertIn("Total skill calls: 2", proc.stdout)
 
 
 class TestNonStringCommand(SessionLogsTestCase):
