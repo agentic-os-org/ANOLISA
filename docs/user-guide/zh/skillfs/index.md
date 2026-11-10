@@ -255,6 +255,11 @@ skillfs validate /path/to/skills --format json
 进入状态汇总并返回非 0 exit code；仅 degraded 的 skill 会被报告，但 exit code 仍为
 0。
 
+`SKILL.md` 中的 `## Parameters` 和 `## Returns` 标题允许带可选的闭合 `#`
+序列，例如 `## Parameters ##` 或 `## Returns #`。闭合序列与标题文字之间须有
+空格或 Tab，序列之后也只允许空格或 Tab。这些标题下的契约条目会正常解析，
+格式错误的 bullet 会产生 warning，并使状态变为 `degraded`。
+
 JSON 输出中，error 和 warning entry 都包含 `path` 字段，方便调用方定位具体出错的
 skill 文件。
 
