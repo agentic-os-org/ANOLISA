@@ -199,12 +199,12 @@ pub(crate) fn check_workspace() {
 }
 
 thread_local! {
-    static ENUMERATION_FAILURE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static ENUMERATION_FAILURE: RefCell<Option<(PathBuf, usize, usize)>> = const { RefCell::new(None) };
 }
 
 /// Restore the previous fault when the isolated test scope exits, including unwinding.
 pub(crate) struct EnumerationFailure {
-    previous: Option<PathBuf>,
+    previous: Option<(PathBuf, usize, usize)>,
     _same_thread: PhantomData<Rc<()>>,
 }
 
@@ -216,28 +216,45 @@ impl Drop for EnumerationFailure {
     }
 }
 
-/// Fail the next directory enumeration under this test directory with EIO.
-pub(crate) fn fail_enumeration(root: &Path) -> EnumerationFailure {
-    let previous = ENUMERATION_FAILURE.with(|failure| failure.replace(Some(root.into())));
+fn arm_enumeration(path: &Path, after: usize, skip: usize) -> EnumerationFailure {
+    let previous =
+        ENUMERATION_FAILURE.with(|failure| failure.replace(Some((path.into(), after, skip))));
     EnumerationFailure {
         previous,
         _same_thread: PhantomData,
     }
 }
 
-pub(super) fn check_enumeration(path: &Path) -> Result<(), crate::store::Error> {
-    let armed = ENUMERATION_FAILURE.with(|failure| {
+/// Fail the next enumeration of `path` with EIO once `after` entries were read,
+/// so the injected fault lands on the `readdir` boundary with a partial list
+/// pending instead of at the entrance to the enumeration.
+pub(crate) fn fail_enumeration(path: &Path, after: usize) -> EnumerationFailure {
+    arm_enumeration(path, after, 0)
+}
+
+/// Like [`fail_enumeration`], but lets the first `skip` matching enumerations
+/// succeed, targeting a later pass over the same directory such as the `extras`
+/// listing in `replay::finish` after `replay::classify` already listed it.
+pub(crate) fn fail_enumeration_nth(path: &Path, after: usize, skip: usize) -> EnumerationFailure {
+    arm_enumeration(path, after, skip)
+}
+
+/// True once the armed fault applies to this directory and enough entries were
+/// read, so the caller raises EIO on the null return of `readdir`.
+pub(super) fn enumeration_failure(path: &Path, collected: usize) -> bool {
+    ENUMERATION_FAILURE.with(|failure| {
         let mut slot = failure.borrow_mut();
-        let matches = slot.as_deref().is_some_and(|root| path.starts_with(root));
-        if matches {
-            *slot = None;
+        let Some((armed, after, skip)) = slot.as_mut() else {
+            return false;
+        };
+        if path != armed.as_path() || collected < *after {
+            return false;
         }
-        matches
-    });
-    if armed {
-        return Err(crate::store::Error::Io(io::Error::from_raw_os_error(
-            libc::EIO,
-        )));
-    }
-    Ok(())
+        if *skip > 0 {
+            *skip -= 1;
+            return false;
+        }
+        *slot = None;
+        true
+    })
 }

@@ -6,8 +6,8 @@ mod faults;
 mod staging;
 #[cfg(test)]
 pub(super) use faults::{
-    check_workspace, fail_database_sync, fail_enumeration, fail_staging_sync, fail_staging_write,
-    fail_tmpfile, replace_workspace_after_check,
+    check_workspace, fail_database_sync, fail_enumeration, fail_enumeration_nth, fail_staging_sync,
+    fail_staging_write, fail_tmpfile, replace_workspace_after_check,
 };
 pub(super) use staging::{anonymous, publish, remove_staging, write_bytes};
 
@@ -520,8 +520,6 @@ pub(super) fn identity_of(file: &File) -> Result<Identity> {
 /// Enumerate a directory through the descriptor that already passed the
 /// identity check, so a replacement at the same path cannot redirect cleanup.
 pub(super) fn entries_in(directory: &File, path: &Path) -> Result<Vec<PathBuf>> {
-    #[cfg(test)]
-    faults::check_enumeration(path)?;
     let held = from_metadata(&directory.metadata()?, String::new());
     // SAFETY: dup duplicates the live descriptor and touches no filesystem state.
     let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
@@ -551,6 +549,14 @@ pub(super) fn entries_in(directory: &File, path: &Path) -> Result<Vec<PathBuf>> 
         // SAFETY: readdir borrows the live stream for the duration of the call.
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
+            // Raise the injected fault on the readdir boundary itself: set EIO
+            // just as a failing read would, so a plain `break` here would still
+            // return a partial entry list and fail the regression.
+            #[cfg(test)]
+            if faults::enumeration_failure(path, entries.len()) {
+                // SAFETY: errno is a thread-local slot owned by the calling thread.
+                unsafe { *libc::__errno_location() = libc::EIO };
+            }
             let error = std::io::Error::last_os_error();
             if error.raw_os_error().unwrap_or(0) == 0 {
                 break;

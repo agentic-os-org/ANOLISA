@@ -425,7 +425,9 @@ fn enumeration_failure_keeps_the_journal_for_a_later_recovery() {
 
     // The aborted pass must keep the journal and the payload it cannot account
     // for: a partial entry list is not evidence that the directory is clean.
-    let failure = fs::fail_enumeration(&fixture.prefix);
+    // Fail on the readdir boundary after the staging payload was read, so the
+    // error lands mid-enumeration instead of at the entrance to the call.
+    let failure = fs::fail_enumeration(&workspace, 1);
     let error = super::super::recover(&fixture.paths, &AtomicBool::new(false))
         .expect_err("enumeration failure must abort recovery");
     assert!(
@@ -445,6 +447,46 @@ fn enumeration_failure_keeps_the_journal_for_a_later_recovery() {
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
     assert!(!directories[0].exists());
     assert!(!workspace.exists());
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert!(inventory.installations.is_empty());
+    assert!(inventory.doctor().unwrap().healthy());
+}
+
+#[test]
+fn extras_enumeration_failure_keeps_the_journal_for_a_later_recovery() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let transactions = fixture.paths.root.join("transactions");
+    let directories = fs::entries(&transactions).unwrap();
+    assert_eq!(directories.len(), 1);
+    let entry = journal::read(&fixture.paths, &directories[0]).unwrap();
+
+    // `classify` lists the transaction directory first, then `finish` lists it
+    // again to detect leftovers. Fail the second listing on its readdir
+    // boundary: a partial `extras` answer must not lead to journal removal.
+    let failure = fs::fail_enumeration_nth(&directories[0], 1, 1);
+    let error = super::super::recover(&fixture.paths, &AtomicBool::new(false))
+        .expect_err("extras enumeration failure must abort recovery");
+    assert!(
+        matches!(error, Error::Io(ref io) if io.raw_os_error() == Some(libc::EIO)),
+        "{error:?}"
+    );
+    drop(failure);
+
+    assert!(
+        entry.path().exists(),
+        "the journal must survive the aborted extras listing"
+    );
+    assert!(directories[0].exists());
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!directories[0].exists());
     let inventory = Inventory::read(&fixture.paths, None).unwrap();
     assert!(inventory.installations.is_empty());
     assert!(inventory.doctor().unwrap().healthy());
