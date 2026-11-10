@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Barrier, Condvar, Mutex,
@@ -16,7 +15,7 @@ use aw_host::{AdapterCapabilities, Host, ProcessContext, StepOutput};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::fixture::{digest, read, Fixture, BINARY, KEY, KEY_ENV, TASK_TEXT};
+use crate::fixture::{digest, Call, Fixture, BINARY, KEY, KEY_ENV, TASK_TEXT};
 
 /// Retain the shared sessionless config with enough budget for a timed overlap wave.
 pub fn config(fixture: &Fixture, endpoint: &str) -> Value {
@@ -170,27 +169,32 @@ pub fn session(event: &Value) -> String {
     )
 }
 
-/// Locate exactly one accepted ingress without depending on directory name order.
-pub fn record(fixture: &Fixture, event: &Value) -> PathBuf {
-    let matching: Vec<_> = fixture
+/// Locate exactly one accepted ingress without depending on call id order.
+pub fn record(fixture: &Fixture, event: &Value) -> Call {
+    let mut matching: Vec<_> = fixture
         .records()
         .into_iter()
-        .filter(|dir| read(&dir.join("00-input.json"))["aw_request"]["event"] == *event)
+        .filter(|call| call.get("input")["aw_request"]["event"] == *event)
         .collect();
     assert_eq!(
         matching.len(),
         1,
         "each event needs exactly one private record"
     );
-    matching[0].clone()
+    matching.remove(0)
 }
 
 /// Check every private file for the synthetic key and for accidental tool execution.
 pub fn no_secrets(fixture: &Fixture) {
-    for dir in fixture.records() {
+    let mut pending = vec![fixture.records.clone()];
+    while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(dir).unwrap() {
-            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
-            assert!(!text.contains(KEY));
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                assert!(!fs::read_to_string(path).unwrap().contains(KEY));
+            }
         }
     }
     assert!(!fixture.root.path().join("greeting.txt").exists());
@@ -210,11 +214,15 @@ pub fn evaluated_text(
     text: &str,
     turns: usize,
 ) -> Value {
-    let dir = record(fixture, event);
-    let input = read(&dir.join("00-input.json"));
+    let call = record(fixture, event);
+    assert_eq!(
+        call.session().map(|hex| format!("sha256:{hex}")),
+        Some(session(event))
+    );
+    let input = call.get("input");
     assert_eq!(input["filesystem_attested"], false);
     assert_eq!(input["aw_request"]["config"], *config);
-    let evaluation = read(&dir.join("10-evaluation.json"));
+    let evaluation = call.get("evaluation");
     let binding = &evaluation["binding"];
     assert_eq!(binding["session_id"], session(event));
     assert_eq!(
@@ -256,7 +264,7 @@ pub fn evaluated_text(
     assert_eq!(evaluation["task"], task);
     assert_eq!(evaluation["task"]["session_id"], binding["session_id"]);
     assert_eq!(
-        read(&dir.join("05-task.json")),
+        call.get("task"),
         json!({
             "version":1,"origin":"native_user","native_session_id":event["session_id"],
             "session_id":binding["session_id"],"adapter":event["agent"]["adapter"],
@@ -279,12 +287,12 @@ pub fn evaluated_text(
         json!({"authoritative_task":task,"candidate":candidate,"evidence":[]})
     );
     assert!(!body["questions"].as_object().unwrap().is_empty());
-    let projection = read(&dir.join("20-model-request.json"));
+    let projection = call.get("model_request");
     assert_eq!(projection["state"], body["state"]);
     assert_eq!(projection["questions"], body["questions"]);
     assert_eq!(projection["backend"]["mode"], "loopback_test");
-    assert_eq!(read(&dir.join("30-model-result.json"))["status"], "parsed");
-    let result = read(&dir.join("40-result.json"));
+    assert_eq!(call.get("model_result")["status"], "parsed");
+    let result = call.get("result");
     assert_eq!(result["status"], "evaluated");
     assert_eq!(result["code"], "shadow_evaluated");
     assert_eq!(result["evaluation"]["binding"], *binding);
@@ -299,22 +307,16 @@ pub fn evaluated_text(
         assert_eq!(judgment["model_used"], true);
         assert!(judgment["error"].is_null());
     }
-    let mut files: Vec<_> = fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    files.sort();
     assert_eq!(
-        files,
+        call.names(),
         [
-            "00-input.json",
-            "05-task.json",
-            "10-evaluation.json",
-            "20-model-request.json",
-            "30-model-result.json",
-            "40-result.json"
+            "input",
+            "task",
+            "evaluation",
+            "model_request",
+            "model_result",
+            "result"
         ]
-        .map(std::ffi::OsString::from)
     );
     no_secrets(fixture);
     evaluation

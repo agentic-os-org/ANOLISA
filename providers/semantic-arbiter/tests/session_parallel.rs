@@ -26,22 +26,16 @@ fn model_body<'a>(bodies: &'a [Value], event: &Value) -> &'a Value {
 }
 
 fn rejected(fixture: &Fixture, event: &Value, code: &str) {
-    let dir = record(fixture, event);
-    let result = read(&dir.join("40-result.json"));
+    let call = record(fixture, event);
+    let result = call.get("result");
     assert_eq!(result["status"], "uncovered");
     assert_eq!(result["code"], code);
     assert!(result["evaluation"].is_null());
-    for name in [
-        "05-task.json",
-        "10-evaluation.json",
-        "20-model-request.json",
-        "30-model-result.json",
-    ] {
-        assert!(
-            !dir.join(name).exists(),
-            "rejected input must not publish {name}"
-        );
-    }
+    assert_eq!(
+        call.names(),
+        ["input", "result"],
+        "rejected input must not publish later stages"
+    );
     no_secrets(fixture);
 }
 

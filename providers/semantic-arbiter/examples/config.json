@@ -28,6 +28,7 @@
     "transport": "loopback_test"
   },
   "record_dir": "/absolute/private-shadow-records",
-  "max_records": 100,
+  "max_sessions": 100,
+  "max_session_bytes": 67108864,
   "max_storage_bytes": 432537600
 }

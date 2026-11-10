@@ -127,7 +127,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             continue;
         }
         let dir = &fixture.records()[0];
-        let evaluation = read(&dir.join("10-evaluation.json"));
+        let evaluation = dir.get("evaluation");
         assert_eq!(
             evaluation["candidate"]["resource_id"], resource,
             "{command}"
@@ -137,7 +137,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             command
         );
         assert_eq!(
-            read(&dir.join("40-result.json"))["evaluation"]["outcome"]["control"]["candidate"],
+            dir.get("result")["evaluation"]["outcome"]["control"]["candidate"],
             control,
             "{command}"
         );

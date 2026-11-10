@@ -54,7 +54,8 @@ spec:
           thresholds: {preservation_ppm: 900000, task_scope_ppm: 900000}
           transport: loopback_test
         record_dir: /absolute/private-shadow-records
-        max_records: 100
+        max_sessions: 100
+        max_session_bytes: 67108864
         max_storage_bytes: 432537600
   events:
     # Records each prompt for its session; tool.before judges calls against it.

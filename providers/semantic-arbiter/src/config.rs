@@ -7,7 +7,7 @@ use semantic_arbiter::contract::{Operation, Scenario};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::storage::{open_root, RESERVE_BYTES, SESSION_RESERVE};
+use crate::storage::{open_root, CALL_LIMIT, TASK_LIMIT};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -23,7 +23,8 @@ pub(crate) struct Config {
     pub resources: BTreeMap<String, String>,
     pub model: ModelConfig,
     pub record_dir: String,
-    pub max_records: u64,
+    pub max_sessions: u64,
+    pub max_session_bytes: u64,
     pub max_storage_bytes: u64,
 }
 
@@ -86,9 +87,10 @@ impl Config {
             || !id(&self.workspace_id)
             || !absolute(&self.workspace_path)
             || !absolute(&self.record_dir)
-            || !(1..=10_000).contains(&self.max_records)
-            // Every evaluated call needs one captured session and one record.
-            || !(RESERVE_BYTES + SESSION_RESERVE..=1024 * 1024 * 1024).contains(&self.max_storage_bytes)
+            || !(1..=10_000).contains(&self.max_sessions)
+            // A full session task plus one admitted call must fit both byte limits.
+            || !(CALL_LIMIT + TASK_LIMIT..=1024 * 1024 * 1024).contains(&self.max_storage_bytes)
+            || !(CALL_LIMIT + TASK_LIMIT..=self.max_storage_bytes).contains(&self.max_session_bytes)
             || self.tools.is_empty()
             || self.tools.len() > 6
             || self.resources.len() > 64

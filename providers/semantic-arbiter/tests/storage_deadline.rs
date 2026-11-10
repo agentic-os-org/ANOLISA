@@ -47,53 +47,103 @@ fn recording_requires_existing_private_nonsymlink_root() {
 }
 
 #[test]
-fn private_files_and_fixed_reserve_enforce_both_quotas() {
-    for byte_quota in [false, true] {
+fn session_count_quota_spares_unbound_calls_and_keeps_files_private() {
+    let fixture = Fixture::new();
+    let mut config = fixture.config("http://127.0.0.1:1");
+    config["max_sessions"] = json!(1);
+    let request = fixture.request(config.clone());
+    fixture.capture(&request);
+    let (_, first) = invoke(&fixture, request.clone(), false);
+    assert_eq!(first["code"], "missing_credentials");
+    let mut other = request.clone();
+    other["event"]["session_id"] = json!("another-native-session");
+    let (_, submit) = invoke(
+        &fixture,
+        fixture.submit(&other, "turn/+1", TASK_TEXT),
+        false,
+    );
+    assert_eq!(submit["code"], "record_unavailable");
+    let (_, call) = invoke(&fixture, other, false);
+    assert_eq!(call["code"], "record_unavailable");
+    let mut unbound = request;
+    unbound["event"]["session_id"] = json!(" ");
+    let (_, call) = invoke(&fixture, unbound, false);
+    assert_eq!(call["code"], "missing_identity");
+    let calls = fixture.records();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().any(|call| call.session().is_none()));
+    let mut pending = vec![fixture.records.clone()];
+    let mut sessions = 0;
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let mode = entry.metadata().unwrap().permissions().mode() & 0o7777;
+            if entry.file_type().unwrap().is_dir() {
+                sessions += 1;
+                assert_eq!(mode, 0o700);
+                pending.push(entry.path());
+            } else {
+                assert_eq!(mode, 0o600);
+            }
+        }
+    }
+    assert_eq!(sessions, 1);
+}
+
+#[test]
+fn session_and_storage_byte_caps_count_actual_call_bytes() {
+    // The smallest accepted cap: one full session task plus one admitted call.
+    let cap = 4 * 1024 * 1024 + 128 * 1024;
+    for shared in [false, true] {
         let fixture = Fixture::new();
         let mut config = fixture.config("http://127.0.0.1:1");
-        if byte_quota {
-            // One session reservation plus one record reservation.
-            config["max_storage_bytes"] = json!(4 * 1024 * 1024 + 128 * 1024);
-        } else {
-            config["max_records"] = json!(1);
+        config["max_session_bytes"] = json!(cap);
+        if shared {
+            config["max_storage_bytes"] = json!(cap);
         }
-        let request = fixture.request(config.clone());
+        let mut request = fixture.request(config);
+        request["event"]["tool"]["input"]["content"] = json!("x".repeat(70_000));
         fixture.capture(&request);
-        let (_, first) = invoke(&fixture, request.clone(), false);
-        assert_eq!(first["code"], "missing_credentials");
-        let (_, second) = invoke(&fixture, fixture.request(config), false);
-        assert_eq!(second["code"], "record_unavailable");
-        assert_eq!(fixture.records().len(), 1);
+        let mut recorded = 0;
+        loop {
+            let (_, diagnostic) = invoke(&fixture, request.clone(), false);
+            if diagnostic["code"] != "oversized_candidate" {
+                assert_eq!(diagnostic["code"], "record_unavailable");
+                break;
+            }
+            recorded += 1;
+            assert!(recorded < 4, "headroom must run out");
+        }
+        // Each call stores its full 70 KB payload, so the 128 KiB margin admits two.
+        assert_eq!(recorded, 2);
+        let calls = fixture.records();
+        assert_eq!(calls.len(), 2);
+        for call in &calls {
+            assert_eq!(call.names(), ["input", "result"]);
+        }
+        assert!(fs::metadata(&calls[0].log).unwrap().len() <= cap);
         let mut other = request.clone();
         other["event"]["session_id"] = json!("another-native-session");
-        let (_, third) = invoke(
-            &fixture,
-            fixture.submit(&other, "turn/+1", TASK_TEXT),
-            false,
-        );
-        assert_eq!(third["code"], "record_unavailable");
-        assert_eq!(
-            fs::read_dir(fixture.records.join("sessions"))
-                .unwrap()
-                .count(),
-            1
-        );
-        let dir = &fixture.records()[0];
-        assert_eq!(
-            fs::metadata(dir).unwrap().permissions().mode() & 0o7777,
-            0o700
-        );
-        for file in fs::read_dir(dir).unwrap() {
-            assert_eq!(
-                file.unwrap().metadata().unwrap().permissions().mode() & 0o7777,
-                0o600
-            );
+        other["event"]["tool"]["input"]["content"] = json!("short");
+        fixture.capture(&other);
+        let (_, diagnostic) = invoke(&fixture, other, false);
+        let mut unbound = request;
+        unbound["event"]["session_id"] = json!(" ");
+        let (_, orphan) = invoke(&fixture, unbound, false);
+        if shared {
+            assert_eq!(diagnostic["code"], "record_unavailable");
+            assert_eq!(orphan["code"], "record_unavailable");
+            assert_eq!(fixture.records().len(), 2);
+        } else {
+            assert_eq!(diagnostic["code"], "missing_credentials");
+            assert_eq!(orphan["code"], "missing_identity");
+            assert_eq!(fixture.records().len(), 4);
         }
     }
 }
 
 #[test]
-fn record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve() {
+fn record_lock_wait_obeys_original_budget_and_concurrent_sessions_cannot_overcommit() {
     let fixture = Fixture::new();
     let root = File::open(&fixture.records).unwrap();
     // SAFETY: a live file descriptor is the only flock precondition.
@@ -107,28 +157,32 @@ fn record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve() {
     assert!(fixture.records().is_empty());
     assert_eq!(unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_UN) }, 0);
     let mut config = fixture.config("http://127.0.0.1:1");
-    config["max_records"] = json!(1);
-    let request = fixture.request(config);
-    fixture.capture(&request);
-    let request = bind(request);
-    let children: Vec<_> = (0..8).map(|_| spawn(fixture.root.path(), false)).collect();
+    config["max_sessions"] = json!(1);
+    let children: Vec<_> = (0..8)
+        .map(|index| {
+            let mut request = fixture.request(config.clone());
+            request["event"]["session_id"] = json!(format!("concurrent-session-{index}"));
+            (spawn(fixture.root.path(), false), bind(request))
+        })
+        .collect();
     let outputs: Vec<_> = std::thread::scope(|scope| {
         let handles: Vec<_> = children
             .into_iter()
-            .map(|child| {
+            .map(|(child, request)| {
                 let bytes = request.to_string().into_bytes();
                 scope.spawn(move || finish(child, &bytes))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    assert_eq!(fs::read_dir(&fixture.records).unwrap().count(), 1);
     assert_eq!(fixture.records().len(), 1);
     let mut recorded = 0;
     for output in outputs {
         let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
         let code = diagnostic["code"].as_str().unwrap();
-        assert!(["missing_credentials", "record_unavailable"].contains(&code));
-        recorded += usize::from(code == "missing_credentials");
+        assert!(["task_unavailable", "record_unavailable"].contains(&code));
+        recorded += usize::from(code == "task_unavailable");
     }
     assert_eq!(recorded, 1);
 }
@@ -154,7 +208,7 @@ fn released_record_lock_allows_inference_with_remaining_budget() {
         assert_eq!(diagnostic["code"], "shadow_evaluated");
     });
     assert_eq!(fixture.records().len(), 1);
-    let evaluation = read(&fixture.records()[0].join("10-evaluation.json"));
+    let evaluation = fixture.records()[0].get("evaluation");
     assert_eq!(
         evaluation["budget"]["deadline_ms"].as_u64().unwrap()
             - evaluation["budget"]["opened_at_ms"].as_u64().unwrap(),
@@ -180,16 +234,24 @@ fn input_and_model_projection_survive_killed_process() {
         .received
         .recv_timeout(Duration::from_secs(3))
         .unwrap();
-    let dir = &fixture.records()[0];
-    assert_eq!(read(&dir.join("00-input.json"))["aw_request"], request);
-    assert!(dir.join("20-model-request.json").is_file());
-    assert!(!dir.join("40-result.json").exists());
+    let call = &fixture.records()[0];
+    assert_eq!(call.get("input")["aw_request"], request);
+    assert!(call.has("model_request"));
+    assert!(!call.has("result"));
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(dir.join("00-input.json").is_file());
+    let calls = fixture.records();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].names(),
+        ["input", "task", "evaluation", "model_request"]
+    );
+    // The killed call's session still counts against the session quota.
     let mut config = fixture.config(&server.endpoint);
-    config["max_records"] = json!(1);
-    let (_, diagnostic) = invoke(&fixture, fixture.request(config), true);
+    config["max_sessions"] = json!(1);
+    let mut other = fixture.request(config);
+    other["event"]["session_id"] = json!("another-native-session");
+    let (_, diagnostic) = invoke(&fixture, other, true);
     assert_eq!(diagnostic["code"], "record_unavailable");
 }
 
@@ -211,7 +273,6 @@ fn pinned_root_ignores_path_replacement_during_inference() {
         .received
         .recv_timeout(Duration::from_secs(3))
         .unwrap();
-    let name = fixture.records()[0].file_name().unwrap().to_owned();
     let moved = fixture.root.path().join("pinned-original");
     fs::rename(&fixture.records, &moved).unwrap();
     let outside = fixture.root.path().join("replacement");
@@ -219,42 +280,10 @@ fn pinned_root_ignores_path_replacement_during_inference() {
     symlink(&outside, &fixture.records).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
-    assert_eq!(
-        read(&moved.join(name).join("40-result.json"))["status"],
-        "evaluated"
-    );
+    let calls = calls_in(&moved);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].get("result")["status"], "evaluated");
     assert!(fs::read_dir(outside).unwrap().next().is_none());
-}
-
-#[test]
-fn atomic_publication_never_overwrites_existing_result() {
-    let fixture = Fixture::new();
-    let server = Server::new("0.99", 200, Duration::from_millis(200));
-    let request = fixture.request(fixture.config(&server.endpoint));
-    fixture.capture(&request);
-    let request = bind(request);
-    let mut child = spawn(fixture.root.path(), true);
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(request.to_string().as_bytes())
-        .unwrap();
-    server
-        .received
-        .recv_timeout(Duration::from_secs(3))
-        .unwrap();
-    let result = fixture.records()[0].join("40-result.json");
-    fs::write(&result, "sentinel").unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    assert_eq!(fs::read_to_string(result).unwrap(), "sentinel");
-    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(diagnostic["code"], "record_write_failed");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()["effects"],
-        json!([])
-    );
 }
 
 #[test]
@@ -291,11 +320,8 @@ fn slow_http_keeps_budget_failure_and_no_effects() {
     let start = Instant::now();
     invoke(&fixture, request, true);
     assert!(start.elapsed() < Duration::from_millis(380));
-    let result = read(&fixture.records()[0].join("40-result.json"));
-    assert_eq!(
-        read(&fixture.records()[0].join("30-model-result.json"))["error"],
-        "timeout"
-    );
+    let result = fixture.records()[0].get("result");
+    assert_eq!(fixture.records()[0].get("model_result")["error"], "timeout");
     assert_eq!(
         result["evaluation"]["answers"][0]["reason"],
         "budget_exceeded"

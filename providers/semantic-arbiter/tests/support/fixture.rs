@@ -54,7 +54,8 @@ impl Fixture {
                 self.root.path().join("private.txt").to_str().unwrap():"private"},
             "model":{"config_revision":"aw_request","backend":{"kind":"bailian","endpoint_url":endpoint,
                 "model":"synthetic-model","key_env":KEY_ENV},"timeout_ms":2000,"max_response_bytes":4096,"transport":"loopback_test"},
-            "record_dir":self.records,"max_records":20,"max_storage_bytes":88080384u64
+            "record_dir":self.records,"max_sessions":20,"max_session_bytes":88080384u64,
+            "max_storage_bytes":88080384u64
         })
     }
 
@@ -88,16 +89,87 @@ impl Fixture {
         assert_eq!(diagnostic["code"], "task_captured");
     }
 
-    /// Evaluation record directories, excluding the captured-session store.
-    pub fn records(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<_> = fs::read_dir(&self.records)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|path| path.file_name().unwrap() != "sessions")
-            .collect();
-        paths.sort();
-        paths
+    /// Recorded `tool.before` calls across every session log and the unbound log.
+    pub fn records(&self) -> Vec<Call> {
+        calls_in(&self.records)
     }
+}
+
+/// One call's stage lines, in append order, from a single log file.
+pub struct Call {
+    pub id: String,
+    pub log: PathBuf,
+    pub stages: Vec<(String, Value)>,
+}
+
+// Each test crate compiles this module and uses only a subset of helpers.
+#[allow(dead_code)]
+impl Call {
+    pub fn get(&self, stage: &str) -> Value {
+        let found: Vec<_> = self
+            .stages
+            .iter()
+            .filter(|(name, _)| name == stage)
+            .collect();
+        assert_eq!(found.len(), 1, "{stage} of {}", self.id);
+        found[0].1.clone()
+    }
+
+    pub fn has(&self, stage: &str) -> bool {
+        self.stages.iter().any(|(name, _)| name == stage)
+    }
+
+    pub fn names(&self) -> Vec<&str> {
+        self.stages.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    /// Session directory hex, or `None` for the unbound log.
+    pub fn session(&self) -> Option<String> {
+        let parent = self.log.parent()?.file_name()?.to_str()?;
+        parent.strip_prefix("session-").map(str::to_owned)
+    }
+}
+
+/// Parses every complete line below `root`; a torn tail line is skipped as a reader would.
+pub fn calls_in(root: &Path) -> Vec<Call> {
+    let mut logs = Vec::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            let calls = path.join("calls.jsonl");
+            if calls.exists() {
+                logs.push(calls);
+            }
+        } else if path.file_name().unwrap() == "unbound.jsonl" {
+            logs.push(path);
+        }
+    }
+    let mut calls: Vec<Call> = Vec::new();
+    for log in logs {
+        for line in fs::read_to_string(&log).unwrap().lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let id = value["call"].as_str().unwrap().to_owned();
+            let stage = (
+                value["stage"].as_str().unwrap().to_owned(),
+                value["data"].clone(),
+            );
+            match calls.iter_mut().find(|call| call.id == id) {
+                Some(call) => {
+                    assert_eq!(call.log, log);
+                    call.stages.push(stage);
+                }
+                None => calls.push(Call {
+                    id,
+                    log: log.clone(),
+                    stages: vec![stage],
+                }),
+            }
+        }
+    }
+    calls.sort_by(|a, b| a.id.cmp(&b.id));
+    calls
 }
 
 pub fn bind(request: Value) -> Value {
@@ -158,10 +230,6 @@ pub fn invoke(fixture: &Fixture, request: Value, key: bool) -> (Value, Value) {
     assert_eq!(response["input_digest"], request["input_digest"]);
     assert!(!String::from_utf8_lossy(&output.stderr).contains(KEY));
     (response, serde_json::from_slice(&output.stderr).unwrap())
-}
-
-pub fn read(path: &Path) -> Value {
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
 pub struct Server {

@@ -61,10 +61,6 @@
       "target": "aw-provider-semantic-arbiter/test/provider",
       "test": "explicit_single_path_delete_is_advisory_and_rejects_extra_targets"
     },
-    "semantic-publication-race": {
-      "target": "aw-provider-semantic-arbiter/bin/aw-provider-semantic-arbiter",
-      "test": "storage::tests::enumerated_pending_entry_survives_atomic_publication"
-    },
     "semantic-budget-encoding": {
       "target": "aw-provider-semantic-arbiter/test/provider",
       "test": "integral_decimal_and_exponent_budgets_follow_aw_protocol"
@@ -139,11 +135,15 @@
     },
     "semantic-quotas": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
-      "test": "private_files_and_fixed_reserve_enforce_both_quotas"
+      "test": "session_count_quota_spares_unbound_calls_and_keeps_files_private"
+    },
+    "semantic-byte-quotas": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "session_and_storage_byte_caps_count_actual_call_bytes"
     },
     "semantic-concurrency": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
-      "test": "record_lock_wait_obeys_original_budget_and_concurrency_cannot_overreserve"
+      "test": "record_lock_wait_obeys_original_budget_and_concurrent_sessions_cannot_overcommit"
     },
     "semantic-lock-release": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
@@ -196,10 +196,6 @@
     "semantic-directory-binding": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
       "test": "pinned_root_ignores_path_replacement_during_inference"
-    },
-    "semantic-atomic-record": {
-      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
-      "test": "atomic_publication_never_overwrites_existing_result"
     },
     "semantic-preparation-budget": {
       "target": "aw-provider-semantic-arbiter/test/storage_deadline",
@@ -1765,7 +1761,6 @@
   "providers": {
     "semantic-arbiter": [
       "semantic-delete",
-      "semantic-publication-race",
       "semantic-budget-encoding",
       "semantic-host",
       "semantic-offline",
@@ -1785,6 +1780,7 @@
       "semantic-binding",
       "semantic-private-root",
       "semantic-quotas",
+      "semantic-byte-quotas",
       "semantic-concurrency",
       "semantic-lock-release",
       "semantic-parallel-sessions",
@@ -1799,7 +1795,6 @@
       "semantic-session-schema",
       "semantic-interruption",
       "semantic-directory-binding",
-      "semantic-atomic-record",
       "semantic-preparation-budget",
       "semantic-model-budget"
     ],

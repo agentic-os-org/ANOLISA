@@ -35,7 +35,7 @@ impl Drop for PendingReply<'_> {
                 .backend
                 .record
                 .save(
-                    "30-model-result.json",
+                    "model_result",
                     &json!({"status":"error","error":ModelError::Timeout}),
                 )
                 .is_err()
@@ -56,7 +56,7 @@ impl ModelBackend for RecordingBackend {
         deadline: Instant,
     ) -> Pin<Box<dyn Future<Output = Result<ModelReply, ModelError>> + Send + 'a>> {
         Box::pin(async move {
-            if self.record.save("20-model-request.json", &json!({
+            if self.record.save("model_request", &json!({
                 "backend": self.identity(), "state": request.state, "questions": request.questions
             })).is_err() {
                 self.recording_failed.store(true, Ordering::Relaxed);
@@ -74,7 +74,7 @@ impl ModelBackend for RecordingBackend {
                 Ok(reply) => json!({"status":"parsed", "reply":reply}),
                 Err(error) => json!({"status":"error", "error":error}),
             };
-            if self.record.save("30-model-result.json", &observed).is_err() {
+            if self.record.save("model_result", &observed).is_err() {
                 self.recording_failed.store(true, Ordering::Relaxed);
                 return Err(ModelError::InvalidResponse);
             }
@@ -85,18 +85,20 @@ impl ModelBackend for RecordingBackend {
 
 pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) -> &'static str {
     if request["event"]["name"] == "input.submit" {
-        return session::capture(request, &config, ingress).await;
+        return session::capture(request, &config, ingress);
     }
     let budget = match mapping::budget(request, &config, ingress) {
         Ok(budget) => budget,
         Err(code) => return code,
     };
     let deadline = ingress.deadline_at(budget.deadline_ms, config.model.timeout_ms);
-    let record = match Record::create(&config, deadline).await {
+    // A call without a valid scoped session is still retained, in the unbound log.
+    let session = mapping::context(request, &config, "tool.before").ok();
+    let record = match Record::create(&config, session.as_deref(), deadline) {
         Ok(record) => Arc::new(record),
         Err(code) => return code,
     };
-    if let Err(code) = record.save("00-input.json", &json!({
+    if let Err(code) = record.save("input", &json!({
         "version":1, "mode":"private_local_shadow", "filesystem_attested":false,
         "aw_request":request, "ingress_unix_ms":ingress.now_ms().saturating_sub(ingress.elapsed_ms())
     })) { return code; }
@@ -127,7 +129,7 @@ pub(crate) async fn invoke(request: &Value, config: Config, ingress: Ingress) ->
         ),
     };
     match record.save(
-        "40-result.json",
+        "result",
         &json!({"status":status,"code":code,"evaluation":response}),
     ) {
         Ok(()) => code,
@@ -143,15 +145,14 @@ async fn run(
 ) -> Result<Value, &'static str> {
     // Mapping checks context before the public candidate revision size limit;
     // uncovered contexts stay uncovered even when their payload is oversized.
-    let (evaluation, turns) = mapping::project(request, &config, ingress, |session_id| {
-        record.session_task(session_id)?.task()
-    })?;
+    let (evaluation, turns) =
+        mapping::project(request, &config, ingress, |_| record.session_task()?.task())?;
     let encoded = serde_json::to_vec(&evaluation).map_err(|_| "mapping_failed")?;
     if encoded.len() > semantic_arbiter::protocol::MAX_MESSAGE_BYTES {
         return Err("oversized_candidate");
     }
     record.save(
-        "05-task.json",
+        "task",
         &json!({
             "version":1, "origin":"native_user",
             "native_session_id":request["event"]["session_id"],
@@ -164,7 +165,7 @@ async fn run(
             "text_bytes":evaluation.task.as_ref().map_or(0, |task| task.text.len())
         }),
     )?;
-    record.save("10-evaluation.json", &evaluation)?;
+    record.save("evaluation", &evaluation)?;
     config.model.config_revision = evaluation.binding.config_revision.clone();
     if ingress.expired(&evaluation.budget, config.model.timeout_ms) {
         return Err("budget_exceeded");

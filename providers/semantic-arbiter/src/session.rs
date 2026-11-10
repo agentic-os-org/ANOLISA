@@ -11,7 +11,7 @@ use crate::storage;
 
 /// Core contract limit on authoritative task text.
 const MAX_TEXT: usize = 16_384;
-/// Bounds the stored turn list so a session file stays within its reservation.
+/// Bounds the stored turn list so `task.json` stays within its size limit.
 const MAX_TURNS: usize = 64;
 const SEPARATOR: &str = "\n\n";
 
@@ -89,7 +89,7 @@ pub(crate) fn digest(text: &str) -> String {
 }
 
 /// Records one `input.submit` prompt in its session; never contacts the model.
-pub(crate) async fn capture(request: &Value, config: &Config, ingress: Ingress) -> &'static str {
+pub(crate) fn capture(request: &Value, config: &Config, ingress: Ingress) -> &'static str {
     let budget = match mapping::budget(request, config, ingress) {
         Ok(budget) => budget,
         Err(code) => return code,
@@ -122,8 +122,7 @@ pub(crate) async fn capture(request: &Value, config: &Config, ingress: Ingress) 
         task.append(turn, text)
             .inspect(|outcome| code = *outcome)
             .is_some()
-    })
-    .await;
+    });
     match updated {
         Ok(()) => code,
         Err(error) => error,

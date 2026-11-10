@@ -103,10 +103,7 @@ fn public_aw_host_admits_and_invokes_observe_only_provider() {
         };
         assert!(!outcome.requests_block());
         assert_eq!(outcome.as_value()["effects"], json!([]));
-        assert_eq!(
-            read(&fixture.records()[0].join("40-result.json"))["status"],
-            "evaluated"
-        );
+        assert_eq!(fixture.records()[0].get("result")["status"], "evaluated");
         assert!(!fixture.root.path().join("greeting.txt").exists());
     }
 }
@@ -182,8 +179,11 @@ fn invalid_config_and_duplicate_fields_are_sanitized() {
         ("/model/credential", json!("private-config-marker")),
         ("/model/config_revision", json!("unrelated")),
         ("/max_storage_bytes", json!(1)),
-        // A session reservation is needed besides the record reservation.
+        // A full session task is needed besides one admitted call.
         ("/max_storage_bytes", json!(4 * 1024 * 1024)),
+        ("/max_session_bytes", json!(4 * 1024 * 1024)),
+        ("/max_session_bytes", json!(88080385u64)),
+        ("/max_sessions", json!(0)),
         // Task text only comes from captured prompts, never from config.
         ("/task/text", json!("Update the synthetic greeting only.")),
         ("/task/version", json!("v1")),
@@ -243,24 +243,21 @@ fn full_candidate_normal_and_denial_never_emit_effects() {
             "native_user"
         );
         let dir = &fixture.records()[0];
-        let input = read(&dir.join("00-input.json"));
+        let input = dir.get("input");
         assert_eq!(input["aw_request"]["event"], request["event"]);
         assert_eq!(input["filesystem_attested"], false);
-        let result = read(&dir.join("40-result.json"));
+        let result = dir.get("result");
         assert_eq!(
             result["evaluation"]["outcome"]["control"]["candidate"],
             expected
         );
-        let projection = read(&dir.join("20-model-request.json"));
+        let projection = dir.get("model_request");
         assert_eq!(projection["state"], received["state"]);
         assert_eq!(projection["questions"], received["questions"]);
         assert_eq!(projection["backend"]["mode"], "loopback_test");
-        assert_eq!(read(&dir.join("30-model-result.json"))["status"], "parsed");
+        assert_eq!(dir.get("model_result")["status"], "parsed");
         assert!(!fixture.root.path().join("greeting.txt").exists());
-        for entry in fs::read_dir(dir).unwrap() {
-            let bytes = fs::read(entry.unwrap().path()).unwrap();
-            assert!(!String::from_utf8_lossy(&bytes).contains(KEY));
-        }
+        assert!(!fs::read_to_string(&dir.log).unwrap().contains(KEY));
     }
 }
 
@@ -296,7 +293,7 @@ fn preservation_scenario_is_refused_until_its_verifier_is_wired() {
     let request = fixture.request(config);
     let (_, diagnostic) = invoke(&fixture, fixture.submit(&request, "turn", TASK_TEXT), false);
     assert_eq!(diagnostic["code"], "unsupported_scenario");
-    assert!(!fixture.records.join("sessions").exists());
+    assert_eq!(fs::read_dir(&fixture.records).unwrap().count(), 0);
 }
 
 #[test]
@@ -329,12 +326,9 @@ fn explicit_single_path_delete_is_advisory_and_rejects_extra_targets() {
             assert!(server.received.try_recv().is_err());
         } else {
             assert_eq!(diagnostic["code"], "shadow_evaluated");
+            assert_eq!(dir.get("evaluation")["candidate"]["operation"], "delete");
             assert_eq!(
-                read(&dir.join("10-evaluation.json"))["candidate"]["operation"],
-                "delete"
-            );
-            assert_eq!(
-                read(&dir.join("40-result.json"))["evaluation"]["outcome"]["control"]["candidate"],
+                dir.get("result")["evaluation"]["outcome"]["control"]["candidate"],
                 if preserve { "block" } else { "allow" }
             );
         }
@@ -352,7 +346,7 @@ fn integral_decimal_and_exponent_budgets_follow_aw_protocol() {
         request["budget_ms"] = serde_json::from_str(budget).unwrap();
         let (_, diagnostic) = invoke(&fixture, request, true);
         assert_eq!(diagnostic["code"], "shadow_evaluated", "{budget}");
-        let evaluation = read(&fixture.records()[0].join("10-evaluation.json"));
+        let evaluation = fixture.records()[0].get("evaluation");
         assert_eq!(
             evaluation["budget"]["deadline_ms"].as_u64().unwrap()
                 - evaluation["budget"]["opened_at_ms"].as_u64().unwrap(),
@@ -370,7 +364,7 @@ fn explicit_permissions_are_not_candidate_derived() {
     fixture.capture(&request);
     let (_, diagnostic) = invoke(&fixture, request, true);
     assert_eq!(diagnostic["code"], "shadow_evaluated");
-    let result = read(&fixture.records()[0].join("40-result.json"));
+    let result = fixture.records()[0].get("result");
     assert_eq!(
         result["evaluation"]["answers"][0]["reason"],
         "outside_scope"
@@ -391,7 +385,7 @@ fn preserve_overrides_allowance_without_model_call() {
     let request = fixture.request(config);
     fixture.capture(&request);
     invoke(&fixture, request, true);
-    let result = read(&fixture.records()[0].join("40-result.json"));
+    let result = fixture.records()[0].get("result");
     assert_eq!(
         result["evaluation"]["outcome"]["control"]["candidate"],
         "block"
@@ -465,11 +459,8 @@ fn mismatches_missing_identity_and_unmapped_tools_are_uncovered() {
         *request.pointer_mut(pointer).unwrap() = value;
         let (_, diagnostic) = invoke(&fixture, request, true);
         assert_eq!(diagnostic["code"], expected, "{pointer}");
-        assert_eq!(
-            read(&fixture.records()[0].join("40-result.json"))["status"],
-            "uncovered"
-        );
-        assert!(!fixture.records()[0].join("05-task.json").exists());
+        assert_eq!(fixture.records()[0].get("result")["status"], "uncovered");
+        assert!(!fixture.records()[0].has("task"));
         assert!(server.received.try_recv().is_err());
     }
 }
@@ -495,11 +486,11 @@ fn unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint() {
         let (_, diagnostic) = invoke(&fixture, request, true);
         assert_eq!(diagnostic["code"], code, "{allowed:?}/{preserve:?}");
         let dir = fixture.records().pop().unwrap();
-        assert_eq!(read(&dir.join("40-result.json"))["status"], status);
-        let evaluation = read(&dir.join("10-evaluation.json"));
+        assert_eq!(dir.get("result")["status"], status);
+        let evaluation = dir.get("evaluation");
         assert_eq!(evaluation["candidate"]["resource_id"], derived);
         // Only an unconstrained or permitted identity reaches the model.
-        let asked = dir.join("20-model-request.json").exists();
+        let asked = dir.has("model_request");
         assert_eq!(asked, preserve.is_empty() && allowed != vec!["greeting"]);
     }
 }
@@ -514,12 +505,9 @@ fn oversized_candidate_is_saved_without_truncation_or_inference() {
         let (_, diagnostic) = invoke(&fixture, request.clone(), true);
         assert_eq!(diagnostic["code"], "oversized_candidate");
         let dir = &fixture.records()[0];
-        assert_eq!(
-            read(&dir.join("00-input.json"))["aw_request"]["event"],
-            request["event"]
-        );
-        assert_eq!(read(&dir.join("40-result.json"))["status"], "uncovered");
-        assert!(!dir.join("20-model-request.json").exists());
+        assert_eq!(dir.get("input")["aw_request"]["event"], request["event"]);
+        assert_eq!(dir.get("result")["status"], "uncovered");
+        assert!(!dir.has("model_request"));
         assert!(server.received.try_recv().is_err());
     }
 }
@@ -535,19 +523,17 @@ fn credentials_and_remote_failures_remain_sanitized_shadow_results() {
         let dir = &fixture.records()[0];
         if key {
             assert_eq!(diagnostic["code"], "shadow_evaluated");
-            assert_eq!(read(&dir.join("30-model-result.json"))["error"], "http");
+            assert_eq!(dir.get("model_result")["error"], "http");
             assert_eq!(
-                read(&dir.join("40-result.json"))["evaluation"]["judgments"][0]["error"],
+                dir.get("result")["evaluation"]["judgments"][0]["error"],
                 "http"
             );
         } else {
             assert_eq!(diagnostic["code"], "missing_credentials");
             assert!(server.received.try_recv().is_err());
         }
-        for entry in fs::read_dir(dir).unwrap() {
-            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
-            assert!(!text.contains("private-remote-error-body") && !text.contains(KEY));
-        }
+        let text = fs::read_to_string(&dir.log).unwrap();
+        assert!(!text.contains("private-remote-error-body") && !text.contains(KEY));
     }
 }
 
@@ -564,7 +550,7 @@ fn changed_content_and_complete_native_ids_change_bindings() {
         fixture.capture(&request);
         invoke(&fixture, request, true);
         let dir = fixture.records().pop().unwrap();
-        let evaluation = read(&dir.join("10-evaluation.json"));
+        let evaluation = dir.get("evaluation");
         revisions.push(evaluation["binding"]["candidate_revision"].clone());
         identities.push(evaluation["binding"]["instance_id"].clone());
     }
