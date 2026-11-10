@@ -66,10 +66,23 @@ pub(super) fn owns_command(words: &[String]) -> bool {
 
 /// Identifies native search executables through the same transparent wrappers.
 pub(super) fn is_search(words: &[String]) -> bool {
-    inner_command(words).is_some_and(|command| matches!(command, "grep" | "rg"))
+    search_invocation(words).is_some()
+}
+
+/// Returns the native search executable and the arguments passed to it.
+pub(super) fn search_invocation(words: &[String]) -> Option<(&str, &[String])> {
+    let index = inner_command_index(words)?;
+    let command = command_basename(words.get(index)?);
+    matches!(command, "grep" | "rg").then(|| (command, &words[index + 1..]))
 }
 
 fn inner_command(words: &[String]) -> Option<&str> {
+    inner_command_index(words)
+        .and_then(|index| words.get(index))
+        .map(|word| command_basename(word))
+}
+
+fn inner_command_index(words: &[String]) -> Option<usize> {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         if is_environment_assignment(word)
@@ -102,7 +115,7 @@ fn inner_command(words: &[String]) -> Option<&str> {
             break;
         }
     }
-    words.get(index).map(|word| command_basename(word))
+    Some(index)
 }
 
 fn wrapper_inner_index(wrapper: &ProcessWrapper, words: &[String]) -> Option<usize> {

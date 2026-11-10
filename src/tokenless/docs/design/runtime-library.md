@@ -65,10 +65,24 @@ be rewritten. The rule is independent of search path sharing and retains the exi
 file-read policy.
 
 The same native-command recognition covers every `grep` and `rg` mode. `git grep`,
-`xargs grep`, and custom wrapper prefixes are outside this recognition. PostTool reuses
+`xargs grep`, and custom wrapper prefixes are outside this recognition. Comments are skipped
+as the shell skips them, so a search or option written after `#` does not count. PostTool reuses
 that parser for `command_output` searches and routes them, like the native `Grep` tool, only to
-`SearchResultsCompressor`. Its unified entry recognizes numbered path matches and path lists;
-format recognition and savings checks stay inside the compressor. Disabled search compression
+`SearchResultsCompressor`. For these shell searches the command's arguments, not the output,
+select the listing format (`entry/search_listing.rs`). Line numbers without context options
+(`grep -rn`, `rg -n`, `rg --vimgrep`) select numbered matches; `-l`, `-L` and `rg --files`
+select path lists. Every other mode returns the output unchanged. Without line numbers a search
+prints the matching file text, and that text can itself look like `path:line:` rows: folding
+`grep error build.log` over compiler messages would present log lines as matches inside the
+source file they mention. Unknown or abbreviated options, standard-output redirections, other
+output-producing commands, and pipeline stages other than `head`, `tail`, `sort`, `uniq`,
+`cat`, or a line-selecting `grep`/`rg` on standard input also keep the output unchanged.
+Only unquoted `<` and `>` start a redirection, and only unquoted digits name its descriptor, so
+a quoted `'=>'` pattern stays a pattern.
+The argument tables assume that nothing outside the command line changes row shape. A
+`RIPGREP_CONFIG_PATH` file that adds `--heading` or context options produces rows the
+compressor rejects, so it costs savings rather than fidelity.
+The compressor still checks the format and savings. Disabled search compression
 or no candidate returns the original, including with `force_json`, without trying another domain.
 Qoder's native Bash adapter sends only `stdout` to Core, even when it is short or empty or
 `stderr` is larger, and preserves every other field when rewrapping the result.
@@ -153,9 +167,11 @@ compression selects dry-run without disabling PreTool RTK.
 
 PostTool routes native `Grep` and recognized shell `grep`/`rg` output directly through
 `SearchResultsCompressor` when search path sharing and text replacement are available.
-Other tools retain content-based routing: numbered records require `api_response` origin,
-and plain path lists also accept command output. Successful `path:line:text` listings with at least three records can share full
-paths across consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
+Shell searches use only the format their arguments select, as described above; output whose
+arguments select no format is returned unchanged. Other tools retain content-based routing:
+numbered records require `api_response` origin, and plain path lists also accept command output.
+Successful `path:line:text` listings with at least three records can share full paths across
+consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
 The input contract excludes colons in paths and context listings. Unsupported rows reject the whole
 candidate; byte length and estimated tokens must both decrease before normal Runtime arbitration.
 The applied operation is `search_path_sharing` (`AppliedOperation.SEARCH_PATH_SHARING` in the

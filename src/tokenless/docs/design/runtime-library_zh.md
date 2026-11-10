@@ -54,9 +54,19 @@ PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，�
 该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
 
 同一原生命令识别覆盖 `grep`、`rg` 的所有模式；`git grep`、`xargs grep` 和自定义 Wrapper
-前缀不在此识别范围。PostTool 复用该解析器识别 `command_output` 来源的搜索，
-与原生 `Grep` 工具一样，只调用 `SearchResultsCompressor`。统一入口识别带路径和行号的
-匹配记录及纯路径列表，格式识别和收益判断都保留在压缩器内部。关闭搜索压缩或没有候选时
+前缀不在此识别范围。注释与 Shell 中一样被跳过，`#` 之后写出的搜索或选项不算数。
+PostTool 复用该解析器识别 `command_output` 来源的搜索，
+与原生 `Grep` 工具一样，只调用 `SearchResultsCompressor`。对这些 Shell 搜索，由命令参数
+而非输出内容选择列表格式（`entry/search_listing.rs`）：带行号且没有上下文选项
+（`grep -rn`、`rg -n`、`rg --vimgrep`）时按带行号的匹配记录处理；`-l`、`-L` 和
+`rg --files` 按纯路径列表处理；其他模式原样返回。不带行号时，搜索输出的是匹配到的文件原文，
+而原文本身可能形如 `path:line:` 记录：若折叠对编译器输出执行的 `grep error build.log`，
+日志行会被呈现为其所提及源文件中的匹配。未知或缩写的选项、重定向标准输出、
+其他会产生输出的命令，以及 `head`、`tail`、`sort`、`uniq`、`cat` 和只筛选标准输入行的
+`grep`/`rg` 之外的管道阶段，同样保持原样。只有未加引号的 `<`、`>` 才开始重定向，
+也只有未加引号的数字才表示其文件描述符，因此加引号的 `'=>'` 模式仍是模式。参数表假定命令行之外不会有配置改变输出行的形状；若 `RIPGREP_CONFIG_PATH`
+配置加入 `--heading` 或上下文选项，产生的行会被压缩器拒绝，只损失收益，不影响保真。
+格式和收益仍由压缩器检查。关闭搜索压缩或没有候选时
 原样返回，即使设置 `force_json` 也不尝试其他领域压缩器。Qoder 原生 Bash Adapter 只将
 `stdout` 交给 Core，即使它较短、为空或 `stderr` 更长；回填结果时保留其他所有字段。
 
@@ -124,7 +134,8 @@ QwenPaw 和 AgentScope；直接 Runtime 构造仍采用显式配置。Diff 默�
 
 PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
 `SearchResultsCompressor`。原生 `Grep` 和识别出的 Shell `grep`、`rg` 直接调用此压缩器，
-不要求内容检测先判为搜索结果。其他工具保留按内容派发：带行号记录要求 `api_response`
+不要求内容检测先判为搜索结果。Shell 搜索只使用其参数选定的格式（见上文），参数未选定格式的输出
+原样返回。其他工具保留按内容派发：带行号记录要求 `api_response`
 来源，纯路径列表也接受命令输出。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；

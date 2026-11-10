@@ -27,6 +27,9 @@ use crate::{
 const MIN_RESPONSE_CHARS: usize = 200;
 
 mod native_output;
+mod search_listing;
+
+pub(crate) use search_listing::{SearchListing, search_listing};
 
 /// Per-call behavior resolved by a transport frontend.
 #[derive(Debug, Clone)]
@@ -459,18 +462,79 @@ pub(crate) fn is_search_command(command: &str) -> bool {
 }
 
 fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) -> bool {
+    // One buffer serves every segment, and the word texts move into it.
     let mut words = Vec::new();
-    let mut word = String::new();
+    shell_segments(command).into_iter().any(|segment| {
+        words.clear();
+        words.extend(segment.words.into_iter().map(|word| word.text));
+        matches_segment(&words)
+    })
+}
+
+/// One shell word with its quotes and escapes removed.
+#[derive(Default)]
+struct ShellWord {
+    text: String,
+    /// Some character so far came from quotes or an escape.
+    quoted: bool,
+    /// Where an unquoted, unescaped `<` or `>` starts a redirection. Quotes are
+    /// gone from `text`, so only this tells a redirection from a `'<'` pattern.
+    redirection: Option<Redirection>,
+}
+
+impl ShellWord {
+    /// Whether the word so far is only an unquoted descriptor and redirection
+    /// operators, so the next character starts a new shell word.
+    fn is_bare_redirection(&self) -> bool {
+        self.redirection.is_some_and(|redirection| {
+            let (descriptor, operators) = self.text.split_at(redirection.offset);
+            redirection.plain_prefix
+                && descriptor.bytes().all(|byte| byte.is_ascii_digit())
+                && operators.bytes().all(|byte| matches!(byte, b'<' | b'>'))
+        })
+    }
+}
+
+/// Position of a redirection operator inside a [`ShellWord`].
+#[derive(Clone, Copy)]
+struct Redirection {
+    /// Byte offset of the operator in the word's text.
+    offset: usize,
+    /// The text before the operator has no quotes or escapes, so digits there
+    /// name a file descriptor. In `'2'>out.txt` the `2` is an argument.
+    plain_prefix: bool,
+}
+
+/// Words of one shell command and the separator that ended them.
+struct ShellSegment {
+    words: Vec<ShellWord>,
+    /// `&`, `|`, `;`, `(`, `)` or a newline; `None` ends the input. Doubled
+    /// operators such as `&&` end with an empty segment.
+    separator: Option<char>,
+    /// The `&` separator belongs to an unquoted `>&`, `<&` or `&>`, so the
+    /// next segment continues the same command.
+    in_redirection: bool,
+}
+
+fn shell_segments(command: &str) -> Vec<ShellSegment> {
+    let mut segments = Vec::new();
+    let mut words = Vec::new();
+    let mut word = ShellWord::default();
     // Empty quoted words still consume wrapper arguments.
     let mut word_started = false;
     let mut quote = None;
     let mut escaped = false;
+    // The preceding character, when it was neither quoted nor escaped.
+    let mut previous = None;
+    let mut characters = command.chars().peekable();
 
-    for character in command.chars() {
+    while let Some(character) = characters.next() {
+        let last = previous.take();
         if escaped {
             if character != '\n' {
                 word_started = true;
-                word.push(character);
+                word.quoted = true;
+                word.text.push(character);
             }
             escaped = false;
             continue;
@@ -483,42 +547,71 @@ fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) ->
             if character == delimiter {
                 quote = None;
             } else {
-                word.push(character);
+                word.text.push(character);
             }
             continue;
         }
+        previous = Some(character);
         if matches!(character, '\'' | '"') {
             word_started = true;
+            word.quoted = true;
             quote = Some(character);
+            previous = None;
+        } else if character == '#'
+            && (!word_started || (matches!(last, Some('<' | '>')) && word.is_bare_redirection()))
+        {
+            // A comment starts a word, and a redirection operator such as the
+            // `2>` in `2># note` ends the word before it. Expansions are not
+            // parsed, so `${v%%>#pat}` keeps its `#`; `foo>#x` and `'2'>#x`
+            // keep it too and fail as redirections instead. The comment runs
+            // to the end of the line, which still ends the segment.
+            while characters.next_if(|&next| next != '\n').is_some() {}
         } else if character.is_whitespace() {
             if word_started {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if character == '\n' && matches_segment(&words) {
-                return true;
-            }
             if character == '\n' {
-                words.clear();
+                segments.push(ShellSegment {
+                    words: std::mem::take(&mut words),
+                    separator: Some(character),
+                    in_redirection: false,
+                });
             }
         } else if matches!(character, '&' | '|' | ';' | '(' | ')') {
             if word_started {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if matches_segment(&words) {
-                return true;
-            }
-            words.clear();
+            // `&&>` and `|&>` start with a list or pipe operator, not `&>`.
+            let in_redirection = character == '&'
+                && (matches!(last, Some('<' | '>'))
+                    || (characters.peek() == Some(&'>') && !matches!(last, Some('&' | '|'))));
+            segments.push(ShellSegment {
+                words: std::mem::take(&mut words),
+                separator: Some(character),
+                in_redirection,
+            });
         } else {
+            if matches!(character, '<' | '>') && word.redirection.is_none() {
+                word.redirection = Some(Redirection {
+                    offset: word.text.len(),
+                    plain_prefix: !word.quoted,
+                });
+            }
             word_started = true;
-            word.push(character);
+            word.text.push(character);
         }
     }
     if word_started {
         words.push(word);
     }
-    matches_segment(&words)
+    segments.push(ShellSegment {
+        words,
+        separator: None,
+        in_redirection: false,
+    });
+    segments
 }
 
 fn segment_keeps_native(words: &[String]) -> bool {
@@ -1714,6 +1807,8 @@ mod tests {
             "time -f '' rg match src",
             "uv run rg match src",
             "gr\\\nep match source.py",
+            "grep -rn match src # find callers",
+            "# find callers\ngrep -rn match src",
         ] {
             let request = bash_request(command);
             let response = pre_tool_with_rewriter(
@@ -1737,6 +1832,10 @@ mod tests {
             "time -f rg echo match",
             "find . -type f",
             "head -40 source.py",
+            // A comment is never executed.
+            "cat notes.md # ; rg -n match src",
+            "echo hi # && grep -rn match src",
+            "# grep -rn match src",
         ] {
             assert!(!is_search_command(command), "{command}");
         }

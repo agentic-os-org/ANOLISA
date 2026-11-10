@@ -187,8 +187,11 @@ bypasses rewriting. This avoids RTK's `head` → `read --max-lines` structural t
 omit function bodies inside the requested line window. Explicit `rtk` commands remain explicit.
 This PreTool rule does not disable eligible PostTool compression; file-read policy is unchanged.
 Recognized `grep` and `rg` calls keep all modes native and use only the search compressor in
-PostTool. Disabled search compression, unsupported formats, and no savings preserve the output,
-including with `force_json`.
+PostTool. Their output is compressed only when the arguments show that the search wrote each row
+prefix: line numbers without context options (for example `grep -rn` or `rg -n`), or a
+file-listing mode such as `-l`. Other modes, such as `grep error build.log`, print file text that
+may itself look like `path:line:` rows and are returned unchanged. Disabled search compression,
+unsupported formats, and no savings preserve the output, including with `force_json`.
 
 The same protection covers the complete output of compound commands containing a recognized
 search, including `grep -q needle Cargo.toml && cargo build`: mixed build/test logs currently

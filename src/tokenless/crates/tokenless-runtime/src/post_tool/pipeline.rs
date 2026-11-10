@@ -19,6 +19,7 @@ use tokenless_protocol::{
 use super::arbitration::{ArbitrationInput, Verdict, decide};
 use super::content::detect;
 use super::stash_ledger::StashLedger;
+use crate::entry::SearchListing;
 
 /// Policy resolved by Runtime for one PostTool call.
 #[derive(Debug, Clone)]
@@ -86,12 +87,12 @@ impl PostToolPipeline {
         // match; other domain compressors may drop rows or rewrite source text.
         // Compound commands have no per-command output boundaries. Protect the
         // complete result when any segment searches, even a quiet condition.
-        let protect_search_output = request.tool_name == "Grep"
-            || (request.content_origin == ContentOrigin::CommandOutput
-                && request
-                    .command
-                    .as_deref()
-                    .is_some_and(crate::entry::is_search_command));
+        let shell_search = request.content_origin == ContentOrigin::CommandOutput
+            && request
+                .command
+                .as_deref()
+                .is_some_and(crate::entry::is_search_command);
+        let protect_search_output = request.tool_name == "Grep" || shell_search;
         // Data printed by a shell file read (`cat build.log`) compresses like
         // command output; a page printed that way is source the agent may edit,
         // so only HTML keeps it verbatim. Read tool results were excluded above.
@@ -284,7 +285,26 @@ impl PostToolPipeline {
                 unrecoverable_truncations: None,
             }
         } else if search_candidate {
-            let output = SearchResultsCompressor.compress(&request.content);
+            let output = if shell_search {
+                // Without line numbers or a file-listing mode a search prints
+                // file text, which may itself look like `path:12:` rows. Only
+                // the arguments prove that the search wrote each prefix.
+                match request
+                    .command
+                    .as_deref()
+                    .and_then(crate::entry::search_listing)
+                {
+                    Some(SearchListing::Matches) => {
+                        SearchResultsCompressor.compress_matches(&request.content)
+                    }
+                    Some(SearchListing::Paths) => {
+                        SearchResultsCompressor.compress_paths(&request.content)
+                    }
+                    None => None,
+                }
+            } else {
+                SearchResultsCompressor.compress(&request.content)
+            };
             DomainCandidate {
                 operations: if output.is_some() {
                     vec![AppliedOperation::SearchPathSharing]
@@ -579,9 +599,19 @@ mod tests {
 
     #[test]
     fn shell_search_uses_only_the_search_compressor_for_every_format() {
-        for command in [
-            "grep -n match file",
-            "cd /testbed && env LANG=C timeout 30 rg match src | sort",
+        type Encoder = fn(&SearchResultsCompressor, &str) -> Option<String>;
+        let unproven: Encoder = |_, _| None;
+        for (command, encode) in [
+            (
+                "grep -n match file",
+                SearchResultsCompressor::compress_matches as Encoder,
+            ),
+            (
+                "cd /testbed && env LANG=C timeout 30 rg -n match src | sort",
+                SearchResultsCompressor::compress_matches,
+            ),
+            ("rg -l match src", SearchResultsCompressor::compress_paths),
+            ("grep match file", unproven),
         ] {
             for input in [
                 search_input(),
@@ -606,7 +636,7 @@ mod tests {
                         let store: Arc<dyn StashStore> = concrete.clone();
                         let run = PostToolPipeline::run(&req, &config, Some(&store));
                         let candidate = enabled
-                            .then(|| SearchResultsCompressor.compress(&input))
+                            .then(|| encode(&SearchResultsCompressor, &input))
                             .flatten();
                         assert_eq!(
                             run.response.output,
@@ -634,6 +664,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shell_search_keeps_file_text_that_looks_like_search_rows() {
+        let compiler_log: String = [(88, 9), (141, 17), (203, 5), (377, 13)]
+            .map(|(line, column)| {
+                format!(
+                    "src/runtime/post_tool/pipeline.rs:{line}:{column}: error[E0308]: mismatched types\n"
+                )
+            })
+            .concat();
+        let heartbeat_log: String = (10..40)
+            .map(|second| format!("09/02/2026 14:30:{second} [INFO] worker heartbeat ok\n"))
+            .collect();
+        for (command, input) in [
+            ("grep error build.log", compiler_log.clone()),
+            // A flag named in a comment is never passed to the search.
+            ("grep error build.log # -n", compiler_log.clone()),
+            ("grep error build.log # -l", compiler_log.clone()),
+            ("grep -r error logs | head -40", compiler_log.clone()),
+            ("rg heartbeat app.log", heartbeat_log),
+            ("grep -h workspace saved_paths.txt", path_list_input()),
+        ] {
+            // The rows alone are indistinguishable from a search listing.
+            assert!(
+                SearchResultsCompressor.compress(&input).is_some(),
+                "{command}"
+            );
+            let mut req = request(&input);
+            req.command = Some(command.into());
+            let run = PostToolPipeline::run(&req, &build_log_config(), None);
+            assert_eq!(run.response.output, input, "{command}");
+            assert_eq!(run.response.disposition, Disposition::NoSavings);
+            assert!(run.response.applied_operations.is_empty());
+        }
+
+        let mut req = request(&compiler_log);
+        req.command = Some("grep -rn error src".into());
+        let run = PostToolPipeline::run(&req, &build_log_config(), None);
+        assert_eq!(
+            run.response.applied_operations,
+            [AppliedOperation::SearchPathSharing]
+        );
     }
 
     #[test]

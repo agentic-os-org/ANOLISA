@@ -400,7 +400,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
 | Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
-| Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
+| Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; shell searches need line numbers without context or a file-listing mode; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Rewrites with RTK and submits shell input that runs through `tokenless rtk` when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
@@ -504,8 +504,11 @@ the search compressor, regardless of detected content type or `force_json`. Disa
 path sharing, unsupported formats, and candidates without savings return the original output;
 they never fall through to JSON, table, or log compression. Other tools retain their existing routes.
 Numbered search records accept these recognized shell searches as well as API origin;
-pure path lists also accept other command output. File content
-and file reads skip the path-list strategy; existing file-read JSON, table, and log handling remains available.
+pure path lists also accept other command output. A shell search is compressed only in the
+format its arguments select: line numbers without context options for numbered records, or
+`-l`, `-L` and `rg --files` for path lists. Other modes, such as `grep error build.log`, are
+returned unchanged because their rows can be file text. File content and file reads skip the
+path-list strategy; existing file-read JSON, table, and log handling remains available.
 Other non-file tool results can use the same Core capability regardless of tool name.
 
 Pure lists need at least three POSIX paths with uniform LF or CRLF endings. The smaller view contains
@@ -557,9 +560,11 @@ The view is used only when it is smaller; it needs no Stash entry or retrieval c
 The compressor supports no-context `path:line:text` listings with at least three records
 and paths without colons, plus the pure path lists described above. Count, empty, single-file
 `line:text`, and unsupported outputs pass through. Recognized Bash `grep` and `rg` commands
-run natively and share this search-only PostTool route. File-read policy is unchanged. Grep may already
-have applied a host limit before Tokenless receives the result; path sharing does not recover
-those missing matches. Lower first-result size does not guarantee lower total task cost.
+run natively and share this search-only PostTool route when they request line numbers without
+context or list file names (see [Controlling search path sharing](#controlling-search-path-sharing)).
+File-read policy is unchanged. Grep may already have applied a host limit before Tokenless
+receives the result; path sharing does not recover those missing matches. Lower first-result
+size does not guarantee lower total task cost.
 
 ### Reversible compression is conditional
 
