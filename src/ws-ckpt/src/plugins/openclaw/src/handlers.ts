@@ -109,8 +109,8 @@ export async function handleRollback(
       isError: true,
     };
   }
-  if (numAncestors !== undefined && (!Number.isFinite(numAncestors) || numAncestors < 1)) {
-    return { text: "'numAncestors' must be >= 1", isError: true };
+  if (numAncestors !== undefined && (!Number.isInteger(numAncestors) || numAncestors < 1)) {
+    return { text: "'numAncestors' must be an integer >= 1", isError: true };
   }
 
   const resolvedWs = workspace?.trim() || pluginState.resolvedConfig?.workspace;

@@ -726,12 +726,16 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     if not target and num_ancestors is None:
         return _err("either 'target' or 'num_ancestors' is required")
     if num_ancestors is not None:
-        try:
+        # JSON Schema `integer` admits 2.0 and 2e0, which json.loads yields as
+        # float; accept those like the OpenClaw host does, reject 2.9/bool/str.
+        if isinstance(num_ancestors, float) and num_ancestors.is_integer():
             num_ancestors = int(num_ancestors)
-        except (ValueError, TypeError):
+        if (
+            isinstance(num_ancestors, bool)
+            or not isinstance(num_ancestors, int)
+            or num_ancestors < 1
+        ):
             return _err("'num_ancestors' must be an integer >= 1")
-    if num_ancestors is not None and num_ancestors < 1:
-        return _err("'num_ancestors' must be >= 1")
 
     workspace, ws_err = _resolve_workspace(args)
     if ws_err:

@@ -902,22 +902,24 @@ describe("handleRollback — numAncestors", () => {
     expect(r.text).toContain("mutually exclusive");
   });
 
-  it("numAncestors < 1 returns error", async () => {
-    const r = await handleRollback(undefined, undefined, 0);
-    expect(r.isError).toBe(true);
-    expect(r.text).toContain(">= 1");
-  });
-
-  it("numAncestors NaN returns error", async () => {
-    const r = await handleRollback(undefined, undefined, NaN);
-    expect(r.isError).toBe(true);
-    expect(r.text).toContain(">= 1");
-  });
-
-  it("numAncestors Infinity returns error", async () => {
-    const r = await handleRollback(undefined, undefined, Infinity);
-    expect(r.isError).toBe(true);
-    expect(r.text).toContain(">= 1");
+  describe.each([
+    { workspace: undefined, preview: false },
+    { workspace: undefined, preview: true },
+    { workspace: "/explicit", preview: false },
+    { workspace: "/explicit", preview: true },
+  ])("workspace=$workspace preview=$preview", ({ workspace, preview }) => {
+    it.each([
+      1.5, 2.9, true, false, "2", "2.0", null, {}, [], NaN, Infinity, -Infinity, 0, -1,
+    ].map((numAncestors) => ({ numAncestors })))(
+      "rejects invalid depth $numAncestors without invoking rollback",
+      async ({ numAncestors }) => {
+        const r = await handleRollback(undefined, workspace, numAncestors as number, preview);
+        expect(r).toEqual({ text: "'numAncestors' must be an integer >= 1", isError: true });
+        expect(mockManager.getWorkspacePath).not.toHaveBeenCalled();
+        expect(mockManager.rollback).not.toHaveBeenCalled();
+        expect(promisifiedMock).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it("no workspace returns error", async () => {
@@ -927,14 +929,16 @@ describe("handleRollback — numAncestors", () => {
     expect(r.text).toContain("No workspace");
   });
 
-  it("numAncestors via manager success", async () => {
+  it.each([1, 2, 10])("passes integer depth %i unchanged to the manager", async (numAncestors) => {
     mockManager.rollback.mockResolvedValue({
       success: true,
-      message: "Rolled back 2 steps",
+      message: "Rolled back",
     });
-    const r = await handleRollback(undefined, undefined, 2);
-    expect(r.isError).toBe(false);
-    expect(mockManager.rollback).toHaveBeenCalledWith(undefined, 2, false);
+    for (const preview of [false, true]) {
+      const r = await handleRollback(undefined, undefined, numAncestors, preview);
+      expect(r.isError).toBe(false);
+      expect(mockManager.rollback).toHaveBeenLastCalledWith(undefined, numAncestors, preview);
+    }
   });
   it("update workspace rejects line breaks", async () => {
     const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
