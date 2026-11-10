@@ -285,7 +285,15 @@ fn section_heading(line: &str) -> Option<&str> {
     if separator != ' ' && separator != '\t' {
         return None;
     }
-    Some(title[1..].trim())
+    // A closing hash sequence needs a space/tab on either side (or EOL).
+    let title = title.trim_end_matches([' ', '\t']);
+    let without_hashes = title.trim_end_matches('#');
+    let title = if without_hashes.ends_with([' ', '\t']) {
+        without_hashes
+    } else {
+        title
+    };
+    Some(title.trim())
 }
 
 fn extract_first_paragraph(body: &str) -> String {
@@ -1087,6 +1095,78 @@ description: Test skill
             entry.returns.is_empty(),
             "four spaces of indentation is content"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ATX Closing Sequence Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_closing_hash_headings_extract_contracts() {
+        for suffix in [" #", " ##", " ###", "\t##", "  ####### \t"] {
+            for prefix in ["## ", " ##\t", "   ## "] {
+                let content = format!(
+                    "---\nname: test\ndescription: Test skill\n---\n\
+                     {prefix}Parameters{suffix}\n\
+                     - `query` (string, required): Search query\n\
+                     {prefix}Returns{suffix}\n\
+                     - `result` (boolean, required): Search result\n"
+                );
+                for content in [content.clone(), content.replace('\n', "\r\n")] {
+                    let entry = parse_skill_md(&content, "test");
+                    assert_eq!(entry.parameters.len(), 1, "{content:?}");
+                    assert_eq!(entry.parameters[0].name, "query");
+                    assert_eq!(entry.parameters[0].param_type, ParamType::String);
+                    assert!(entry.parameters[0].required);
+                    assert_eq!(entry.returns.len(), 1, "{content:?}");
+                    assert_eq!(entry.returns[0].name, "result");
+                    assert_eq!(entry.returns[0].field_type, ParamType::Boolean);
+                    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hashes_in_heading_content_are_preserved() {
+        for title in [
+            "Parameters#",
+            "Parameters ### extra",
+            "Parameters \\###",
+            "Parameters #\\##",
+            "Parameters\u{a0}##",
+            "Parameters ##\u{a0}",
+        ] {
+            assert_eq!(section_heading(&format!("## {title}")), Some(title.trim()));
+            let content = format!(
+                "---\nname: test\ndescription: Test skill\n---\n\
+                 ## {title}\n- `query` (string, required): Search query\n"
+            );
+            let entry = parse_skill_md(&content, "test");
+            assert!(entry.parameters.is_empty(), "{title:?}");
+            assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+        }
+        assert_eq!(section_heading("## C# ##"), Some("C#"));
+        assert_eq!(section_heading("## ##"), Some(""));
+    }
+
+    #[test]
+    fn test_closing_hash_headings_preserve_duplicate_contracts() {
+        let content = "---\nname: test\ndescription: Test skill\n---\n\
+                       ## Parameters\n- `first` (string, required): First\n\
+                       ## Parameters ##\n- `second` (string, optional): Second\n\
+                       ## Returns ###\n- `first` (string, required): First\n\
+                       ## Returns\n- `second` (string, required): Second\n";
+        let entry = parse_skill_md(content, "test");
+        let parameter_names: Vec<_> = entry.parameters.iter().map(|p| p.name.as_str()).collect();
+        let return_names: Vec<_> = entry.returns.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(parameter_names, ["first", "second"]);
+        assert_eq!(return_names, ["first", "second"]);
+        let ParseStatus::Degraded(issues) = entry.parse_status else {
+            panic!("duplicate contract sections must degrade the skill");
+        };
+        assert!(issues.contains("duplicate section heading: Parameters"));
+        assert!(issues.contains("duplicate section heading: Returns"));
     }
 
     // -----------------------------------------------------------------------

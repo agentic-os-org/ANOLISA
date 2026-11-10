@@ -214,6 +214,47 @@ fn degraded_only_json_exits_zero() {
     assert!(!warnings.is_empty(), "warnings should not be empty");
 }
 
+#[test]
+fn closing_hash_contract_headings_report_malformed_bullets() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    for section in ["Parameters", "Returns"] {
+        for (index, suffix) in [" ##", " #", " ###", "\t##"].iter().enumerate() {
+            let name = format!("{}-{index}", section.to_lowercase());
+            let content = format!(
+                "---\nname: {name}\ndescription: Test skill\n---\n\
+                 ## {section}{suffix}\n- this bullet is not the typed contract shape\n"
+            );
+            create_skill_dir(source.path(), &name, &content);
+        }
+    }
+    let out = Command::new(bin_path())
+        .arg("validate")
+        .arg(source.path())
+        .args(["--format", "json"])
+        .output()
+        .expect("invoke skillfs validate --format json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(json["total"], 8);
+    assert_eq!(json["success"], 0);
+    assert_eq!(json["degraded"], 8);
+    assert_eq!(json["failed"], 0);
+    let skills = json["skills"].as_array().expect("skills array");
+    assert_eq!(skills.len(), 8);
+    for skill in skills {
+        assert_eq!(skill["status"], "degraded", "{skill}");
+    }
+    let warnings = json["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 8);
+    for warning in warnings {
+        assert_eq!(
+            warning["message"],
+            "malformed parameter line: - this bullet is not the typed contract shape"
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. all-ok
 // ─────────────────────────────────────────────────────────────────────────────

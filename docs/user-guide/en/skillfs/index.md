@@ -279,6 +279,13 @@ skillfs validate /path/to/skills --format json
 failures are included in the status summary and produce a non-zero exit code;
 degraded-only skills are reported but keep exit code 0.
 
+In `SKILL.md`, `## Parameters` and `## Returns` headings accept an optional
+closing sequence of `#` characters, such as `## Parameters ##` or
+`## Returns #`. Separate that sequence from the title with a space or Tab;
+only spaces or Tabs may follow it. Contract entries under these headings
+are parsed normally, and malformed bullets produce a warning and a
+`degraded` status.
+
 In JSON output, error and warning entries include a `path` field so consumers
 can locate the exact offending skill file.
 
