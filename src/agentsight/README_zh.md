@@ -332,6 +332,8 @@ sudo yum install agentsight
 - `/usr/bin/agentsight-start` — trace/serve 监督脚本
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight systemd 单元
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — 强制执行 systemd 单元
+- `/usr/share/agentsight/adapters/dsh/` — DSH 插件资源，来自弱依赖推荐的 `agentsight-plugins`；
+  关闭弱依赖时不会安装
 
 RPM 是 Linux system 包。两个单元会随包安装；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。

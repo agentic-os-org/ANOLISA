@@ -53,14 +53,16 @@ agent-sec-cli --version
 ```
 
 `sec-core` is the ANOLISA component name. The V2 RPMs separate the backend,
-host integrations, and skills:
+host integrations, and skills. `agent-sec-core` recommends the matching
+`agent-sec-plugins` and `agent-sec-skills`, so a default installation includes
+all three:
 
 ```bash
-# Backend, sandbox, configuration and system service only.
+# Backend, host integrations and security skills (weak dependencies enabled).
 sudo yum install agent-sec-core
 
-# Complete direct integrations and security skills.
-sudo yum install agent-sec-core agent-sec-plugins agent-sec-skills
+# Backend, sandbox, configuration and system service only.
+sudo yum install --setopt=install_weak_deps=False agent-sec-core
 
 # Optional: use ANOLISA to manage the installed framework integrations.
 sudo yum install anolisa
@@ -71,9 +73,14 @@ Installing the CLI from YUM makes it available on sudo's system path. Adoption
 records the RPM in system state so the adapter manager can read the installed
 component contract.
 
-`agent-sec-core` no longer installs every framework plugin and skill as
-dependencies. `agent-sec-plugins` contains all six existing host integrations;
-register the selected framework as its owning user after installation.
+The plugin and skill packages are weak dependencies. They are skipped when
+`install_weak_deps` is disabled, when they are excluded, or when the repository
+has no build of the same version; in those cases install them explicitly with
+`sudo yum install agent-sec-plugins agent-sec-skills` and confirm with
+`rpm -q agent-sec-core agent-sec-plugins agent-sec-skills`. Either subpackage
+can be removed without removing `agent-sec-core`. `agent-sec-plugins` contains
+all six existing host integrations; register the selected framework as its
+owning user after installation.
 The existing ANOLISA raw archive remains a combined delivery.
 
 The repository convenience workflow remains available:

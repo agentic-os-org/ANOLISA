@@ -90,6 +90,10 @@ class RpmSplitTests(unittest.TestCase):
         )
         header = text.split("%description", 1)[0]
         self.assertIn("Requires:       %{name}-core = %{version}-%{release}", header)
+        self.assertIn(
+            "Recommends:     %{name}-plugins = %{version}-%{release}", header
+        )
+        self.assertNotIn("Requires:       %{name}-plugins", header)
         self.assertIn("Provides:       anolisa-component(agentsight)", header)
         core = parsed["package", "agentsight-core"]
         self.assertIn("Conflicts:      agentsight < %{version}", core)

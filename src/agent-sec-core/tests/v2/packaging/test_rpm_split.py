@@ -106,8 +106,11 @@ class RpmSplitTests(unittest.TestCase):
             real - {"agent-sec-core"},
         )
         header = text.split("%description", 1)[0]
-        self.assertNotIn("Requires:       agent-sec-plugins", header)
-        self.assertNotIn("Requires:       agent-sec-skills", header)
+        for package in ("agent-sec-plugins", "agent-sec-skills"):
+            self.assertIn(
+                f"Recommends:     {package} = %{{version}}-%{{release}}", header
+            )
+            self.assertNotIn(f"Requires:       {package}", header)
         self.assertIn("Requires:       bubblewrap", header)
         self.assertIn("%define anolis_release 1", header)
         self.assertIn("Provides:       agent-sec-cli = %{version}-%{release}", header)

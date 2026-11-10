@@ -49,14 +49,16 @@ sudo anolisa status sec-core
 agent-sec-cli --version
 ```
 
-`sec-core` 是 ANOLISA 中的组件名。V2 RPM 分别交付后端、宿主接入和 skills：
+`sec-core` 是 ANOLISA 中的组件名。V2 RPM 分别交付后端、宿主接入和 skills。
+`agent-sec-core` 通过弱依赖推荐同版本的 `agent-sec-plugins` 和 `agent-sec-skills`，
+默认安装会同时装上这三个包：
 
 ```bash
-# Backend, sandbox, configuration and system service only.
+# Backend, host integrations and security skills (weak dependencies enabled).
 sudo yum install agent-sec-core
 
-# Complete direct integrations and security skills.
-sudo yum install agent-sec-core agent-sec-plugins agent-sec-skills
+# Backend, sandbox, configuration and system service only.
+sudo yum install --setopt=install_weak_deps=False agent-sec-core
 
 # Optional: use ANOLISA to manage the installed framework integrations.
 sudo yum install anolisa
@@ -66,7 +68,10 @@ sudo anolisa --install-mode system adopt sec-core
 从 YUM 安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把 RPM
 写入 system 状态，adapter 管理器随后才能读取已安装组件的契约。
 
-`agent-sec-core` 不再依赖安装全部框架插件和 skills。`agent-sec-plugins` 包含已有的
+插件包和 skills 包是弱依赖。关闭 `install_weak_deps`、显式排除，或仓库中没有同版本
+构建时，它们会被静默跳过；此时请用 `sudo yum install agent-sec-plugins agent-sec-skills`
+显式安装，并用 `rpm -q agent-sec-core agent-sec-plugins agent-sec-skills` 确认。
+两个子包都可以单独卸载，不会连带卸载 `agent-sec-core`。`agent-sec-plugins` 包含已有的
 六种宿主接入，安装后再以实际框架用户注册需要的接入。现有 ANOLISA raw 归档仍是整包交付。
 
 仓库级便利脚本继续可用。
