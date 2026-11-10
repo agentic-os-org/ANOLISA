@@ -741,6 +741,39 @@ fn schema_probe_does_not_create_a_missing_database() {
 }
 
 #[test]
+fn primary_http_database_is_not_a_trajectory_source() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should follow Unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "agentsight-causal-primary-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).expect("create sibling database directory");
+    let path = dir.join("agentsight.db");
+    let payload = serde_json::to_string(&broken_sql_trajectory()).expect("serialize ATIF fixture");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("create primary database");
+        conn.execute_batch("CREATE TABLE http_records(response_body TEXT)")
+            .expect("create HTTP records table");
+        conn.execute(
+            "INSERT INTO http_records(response_body) VALUES (?1)",
+            [payload],
+        )
+        .expect("insert ATIF-shaped HTTP response");
+    }
+
+    let result = load_trajectory(&dir.join("genai_events.db"), "s", None, None, None);
+    assert!(
+        result.is_err(),
+        "the primary HTTP database must not supply causal-attribution trajectories"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn probe_requires_a_session_match_in_an_unscoped_table() {
     // The sibling table has no session_id column, so the probe scans it
     // unscoped. A row whose document has no top-level session_id must not be
