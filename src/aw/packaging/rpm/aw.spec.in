@@ -1,0 +1,95 @@
+%define anolis_release 1
+%global         rustflags -C opt-level=3 -C codegen-units=1
+%global         debug_package %{nil}
+%global         debug_build_guard %{nil}
+
+Name:           aw
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Agent Workflow hook orchestration core
+License:        Apache-2.0
+URL:            https://github.com/agentic-os-org/ANOLISA
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+# AW core and its Provider bridges are Rust workspaces built with the pinned
+# toolchain declared by each workspace's rust-toolchain.toml.
+BuildRequires:  rust >= 1.97
+BuildRequires:  cargo
+BuildRequires:  gcc
+BuildRequires:  make
+
+Obsoletes:      aw-seccore
+Obsoletes:      aw-tokenless
+
+%description
+AW is the workflow hook orchestration layer: it wraps an Agent's tool calls,
+dispatches them to Provider policies and reports the resulting decision.
+This package carries the aw CLI and its documentation; the Provider bridges
+ship in the aw-provider-* subpackages.
+
+%package -n aw-provider-sec-core
+Summary:        AW Provider bridging agent-sec-core
+Requires:       aw(x86-64) = %{version}-%{release}
+Requires:       agent-sec-core >= 1.2.0
+
+%description -n aw-provider-sec-core
+Provider bridge that lets AW apply agent-sec-core code scanning, PII, prompt
+injection and tool safety policies. The agent-sec-core CLI and daemon are
+delivered by the agent-sec-core package.
+
+%package -n aw-provider-tokenless
+Summary:        AW Provider bridging tokenless
+Requires:       aw(x86-64) = %{version}-%{release}
+Requires:       tokenless-core >= 0.9.4
+
+%description -n aw-provider-tokenless
+Provider bridge that lets AW apply tokenless output compression and command
+rewriting. The tokenless CLI is delivered by the tokenless packages.
+
+%prep
+%setup -q -a 1 -n %{name}-%{version}
+
+%build
+export RUSTFLAGS="%{rustflags}"
+(
+  cd src/aw
+  cargo build --release --locked --offline
+)
+(
+  cd providers/agent-sec-core
+  cargo build --release --locked --offline
+)
+(
+  cd providers/tokenless
+  cargo build --release --locked --offline
+)
+
+%install
+rm -rf %{buildroot}
+
+make -C src/aw install \
+    PREFIX=/usr AWPRJ= DESTDIR=%{buildroot} \
+    BINARY=%{_builddir}/%{name}-%{version}/src/aw/target/release/aw
+make -C providers/agent-sec-core install \
+    PREFIX=/usr AWPRJ= DESTDIR=%{buildroot}
+make -C providers/tokenless install \
+    PREFIX=/usr AWPRJ= DESTDIR=%{buildroot}
+
+%files
+%{_bindir}/aw
+%{_datadir}/doc/aw
+
+%files -n aw-provider-sec-core
+%{_libexecdir}/aw/providers/sec-core
+%{_datadir}/aw/providers/sec-core
+%{_datadir}/doc/aw-provider-sec-core
+
+%files -n aw-provider-tokenless
+%{_libexecdir}/aw/providers/tokenless
+%{_datadir}/aw/providers/tokenless
+%{_datadir}/doc/aw-provider-tokenless
+
+%changelog
+* Tue Nov 10 2026 ANOLISA maintainers <maintainers@agentic-os.org> - @VERSION@-1
+- Package AW core and its sec-core / tokenless Provider bridges as RPMs.

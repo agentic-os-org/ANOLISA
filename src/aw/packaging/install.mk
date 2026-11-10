@@ -8,7 +8,8 @@ BINDIR ?= $(packaging_prefix)/bin
 DOCDIR ?= $(packaging_prefix)/share/$(packaging_namespace)doc/aw
 BINARY ?= $(CARGO_TARGET_DIR)/release/aw
 LICENSE_FILE ?= $(COMPONENT_ROOT)/../../LICENSE
-DOC_FILES ?= $(LICENSE_FILE) $(COMPONENT_ROOT)/README.md $(COMPONENT_ROOT)/README_zh.md
+DOC_FILES ?= $(LICENSE_FILE) $(COMPONENT_ROOT)/README.md $(COMPONENT_ROOT)/README_zh.md \
+             $(COMPONENT_ROOT)/CHANGELOG.md $(COMPONENT_ROOT)/CHANGELOG_zh.md
 
 .PHONY: install install-core check-install-inputs
 check-install-inputs:
