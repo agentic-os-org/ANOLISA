@@ -46,6 +46,11 @@ Requires(post): systemd
 Requires(posttrans): coreutils systemd
 Requires:       rpm coreutils grep
 Requires(postun): rpm coreutils grep systemd
+# Installing the runtime alone leaves the Cosh/OpenClaw hooks and skills
+# missing. Weak dependencies pull them in by default without making the
+# subpackages, which already require this package, a dependency cycle.
+Recommends:     agent-sec-plugins = %{version}-%{release}
+Recommends:     agent-sec-skills = %{version}-%{release}
 Provides:       agent-sec-cli = %{version}-%{release}
 # Replace legacy packages from before the split.
 Obsoletes:      agent-sec-cli < 1.1.2
@@ -54,8 +59,9 @@ Obsoletes:      agent-sec-cli < 1.1.2
 Native V2 CLI, daemon, health helper, sandbox, configuration and system service.
 Includes opt-in secret gateway assets and a pinned mitmproxy installer;
 administrators provision mitmproxy separately and explicitly enable the gateway.
-Framework integrations and skills are supplied separately by agent-sec-plugins
-and agent-sec-skills. ANOLISA discovery metadata belongs to the distribution.
+Framework integrations and skills are supplied by agent-sec-plugins and
+agent-sec-skills, which this package recommends at the same version.
+ANOLISA discovery metadata belongs to the distribution.
 
 # Expand these helpers into scriptlets: rollback also needs them after
 # the runtime package (and any files it owned) has been removed.

@@ -40,8 +40,12 @@ cd src/agentsight && make build-all
 ```
 
 For RPM installations, `agentsight` selects `agentsight-core`, which includes the tracer,
-Dashboard, enforcer and services. Add `agentsight-plugins` only for DSH integration; it requires
-Node.js 22 or later and registration with the target user's DSH profile.
+Dashboard, enforcer and services. It also recommends the matching `agentsight-plugins`, so a
+default `yum install agentsight` or `anolisa install agentsight` installs the DSH integration
+too; it requires Node.js 22 or later and registration with the target user's DSH profile. For
+the runtime only, install `agentsight-core` directly or pass `--setopt=install_weak_deps=False`.
+The plugin package is skipped silently when weak dependencies are disabled or the repository has
+no build of the same version; install it explicitly with `sudo yum install agentsight-plugins`.
 
 ### 3. Start the service
 

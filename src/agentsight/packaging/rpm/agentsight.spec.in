@@ -18,12 +18,13 @@ BuildRequires:  python3
 BuildRequires:  systemd-rpm-macros
 
 Requires:       %{name}-core = %{version}-%{release}
+Recommends:     %{name}-plugins = %{version}-%{release}
 Provides:       anolisa-component(agentsight)
 
 %description
 Compatibility package selecting matching agentsight-core through an
-exact-version dependency, without a runtime payload of its own. The DSH plugin
-is optional.
+exact-version dependency, without a runtime payload of its own. The matching
+DSH plugin package is a weak dependency and may be excluded.
 
 %package core
 Summary:        AgentSight tracing, dashboard and enforcement runtime

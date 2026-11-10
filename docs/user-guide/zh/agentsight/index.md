@@ -38,8 +38,11 @@ cd src/agentsight && make build-all
 ```
 
 通过 RPM 安装时，`agentsight` 会选择 `agentsight-core`，包含 tracer、Dashboard、enforcer 和服务。
-仅在需要接入 DSH 时添加 `agentsight-plugins`；它要求 Node.js 22 或更高版本，
-并需为实际用户的 DSH profile 注册。
+它还通过弱依赖推荐同版本的 `agentsight-plugins`，因此默认的 `yum install agentsight` 或
+`anolisa install agentsight` 也会装上 DSH 接入；它要求 Node.js 22 或更高版本，并需为实际用户的
+DSH profile 注册。只需要运行时时，直接安装 `agentsight-core`，或加上
+`--setopt=install_weak_deps=False`。关闭弱依赖或仓库中没有同版本构建时，插件包会被静默跳过，
+此时请用 `sudo yum install agentsight-plugins` 显式安装。
 
 ### 3. 启动服务
 

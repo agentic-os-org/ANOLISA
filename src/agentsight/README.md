@@ -336,6 +336,8 @@ Installs:
 - `/usr/bin/agentsight-start` — trace/serve supervisor
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight system unit
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — enforcement system unit
+- `/usr/share/agentsight/adapters/dsh/` — DSH plugin resources, from the recommended
+  `agentsight-plugins` package; skipped when weak dependencies are disabled
 
 The RPM is a Linux system package. When both units run, AgentSight is ordered
 after the enforcer.
