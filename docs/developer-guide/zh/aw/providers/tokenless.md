@@ -70,7 +70,11 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装（�
 共用 Provider 和 after 链。
 
 当前恢复能力为 `none`。恢复入口、Stash、恢复作用域及恢复输出旁路由 Tokenless
-接入层负责；启用 PreTool 不会自动获得这些能力或 Schema 压缩。
+接入层负责；启用 PreTool 不会自动获得这些能力或 Schema 压缩。已识别的原始 pnpm 输出
+仍可使用 `build_log_reduction` 压紧通知、依赖清单和装饰条布局，恢复等级为语义 `lossless`，
+不写 Stash。同一标签也用于进度省略；省略报告 `retrievable` 并要求可用的恢复路径，恢复为 `none` 时不可用。
+这不改变 `pnpm install` 的 PreTool 归属或 RTK 输出旁路规则。
+详见 [pnpm 边界](../../../../user-guide/zh/tokenless/index.md#pnpm-安装输出)。
 
 ## 结果与故障行为
 

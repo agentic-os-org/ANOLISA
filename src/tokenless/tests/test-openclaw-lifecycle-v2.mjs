@@ -35,6 +35,7 @@ writeFileSync(
     'const request = JSON.parse(fs.readFileSync(0, "utf8"));',
     'fs.appendFileSync(requestLog, JSON.stringify({ argv: process.argv.slice(2), request }) + "\\n");',
     'const behavior = fs.existsSync(behaviorFile) ? fs.readFileSync(behaviorFile, "utf8") : "normal";',
+    'if (request.protocol_version !== 2) process.exit(2);',
     'if (behavior === "exit") process.exit(1);',
     'if (behavior === "malformed") { process.stdout.write("{bad"); process.exit(0); }',
     'if (behavior === "timeout") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);',
@@ -80,7 +81,7 @@ writeFileSync(
     "}",
     'if (behavior === "invalid-output") result.output = 17;',
     "process.stdout.write(JSON.stringify({",
-    '  protocol_version: behavior === "wrong-version" ? 1 : 2,',
+    '  protocol_version: behavior === "wrong-version" ? 1 : behavior === "future-version" ? 3 : 2,',
     "  operation: request.operation,",
     "  attribution: request.attribution,",
     "  result,",
@@ -538,12 +539,15 @@ test("PreTool requires a stable tool call ID and fails open", () => {
   assert.equal(rewrite("git status", { sessionId: "session-2" }), undefined);
   assert.equal(requests().length, 0);
 
-  writeFileSync(behaviorFile, "malformed");
-  assert.equal(
-    rewrite("git status", { sessionId: "session-2", toolCallId: "call-bad" }),
-    undefined,
-  );
-  assert.equal(requests().length, 1);
+  for (const behavior of ["malformed", "wrong-version", "future-version"]) {
+    writeFileSync(behaviorFile, behavior);
+    assert.equal(
+      rewrite("git status", { sessionId: "session-2", toolCallId: `call-${behavior}` }),
+      undefined,
+    );
+  }
+  assert.equal(requests().length, 3);
+  for (const { request } of requests()) assert.equal(request.protocol_version, 2);
 });
 
 test("RTK output optimization is isolated and consumed once", () => {
@@ -721,14 +725,16 @@ for (const length of [100000, 150000]) {
       "exit",
       "malformed",
       "wrong-version",
+      "future-version",
       "no-savings",
     ]) {
       writeFileSync(behaviorFile, behavior);
       assert.equal(postTool("exec", `failure-${length}`, received), undefined);
       assert.deepEqual(received, snapshot);
     }
-    assert.equal(requests().length, 4);
+    assert.equal(requests().length, 5);
     for (const { request } of requests()) {
+      assert.equal(request.protocol_version, 2);
       assert.equal(request.input.content, received.content[0].text);
     }
     rmSync(behaviorFile);

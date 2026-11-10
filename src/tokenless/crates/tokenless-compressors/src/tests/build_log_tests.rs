@@ -142,7 +142,7 @@ fn unittest_success_reduces_and_restores_exactly() {
         assert!(BuildLogCompressor::detect(&input));
         let store = InMemoryStore::new();
         let outcome = BuildLogCompressor.compress(&input, Some(&store));
-        assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+        assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
         assert_eq!(outcome.metrics.omitted_lines, 79);
         assert!(outcome.output.contains("test_case_000"));
         assert!(outcome.output.contains("test_case_082"));
@@ -196,7 +196,7 @@ fn unittest_django_keeps_nonpassing_records_and_tracebacks() {
     input = input.replace("Ran 80 tests in 0.295s\n\nOK\n", summary);
     let store = InMemoryStore::new();
     let outcome = BuildLogCompressor.compress(&input, Some(&store));
-    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
     assert_eq!(outcome.metrics.omitted_blocks, 2);
     assert!(outcome.output.starts_with(setup));
     assert!(outcome.output.contains(diagnostics));
@@ -301,7 +301,7 @@ fn colored_progress_continues_to_recoverable_reduction() {
         outcome.operations,
         [
             BuildLogOperation::TerminalCleanup,
-            BuildLogOperation::ProgressReduction,
+            BuildLogOperation::Reduction,
         ]
     );
     assert_eq!(outcome.recoverability, crate::Recoverability::Retrievable);
@@ -320,7 +320,7 @@ fn reduction_keeps_edges_diagnostics_summary_and_unknown_lines() {
     let store = InMemoryStore::new();
     let outcome = BuildLogCompressor.compress(&input, Some(&store));
 
-    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
     assert_eq!(outcome.recoverability, crate::Recoverability::Retrievable);
     assert_eq!(outcome.metrics.omitted_blocks, 1);
     assert!(outcome.output.contains("package-000"));
@@ -350,7 +350,7 @@ fn cargo_test_reduction_keeps_failure_and_summary() {
     let store = InMemoryStore::new();
     let outcome = BuildLogCompressor.compress(&input, Some(&store));
 
-    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
     assert_eq!(outcome.metrics.omitted_blocks, 2);
     assert!(
         outcome
@@ -385,7 +385,7 @@ fn pytest_quiet_progress_reduces_but_xpass_remains_visible() {
     let store = InMemoryStore::new();
     let outcome = BuildLogCompressor.compress(&input, Some(&store));
 
-    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
     assert_eq!(outcome.metrics.omitted_blocks, 2);
     assert!(outcome.output.contains("....X... [ 53%]"));
     assert!(
@@ -553,7 +553,7 @@ fn anchored_generic_log_reduces_only_its_dominant_template() {
 
     let store = InMemoryStore::new();
     let outcome = BuildLogCompressor.compress(&input, Some(&store));
-    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
     assert!(outcome.output.contains("unique final observation"));
     assert!(outcome.output.contains("Exit code: 0"));
 }

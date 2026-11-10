@@ -117,9 +117,27 @@ fn all_response_operations_round_trip_with_fixed_envelope() {
         };
         let json = envelope.to_json().unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["protocol_version"], 2);
         assert!(value.get("result").is_some());
         assert!(value.get("input").is_none());
         assert_eq!(ResponseEnvelope::from_json(&json).unwrap(), envelope);
+        if matches!(envelope.response, Response::PostTool(_)) {
+            assert_eq!(
+                value["result"]["applied_operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|operation| operation.as_str() == Some("build_log_reduction"))
+                    .count(),
+                1
+            );
+            let mut unknown = value;
+            unknown["result"]["applied_operations"] = json!(["unknown_operation"]);
+            assert!(matches!(
+                ResponseEnvelope::from_json(&unknown.to_string()),
+                Err(ProtocolError::Malformed(_))
+            ));
+        }
     }
 }
 
@@ -146,6 +164,7 @@ fn record_reduction_has_a_stable_wire_name() {
 #[test]
 fn content_operations_have_stable_wire_names() {
     for (operation, name) in [
+        (AppliedOperation::BuildLogReduction, "build_log_reduction"),
         (AppliedOperation::TabularCompaction, "tabular_compaction"),
         (AppliedOperation::SearchPathSharing, "search_path_sharing"),
         (AppliedOperation::DiffReduction, "diff_reduction"),
@@ -225,6 +244,35 @@ fn protocol_v1_is_rejected_before_shape_validation() {
         error,
         ProtocolError::UnsupportedVersion { found: 1 }
     ));
+}
+
+#[test]
+fn old_and_future_envelopes_are_rejected() {
+    let response = ResponseEnvelope {
+        attribution: attribution(),
+        response: Response::Retrieve(RetrieveResponse {
+            hash: "0123456789abcdef01234567".into(),
+            payload: "payload".into(),
+        }),
+    };
+    for version in [1, 3] {
+        for request in requests() {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&request.to_json().unwrap()).unwrap();
+            value["protocol_version"] = json!(version);
+            assert!(matches!(
+                RequestEnvelope::from_json(&value.to_string()),
+                Err(ProtocolError::UnsupportedVersion { found }) if found == version
+            ));
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_str(&response.to_json().unwrap()).unwrap();
+        value["protocol_version"] = json!(version);
+        assert!(matches!(
+            ResponseEnvelope::from_json(&value.to_string()),
+            Err(ProtocolError::UnsupportedVersion { found }) if found == version
+        ));
+    }
 }
 
 #[test]

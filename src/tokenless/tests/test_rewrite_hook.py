@@ -101,6 +101,8 @@ class PreToolContractTest(unittest.TestCase):
             "error_disposition",
             "nonzero_exit",
             "malformed_stdout",
+            "old_response",
+            "future_response",
         ]:
             with self.subTest(behavior=behavior):
                 result = self.run_case(behavior)

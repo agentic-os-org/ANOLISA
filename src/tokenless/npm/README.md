@@ -52,8 +52,8 @@ OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and DeepSeek H
 adapter hooks are plain bash/python scripts — OS and architecture independent —
 so they work on both Linux and macOS.
 
-DeepSeek Harness uses its dedicated `tools/post-execute` path for JSON response compression and
-environment-error attribution. It does not use the Protocol v2 PostTool Pipeline.
+DeepSeek Harness uses its dedicated `tools/post-execute` seam to call the Protocol v2
+PostTool Pipeline for response compression and environment-error attribution.
 
 On install, they are copied to the user-level data directory searched by the
 hook dispatcher:
@@ -69,13 +69,24 @@ e.g. for Claude Code:
 bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ```
 
+Recognized raw pnpm output uses the existing `build_log_reduction` label for both
+layout compaction and progress reduction; both can apply together. Layout-only
+output is semantically `lossless`, needs no Stash or recovery, and retains all
+notification text, dependency facts, package counts and completion information.
+Progress omissions require recovery and report `retrievable`. Protocol v2 and SDK
+enums remain unchanged.
+Warnings, scripts and unknown text preserve the remaining suffix after existing
+SGR cleanup. `pnpm install` retains its existing PreTool RTK ownership; this is not
+a promise that every installation reaches PostTool unmodified. See
+[pnpm boundaries](../../../docs/user-guide/en/tokenless/index.md#pnpm-install-output).
+
 ## Usage
 
 ```bash
 # Run the Protocol v2 PostTool operation used by shared Agent hooks
 jq -n --rawfile content build.log \
   '{protocol_version: 2, operation: "post_tool",
-    attribution: {agent_id: "manual"},
+    attribution: {agent_id: "manual", session_id: "session-42", tool_use_id: "tool-7"},
     input: {result_kind: "tool", tool_name: "Bash", content: $content,
       status: "success", content_origin: "command_output",
       output_optimization: "none",

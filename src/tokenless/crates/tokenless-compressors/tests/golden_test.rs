@@ -203,10 +203,7 @@ fn every_compressing_fixture_actually_saves() {
         let input = load(&format!("{name}.txt"));
         let store = InMemoryStore::new();
         let (cleaned, outcome) = run_chain(&input, &store);
-        if outcome
-            .operations
-            .contains(&BuildLogOperation::ProgressReduction)
-        {
+        if outcome.operations.contains(&BuildLogOperation::Reduction) {
             assert!(
                 outcome.output.chars().count() < cleaned.chars().count(),
                 "{name}: markers without net savings"

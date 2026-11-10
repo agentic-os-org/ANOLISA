@@ -74,7 +74,7 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
                                "request.json"), "w") as captured:
             json.dump(operation_input, captured)
 
-        def respond(output, disposition, additional_context=None):
+        def respond(output, disposition, additional_context=None, protocol_version=2):
             result = {
                 "output": output,
                 "disposition": disposition,
@@ -89,7 +89,7 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
             if additional_context:
                 result["additional_context"] = additional_context
             print(json.dumps({
-                "protocol_version": 2,
+                "protocol_version": protocol_version,
                 "operation": "post_tool",
                 "attribution": request["attribution"],
                 "result": result,
@@ -138,15 +138,9 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
         script = prologue + 'respond(content, "no_savings")\n'
     elif behavior == "passthrough":
         script = prologue + 'respond(content, "passthrough")\n'
-    elif behavior == "wrong-protocol-version":
-        script = prologue + textwrap.dedent("""\
-            print(json.dumps({
-                "protocol_version": 1,
-                "operation": "post_tool",
-                "attribution": request["attribution"],
-                "result": {},
-            }))
-        """)
+    elif behavior in ("wrong-protocol-version", "future-protocol-version"):
+        version = 1 if behavior == "wrong-protocol-version" else 3
+        script = prologue + f'respond(content[:40], "applied", protocol_version={version})\n'
     else:
         raise ValueError(f"Unknown behavior: {behavior}")
 
@@ -1367,26 +1361,31 @@ class TestPassthrough(unittest.TestCase):
     def test_version_skewed_response_fails_open(self):
         """A response declaring a protocol version this adapter does not
         speak must never replace model-visible output."""
-        mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
-        mock_bin = _create_mock_tokenless(mock_dir, "wrong-protocol-version")
-        _create_mock_claude(mock_dir)
-
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": _make_large_json_payload(),
-                "session_id": "s",
-                "tool_use_id": "t",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertEqual(result, {},
-                         "Version-skewed responses must fail open")
+        for behavior in (
+            "wrong-protocol-version", "future-protocol-version"
+        ):
+            with self.subTest(behavior=behavior):
+                mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
+                mock_bin = _create_mock_tokenless(mock_dir, behavior)
+                _create_mock_claude(mock_dir)
+                payload = _make_large_json_payload()
+                snapshot = json.loads(json.dumps(payload))
+                result = _run_hook(
+                    {
+                        "tool_name": "Bash",
+                        "tool_response": payload,
+                        "session_id": "s",
+                        "tool_use_id": "t",
+                    },
+                    agent_id="claude-code",
+                    mock_tokenless_path=mock_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertNotIn("_subprocess_error", result,
+                                 f"Hook subprocess failed: {result}")
+                self.assertEqual(result, {}, "Version skew must not replace host output")
+                self.assertEqual(payload, snapshot)
+                self.assertEqual(_spawn_log_lines(mock_bin), ["compress"])
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

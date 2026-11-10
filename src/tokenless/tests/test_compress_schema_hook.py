@@ -58,6 +58,7 @@ def _create_mock_tokenless(
     the entry point's fail-open contract.
     """
     mock_script = os.path.join(tmpdir, "tokenless")
+    response_version = {"old_response": 1, "future_response": 3}.get(disposition, 2)
     script = textwrap.dedent(f"""\
         #!/usr/bin/env python3
         import json, sys
@@ -70,11 +71,11 @@ def _create_mock_tokenless(
             sys.exit(2)
         disposition = {disposition!r}
         tools = request["input"]["tools"]
-        if disposition == "applied":
+        if disposition in ("applied", "old_response", "future_response"):
             for tool in tools:
                 tool["description"] = "compressed"
         print(json.dumps({{
-            "protocol_version": 2,
+            "protocol_version": {response_version},
             "operation": "before_model",
             "attribution": request["attribution"],
             "result": {{
@@ -211,6 +212,21 @@ class TestSchemaCompressionProtocol(unittest.TestCase):
         self.assertEqual(tools[0]["description"], _TOOLS[0]["description"],
                          "the original schemas must pass through untouched")
         self.assertNotIn("stash unavailable", proc.stderr)
+
+    def test_version_skew_preserves_original_schemas(self):
+        for behavior in ("old_response", "future_response"):
+            with self.subTest(behavior=behavior):
+                mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
+                argv_log = os.path.join(mock_dir, "argv.json")
+                mock_bin = _create_mock_tokenless(mock_dir, argv_log, behavior)
+                request = {"session_id": "s1", "llm_request": {"config": {"tools": _TOOLS}}}
+                result = _run_hook(request, mock_bin, {"TOKENLESS_AGENT_ID": "copilot-shell"})
+                self.assertNotIn("_subprocess_error", result)
+                self.assertEqual(result, {})
+                with open(argv_log) as handle:
+                    logged = json.load(handle)
+                self.assertEqual(logged["request"]["protocol_version"], 2)
+                self.assertEqual(logged["request"]["input"]["tools"], _TOOLS)
 
     def test_accepts_legacy_top_level_tools(self):
         result = _run_hook(

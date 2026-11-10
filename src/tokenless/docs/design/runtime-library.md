@@ -40,6 +40,13 @@ requires agent and session identifiers; PreTool and ordinary PostTool requests a
 tool-use identifier. OpenAI Function Calling JSON is the normalized schema representation, but the
 lifecycle operations are Tokenless contracts rather than OpenAI requests.
 
+The CLI envelope remains Protocol v2. BuildLog layout compaction and progress
+reduction share the existing `AppliedOperation::BuildLogReduction` /
+`build_log_reduction` label; no wire upgrade or new SDK enum is required.
+PyO3 calls bypass the envelope and retain `AppliedOperation.BUILD_LOG_REDUCTION`.
+Recoverability remains a separate result field: layout-only output is semantically
+`lossless`, while output containing progress omissions is `retrievable`.
+
 `tokenless-runtime` owns one SQLite Stash and statistics recorder. Schema and response compression
 share that Stash and roll back keys whenever a candidate is discarded. TOON is linked as a Rust
 library and never starts a process. RTK is linked into the `tokenless` executable, and
@@ -148,6 +155,39 @@ at construction time. Explicit `TokenlessConfig` arguments win over environment 
 the resolved flags are passed to the in-process Runtime. This also covers QwenPaw and AgentScope;
 the direct Runtime constructor remains explicit. Diff is enabled by default, and disabling global
 compression selects dry-run without disabling PreTool RTK.
+
+## Build-log layout and progress
+
+BuildLog handles pnpm within the existing PostTool content route, without command
+parsing or new PreTool ownership. `pnpm install` is not added to the native-command
+exemption list; RTK-owned results retain their existing bypass/receipt rules.
+After SGR cleanup, pnpm plans non-overlapping layout edits and progress roles on
+original line coordinates, then renders once. Recognized update notifications,
+dependency lists and exact count-matched decorative bars can be compacted under
+`build_log_reduction` with semantic `lossless` recoverability and zero Stash writes,
+even with recovery `none`. Borders and padding need not be byte-reconstructible;
+notification text, all dependency facts and completion information remain intact.
+
+Only complete LF records are eligible. Non-SGR controls, CRLF, bare CR and TAB
+suppress new pnpm transformations. Warnings, script headers and unknown bodies
+protect the entire remaining suffix after SGR cleanup; later blank/progress lines
+do not restart parsing. Progress runs require at least nine records and retain two
+at either end; any decreasing counter splits the run. `done`, package totals,
+notification/category boundaries and final duration/version remain visible, and
+layout changes cannot merge previously separate runs.
+
+Progress omissions can coexist with layout compaction and use the same
+`build_log_reduction` label, with `retrievable` recoverability, Stash and the host's
+actual recovery method. Every omission must independently save characters and estimated
+tokens including its marker; layout savings cannot subsidize it. The compressor falls
+back to layout when omission is unavailable, unprofitable, over budget or fails,
+returning all tentative writes and Stash errors. Entry still promotes Stash errors to
+Runtime errors, so a host may retain the original rather than apply layout. The single
+Pipeline arbitration and `StashLedger` retain dry-run, timeout, rollback and generation
+ownership. Both transformations use internal `BuildLogOperation::Reduction`, mapped to
+`AppliedOperation::BuildLogReduction`. Accepted operations are ordered `terminal_cleanup`,
+`build_log_reduction`, each reported at most once and only when reflected in the result.
+See [pnpm output boundaries](../../../../docs/user-guide/en/tokenless/index.md#pnpm-install-output).
 
 ## Search path sharing
 

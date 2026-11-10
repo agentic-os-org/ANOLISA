@@ -87,7 +87,12 @@ only the `rewrite-command` before step and retain the shared Provider and after 
 
 Recovery remains `none` in this delivery. Recovery entry points, Stash, retrieval
 scope and retrieval-output bypass belong to the Tokenless integration layer; enabling
-PreTool does not provide those capabilities or Schema compression.
+PreTool does not provide those capabilities or Schema compression. Recognized raw
+pnpm output can still use `build_log_reduction` for notification, dependency-list and
+decorative-bar layout compaction with semantic `lossless` recoverability and no Stash
+writes. That same label also covers progress omissions, which report `retrievable`
+and require an available recovery path; recovery `none` excludes them. This does not
+change PreTool ownership of `pnpm install` or RTK-output bypass rules. See [pnpm boundaries](../../../../user-guide/en/tokenless/index.md#pnpm-install-output).
 
 ## Result and failure behavior
 

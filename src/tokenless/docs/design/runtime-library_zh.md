@@ -35,6 +35,11 @@ Adapter 把框架对象转换为四组不可变 Request/Response：`BeforeModelR
 Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。工具 Schema 统一为
 OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约，不是 OpenAI 请求。
 
+CLI Envelope 保持 Protocol v2。BuildLog 布局压紧与进度缩减共用现有
+`AppliedOperation::BuildLogReduction` / `build_log_reduction`，无需 Wire 升版或新增 SDK 枚举。
+PyO3 调用不经过 Envelope，沿用 `AppliedOperation.BUILD_LOG_REDUCTION`。
+恢复等级仍由独立结果字段表示：仅布局为语义 `lossless`，包含进度省略时为 `retrievable`。
+
 `tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
 候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。RTK 链接在 `tokenless`
 可执行文件中；Adapter 提供 `command_field` 时，`TokenlessSdk.pre_tool` 每次调用都启动
@@ -119,6 +124,29 @@ Python 生命周期配置在构造时读取总开关、搜索、HTML 和 Diff �
 `TokenlessConfig` 参数优先于环境默认值，解析后的开关传入进程内 Runtime，因此也覆盖
 QwenPaw 和 AgentScope；直接 Runtime 构造仍采用显式配置。Diff 默认开启，关闭压缩
 总开关只选择 dry-run，不会关闭 PreTool RTK。
+
+## BuildLog 布局与进度
+
+BuildLog 在既有 PostTool 内容路由内处理 pnpm，不解析命令，也不新增 PreTool 归属规则。
+`pnpm install` 不加入原生命令豁免列表；RTK-owned 结果沿用既有旁路/回执规则。
+SGR 清理后，pnpm 在原始行坐标上规划互不重叠的布局替换和进度角色，再一次渲染。
+已识别的更新通知、依赖清单和与数量精确匹配的装饰条可压紧并报告为 `build_log_reduction`，
+恢复等级为语义 `lossless`，即使恢复为 `none` 也不写 Stash。边框和填充无需逐字节重建，
+但通知正文、全部依赖事实和完成信息必须完整保留。
+
+只处理完整 LF 记录。非 SGR 控制字符、CRLF、裸 CR、TAB 会停用 pnpm 新转换。
+警告、脚本头和未知正文保护 SGR 清理后的整个剩余后缀，不因后续空行/进度恢复解析。
+进度至少连续九条才考虑省略，首尾各保留两条；任一计数下降即分段。
+`done`、包总数、通知/类别边界及最终耗时/版本保持可见，布局变换不能合并原先分离的进度段。
+
+进度省略可与布局压紧同时生效，共用 `build_log_reduction` 标签，恢复等级为 `retrievable`，
+要求 Stash 和宿主实际恢复路径。每个省略区间计入 Marker 后须独立减少字符与估算 Token，
+不能用布局收益补贴省略。恢复不可用、省略无收益、超预算或写入失败时，压缩器返回布局候选及
+全部 tentative writes 和 Stash 错误。入口仍将 Stash 错误提升为 Runtime 错误，宿主因此可能
+保留原文而不是采用布局。唯一 Pipeline 仲裁与 `StashLedger` 保留 dry-run、时限、回滚和 generation
+归属保护。两种转换内部共用 `BuildLogOperation::Reduction`，映射到 `AppliedOperation::BuildLogReduction`。
+操作按 `terminal_cleanup`、`build_log_reduction` 排序，每项最多报告一次，只记录最终结果实际采用的操作。
+详见 [pnpm 输出边界](../../../../docs/user-guide/zh/tokenless/index.md#pnpm-安装输出)。
 
 ## 搜索路径共享
 

@@ -3431,6 +3431,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn pnpm_entry_preserves_host_guards_and_rtk_ownership() {
+        let input = include_str!(
+            "../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt"
+        );
+        for mode in 0..8 {
+            let mut request = post_tool_request(input);
+            match mode {
+                0 => request.status = ToolResultStatus::Error,
+                1 => request.status = ToolResultStatus::Denied,
+                2 => request.status = ToolResultStatus::Interrupted,
+                3 => request.result_kind = ResultKind::Retrieve,
+                4 => request.output_optimization = OutputOptimization::Rtk,
+                5 => request.content_origin = ContentOrigin::FileContent,
+                6 => request.tool_name = "Grep".into(),
+                7 => request.capabilities.replace_output = false,
+                _ => unreachable!(),
+            }
+            let result = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(result.response.output, input, "mode {mode}");
+            assert!(result.response.applied_operations.is_empty());
+            assert!(result.response.stash_keys.is_empty());
+        }
+        assert!(!package_command_is_build_log_owned(&["install".into()]));
+    }
+
+    #[test]
+    fn pnpm_entry_reports_storage_failure_even_with_profitable_layout() {
+        let input = include_str!(
+            "../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt"
+        );
+        let mut request = post_tool_request(input);
+        request.capabilities.recovery = tokenless_protocol::RecoveryMethod::Shell;
+        let failing: Arc<dyn StashStore> = Arc::new(FailingStore);
+        assert!(matches!(
+            post_tool_with_store(&request, &options(), Some(&failing)),
+            Err(RuntimeError::StashWrite { count: 1 })
+        ));
+    }
+
     fn post_tool_request(content: &str) -> PostToolRequest {
         PostToolRequest {
             result_kind: ResultKind::Tool,

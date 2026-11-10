@@ -18,7 +18,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
-| Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
+| Build Log 压缩 | 取决于具体负载 | 清理 SGR 颜色，并可恢复地缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C 和通用命令日志的常规进度；pnpm 还可在无需恢复时压紧已识别的通知、依赖清单和装饰条布局，保留全部任务相关事实 |
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
@@ -26,6 +26,13 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
+
+pnpm 布局压紧无需恢复，保留通知正文、全部依赖事实、包总数和完成信息；只有省略的进度
+需要 Stash/retrieve。遇到警告、脚本或未知正文后，停止解析剩余后缀。
+这不会让 `pnpm install` 豁免 PreTool RTK 改写：仅处理符合现有归属规则、实际进入 PostTool
+的原始输出。详见 [pnpm 安装输出](../../docs/user-guide/zh/tokenless/index.md#pnpm-安装输出)。
+布局压紧和进度缩减可同时生效，共用现有 `build_log_reduction` 标签；`recoverability` 区分
+仅布局的 `lossless` 与包含省略的 `retrievable`。Protocol v2 和 SDK 枚举保持不变。
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
 结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、排版开销、可移除的 Schema 元数据、

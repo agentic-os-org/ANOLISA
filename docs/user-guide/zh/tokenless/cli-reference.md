@@ -122,8 +122,10 @@ jq -n \
   旁路，不会使 PostTool 操作失败。
 - Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
-- 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的
-  Routine Progress Reduction。
+- 已识别的成功构建/测试/包安装输出使用 `BuildLogCompressor`。`terminal_cleanup` 清理 SGR
+  颜色。现有 `build_log_reduction` 统一表示 pnpm 布局压紧与常规进度缩减，包括两者组合的结果。
+  仅布局时为语义 `lossless`，不写 Stash，`recovery.kind = none` 时仍可采用；
+  进度省略要求恢复能力，并报告 `retrievable`。详见 [pnpm 边界](index.md#pnpm-安装输出)。
 - 成功 CSV/TSV 在宿主支持任意文本替换时使用 `TabularCompressor`。只有字符数和估算 Token
   数同时减少时才应用保留全部单元格的完整压紧，否则原样透传；无需 Stash 或恢复能力。
   文件来源结果透传；见[CSV/TSV 压紧](index.md#csvtsv-压紧保留完整表格)。
@@ -137,8 +139,9 @@ Compressor 列表。
 `before_model` 和 `post_tool` 必须提供 `capabilities.recovery`：`{"kind":"none"}`、
 `{"kind":"shell"}` 或 `{"kind":"tool","name":"tokenless_retrieve"}`。Tool 名称限 1–64 个
 ASCII 字母、数字、下划线或连字符。未知字段、缺失 recovery 和旧的 `retrieval_available`
-布尔字段均会被拒绝，Core 与调用方必须一起更新；协议版本保持 2。只有静态 Tool 能启用
-BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增或改变 Agent 工具。
+布尔字段均会被拒绝。Wire 版本保持 2；BuildLog 沿用现有操作标签，不新增 SDK 枚举。
+只有静态 Tool 能启用 BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，
+不新增或改变 Agent 工具。
 
 退出码属于 Transport 契约：
 

@@ -461,7 +461,7 @@ fn build_log_operations(operations: &[BuildLogOperation]) -> Vec<AppliedOperatio
         .iter()
         .map(|operation| match operation {
             BuildLogOperation::TerminalCleanup => AppliedOperation::TerminalCleanup,
-            BuildLogOperation::ProgressReduction => AppliedOperation::BuildLogReduction,
+            BuildLogOperation::Reduction => AppliedOperation::BuildLogReduction,
         })
         .collect()
 }
@@ -1245,6 +1245,135 @@ mod tests {
         assert!(run.response.stash_keys.is_empty());
         assert_eq!(run.stash_errors, Some(1));
         assert_eq!(run.stash_writes, Some(0));
+    }
+
+    const PNPM_INSTALL: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt"
+    );
+
+    #[test]
+    fn pnpm_layout_is_lossless_without_recovery_or_storage() {
+        for mode in 0..3 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(PNPM_INSTALL);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            } else if mode == 1 {
+                config.stash_enabled = false;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert_eq!(run.response.before_tokens, 332);
+            assert_eq!(run.response.after_tokens, 256);
+            assert_eq!(run.response.output.matches("Progress:").count(), 13);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn pnpm_combines_layout_and_progress_in_one_committed_candidate() {
+        for origin in [ContentOrigin::CommandOutput, ContentOrigin::FileRead] {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(PNPM_INSTALL);
+            req.content_origin = origin;
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert_eq!(run.response.after_tokens, 184);
+            assert_eq!(run.response.stash_keys.len(), 1);
+            let payload = concrete
+                .retrieve(&run.response.stash_keys[0])
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                payload,
+                PNPM_INSTALL
+                    .lines()
+                    .skip(12)
+                    .take(7)
+                    .map(|line| format!("{line}\n"))
+                    .collect::<String>()
+            );
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(concrete.len(), 1);
+        }
+    }
+
+    #[test]
+    fn pnpm_dry_run_and_timeout_do_not_leave_persistent_omissions() {
+        for dry_run in [true, false] {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut config = build_log_config();
+            if dry_run {
+                config.compression_enabled = false;
+            } else {
+                config.timeout = Duration::ZERO;
+            }
+            let run = PostToolPipeline::run(&request(PNPM_INSTALL), &config, Some(&store));
+            assert_eq!(run.response.output, PNPM_INSTALL);
+            assert_eq!(
+                run.response.disposition,
+                if dry_run {
+                    Disposition::DryRun
+                } else {
+                    Disposition::Timeout
+                }
+            );
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.len(), 0);
+            assert_eq!(
+                concrete.stash_calls.load(Ordering::Relaxed),
+                usize::from(!dry_run)
+            );
+            assert_eq!(
+                concrete.delete_calls.load(Ordering::Relaxed),
+                usize::from(!dry_run)
+            );
+            if dry_run {
+                assert_eq!(run.response.after_tokens, 184);
+            }
+        }
+    }
+
+    #[test]
+    fn pnpm_partial_stash_failure_retains_layout_and_rolls_back_progress() {
+        let concrete = Arc::new(CountingStore {
+            fail_stashes_after: 1,
+            ..CountingStore::default()
+        });
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let input = PNPM_INSTALL.repeat(2);
+        let run = PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store));
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert_eq!(run.response.recoverability, Recoverability::Lossless);
+        assert_eq!(
+            run.response.applied_operations,
+            [AppliedOperation::BuildLogReduction]
+        );
+        assert_eq!(run.response.output.matches("Progress:").count(), 26);
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(run.stash_errors, Some(1));
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(concrete.len(), 0);
     }
 
     #[test]
