@@ -417,9 +417,10 @@ fn element_attribute(element: &str, name: &str) -> bool {
     ) || (element == "html" && (name == "xmlns" || name.starts_with("xmlns:")))
 }
 
-/// Whether an `ol` start is read the same by a browser and the renderer:
+/// Whether an `ol` start is a number a Markdown list can begin with:
 /// ASCII digits within `i32`, optionally padded with ASCII whitespace. A
-/// sign, a trailing suffix or an overflowing value is parsed differently.
+/// negative start has no Markdown marker, and a suffixed or overflowing
+/// one is malformed, so either leaves the fragment as it is.
 fn plain_start(value: &str) -> bool {
     let digits = value.trim_matches(|c: char| c.is_ascii_whitespace());
     !digits.is_empty()
