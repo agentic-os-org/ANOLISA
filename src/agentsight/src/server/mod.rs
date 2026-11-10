@@ -1919,6 +1919,55 @@ mod tests {
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
+    #[test]
+    fn storage_config_request_preserves_symlink_target_and_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let target_path = directory.path().join("real.json");
+        let config_path = directory.path().join("config.json");
+        std::fs::write(
+            &target_path,
+            r#"{"storage":{"max_total_size_mb":2200},"keep":1}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target_path, &config_path).unwrap();
+
+        let mut state = test_app_state(0).into_inner();
+        Arc::get_mut(&mut state).unwrap().config_path = Some(config_path.clone());
+        let data = web::Data::from(state);
+        actix_web::rt::System::new().block_on(async move {
+            let app = awtest::init_service(
+                App::new()
+                    .app_data(data)
+                    .service(super::storage_status::post_storage_config),
+            )
+            .await;
+            let request = awtest::TestRequest::post()
+                .uri("/storage/config")
+                .set_json(serde_json::json!({"max_total_size_mb": 2000}))
+                .to_request();
+            let response = awtest::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+
+        assert_eq!(std::fs::read_link(&config_path).unwrap(), target_path);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target_path).unwrap()).unwrap();
+        assert_eq!(saved["storage"]["max_total_size_mb"], 2000);
+        assert_eq!(saved["keep"], 1);
+        assert_eq!(
+            std::fs::metadata(&target_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
     fn test_app_state_with_trajectory_store(store: TrajectoryStore) -> web::Data<AppState> {
         let auth_config = ServerAuthConfig { enabled: false };
         let auth = Arc::new(DashboardAuth::init(
