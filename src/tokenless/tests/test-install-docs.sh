@@ -497,14 +497,15 @@ has "$DOC_ZH_TROUBLE" "只有确实被替换过才恢复" \
   "zh troubleshooting documents that an untouched foreign tree is not rebuilt"
 
 # --- QUICKSTART: the install matrix keeps the documented priority order ------
-# specs/documentation-standard.md fixes the installation priority every component
-# doc has to follow: anolisa CLI first, the RPM package second, a source build
-# last. A method matrix that lists npm and curl ahead of RPM steers Alinux users
-# away from the managed package and towards routes that create no component record.
+# specs/documentation-standard.md puts the anolisa CLI first wherever it supports
+# the target and leaves the order of the other supported channels to each
+# component. Tokenless lists the RPM package right after the CLI: a method matrix
+# that lists npm and curl ahead of RPM steers Alinux users away from the managed
+# package and towards routes that create no component record.
 SPEC_DOC_STANDARD="$REPO_ROOT/specs/documentation-standard.md"
 [ -f "$SPEC_DOC_STANDARD" ] || { echo "FAIL missing file: $SPEC_DOC_STANDARD" >&2; exit 1; }
-has "$SPEC_DOC_STANDARD" 'RPM package (`yum install`)' \
-  "the documentation standard still fixes the priority this asserts against"
+has "$SPEC_DOC_STANDARD" '(`anolisa install <component>`) when supported for that target' \
+  "the documentation standard still puts the anolisa CLI first"
 
 matrix_line() { grep -nF -- "$2" "$1" | head -1 | cut -d: -f1; }
 check_matrix_order() {
