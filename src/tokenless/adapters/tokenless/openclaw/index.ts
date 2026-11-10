@@ -47,7 +47,7 @@ interface CallState {
 }
 
 interface ToolCategories {
-  layer_1_skip: { tools: string[] };
+  layer_1_skip: { tools: string[]; search_listing_tools?: string[] };
   layer_2_shell: { tools: string[] };
 }
 
@@ -167,7 +167,16 @@ function checkTokenless(): boolean {
 
 function loadToolCategories(): ToolCategories {
   const fallback: ToolCategories = {
-    layer_1_skip: { tools: FALLBACK_FILE_TOOLS },
+    layer_1_skip: {
+      tools: FALLBACK_FILE_TOOLS,
+      search_listing_tools: [
+        "Grep",
+        "grep",
+        "grep_code",
+        "grep_search",
+        "search_files",
+      ],
+    },
     layer_2_shell: { tools: FALLBACK_SHELL_TOOLS },
   };
   const possiblePaths = [
@@ -388,10 +397,16 @@ export default {
       categories.layer_2_shell.tools.map((tool) => tool.toLowerCase()),
     );
     const searchTools = new Set(
-      ["Grep", "grep", "grep_code", "grep_search", "search_files"].map((tool) =>
+      (categories.layer_1_skip.search_listing_tools ?? []).map((tool: string) =>
         tool.toLowerCase(),
       ),
     );
+    // Shortest text considered a match listing at the hook boundary.
+    // Deliberately independent of Core's `min_input_chars`: the gate only
+    // decides whether OpenClaw declares a search listing; Core then applies
+    // its own minimums and savings checks to the candidate. Mirrors
+    // hook_utils MIN_SEARCH_LISTING_CHARS.
+    const minSearchListingChars = 200;
 
     const sessionIdFor = (ctx: HookContext): string => {
       if (ctx.sessionId) {
@@ -651,7 +666,8 @@ export default {
               // file copy: api_response routes it through the lossless
               // search-only path. File reads stay file_content, byte-for-byte.
               const isSearchText =
-                searchTools.has(normalizedToolName) && block.text.length >= 200;
+                searchTools.has(normalizedToolName)
+                && block.text.length >= minSearchListingChars;
               const contentOrigin = isSearchText
                 ? "api_response"
                 : fileTools.has(normalizedToolName)
@@ -666,6 +682,7 @@ export default {
                 status: toolFailed(event) ? "error" : "success",
                 content_origin: contentOrigin,
                 output_optimization: state?.optimization ?? "none",
+                search_listing: isSearchText,
                 capabilities: {
                   replace_output: true,
                   recovery: state?.optimization !== "rtk" && recoverySessions.has(context.sessionId)

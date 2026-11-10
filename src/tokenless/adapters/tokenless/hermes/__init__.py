@@ -287,6 +287,7 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    MIN_SEARCH_LISTING_CHARS,
 )
 from hook_utils import SHELL_TOOLS as _SHELL_TOOLS_SHARED
 from hook_utils import SEARCH_TOOLS
@@ -370,7 +371,7 @@ def _search_origin(tool_name: str, result: str) -> str | None:
     """
     if tool_name not in SEARCH_TOOLS or not isinstance(result, str):
         return None
-    return "api_response" if len(result) >= 200 else None
+    return "api_response" if len(result) >= MIN_SEARCH_LISTING_CHARS else None
 
 
 def _output_optimization(args: Any) -> str:
@@ -503,6 +504,7 @@ def on_transform_tool_result(
     # declare api_response so Core's lossless search-only route applies.
     # Unknown search envelopes keep the file_content passthrough.
     search_origin = _search_origin(tool_name, result)
+    search_listing = search_origin is not None
     if search_origin is not None:
         content_origin = search_origin
     # Core reports a plain file print (`cat page.html`) as file_read from the
@@ -544,6 +546,7 @@ def on_transform_tool_result(
         replace_output=True,
         replace_with_text=True,
         command=command if isinstance(command, str) else None,
+        search_listing=search_listing,
     )
     response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "post_tool")
     if not isinstance(response, dict):

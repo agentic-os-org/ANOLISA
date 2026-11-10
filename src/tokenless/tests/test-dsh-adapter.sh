@@ -223,6 +223,7 @@ assert.deepEqual(requests(), [{
       status: 'success',
       content_origin: 'api_response',
       output_optimization: 'none',
+      search_listing: false,
       capabilities: {
         replace_output: true,
         recovery: { kind: "shell" },
@@ -419,6 +420,20 @@ clearRequests()
 await listener(exec, success(), async () => ({ kind: 'accept' }))
 assert.equal(requests()[0].request.input.content_origin, 'api_response')
 assert.equal(requests()[0].request.input.command, undefined)
+
+// Every native search alias with listing-length text declares the search
+// listing; dropping one alias from SEARCH_TOOLS or the listing gate fails here.
+const listing = Array.from({ length: 20 }, (_, i) => `src/very/long/common/search/path/module.py:${i}:matched_value_${i}\n`).join('')
+for (const name of categories.layer_1_skip.search_listing_tools) {
+  clearRequests()
+  await listener({ ...exec, name }, success(listing), async () => ({ kind: 'accept' }))
+  assert.equal(requests()[0].request.input.content_origin, 'api_response', name)
+  assert.equal(requests()[0].request.input.search_listing, true, name)
+}
+// The same listing through a non-search tool keeps the plain api_response route.
+clearRequests()
+await listener({ ...exec, name: 'web_fetch' }, success(listing), async () => ({ kind: 'accept' }))
+assert.equal(requests()[0].request.input.search_listing, false)
 
 // Core classifies plain file prints as file_read from the shell command line.
 clearRequests()

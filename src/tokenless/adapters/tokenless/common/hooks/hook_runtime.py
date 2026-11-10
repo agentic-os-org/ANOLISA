@@ -144,6 +144,7 @@ def post_tool(adapter: ModuleType, agent_id: str) -> None:
         replace_output=result.replace_output,
         replace_with_text=result.replace_with_text,
         command=result.command if isinstance(result.command, str) else None,
+        search_listing=result.search_listing,
     )
     response = run_compress(binary, request, 8, "post_tool")
     message = response.get("additional_context", "") if response is not None else ""

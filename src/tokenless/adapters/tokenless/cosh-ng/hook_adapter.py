@@ -16,6 +16,7 @@ from hook_utils import (
     warn,
 )
 from result_utils import (
+    MIN_SEARCH_LISTING_CHARS,
     ToolResult,
     content_origin,
     process_result,
@@ -122,7 +123,7 @@ def response(data: dict) -> ToolResult:
         if isinstance(parsed, dict):
             envelope = parsed
     # Keep the legacy structured result route; current llmContent is text.
-    minimum = 2000 if isinstance(value, dict) else 200
+    minimum = 2000 if isinstance(value, dict) else MIN_SEARCH_LISTING_CHARS
     field = None
     if tool in SHELL_TOOLS:
         if (
@@ -137,13 +138,18 @@ def response(data: dict) -> ToolResult:
             field = selected
     arguments = data.get("tool_input", {})
     origin = content_origin(tool)
-    # Native search results hold match listings in one text slot. Declaring
-    # that slot as api_response routes the derived match text through the
-    # lossless search-only path; the envelope's counters and other fields
-    # stay untouched, and replacement rewrites only the slot itself.
+    # Native search results hold match listings in their text. Declaring
+    # that text as api_response routes the derived match listing through
+    # the lossless search-only path. Cosh-NG replaces the whole result with
+    # a plain string (`llmContent` unwrapped at :107-116), so `field` stays
+    # None here — there are no envelope counters to keep, matching cosh-core's
+    # string-only hook contract.
     if search_origin(tool, envelope) == "api_response":
         field = search_text_field(tool, envelope, ("content", "output", "text"))
         origin = "api_response"
+        search_listing = True
+    else:
+        search_listing = False
     can_replace = True
     command = (
         arguments.get("command")
@@ -165,6 +171,7 @@ def response(data: dict) -> ToolResult:
         status,
         can_replace,
         True,
+        search_listing=search_listing,
     )
 
 

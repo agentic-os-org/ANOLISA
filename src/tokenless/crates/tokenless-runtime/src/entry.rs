@@ -1004,6 +1004,7 @@ pub(crate) fn post_tool_with_outcomes(
         refined = PostToolRequest {
             output_optimization: OutputOptimization::None,
             command: Some(command),
+            search_listing: false,
             ..request.clone()
         };
         &refined
@@ -2918,6 +2919,7 @@ mod tests {
                 status: ToolResultStatus::Success,
                 content_origin: ContentOrigin::CommandOutput,
                 command: None,
+                search_listing: false,
                 output_optimization: optimization,
                 capabilities: PostToolCapabilities {
                     replace_output: true,
@@ -3026,6 +3028,7 @@ mod tests {
                 result_kind: kind,
                 output_optimization: OutputOptimization::Rtk,
                 command: Some(run),
+                search_listing: false,
                 ..post_tool_request(&content)
             };
             let outcome = post_tool_with_outcomes(&request, &options, None, &attribution).unwrap();
@@ -3066,6 +3069,7 @@ mod tests {
             let request = PostToolRequest {
                 content_origin: origin,
                 command: Some(command.into()),
+                search_listing: false,
                 ..post_tool_request(content)
             };
             let outcome = post_tool_with_store(&request, &options(), None).unwrap();
@@ -3086,6 +3090,7 @@ mod tests {
         let request = PostToolRequest {
             content_origin: ContentOrigin::CommandOutput,
             command: Some("cat page.html".into()),
+            search_listing: false,
             ..post_tool_request(&content)
         };
         let mut opts = options();
@@ -3480,6 +3485,7 @@ mod tests {
             status: ToolResultStatus::Success,
             content_origin: ContentOrigin::CommandOutput,
             command: None,
+            search_listing: false,
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,

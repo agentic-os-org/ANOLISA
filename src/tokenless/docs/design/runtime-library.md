@@ -254,8 +254,9 @@ Recognized native `find` calls still bypass RTK rewriting when path sharing is d
 boundary independent of compression: disabling an optimization must not reintroduce summarized or
 altered lookup paths. Revert the change to restore the previous RTK routing policy completely.
 JSON, table, and log compression remain available for other tool names. The exact name `Grep`
-always excludes those domains to retain every received match; disabling path sharing does not
-restore pre-feature JSON/table/log dispatch for a custom tool named `Grep`.
+and every result declared with `search_listing` always exclude those domains to retain every
+received match; disabling path sharing does not restore pre-feature JSON/table/log dispatch
+for a custom tool named `Grep` or for a declared search listing.
 The global compression switch still controls dry-run behavior for enabled domains.
 Whole-task savings depend on the workload; preserving all received bytes does not guarantee
 fewer follow-up tool calls or lower total token use.
@@ -284,7 +285,9 @@ or log compressors, even when search path sharing is disabled. Replacement hosts
 search text slot — or the whole result when the host's text is the listing — as `api_response`
 instead of `file_content`, so identical search text compresses identically through a search tool
 and through the shell; file reads keep `file_content` and stay byte-for-byte. SDK callers should
-use those names only for this search contract.
+use those names only for this search contract. Only the Claude Code adapter keeps the context-option
+precondition; the other replacement hosts admit context listings into the search route, where the
+compressor rejects any row outside the `path:number:text` shape and returns the input unchanged.
 
 RTK ownership is provisional until execution completes. PreTool atomically stores the original and exact executed commands
 and assigns each rewritten RTK invocation a generation and ordinal in `rtk-outcomes.db` under

@@ -295,7 +295,10 @@ class PostToolRequest:
     """One final model-visible tool result before Core routing.
 
     The exact tool name ``Grep`` opts into search-only routing; its output
-    never enters JSON, table, or log compressors.
+    never enters JSON, table, or log compressors. Other search-shaped tool
+    names route the same way when the adapter declares the result as a
+    complete match listing with ``search_listing``; without that declaration
+    they keep their usual content-based dispatch.
     """
 
     result_kind: ResultKind
@@ -310,6 +313,10 @@ class PostToolRequest:
     #: it. Core reports a plain print of local files such as ``cat page.html``
     #: as ``FILE_READ``; ignored for every other origin.
     command: str | None = None
+    #: The host declares this result to be a complete search match listing.
+    #: Core then routes it to the lossless search-only path and keeps it out
+    #: of the JSON, table, HTML and log compressors even with ``force_json``.
+    search_listing: bool = False
 
     def __post_init__(self) -> None:
         if not self.tool_name:
@@ -449,6 +456,8 @@ class TokenlessSdk:
         }
         if request.command is not None:
             payload["command"] = request.command
+        if request.search_listing:
+            payload["search_listing"] = True
         response = await asyncio.to_thread(
             self.runtime._post_tool_json,
             _json_dumps(payload),

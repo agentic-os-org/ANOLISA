@@ -5,7 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from hook_utils import SHELL_TOOLS, SEARCH_TOOLS, SKIP_TOOLS, skip, try_parse_json
+from hook_utils import (
+    MIN_SEARCH_LISTING_CHARS,
+    SHELL_TOOLS,
+    SEARCH_TOOLS,
+    SKIP_TOOLS,
+    skip,
+    try_parse_json,
+)
 
 
 @dataclass
@@ -20,6 +27,7 @@ class ToolResult:
     status: str
     replace_output: bool
     replace_with_text: bool
+    search_listing: bool = False
 
     def content(self) -> str:
         value = self.field[1] if self.field is not None else self.value
@@ -78,17 +86,16 @@ def search_text_field(
 
     A native search result keeps its host envelope (``mode`` counters,
     truncation indicators, other metadata): only the named slot holds the
-    match listing the lossless search compressor reads. A slot is eligible
-    when it is a string at or above the shared minimum so tiny or empty
-    results never become the compression target.
+    match listing the lossless search compressor reads. Among several
+    eligible slots the largest one wins — the same rule
+    :func:`select_text_field` applies to shell envelopes — so a secondary
+    short slot never masks the real listing. A slot is eligible when it is
+    a string at or above the shared minimum so tiny or empty results never
+    become the compression target.
     """
     if not is_search_tool(tool_name) or not isinstance(envelope, dict):
         return None
-    for name in slots:
-        value = envelope.get(name)
-        if isinstance(value, str) and len(value) >= 200:
-            return (name, value)
-    return None
+    return select_text_field(envelope, slots, MIN_SEARCH_LISTING_CHARS)
 
 
 def search_origin(
@@ -101,16 +108,17 @@ def search_origin(
     match text through the lossless search-only path, and replacement
     rewrites only the received slot. Any other shape keeps the caller's
     classification: unknown search envelopes are preserved, never guessed.
+
+    The verdict is derived from :func:`search_text_field` so the declared
+    origin and the slot replacement rewrites cannot drift apart.
     """
     if not is_search_tool(tool_name):
         return None
     if isinstance(envelope, str):
-        return "api_response" if len(envelope) >= 200 else None
+        return "api_response" if len(envelope) >= MIN_SEARCH_LISTING_CHARS else None
     if isinstance(envelope, dict):
-        for name in slots:
-            value = envelope.get(name)
-            if isinstance(value, str) and len(value) >= 200:
-                return "api_response"
+        if search_text_field(tool_name, envelope, slots) is not None:
+            return "api_response"
     return None
 
 

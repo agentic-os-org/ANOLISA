@@ -499,7 +499,8 @@ This setting is independent of `config.json`. Python SDK callers can disable it 
 `TokenlessConfig(search_path_sharing_enabled=False)`; Rust callers set
 `RuntimeConfig.search_path_sharing_enabled` to `false`. All entry points default to enabled.
 
-The exact tool name `Grep` and shell commands recognized as native `grep` or `rg` use only
+The exact tool name `Grep`, results the host declares with `search_listing`, and shell commands
+recognized as native `grep` or `rg` use only
 the search compressor, regardless of detected content type or `force_json`. Disabling search
 path sharing, unsupported formats, and candidates without savings return the original output;
 they never fall through to JSON, table, or log compression. Other tools retain their existing routes.

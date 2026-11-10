@@ -363,26 +363,31 @@ class NativeSearchHooks(unittest.TestCase):
             # model-visible llmContent text, so the replacement is the text.
             ("cosh-ng", {"llmContent": text}, "[Search results", False),
         ]
+        # Every alias in the search family must reach the lossless route on
+        # every replacement host; dropping one alias from any adapter-side
+        # set fails here.
+        aliases = ["Grep", "grep", "grep_code", "grep_search", "search_files"]
         for agent, response, slot, wrapped in cases:
-            with self.subTest(agent=agent):
-                payload = {
-                    "session_id": "search-session",
-                    "tool_use_id": "search-call",
-                    "tool_name": "grep",
-                    "tool_response": response,
-                }
-                envelope = self.run_response(payload, agent=agent)
-                replaced = self.replacement(envelope)
-                if wrapped:
-                    self.assertIsInstance(replaced, str, envelope)
-                    replaced = json.loads(replaced)
-                    self.assertIn("[Search results grouped by file", replaced[slot], envelope)
-                elif agent == "cosh-ng":
-                    self.assertIsInstance(replaced, str)
-                    self.assertIn(slot, replaced)
-                else:
-                    self.assertIsInstance(replaced, dict)
-                    self.assertIn("[Search results grouped by file", replaced[slot], envelope)
+            for alias in aliases:
+                with self.subTest(agent=agent, alias=alias):
+                    payload = {
+                        "session_id": "search-session",
+                        "tool_use_id": "search-call",
+                        "tool_name": alias,
+                        "tool_response": response,
+                    }
+                    envelope = self.run_response(payload, agent=agent)
+                    replaced = self.replacement(envelope)
+                    if wrapped:
+                        self.assertIsInstance(replaced, str, envelope)
+                        replaced = json.loads(replaced)
+                        self.assertIn("[Search results grouped by file", replaced[slot], envelope)
+                    elif agent == "cosh-ng":
+                        self.assertIsInstance(replaced, str)
+                        self.assertIn(slot, replaced)
+                    else:
+                        self.assertIsInstance(replaced, dict)
+                        self.assertIn("[Search results grouped by file", replaced[slot], envelope)
 
     def test_small_search_results_and_file_reads_pass_through(self):
         # Below the slot minimum the search keeps its protection without a
@@ -394,6 +399,42 @@ class NativeSearchHooks(unittest.TestCase):
             with self.subTest(tool=payload["tool_name"]):
                 payload = {"session_id": "s", "tool_use_id": "c", **payload}
                 self.assertEqual(self.run_response(payload), {})
+
+    def test_multi_slot_envelope_picks_the_largest_listing(self):
+        # The largest eligible slot is the match listing; a secondary short
+        # slot never masks it (same rule as select_text_field for shells).
+        text = self.matches()
+        short = "a.py:1:x\n" * 40
+        payload = {
+            "session_id": "search-session",
+            "tool_use_id": "search-call",
+            "tool_name": "grep_search",
+            "tool_response": {"content": short, "output": text, "mode": "content"},
+        }
+        envelope = self.run_response(payload, agent="qwenwork")
+        replaced = self.replacement(envelope)
+        self.assertIsInstance(replaced, dict)
+        self.assertIn("[Search results grouped by file", replaced["output"], envelope)
+        self.assertEqual(replaced["content"], short)
+
+    def test_context_listings_enter_the_search_route_and_stay_uncompressed(self):
+        # Only Claude Code keeps the context-option precondition. The other
+        # replacement hosts admit a context listing into the search route;
+        # the compressor rejects the rows that lack the path:number:text
+        # shape, and a candidate without savings emits no replacement.
+        match = "src/project/with/very/long/common/search/path/module.py:1:matched_value_1\n"
+        listing = "".join(
+            row if i % 3 == 2 else "--\n" for i, row in enumerate([match] * 9)
+        )
+        for agent in ["qoder-cli", "qwenwork", "opencode"]:
+            with self.subTest(agent=agent):
+                payload = {
+                    "session_id": "search-session",
+                    "tool_use_id": "search-call",
+                    "tool_name": "Grep",
+                    "tool_response": {"content": listing, "mode": "content"},
+                }
+                self.assertEqual(self.run_response(payload, agent=agent), {})
 
 
 if __name__ == "__main__":

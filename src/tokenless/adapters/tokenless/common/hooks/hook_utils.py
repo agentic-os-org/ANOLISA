@@ -163,6 +163,12 @@ SHELL_TOOLS: set[str] = set(_tool_categories.get("layer_2_shell", {}).get("tools
 # byte-for-byte. Mirrored in tool_categories.json `_aliases`.
 SEARCH_TOOLS: set[str] = {"Grep", "grep", "grep_code", "grep_search", "search_files"}
 
+# Shortest text considered a match listing at the hook boundary. Deliberately
+# independent of Core's `min_input_chars`: the gate only decides whether the
+# adapter declares a search listing (and takes the slot-replacement route);
+# Core then applies its own minimums and savings checks to the candidate.
+MIN_SEARCH_LISTING_CHARS = 200
+
 _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
     r"^[ \t]*(?:\"tokenless\"|'tokenless'|tokenless)[ \t]+retrieve[ \t]+"
     r"(?:\"(?:[0-9a-f]{24}|<<tokenless:[0-9a-f]{24}>>)\"|"
@@ -747,11 +753,15 @@ def build_post_tool_request(
     replace_output: bool = False,
     replace_with_text: bool = False,
     command: str | None = None,
+    search_listing: bool = False,
 ) -> dict:
     """Build a Protocol v2 PostTool transport request.
 
     ``command`` is the shell command line behind a ``command_output`` result;
     Core reports a plain print of local files as ``file_read``.
+    ``search_listing`` declares the content a complete native search match
+    listing so Core keeps its lossless search-only route under the alias
+    family, whatever the detected content shape.
     """
     request = {
         "protocol_version": 2,
@@ -773,6 +783,8 @@ def build_post_tool_request(
     }
     if command is not None:
         request["input"]["command"] = command
+    if search_listing:
+        request["input"]["search_listing"] = True
     return request
 
 

@@ -13,6 +13,7 @@ from hook_utils import (
     warn,
 )
 from result_utils import (
+    MIN_SEARCH_LISTING_CHARS,
     ToolResult,
     content_origin,
     process_result,
@@ -68,7 +69,7 @@ def response(data: dict) -> ToolResult:
     if isinstance(value, str) and is_skill_file(value):
         skip()
     envelope = value
-    minimum = 200
+    minimum = MIN_SEARCH_LISTING_CHARS
     can_replace = True
     if tool == "Bash" and isinstance(envelope, dict):
         # The native renderer consumes stdout, so no other field is replaceable.
@@ -88,7 +89,10 @@ def response(data: dict) -> ToolResult:
     if search_origin(tool, envelope) == "api_response":
         field = search_text_field(tool, envelope, ("content", "output", "text"))
         origin = "api_response"
+        search_listing = True
         can_replace = True
+    else:
+        search_listing = False
     command = (
         arguments.get("command")
         if origin == "command_output" and isinstance(arguments, dict)
@@ -109,6 +113,7 @@ def response(data: dict) -> ToolResult:
         status,
         can_replace,
         field is not None or not isinstance(raw, (dict, list)),
+        search_listing=search_listing,
     )
 
 

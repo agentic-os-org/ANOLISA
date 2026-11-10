@@ -288,6 +288,12 @@ function contentOrigin(toolName) {
 
 const SEARCH_TOOLS = new Set(['grep', 'grep_code', 'grep_search', 'search_files'])
 
+/** Shortest text considered a match listing at the hook boundary. Deliberately
+ * independent of Core's `min_input_chars`: the gate only decides whether DSH
+ * declares a search listing; Core then applies its own minimums and savings
+ * checks to the candidate. Mirrors hook_utils MIN_SEARCH_LISTING_CHARS. */
+const MIN_SEARCH_LISTING_CHARS = 200
+
 /** api_response for a native search's match-listing text, else the mapped origin.
  *
  * Search listings are derived match data, not file copies: Core's lossless
@@ -299,7 +305,7 @@ function effectiveOrigin(toolName, content) {
   if (
     SEARCH_TOOLS.has(toolName.toLowerCase())
     && typeof content === 'string'
-    && content.length >= 200
+    && content.length >= MIN_SEARCH_LISTING_CHARS
   ) {
     return 'api_response'
   }
@@ -371,6 +377,7 @@ function postToolRequest(
   replaceOutput,
   resultKind,
   retrievalAvailable,
+  searchListing = false,
 ) {
   const attribution = {
     agent_id: String(valueOr(config, 'agentId', DEFAULT_AGENT_ID)),
@@ -388,6 +395,7 @@ function postToolRequest(
     status,
     content_origin: origin,
     output_optimization: 'none',
+    search_listing: searchListing,
     capabilities: {
       replace_output: replaceOutput,
       recovery: { kind: retrievalAvailable ? "shell" : "none" },
@@ -521,6 +529,7 @@ export function apply(ctx, config = {}) {
         true,
         retrieveResult ? 'retrieve' : 'tool',
         !retrieveResult && tokenlessRetrieveCommandAvailable(config),
+        SEARCH_TOOLS.has(exec.name.toLowerCase()),
       )
       if (rtkOutput) {
         request.input.output_optimization = 'rtk'

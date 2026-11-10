@@ -102,8 +102,11 @@ _API_TOOLS = frozenset(
         "search_file",
         "list_directory",
         "list_dir",
-        # Core reserves this exact name for complete search listings, even
+        # The exact name `Grep` is reserved for complete search listings, even
         # with path sharing disabled; JSON/table/log compression is excluded.
+        # The lowercase aliases only route search-only when the host declares
+        # the result with `search_listing`, which this adapter does not do —
+        # its search results stay JSON-compressed api_response payloads.
         "Grep",
         "grep",
         "grep_code",
