@@ -1686,24 +1686,27 @@ mod tests {
     async fn observation_spanning_a_registration_walk_is_void() {
         let dir = tempfile::tempdir().unwrap();
         let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
-        // Drive the full quiet-period path instead of the idle shortcut.
-        watcher
-            .last_activity()
-            .fetch_max(activity_now_ms(), Ordering::AcqRel);
-        let shared = Arc::clone(&watcher.shared);
-        let check = tokio::spawn(async move { watcher.check_quiescent().await });
+        let start_ms = 1_000;
+        let activity = AtomicU64::new(start_ms);
+        let clock = Cell::new(start_ms);
+        let evidence = watcher.quiescence_evidence();
+        let attempt = observe_once_with(
+            &activity,
+            false,
+            || watcher.quiescence_evidence_is_current(evidence),
+            || clock.get(),
+            |window| {
+                // Finish a registration after the observation starts and
+                // before its quiet-window check, even without any writes.
+                drop(watcher.shared.begin_registration());
+                clock.set(clock.get() + window.as_millis() as u64);
+                std::future::ready(())
+            },
+        )
+        .await;
 
-        // A registration walk that starts and ends inside the observation
-        // window: the watermark's silence cannot be evidence because events
-        // generated during the walk were still queued.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        drop(RegistrationGuard::new(&shared.registration));
-
-        assert!(
-            !check.await.unwrap(),
-            "a quiet period that spans a registration walk proves nothing and must void \
-             the Safe decision (#8448)"
-        );
+        assert_eq!(clock.get(), start_ms + QUIET_WINDOW_MS);
+        assert_eq!(attempt, ObservationAttempt::Unstable);
     }
 
     #[tokio::test]
