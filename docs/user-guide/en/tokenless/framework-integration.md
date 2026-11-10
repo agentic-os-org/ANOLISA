@@ -47,7 +47,7 @@ browser-snapshot compression are on by default; mixed-region compression is off 
 | Cosh-NG / legacy Copilot Shell | Cosh-NG can replace supported results, but the Common BeforeModel hook cannot publish an executable static recovery tool. Legacy Copilot Shell cannot replace PostTool results. |
 | OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
 | Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH use block-and-suggest for RTK; DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
-| QwenWork shell recovery | The macOS recovery hook routes to the bundled CLI and the same Stash. Workspace Shell and plugin-private runtimes use lossless candidates when this path is unavailable. |
+| QwenWork workspace Shell or plugin-private CLI | On macOS and Windows, a complete private recovery bridge rewrites Marker commands to the plugin binary with matching state and attribution (on Windows, the installer rewrites hook commands to the PowerShell form and the binary is `bin/tokenless.exe`). Without that bridge, only lossless candidates are eligible. |
 | QwenPaw / AgentScope | All current Core domains are connected, including Schema and static retrieval. Intermediate stream chunks and non-text blocks remain unchanged. Custom AgentScope tools require an explicit content-origin contract. |
 
 OpenClaw recovery is authorized by markers in the current history and newly delivered results,
@@ -69,7 +69,8 @@ PostTool leaves the entire JSON response unchanged when its parser cannot preser
 The Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode adapters each send one
 `post_tool` request to `tokenless compress`. When the host can replace the result and bare
 `tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
-with the existing shell tool.
+with the existing shell tool. QwenWork can also use its verified macOS and Windows private
+recovery bridges.
 Otherwise Core accepts only lossless candidates. Every non-`applied`
 disposition keeps the original. The hook currently routes:
 
@@ -211,21 +212,32 @@ filesystem root, parent traversal, non-directory targets, or unresolvable links)
 make workspace Shell hooks pass through without creating a data directory.
 The same applies when no system home is available and no override is set.
 
-The hook process writes compression statistics subject to its permissions.
-Installation and detection show the data directory they resolve in their own process.
+If the Shell sandbox cannot write to the selected directory, RTK's Tokenless
+statistics and execution receipts may be missing while commands still run.
+Missing receipts conservatively skip further compression. PostTool compression
+statistics are written by the Hook process and depend on its permissions.
+Statistics can therefore be incomplete even when the Agent completes its task.
+Failed RTK records are not queued for later recovery.
 
-When the plugin bundles `bin/tokenless`, the recovery hook routes the
-standalone command to that executable and the same Stash used by PostTool.
-Workspace Shell and plugin-private runtimes use lossless compression when this
-path is unavailable. The native Shell can use a separately installed CLI on its
-`PATH` when the adapter uses that same CLI and Stash. The retrieve command opens
-an existing Stash in read-only mode. Exact recovery results bypass compression.
+RTK's native database has its own path configuration, independent of
+`TOKENLESS_DATA_DIR`. Its writes are
+subject to the Shell sandbox too. The adapter keeps this behavior unchanged.
 
-After an upgrade, a Stash last closed by an older writer may be missing its
-SQLite WAL files. If the tool Shell cannot write to that directory, let the
-updated plugin complete a compression that writes to the same Stash before
-trying an earlier recovery reference. The updated writer retains both files
-when it closes.
+Installation and detection output show the data directory and its source for the
+current process, together with this sandbox limitation. They do not test sandbox
+write access or verify that the desktop inherited terminal environment variables.
+These notices are not added to Hook results or model context. For complete RTK
+records, use a directory the Shell is authorized to write. The adapter does not
+change sandbox permissions or transfer records across that boundary.
+
+If a standalone installation includes `bin/` inside the plugin, the adapter uses
+those binaries.
+On macOS and Windows, a complete PreTool bridge rewrites standalone `tokenless retrieve`
+commands to the private binary with the same state directory, Stash selection, session and call
+attribution; the Windows bridge emits the PowerShell form (`$env:` assignments and
+`& '<tokenless.exe>' retrieve <HASH>`) for PowerShell events. Exact recovery results bypass
+compression. If the bridge is unavailable, these private runtime paths accept only lossless
+compression.
 
 Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
 Python 3.9+, and the Tokenless binary. Verify binary availability in the desktop
