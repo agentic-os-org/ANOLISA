@@ -9,6 +9,9 @@ mod native;
 #[path = "service/cancellation.rs"]
 mod cancellation;
 
+#[path = "service/expired.rs"]
+mod expired;
+
 #[path = "service/policy.rs"]
 mod policy;
 
@@ -166,60 +169,6 @@ fn caller_parallel_steps_reach_a_two_party_barrier() {
     assert!(fixture.0.join("check.overlap").exists());
     assert!(fixture.0.join("second.overlap").exists());
     close(&service.client, &handle);
-    fixture.assert_reaped();
-}
-
-#[test]
-fn serial_steps_share_the_original_event_deadline() {
-    let fixture = Fixture::new();
-    let mut document = fixture.document();
-    second_step(&mut document);
-    document["spec"]["events"]["tool.before"]["budget_ms"] = json!(1200);
-    document["spec"]["providers"]["policy"]["config"]["delays_ms"] =
-        json!({"check": 700, "second": 700});
-    let service = Running::start(&fixture, &document);
-    let binding = fixture.bind(&service.client);
-    let handle = open(
-        &service.client,
-        &binding,
-        event(&binding, "tool.before", "observe"),
-    );
-    let first = service
-        .client
-        .call(invoke(&handle, "check"), Instant::now() + TIMEOUT)
-        .unwrap();
-    assert_eq!(first["status"], "ok");
-    let second = service
-        .client
-        .call(invoke(&handle, "second"), Instant::now() + TIMEOUT)
-        .unwrap();
-    assert_eq!(second["status"], "error");
-    assert_eq!(second["effects"], json!([]));
-    assert_eq!(second["failure_action"], "block");
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let evidence = audit(&service.client, &handle.event_id);
-        if evidence["terminal"] == true {
-            break;
-        }
-        assert!(Instant::now() < deadline, "event expiry was not recorded");
-        thread::sleep(Duration::from_millis(5));
-    }
-    let calls = fixture.calls("invoke");
-    assert_eq!(calls.len(), 2);
-    let first_budget = calls
-        .iter()
-        .find(|call| call["request"]["operation"] == "check")
-        .unwrap()["request"]["budget_ms"]
-        .as_u64()
-        .unwrap();
-    let second_budget = calls
-        .iter()
-        .find(|call| call["request"]["operation"] == "second")
-        .unwrap()["request"]["budget_ms"]
-        .as_u64()
-        .unwrap();
-    assert!(second_budget < first_budget);
     fixture.assert_reaped();
 }
 

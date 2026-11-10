@@ -152,9 +152,19 @@ durable audit, immediately before Provider invocation. Failed cleanup
 retains the draining state and returns an error; maintenance retries bounded work.
 
 Concurrent budgets live in `spec.daemon.limits`: bindings 64 (including roots),
-live events 128, Provider calls 64, connections 128 and active invocations per
+event slots 128, Provider calls 64, connections 128 and active invocations per
 binding 256 by default. Each field accepts 1..4096; status exposes usage, peaks and
 rejection reasons. Preparing, idle and draining bindings count toward capacity.
+An event that expires before a step is claimed retains only that step's failure
+reply and original policy action. Its worker and event payload are released;
+no extra Host reference is kept.
+Live events and retained expiry handles share the event-slot limit; status exposes
+`resources.usage.event_slots` and `resources.usage.expired_events`. Each step
+can consume its retained reply once. Explicit `close_event` or unbind reclaims
+the handle; native events also reclaim it after all retained replies are consumed
+or their native correlation is closed. The terminal audit records `expired` and
+the retained steps' failure actions. Expired handles do not count as active work
+for idle policy updates. Closed or unknown handles still return `unknown_event`.
 Resident Pi/Claude and ordinary Qoder SDK producers register strictly increasing
 invocation sequences. Each ordinary Qoder Query owns one acknowledged child scope;
 its native queue and original callbacks drain before invocation retirement and scope release.
