@@ -149,7 +149,7 @@ impl PreparedScope {
     pub fn uses_credentials(&self) -> bool {
         self.policy_snapshots
             .iter()
-            .any(|policy| policy.template.uses_credentials())
+            .any(crate::policy::PreparedPolicy::uses_credentials)
     }
 }
 

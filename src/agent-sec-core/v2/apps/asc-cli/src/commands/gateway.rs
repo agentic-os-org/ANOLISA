@@ -1,16 +1,14 @@
-//! Root credential administration and owner-scoped startup environment queries.
+//! Gateway administration and shared public CA queries.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use asc_daemon_protocol::method::{
-    GATEWAY_CREDENTIALS, GATEWAY_DISABLE, GATEWAY_ENABLE, GATEWAY_KEY_ADD, GATEWAY_KEY_LIST,
-    GATEWAY_KEY_REMOVE, GATEWAY_STATUS,
+    GATEWAY_CA, GATEWAY_DISABLE, GATEWAY_ENABLE, GATEWAY_KEY_LIST, GATEWAY_KEY_REMOVE,
+    GATEWAY_STATUS,
 };
-use asc_daemon_protocol::{
-    DaemonRequest, GatewayKeyAddParams, GatewayKeyRemoveParams, GatewayScopeParams,
-};
+use asc_daemon_protocol::{DaemonRequest, GatewayKeyRemoveParams};
 use clap::{Args, Subcommand};
 
 use super::common::encode;
@@ -25,43 +23,25 @@ pub(crate) enum GatewayCommand {
     Disable,
     /// Show execution state visible to your UID, without credential values.
     Status,
-    /// Import, list or globally retire credentials (root only).
+    /// List or globally retire credential pairs (root only).
     #[command(subcommand)]
     Key(KeyCommand),
-    /// Query your Scope's fake credentials and CA environment.
-    Credentials(ScopeArgs),
+    /// Return the shared public CA bundle path while the gateway is ready.
+    Ca,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum KeyCommand {
-    /// Import a credential without replacing an existing value or granting Scope access.
-    Add(KeyAdd),
-    /// Globally retire a credential and revoke all referencing grants.
+    /// Globally retire a pair and revoke all referencing grants.
     Remove(KeyRemove),
-    /// List currently imported credential identifiers.
+    /// List currently imported pair identifiers, without token values.
     List,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct KeyAdd {
-    /// Credential identifier; currently `github`.
-    credential: String,
-    /// Root-owned file holding the real value, unreadable by group and others.
-    #[arg(long)]
-    secret_file: PathBuf,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct KeyRemove {
-    /// Credential identifier.
-    credential: String,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ScopeArgs {
-    /// Canonical Scope identity returned by `scope create`.
-    #[arg(long)]
-    scope: String,
+    /// Internal pair identifier.
+    pairid: String,
 }
 
 impl GatewayCommand {
@@ -84,27 +64,12 @@ impl GatewayCommand {
             Self::Enable => encode(GATEWAY_ENABLE, &empty),
             Self::Disable => encode(GATEWAY_DISABLE, &empty),
             Self::Status => encode(GATEWAY_STATUS, &empty),
-            Self::Credentials(args) => encode(
-                GATEWAY_CREDENTIALS,
-                &GatewayScopeParams {
-                    scope_id: args.scope.clone(),
-                },
-            ),
+            Self::Ca => encode(GATEWAY_CA, &empty),
             Self::Key(KeyCommand::List) => encode(GATEWAY_KEY_LIST, &empty),
-            Self::Key(KeyCommand::Add(args)) => encode(
-                GATEWAY_KEY_ADD,
-                &GatewayKeyAddParams {
-                    credential: args.credential.clone(),
-                    secret_file: std::path::absolute(&args.secret_file)?
-                        .to_str()
-                        .ok_or_else(|| InputError::Gateway("--secret-file must be UTF-8".into()))?
-                        .to_owned(),
-                },
-            ),
             Self::Key(KeyCommand::Remove(args)) => encode(
                 GATEWAY_KEY_REMOVE,
                 &GatewayKeyRemoveParams {
-                    credential: args.credential.clone(),
+                    pairid: args.pairid.clone(),
                 },
             ),
         }
@@ -123,41 +88,21 @@ mod tests {
     }
 
     #[test]
-    fn credential_import_is_independent_of_process_or_scope_admission() {
-        let args = Arguments::try_parse_from([
-            "gateway",
-            "key",
-            "add",
-            "github",
-            "--secret-file",
-            "/root/token",
-        ])
-        .unwrap();
+    fn removal_selects_an_internal_pair_identifier() {
+        let args = Arguments::try_parse_from(["gateway", "key", "remove", "pair-1"]).unwrap();
         let request = args.command.request().unwrap();
-        assert_eq!(request.method.as_str(), GATEWAY_KEY_ADD);
-        assert_eq!(
-            request.params,
-            serde_json::json!({"credential":"github","secretFile":"/root/token"})
-        );
+        assert_eq!(request.method.as_str(), GATEWAY_KEY_REMOVE);
+        assert_eq!(request.params, serde_json::json!({"pairid":"pair-1"}));
     }
 
     #[test]
-    fn environment_queries_select_scope_but_cannot_select_caller_identity() {
-        let args =
-            Arguments::try_parse_from(["gateway", "credentials", "--scope", "scope-1"]).unwrap();
+    fn ca_queries_cannot_select_scope_or_caller_identity() {
+        let args = Arguments::try_parse_from(["gateway", "ca"]).unwrap();
         let request = args.command.request().unwrap();
-        assert_eq!(request.method.as_str(), GATEWAY_CREDENTIALS);
-        assert_eq!(request.params, serde_json::json!({"scopeId":"scope-1"}));
-        assert!(
-            Arguments::try_parse_from([
-                "gateway",
-                "credentials",
-                "--scope",
-                "scope-1",
-                "--uid",
-                "1001",
-            ])
-            .is_err()
-        );
+        assert_eq!(request.method.as_str(), GATEWAY_CA);
+        assert_eq!(request.params, serde_json::json!({}));
+        for option in ["--scope", "--uid", "--gid", "--pid"] {
+            assert!(Arguments::try_parse_from(["gateway", "ca", option, "1001"]).is_err());
+        }
     }
 }

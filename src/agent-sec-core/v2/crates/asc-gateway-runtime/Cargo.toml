@@ -12,12 +12,14 @@ publish.workspace = true
 asc-credential-store = { workspace = true }
 asc-gateway-plan = { workspace = true }
 asc-policy-types = { workspace = true }
+asc-policy-cedar = { workspace = true }
 asc-pap = { workspace = true }
 asc-policy-target-contracts = { workspace = true }
 nix = { workspace = true }
 rustix = { workspace = true, features = ["event"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }

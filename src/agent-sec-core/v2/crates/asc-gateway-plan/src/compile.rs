@@ -2,65 +2,61 @@
 
 use std::collections::BTreeSet;
 
-use asc_credential_store::{CredentialId, ScopeId};
+use asc_credential_store::ScopeId;
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::{PolicySource as AuthoredPolicySource, Resource};
+use asc_policy_types::authoring::PolicySource as AuthoredPolicySource;
 use asc_policy_types::scope::PreparedScope;
 
-use crate::{Plan, PlanError, PlanFormat, PolicySource, RequestMatch, Rule, RuleSource};
+use crate::{
+    Plan, PlanError, PlanFormat, PolicySource, RequestMatch, Rule, RuleSource, Scheme,
+    credential::resolve_bindings,
+};
 
-/// Compiles all credential Policies, skipping independently validated file Policies.
+/// Compiles Cedar credential Policies, skipping independent non-credential file Policies.
 ///
 /// # Errors
-/// Returns validation errors without producing a partial plan.
+/// Rejects invalid snapshots, mixed or unconsumed Cedar, and missing/extra/duplicate bindings.
 pub fn compile_scope(scope: &PreparedScope) -> Result<Plan, PlanError> {
-    scope.validate().map_err(PlanError::Policy)?;
+    scope.validate()?;
     let scope_id = ScopeId::new(scope.scope_id.as_str()).map_err(|_| PlanError::Invalid {
         field: "scopeId",
-        reason: "must be a lowercase DNS label",
+        reason: "must be a valid scope identifier",
     })?;
-    let mut snapshots: Vec<_> = scope
-        .policy_snapshots
-        .iter()
-        .filter_map(|policy| {
-            let AuthoredPolicySource::SecCore(template) = &policy.template else {
-                return None;
-            };
-            template.uses_credentials().then_some((policy, template))
-        })
-        .collect();
-    snapshots.sort_by(|(left, _), (right, _)| left.policy_id.cmp(&right.policy_id));
+    let mut snapshots: Vec<_> = scope.policy_snapshots.iter().collect();
+    snapshots.sort_by(|a, b| a.policy_id.cmp(&b.policy_id));
     let mut credentials = BTreeSet::new();
-    let mut policies = Vec::with_capacity(snapshots.len());
+    let mut policies = Vec::new();
     let mut rules = Vec::new();
-    for (policy, template) in snapshots {
+    for policy in snapshots {
+        let authored = match &policy.template {
+            AuthoredPolicySource::Cedar(source) => asc_policy_cedar::credential_rules(source)?,
+            AuthoredPolicySource::SecCore(template) => {
+                if template.uses_credentials() || !policy.credential_bindings.is_empty() {
+                    return Err(PlanError::Invalid {
+                        field: "template",
+                        reason: "credential gateway policies require Cedar source",
+                    });
+                }
+                continue;
+            }
+        };
+        let bindings = resolve_bindings(policy, &authored)?;
+        if authored.is_empty() {
+            continue;
+        }
         policies.push(PolicySource {
             id: policy.policy_id.clone(),
             revision: policy.revision,
         });
-        for (rule_index, authored) in template.rules.iter().enumerate() {
-            let Resource::HttpRequest {
-                credential_id,
-                scheme,
-                host,
-                path,
-                methods,
-                response_rewrite,
-            } = &authored.target
-            else {
-                return Err(PlanError::Invalid {
-                    field: "target",
-                    reason: "credential rules require an http_request target",
-                });
-            };
-            let credential =
-                CredentialId::new(credential_id.clone()).map_err(|_| PlanError::Invalid {
-                    field: "credentialId",
-                    reason: "must be a lowercase DNS label",
-                })?;
+        for (rule_index, rule) in authored.into_iter().enumerate() {
+            let credential = bindings
+                .get(rule.rule_id.as_str())
+                .ok_or(PlanError::Invalid {
+                    field: "credentialBindings",
+                    reason: "missing persisted binding for Cedar rule identity",
+                })?
+                .clone();
             credentials.insert(credential.clone());
-            let mut methods = methods.clone();
-            methods.sort_unstable();
             rules.push(Rule {
                 source: RuleSource {
                     policy_id: policy.policy_id.clone(),
@@ -68,22 +64,21 @@ pub fn compile_scope(scope: &PreparedScope) -> Result<Plan, PlanError> {
                     rule_index,
                 },
                 matcher: RequestMatch {
-                    scheme: *scheme,
-                    host: host.clone(),
-                    path: path.clone(),
-                    methods,
+                    scheme: Scheme::Https,
+                    host: rule.host,
+                    path: rule.path,
+                    methods: rule.methods,
                     credential_id: credential,
                 },
-                response_rewrite: *response_rewrite,
-                because: authored
-                    .because
-                    .clone()
-                    .unwrap_or_else(|| "Credential use allowed by policy".to_owned()),
+                header: rule.header,
+                format: rule.format,
+                response_rewrite: rule.response_rewrite,
+                because: "Credential use allowed by policy".into(),
             });
         }
     }
     let plan = Plan {
-        format: PlanFormat::V1,
+        format: PlanFormat::V2,
         scope_id,
         policies,
         credentials: credentials.into_iter().collect(),

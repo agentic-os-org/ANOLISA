@@ -285,7 +285,7 @@ AST 外，不需要为本次评估引入第二套策略模型。通用 Cedar 授
 
 本节作为当前本地设计约定。前期讨论见
 [SecCore 集成 Cedar：剩余设计问题与待定选项](https://alidocs.dingtalk.com/i/nodes/gvNG4YZ7Jnxop15OCoadooMLW2LD0oRE)。
-以下架构包含尚未实现的请求决策路径；代码现状见 8.6，接入顺序见 8.9。
+OS sandbox 请求决策路径已接入；更广的 PIP 与动态约束映射仍是目标设计。库接口见 8.6。
 
 ### 8.1 组件职责与两条处理链路
 
@@ -299,7 +299,7 @@ Cedar 原生授权结果是 Allow/Deny 与诊断信息；策略部署和业务�
 |---|---|---|
 | 策略前端与共享 schema | 原有 JSON 反序列化；Cedar 解析、类型校验与公共子集检查；定义 action/resource/context 的字段契约 | `asc-policy-types`、`asc-policy-cedar`；PAP 已接入 Cedar 准入 |
 | PAP 策略管理 | 保存源码及 revision，关联 Scope，保留分配和 Binding 快照 | `asc-pap`、repository 管理双前端源码；策略组合待设计 |
-| PDP 请求决策 | 加载适用策略，接收具体请求，按需组织 PIP 信息并执行授权 | 目标设计；可以与 PAP 同处 SecCore daemon，逻辑职责独立 |
+| PDP 请求决策 | 加载适用策略，接收具体请求，按需组织 PIP 信息并执行授权 | `asc-pdp-runtime` 与 daemon sandbox 授权使用 PAP 选定策略；HTTP 凭据注入仍由 Gateway 编译器和数据面负责 |
 | 部署编排 | 生成或更新 Binding、选择目标，由 Reconciler 驱动安装、更新、撤销与恢复 | 现有 Scope/Binding 与 `asc-pcp`；从授权结果生成部署输入仍待接入 |
 | 后端适配 | Translator 负责目标能力检查与翻译；Deployment Client 负责后端协议和部署调用 | 原生 DSL 与 Cedar 删除/普通写/精确文件禁读结构化翻译已接入；Client 检查目标运行能力 |
 | PEP 与后端 PDP | PEP 捕获请求并落实决策；部分后端还包含自己的 PDP，持续判断系统操作 | 按 Hook、sandbox、系统调用拦截等具体场景确定；不能由 schema 推断支持情况 |
@@ -386,6 +386,7 @@ pub struct PreparedPolicy {
     pub policy_name: String,
     pub revision: Revision,
     pub template: PolicySource,
+    pub credential_bindings: Vec<CredentialBinding>,
 }
 ```
 
@@ -445,7 +446,9 @@ SQL 表结构，但仍需保持对应旧版本可解析、可执行。
 
 `authoring::source_serde` 在 CLI、RPC 和快照边界统一读取裸 `PolicyTemplate` 或
 `language/content` 封装；原生分支仍以旧形状写出，Cedar 保存封装。类型化解析拒绝
-重复字段及未知语言。三处旧快照不需要改写，SQLite 存储版本保持 1；新增 Cedar 数据
+重复字段及未知语言。三处历史文件策略快照不需要改写，SQLite 存储版本保持 1。
+HTTP 快照额外固定服务端 `credentialBindings: [{ruleId,pairId}]`，文件策略为空时省略，
+作者请求不可提交派生关联。旧 Gateway 凭据快照明确拒绝，无迁移（见 §8.6.1）；新增 Cedar 数据
 不能由旧二进制读取，回滚需保留升级前数据库。SQL `phase` 的取值写在 CHECK 约束中，
 修改它需要存储迁移；这与修改 Cedar `WriteOperation` 枚举是两类变更。
 
@@ -561,8 +564,10 @@ schema 插件加载器。Hook 扩展仅在测试中定义，内嵌 schema 拒绝
 这是 V2 前端与策略管理契约。PAP/RPC 与源码快照已接入，测试将恢复的源码传给 `pst`；
 现有 PEP Adapter 已翻译受支持的 Cedar forbid 删除/普通写/精确文件禁读条件，Client 下发目标防护策略。
 完整边界见[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)；sandbox 运行时请求使用 schema revision 1。
-校验成功只证明前端接受该策略。SDK 的深层嵌套输入栈溢出限制仍未解决，
-当前应使用管理员审阅的策略，接入不可信生成输入前需补齐防护。
+校验成功只证明前端接受该策略。SDK 解析前由非递归 scanner 限制源码 256 KiB、
+嵌套及连续前缀操作符 64、每 statement 64 个 `if` 及 512 token；结构计数跳过字符串和
+注释。平坦二元条件由 token 上限约束，不按操作符总数误判为嵌套。
+凭据 lowering 另限制 AST 16 层/4096 节点；这些限额不代表运行时授权。
 
 验收由 [`tests/validation.rs`](../../v2/crates/asc-policy-cedar/tests/validation.rs)执行：
 `validate`/`pst` 准入一致性、warnings 返回、官方 PST 往返、文件与网络字段、
@@ -591,6 +596,78 @@ Sandbox PDP 对 `Subject.agent_type`、主体条件、`process.spawn` 和 permit
 合并集合中的 permit 可以增加授权，整个集合中匹配的 forbid 优先于 permit。
 配置与迁移见 [Sandbox 使用指南](../../../../docs/user-guide/zh/agent-sec-core/sandbox.md)，
 决策与回执见 [Sandbox 授权设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。
+
+### 8.6.1 HTTP 注入扩展
+
+V2 HTTP 前端保留 `seccore.system@1`，
+原生 JSON **文件**策略和既有 OS PDP 不变。revision 2（`schema/seccore-v2.cedarschema`）
+新增 `SecCore::HttpEndpoint {host: String}`、含实际 `scheme/method/path` 的
+`HttpRequestContext.input` 和 `SecCore::Action::"network.send"`。两个 revision 精确解析，
+不得静默升级保存的 revision 1 引用。HTTP 注入降低为 Gateway plan，不进入 OS PDP，
+也不提供通用网络 allow/deny 服务。
+
+每条注入 permit 必须含六个注解：
+
+```cedar
+@modify("inject_credential")
+@real_token_file("/secure/github-real")
+@fake_token_file("/secure/github-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+```
+
+`auto` 要求指定 header 中恰好一次完整 fake；`basic` 匹配解码后的密码并保留用户名；
+其它格式必须为含唯一 `{fake}` 的整值模板，如 `Bearer {fake}`。header、format 无默认值。
+`@response_rewrite` 必须为精确注解字符串 `"true"` 或 `"false"`，降低为 Plan/Decision 的
+必填 JSON bool；缺失、空值、旧 `buffered/none` 及其它值、孤立注解、inline Token 和未知
+组合均拒绝。公共前端保留 `@id`、主体条件及合法 permit `@advice`；Gateway 单独拒绝
+主体限制/引用、advice、forbid、slot 和任何未消费条件。
+
+本内部终态以 ANOLISA `89fe4fec0` 为基线，结合 `46738d58d` Cedar 注入设计，并沿用
+`46e2a8682` 流式行为。开启时仅重写实际注入响应的 headers、identity 正文和 trailers；
+identity 匹配跨 chunk，仅保留有界未决尾部。gzip 等压缩正文原样透传，仍可能暴露 real。
+关闭时所有响应字段不改写，请求注入独立。固定分块及 HTTP/2 队列限制在故障/超预算时
+中止已注入流，不退回未经检查的响应、不整包缓存、不新增可配置限制；已发字节不可撤回。
+详见[响应契约](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)。Gateway 尚未对外开放，
+这不是本轮运行验证通过记录。
+
+Gateway 仅接受有界合取：精确 host、HTTPS scheme、method 字面相等/固定集合 contains、
+path 字面相等/Cedar like。host 必填，省略 method 放宽至既有六种方法，省略 path 不增加
+限制，不补写请求 GET 或 `/`。Cedar `*` 跨 `/`，不是原生分段 glob；实际 path 歧义、
+HTTPS、Host/SNI/authority、退役检查独立于 permit。同一有效 pair/header/format/response
+候选去重，不同指令冲突拒绝，不按首条优先或递归改写。无托管凭据的请求通过安全检查后
+原样转发；托管 fake 即使位于未匹配 host/header/格式也不得降级为无凭据。无 fake 不注入。
+
+前端校验是纯函数。两个文件注解必须是 daemon 主机的规范绝对路径；相对路径、`~`、
+环境展开、NUL、`.`/`..` 在 I/O 前拒绝。全部准入及 root 授权完成后，管理入口才安全读取
+root-owned/private/regular/single-link 文件，一次登记配对。Store 原子登记；PAP 保存可信
+非秘密规则→opaque pair ID 关联，Scope/Binding 与源码一起固定该关联，作者输入不可伪造。
+路径只是导入来源，不是身份或轮换触发器。部署/恢复不得重读源文件；CAS 重试和回执丢失
+须核对权威 revision/关联，不删除并发共享配对或假定提交成功。
+
+Scope 可显式共用指定 fake；撤销一个不影响其它 Active Scope，最后 Active Scope 删除
+永久 tombstone，包括零实例 Scope。恢复先核对全部 canonical 关联，再恢复缓存成员。
+生成与登记共用等长可见 ASCII 校验：整串 `mismatch_count * 5 >= length * 4`，前缀及标点
+均计入。本地 `key generate-fake` 默认 `--format auto`，独占创建 0600 输出且不打印 Token；
+未知启发式明确失败。
+
+原生凭据执行、KeyAdd、`gateway credentials` 及 RPC 全部删除。旧 Gateway 策略/Store/
+plan/快照数据明确拒绝，不迁移、不覆盖、不推断转换。root pair list/remove 使用 opaque ID。
+无 Scope 参数的 `gateway ca` 仅在真实 Gateway ready 时返回共享公开 CA 的 `{caBundlePath}`，
+不提供 GitHub 环境映射。remove 返回 `{pairid}`，list 返回 `{pairids: string[]}`。
+仅 `github.cedar` 资产覆盖八条 auto/basic REST/Smart HTTP 规则；source/raw/RPM 不交付
+`github.json` 或 `github-policy.json` wrapper。八条规则均开启响应改写，包括流式
+ git-upload-pack 响应。源码资产不自动注册：[`policy.rs`](../../v2/apps/asc-cli/src/commands/policy.rs)
+的 `PolicyInput::template()` 缺省以 `--language cedar` 读取 raw Cedar，不依据文件扩展名
+推断格式，将 UTF-8 原文完整保留在 Cedar envelope 中。可选 `--schema-id`、`--schema-revision`
+指定 schema；省略值使用 `embedded_reference()`（`seccore.system`、revision 1）。
+HTTP 凭据 Policy 输入使用 `--file github.cedar --schema-revision 2`，不会隐式选择 revision 2。
+无效 UTF-8 被拒绝，raw 与 JSON 文件读取均保留 4 MiB 上限。`--language json` 选择原生
+JSON 模板或 Cedar envelope，禁止两个 schema option，并保留 `source_serde::from_slice`
+类型化解码及重复键拒绝。
+[`PermissionInput::parse`](../../v2/crates/asc-pep-runtime/src/permissions.rs) 仍是独立的
+revision 1 OS 权限输入路径。详见 [Gateway 契约](V2_SECRET_GATEWAY_DESIGN_zh.md)。
 
 ### 8.7 Schema 版本与策略加载
 
@@ -663,8 +740,8 @@ Binding，必须保留其版本支持，或先完成显式迁移和目标重新�
 
 | 部分 | 当前状态 | 下一步 |
 |---|---|---|
-| 类型与 Cedar 前端 | 源码联合类型；内置 revision 1；`validate` 返回非阻断 warnings，`pst` 校验并返回 SDK PST | schema 文件元数据及读取；保持公共子集诊断 |
-| Policy/PAP/RPC/SQLite | `template: PolicySource`；Cedar 准入和源码持久化；旧请求与三处快照兼容 | 保持版本与快照契约 |
+| 类型与 Cedar 前端 | 源码联合类型；精确内置 revision 1、2；`validate` 返回非阻断 warnings，`pst` 校验并返回 SDK PST；revision 2 HTTP 注入终态使用两值响应开关 | schema 文件元数据及读取；保持公共子集诊断；单独验证最终 HTTP 实现 |
+| Policy/PAP/RPC/SQLite | `template: PolicySource`；Cedar 准入和源码持久化；历史文件请求与三处文件快照兼容；HTTP 快照固定 pair 关联，旧 Gateway 数据拒绝且不迁移 | 保持版本与快照契约 |
 | 策略加载与目标翻译 | 保存的 Cedar 源码经 `pst` 加载；删除/普通写/精确文件禁读翻译和 Client 部署已接入现有 PEP Adapter | 按声明边界验证真实后端防护；逐目标扩展支持范围 |
 | Sandbox 运行时授权 | PAP 当前版本读取、OS 授权 PDP、五态、本地 PEP 审批/执行与检查写入的回执 | 按最终修订确认 Linux 和 CI 结果；保留独立的 Binding 部署语义 |
 | Agent Hook/PIP | 内置 schema 尚未支持 | 另定资源、动作、请求字段与检测契约，再发布对应 schema 版本 |

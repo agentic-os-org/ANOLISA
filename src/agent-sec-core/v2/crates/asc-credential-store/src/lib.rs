@@ -1,10 +1,8 @@
-//! Root-only credential store for the secret gateway.
+//! Explicit real/fake pair storage for the secret gateway.
 //!
-//! The store keeps real credential values out of every Policy, plan and
-//! database surface. It issues one format-preserving fake per (credential,
-//! Scope) pair, keeps tombstones for removed credentials so their old
-//! fakes stay rejected, and materializes the selected mappings into a
-//! gateway-readable snapshot.
+//! Pairs share one fake across authorized Scopes. Last-Scope revocation drops
+//! the real permanently and retains a rejection tombstone. Selected live pairs
+//! are materialized into a versioned gateway snapshot without authentication metadata.
 
 mod error;
 mod fake;
@@ -15,13 +13,14 @@ mod secret;
 mod store;
 
 pub use error::CredentialStoreError;
-pub use fake::FakeFormat;
+pub use fake::{FakeFormat, generate_fake, validate_pair};
+pub use filesystem::{read_token_file, write_fake_file};
 pub use materialize::{SECRETS_SNAPSHOT_VERSION, SecretsTarget};
 pub use names::{CredentialId, ScopeId};
 pub use secret::{MAX_SECRET_BYTES, Secret};
 pub use store::{
-    Carrier, CredentialSpec, CredentialState, CredentialStore, CredentialSummary, FakeSummary,
-    MAX_ACTIVE_FAKES_PER_SCOPE, MAX_FAKES_TOTAL, STORE_FILE_NAME,
+    CredentialState, CredentialStore, CredentialSummary, FakeSummary, MAX_ACTIVE_FAKES_PER_SCOPE,
+    MAX_FAKES_TOTAL, PairInput, STORE_FILE_NAME,
 };
 
 #[cfg(test)]

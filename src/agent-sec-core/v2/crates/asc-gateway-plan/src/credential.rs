@@ -1,24 +1,32 @@
-//! GitHub credential shape and environment metadata, independent of Policy rules.
+//! Match server-persisted credential bindings to canonical Cedar rule identities.
 
-use asc_credential_store::{Carrier, CredentialId, CredentialSpec, FakeFormat};
+use std::collections::BTreeMap;
 
-/// Metadata for importing GitHub personal access or app tokens into the store.
-#[must_use]
-pub fn github_credential_spec() -> CredentialSpec {
-    CredentialSpec {
-        // The literal is a valid lowercase DNS label.
-        id: CredentialId::new("github")
-            .unwrap_or_else(|_| unreachable!("static credential identifier is valid")),
-        carriers: vec![Carrier::HeaderToken, Carrier::BasicPassword],
-        format: FakeFormat::with_prefixes(["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]),
+use asc_credential_store::CredentialId;
+use asc_policy_cedar::http::CredentialRule;
+use asc_policy_types::policy::PreparedPolicy;
+
+use crate::PlanError;
+
+pub(super) fn resolve_bindings<'a>(
+    policy: &'a PreparedPolicy,
+    rules: &[CredentialRule],
+) -> Result<BTreeMap<&'a str, CredentialId>, PlanError> {
+    let invalid = || PlanError::Invalid {
+        field: "credentialBindings",
+        reason: "must bind every Cedar rule identity exactly once to a valid persisted pair ID",
+    };
+    if policy.credential_bindings.len() != rules.len() {
+        return Err(invalid());
     }
-}
-
-/// Environment variables receiving the issued fake; unknown credentials have no mapping.
-#[must_use]
-pub fn credential_environment_variables(credential: &CredentialId) -> &'static [&'static str] {
-    match credential.as_str() {
-        "github" => &["GITHUB_TOKEN", "GH_TOKEN"],
-        _ => &[],
+    let mut bindings = BTreeMap::new();
+    for binding in &policy.credential_bindings {
+        let pair_id = CredentialId::new(binding.pair_id.clone()).map_err(|_| invalid())?;
+        if !rules.iter().any(|rule| rule.rule_id == binding.rule_id)
+            || bindings.insert(binding.rule_id.as_str(), pair_id).is_some()
+        {
+            return Err(invalid());
+        }
     }
+    Ok(bindings)
 }

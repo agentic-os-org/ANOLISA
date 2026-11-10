@@ -28,6 +28,39 @@ pub use model::{Page, PolicyRevisionState, ScopeDiscoverySeed};
 pub use repository::PapRepository;
 pub use service::PapService;
 
+/// Validates server-owned rule associations against the entire pinned source.
+/// # Errors
+/// Rejects missing, extraneous or malformed credential associations.
+pub fn validate_policy_snapshot(
+    policy: &asc_policy_types::policy::PreparedPolicy,
+) -> Result<(), PapError> {
+    use asc_policy_types::{Validate, authoring::PolicySource};
+    policy.validate().map_err(PapError::InvalidPolicy)?;
+    let rules = match &policy.template {
+        PolicySource::Cedar(source) => asc_policy_cedar::credential_rules(source)
+            .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?,
+        PolicySource::SecCore(source) if source.uses_credentials() => {
+            return Err(PapError::InvalidCedar(
+                "native credential snapshots are unsupported".into(),
+            ));
+        }
+        PolicySource::SecCore(_) => Vec::new(),
+    };
+    if rules.len() != policy.credential_bindings.len()
+        || rules.iter().any(|rule| {
+            !policy
+                .credential_bindings
+                .iter()
+                .any(|binding| binding.rule_id == rule.rule_id)
+        })
+    {
+        return Err(PapError::InvalidCedar(
+            "credential associations differ from pinned source rules".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Post-commit Binding wake-up; notifications contain no command or spec.
 pub trait BindingReconcileEnqueuer: Send + Sync {
     /// # Errors
@@ -40,6 +73,16 @@ pub trait BindingReconcileEnqueuer: Send + Sync {
     /// # Errors
     /// Returns Full or Stopped when this notification cannot be accepted.
     fn enqueue(&self, id: &asc_foundation_types::ResourceId) -> Result<(), EnqueueError>;
+}
+
+/// Resolves validated credential sources into non-secret immutable associations.
+pub trait CredentialRegistration: Send + Sync {
+    /// # Errors
+    /// Rejects unsafe source files, invalid pairs or unavailable storage.
+    fn register(
+        &self,
+        source: &asc_policy_types::cedar::CedarPolicySource,
+    ) -> Result<Vec<asc_policy_types::policy::CredentialBinding>, PapError>;
 }
 
 /// Credential execution owned by an immutable Scope, never by a file-only assignment.

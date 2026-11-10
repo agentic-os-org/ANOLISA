@@ -33,6 +33,7 @@ asc-observability = { workspace = true, features = ["runtime"] }
 tracing.workspace = true
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
+asc-credential-store = { workspace = true }
 asc-foundation-types = { workspace = true }
 asc-os-permission-types = { workspace = true }
 asc-policy-cedar = { workspace = true }

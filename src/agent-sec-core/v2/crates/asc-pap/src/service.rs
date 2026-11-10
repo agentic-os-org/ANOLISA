@@ -30,6 +30,7 @@ pub struct PapService<R> {
     repository: Arc<R>,
     discovery: Option<Arc<dyn crate::ScopeDiscovery>>,
     execution: Option<Arc<dyn crate::ScopeExecution>>,
+    registration: Option<Arc<dyn crate::CredentialRegistration>>,
     enqueuer: Option<Arc<dyn crate::BindingReconcileEnqueuer>>,
 }
 
@@ -42,6 +43,7 @@ impl<R> Clone for PapService<R> {
             enqueuer: self.enqueuer.clone(),
             discovery: self.discovery.clone(),
             execution: self.execution.clone(),
+            registration: self.registration.clone(),
         }
     }
 }
@@ -59,6 +61,7 @@ where
             enqueuer: None,
             discovery: None,
             execution: None,
+            registration: None,
         }
     }
 
@@ -82,6 +85,34 @@ where
     pub fn with_scope_execution(mut self, execution: Arc<dyn crate::ScopeExecution>) -> Self {
         self.execution = Some(execution);
         self
+    }
+
+    /// Connects root-authorized Policy admission to protected pair storage.
+    #[must_use]
+    pub fn with_credential_registration(
+        mut self,
+        registration: Arc<dyn crate::CredentialRegistration>,
+    ) -> Self {
+        self.registration = Some(registration);
+        self
+    }
+
+    /// Classifies credentials only after validating the complete authored source.
+    /// # Errors
+    /// Rejects malformed Cedar and retired native credential policies.
+    pub fn source_uses_credentials(template: &PolicySource) -> Result<bool, PapError> {
+        match template {
+            PolicySource::Cedar(source) => asc_policy_cedar::credential_rules(source)
+                .map(|rules| !rules.is_empty())
+                .map_err(|error| PapError::InvalidCedar(error.diagnostic())),
+            PolicySource::SecCore(source) if source.uses_credentials() => {
+                Err(PapError::InvalidCedar(
+                    "native credential policies are unsupported; use Cedar schema revision 2"
+                        .into(),
+                ))
+            }
+            PolicySource::SecCore(_) => Ok(false),
+        }
     }
 
     fn scope_mutation_lock(
@@ -205,10 +236,25 @@ where
     ) -> Result<PreparedPolicy, PapError> {
         validate_policy_name(policy_name)
             .map_err(|message| PapError::InvalidPolicyName(message.to_owned()))?;
-        if let PolicySource::Cedar(cedar) = template {
-            asc_policy_cedar::request_authorization_eligible(cedar)
-                .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
+        match template {
+            PolicySource::Cedar(cedar) => {
+                asc_policy_cedar::request_authorization_eligible(cedar)
+                    .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
+            }
+            PolicySource::SecCore(source) => {
+                source.validate().map_err(|error| {
+                    PapError::InvalidPolicy(ValidationError::new(
+                        format!("template.{}", error.path),
+                        error.message,
+                    ))
+                })?;
+            }
         }
+        let uses_credentials = Self::source_uses_credentials(template)?;
+        if matches!(target, WriteTarget::UpdateFile(_)) && uses_credentials {
+            return Err(PapError::CredentialAuthorityRequired);
+        }
+        let mut credential_bindings = None;
         let (update_existing, mut selected_id) = match target {
             WriteTarget::Create => (false, generated_resource_id()?),
             WriteTarget::Update(id) | WriteTarget::UpdateFile(id) => (true, id.clone()),
@@ -217,11 +263,11 @@ where
         for _ in 0..MAX_WRITE_ATTEMPTS {
             let state = self.repository.get_policy_revision_state(&selected_id)?;
             if matches!(target, WriteTarget::UpdateFile(_))
-                && (template.uses_credentials()
+                && (uses_credentials
                     || state
                         .as_ref()
                         .and_then(|s| s.current.as_ref())
-                        .is_some_and(|p| p.template.uses_credentials()))
+                        .is_some_and(PreparedPolicy::uses_credentials))
             {
                 return Err(PapError::CredentialAuthorityRequired);
             }
@@ -239,6 +285,25 @@ where
                 return Ok(current.clone());
             }
 
+            if credential_bindings.is_none() {
+                credential_bindings = Some(if uses_credentials {
+                    let PolicySource::Cedar(source) = template else {
+                        return Err(PapError::Unavailable);
+                    };
+                    if let Some(current) = state.as_ref().and_then(|value| value.current.as_ref())
+                        && &current.template == template
+                    {
+                        current.credential_bindings.clone()
+                    } else {
+                        self.registration
+                            .as_ref()
+                            .ok_or(PapError::Unavailable)?
+                            .register(source)?
+                    }
+                } else {
+                    Vec::new()
+                });
+            }
             let revision =
                 next_revision(state.as_ref().map(|value| value.last_allocated_revision))?;
             let candidate = PreparedPolicy {
@@ -246,14 +311,27 @@ where
                 policy_name: policy_name.to_owned(),
                 revision,
                 template: template.clone(),
+                credential_bindings: credential_bindings.clone().ok_or(PapError::Persistence)?,
             };
+            crate::validate_policy_snapshot(&candidate)?;
             match self.repository.put_policy(&candidate) {
                 Err(PapError::Conflict) => {
                     if !update_existing {
                         selected_id = generated_resource_id()?;
                     }
                 }
-                result => return result,
+                Err(error) => {
+                    if self
+                        .repository
+                        .get_policy(&candidate.policy_id, candidate.revision)
+                        .as_ref()
+                        == Ok(&candidate)
+                    {
+                        return Ok(candidate);
+                    }
+                    return Err(error);
+                }
+                Ok(policy) => return Ok(policy),
             }
         }
         Err(PapError::Conflict)
@@ -390,7 +468,7 @@ where
         if candidate
             .policy_snapshots
             .iter()
-            .any(|p| !p.template.uses_credentials())
+            .any(|p| !p.uses_credentials())
         {
             self.check_ready()?;
         }

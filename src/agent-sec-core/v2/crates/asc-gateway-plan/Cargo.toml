@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 asc-credential-store = { workspace = true }
 asc-policy-types = { workspace = true }
+asc-policy-cedar = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

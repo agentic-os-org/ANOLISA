@@ -31,23 +31,18 @@ pub enum CredentialStoreError {
     /// No credential with this identifier exists.
     #[error("unknown credential {0}")]
     UnknownCredential(CredentialId),
-    /// An active credential already has a different real value or spec.
-    #[error(
-        "credential {0} already exists with a different value or spec; remove it before reimporting"
-    )]
+    /// A Scope would assign multiple fakes to the same real value.
+    #[error("pair {0} conflicts with another pair for the same real in one Scope")]
     Conflict(CredentialId),
-    /// The credential was removed; its fakes are tombstones and no new fake is issued.
+    /// The pair is permanently retired and cannot be activated or registered again.
     #[error("credential {0} is retired")]
     Retired(CredentialId),
-    /// The real value equals another credential's real value or an issued fake.
-    #[error("real value of credential {0} collides with another managed value")]
+    /// A fake has another real owner, or a real equals a managed fake or tombstone.
+    #[error("pair value collides with managed pair {0}")]
     DuplicateValue(CredentialId),
     /// A fake mapping limit would be exceeded.
     #[error("capacity exceeded: {0}")]
     Capacity(&'static str),
-    /// No fake distinct from every managed value was found after retries.
-    #[error("cannot generate a unique fake value")]
-    FakeGeneration,
     /// The system random generator failed.
     #[error("system random generator failed")]
     Randomness,

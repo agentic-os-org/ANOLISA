@@ -2,17 +2,20 @@
 
 | 属性 | 值 |
 | --- | --- |
-| 状态 | [TARGET V2] |
-| 范围 | GitHub 凭据；复用原生 Policy/Scope/Binding 与 process discovery |
+| 状态 | [TARGET V2] Cedar HTTP 凭据注入 |
+| 范围 | HTTPS 静态 Token 注入；复用 Policy/Scope/Binding 与 process discovery |
 | 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2-secret-gateway-管理) |
 
-本文面向维护 Policy 契约与网关实现的开发者，定义布尔响应开关、未压缩正文的有界流式
-替换和压缩正文透传边界。发布支持以对应版本的实际制品为准，源码行为不代表已发布能力。
+本文面向维护 Policy 契约与网关实现的开发者，定义 Cedar 两值响应开关、未压缩正文的
+有界流式替换和压缩正文透传边界。本文以 ANOLISA `89fe4fec0` 为 rebase 基线，结合
+`46738d58d` 的 Cedar HTTP 注入设计；响应算法沿用 `46e2a8682`，不恢复整包缓存模式。
+Gateway 尚未对外开放，本文是内部终态契约，不是已发布能力或本轮运行验证记录。
 
 ## 1. 目标与授权对象
 
-Secret Gateway 让 Agent 只持有与真实 GitHub Token 同形的 fake，在 Policy 允许的 HTTPS
-请求 Authorization 中把 fake 换成真实值；响应是否反向替换由 `responseRewrite` 控制。
+Secret Gateway 让 Agent 持有用户指定的 fake，真实 HTTPS 静态 Token 保存在受保护 Store。
+网关只在 Policy 允许的指定请求头中把 fake 换成真实值；响应是否反向替换由
+`@response_rewrite("true")` / `@response_rewrite("false")` 控制。
 设计前提是 Agent 无法从环境变量、文件、工具或其他渠道取得真实凭据。响应改写不是完整
 防泄漏保证：关闭改写或上游返回压缩正文时，真实 key 仍可能回到 Agent（见 §4.3），因此
 不能无条件声称 Agent 始终只会看到 fake。这也不是一般 DLP：请求正文不检查或改写，若
@@ -20,73 +23,90 @@ Agent 已取得真实凭据，本设计不保证阻止其通过正文外泄。
 
 授权由 PAP 中的 Policy、Scope 和 Binding 负责：Policy 描述允许的请求，Scope 固定 Policy
 revision 与 owner UID 并持续选择进程，Binding 固定一次发现的进程实例。Credential Store 保存
-真实值与 Scope fake；Gateway Runtime 保存执行投影与清理责任，不成为第二套授权配置。
-key 导入不授权，执行投影不能在 canonical 对象失效后独立恢复权限。
+真实值、指定 fake 与 Scope 授权集合；Gateway Runtime 保存执行投影与清理责任，不成为第二套授权配置。
+配对登记不授权，执行投影不能在 canonical 对象失效后独立恢复权限。
 
-本版本仅支持 GitHub 凭据元数据和静态 HTTPS allow 规则；不提供 DLP、审计导出、OAuth 或
-其他 provider 的启动凭据映射。
+本阶段支持显式 header/格式的静态 HTTPS 注入，不提供 DLP、审计导出、OAuth、签名、
+非 HTTP 协议或自动 Agent 凭据映射。Gateway 尚未开放，本次不做旧 Gateway 策略、Store、
+快照或执行投影迁移；旧数据明确拒绝，不丢弃、覆盖或推断转换。
 
 | 组件 | 位置 | 职责 |
 | --- | --- | --- |
-| Policy Types | `v2/crates/asc-policy-types` | 原生 `network/use_credential/http_request` 与 Scope owner |
+| Policy Types / Cedar | `v2/crates/asc-policy-types`、`asc-policy-cedar` | Cedar HTTP 注入描述、非秘密 pair 关联与 Scope owner |
 | PAP / PCP | `v2/crates/asc-pap`、`asc-pcp` | 固定 assignment 快照、discovery、Binding reconciliation 与删除 |
 | Credential Store | `v2/crates/asc-credential-store` | root 真实值、稳定 Scope fake、永久 tombstone、网关快照 |
 | Gateway Plan | `v2/crates/asc-gateway-plan` | 从 Scope 的凭据 Policy 快照编译确定性 plan |
 | Gateway Runtime | `v2/crates/asc-gateway-runtime` | Scope 准备/撤销、Binding 实例接管、generation、systemd 与 nft |
 | 数据面 addon | `v2/gateway/addon/` | mitmproxy 请求判定、替换与响应检查 |
-| CLI | `v2/apps/asc-cli/src/commands/` | root key 管理、既有 Policy/Scope 操作、owner fake/CA 查询 |
+| CLI | `v2/apps/asc-cli/src/commands/` | 本地 fake 生成、root pair 管理、Policy/Scope 操作、共享公开 CA 查询 |
 
-## 2. 原生 Policy 与 Scope
+## 2. Cedar Policy 与 Scope
 
 ### 2.1 Policy authoring
 
-Policy 使用既有 `specVersion: "0.1"`、`rules` JSON，不增加独立授权语言。凭据规则为：
+原生 JSON **文件策略**及已有 schema revision 1、OS PDP 不变；原生
+`network/use_credential/http_request` 凭据执行链路删除，不作为兼容 fallback。
+HTTP 使用精确 `seccore.system@2`，经纯 Cedar 准入、root 登记、Scope 快照和 Gateway
+Translator 执行，不接入通用网络 PDP。注册 RPC 仍接受带精确 schema 引用的 `PolicySource`
+源码封装：`{language:"cedar", content:{schema:{schemaId:"seccore.system",revision:2},text:"..."}}`。
+`policy create/update --file` 缺省以 `--language cedar` 读取独立 Cedar 文件，不依据扩展名
+推断格式；保留 UTF-8 原文并在 CLI 构造 `PolicySource`。schema 默认 `seccore.system@1`，
+HTTP 凭据策略显式使用 `--schema-revision 2`，可选 `--schema-id` 指定 schema 身份。
+`--language json` 下原生 JSON 模板或 Cedar envelope 仍经 `source_serde::from_slice`
+类型化解码，禁止额外 schema 参数覆盖其自带引用。
+`PermissionInput::parse` 是独立的 schema revision 1 OS 权限输入通路，不作为 Gateway fallback。
 
-```json
-{
-  "specVersion": "0.1",
-  "rules": [{
-    "effect": "allow",
-    "category": "network",
-    "action": "use_credential",
-    "target": {
-      "type": "http_request",
-      "credentialId": "github",
-      "scheme": "https",
-      "host": "api.github.com",
-      "path": "/**",
-      "methods": ["GET", "HEAD"],
-      "responseRewrite": true
-    }
-  }]
-}
+```cedar
+@modify("inject_credential")
+@real_token_file("/secure/github-real")
+@fake_token_file("/secure/github-fake")
+@inject_header("Authorization")
+@inject_format("auto")
+@response_rewrite("true")
+permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+when {
+    resource.host == "api.github.com" &&
+    context.input.scheme == "https" &&
+    ["GET", "HEAD"].contains(context.input.method) &&
+    context.input.path == "/user"
+};
 ```
 
-- 凭据 Policy 只能含 `allow/network/use_credential`，不支持 `where`、`previous`、确认或 file
-  规则；单 Policy 混合必须拒绝。不同 file/credential Policy 可在同一个 Scope 中分别执行。
-- `credentialId` 是 store 标识，不是 Token；GitHub 标识为 `github`。
-- host 为精确小写 DNS 名，最长 253 字节；不支持通配 host。
-- path 最长 512 字节、必须绝对；`*` 为一段，`**` 跨多段，其余为字面段，不允许 `.`、`..`。
-- methods 是 1–6 个不重复的大写 `GET/HEAD/POST/PUT/PATCH/DELETE`。
-- `responseRewrite` 必填，且只接受 JSON bool `true` / `false`；不接受省略、null、字符串
-  `"true"` / `"false"`、数字或旧 `buffered` / `none`，不提供默认值或兼容别名。
-  `true` 重写注入后响应的 headers、未压缩正文和 trailers；`false` 全部不重写（详见 §4.3）。
-- 不提供 `auto` / `stream` 等技术配置；可选 `because` 最长 256 字节且不含控制字符。
+六个注解均必填；孤立配套注解、inline Token、未知组合拒绝。两个文件路径必须是 daemon
+主机的不同规范绝对路径；相对路径、`~`、环境展开、NUL、`.`/`..` 在任何文件读取前拒绝。
+不按 CLI/daemon 工作目录补齐路径。公共前端保留 `@id`、主体条件及合法 `@advice`，但
+Gateway 子集拒绝主体限制/引用、advice、forbid、slot 和任何未消费条件，不能静默丢条件。
 
-标准 GitHub Policy 的完整 JSON 位于 `v2/crates/asc-gateway-plan/policies/github.json`；RPM 将其安装为 `/usr/share/anolisa/sec-core/gateway/github-policy.json`。各规则的布尔开关如下：
+`@response_rewrite` 的注解字符串仅接受精确小写 `"true"` / `"false"`，分别降低为
+Plan/Decision 的 bool `true` / `false`。缺失、空值、旧 `buffered/none` 或其它值拒绝，
+不提供默认值、兼容别名或缓存/编码/队列限制配置。`true` 重写实际注入响应的 headers、
+identity 正文和 trailers；`false` 全部不重写，请求注入不受影响（见 §4.3）。
 
-| host | path | method | responseRewrite |
+Gateway 只支持有界合取：精确 host、scheme=https、method 字面相等或固定集合 contains、
+path 字面相等或 Cedar like。host 必须精确小写 DNS 名且最多 253 字节；省略 scheme 仍由
+执行层强制 HTTPS。method 集合为 1–6 个不重复的大写 GET/HEAD/POST/PUT/PATCH/DELETE，
+省略 method 仅放宽至这六种方法；省略 path 不增加限制，不补写 GET 或 `/`。
+path 字面量/模式最多 512 字节，Cedar `*` 跨 `/`，不是旧分段 glob；实际 path 必须绝对且
+通过歧义检查。不同 file/credential Policy 可在同一个 Scope 分别执行，单 Policy 不混合。
+
+标准资产仅保留 `v2/crates/asc-gateway-plan/policies/github.cedar`；source/raw/RPM 按安装
+布局交付 `gateway/github.cedar`（RPM 位于 `/usr/share/anolisa/sec-core/gateway/`），
+不交付 `github.json` 或 `github-policy.json` wrapper。它是可审阅源码，不是已自动导入的
+Policy；通过 `policy create --name github --file github.cedar --schema-revision 2` 显式注册。
+每个 endpoint 有 auto/basic 两条，共八条：
+
+| host | Cedar path 范围 | method | response_rewrite |
 | --- | --- | --- | --- |
-| `api.github.com` | `/**` | GET、HEAD、POST、PUT、PATCH、DELETE | `true` |
-| `github.com` | `/**/info/refs` | GET | `true` |
-| `github.com` | `/**/git-upload-pack` | POST | `false` |
-| `github.com` | `/**/git-receive-pack` | POST | `true` |
+| `api.github.com` | `/*`（所有通过安全检查的路径） | GET、HEAD、POST、PUT、PATCH、DELETE | `"true"` |
+| `github.com` | `/*/info/refs` | GET | `"true"` |
+| `github.com` | `/*/git-upload-pack` | POST | `"true"` |
+| `github.com` | `/*/git-receive-pack` | POST | `"true"` |
 
-上传接口、raw 内容、GitHub Enterprise 不在标准 Policy 中。原 `buffered` 项改为 `true`，
-不再整包缓存；Git upload-pack 原 `none` 改为 `false`，headers、body、trailers 均不重写。
-旧 `none` 仍替换 headers/trailers，因此这一映射改变行为，并非兼容迁移。字节替换不是
-Git 或通用二进制协议解析；带 hash、签名或 framing 的内容即使长度不变，也不保证替换后
-协议正确。标准 Policy 的选择不构成任意二进制响应可安全改写的保证。
+这保留两个 host 的 auto/basic 输入范围，不增加 Git host-only 规则。上传接口、raw 内容、
+GitHub Enterprise 不在标准 Policy 中；upload-pack 大 pack 按统一规则流式处理，不由模板
+选择缓冲或透传模式。字节替换不是 Git 或通用二进制协议解析；带 hash、签名或 framing 的
+内容即使长度不变，也不保证替换后协议正确。标准模板不证明任意服务兼容，部署前需按
+host、路径和响应开关审阅。
 
 ### 2.2 Scope 准备与发现
 
@@ -97,10 +117,11 @@ root 通过既有 `scope create` 指定精确 Policy ID/revision、owner UID，�
 进程自身设置，只在 owner UID 内识别进程，与 cgroup 不是 UID 内部隔离边界的前提一致。
 凭据 Scope 必须有非 root owner；普通 file Scope 的权限、selector 和快照行为保持不变。
 
-创建 Scope 固定完整 Policy 快照，校验 owner 与网关秘密读取权限，预留端口并签发稳定 fake。
-没有进程时也可以准备 plan。启动顺序为：导入 key → 创建 Policy → 创建 Scope → enable →
-owner 查询 fake/CA → Agent 自身加载配置 → 自主启动。未满足 §4.1 的网关 ready 条件时查询
-必须明确失败，不向客户端交付部分配置。
+创建 Scope 固定完整 Policy 和非秘密 pair 关联快照，校验 owner 与网关秘密读取权限，
+预留端口并授权已登记的指定 fake，不签发新 fake。无进程时也可准备 plan。
+启动顺序为：准备 real/fake 文件 → root 提交 Cedar Policy 并登记配对 → 创建 Scope → enable →
+`gateway ca` 查询共享 CA → Agent 自行加载 fake 文件与 CA → 自主启动。
+未满足 §4.1 的 ready 条件时 CA 查询明确失败；不返回 fake、Token 或环境变量映射。
 
 PCP process discovery 约两秒运行一次。每个匹配进程实例通过既有 Binding 接管，核对 boot ID、
 PID namespace、PID、start time、UID 和组；目标及已有后代快照逐个核验后移入实例 cgroup。
@@ -123,8 +144,8 @@ PID namespace、PID、start time、UID 和组；目标及已有后代快照逐�
 目标写入 daemon stderr，经 systemd 进入 journald（`journalctl -u agent-sec-core-v2`）。
 
 匹配实例重启由 discovery 重新接管，fake
-保持稳定。同 UID 多 Scope 有不同 fake，但同一用户仍可读取彼此 fake；cgroup 不是 UID
-内部的安全隔离边界。
+保持稳定。不同 Scope 可以显式共用同一配对的指定 fake，授权仍按当前 Scope 检查；
+不凭 fake 本身授权。cgroup 不是同 UID 内部的安全隔离边界。
 
 ## 3. Credential Store
 
@@ -134,76 +155,86 @@ PID namespace、PID、start time、UID 和组；目标及已有后代快照逐�
   打开路径，拒绝符号链接。目录 advisory lock 保证单写者，打开时删除崩溃遗留 `.tmp-*`。
 - 修改在副本上校验并原子替换；文件未替换时磁盘与内存保持原状，已替换但持久性未确认时
   内存跟随磁盘，避免撤销后继续下发旧值。
-- 真实值为 1–512 字节可见 ASCII；不实现 `Clone/Serialize/Display`，Debug 不含真实值，比较
-  不在第一个不同字节提前退出。凭据 ID 为有界小写 DNS label，Scope fake 以 canonical Scope ID
-  归属，不以 PID 或进程名归属。
-- GitHub carrier 为 `header_token`（Authorization Bearer/token）与 `basic_password`（Basic 密码）。
-  已知前缀为 `ghp_`、`gho_`、`ghu_`、`ghs_`、`ghr_`、`github_pat_`。
-- fake 保留最长已知前缀、长度与标点，以均匀随机同类字符替换其余字母/数字。前缀之后少于
-  16 个字母/数字则拒绝；候选与任何真实值/fake 相等时重新生成，最多八次。
+- real/fake 为 1–512 字节有界可见 ASCII；真实值不进入普通 Serialize/Display/Debug 输出。
+  配对必须等长，整串逐位置差异满足 `mismatch_count * 5 >= length * 4`，即至少
+  `ceil(0.8 * length)`；包含保留前缀和标点。生成和人工 fake 登记共用此校验。
+- 所有规则先纯校验并核验 root，才逐级安全读取两个 private/root-owned/regular/single-link
+  文件；拒绝 symlink，允许约定的末尾换行，不静默删除内部空白/控制符。秘密不进 argv、
+  普通 RPC、日志或策略数据库。配对批量在 Store 一次原子写内登记；未绑定记录不授权。
+- 身份是稳定 opaque pair ID，不是路径或秘密摘要；相同配对可跨路径复用。PreparedPolicy
+  保存可信规则→pair ID 关联，作者 CLI/RPC 不接受派生关联字段。Scope/Binding 固定完整
+  快照，加载核验关联与来源规则一致；原生文件策略关联为空。
+- Store/PAP CAS 冲突或回执丢失时，依据权威 Policy revision/关联确认是否提交成功；不补偿
+  删除其他并发 Policy 共享的配对，不静默报成功，不重读源文件恢复授权。来源路径或内容
+  改动不轮换已登记快照；部署/恢复只能读 Store 和 canonical 关联。
+- Store 将完整 Cedar 源与 schema 的哈希→有序 pair IDs 作为非秘密登记回执，与配对一次原子写入；
+  相同源重试先查回执，不重读文件。哈希不是凭据身份，不对外公开；退役配对的回执不能复活 fake。
 
 ### 3.2 生命周期
 
-每个（credential，Scope）只有一个活跃 fake，重复签发返回相同值。`key add` 对相同 secret
-幂等成功；已有凭据的不同值必须报错，不覆盖真实值。更换 key 必须先 remove 再 add，
-不自动轮换。Scope 删除先关闭 canonical admission，再把该 Scope 的 fake 退役；不删除
-共享真实值。空 Scope 也必须释放准备责任和端口，不能依赖最后一个 Binding 的回调。
+同一配对可显式关联多个 Scope，Scope prepare 使用已登记 fake，不自动随机签发。
+同 real 可以有不同人工 fake，但同 Scope 不允许同 real 对应多个 fake，避免响应回写歧义。
+删除 Scope 先关闭 canonical admission、撤销该 Scope 授权，再清理 Binding/端口；
+其余 Active Scope 的共享授权仍有效。最后 Active Scope 删除时 fake 全局永久 tombstone，
+零实例 Scope 同样执行；已退役 Scope/fake 不可重挂或通过重新导入复活。
+恢复先全量核对 canonical Active Scope 关联，再恢复缓存成员，不能因恢复顺序误退役共享 fake。
 
-全局 `key remove` 删除真实值并退役所有相关 fake，不影响其他凭据。重新导入不复活旧 fake；
-使用更换后的 key 必须创建新 Scope，并将新 fake 加载到 Agent 配置中。
-tombstone 永久保留，防止旧 fake 成为“未知值”而被默认放行；含 tombstone 的 fake 总数最多
-4096，每 Scope 最多 64 个活跃 fake。加载和写入必须校验真实值/fake 全局不冲突、fake 唯一、
-退役凭据无活跃 fake、同 credential/Scope 不重复，以及 carrier 非空。
+root `gateway key remove <pairid>` 全局退役该配对，撤销全部引用授权，不影响其他配对；
+使用新配对需要新的 fake、Policy/Scope 和 Agent 配置，不提供自动轮换或 key add 别名。
+tombstone 永久保留，使旧 fake 不会被降级为“未知值”而原样放行。fake 全局唯一，不得与
+real/tombstone 冲突；含 tombstone 的 fake 总数最多 4096，每 Scope 最多 64 个活跃 fake。
+Store、秘密快照和 plan 明确升级格式；发现旧 Gateway 数据明确拒绝，无迁移或覆盖。
 
-### 3.3 网关快照
+### 3.3 网关快照与本地生成
 
-仅选中凭据的活跃 fake→真实值映射和所有 tombstone 被下发；未选中的真实值不离开存储目录。
-快照持有 generation，归属使用 Scope ID。目标目录归 root 且 group/other 不可写，快照 0640、
-网关属组、原子替换。`key list` 只返回 active 凭据 ID：`{"credentials":["github"]}`。
-`key add/remove` 成功仅返回 `{"credential":"github"}`。管理结果不改变既有凭据文件的权限
-与快照保护边界。
+秘密快照 version 2 的 `entries` 仅下发选中配对的活跃 fake→real 与 `scopeIds`，`retired`
+下发所有 tombstone；`unavailable` 仅携带待绑定或未选中的 live fake 与 pair ID，不含 real。
+三组 fake 互斥；`unavailable` 表示当前 generation 无注入资格，不是永久退役。未选中的 real 不离开存储目录。
+快照持有 generation 和 Scope 授权集合。目标目录 root 所有且 group/other 不可写，快照
+0640、网关属组、原子替换。root `key list` 仅返回 active opaque IDs
+`{pairids:["<pairid>"]}`，remove 返回 `{pairid:"<pairid>"}`，不公开 Token、fake 或摘要。
+
+```bash
+agent-sec-cli key generate-fake \
+  --real-token-file /secure/github-real \
+  --output /secure/github-fake \
+  --format auto
+```
+
+这是纯本地生成入口，不连接 daemon、不登记或授权，不是 daemon 故障 fallback。
+`--format auto` 为默认且本阶段唯一生成启发式，与请求注入 format 不同；仅可靠识别的
+Token 形态可生成，至少 16 个随机位置，保留前缀/标点后仍须整串达到 80% 差异。
+未知形态、JWT/签名结构、随机区间不足或阈值不可达明确失败，不猜测、不输出候选。
+输出 0600，以 O_EXCL 禁止覆盖，成功也不打印 Token；生成不替代登记时全局冲突检查。
+Agent 从用户准备的 fake 文件自行配置，不新增 GH_TOKEN/GITHUB_TOKEN 默认映射。
+`gateway credentials`、对应 RPC 与 KeyAdd 全部移除；CA 仅由 §4.1 的共享查询提供。
 
 ## 4. Plan 与数据面
 
-plan 从 Scope 的 canonical pinned Policy 快照编译，忽略独立 file Policy。Policy ID 排序、
-methods 确定性排序；规则记录来源 Policy ID/revision/ruleIndex。plan 不含真实值或 fake，二者
-通过单独快照解析。作者 Policy JSON 保持 §2.1 的既有形状，包括 target 中的 `scheme` 和
-`responseRewrite`；plan 是该快照的执行投影，不是另一种 authoring 格式。
+plan 从 Scope 的 canonical pinned Cedar 与可信 pair 关联编译，忽略独立 file Policy。
+Policy ID、方法及规则按确定性顺序保存；规则保留 Policy ID/revision/规则来源。
+plan 显式携带 pair ID、header、format/模板、response 指令和匹配条件，不含 real/fake；
+秘密通过独立受保护快照解析。它是执行投影，不是第二套 authoring 或授权数据。
+Rust/Python 双端严格校验版本、未知字段、重复键和完整来源关联；拒绝旧原生 plan。
 
-plan 的完整字段形状如下，示例只包含一条 HTTPS 规则：
+`auto` 只在指定 header 中接受一次完整 fake，保留周围文字；重复 fake、多个不同 fake、
+重复指定 header 拒绝。`basic` 解码密码位置的完整 fake，保留用户名再编码；畸形输入
+拒绝，不回退 auto。整值模板必须含唯一 `{fake}`，如 `Bearer {fake}` 或 `{fake}`，
+只接受完整 header 值匹配，无 customize 前缀、默认 header/格式或任意脚本。
 
-```json
-{
-  "format": "agent-sec-gateway-plan/v1",
-  "scopeId": "00000000-0000-4000-8000-000000000001",
-  "policies": [{"id": "policy:github", "revision": 7}],
-  "credentials": ["github"],
-  "rules": [{
-    "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 0},
-    "match": {
-      "scheme": "https",
-      "host": "api.github.com",
-      "path": "/**",
-      "methods": ["GET", "HEAD"],
-      "credentialId": "github"
-    },
-    "responseRewrite": true,
-    "because": "GitHub REST API with github"
-  }]
-}
-```
+Plan 的 `responseRewrite` 必填且严格为 JSON bool，由 pinned Cedar 注解精确降低；
+Decision 同样使用 bool。Rust 与 addon 均拒绝缺失、null、数字、字符串（含 `"true"`、
+`"false"` 和旧模式），不能把 Cedar 注解字符串直接保存为 Plan 字段或以 truthiness 判断。
+新 Plan 只能从 canonical 源码及可信 pair 关联生成，不接受旧原生凭据 plan。
 
-`scopeId` 直接标识 Scope，`policies` 列出固定 revision，`credentials` 是凭据 ID 数组。
-每条规则仅有 `source`、`match`、`responseRewrite`、`because`；`source.ruleIndex` 是作者
-Policy 中的规则位置，数据面判定使用 rules 数组位置，不额外保存 index。`match.methods`
-为方法数组，`match.credentialId` 为单个凭据 ID。Plan 的 `responseRewrite` 同样必填且严格为
-JSON bool，由 pinned Policy 原样投影；Rust 与 addon 均拒绝旧字符串、缺失或其他类型。
-示例保留 `agent-sec-gateway-plan/v1` 标签，但标签不代表与旧字符串格式兼容；旧 Plan 必须
-从已转换或重建的 canonical 快照重新生成，不能绕过 §5.1 的持久化兼容边界。
-
-携带本 Scope fake 的请求必须命中同时点名该凭据的规则，未授权固定 block；无托管凭据
-固定 allow，但仍执行安全校验。这两项是数据面语义，不是 plan 配置字段。plan 上限为
-256 条规则、64 个凭据；Rust 与 Python 两侧拒绝未知字段和重复键。
+数据面先识别已知 live/retired fake 并完成安全检查，再收集有效注入候选，最后仅改写一次。
+同一有效 pair/header/format/response 指令去重，不同指令冲突拒绝；不按规则顺序选择或
+递归连锁替换。托管 fake 在未授权 host/header/格式中也不能降级为 no_credential。
+未携带托管凭据的请求通过安全检查后原样转发；命中规则但没有 fake 不主动注入 real。
+plan 上限为 256 条规则、64 个配对。SDK 解析前限制源码 256 KiB、64 层嵌套或连续前缀
+操作符、每 statement 64 个 `if` 及 512 token；平坦二元条件由 token 上限约束，不按操作符总数
+误判为嵌套深度。解析后凭据表达式限制 16 层/4096 节点，path pattern 最长 512 字节。
+未知表达式整组拒绝。
 
 ### 4.1 启动与 generation
 
@@ -222,8 +253,11 @@ addon 原子写 `status/health.json` 的 `loadedGeneration/listeners/lastAttempt
 这些是内部 readiness 输入。公开 `gateway status` 仅为 `{enabled, ready, scopes}`，Scope 项为
 `{scopeId, bindings}`；`ready` 要求 enabled、cgroup v2 检查通过、unit active、loaded generation
 与当前 generation 匹配、CA 可用。已启用时每次 status 都重新只读检查 cgroup，失败返回
-`ready=false`，不改变状态；`credentials` 也重新检查，仅返回 `{scopeId, environment}`，
-未就绪明确失败。generation 与 revoked/tombstone 保留在内部发布、恢复和撤销逻辑中，
+`ready=false`，不改变状态。`gateway ca` 是认证本机 peer 的 LocalUser 查询，无 Scope
+参数；各 Scope 共用一个公开 CA bundle，仅返回 `{caBundlePath}`。查询重新核验 enabled、
+cgroup v2、unit/generation 和实际 CA ready，未就绪明确失败，不交付 fake/Token/环境映射。
+共享 CA 不是秘密，不要求凭据 owner 判定，也不表示 Scope 证书隔离。
+generation 与 revoked/tombstone 保留在内部发布、恢复和撤销逻辑中，
 不作为管理查询的展示字段。`enable/disable` 成功返回 `{}`。网关 ready 不替代 Binding `READY`
 及引流完成的等待。
 
@@ -236,19 +270,17 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 
 ### 4.2 请求判定与响应
 
-请求在 `requestheaders` 阶段完成授权与 Authorization fake→真实值注入，不等待正文；注入
+请求在 `requestheaders` 阶段完成授权与指定 header 的 fake→真实值注入，不等待正文；注入
 独立于 `responseRewrite`，`true` / `false` 均须经过相同授权与请求安全校验。请求正文原样
 流式传输，不解压、不缓存、不检查或改写。URL（含 query 的原始
 及 URL 解码形式）、header 值以及解析后的 Basic 用户名/密码中既有真实凭据拒绝仍保留。
 query 不作为凭据替换 carrier，Policy path 匹配不含 query。
 
-请求校验顺序保持：generation/listener → Authorization 重复与 Basic 格式 → URL/header 中
-真实值泄露 → fake 的 carrier、Scope 与 tombstone → 明文 → Host/SNI/authority → Upgrade →
-HTTPS 端口与规范 path、method、Policy allow。常见拒绝码为 `gateway_not_ready`、`duplicate_authorization`、
-`malformed_authorization`、`real_credential_exposed`、`fake_in_username`、`retired_credential`、
-`subject_mismatch`、`carrier_not_allowed`、`plaintext_credential`、`invalid_host`、
-`sni_host_mismatch`、`authority_mismatch`、`sni_missing`、`upgrade_not_allowed`、
-`credential_not_allowed`。不携带托管凭据仍需通过有关校验，不是 TLS 透传。
+请求检查 generation/listener、重复指定 header/Basic 格式、URL/header 中 real 暴露、
+fake 的 Scope 授权与 tombstone、HTTPS、Host/SNI/authority、Upgrade、端口及规范 path/method。
+随后收集匹配的显式注入指令并去重/冲突拒绝，执行一次改写；不是固定 Authorization carrier
+默认链路。不携带托管凭据仍须通过安全检查，不是 TLS 透传；错误码由数据面契约冻结，
+不得将解析失败或未授权托管 fake 视为无凭据放行。
 
 在请求头阶段拒绝有正文的 HTTP/1 请求或 HTTP/2 请求时，立即关闭连接，不继续接收或
 缓冲正文，不承诺结构化 HTTP 拒绝响应；HTTP/1 空正文请求保留
@@ -256,14 +288,14 @@ HTTPS 端口与规范 path、method、Policy allow。常见拒绝码为 `gateway
 SNI/Host 不符为 421，内部异常 `gateway_error` 为 500。输出日志只允许 addon 的固定安全诊断，
 不输出请求字段、依赖解析消息或异常堆栈；内部 readiness 报告保留，底层故障日志细节减少。
 
-命中 allow 后只替换 Authorization token/Basic 密码，保留 Basic 用户名；不因响应开关关闭
-而跳过注入，也不修改请求 `Accept-Encoding`，压缩协商由客户端与上游决定。
+获得注入资格后只替换指定 header 的 fake 或 Basic 密码，保留 Basic 用户名；不因响应
+开关关闭而跳过注入，也不修改请求 `Accept-Encoding`，压缩协商由客户端与上游决定。
 
 ### 4.3 响应改写
 
-只对实际注入凭据的请求应用 `responseRewrite`。替换表将实际注入的 Authorization
-（含 Basic 编码）映射回原 fake Authorization，将裸真实值映射回 Scope fake；不提供
-任意编码或语义还原。未注入的响应保持普通流式转发。
+只对实际注入凭据的请求应用 bool `responseRewrite`。替换表将实际注入的 header 整值
+（含 Basic 编码）映射回原 fake header，将裸真实值映射回该 Scope 授权的指定 fake；
+不提供任意编码或语义还原。未注入的响应保持普通流式转发。
 
 | responseRewrite | headers | body | trailers |
 | --- | --- | --- | --- |
@@ -308,17 +340,20 @@ framing。固定依赖不支持 HTTP/1 trailers，遇到此类协议错误仍中
 缓存路径的“不交付任何部分正文”保证。已注入请求的上游响应头解析、字段校验等协议错误
 保持关闭连接边界；同步关闭底层 writer 的行为依赖固定 mitmproxy 版本，HTTP/2 同连接
 其它流也可能断开。上传未结束而上游先结束响应时，不等待请求 EOF，应完成响应收尾并
-停止上传；共享上游连接的其它流可能受影响。依赖升级时须通过内部 mock 黑盒重新验证
-这些连接边界。
+停止上传；HTTP/1 响应结束后关闭连接，HTTP/2 下游连接保留以便窗口更新后发送排队正文
+与 END_STREAM，但上游连接关闭，共享上游连接的其它流可能受影响。依赖升级时须通过
+内部 mock 黑盒重新验证这些连接边界。上述匹配尾部、64 KiB 处理分块及 HTTP/2 队列
+预算都是固定实现保护，不开放新参数；fail-closed 不等于能撤回已发出的安全前缀。
 
 ## 5. 执行投影、发布与清理
 
 `<数据目录>/gateway/state.json` 只保存 enabled、generation 与 Scope 执行投影：owner UID、端口、
 撤销 fence、Binding 责任与完整实例身份。它不保存另一套授权规则。恢复必须从 PAP 读取
 canonical Scope、固定的 Policy revision 和 Binding，核对 lifecycle 与实例身份；不从 PID
-单独恢复、不读取 latest Policy 替代快照。version 2 的 Binding 投影增加 `sharedCgroups`，
-缺失时按仅有根路径读取。旧版本不认识此字段，不能直接回退二进制后沿用新投影；回退前
-必须关闭网关并撤流，canonical Scope/Binding 和 Credential Store 不属于该投影的清理范围。
+单独恢复、不读取 latest Policy 替代快照、不重读 real/fake 源文件。执行投影保存
+`sharedCgroups` 等清理责任；旧 Gateway 格式明确拒绝，不通过缺省字段恢复旧授权。
+回滚须先关闭网关并确认撤流，不能直接回退二进制沿用新 Store/plan/投影；canonical
+Scope/Binding、Store 与 tombstone 不属于运行投影的清理范围，不提供本次迁移工具。
 
 当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并在 blocking task 中执行
 网关构造与 `GatewayService.recover()`；信号监听先启动，恢复期间收到停止请求后不开放 UDS。
@@ -350,7 +385,8 @@ nft 独占 `inet agent_sec_gateway`，按实例 cgroup 路径分类，同 Scope 
 IPv4 TCP 80/443 引流，IPv6、UDP/443 与其他端口放行但不保护、不强制回退。已有 TCP
 连接不受追溯保护。所有被引流 HTTPS 均 MITM，即使不含 fake 也要求信任 CA。
 
-Scope 删除先永久关闭 admission 并撤销 fake，再清理 Binding 和执行投影；清理失败保留责任
+Scope 删除先永久关闭 admission 并撤销本 Scope 授权；仅最后 Active Scope 删除才全局退役
+共享 fake，再清理 Binding 和执行投影。其他 Active Scope 仍有效，清理失败保留责任
 以便重试。Policy Runtime 拥有单一 Scope 清理 worker，调用 `sweep_deleting_scopes()`，
 在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
 等待其实际调用结束。网关发布等待不占用 Binding timer，file-only Scope 和 credential Scope
@@ -374,21 +410,22 @@ cgroup v2 预检失败发生在 enabled 状态改变之前。失败撤销同样�
 
 ### 5.1 responseRewrite 的持久化兼容边界
 
-必填 bool 替代字符串是不兼容修订，不只是改作者 JSON 或标准 Policy 文件。旧 JSON
-`PreparedPolicy`、Scope `policySnapshots`、Binding 内嵌 Policy，以及任何保存固定 Scope
-快照的 `pinnedScope` 中，凡含旧 `buffered/none` 都不被新契约接受。SQLite 的表结构不变
-也不能证明内嵌 JSON 可读；Repository 会严格反序列化这些快照。
+这是未开放 Gateway 的不兼容终态修订：Cedar 注解精确降低为 bool，同时改变原生凭据
+执行、pair 关联、Store、秘密快照、Plan 和运行投影。旧 JSON `PreparedPolicy`、Scope
+`policySnapshots`、Binding 内嵌 Policy、`pinnedScope` 或 Cedar 源码中的旧 `buffered/none`
+均不被接受；旧原生凭据规则即使已使用 bool，也不能作为新 Cedar 配对策略直接执行。
+SQLite 表结构不变不证明内嵌数据可读，不能只更新 latest Policy、标准资产或运行 Plan。
 
-**不能携带旧策略直接滚动升级。** 须单独安排配套备份及显式离线转换，或在旧版本仍能
-管理这些记录时按原生命周期撤销、清理并重建全部相关持久化记录与 pinnedScope。转换须
-覆盖所有内嵌副本并核对固定 revision/归属的一致性，不能只更新 latest Policy 或运行时 Plan；
-将旧 `none` 改成 `false` 还须接受 headers/trailers 不再替换的行为变化。不可在常规加载、
-恢复或 Policy update 中偷偷覆盖既有不可变 Scope/Binding 快照，也不自动兼容旧字段。
-重新发布的 Plan 只能来自转换或重建后的 canonical 快照。
+**本次不提供旧 Gateway 数据迁移或滚动升级支持。** 发现旧数据必须明确失败，不推断
+`buffered→true` / `none→false`，不丢弃 Store/tombstone，不在加载、恢复或 Policy update
+中覆盖不可变 Scope/Binding 快照。`false` 关闭全部响应改写，与历史 `none` 仍替换
+headers/trailers 的语义不同；修改旧模式文字本身也不能建立兼容性。
 
-备份、转换/重建、回退与部署须作为独立迁移执行；没有自动迁移工具或旧格式滚动升级
-保证。回退须使用与旧二进制/旧 addon 配套的备份和策略，不能直接沿用 bool 快照；
-同时遵守本节已有的网关撤流与执行投影回退边界。
+内部旧环境需在旧版本仍能管理记录时先备份，再按原生命周期撤销授权并确认撤流与清理；
+新环境显式准备 real/fake 文件、登记新配对及新 Policy/Scope，不能复活已退役 fake。
+离线转换工具或保留旧授权的迁移需要另行批准及验证，不属于本次交付。回退须先关闭
+网关并确认撤流，使用配套旧二进制、addon 和完整旧格式备份，不能沿用新 Store、bool
+快照或执行投影。新 Plan 仅从新 canonical 源码和可信 pair 关联重新生成。
 
 ## 6. 交付与验证边界
 
@@ -398,7 +435,9 @@ V2 RPM staging 只写 `DESTDIR`，包含 addon、policy 模块、gateway unit、
 和 provenance。安装自动启动基础 daemon，但默认不启动代理、不创建网关账户、不下载
 mitmproxy、不添加引流。未配置凭据 Scope、没有保存网关状态的初始安装，daemon 启动和
 重启也不创建网关 runtime、凭据目录或 nft 表；默认关闭不跳过既有 assignment 或此前已启用
-状态的同步恢复。管理员显式安装 standalone、导入 key、准备 Policy/Scope 后 enable。
+状态的同步恢复。管理员显式安装 standalone、准备 real/fake 文件、root 提交 Cedar
+Policy 登记配对并准备 Scope 后 enable。仅交付 `github.cedar` 标准源码，不交付 JSON wrapper；
+随包交付不代表自动导入，现有注册 CLI 的 envelope 输入边界见 §2.1。
 最终卸载活动网关须先通过 daemon disable，失败拒绝卸载；升级不执行 erase 清理。手动安装
 的 mitmproxy 与持久凭据保留。本设计不把源码 staging 当作最终 RPM 已构建或验收的证据。
 
@@ -426,21 +465,22 @@ raw 升级只更新文件，不因新增网关资产而启用或重启代理；�
 
 | 验证对象 | 必须观察的结果 |
 | --- | --- |
-| Policy/Plan 与持久化类型 | bool `true/false` 接受；缺失、null、数字、字符串及旧 `buffered/none` 拒绝；旧 PreparedPolicy/Scope/Binding 内嵌快照不静默转换 |
-| 请求与响应开关独立 | 两种 bool 都在请求头阶段授权并注入 Authorization；不等待/扫描/改写请求 body；`false` 的响应 headers/body/trailers 全部不替换 |
-| 未压缩连续字节流 | identity、缺失及空 Content-Encoding；真实值/Authorization 任意跨 chunk 仍被替换；尾部有界、EOF 收尾、非终止空 DATA 不截断；超过旧 8 MiB 的正文不因累计大小拒绝、不整包缓存 |
+| Cedar/Plan 与持久化类型 | 注解仅接受 `"true"`/`"false"`，降低为 Plan/Decision bool；注解缺失/空值/旧模式拒绝，Plan 缺失/null/数字/字符串拒绝；旧 Gateway PreparedPolicy/Scope/Binding/pinnedScope、Store/Plan/投影不静默转换 |
+| 请求与响应开关独立 | 两值均在请求头阶段授权并按显式 header/auto/basic/整值模板注入；不等待/扫描/改写请求 body；`false` 的响应 headers/body/trailers 全部不替换 |
+| 未压缩连续字节流 | identity、缺失及空 Content-Encoding；真实值/注入 header 整值任意跨 chunk 仍被替换；尾部有界、EOF 收尾、非终止空 DATA 不截断；超过旧 8 MiB 的正文不因累计大小拒绝、不整包缓存 |
 | 压缩透传与协商 | `gzip/br/deflate` 正文字节与上游一致，不解压/扫描/重新压缩；Accept-Encoding 不变；`true` 只替换 headers/trailers，压缩 body 中 real 仍可返回 |
 | SSE 与二进制边界 | 未压缩 SSE 的物理连续匹配可替换；跨 JSON 事件语义拼接不识别；hash/framing 不宣称通用协议正确性 |
 | 收尾与失败 | HEAD/204/304 无正文及表示长度保持；响应长度/framing 一致；故障中止且不发送原始上游错误页，已发 headers/正文不可撤回；上游早结束不等待请求 EOF |
-| HTTP/2 待发送队列 | 客户端窗口停滞时超过待发预算中止并回收队列，上游不被完整积攒；正常窗口更新的大响应仍成功；共享代理继续服务 |
-| 标准 Git Policy | 原 buffered 项为 `true`、upload-pack 原 none 为 `false`；内部 mock clone/fetch/push，不能把成功例推导为所有二进制协议可改写 |
+| HTTP/2 待发送队列 | 已注入响应的客户端窗口停滞时，超过固定 8 MiB 或 1024 DATA 项预算中止并回收队列，覆盖两值及压缩透传；正常窗口更新的大响应成功；同连接其它流可断开，独立连接继续服务 |
+| 标准 Git Policy | 仅 `github.cedar`，八条 auto/basic 规则；REST/refs/upload-pack/receive-pack 均为 `"true"`；不交付 wrapper、不自动导入；内部 mock clone/fetch/push，不推导所有二进制协议可改写 |
 
 安装态 E2E 保留显式 `ASC_GATEWAY_E2E_USER` gate，只在允许修改宿主 systemd/nft 的专用环境
 执行，不增加默认流量引流。测试使用独立 executable 路径与非 root owner，经真实 CLI 创建
-Policy/Scope，先 enable/owner 查询再启动 worker，等待真实 Binding 接管。用本机
-`198.18.0.1`、临时 CA 与 mock REST/Git 上游，验证上游收到 real，`true` 的未压缩回显返回
+Cedar Policy/Scope，先 enable/共享 CA 查询再启动 worker，等待真实 Binding 接管。用本机
+`198.18.0.1`、临时 CA 与 mock REST/Git 上游验证上游收到 real，`true` 的未压缩回显返回
 fake；`false` 与压缩 body 不能使用“Agent 响应必为 fake”的断言。还须验证 clone/fetch/push、
-相同 secret 幂等、不同值拒绝覆盖、remove/add 后旧 fake 永久退役与新 Scope 配置、撤销、
-多 Scope、多实例和空 Scope 删除。Token 随机生成，不访问外网 API；所有 Scope/Policy
-资源 finally 清理。默认关闭测试只观察 `scopes=[]`、无 nft 表、无 runtime/凭据目录，不改变
-宿主网关状态。文档矩阵或测试编写不等于已通过运行验证，安装态结果应独立报告。
+配对幂等、共享 Scope 删除/最后退役、opaque pair remove、生成/人工 fake 整串 80% 校验、
+源文件删除后恢复、旧数据拒绝、撤销、多实例和空 Scope 删除。Token 随机生成，不访问
+外网 API；所有 Scope/Policy 资源 finally 清理。默认关闭测试只观察 `scopes=[]`、无 nft 表、
+无 runtime/凭据目录，不改变宿主网关状态。这些是待验证目标，不是本轮通过记录；文档
+矩阵或测试编写不等于运行验证通过，安装态结果应独立报告。

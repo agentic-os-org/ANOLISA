@@ -7,6 +7,7 @@ mod events;
 mod events_summary;
 mod gateway;
 mod intent;
+mod key;
 mod observability;
 mod policy;
 mod scan_code;
@@ -23,6 +24,7 @@ pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
 pub(crate) use self::gateway::GatewayCommand;
 pub use self::intent::IntentFailure;
+pub use self::key::KeyCommand;
 pub use self::policy::DefaultPolicy;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
@@ -66,9 +68,39 @@ pub(crate) enum Command {
     SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),
-    /// Protect GitHub tokens from Agents with the secret gateway.
+    /// Manage the credential gateway and query its public CA bundle.
     #[command(subcommand)]
     Gateway(GatewayCommand),
+    /// Generate fake credentials locally without sending tokens to a daemon.
+    #[command(subcommand)]
+    Key(KeyCommand),
+}
+
+/// Approved local execution paths, independent of the daemon endpoint.
+#[derive(Debug)]
+pub enum LocalCommand<'a> {
+    /// Environment-variable capability view.
+    Capabilities(&'a CapabilitiesCommand),
+    /// Local fake credential generation.
+    Key(&'a KeyCommand),
+}
+
+impl LocalCommand<'_> {
+    /// Executes locally; credential commands never render token values.
+    ///
+    /// # Errors
+    /// Returns value-free file, generation or output failures.
+    pub fn render(
+        &self,
+        env: &crate::capabilities::Environment,
+        stdout: &mut impl std::io::Write,
+        stderr: &mut impl std::io::Write,
+    ) -> std::io::Result<u8> {
+        match self {
+            Self::Capabilities(command) => command.render(env, stdout, stderr),
+            Self::Key(command) => command.run(),
+        }
+    }
 }
 
 impl Command {
@@ -121,8 +153,10 @@ impl Command {
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
-            Self::Capabilities(_) | Self::Sandbox(_) => Err(InputError::LocalCommand),
-            // Gateway commands own their transport: `run` execs after the response.
+            Self::Capabilities(_) | Self::Sandbox(_) | Self::Key(_) => {
+                Err(InputError::LocalCommand)
+            }
+            // Gateway commands own their transport and response rendering.
             Self::Gateway(_) => Err(InputError::Gateway(
                 "gateway commands run through their own transport".into(),
             )),
@@ -198,13 +232,11 @@ impl Command {
         matches!(self, Self::ScanPrompt(_))
     }
 
-    /// Returns the command when it runs locally instead of through the daemon.
-    ///
-    /// The capability view resolves everything from the process environment, so
-    /// requiring a socket for it would break hosts that never deploy a daemon.
-    pub(crate) const fn local(&self) -> Option<&CapabilitiesCommand> {
+    /// Returns only explicitly approved daemon-independent execution paths.
+    pub(crate) const fn local(&self) -> Option<LocalCommand<'_>> {
         match self {
-            Self::Capabilities(command) => Some(command),
+            Self::Capabilities(command) => Some(LocalCommand::Capabilities(command)),
+            Self::Key(command) => Some(LocalCommand::Key(command)),
             _ => None,
         }
     }

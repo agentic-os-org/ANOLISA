@@ -433,8 +433,16 @@ fn bound_alias_retargeting_is_rejected_before_helper_start() {
 }
 
 #[test]
-fn oversized_program_regions_fail_before_representative_evaluation() {
-    for count in [150, 16_385] {
+fn program_region_and_source_budgets_apply_before_representative_evaluation() {
+    let expected =
+        resolve(r#"permit(principal, action == SecCore::Action::"file.read", resource);"#);
+    // Including the extra program class, 126 entries cost 16,256 regions; 127 cost 16,512.
+    for (count, expected_error) in [
+        (126, None),
+        (127, Some("region budget")),
+        (150, Some("region budget")),
+        (16_385, Some("source exceeds")),
+    ] {
         let programs: Vec<_> = (0..count)
             .map(|index| format!("/__asc_permission_input_{index}__"))
             .collect();
@@ -444,11 +452,16 @@ when {{ {}.contains(context.input.program) }};"#,
             json!(programs),
         );
         assert!(source.len() < 4 * 1024 * 1024);
-        let error = PermissionInput::parse(&source)
-            .unwrap()
-            .resolve(&launch())
-            .unwrap_err();
-        assert!(error.to_string().contains("region budget"), "{error}");
+        let result = PermissionInput::parse(&source).unwrap().resolve(&launch());
+        if let Some(expected_error) = expected_error {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains(expected_error),
+                "{count}: {error}"
+            );
+        } else {
+            assert_eq!(result.unwrap(), expected);
+        }
     }
 }
 

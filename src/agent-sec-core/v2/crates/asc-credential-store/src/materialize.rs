@@ -1,13 +1,13 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::Serialize;
 
 use crate::filesystem::{DirectoryAccess, PinnedDirectory};
-use crate::store::Carrier;
 use crate::{CredentialId, CredentialStore, CredentialStoreError, ScopeId};
 
-/// Schema version of the gateway secrets snapshot.
-pub const SECRETS_SNAPSHOT_VERSION: u32 = 1;
+/// Schema version of the explicit-pair gateway secrets snapshot.
+pub const SECRETS_SNAPSHOT_VERSION: u32 = 2;
 
 const SNAPSHOT_FILE_MODE: rustix::fs::RawMode = 0o640;
 
@@ -29,6 +29,7 @@ struct Snapshot<'a> {
     generation: u64,
     entries: Vec<Entry<'a>>,
     retired: Vec<Tombstone<'a>>,
+    unavailable: Vec<Tombstone<'a>>,
 }
 
 #[derive(Serialize)]
@@ -36,9 +37,8 @@ struct Snapshot<'a> {
 struct Entry<'a> {
     fake: &'a str,
     credential: &'a CredentialId,
-    scope_id: &'a ScopeId,
+    scope_ids: &'a BTreeSet<ScopeId>,
     real: &'a str,
-    carriers: &'a [Carrier],
 }
 
 #[derive(Serialize)]
@@ -46,15 +46,14 @@ struct Entry<'a> {
 struct Tombstone<'a> {
     fake: &'a str,
     credential: &'a CredentialId,
-    scope_id: &'a ScopeId,
 }
 
 impl CredentialStore {
     /// Writes the fake→real mappings of `credentials` plus every tombstone to `target`.
     ///
-    /// Credentials outside `credentials` never leave the store directory.
-    /// Tombstones are always included so removed fakes stay rejected instead
-    /// of degrading to "no credential". The file is replaced atomically.
+    /// Real values outside `credentials` never leave the store directory. Pending pairs
+    /// have no live entry; shared fakes have one entry with every active Scope.
+    /// Unavailable live fakes and all tombstones remain recognizable without disclosing real values.
     ///
     /// # Errors
     /// Returns unknown/retired credential, invalid target, path or I/O errors.
@@ -93,23 +92,33 @@ impl CredentialStore {
                 .real
                 .as_ref()
                 .ok_or_else(|| CredentialStoreError::Retired(id.clone()))?;
-            entries.extend(record.fakes.iter().map(|fake| Entry {
-                fake: &fake.value,
-                credential: id,
-                scope_id: &fake.scope_id,
-                real: real.expose(),
-                carriers: &record.carriers,
-            }));
+            if !record.scope_ids.is_empty() {
+                entries.push(Entry {
+                    fake: &record.fake,
+                    credential: id,
+                    scope_ids: &record.scope_ids,
+                    real: real.expose(),
+                });
+            }
         }
         let retired = self
             .records
             .iter()
-            .flat_map(|(id, record)| {
-                record.retired_fakes.iter().map(move |fake| Tombstone {
-                    fake: &fake.value,
-                    credential: id,
-                    scope_id: &fake.scope_id,
-                })
+            .filter(|(_, record)| record.real.is_none())
+            .map(|(id, record)| Tombstone {
+                fake: &record.fake,
+                credential: id,
+            })
+            .collect();
+        let unavailable = self
+            .records
+            .iter()
+            .filter(|(id, record)| {
+                record.real.is_some() && (record.scope_ids.is_empty() || !seen.contains(id))
+            })
+            .map(|(id, record)| Tombstone {
+                fake: &record.fake,
+                credential: id,
             })
             .collect();
         let snapshot = Snapshot {
@@ -117,6 +126,7 @@ impl CredentialStore {
             generation,
             entries,
             retired,
+            unavailable,
         };
         let bytes = serde_json::to_vec(&snapshot)
             .map_err(|_| CredentialStoreError::Corrupt("cannot encode secrets snapshot".into()))?;

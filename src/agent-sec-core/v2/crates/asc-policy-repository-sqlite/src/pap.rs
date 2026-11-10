@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 impl PapRepository for SqlitePolicyRepository {
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError> {
-        policy.validate().map_err(PapError::InvalidPolicy)?;
+        asc_pap::validate_policy_snapshot(policy)?;
         self.access(true, |tx| {
             let encoded = encode(policy)?;
             if encoded.len() > 1024 * 1024 {

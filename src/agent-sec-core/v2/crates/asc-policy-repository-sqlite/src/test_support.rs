@@ -42,7 +42,7 @@ impl SqlitePolicyRepository {
         let directory = tempfile::Builder::new()
             .prefix("asc-policy-test-")
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").map_err(|_| StoreError::Io)?)
             .map_err(|_| StoreError::Io)?;
         let mut repository = Self::open(&directory.path().join("policy-state.db"))
             .map_err(RepositoryError::store)?;

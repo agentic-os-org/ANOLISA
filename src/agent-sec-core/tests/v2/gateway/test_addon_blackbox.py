@@ -428,7 +428,11 @@ class MockUpstream:
 
             def _handle(self) -> None:
                 if self.path == "/echo/early-upload":
-                    auth = self.headers.get("Authorization") or ""
+                    auth = (
+                        self.headers.get("X-Api-Key")
+                        or self.headers.get("Authorization")
+                        or ""
+                    )
                     upstream.requests.append({"path": self.path, "authorization": auth})
                     payload = json.dumps(
                         {"auth": auth, "padding": "x" * 200000}
@@ -456,12 +460,17 @@ class MockUpstream:
                     body = bytes(body)
                 else:
                     body = self.rfile.read(length) if length else b""
-                auth = self.headers.get("Authorization") or ""
+                auth = (
+                    self.headers.get("X-Api-Key")
+                    or self.headers.get("Authorization")
+                    or ""
+                )
                 upstream.requests.append(
                     {
                         "method": self.command,
                         "path": self.path,
                         "authorization": auth,
+                        "headers": dict(self.headers),
                         "body": body,
                         "accept_encoding": self.headers.get("Accept-Encoding"),
                     }
@@ -640,13 +649,21 @@ def write_generation(
     generation: int,
     listeners: list[dict[str, object]],
     secrets: dict[str, object],
+    plans: dict[str, object] | None = None,
 ) -> None:
     secrets_name = f"secrets-{generation}.json"
     (runtime / secrets_name).write_text(json.dumps(secrets))
     entries = []
     for listener in listeners:
         plan_name = f"plan-{listener['scopeId']}-{generation}.json"
-        (runtime / plan_name).write_text(json.dumps(plan_for(str(listener["scopeId"]))))
+        scope_id = str(listener["scopeId"])
+        if plans is not None and scope_id in plans:
+            plan = plans[scope_id]
+        else:
+            plan = plan_for(scope_id)
+            for rule in plan["rules"]:
+                rule["responseRewrite"] = True
+        (runtime / plan_name).write_text(json.dumps(plan))
         entries.append({**listener, "plan": plan_name})
     manifest = {
         "version": 1,
@@ -861,6 +878,36 @@ class GatewayCase(unittest.TestCase):
         response.close()
         return Response(response.status, dict(response.getheaders()), payload)
 
+    @contextmanager
+    def disabled_rewrite(self) -> Iterator[None]:
+        """Publish an explicit false switch, then restore this class's true plans."""
+        listeners = [
+            {"scopeId": scope, "port": port}
+            for scope, port in self.ports.items()
+            if scope != "unconfigured"
+        ]
+
+        def publish(enabled: bool) -> None:
+            generation = self.health()["loadedGeneration"] + 1
+            secrets = json.loads(json.dumps(DECISIONS["secrets"]))
+            secrets["generation"] = generation
+            plans = {}
+            for listener in listeners:
+                plan = plan_for(listener["scopeId"])
+                for rule in plan["rules"]:
+                    rule["responseRewrite"] = enabled
+                plans[listener["scopeId"]] = plan
+            write_generation(
+                self.workdir / "runtime", generation, listeners, secrets, plans
+            )
+            self.wait_health(lambda health: health["loadedGeneration"] == generation)
+
+        try:
+            publish(False)
+            yield
+        finally:
+            publish(True)
+
     def recorded(self, path: str) -> list[dict[str, object]]:
         return [r for r in self.mock.requests if r["path"] == path]
 
@@ -1023,14 +1070,15 @@ class InjectionTest(GatewayCase):
 
     def test_disabled_rewrite_preserves_headers_and_large_body(self) -> None:
         basic = base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
-        response = self.send(
-            "00000000-0000-4000-8000-000000000001",
-            "POST",
-            "/o/r.git/git-upload-pack",
-            host="github.com",
-            headers=[("Authorization", f"Basic {basic}")],
-            body=b"0000",
-        )
+        with self.disabled_rewrite():
+            response = self.send(
+                "00000000-0000-4000-8000-000000000001",
+                "POST",
+                "/o/r.git/git-upload-pack",
+                host="github.com",
+                headers=[("Authorization", f"Basic {basic}")],
+                body=b"0000",
+            )
         self.assertEqual(response.status, 200)
         self.assertEqual(len(response.body), BIG)
         injected = self.recorded("/o/r.git/git-upload-pack")[0]["authorization"]
@@ -1215,6 +1263,107 @@ class InjectionTest(GatewayCase):
                 )
                 self.assertEqual(response.status, 200)
                 self.assertEqual(self.recorded(path)[0]["authorization"], authorization)
+
+
+class CustomHeaderInjectionTest(GatewayCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        secrets = json.loads(json.dumps(DECISIONS["secrets"]))
+        secrets["generation"] = 2
+        listeners = [
+            {"scopeId": scope, "port": port}
+            for scope, port in cls.ports.items()
+            if scope != "unconfigured"
+        ]
+        plans = {}
+        for listener in listeners:
+            plan = plan_for(listener["scopeId"])
+            for rule in plan["rules"]:
+                rule.update(header="X-Api-Key", responseRewrite=True)
+            plans[listener["scopeId"]] = plan
+        write_generation(cls.workdir / "runtime", 2, listeners, secrets, plans)
+        cls.wait_health(lambda health: health["loadedGeneration"] == 2)
+
+    def test_custom_auto_and_basic_echoes_are_rewritten(self) -> None:
+        for label, presented, injected in (
+            ("auto", f"Vendor prefix={FAKE}; suffix", f"Vendor prefix={REAL}; suffix"),
+            (
+                "basic",
+                "Basic " + base64.b64encode(f"user:{FAKE}".encode()).decode(),
+                "Basic " + base64.b64encode(f"user:{REAL}".encode()).decode(),
+            ),
+        ):
+            with self.subTest(label=label):
+                path = f"/echo/custom-{label}"
+                response = self.send(
+                    "00000000-0000-4000-8000-000000000001",
+                    "GET",
+                    path,
+                    headers=[("x-api-key", presented)],
+                )
+                self.assertEqual(response.status, 200)
+                [record] = self.recorded(path)
+                self.assertEqual(record["headers"]["X-Api-Key"], injected)
+                self.assertNotIn("Authorization", record["headers"])
+                self.assertEqual(response.headers["X-Echo"], presented)
+                self.assertEqual(response.json()["auth"], presented)
+                self.assertNotIn(injected.encode(), response.body)
+
+    def test_custom_enabled_rewrite_redacts_headers_and_large_identity_body(
+        self,
+    ) -> None:
+        path = "/o/r.git/git-upload-pack"
+        encoded = base64.b64encode(f"user:{FAKE}".encode()).decode()
+        response = self.send(
+            "00000000-0000-4000-8000-000000000001",
+            "POST",
+            path,
+            host="github.com",
+            headers=[("X-Api-Key", f"Basic {encoded}")],
+            body=b"0000",
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(response.body), BIG)
+        self.assertEqual(response.headers["X-Echo"], f"Basic {encoded}")
+        self.assertEqual(
+            response.body,
+            f"Basic {encoded}".encode() + b"P" * (BIG - len(f"Basic {encoded}")),
+        )
+        self.assertNotIn("Content-Length", response.headers)
+        self.assertNotIn("ETag", response.headers)
+        self.assertEqual(
+            base64.b64decode(
+                self.recorded(path)[0]["headers"]["X-Api-Key"].split()[1]
+            ).decode(),
+            f"user:{REAL}",
+        )
+
+    def test_custom_origin_errors_close_without_dependency_error_pages(self) -> None:
+        for format_word, presented in (
+            ("auto", f"Vendor {FAKE}"),
+            ("basic", "Basic " + base64.b64encode(f"user:{FAKE}".encode()).decode()),
+        ):
+            with self.subTest(format_word=format_word):
+                path = f"/invalid-header-name/custom-{format_word}"
+                received = bytearray()
+                with self.connection("00000000-0000-4000-8000-000000000001") as stream:
+                    stream.sendall(
+                        (
+                            f"GET {path} HTTP/1.1\r\nHost: api.github.com\r\n"
+                            f"X-Api-Key: {presented}\r\nConnection: close\r\n\r\n"
+                        ).encode()
+                    )
+                    while True:
+                        try:
+                            chunk = stream.recv(4096)
+                        except (ConnectionResetError, ssl.SSLEOFError):
+                            break
+                        if not chunk:
+                            break
+                        received.extend(chunk)
+                self.assertEqual(len(self.recorded(path)), 1)
+                self.assertEqual(received, b"")
 
 
 class RejectionTest(GatewayCase):
@@ -1674,7 +1823,7 @@ class Http2UpstreamInjectionTest(GatewayCase):
         injected = (
             "Basic " + base64.b64encode(f"x-access-token:{REAL}".encode()).decode()
         )
-        with self.h2_upstream():
+        with self.h2_upstream(), self.disabled_rewrite():
             response = self._h2_response(
                 "github.com", "/o/r.git/git-upload-pack", presented, method="POST"
             )
@@ -1792,13 +1941,12 @@ class ReloadTest(GatewayCase):
             {
                 "fake": FAKE,
                 "credential": "github",
-                "scopeId": "00000000-0000-4000-8000-000000000001",
             }
         )
         secrets["entries"] = [
             e
             for e in secrets["entries"]
-            if e["scopeId"] != "00000000-0000-4000-8000-000000000001"
+            if "00000000-0000-4000-8000-000000000001" not in e["scopeIds"]
         ]
         write_generation(
             runtime,

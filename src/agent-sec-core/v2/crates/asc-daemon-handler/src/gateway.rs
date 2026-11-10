@@ -1,16 +1,10 @@
-//! Credential administration and authenticated Scope environment protocol adapter.
+//! Root pair administration and authenticated public CA protocol adapter.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use asc_daemon_core::{
-    GatewayAdministration, GatewayFailure, GatewayFailureKind, GatewayKeyRequest, PeerCredentials,
-};
+use asc_daemon_core::{GatewayAdministration, GatewayFailure, GatewayFailureKind, PeerCredentials};
 use asc_daemon_protocol::method::GatewayMethod;
-use asc_daemon_protocol::{
-    DaemonResponse, GatewayKeyAddParams, GatewayKeyRemoveParams, GatewayScopeParams, RequestId,
-    error_code,
-};
+use asc_daemon_protocol::{DaemonResponse, GatewayKeyRemoveParams, RequestId, error_code};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -33,8 +27,7 @@ impl GatewayHandler {
         method: GatewayMethod,
         params: Value,
     ) -> DaemonResponse {
-        if peer.uid() != 0 && !matches!(method, GatewayMethod::Status | GatewayMethod::Credentials)
-        {
+        if peer.uid() != 0 && !matches!(method, GatewayMethod::Status | GatewayMethod::Ca) {
             return DaemonResponse::error(
                 request_id,
                 error_code::PERMISSION_DENIED,
@@ -53,19 +46,9 @@ impl GatewayHandler {
             GatewayMethod::Disable => no_params(params).and_then(|()| application.disable()),
             GatewayMethod::Status => no_params(params).and_then(|()| application.status(peer)),
             GatewayMethod::KeyList => no_params(params).and_then(|()| application.list_keys()),
-            GatewayMethod::KeyAdd => decode::<GatewayKeyAddParams>(params).and_then(|params| {
-                application.add_key(
-                    peer,
-                    GatewayKeyRequest {
-                        credential: params.credential,
-                        secret_file: PathBuf::from(params.secret_file),
-                    },
-                )
-            }),
             GatewayMethod::KeyRemove => decode::<GatewayKeyRemoveParams>(params)
-                .and_then(|params| application.remove_key(&params.credential)),
-            GatewayMethod::Credentials => decode::<GatewayScopeParams>(params)
-                .and_then(|params| application.credentials(peer, &params.scope_id)),
+                .and_then(|params| application.remove_key(&params.pairid)),
+            GatewayMethod::Ca => no_params(params).and_then(|()| application.ca(peer)),
         };
         match result {
             Ok(value) => DaemonResponse::success(request_id, value),
@@ -136,43 +119,19 @@ mod tests {
                 serde_json::json!({"enabled":true,"ready":true,"scopes":[{"scopeId":"scope-1","bindings":[]}]}),
             ))
         }
-        fn add_key(
-            &self,
-            peer: PeerCredentials,
-            request: GatewayKeyRequest,
-        ) -> Result<Value, GatewayFailure> {
+        fn remove_key(&self, pairid: &str) -> Result<Value, GatewayFailure> {
             Ok(self.record(
-                format!(
-                    "add {} {} by {}",
-                    request.credential,
-                    request.secret_file.display(),
-                    peer.uid()
-                ),
-                serde_json::json!({"credential":request.credential}),
-            ))
-        }
-        fn remove_key(&self, credential: &str) -> Result<Value, GatewayFailure> {
-            Ok(self.record(
-                format!("remove {credential}"),
-                serde_json::json!({"credential":credential}),
+                format!("remove {pairid}"),
+                serde_json::json!({"pairid":pairid}),
             ))
         }
         fn list_keys(&self) -> Result<Value, GatewayFailure> {
-            Ok(self.record("list".into(), serde_json::json!({"credentials":["github"]})))
+            Ok(self.record("list".into(), serde_json::json!({"pairids":["pair-1"]})))
         }
-        fn credentials(
-            &self,
-            peer: PeerCredentials,
-            scope_id: &str,
-        ) -> Result<Value, GatewayFailure> {
+        fn ca(&self, peer: PeerCredentials) -> Result<Value, GatewayFailure> {
             Ok(self.record(
-                format!(
-                    "credentials {scope_id} by {} gid {} pid {}",
-                    peer.uid(),
-                    peer.gid(),
-                    peer.pid()
-                ),
-                serde_json::json!({"scopeId":scope_id,"environment":{"GITHUB_TOKEN":"fake"}}),
+                format!("ca by {} gid {} pid {}", peer.uid(), peer.gid(), peer.pid()),
+                serde_json::json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"}),
             ))
         }
     }
@@ -188,19 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn credential_requests_are_decoded_and_bound_to_the_peer() {
+    fn pair_requests_and_public_ca_queries_are_bound_to_the_peer() {
         let recorder = Arc::new(Recorder::default());
         let handler = GatewayHandler::new(recorder.clone());
         let root = PeerCredentials::new(0, 0, 42);
         for (method, params) in [
             (GatewayMethod::Enable, Value::Null),
             (
-                GatewayMethod::KeyAdd,
-                serde_json::json!({"credential":"github","secretFile":"/root/t"}),
-            ),
-            (
                 GatewayMethod::KeyRemove,
-                serde_json::json!({"credential":"github"}),
+                serde_json::json!({"pairid":"pair-1"}),
             ),
             (GatewayMethod::KeyList, Value::Null),
         ] {
@@ -210,23 +165,23 @@ mod tests {
             ));
         }
         let owner = PeerCredentials::new(1001, 1002, 1003);
-        assert!(matches!(
-            handler.handle(
-                request_id(),
-                owner,
-                GatewayMethod::Credentials,
-                serde_json::json!({"scopeId":"scope-1"})
-            ),
-            DaemonResponse::Success(_)
-        ));
+        for params in [Value::Null, serde_json::json!({})] {
+            assert_eq!(
+                handler.handle(request_id(), owner, GatewayMethod::Ca, params),
+                DaemonResponse::success(
+                    request_id(),
+                    serde_json::json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"})
+                )
+            );
+        }
         assert_eq!(
             *recorder.0.lock().unwrap(),
             [
                 "enable",
-                "add github /root/t by 0",
-                "remove github",
+                "remove pair-1",
                 "list",
-                "credentials scope-1 by 1001 gid 1002 pid 1003",
+                "ca by 1001 gid 1002 pid 1003",
+                "ca by 1001 gid 1002 pid 1003",
             ]
         );
         assert_eq!(
@@ -234,13 +189,15 @@ mod tests {
             error_code::UNAVAILABLE
         );
         for (method, params) in [
+            (GatewayMethod::Ca, serde_json::json!({"scopeId":"scope-1"})),
+            (GatewayMethod::Ca, serde_json::json!({"uid":0})),
+            (GatewayMethod::Ca, serde_json::json!({"gid":0})),
+            (GatewayMethod::Ca, serde_json::json!({"pid":1})),
+            (GatewayMethod::Ca, serde_json::json!({"secret":"dummy"})),
+            (GatewayMethod::Ca, serde_json::json!([])),
             (
-                GatewayMethod::Credentials,
-                serde_json::json!({"scopeId":"scope-1","uid":0}),
-            ),
-            (
-                GatewayMethod::KeyAdd,
-                serde_json::json!({"credential":"github","secret":"dummy"}),
+                GatewayMethod::KeyRemove,
+                serde_json::json!({"pairid":"pair-1","secret":"dummy"}),
             ),
             (GatewayMethod::Enable, serde_json::json!({"force":true})),
         ] {
@@ -301,22 +258,17 @@ mod tests {
             ("gateway.enable", serde_json::json!({})),
             ("gateway.disable", serde_json::json!({})),
             ("gateway.key.list", serde_json::json!({})),
-            (
-                "gateway.key.add",
-                serde_json::json!({"credential":"github","secretFile":"/root/t"}),
-            ),
-            (
-                "gateway.key.remove",
-                serde_json::json!({"credential":"github"}),
-            ),
+            ("gateway.key.remove", serde_json::json!({"pairid":"pair-1"})),
         ] {
-            let response = dispatcher.handle(
-                request_id(),
-                administrator,
-                serde_json::from_value(serde_json::json!({"method":method,"params":params}))
-                    .unwrap(),
-            );
-            assert_eq!(error_of(response), error_code::PERMISSION_DENIED);
+            for peer in [administrator, PeerCredentials::new(1001, 1001, 43)] {
+                let response = dispatcher.handle(
+                    request_id(),
+                    peer,
+                    serde_json::from_value(serde_json::json!({"method":method,"params":params}))
+                        .unwrap(),
+                );
+                assert_eq!(error_of(response), error_code::PERMISSION_DENIED);
+            }
         }
         assert!(recorder.0.lock().unwrap().is_empty());
         assert!(matches!(
@@ -333,13 +285,74 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfigured_gateway_is_unavailable() {
-        let response = GatewayHandler::default().handle(
-            request_id(),
-            PeerCredentials::new(0, 0, 1),
-            GatewayMethod::Status,
-            Value::Null,
+    fn public_ca_dispatch_accepts_local_peers_but_rejects_retired_routes_and_scope_inputs() {
+        let recorder = Arc::new(Recorder::default());
+        let dispatcher = dispatcher(recorder.clone());
+        let peer = PeerCredentials::new(1001, 1002, 1003);
+        assert_eq!(
+            dispatcher.handle(
+                request_id(),
+                peer,
+                serde_json::from_value(serde_json::json!({"method":"gateway.ca","params":{}}))
+                    .unwrap(),
+            ),
+            DaemonResponse::success(
+                request_id(),
+                serde_json::json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"})
+            )
         );
-        assert_eq!(error_of(response), error_code::UNAVAILABLE);
+        for (method, params, error) in [
+            (
+                "gateway.credentials",
+                serde_json::json!({"scopeId":"scope-1"}),
+                error_code::UNKNOWN_METHOD,
+            ),
+            (
+                "gateway.key.add",
+                serde_json::json!({"secretFile":"/root/t"}),
+                error_code::UNKNOWN_METHOD,
+            ),
+            (
+                "gateway.ca",
+                serde_json::json!({"scopeId":"scope-1"}),
+                error_code::INVALID_ARGUMENT,
+            ),
+            (
+                "gateway.ca",
+                serde_json::json!({"uid":0}),
+                error_code::INVALID_ARGUMENT,
+            ),
+        ] {
+            assert_eq!(
+                error_of(
+                    dispatcher.handle(
+                        request_id(),
+                        peer,
+                        serde_json::from_value(
+                            serde_json::json!({"method":method,"params":params})
+                        )
+                        .unwrap(),
+                    )
+                ),
+                error
+            );
+        }
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            ["ca by 1001 gid 1002 pid 1003"]
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_gateway_is_unavailable() {
+        for method in [GatewayMethod::Status, GatewayMethod::Ca] {
+            let response = GatewayHandler::default().handle(
+                request_id(),
+                PeerCredentials::new(1001, 1001, 1),
+                method,
+                Value::Null,
+            );
+            assert_eq!(error_of(response), error_code::UNAVAILABLE);
+        }
     }
 }

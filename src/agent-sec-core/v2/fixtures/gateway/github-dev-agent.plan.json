@@ -1,92 +1,56 @@
 {
-  "format": "agent-sec-gateway-plan/v1",
+  "format": "agent-sec-gateway-plan/v2",
   "scopeId": "00000000-0000-4000-8000-000000000001",
-  "policies": [
-    {
-      "id": "policy:github",
-      "revision": 7
-    }
-  ],
-  "credentials": [
-    "github"
-  ],
+  "policies": [{"id": "policy:github", "revision": 7}],
+  "credentials": ["github"],
   "rules": [
     {
-      "source": {
-        "policyId": "policy:github",
-        "policyRevision": 7,
-        "ruleIndex": 0
-      },
-      "match": {
-        "scheme": "https",
-        "host": "api.github.com",
-        "path": "/**",
-        "methods": [
-          "GET",
-          "HEAD",
-          "POST",
-          "PUT",
-          "PATCH",
-          "DELETE"
-        ],
-        "credentialId": "github"
-      },
-      "responseRewrite": true,
-      "because": "GitHub REST API with github"
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 0},
+      "match": {"scheme": "https", "host": "api.github.com", "path": {"kind": "like", "value": "/*"}, "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], "credentialId": "github"},
+      "header": "Authorization", "format": "auto", "responseRewrite": true,
+      "because": "REST API credential substitution"
     },
     {
-      "source": {
-        "policyId": "policy:github",
-        "policyRevision": 7,
-        "ruleIndex": 1
-      },
-      "match": {
-        "scheme": "https",
-        "host": "github.com",
-        "path": "/**/info/refs",
-        "methods": [
-          "GET"
-        ],
-        "credentialId": "github"
-      },
-      "responseRewrite": true,
-      "because": "Git ref discovery with github"
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 1},
+      "match": {"scheme": "https", "host": "api.github.com", "path": {"kind": "like", "value": "/*"}, "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], "credentialId": "github"},
+      "header": "Authorization", "format": "basic", "responseRewrite": true,
+      "because": "REST API Basic password substitution"
     },
     {
-      "source": {
-        "policyId": "policy:github",
-        "policyRevision": 7,
-        "ruleIndex": 2
-      },
-      "match": {
-        "scheme": "https",
-        "host": "github.com",
-        "path": "/**/git-upload-pack",
-        "methods": [
-          "POST"
-        ],
-        "credentialId": "github"
-      },
-      "responseRewrite": false,
-      "because": "Git fetch with github"
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 2},
+      "match": {"scheme": "https", "host": "github.com", "path": {"kind": "like", "value": "/*/info/refs"}, "methods": ["GET"], "credentialId": "github"},
+      "header": "Authorization", "format": "auto", "responseRewrite": true,
+      "because": "Git ref discovery credential substitution"
     },
     {
-      "source": {
-        "policyId": "policy:github",
-        "policyRevision": 7,
-        "ruleIndex": 3
-      },
-      "match": {
-        "scheme": "https",
-        "host": "github.com",
-        "path": "/**/git-receive-pack",
-        "methods": [
-          "POST"
-        ],
-        "credentialId": "github"
-      },
-      "responseRewrite": true,
-      "because": "Git push with github"
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 3},
+      "match": {"scheme": "https", "host": "github.com", "path": {"kind": "like", "value": "/*/info/refs"}, "methods": ["GET"], "credentialId": "github"},
+      "header": "Authorization", "format": "basic", "responseRewrite": true,
+      "because": "Git ref discovery Basic password substitution"
+    },
+    {
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 4},
+      "match": {"scheme": "https", "host": "github.com", "path": {"kind": "like", "value": "/*/git-upload-pack"}, "methods": ["POST"], "credentialId": "github"},
+      "header": "Authorization", "format": "auto", "responseRewrite": true,
+      "because": "Git fetch body passthrough"
+    },
+    {
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 5},
+      "match": {"scheme": "https", "host": "github.com", "path": {"kind": "like", "value": "/*/git-upload-pack"}, "methods": ["POST"], "credentialId": "github"},
+      "header": "Authorization", "format": "basic", "responseRewrite": true,
+      "because": "Git fetch Basic password substitution"
+    },
+    {
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 6},
+      "match": {"scheme": "https", "host": "github.com", "path": {"kind": "like", "value": "/*/git-receive-pack"}, "methods": ["POST"], "credentialId": "github"},
+      "header": "Authorization", "format": "auto", "responseRewrite": true,
+      "because": "Git push credential substitution"
+    },
+    {
+      "source": {"policyId": "policy:github", "policyRevision": 7, "ruleIndex": 7},
+      "match": {"scheme": "https", "host": "github.com", "path": {"kind": "like", "value": "/*/git-receive-pack"}, "methods": ["POST"], "credentialId": "github"},
+      "header": "Authorization", "format": "basic", "responseRewrite": true,
+      "because": "Git push Basic password substitution"
     }
   ]
 }

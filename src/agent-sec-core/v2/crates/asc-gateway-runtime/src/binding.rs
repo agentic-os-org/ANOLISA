@@ -53,7 +53,7 @@ impl GatewayService {
             && scope
                 .policy_snapshots
                 .iter()
-                .any(|policy| *policy == binding.policy && policy.template.uses_credentials())
+                .any(|policy| *policy == binding.policy && policy.uses_credentials())
     }
     fn admitted_binding(&self, binding: &PreparedBinding) -> Result<PreparedScope, GatewayError> {
         let view = self.repository.get_binding(&binding.binding_id)?;
@@ -68,7 +68,7 @@ impl GatewayService {
         self.check_scope(&scope)?;
         if binding.scope.selector != scope.selector
             || !scope.policy_snapshots.contains(&binding.policy)
-            || !binding.policy.template.uses_credentials()
+            || !binding.policy.uses_credentials()
         {
             return Err(GatewayError::new(
                 GatewayErrorKind::Conflict,
@@ -933,8 +933,7 @@ impl TargetDeploymentClient for GatewayBindingClient {
 }
 impl ScopeExecution for GatewayService {
     fn validate(&self, scope: &PreparedScope) -> Result<(), PapError> {
-        self.check_scope(scope)
-            .map(|_| ())
+        self.validate_scope_pairs(scope)
             .map_err(|error| pap_failure(&error))
     }
     fn prepare(&self, scope: &PreparedScope) -> Result<(), PapError> {
