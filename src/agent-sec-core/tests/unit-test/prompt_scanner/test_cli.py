@@ -637,3 +637,12 @@ def test_scan_prompt_invokes_middleware_and_writes_event():
     assert event.category == "prompt_scan"
     assert event.event_type == "prompt_scan"
     assert event.details["result"]["verdict"] == "deny"
+
+
+@pytest.mark.parametrize("payload", ["[]", '"hello"', "123", "null"])
+def test_scan_prompt_multi_turn_rejects_non_object_payload(payload):
+    with _patch_invoke() as invoke_mock:
+        rv = runner.invoke(scanner_app, ["--mode", "multi_turn"], input=payload)
+    assert rv.exit_code == 1
+    assert "payload must be a JSON object" in rv.output
+    invoke_mock.assert_not_called()
