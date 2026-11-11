@@ -512,19 +512,20 @@ fn kongche_cancel_and_suppression_have_one_terminal_notice() {
                 if choice == 1 { b"\n" } else { b"2\n" },
             ));
         }
-        let final_notice = if choice == 2 {
-            "Automatic OS Console access disabled."
-        } else {
-            "Cancelled. Your question is retained"
+        let final_notice = match choice {
+            0 => "Cancelled. Your question is retained",
+            1 => "Automatic access is disabled for this session.",
+            _ => "Automatic OS Console access disabled.",
         };
         steps.push((final_notice, b"printf 'KONGCHE_%s\n' CANCEL_DONE\n"));
         steps.push(("KONGCHE_CANCEL_DONE", b""));
         let (output, requests) = run_trial(&[], &steps);
         assert_eq!(
             output.matches("Cancelled.").count(),
-            usize::from(choice != 2),
+            usize::from(choice == 0),
             "{output}"
         );
+        assert_eq!(output.matches(final_notice).count(), 1, "{output}");
         assert_eq!(
             requests
                 .iter()

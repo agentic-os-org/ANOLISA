@@ -174,11 +174,13 @@ pub fn govern_agent_events_with_language(
                 summary.clone(),
                 false,
             ),
-            AgentEvent::AgentFailed { error, .. } => (
+            AgentEvent::AgentFailed {
+                error, error_code, ..
+            } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,
                 "agent failure is display-only".to_string(),
-                display_agent_error(error, &i18n),
+                display_agent_error(error, error_code.as_deref(), &i18n),
                 false,
             ),
             AgentEvent::AgentCancelled { reason, .. } => (

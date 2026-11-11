@@ -419,6 +419,7 @@ pub(crate) fn poll<W: Write>(
         if let Some(code) = observe_terminal(&mut state.auth.ecs_trial) {
             let message = crate::agent::display::display_agent_error(
                 &format!("provider_access:{code}"),
+                None,
                 &state.i18n(),
             );
             notice(state, output, &message, &message)?;
@@ -468,8 +469,10 @@ pub(crate) fn poll<W: Write>(
                 },
                 if disconnected {
                     "Model service connection closed. Your question is retained; ask again or use /auth to configure a model."
-                } else {
+                } else if state.auth.ecs_trial.auto_use_allowed {
                     "Cancelled. Your question is retained; use /auth to configure a model."
+                } else {
+                    "✓ Automatic access is disabled for this session. Your question is retained; use /auth to configure a model."
                 },
             )?;
         }
