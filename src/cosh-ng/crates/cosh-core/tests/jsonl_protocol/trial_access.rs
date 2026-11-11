@@ -396,11 +396,12 @@ fn legacy_trusted_capabilities_do_not_authorize_trial() {
 }
 
 #[test]
-fn trial_default_model_change_is_announced() {
+fn trial_fixed_auto_model_is_announced() {
     let messages = exchange(true, &[initialize(true), user(true), shutdown()]);
     assert!(
-        messages.iter().any(|message| message["type"] == "system"
-            && message["status"] == "model_switched:qwen3.7-plus"),
+        messages.iter().any(
+            |message| message["type"] == "system" && message["status"] == "model_switched:auto"
+        ),
         "{messages:?}"
     );
 }

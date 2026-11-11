@@ -4,7 +4,9 @@
 
 Cosh Shell can use OS Console model service on ECS without manual model
 credentials. Existing configured providers retain their selection. Automatic
-access defaults to `qwen3.7-plus` and preserves explicit and resumed models.
+access uses the fixed model `auto`. Configuration, environment variables, CLI
+overrides, runtime model switches, and resumed sessions cannot change this model.
+Use `/auth` to configure another provider when a specific model is needed.
 The service determines entitlement and quota; this is not a promise of
 permanently free access. Cosh never enables paid access automatically.
 
@@ -46,7 +48,8 @@ it does not disable another configured provider. Explicit `/auth` selection
 can re-enable identity access without replaying a cancelled question.
 
 Implicit use does not save a provider. Explicit selection stores only
-`aliyun`/`ecs_identity` metadata and the selected model, preserves other
+`aliyun`/`ecs_identity` metadata and the fixed model `auto`, preserves other
 providers and avoids duplicate entries. Provider changes update live model
-state; resumed sessions retain their model. Partial session-save failure is
+state; resumed identity sessions also use `auto`. Other providers retain their
+model selection and session behavior. Partial session-save failure is
 reported separately from an already applied provider change.

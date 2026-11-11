@@ -11,7 +11,10 @@ add credentials or provider definitions.
 With a compatible Cosh Shell/Core, a user-initiated model request on ECS can use
 automatic access to OS Console model service without `/auth` when no provider, endpoint, or credentials
 have been selected. Existing model configurations keep their current behavior.
-This path defaults to `qwen3.7-plus`; an explicitly selected model is preserved.
+This path uses the fixed model `auto`; project/user configuration, environment
+variables, CLI model overrides, runtime model switches, and resumed sessions
+cannot change it. Use `/auth` to configure another provider for a specific model.
+You do not need to run `/auth` before using automatic access.
 This path requires server support for ECS instance identity exchange.
 
 Automatic access removes manual credential setup; it does not promise a permanently free service. Monthly free allowances will be introduced after the current preview period. Once the available allowance is exhausted, requests stop unless the user purchases a top-up or explicitly enables pay-as-you-go. OS Console determines current availability and quota; Cosh never enables paid access automatically.

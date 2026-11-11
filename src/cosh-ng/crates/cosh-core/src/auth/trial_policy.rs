@@ -4,24 +4,7 @@ use std::ffi::OsString;
 
 use crate::config::{CoreConfig, ProviderConfig};
 
-pub(crate) const DEFAULT_MODEL: &str = "qwen3.7-plus";
-
-pub(crate) fn model(config: &CoreConfig) -> String {
-    let name = config.ai.active_provider.as_deref().or_else(|| {
-        (config.ai.providers.len() == 1)
-            .then(|| config.ai.providers.keys().next().map(String::as_str))
-            .flatten()
-    });
-    config
-        .ai
-        .active_model
-        .clone()
-        .or_else(|| {
-            name.and_then(|name| config.ai.providers.get(name))
-                .and_then(|provider| provider.model.clone())
-        })
-        .unwrap_or_else(|| DEFAULT_MODEL.into())
-}
+pub(crate) const MODEL: &str = "auto";
 
 /// Selects the existing configuration, an ECS trial candidate, or no trial.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

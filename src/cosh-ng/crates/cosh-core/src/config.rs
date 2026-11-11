@@ -141,6 +141,13 @@ pub struct ProviderConfig {
     pub explicit_cache: Option<bool>,
 }
 
+impl ProviderConfig {
+    pub(crate) fn is_ecs_identity(&self) -> bool {
+        self.provider_type.as_deref() == Some("aliyun")
+            && self.auth_source.as_deref() == Some("ecs_identity")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -1065,12 +1072,15 @@ impl CoreConfig {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
 
-        let model = self
-            .ai
-            .active_model
-            .clone()
-            .or_else(|| provider_cfg.and_then(|p| p.model.clone()))
-            .unwrap_or_else(|| "qwen-max".to_string());
+        let model = if provider_cfg.is_some_and(ProviderConfig::is_ecs_identity) {
+            crate::auth::trial_policy::MODEL.to_string()
+        } else {
+            self.ai
+                .active_model
+                .clone()
+                .or_else(|| provider_cfg.and_then(|p| p.model.clone()))
+                .unwrap_or_else(|| "qwen-max".to_string())
+        };
 
         let provider_type = provider_cfg
             .and_then(|p| p.provider_type.clone())
@@ -1502,6 +1512,18 @@ mod tests {
         let config = CoreConfig::load_from_paths(Some(&system), Some(&user), None, false);
 
         assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
+    }
+
+    #[test]
+    fn ecs_identity_model_is_fixed_without_changing_other_providers() {
+        for (source, expected) in [("ecs_identity", "auto"), ("ecs_ram_role", "chosen-model")] {
+            let config: CoreConfig = toml::from_str(&format!(
+                "[ai]\nactive_provider = 'trial'\nactive_model = 'chosen-model'\n\
+                 [ai.providers.trial]\ntype = 'aliyun'\nauth_source = '{source}'\nmodel = 'provider-model'\n"
+            ))
+            .unwrap();
+            assert_eq!(config.resolve_provider().model, expected, "{source}");
+        }
     }
 
     #[test]

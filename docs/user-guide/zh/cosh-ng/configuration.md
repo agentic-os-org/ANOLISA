@@ -14,6 +14,11 @@
 
 Core 按系统 → 用户 → 项目的顺序合并配置。项目配置可以设置 Agent、Skill、会话、`active_model` 和回答语言偏好，但会忽略 `active_provider`、Provider 定义、MCP server、Hook 定义、`agent.approval_mode`、`agent.allowed_tools` 和项目审计设置。`cosh-shell` 只读取用户文件，不读取系统或项目文件。
 
+ECS 免配接入（`aliyun` 且 `auth_source = "ecs_identity"`）始终使用固定模型
+`auto`，`active_model` 和 Provider 的 `model` 均不能修改；选择该接入方式不会把
+项目模型保存为用户配置。需要自选模型时，可用 `/auth` 配置其它 Provider；
+默认 ECS 免配接入不需要先运行 `/auth`。
+
 ## 最小用户配置
 
 ```toml
