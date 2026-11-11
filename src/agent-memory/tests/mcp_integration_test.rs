@@ -181,6 +181,41 @@ async fn lists_ten_tier_a_tools() {
 }
 
 #[tokio::test]
+async fn grep_returns_matches_after_invalid_utf8_over_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let notes = tmp.path().join("user-tester/notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(
+        notes.join("mixed.md"),
+        b"alpha first\n\xff\xfe alpha bad\nomega last\n",
+    )
+    .unwrap();
+
+    let resp = call_tool(
+        &mut reader,
+        &mut stdin,
+        2,
+        "mem_grep",
+        json!({"pattern": "alpha|omega", "dir": "notes"}),
+    )
+    .await;
+    drop(stdin);
+    let _ = child.kill().await;
+
+    assert_ne!(resp["result"]["isError"], true, "{resp}");
+    let hits: Value = serde_json::from_str(&extract_text(&resp)).unwrap();
+    assert_eq!(
+        hits,
+        json!([
+            {"path": "notes/mixed.md", "line": 1, "text": "alpha first"},
+            {"path": "notes/mixed.md", "line": 3, "text": "omega last"}
+        ])
+    );
+}
+
+#[tokio::test]
 async fn write_read_grep_workflow() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;

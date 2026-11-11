@@ -330,6 +330,53 @@ fn grep_finds_matches_with_line_numbers() {
 }
 
 #[test]
+fn grep_skips_invalid_utf8_lines_and_keeps_physical_line_numbers() {
+    let (_t, svc) = setup();
+    let notes = svc.mount.root.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let cases = [
+        (
+            b"alpha first\n\xff\xfe alpha bad\nomega last\n".as_slice(),
+            vec![(1, "alpha first"), (3, "omega last")],
+        ),
+        (
+            b"\xff alpha bad\r\n\xfe omega bad\r\n\r\nalpha first\r\nomega last".as_slice(),
+            vec![(4, "alpha first"), (5, "omega last")],
+        ),
+        (
+            b"alpha first\n\xe4\xb8".as_slice(),
+            vec![(1, "alpha first")],
+        ),
+        (b"\xff alpha bad\n\xfe omega bad".as_slice(), vec![]),
+        (
+            "alpha 中文\n\nomega 最后".as_bytes(),
+            vec![(1, "alpha 中文"), (3, "omega 最后")],
+        ),
+    ];
+
+    for (content, expected) in cases {
+        std::fs::write(notes.join("mixed.md"), content).unwrap();
+        let hits = svc
+            .grep(
+                "alpha|omega",
+                GrepOptions {
+                    dir: "notes".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for hit in &hits {
+            assert_eq!(hit.path, "notes/mixed.md");
+        }
+        let actual: Vec<_> = hits
+            .iter()
+            .map(|hit| (hit.line, hit.text.as_str()))
+            .collect();
+        assert_eq!(actual, expected, "input: {content:?}");
+    }
+}
+
+#[test]
 fn grep_respects_case_insensitive() {
     let (_t, svc) = setup();
     svc.write("a.md", "Hello World", false).unwrap();

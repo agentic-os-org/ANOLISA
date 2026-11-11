@@ -118,7 +118,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Search files for a regex pattern. Returns matches as JSON: [{path, line, text}]. Honors r#type as a glob filter and max as result cap."
+        description = "Search files for a regex pattern. Returns matches as JSON: [{path, line, text}]. Skips non-UTF-8 lines and continues searching the file, preserving original line numbers. Honors r#type as a glob filter and max as result cap."
     )]
     async fn mem_grep(
         &self,

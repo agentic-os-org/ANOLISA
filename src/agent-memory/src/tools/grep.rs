@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::os::fd::AsFd;
 use std::path::Path;
 
@@ -117,6 +117,7 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
         for (idx, line_result) in reader.lines().enumerate() {
             let mut line = match line_result {
                 Ok(l) => l,
+                Err(e) if e.kind() == ErrorKind::InvalidData => continue,
                 Err(_) => break,
             };
             if line.len() > MAX_LINE_LEN {

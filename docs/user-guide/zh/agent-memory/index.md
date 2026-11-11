@@ -292,6 +292,9 @@ sandbox 会话还有一层独立策略：默认 sandbox 不开放记忆工具，
 | `mem_promote` | `session_path`、`store_path` | — | 把会话 scratch 文件复制到持久化仓的新文件 |
 | `mem_session_log` | — | — | 当前会话 JSONL |
 
+`mem_grep` 跳过含非法 UTF-8 字节的行，继续搜索同一文件的后续行。
+返回的行号从 1 开始，按原文件中的位置计算，包含被跳过的行。
+
 `mem_write(overwrite=false)` 和 `mem_promote` 拒绝覆盖已有目标。写入失败时，会删除
 本次创建的不完整文件，以便重试同一请求；清理失败会与写入错误一起报告。这不是原子发布：
 并发读取可能看到写入中的内容，进程崩溃也可能留下残缺文件。外部操作替换同一目标时，
