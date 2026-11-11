@@ -27,6 +27,29 @@ aw service serve --config /absolute/aw.yaml --state-dir /absolute/private/state
 
 复用服务要求协议与启动配置匹配。编辑配置后按[策略更新](policy-updates.md)操作，或停止旧服务后重启。
 
+## 接流前准备
+
+分别检查 AW Service、配置的 Provider 后端以及实际原生请求对象的就绪状态。
+后端 socket 可达时，scanner 可能仍未初始化；SDK daemon 运行时，Query 或 session
+也可能仍未初始化。应用或其 supervisor 负责最终接流门禁。
+
+沿用部署时的身份、配置和数据目录，并行启动相互独立的服务，保留后端认证与
+AW 审计健康检查。框架原生 daemon 就绪后，通过已准入的 AW 工厂初始化真实请求对象，
+同时预热该目标使用的 scanner。CPU 受限的容器可通过分阶段准备减少与 daemon
+首次模块加载的竞争；选择业务启动顺序前，对两种编排分别计时。
+
+[Qoder SDK](../agents/qoder-sdk.md) 的 `bridge.startup({options})` 无需 prompt
+即可准备一个真实 Query。沿用实际请求的 daemon、cwd、模型、设置和权限；
+[sec-core 输入预热](../providers/sec-core.md#预热输入扫描器)独立准备配置的输入 scanner。
+其他框架沿用各自文档中的 session/client 工厂与原生就绪检查。
+
+所有必要准备成功后再接流。并行准备失败时，等待各准备操作收尾并关闭已创建的
+Query/session，包括尚未使用的预热对象。策略更新或关闭前停止派发并排空这些对象。
+就绪检查和预热之后，每次请求继续执行 Hook 检查。
+
+分别记录启动到 daemon 就绪、启动到请求对象与 scanner 均就绪，以及首次响应延迟。
+冷启动计时包含服务启动；移到接流前的工作仍计入总启动耗时。
+
 ## 停止与升级
 
 先停止派发、排空任务并关闭 SDK 客户端，再退出 Agent，最后执行 `aw stop --config FILE`。

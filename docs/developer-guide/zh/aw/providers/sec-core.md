@@ -72,6 +72,25 @@ AW 卸载只移除其管理的桥接程序/资源，保留独立管理的系统�
 配置及后台数据。后台升级/移除交给拥有它的系统包；AW 暂无自动服务安装、
 升级或卸载衔接。
 
+## 预热输入扫描器
+
+目标使用 fast Prompt 和输入 PII 检查时，在接流前准备同一 daemon 中的 scanner。
+以下命令已在 sec-core 1.2.0 验证；使用其他发行版本时先检查实际 CLI 的帮助：
+
+```bash
+SEC_CORE_SOCKET=/run/agent-sec-core/daemon.sock
+agent-sec-cli --socket "$SEC_CORE_SOCKET" --timeout-ms 10000 \
+  scan-prompt warmup --mode fast
+printf 'AW startup readiness\n' | \
+  agent-sec-cli --socket "$SEC_CORE_SOCKET" --timeout-ms 10000 \
+  scan-pii --stdin --source user_input --format json
+```
+
+Prompt 预热须成功，无风险 PII 探针须返回 `verdict: pass`。daemon 健康响应只证明
+服务可达。沿用后端实际身份、Skill 目录和启动配置，预热连接 `transport.argv`
+使用的同一 socket。每次真实输入继续扫描；与框架已准入请求对象并行准备的方式见
+[接流前准备](../deployment/lifecycle.md#接流前准备)。
+
 ## 配置 Provider
 
 复制[完整示例](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)为

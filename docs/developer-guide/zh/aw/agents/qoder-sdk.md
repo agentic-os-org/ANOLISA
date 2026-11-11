@@ -71,7 +71,7 @@ aw status --config /absolute/aw.yaml
 aw stop --config /absolute/aw.yaml
 ```
 
-`startDaemon()` 确认预热就绪；`createQuery()` 在 SDK 握手后确认 Query 就绪。按[原生验收](../validation.md)检查允许、阻断、后置故障和清理。
+`startDaemon()` 确认 daemon 就绪；`createQuery()` 在 SDK 握手后确认 Query 就绪。按[原生验收](../validation.md)检查允许、阻断、后置故障和清理。
 安全组合使用[SDK 示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)，先替换路径并启动 sec-core。
 
 共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。
@@ -147,7 +147,9 @@ settings、插件、Hook 和权限选项沿用原值。探测、普通 Query、�
 创建均经过 Bridge；配置了 AW 时，准入失败须向调用方返回。应用入口支持 `.js` 与 `.mjs`。
 
 一次性预热使用 `await bridge.startup({options})`：初始化期间不提交 prompt，
-`warm.query(prompt)` 再次校验 scope 有效性。未使用的实例通过 `await warm.close()`
+`warm.query(prompt)` 再次校验 scope 有效性。每个预热对象只能使用一次，关闭前持有实例和任务
+scope；空闲策略更新前先关闭预热对象。按[接流前准备](../deployment/lifecycle.md#接流前准备)
+与配置的输入 scanner 并行初始化。未使用的实例通过 `await warm.close()`
 清理。AW 启停保持 SDK/Worker 文件不变；移除 AW 接入时，重启应用并恢复原生工厂调用。
 
 原生 SDK 进程内 MCP 保留 schema transform 和默认值：AW 检查解析后的 handler 输入，
