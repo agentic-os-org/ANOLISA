@@ -362,27 +362,36 @@ class TestHandlers:
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
     def test_rollback_sets_skip_flag(self, _ws, _cwd, _cmd):
         mgr = get_manager()
-        mgr.skip_auto_checkpoint_workspaces.clear()
-        handle_ws_ckpt_rollback({"target": "snap1"})
-        assert mgr.skip_auto_checkpoint_workspaces == {"/ws"}
+        mgr.rollback_workspaces_by_session.clear()
+        handle_ws_ckpt_rollback({"target": "snap1"}, session_id="conv-a", task_id="t1")
+        assert mgr.rollback_workspaces_by_session == {"conv-a": {"/ws"}}
+
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_without_session_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
+        mgr = get_manager()
+        mgr.rollback_workspaces_by_session.clear()
+        assert json.loads(handle_ws_ckpt_rollback({"target": "snap1"}))["success"]
+        assert not mgr.rollback_workspaces_by_session
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "preview"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace")
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
     def test_rollback_preview_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
         mgr = get_manager()
-        mgr.skip_auto_checkpoint_workspaces.clear()
-        handle_ws_ckpt_rollback({"target": "snap1", "preview": True})
-        assert not mgr.skip_auto_checkpoint_workspaces
+        mgr.rollback_workspaces_by_session.clear()
+        handle_ws_ckpt_rollback({"target": "snap1", "preview": True}, session_id="conv-a")
+        assert not mgr.rollback_workspaces_by_session
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(False, "failed"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
     def test_rollback_failure_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
         mgr = get_manager()
-        mgr.skip_auto_checkpoint_workspaces.clear()
-        handle_ws_ckpt_rollback({"target": "snap1"})
-        assert not mgr.skip_auto_checkpoint_workspaces
+        mgr.rollback_workspaces_by_session.clear()
+        handle_ws_ckpt_rollback({"target": "snap1"}, session_id="conv-a")
+        assert not mgr.rollback_workspaces_by_session
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview\nM  file.txt"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace")

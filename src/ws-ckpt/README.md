@@ -24,7 +24,7 @@ After a successful rollback through the OpenClaw or Hermes plugin, the next
 turn-end checkpoint is skipped only for the restored workspace, whether the
 rollback uses its ID or registered path. Other
 workspaces keep their automatic checkpoints; preview and failed rollbacks do
-not suppress them. OpenClaw keeps this state within the originating session,
+not suppress them. Both plugins keep this state within the originating session,
 so another session finishing first cannot consume it.
 
 ## Project Structure

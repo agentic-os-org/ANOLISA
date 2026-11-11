@@ -13,7 +13,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .config import HermesPluginConfig, MSG_TRUNCATE_LEN, load_config
 
@@ -112,8 +112,8 @@ class CheckpointManager:
     def __init__(self, config: HermesPluginConfig) -> None:
         self._config = config
         self._turn_count: int = 0
-        # Registrations restored this turn; consumed together at turn end.
-        self.skip_auto_checkpoint_workspaces: set[str] = set()
+        # Registrations restored by each session; only that session consumes them.
+        self.rollback_workspaces_by_session: Dict[str, Set[str]] = {}
 
     @property
     def config(self) -> HermesPluginConfig:
@@ -132,6 +132,18 @@ class CheckpointManager:
         """Increment and return the turn counter."""
         self._turn_count += 1
         return self._turn_count
+
+    def remember_rollback(self, workspace: str, session_id: str) -> None:
+        """Record a restored registration only when the host identifies the session."""
+        if not session_id:
+            return
+        self.rollback_workspaces_by_session.setdefault(session_id, set()).add(workspace)
+
+    def take_rollback_workspaces(self, session_id: str) -> Set[str]:
+        """Consume this session's state even when its turn cannot create a checkpoint."""
+        if not session_id:
+            return set()
+        return self.rollback_workspaces_by_session.pop(session_id, set())
 
     # ------------------------------------------------------------------
     # CLI execution

@@ -699,7 +699,9 @@ def handle_ws_ckpt_checkpoint(args: Dict[str, Any], **_kwargs) -> str:
     return _ok(output) if success else _err(output)
 
 
-def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
+def handle_ws_ckpt_rollback(
+    args: Dict[str, Any], session_id: str = "", **_kwargs: Any
+) -> str:
     """Handle ws-ckpt-rollback tool call."""
     target = (args.get("target") or "").strip()
     num_ancestors = args.get("num_ancestors")
@@ -757,7 +759,7 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
         cmd.append("--preview")
     success, output = _run_ws_ckpt_cmd(cmd)
     if success and registration is not None:
-        get_manager().skip_auto_checkpoint_workspaces.add(registration)
+        get_manager().remember_rollback(registration, session_id)
     return _ok(output) if success else _err(map_error_to_message(output))
 
 
