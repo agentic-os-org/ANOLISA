@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 
 /// Explicit trusted helper location, chosen by the embedding application.
 #[derive(Debug, Clone)]
-pub struct SandboxBackend {
+pub struct LinuxSandboxBackend {
     helper: PathBuf,
 }
 
-impl SandboxBackend {
+impl LinuxSandboxBackend {
     /// Uses a specific installed helper, never the target's PATH or environment.
     pub fn new(helper: PathBuf) -> Self {
         Self { helper }
@@ -97,6 +97,27 @@ impl SandboxBackend {
     }
 }
 
+impl crate::SandboxBackend for LinuxSandboxBackend {
+    fn capabilities(&self) -> Result<BackendCapabilities, PepError> {
+        Self::capabilities(self)
+    }
+
+    fn execute_bound(&self, spec: &ExecutionSpec) -> Result<ExecutionResult, PepError> {
+        Self::execute_bound(self, spec)
+    }
+
+    fn preflight(&self, spec: &ExecutionSpec) -> Result<(), PepError> {
+        // The bwrap mount plan is backend-specific; other backends validate
+        // their own placement inside execute_bound.
+        #[cfg(target_os = "linux")]
+        linux_sandbox::runtime::check_mount_plan(spec)
+            .map_err(|e| PepError::Unsupported(e.to_string()))?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = spec;
+        Ok(())
+    }
+}
+
 /// Runs a command directly; this entrypoint never evaluates or reports to a PDP.
 ///
 /// # Errors
@@ -105,7 +126,7 @@ pub fn execute(
     launch: LaunchSpec,
     permissions: OsPermissionSet,
 ) -> Result<ExecutionResult, PepError> {
-    SandboxBackend::installed()?.execute(launch, permissions)
+    LinuxSandboxBackend::installed()?.execute(launch, permissions)
 }
 
 /// Resolves a command using the target's PATH and cwd, preserving original argv.

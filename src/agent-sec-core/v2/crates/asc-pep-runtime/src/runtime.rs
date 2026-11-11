@@ -202,15 +202,15 @@ impl PreparedInvocation {
 
 /// Upper PEP state; retain one instance across invocations to reject decision replay.
 pub struct PepRuntime {
-    backend: SandboxBackend,
+    backend: Box<dyn SandboxBackend>,
     consumed: HashMap<String, u64>,
 }
 
 impl PepRuntime {
-    /// Uses the same strict backend as the independent CLI.
-    pub fn new(backend: SandboxBackend) -> Self {
+    /// Uses the deployment-selected enforcement backend.
+    pub fn new(backend: impl SandboxBackend + 'static) -> Self {
         Self {
-            backend,
+            backend: Box::new(backend),
             consumed: HashMap::new(),
         }
     }
@@ -309,9 +309,7 @@ impl PepRuntime {
             mount_aliases: prepared.execution.mount_aliases.clone(),
         };
         decision.validate_execution(&spec)?;
-        #[cfg(target_os = "linux")]
-        linux_sandbox::runtime::check_mount_plan(&spec)
-            .map_err(|e| PepError::Unsupported(e.to_string()))?;
+        self.backend.preflight(&spec)?;
         Ok(spec)
     }
 
