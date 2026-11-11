@@ -19,7 +19,9 @@ use asc_policy_types::binding::{BindingStatus, PreparedBinding};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::process_discovery::ProcessIdentity as CanonicalProcess;
-use asc_policy_types::scope::{PreparedScope, ProcessMatcher, ScopeSelector, ScopeStatus};
+use asc_policy_types::scope::{
+    PolicyReference, PreparedScope, ProcessMatcher, ScopeSelector, ScopeStatus,
+};
 use asc_policy_types::target::{PreparedApply, TargetBindingPlan};
 
 use crate::{
@@ -2075,7 +2077,10 @@ fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retire
     drop(service);
     fixture.key(OTHER_REAL);
     let service = fixture.service();
-    service.prepare_scope(&scope).unwrap();
+    assert_eq!(
+        service.prepare_scope(&scope).err().unwrap().kind(),
+        GatewayErrorKind::Conflict
+    );
     drop(service);
     let restarted = fixture.service();
     restarted.recover().unwrap();
@@ -2090,6 +2095,177 @@ fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retire
     let reimported = fixture.secrets();
     assert_eq!(reimported["entries"], serde_json::json!([]));
     assert_eq!(reimported["retired"], retired);
+}
+#[test]
+fn scope_preparation_rejects_retired_credentials_until_a_new_scope_is_created() {
+    let fixture = Fixture::new();
+    let service = fixture.service();
+    fixture.key(REAL);
+    let original = fixture.scope("original", 1);
+    service.prepare_scope(&original).unwrap();
+    service.enable().unwrap();
+    let original_fake =
+        service.credentials(UID, "original").unwrap().environment["GH_TOKEN"].clone();
+
+    service.remove_key("github").unwrap();
+    // A Scope admitted after global retirement must not report a successful
+    // preparation while it cannot hold a fake.
+    let rejected = fixture.scope("rejected", 1);
+    assert_eq!(
+        service.prepare_scope(&rejected).err().unwrap().kind(),
+        GatewayErrorKind::Conflict
+    );
+
+    drop(service);
+    fixture.key(OTHER_REAL);
+    let service = fixture.service();
+    // Reimport never revives the retired assignment.
+    assert_eq!(
+        service.prepare_scope(&original).err().unwrap().kind(),
+        GatewayErrorKind::Conflict
+    );
+    // A new Scope under the reimported key receives a fresh fake.
+    let fresh = fixture.scope("fresh", 1);
+    service.prepare_scope(&fresh).unwrap();
+    let fresh_fake = service.credentials(UID, "fresh").unwrap().environment["GH_TOKEN"].clone();
+    assert_ne!(fresh_fake, original_fake);
+}
+#[test]
+fn startup_recovery_resumes_mixed_scope_discovery_after_credential_retirement() {
+    use asc_pap::{PapService, ScopeDiscovery, ScopeDiscoverySeed};
+
+    #[derive(Default)]
+    struct RecordingDiscovery {
+        scopes: Mutex<Vec<ResourceId>>,
+    }
+    impl ScopeDiscovery for RecordingDiscovery {
+        fn start(&self, seed: &ScopeDiscoverySeed) -> Result<(), asc_pap::PapError> {
+            self.scopes
+                .lock()
+                .unwrap()
+                .push(seed.scope.scope_id.clone());
+            Ok(())
+        }
+        fn stop(&self, _: &ResourceId) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let discovery = Arc::new(RecordingDiscovery::default());
+    let service = fixture.service();
+    let pap = PapService::new(fixture.repository.clone())
+        .with_scope_execution(service.clone() as Arc<dyn asc_pap::ScopeExecution>)
+        .with_scope_discovery(discovery.clone() as Arc<dyn ScopeDiscovery>);
+    let credential: PolicySource = PolicySource::SecCore(
+        serde_json::from_value(serde_json::json!({
+            "specVersion": "0.1",
+            "rules": [{
+                "effect": "allow", "category": "network", "action": "use_credential",
+                "target": {
+                    "type": "http_request", "credentialId": "github", "scheme": "https",
+                    "host": "api.github.com", "path": "/repos/**", "methods": ["GET"],
+                    "responseRewrite": "buffered"
+                },
+                "because": "credential execution contract"
+            }]
+        }))
+        .unwrap(),
+    );
+    let file: PolicySource = PolicySource::SecCore(
+        serde_json::from_value(serde_json::json!({
+            "specVersion": "0.1",
+            "rules": [{
+                "effect": "block", "category": "file", "action": "write",
+                "target": {"type": "file", "path": "/work"},
+                "where": {"operation": {"eq": "delete"}}
+            }]
+        }))
+        .unwrap(),
+    );
+    let credential = pap.create_policy("credential", &credential).unwrap();
+    let file = pap.create_policy("file", &file).unwrap();
+    let selector = ScopeSelector::Process {
+        matcher: ProcessMatcher::Name {
+            process_name: "worker".into(),
+        },
+    };
+    let references = |policy: &PreparedPolicy| PolicyReference {
+        policy_id: policy.policy_id.clone(),
+        policy_revision: policy.revision,
+    };
+    let scope = pap
+        .create_scope_assignment(
+            &selector,
+            &[references(&credential), references(&file)],
+            Some(UID),
+        )
+        .unwrap();
+    let binding = fixture.instance(&scope, 77, &[]).remove(0);
+    fixture.transition(&binding, BindingStatus::ApplyFailed);
+    service.enable().unwrap();
+    service.remove_key("github").unwrap();
+    assert_eq!(
+        service
+            .credentials(UID, scope.scope_id.as_str())
+            .err()
+            .unwrap()
+            .kind(),
+        GatewayErrorKind::Unavailable
+    );
+
+    drop(pap);
+    drop(service);
+    discovery.scopes.lock().unwrap().clear();
+    let restarted = fixture.service();
+    restarted.recover().unwrap();
+    let recovered = PapService::new(fixture.repository.clone())
+        .with_scope_execution(restarted.clone() as Arc<dyn asc_pap::ScopeExecution>)
+        .with_scope_discovery(discovery.clone() as Arc<dyn ScopeDiscovery>);
+    recovered.recover_scopes().unwrap();
+    // The retired credential must not stop discovery for the file Policy.
+    assert_eq!(
+        *discovery.scopes.lock().unwrap(),
+        vec![scope.scope_id.clone()]
+    );
+    assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
+    assert_eq!(
+        restarted
+            .credentials(UID, scope.scope_id.as_str())
+            .err()
+            .unwrap()
+            .kind(),
+        GatewayErrorKind::Unavailable
+    );
+    // Explicit retry still surfaces the retired assignment, but it must also
+    // retry the failed file Binding instead of stranding it behind the tombstone.
+    discovery.scopes.lock().unwrap().clear();
+    assert!(matches!(
+        recovered.retry_scope(&scope.scope_id),
+        Err(asc_pap::PapError::Conflict)
+    ));
+    assert_eq!(
+        recovered
+            .get_binding(&binding.binding_id)
+            .unwrap()
+            .status
+            .phase,
+        BindingStatus::PendingApply
+    );
+    assert_eq!(
+        *discovery.scopes.lock().unwrap(),
+        vec![scope.scope_id.clone()]
+    );
+    assert_eq!(fixture.secrets()["entries"], serde_json::json!([]));
+    assert_eq!(
+        restarted
+            .credentials(UID, scope.scope_id.as_str())
+            .err()
+            .unwrap()
+            .kind(),
+        GatewayErrorKind::Unavailable
+    );
 }
 #[test]
 fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_overlap() {

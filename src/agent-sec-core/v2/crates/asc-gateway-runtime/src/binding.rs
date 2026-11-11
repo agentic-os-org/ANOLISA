@@ -797,6 +797,10 @@ impl ScopeExecution for GatewayService {
         self.prepare_scope(scope)
             .map_err(|error| pap_failure(&error))
     }
+    fn restore(&self, scope: &PreparedScope) -> Result<(), PapError> {
+        self.restore_scope(scope)
+            .map_err(|error| pap_failure(&error))
+    }
     fn revoke(&self, scope: &PreparedScope) -> Result<(), PapError> {
         self.revoke_scope(scope)
             .map_err(|error| pap_failure(&error))

@@ -54,6 +54,14 @@ pub trait ScopeExecution: Send + Sync {
     /// # Errors
     /// Leaves any partially prepared resources available to revoke and release.
     fn prepare(&self, scope: &asc_policy_types::scope::PreparedScope) -> Result<(), PapError>;
+    /// Restores execution for an already admitted Scope during startup recovery.
+    ///
+    /// Unlike [`Self::prepare`], restoration must tolerate credential assignments
+    /// that cannot be reissued so independent file Policies keep their discovery
+    /// worker. Admission of a new or explicitly retried Scope stays strict.
+    /// # Errors
+    /// Rejects assignments that cannot be projected at all.
+    fn restore(&self, scope: &asc_policy_types::scope::PreparedScope) -> Result<(), PapError>;
     /// Closes credential injection before discovery and Binding cleanup.
     /// # Errors
     /// Retains durable cleanup responsibility when revocation cannot be confirmed.

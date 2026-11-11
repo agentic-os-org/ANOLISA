@@ -460,7 +460,10 @@ impl ScopeLifecycle {
     }
 
     fn call(&self, name: &'static str) -> Result<(), PapError> {
-        if matches!(name, "validate" | "prepare" | "revoke" | "release") {
+        if matches!(
+            name,
+            "validate" | "prepare" | "restore" | "revoke" | "release"
+        ) {
             assert!(
                 !self.revoking.load(Ordering::SeqCst),
                 "credential lifecycle overlapped a blocked revocation: {name}"
@@ -483,6 +486,9 @@ impl asc_pap::ScopeExecution for ScopeLifecycle {
             assert_eq!(repository.get_scope(&scope.scope_id).unwrap(), *scope);
         }
         self.call_for_scope("prepare", &scope.scope_id)
+    }
+    fn restore(&self, scope: &PreparedScope) -> Result<(), PapError> {
+        self.call_for_scope("restore", &scope.scope_id)
     }
     fn revoke(&self, _: &PreparedScope) -> Result<(), PapError> {
         self.call("revoke")?;
@@ -971,7 +977,7 @@ fn recovery_prepares_pinned_active_scope_and_resumes_failed_deletion() {
     recovered.recover_scopes().unwrap();
     assert_eq!(
         *lifecycle.calls.lock().unwrap(),
-        ["validate", "prepare", "start"]
+        ["validate", "restore", "start"]
     );
     assert_eq!(recovered.get_scope(&scope.scope_id).unwrap(), scope);
     *lifecycle.fail.lock().unwrap() = Some("revoke");
@@ -998,7 +1004,7 @@ fn recovery_prepares_pinned_active_scope_and_resumes_failed_deletion() {
 #[test]
 fn active_recovery_failure_preserves_authority_and_explicit_retry_restores_before_bindings() {
     use asc_pap::ScopeBindingSink;
-    for failing in ["validate", "prepare", "start"] {
+    for failing in ["validate", "restore", "start"] {
         let (pap, repo) = service();
         let lifecycle = Arc::new(ScopeLifecycle::default());
         *lifecycle.repository.lock().unwrap() = Some(repo.clone());
@@ -1039,24 +1045,26 @@ fn active_recovery_failure_preserves_authority_and_explicit_retry_restores_befor
         assert_eq!(repo.binding_state(&binding.spec.binding_id), failed_binding);
         let failed_calls = match failing {
             "validate" => vec!["validate"],
-            "prepare" => vec!["validate", "prepare"],
-            "start" => vec!["validate", "prepare", "start"],
+            "restore" => vec!["validate", "restore"],
+            "start" => vec!["validate", "restore", "start"],
             _ => unreachable!(),
         };
         let mut expected = failed_calls.clone();
-        expected.extend(["validate", "prepare", "start"]);
+        expected.extend(["validate", "restore", "start"]);
         assert_eq!(*lifecycle.calls.lock().unwrap(), expected);
         assert_eq!(
             lifecycle.seeds.lock().unwrap().last(),
             Some(&repo.scope_discovery_seed(&healthy.scope_id).unwrap())
         );
 
+        // Explicit retry remains strict admission, so it uses prepare.
+        *lifecycle.fail.lock().unwrap() = Some("prepare");
         lifecycle.calls.lock().unwrap().clear();
         assert_eq!(
             recovered.retry_scope(&scope.scope_id),
             Err(PapError::Unavailable)
         );
-        assert_eq!(*lifecycle.calls.lock().unwrap(), failed_calls);
+        assert_eq!(*lifecycle.calls.lock().unwrap(), ["validate", "prepare"]);
         assert_eq!(repo.binding_state(&binding.spec.binding_id), failed_binding);
         assert_eq!(recovered.get_scope(&scope.scope_id).unwrap(), *scope);
 
