@@ -27,6 +27,8 @@ refreshed before subsequent requests as expiry approaches; no AK/SK is saved.
   the prompt also stops automatic model access.
 - Session preferences end when the Shell exits. Persistent preferences live in
   `~/.copilot-shell/cosh/preferences.toml` and survive `/new` or a Core restart.
+  Session suppression displays its own confirmation. When no model is configured,
+  subsequent questions show setup guidance in the Shell's selected language.
 - Use `/auth` to configure another model or explicitly re-enable automatic access.
   Re-enabling does not replay a cancelled question.
 

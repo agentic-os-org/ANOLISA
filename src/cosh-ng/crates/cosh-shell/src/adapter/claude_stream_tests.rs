@@ -208,6 +208,59 @@ fn claude_stream_parser_carries_structured_result_error_code() {
 }
 
 #[test]
+fn trial_i18n_result_errors_do_not_become_assistant_text() {
+    for code in [Some("ModelNotConfigured"), Some("unknown_failure"), None] {
+        for include_errors in [true, false] {
+            let mut parser = ClaudeStreamParser::new("trial-error".into(), None);
+            let mut result = serde_json::json!({
+                "type": "result", "is_error": true,
+                "result": "no model configured; use /auth to configure or re-enable a model",
+                "error_code": code,
+            });
+            if include_errors {
+                result["errors"] = serde_json::json!([result["result"].clone()]);
+            }
+            let events = parser.parse_line(&result.to_string());
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [AgentEvent::AgentFailed { error, error_code, .. }]
+                        if error == result["result"].as_str().unwrap()
+                            && error_code.as_deref() == code
+                ),
+                "{events:?}"
+            );
+        }
+    }
+    for is_error in [Some(false), None] {
+        let mut parser = ClaudeStreamParser::new("trial-success".into(), None);
+        let mut result = serde_json::json!({"type": "result", "result": "answer"});
+        if let Some(value) = is_error {
+            result["is_error"] = serde_json::json!(value);
+        }
+        let events = parser.parse_line(&result.to_string());
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::TextDelta { text, .. }, AgentEvent::AgentCompleted { .. }]
+                if text == "answer"
+        ));
+    }
+    let mut parser = ClaudeStreamParser::new("trial-partial".into(), None);
+    let partial = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial answer"}}}"#,
+    );
+    assert!(
+        matches!(partial.as_slice(), [AgentEvent::TextDelta { text, .. }] if text == "partial answer")
+    );
+    let failed = parser.parse_line(
+        r#"{"type":"result","is_error":true,"result":"upstream failure","error_code":"unknown_failure"}"#,
+    );
+    assert!(
+        matches!(failed.as_slice(), [AgentEvent::AgentFailed { error, .. }] if error == "upstream failure")
+    );
+}
+
+#[test]
 fn claude_stream_parser_extracts_tool_use_and_session_id() {
     let session = Arc::new(Mutex::new(None));
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), Some(Arc::clone(&session)));
