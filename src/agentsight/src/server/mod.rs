@@ -687,8 +687,25 @@ async fn api_not_found() -> impl Responder {
 fn json_extractor_config() -> web::JsonConfig {
     // Generic prefix keeps Rust type names out of the leading text while
     // preserving the serde detail (field/variant names are public API states).
-    web::JsonConfig::default()
-        .error_handler(|error, _req| extractor_error(format!("invalid request body: {error}")))
+    web::JsonConfig::default().error_handler(|error, _req| {
+        // Actix maps an oversized body to 413. Rewriting every failure as 400
+        // told clients a valid-but-large body was malformed and made "body too
+        // big" indistinguishable from a serde error.
+        let oversized = matches!(
+            error,
+            actix_web::error::JsonPayloadError::Overflow { .. }
+                | actix_web::error::JsonPayloadError::OverflowKnownLength { .. }
+        );
+        let (status, code) = if oversized {
+            (
+                actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+            )
+        } else {
+            (actix_web::http::StatusCode::BAD_REQUEST, "bad_request")
+        };
+        extractor_error_with_status(status, code, format!("invalid request body: {error}"))
+    })
 }
 
 /// Builds the typed path extractor config registered on the server `App`.
@@ -714,12 +731,20 @@ fn query_extractor_config() -> web::QueryConfig {
 
 /// Wraps an extractor failure into a 400 response with the shared envelope.
 fn extractor_error(message: String) -> actix_web::Error {
-    let response = system_audit::error_response(
+    extractor_error_with_status(
         actix_web::http::StatusCode::BAD_REQUEST,
         "bad_request",
-        &message,
-        false,
-    );
+        message,
+    )
+}
+
+/// Wraps an extractor failure into the shared error envelope at `status`.
+fn extractor_error_with_status(
+    status: actix_web::http::StatusCode,
+    code: &'static str,
+    message: String,
+) -> actix_web::Error {
+    let response = system_audit::error_response(status, code, &message, false);
     actix_web::error::InternalError::from_response(message, response).into()
 }
 
@@ -1728,6 +1753,37 @@ mod tests {
             .to_request();
         let response = awtest::call_service(&app, invalid_variant).await;
         assert_bad_request_envelope(response, "unknown variant").await;
+    }
+
+    /// Actix rejects a JSON body above the configured limit with 413, but the
+    /// shared error handler rewrote every JSON failure as 400. A client could
+    /// not tell "body too large" from malformed JSON.
+    #[actix_web::test]
+    async fn oversized_json_bodies_return_payload_too_large() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        let uri = "/api/audit/cases/00000000-0000-0000-0000-000000000000/review";
+        let payload = "x".repeat(2 * 1024 * 1024 + 1);
+
+        let request = awtest::TestRequest::post()
+            .uri(uri)
+            .insert_header(("content-type", "application/json"))
+            .set_payload(payload.into_bytes())
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "payload_too_large");
     }
 
     #[actix_web::test]
