@@ -11,7 +11,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- structural anchors: the lifecycle sections must stay in the spec ---
 grep -q '^%preun$' "$SPEC"
-grep -q '^%define cosh_replacement_ready ' "$SPEC"
+grep -Fq '/login-preflight check-erase' "$SPEC"
 grep -q '^Requires(preun): ' "$SPEC"
 grep -Fxq \
     'Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk' \
@@ -170,19 +170,6 @@ run_post_case() {
 }
 
 if command -v rpm >/dev/null 2>&1 && rpm --eval '%{lua:print("ok")}' >/dev/null 2>&1; then
-    # the shared predicate must survive macro expansion with a queryformat
-    # that emits a real newline (%%{NAME} folds to %{NAME}, \\n folds to \n)
-    predicate_line="$(sed -n 's/^%define cosh_replacement_ready //p' "$SPEC")"
-    expanded="$(rpm --define "cosh_replacement_ready $predicate_line" \
-        --eval '%{cosh_replacement_ready}')"
-    case "$expanded" in
-        *"--qf '%{NAME}\n' -f"*) : ;;
-        *)
-            echo "ERROR: cosh_replacement_ready expanded unexpectedly: $expanded" >&2
-            exit 1
-            ;;
-    esac
-
     run_post_case "missing file" "<missing>" "$COSH"$'\n'
     run_post_case "empty file" "" "$COSH"$'\n'
     run_post_case "missing trailing newline" \
@@ -226,32 +213,10 @@ SYSTEMD_RUNTIME="$TMP/run/systemd/system"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
 install -d -m 0755 "$SYSTEMD_RUNTIME"
 
-PREDICATE="$(sed -n 's/^%define cosh_replacement_ready //p' "$SPEC")"
-PREUN_RAW="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
+PREUN="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
     sed -e '/^%systemd_preun cosh-gateway@\.service$/d')"
-# Bash 5.2 enables patsub_replacement by default, which would expand every
-# unquoted '&' in the substituted predicate to the matched pattern text;
-# keep the replacement strings verbatim.
-shopt -u patsub_replacement 2>/dev/null || :
-PREUN="${PREUN_RAW//'%{cosh_replacement_ready}'/$PREDICATE}"
-PREUN="${PREUN//'%{_bindir}'/$STUB}"
+PREUN="${PREUN//\/usr\/libexec\/cosh\/login-preflight/$STUB/login-preflight}"
 PREUN="${PREUN//\/run\/systemd\/system/$SYSTEMD_RUNTIME}"
-PREUN="${PREUN//%%/%}"
-case "$PREUN" in
-    *'%{cosh_replacement_ready}'*)
-        echo "ERROR: %preun still references the unexpanded predicate macro" >&2
-        exit 1
-        ;;
-esac
-expected_predicate="${PREDICATE//'%{_bindir}'/$STUB}"
-expected_predicate="${expected_predicate//%%/%}"
-case "$PREUN" in
-    *"$expected_predicate"*) : ;;
-    *)
-        echo "ERROR: predicate was not spliced verbatim into %preun" >&2
-        exit 1
-        ;;
-esac
 
 write_stub() {
     printf '%s\n' "#!/usr/bin/env bash" "$2" > "$STUB/$1"
@@ -259,16 +224,11 @@ write_stub() {
 }
 
 run_preun() {
-    local action="$1"
-    PATH="$STUB:/usr/bin:/bin" bash -c "$PREUN" cosh-preun "$action"
+    PATH="$STUB:/usr/bin:/bin" bash -c "$PREUN" cosh-preun "$1"
 }
 
 expect_preun() {
-    local name="$1"
-    local action="$2"
-    local expected_status="$3"
-    local status=0
-
+    local name="$1" action="$2" expected_status="$3" status=0
     run_preun "$action" >"$TMP/preun.out" 2>"$TMP/preun.err" || status=$?
     if [ "$status" -ne "$expected_status" ]; then
         echo "ERROR: %preun case '$name' exited $status, expected $expected_status:" >&2
@@ -277,61 +237,32 @@ expect_preun() {
     fi
 }
 
-write_stub getent "printf '%s\n' 'coshuser:x:1000:1000::/home/coshuser:$GUARD_COSH'"
-write_stub rpm "printf '%s\n' cosh-ng"
-write_stub cosh ":"
-write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'"
-
+PREFLIGHT_LOG="$TMP/preflight.log"
+write_stub login-preflight "printf '%s\\n' \"\$*\" >> '$PREFLIGHT_LOG'; [ \"\$*\" = check-erase ] || exit 64; exit \"\${COSH_TEST_ERASE_STATUS:-0}\""
+write_stub systemctl "printf '%s\\n' \"\$*\" >> '$SYSTEMCTL_LOG'"
 : > "$SYSTEMCTL_LOG"
-expect_preun "erase with cosh login-shell user" 0 1
-grep -Fq coshuser "$TMP/preun.err"
-grep -Fq "$GUARD_COSH" "$TMP/preun.err"
+: > "$PREFLIGHT_LOG"
+export COSH_TEST_ERASE_STATUS=1
+expect_preun "blocked account lifecycle" 0 1
+grep -Fxq check-erase "$PREFLIGHT_LOG"
 test ! -s "$SYSTEMCTL_LOG"
-
-expect_preun "upgrade never blocks" 1 0
+: > "$PREFLIGHT_LOG"
+expect_preun "upgrade never blocks or invokes preflight" 1 0
+test ! -s "$PREFLIGHT_LOG"
 test ! -s "$SYSTEMCTL_LOG"
-
-write_stub getent "printf '%s\n' 'root:x:0:0:root:/root:/usr/bin/bash'"
-expect_preun "erase without cosh users" 0 0
+export COSH_TEST_ERASE_STATUS=0
+expect_preun "erase after lifecycle preflight" 0 0
 grep -Fxq 'stop cosh-gateway@*.service cosh-gateway-acp@*.service' "$SYSTEMCTL_LOG"
-
-write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'; exit 4"
+write_stub systemctl "printf '%s\\n' \"\$*\" >> '$SYSTEMCTL_LOG'; exit 4"
 expect_preun "failed Gateway instance stop" 0 1
 grep -Fq 'failed to stop running Gateway instances' "$TMP/preun.err"
-
 rmdir "$SYSTEMD_RUNTIME"
 expect_preun "erase without a systemd manager" 0 0
 install -d -m 0755 "$SYSTEMD_RUNTIME"
-write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'"
-
-write_stub getent "exit 2"
-expect_preun "failed passwd enumeration" 0 1
-expect_preun "upgrade with broken enumeration" 1 0
-
-write_stub getent "exit 0"
-expect_preun "empty passwd enumeration" 0 1
-
-write_stub getent "printf '%s\n' 'root:x:0:0:root:/root:/usr/bin/bash'"
-write_stub awk "exit 3"
-expect_preun "failed passwd filter" 0 1
-rm -f "$STUB/awk"
-
-write_stub getent "printf '%s\n' 'coshuser:x:1000:1000::/home/coshuser:$GUARD_COSH'"
-write_stub rpm "exit 1"
-expect_preun "failed replacement lookup" 0 1
-
-write_stub rpm "printf '%s\n' cosh-ng unexpected-shell"
-expect_preun "unexpected replacement owner" 0 1
-
-write_stub rpm "printf '%s\n' cosh-ng copilot-shell"
-chmod 0644 "$GUARD_COSH"
-expect_preun "non-executable replacement" 0 1
-
-chmod 0755 "$GUARD_COSH"
-expect_preun "atomic provider swap" 0 0
-
-rm -f "$GUARD_COSH"
-expect_preun "upgrade without launcher" 1 0
+chmod 0644 "$STUB/login-preflight"
+expect_preun "unavailable lifecycle backend fails closed" 0 1
+expect_preun "upgrade without executable backend" 1 0
+unset COSH_TEST_ERASE_STATUS
 
 # --- %postun /etc/shells removal matrix through fixture-backed bash runs ---
 # %postun uses GNU coreutils (cp --attributes-only); skip the behavioral matrix

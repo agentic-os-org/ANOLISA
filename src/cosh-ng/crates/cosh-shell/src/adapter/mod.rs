@@ -214,6 +214,18 @@ impl AgentRunHandle {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_with_events(events: Vec<AgentEvent>) -> Self {
+        let (approval_sender, _approval_receiver) = mpsc::channel();
+        let mut handle = Self::test_with_approval_sender(approval_sender);
+        let (sender, receiver) = mpsc::channel();
+        for event in events {
+            sender.send(Ok(event)).expect("seed test event");
+        }
+        handle.receiver = receiver;
+        handle
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_with_question_answer_confirmation(
         approval_sender: mpsc::Sender<ApprovalChannelMessage>,
         confirmation: mpsc::Receiver<Result<String, AdapterError>>,

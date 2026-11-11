@@ -675,3 +675,6 @@ fn native_post_spawn_panic_does_not_fall_open() {
         "Native post-spawn panic must not fall open:\n{transcript}"
     );
 }
+
+#[path = "failopen/profile_probe.rs"]
+mod profile_probe;

@@ -6,13 +6,21 @@ use crate::shell_host::ShellHostConfig;
 type ProbeSender = mpsc::SyncSender<Option<bool>>;
 type ProbeReceiver = mpsc::Receiver<Option<bool>>;
 
-pub(super) fn probe_core(adapter: &AdapterInstance, ai_enabled: bool) -> Option<CoshCoreAdapter> {
-    (ai_enabled && crate::runtime::startup::startup_banner_enabled())
-        .then(|| match adapter {
-            AdapterInstance::CoshCore(core) => Some(core.clone()),
-            _ => None,
-        })
-        .flatten()
+pub(super) fn probe_core(
+    adapter: &AdapterInstance,
+    ai_enabled: bool,
+    compact_startup: bool,
+) -> Option<CoshCoreAdapter> {
+    crate::runtime::startup::session::StartupAuthState::should_probe(
+        ai_enabled,
+        compact_startup,
+        crate::runtime::startup::startup_banner_enabled(),
+    )
+    .then(|| match adapter {
+        AdapterInstance::CoshCore(core) => Some(core.clone()),
+        _ => None,
+    })
+    .flatten()
 }
 
 struct DeferredProbe {

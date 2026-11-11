@@ -12,9 +12,7 @@ use nix::pty::Winsize;
 use wait_timeout::ChildExt;
 
 use self::probe_outcome::record_probe_outcome;
-use crate::diagnostics::health::{
-    record_startup_health_recommendations, HealthFindingCategory, HealthScanReport, HealthSeverity,
-};
+use crate::diagnostics::health::{HealthFindingCategory, HealthScanReport, HealthSeverity};
 use crate::raw_input::{PromptGhostCandidate, PromptGhostRoute};
 use crate::recommendation::personal_context::discover_repo_context;
 use crate::recommendation::personal_crypto::random_hex;
@@ -27,33 +25,10 @@ use crate::recommendation::personal_planner::{
     plan_startup, HealthResolution, PlannerCandidate, PlannerContext,
 };
 use crate::runtime::cli_args::RawShellKind;
-use crate::runtime::invocation::{
-    classify_invocation, exec_shell, normalize_raw_invocation, Invocation,
-};
 use crate::runtime::prelude::*;
 use crate::runtime::state::PendingInputGhostBinding;
 use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
 
-const LOGO_LINES: &[&str] = &[
-    "  ██████╗  ██████╗  ███████╗ ██╗  ██╗",
-    " ██╔════╝ ██╔═══██╗ ██╔════╝ ██║  ██║",
-    " ██║      ██║   ██║ ███████╗ ███████║",
-    " ██║      ██║   ██║ ╚════██║ ██╔══██║",
-    " ╚██████╗ ╚██████╔╝ ███████║ ██║  ██║",
-    "  ╚═════╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═╝",
-];
-
-const LOGO_COLORS: &[&str] = &[
-    "\x1b[1;38;5;33m",
-    "\x1b[1;38;5;33m",
-    "\x1b[1;38;5;39m",
-    "\x1b[1;38;5;39m",
-    "\x1b[1;38;5;117m",
-    "\x1b[1;38;5;117m",
-];
-
-const RESET: &str = "\x1b[0m";
-const LOGO_MIN_WIDTH: u16 = 42;
 const BOOTSTRAP_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_PATH_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -61,11 +36,13 @@ mod bash_capability;
 mod descendants;
 mod probe_outcome;
 mod recommendations;
+pub(crate) mod session;
+mod welcome;
 pub(crate) use bash_capability::{exported_bash_functions_posix_compatible, resolve_bash_for_r2};
 #[cfg(test)]
 use recommendations::{
-    append_startup_auth_hint, plan_startup_for_render, record_visible_personal_impressions,
-    render_pending_upgrade_notice, visible_personal_candidates, write_startup_suggestion_card,
+    plan_startup_for_render, record_visible_personal_impressions, render_pending_upgrade_notice,
+    visible_personal_candidates, write_startup_suggestion_card,
 };
 pub(crate) use recommendations::{
     render_pending_recommendation_notice, render_pending_upgrade_notice_at_idle_prompt,
@@ -128,41 +105,11 @@ pub(crate) fn startup_banner_enabled() -> bool {
     }
 }
 
-struct StartupHookResult {
-    summary: String,
-    markdown: Option<String>,
-}
-
-fn evaluate_startup_hooks(cwd: &str, i18n: I18n) -> StartupHookResult {
-    if !startup_hooks_enabled() {
-        return StartupHookResult {
-            summary: i18n.t(MessageId::StartupHooksNoneSummary).to_string(),
-            markdown: None,
-        };
-    }
-
-    let mut findings = Vec::new();
-    let cwd_path = Path::new(cwd);
-    if cwd_path.join("Cargo.toml").is_file() {
-        findings.push(format!(
-            "- {}",
-            i18n.t(MessageId::StartupHooksRustProjectFinding)
-        ));
-    }
-
-    if findings.is_empty() {
-        findings.push(format!("- {}", i18n.t(MessageId::StartupHooksNoFindings)));
-    }
-
-    StartupHookResult {
-        summary: i18n.t(MessageId::StartupHooksCompletedSummary).to_string(),
-        markdown: Some(format!(
-            "## {}\n\n{}\n\n{}",
-            i18n.t(MessageId::StartupHooksFindingsHeading),
-            findings.join("\n"),
-            i18n.t(MessageId::StartupHooksReadOnlyNote)
-        )),
-    }
+fn evaluate_startup_hooks(cwd: &str, i18n: I18n) -> Option<String> {
+    (startup_hooks_enabled() && Path::new(cwd).join("Cargo.toml").is_file()).then(|| {
+        i18n.t(MessageId::StartupHooksRustProjectFinding)
+            .to_string()
+    })
 }
 
 fn startup_hooks_enabled() -> bool {
@@ -272,7 +219,8 @@ fn bootstrap_path_command(shell: &str, flags: &str) -> Command {
     command
         .arg(flags)
         .arg("printf '\\n__COSH_PATH_BEGIN__%s__COSH_PATH_END__\\n' \"$PATH\"")
-        .env("COSH_SHELL_BOOTSTRAP_PATH", "0");
+        .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
+        .env("COSH_INTERNAL_SHELL", "1");
     command
 }
 
@@ -541,11 +489,17 @@ pub(crate) fn bootstrap_process_path_from_shell(
     enabled: bool,
     winsize: &Winsize,
     effects: &LoginEffectGuard,
+    trusted_bash: Option<&str>,
 ) {
     let Some((shell, probes)) = bootstrap_path_probe_plan(shell_kind, login, enabled) else {
         return;
     };
 
+    let shell = if matches!(shell_kind, RawShellKind::Bash) {
+        trusted_bash.unwrap_or(shell)
+    } else {
+        shell
+    };
     let mut discovered = Vec::with_capacity(probes.len());
     for probe in probes {
         // Each child imports only PATH; probe failures stay independently visible.
@@ -576,37 +530,21 @@ pub(crate) fn bootstrap_process_path_from_shell(
     }
 }
 
-pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
-    // Documented `cosh-shell` extension: `-- <command> [args…]` executes the
-    // command directly (no shell). The `/usr/bin/cosh` entry never reaches
-    // this path; there `--` is handed to bash verbatim.
-    if args.get(1).map(String::as_str) == Some("--") {
-        let Some(command) = args.get(2) else {
-            eprintln!("cosh-shell: missing command after --");
-            return Some(2);
-        };
-        let status = Command::new(command)
-            .args(&args[3..])
-            .status()
-            .map(passthrough_exit_code)
-            .unwrap_or_else(|err| {
-                let command = crate::evidence::redact_sensitive_text(command).0;
-                let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
-                eprintln!("cosh-shell: exec {command} failed: {err}");
-                126
-            });
-        return Some(status);
-    }
-
-    let argv0 = OsString::from(args[0].as_str());
-    let rest = args[1..].iter().map(OsString::from).collect::<Vec<_>>();
-    let stdin_tty = std::io::stdin().is_terminal();
-    let stdout_tty = std::io::stdout().is_terminal();
-    let stderr_tty = std::io::stderr().is_terminal();
-    match classify_invocation(&argv0, &rest, stdin_tty, stdout_tty, stderr_tty) {
-        Invocation::ExecShell(plan) => Some(exec_shell(plan)),
-        Invocation::Tui(_) => None,
-    }
+pub(crate) fn exec_direct_command(args: &[OsString]) -> i32 {
+    let Some(command) = args.first() else {
+        eprintln!("cosh-shell: missing command after --");
+        return 2;
+    };
+    Command::new(command)
+        .args(&args[1..])
+        .status()
+        .map(passthrough_exit_code)
+        .unwrap_or_else(|err| {
+            let command = crate::evidence::redact_sensitive_text(&command.to_string_lossy()).0;
+            let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
+            eprintln!("cosh-shell: exec {command} failed: {err}");
+            126
+        })
 }
 
 fn passthrough_exit_code(status: ExitStatus) -> i32 {
@@ -614,29 +552,6 @@ fn passthrough_exit_code(status: ExitStatus) -> i32 {
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
         .unwrap_or(1)
-}
-
-pub(crate) fn passthrough_raw_non_interactive(args: &[String]) -> Option<i32> {
-    let rest = args[1..].iter().map(OsString::from).collect::<Vec<_>>();
-    let normalized = normalize_raw_invocation(&rest)?;
-    // Leading `--`: same documented direct-exec extension as the bare
-    // `cosh-shell` surface.
-    if normalized.first().and_then(|arg| arg.to_str()) == Some("--") {
-        let mut forwarded = vec![args[0].clone()];
-        forwarded.extend(
-            normalized
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned()),
-        );
-        return passthrough_non_interactive(&forwarded);
-    }
-    // `raw` is an explicit TUI request, so classify argv with terminals assumed;
-    // piped drivers must never be diverted away from an interactive session.
-    let argv0 = OsString::from(args[0].as_str());
-    match classify_invocation(&argv0, &normalized, true, true, true) {
-        Invocation::ExecShell(plan) => Some(exec_shell(plan)),
-        Invocation::Tui(_) => None,
-    }
 }
 
 pub(crate) fn print_usage_help() {
@@ -655,6 +570,7 @@ pub(crate) fn print_usage_help() {
            -- <command> [args...]   Execute command directly and exit\n\
            --shell <shell>         Use specified shell (bash, zsh) [default: bash]\n\
            --resume [session-id]   Open the session picker or resume a provider session\n\
+           --ask <question>        Open AI Shell with an initial question (terminal required)\n\
            --isolated              Isolated mode: skip user rcfiles\n\
            --login, -l             Treat as login shell\n\
            --version               Print version\n\

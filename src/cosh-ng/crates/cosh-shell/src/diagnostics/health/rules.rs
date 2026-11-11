@@ -23,7 +23,9 @@ pub(crate) fn evaluate_judgement_rules(
     let oom_age = number(facts, "kernel.oom_latest_age_seconds");
     let oom_recent_1h = oom_age.is_some_and(|age| age <= 3600.0);
     let oom_recent_24h = oom_age.is_some_and(|age| age <= 86400.0);
-    let swap_pressure_context = memory_low.is_some() || oom_recent_1h || service_issue;
+    let memory_pressure =
+        memory_low.is_some() || bool_value(facts, "memory.swap_memory_pressure") == Some(true);
+    let swap_pressure_context = memory_pressure || oom_recent_1h || service_issue;
 
     if report.unavailable.iter().any(|item| {
         item.collector == HealthCollector::Host
@@ -99,14 +101,21 @@ pub(crate) fn evaluate_judgement_rules(
     }
 
     if swap_used_at_least(facts, 0.90, 1024.0)
-        && (memory_low.is_some() || oom_recent_24h || config.memory_sensitive)
+        && (memory_pressure || oom_recent_24h || config.memory_sensitive)
     {
         findings.push(finding(
             "J07",
             HealthSeverity::Warning,
             HealthFindingCategory::Anomaly,
             HealthMessageId::HealthFindingSwapPressure,
-            evidence_ids(facts, &["memory.swap_used_ratio", "memory.swap_used_mib"]),
+            evidence_ids(
+                facts,
+                &[
+                    "memory.swap_used_ratio",
+                    "memory.swap_used_mib",
+                    "memory.swap_memory_pressure",
+                ],
+            ),
         ));
     } else if swap_used_at_least(facts, 0.50, 1024.0) && swap_pressure_context {
         findings.push(finding(
@@ -114,41 +123,18 @@ pub(crate) fn evaluate_judgement_rules(
             HealthSeverity::Warning,
             HealthFindingCategory::Anomaly,
             HealthMessageId::HealthFindingSwapPressure,
-            evidence_ids(facts, &["memory.swap_used_ratio", "memory.swap_used_mib"]),
+            evidence_ids(
+                facts,
+                &[
+                    "memory.swap_used_ratio",
+                    "memory.swap_used_mib",
+                    "memory.swap_memory_pressure",
+                ],
+            ),
         ));
     }
 
-    if disk_critical(facts) {
-        findings.push(finding(
-            "J09",
-            HealthSeverity::Critical,
-            HealthFindingCategory::Anomaly,
-            HealthMessageId::HealthFindingDiskHigh,
-            evidence_ids(
-                facts,
-                &[
-                    "filesystem.max_used_ratio",
-                    "filesystem.available_gib",
-                    "filesystem.riskiest_mount",
-                ],
-            ),
-        ));
-    } else if disk_warning(facts, config) {
-        findings.push(finding(
-            "J10",
-            HealthSeverity::Warning,
-            HealthFindingCategory::Anomaly,
-            HealthMessageId::HealthFindingDiskHigh,
-            evidence_ids(
-                facts,
-                &[
-                    "filesystem.max_used_ratio",
-                    "filesystem.available_gib",
-                    "filesystem.riskiest_mount",
-                ],
-            ),
-        ));
-    }
+    findings.extend(disk_findings(facts, config));
 
     if oom_age.is_some_and(|age| age <= 300.0) {
         findings.push(finding(
@@ -293,6 +279,13 @@ fn cpu_load_at_least(facts: &[HealthFact], one_minute: f64, five_minutes: f64) -
 fn memory_low_level(facts: &[HealthFact]) -> Option<HealthSeverity> {
     let available_mib = number(facts, "memory.available_mib")?;
     let available_ratio = number(facts, "memory.available_ratio")?;
+    memory_pressure_level(available_mib, available_ratio)
+}
+
+pub(super) fn memory_pressure_level(
+    available_mib: f64,
+    available_ratio: f64,
+) -> Option<HealthSeverity> {
     if available_mib < 512.0 || (available_ratio < 0.05 && available_mib < 2048.0) {
         return Some(HealthSeverity::Critical);
     }
@@ -305,28 +298,118 @@ fn memory_low_level(facts: &[HealthFact]) -> Option<HealthSeverity> {
     None
 }
 
+pub(super) fn swap_context_complete(report: &HealthScanReport, config: &HealthConfig) -> bool {
+    if !swap_used_at_least(&report.facts, 0.50, 1024.0) {
+        return true;
+    }
+    if bool_value(&report.facts, "memory.swap_memory_pressure") == Some(true)
+        || configured_service_issue(&report.facts, config)
+        || number(&report.facts, "kernel.oom_latest_age_seconds").is_some_and(|age| age <= 86400.0)
+        || (config.memory_sensitive && swap_used_at_least(&report.facts, 0.90, 1024.0))
+    {
+        return true;
+    }
+    super::plan::judgement_context_available("resource.swap", report, config)
+}
+
 fn swap_used_at_least(facts: &[HealthFact], ratio: f64, used_mib: f64) -> bool {
     number(facts, "memory.swap_used_ratio").is_some_and(|value| value >= ratio)
         && number(facts, "memory.swap_used_mib").is_some_and(|value| value >= used_mib)
 }
 
-fn disk_critical(facts: &[HealthFact]) -> bool {
-    number(facts, "filesystem.max_used_ratio").is_some_and(|value| value >= 0.95)
-        || number(facts, "filesystem.available_gib").is_some_and(|value| value < 2.0)
+fn disk_severity(
+    used_ratio: Option<f64>,
+    available_gib: Option<f64>,
+    mount: &str,
+    config: &HealthConfig,
+) -> Option<HealthSeverity> {
+    if used_ratio.is_some_and(|value| value >= 0.95)
+        || available_gib.is_some_and(|value| value < 2.0)
+    {
+        Some(HealthSeverity::Critical)
+    } else if used_ratio.is_some_and(|value| value >= 0.90)
+        || (used_ratio.is_some_and(|value| value >= 0.85)
+            && available_gib.is_some_and(|value| value < 20.0)
+            && is_critical_mount(mount, config))
+    {
+        Some(HealthSeverity::Warning)
+    } else {
+        None
+    }
 }
 
-fn disk_warning(facts: &[HealthFact], config: &HealthConfig) -> bool {
-    let used_ratio = number(facts, "filesystem.max_used_ratio").unwrap_or_default();
-    if used_ratio >= 0.90 {
-        return true;
+fn disk_findings(facts: &[HealthFact], config: &HealthConfig) -> Vec<HealthFinding> {
+    let paths = facts
+        .iter()
+        .filter_map(|fact| {
+            fact.key
+                .strip_prefix("filesystem.mount.")
+                .and_then(|suffix| suffix.strip_suffix(".path"))
+        })
+        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    for path in &paths {
+        let prefix = format!("filesystem.mount.{path}.");
+        let used = format!("{prefix}used_ratio");
+        let available = format!("{prefix}available_gib");
+        if let Some(severity) = disk_severity(
+            number(facts, &used),
+            number(facts, &available),
+            path,
+            config,
+        ) {
+            let rule = if severity == HealthSeverity::Critical {
+                "J09"
+            } else {
+                "J10"
+            };
+            let mut result = finding(
+                if *path == "/" {
+                    rule.to_string()
+                } else {
+                    format!("{rule}:{path}")
+                },
+                severity,
+                HealthFindingCategory::Anomaly,
+                HealthMessageId::HealthFindingDiskHigh,
+                evidence_ids(facts, &[&format!("{prefix}path"), &used, &available]),
+            );
+            result.detail_args.insert("mount".into(), path.to_string());
+            findings.push(result);
+        }
     }
-    let Some(available_gib) = number(facts, "filesystem.available_gib") else {
-        return false;
-    };
-    used_ratio >= 0.85
-        && available_gib < 20.0
-        && string_value(facts, "filesystem.riskiest_mount")
-            .is_some_and(|mount| is_critical_mount(mount, config))
+    if paths.is_empty() {
+        let mount = string_value(facts, "filesystem.riskiest_mount").unwrap_or("/");
+        let used = number(facts, "filesystem.max_used_ratio")
+            .or_else(|| number(facts, "filesystem.root_used_ratio"));
+        let available = number(facts, "filesystem.available_gib")
+            .or_else(|| number(facts, "filesystem.root_available_gib"));
+        if let Some(severity) = disk_severity(used, available, mount, config) {
+            let mut result = finding(
+                if severity == HealthSeverity::Critical {
+                    "J09"
+                } else {
+                    "J10"
+                },
+                severity,
+                HealthFindingCategory::Anomaly,
+                HealthMessageId::HealthFindingDiskHigh,
+                evidence_ids(
+                    facts,
+                    &[
+                        "filesystem.max_used_ratio",
+                        "filesystem.available_gib",
+                        "filesystem.riskiest_mount",
+                        "filesystem.root_used_ratio",
+                        "filesystem.root_available_gib",
+                    ],
+                ),
+            );
+            result.detail_args.insert("mount".into(), mount.into());
+            findings.push(result);
+        }
+    }
+    findings
 }
 
 fn configured_service_issue(facts: &[HealthFact], config: &HealthConfig) -> bool {
@@ -355,7 +438,7 @@ fn evidence_ids(facts: &[HealthFact], keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn number(facts: &[HealthFact], key: &str) -> Option<f64> {
+pub(super) fn number(facts: &[HealthFact], key: &str) -> Option<f64> {
     match &fact(facts, key)?.value {
         HealthFactValue::Integer(value) => Some(*value as f64),
         HealthFactValue::Unsigned(value) => Some(*value as f64),
@@ -383,207 +466,4 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::config::{HealthServiceConfig, HealthServiceExpectedState};
-
-    use super::*;
-    use crate::diagnostics::health::model::{
-        HealthFactCategory, HealthFactSource, UnavailableCollector,
-    };
-
-    #[test]
-    fn healthy_and_low_confidence_signals_do_not_create_findings() {
-        let mut report = report_with_facts(vec![
-            float_fact("cpu.load_per_core_1m", 3.0),
-            float_fact("cpu.load_per_core_5m", 0.4),
-            float_fact("memory.available_mib", 32768.0),
-            float_fact("memory.available_ratio", 0.40),
-            float_fact("memory.swap_used_ratio", 0.55),
-            float_fact("memory.swap_used_mib", 4096.0),
-            float_fact("filesystem.max_used_ratio", 0.80),
-            float_fact("filesystem.available_gib", 1024.0),
-            string_fact("filesystem.riskiest_mount", "/data"),
-        ]);
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        assert!(report.findings.is_empty());
-        assert_eq!(report.overall_severity, HealthSeverity::Ok);
-    }
-
-    #[test]
-    fn core_collector_unavailable_degrades_report_without_claiming_ok() {
-        let mut report = HealthScanReport::new("health-1", 0);
-        report.unavailable.push(UnavailableCollector {
-            collector: HealthCollector::Memory,
-            reason: HealthUnavailableReason::Timeout,
-            severity: HealthSeverity::Unavailable,
-            elapsed_ms: 100,
-        });
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        assert_eq!(report.findings[0].id, "J02");
-        assert_eq!(report.findings[0].severity, HealthSeverity::Degraded);
-        assert_eq!(report.overall_severity, HealthSeverity::Degraded);
-    }
-
-    #[test]
-    fn unsupported_platform_is_unavailable() {
-        let mut report = HealthScanReport::new("health-1", 0);
-        report.unavailable.push(UnavailableCollector {
-            collector: HealthCollector::Host,
-            reason: HealthUnavailableReason::Unsupported,
-            severity: HealthSeverity::Unavailable,
-            elapsed_ms: 1,
-        });
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        assert_eq!(report.findings[0].id, "J01");
-        assert_eq!(report.findings[0].severity, HealthSeverity::Unavailable);
-        assert_eq!(report.overall_severity, HealthSeverity::Unavailable);
-    }
-
-    #[test]
-    fn critical_load_and_recent_oom_sort_before_warnings() {
-        let mut report = report_with_facts(vec![
-            float_fact("cpu.load_per_core_1m", 4.0),
-            float_fact("cpu.load_per_core_5m", 2.0),
-            float_fact("kernel.oom_latest_age_seconds", 120.0),
-            float_fact("filesystem.max_used_ratio", 0.90),
-            float_fact("filesystem.available_gib", 30.0),
-        ]);
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        let ids = finding_ids(&report);
-        assert_eq!(ids[0], "J03");
-        assert_eq!(ids[1], "J11");
-        assert!(ids.contains(&"J10".to_string()));
-        assert_eq!(report.overall_severity, HealthSeverity::Critical);
-    }
-
-    #[test]
-    fn warning_disk_requires_high_ratio_or_critical_mount_with_low_space() {
-        let mut report = report_with_facts(vec![
-            float_fact("filesystem.max_used_ratio", 0.86),
-            float_fact("filesystem.available_gib", 8.0),
-            string_fact("filesystem.riskiest_mount", "/"),
-        ]);
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        assert_eq!(report.findings[0].id, "J10");
-        assert_eq!(report.findings[0].severity, HealthSeverity::Warning);
-    }
-
-    #[test]
-    fn swap_history_without_memory_or_oom_context_is_suppressed() {
-        let mut report = report_with_facts(vec![
-            float_fact("memory.available_mib", 16384.0),
-            float_fact("memory.available_ratio", 0.30),
-            float_fact("memory.swap_used_ratio", 0.90),
-            float_fact("memory.swap_used_mib", 4096.0),
-        ]);
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        assert!(report.findings.is_empty());
-    }
-
-    #[test]
-    fn memory_low_closes_swap_pressure_context() {
-        let mut report = report_with_facts(vec![
-            float_fact("memory.available_mib", 700.0),
-            float_fact("memory.available_ratio", 0.08),
-            float_fact("memory.swap_used_ratio", 0.55),
-            float_fact("memory.swap_used_mib", 4096.0),
-        ]);
-
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        let ids = finding_ids(&report);
-        assert!(ids.contains(&"J06".to_string()));
-        assert!(ids.contains(&"J08".to_string()));
-    }
-
-    #[test]
-    fn configured_service_inactive_only_warns_when_expected_active() {
-        let mut report = report_with_facts(vec![string_fact("service.redis.status", "inactive")]);
-        let mut config = HealthConfig::default();
-        config.services.push(HealthServiceConfig {
-            name: "redis".to_string(),
-            expected: HealthServiceExpectedState::Inactive,
-        });
-
-        apply_judgement_rules(&mut report, &config);
-        assert!(report.findings.is_empty());
-
-        config.services[0].expected = HealthServiceExpectedState::Active;
-        apply_judgement_rules(&mut report, &config);
-        assert_eq!(report.findings[0].id, "J16:redis");
-    }
-
-    #[test]
-    fn configured_service_failed_records_unit_and_status_detail() {
-        let mut report =
-            report_with_facts(vec![string_fact("service.redis.service.status", "failed")]);
-        let mut config = HealthConfig::default();
-        config.services.push(HealthServiceConfig {
-            name: "redis.service".to_string(),
-            expected: HealthServiceExpectedState::Active,
-        });
-
-        apply_judgement_rules(&mut report, &config);
-
-        let finding = &report.findings[0];
-        assert_eq!(finding.id, "J15:redis.service");
-        assert_eq!(
-            finding.detail_args.get("service").map(String::as_str),
-            Some("redis.service")
-        );
-        assert_eq!(
-            finding.detail_args.get("observed").map(String::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            finding.detail_args.get("expected").map(String::as_str),
-            Some("active")
-        );
-    }
-
-    fn report_with_facts(facts: Vec<HealthFact>) -> HealthScanReport {
-        let mut report = HealthScanReport::new("health-1", 0);
-        report.facts = facts;
-        report
-    }
-
-    fn finding_ids(report: &HealthScanReport) -> Vec<String> {
-        report
-            .findings
-            .iter()
-            .map(|finding| finding.id.clone())
-            .collect()
-    }
-
-    fn float_fact(key: &str, value: f64) -> HealthFact {
-        fact_with_value(key, HealthFactValue::Float(value))
-    }
-
-    fn string_fact(key: &str, value: &str) -> HealthFact {
-        fact_with_value(key, HealthFactValue::String(value.to_string()))
-    }
-
-    fn fact_with_value(key: &str, value: HealthFactValue) -> HealthFact {
-        HealthFact {
-            id: key.to_string(),
-            category: HealthFactCategory::Host,
-            key: key.to_string(),
-            value,
-            unit: None,
-            source: HealthFactSource::Fixture,
-            elapsed_ms: 0,
-        }
-    }
-}
+mod tests;

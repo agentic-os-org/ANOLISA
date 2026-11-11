@@ -79,7 +79,6 @@ pub(super) fn run_supervised_profile_probe(
     super::extract_bootstrap_path(&text).ok_or(BootstrapPathProbeError::MissingMarker)
 }
 
-#[cfg(not(test))]
 pub(super) fn supervisor_command(
     command: &Command,
     argv0: Option<&OsStr>,
@@ -118,7 +117,7 @@ pub(super) fn supervisor_command(
             helper.env_remove(HELPER_ARG0_ENV);
         }
     }
-    helper.env(HELPER_ENV, "1");
+    helper.env(HELPER_ENV, "1").env("COSH_INTERNAL_SHELL", "1");
     Ok(helper)
 }
 
@@ -193,7 +192,8 @@ fn parse_helper_spec(args: &[OsString]) -> io::Result<HelperSpec> {
     command
         .args(&args[9..])
         .env_remove(HELPER_ENV)
-        .env_remove(HELPER_ARG0_ENV);
+        .env_remove(HELPER_ARG0_ENV)
+        .env("COSH_INTERNAL_SHELL", "1");
     Ok(HelperSpec {
         command,
         timeout: Duration::from_millis(timeout_ms),
@@ -542,5 +542,49 @@ impl ProfileProbeDescendants {
 
     pub(super) fn cancel(self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod internal_marker_tests {
+    use super::*;
+
+    #[test]
+    fn supervisor_and_reconstructed_profile_shell_keep_the_internal_marker() {
+        let mut command = Command::new("bash");
+        command
+            .arg("-lc")
+            .arg("true")
+            .env("COSH_INTERNAL_SHELL", "0");
+        let winsize = Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let helper =
+            supervisor_command(&command, None, Duration::from_millis(100), &winsize).unwrap();
+        assert!(helper
+            .get_envs()
+            .any(|(name, value)| name == "COSH_INTERNAL_SHELL" && value == Some(OsStr::new("1"))));
+        let args = [
+            "cosh-shell",
+            HELPER_ARG,
+            "100",
+            "24",
+            "80",
+            "0",
+            "0",
+            "--",
+            "bash",
+            "-lc",
+            "true",
+        ]
+        .map(OsString::from);
+        let spec = parse_helper_spec(&args).unwrap();
+        assert!(spec
+            .command
+            .get_envs()
+            .any(|(name, value)| name == "COSH_INTERNAL_SHELL" && value == Some(OsStr::new("1"))));
     }
 }

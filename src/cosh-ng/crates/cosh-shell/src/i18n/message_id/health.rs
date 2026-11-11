@@ -123,3 +123,9 @@ macro_rules! health_ids {
         );
     };
 }
+
+macro_rules! health_guidance_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!($remaining, $($ids,)* HealthMetricUsed,);
+    };
+}

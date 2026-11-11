@@ -1,9 +1,13 @@
 pub(crate) mod audit;
+pub(crate) mod guide;
 mod hook_feedback;
 mod language;
+mod login_health;
+pub(crate) use login_health::{read_login_health_config, HealthLoginConfig};
 mod load;
 mod model;
 mod parse;
+pub(crate) mod private_state;
 mod readonly;
 mod trust;
 
@@ -12,6 +16,7 @@ pub use hook_feedback::{
     load_hook_feedback_preferences, record_hook_feedback_key, record_hook_feedback_preference,
     HookFeedbackPreference,
 };
+pub(crate) use language::read_guidance_language;
 pub use language::{
     detect_language_from_env, language_config_status, parse_language_setting,
     resolve_language_setting, write_user_language_config, Language, LanguageConfigStatus,

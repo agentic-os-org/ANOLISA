@@ -54,8 +54,8 @@ pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel}
 pub(crate) use approval_reason::{card_reason_phrase, CARD_REASON_PHRASE_MAX_WIDTH};
 pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;
+pub(crate) use health::primary_health_prompt_suggestion;
 pub use health::HealthBannerModel;
-pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
 pub(crate) use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
 pub(crate) use hook_status::{AgentHooksView, HookEntryView, HookEventGroup, HookStatusPanelModel};
 use markdown::MarkdownRenderModel;
@@ -76,6 +76,7 @@ const MAX_WIDTH: u16 = 160;
 #[derive(Debug, Clone)]
 pub struct RatatuiInlineRenderer {
     width: u16,
+    column_limit: Option<u16>,
     pub(crate) plain: bool,
     pub(crate) styled: bool,
     language: crate::Language,
@@ -96,6 +97,7 @@ impl RatatuiInlineRenderer {
         };
         Self {
             width,
+            column_limit: None,
             plain: plain_output_requested(),
             styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
             language: crate::Language::EnUs,
@@ -105,15 +107,22 @@ impl RatatuiInlineRenderer {
     pub fn with_width(width: u16) -> Self {
         Self {
             width: width.clamp(20, 240),
+            column_limit: None,
             plain: false,
             styled: false,
             language: crate::Language::EnUs,
         }
     }
 
+    pub(crate) fn within_columns(mut self, columns: u16) -> Self {
+        self.column_limit = Some(columns);
+        self
+    }
+
     pub fn plain_with_width(width: u16) -> Self {
         Self {
             width: width.clamp(20, 240),
+            column_limit: None,
             plain: true,
             styled: false,
             language: crate::Language::EnUs,
@@ -445,7 +454,9 @@ impl RatatuiInlineRenderer {
     }
 
     pub(crate) fn panel_standard_width(&self) -> u16 {
-        self.width.clamp(MIN_WIDTH, MAX_WIDTH)
+        self.width
+            .clamp(MIN_WIDTH, MAX_WIDTH)
+            .min(self.column_limit.unwrap_or(MAX_WIDTH))
     }
 
     fn content_width(&self) -> usize {
@@ -468,7 +479,7 @@ impl RatatuiInlineRenderer {
         }
     }
 
-    pub(super) fn styles_enabled(&self) -> bool {
+    pub(crate) fn styles_enabled(&self) -> bool {
         self.styled
     }
 }
@@ -682,4 +693,6 @@ fn configured_terminal_width() -> Option<u16> {
 }
 
 #[cfg(test)]
-mod tests;
+library_tests! {
+    mod tests;
+}

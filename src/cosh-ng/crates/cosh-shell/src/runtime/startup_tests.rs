@@ -8,14 +8,13 @@ use nix::pty::Winsize;
 
 use super::probe_outcome::{record_probe_outcome, ProbeStartOutcome};
 use super::{
-    append_startup_auth_hint, bootstrap_path_command, bootstrap_path_probe_plan,
-    bootstrap_process_path_from_shell, extract_bootstrap_path, merge_bootstrap_paths,
-    merge_path_additions_at_anchors, merge_path_lists, plan_startup_for_render,
-    record_visible_personal_impressions, render_pending_recommendation_notice,
-    render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
-    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
-    BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
-    BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    bootstrap_path_command, bootstrap_path_probe_plan, bootstrap_process_path_from_shell,
+    extract_bootstrap_path, merge_bootstrap_paths, merge_path_additions_at_anchors,
+    merge_path_lists, plan_startup_for_render, record_visible_personal_impressions,
+    render_pending_recommendation_notice, render_pending_upgrade_notice, render_startup_banner,
+    run_bootstrap_path_probe, startup_suggestion_mode, visible_personal_candidates,
+    write_startup_suggestion_card, BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind,
+    StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -833,6 +832,7 @@ fn bootstrap_path_without_a_plan_keeps_login_effects_armed() {
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(!effects.may_have_started());
@@ -848,6 +848,7 @@ fn disabled_bootstrap_path_keeps_login_effects_armed() {
         false,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(!effects.may_have_started());
@@ -875,6 +876,7 @@ fn missing_selected_shell_reports_spawn_and_keeps_login_effects_armed() {
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
     assert!(!effects.may_have_started());
 }
@@ -905,6 +907,7 @@ fn bash_login_bootstrap_path_never_runs_a_side_probe() {
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(!effects.may_have_started());
@@ -940,6 +943,7 @@ fn selected_bootstrap_path_plan_marks_successful_probe() {
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
@@ -963,6 +967,7 @@ fn selected_bootstrap_path_plan_marks_failed_probe() {
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
@@ -990,6 +995,7 @@ fn selected_zsh_bootstrap_path_plan_marks_probe_without_real_zsh() {
         true,
         &BOOTSTRAP_PATH_TEST_WINSIZE,
         &effects,
+        None,
     );
 
     assert!(effects.has(LoginEffectSource::PathBootstrapProbe));
@@ -1062,34 +1068,26 @@ fn bash_login_probe_timeout_preserves_non_login_path() {
 }
 
 #[test]
-fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
+fn startup_auth_hint_uses_the_probe_without_overriding_disabled_ai() {
     let mut state = InlineState::default();
-    let mut body = vec!["/help".to_string()];
-
-    // Unresolved probe stays quiet.
-    append_startup_auth_hint(&mut state, &mut body);
-    assert_eq!(body.len(), 1);
-
-    // Configured credentials stay quiet.
+    let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+    assert!(!model.capability.contains("/auth"));
     state.startup_auth.resolved = Some(true);
-    append_startup_auth_hint(&mut state, &mut body);
-    assert_eq!(body.len(), 1);
-
-    // Explicitly unconfigured credentials show ECS trial and optional model setup.
+    assert!(
+        !super::welcome::welcome_model(&state, Some(("bash", "/tmp")))
+            .capability
+            .contains("/auth")
+    );
     state.startup_auth.resolved = Some(false);
-    append_startup_auth_hint(&mut state, &mut body);
-    assert_eq!(body.len(), 3);
-    assert_eq!(body[1], "");
-    assert!(body[2].contains("/auth"), "{:?}", body[2]);
-    assert!(body[2].contains("ECS"), "{:?}", body[2]);
-
-    // AI disabled by config suppresses the hint even when unconfigured.
-    let mut disabled = InlineState::default();
-    disabled.personalization.ai_disabled = true;
-    disabled.startup_auth.resolved = Some(false);
-    let mut quiet = Vec::new();
-    append_startup_auth_hint(&mut disabled, &mut quiet);
-    assert!(quiet.is_empty());
+    let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+    let hint = model.extra.join(" ");
+    assert!(hint.contains("/auth"));
+    assert!(hint.contains("ECS"));
+    assert!(!hint.contains("AI not configured"));
+    state.personalization.ai_disabled = true;
+    let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+    assert!(!model.capability.contains("/auth"));
+    assert!(model.capability.contains("AI is disabled"));
 }
 
 #[test]
@@ -1113,12 +1111,8 @@ fn startup_auth_hint_presents_ecs_trial_and_optional_model_setup_in_both_languag
             ..InlineState::default()
         };
         state.startup_auth.resolved = Some(false);
-        let mut body = Vec::new();
-
-        append_startup_auth_hint(&mut state, &mut body);
-
-        assert_eq!(body.len(), 2);
-        let hint = &body[1];
+        let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
+        let hint = model.extra.join(" ");
         for expected in ["ECS", direct_question, "/auth", model_choice] {
             assert!(hint.contains(expected), "missing {expected:?}: {hint}");
         }
@@ -1266,4 +1260,175 @@ fn recommendation_notice_is_suppressed_while_auth_is_unconfigured() {
     let mut writer = state.personalization.writer.take().unwrap();
     writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn startup_health_handle_is_taken_once_without_filtering_the_report() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let mut report = HealthScanReport::new("startup-owned", 0);
+    report
+        .try_items
+        .push(health_try("stale-worker-preview", 100));
+    let mut state = InlineState::default();
+    state.startup_health.config = crate::config::HealthConfig {
+        role: Some("launch-config-snapshot".into()),
+        ..crate::config::HealthConfig::default()
+    };
+    state.startup_health.pending = Some(HealthScanHandle::ready(report));
+    state.startup_health.wait_ready(Duration::from_millis(100));
+    assert!(state.startup_health.pending.is_none());
+    let report = state.startup_health.report.as_ref().unwrap();
+    assert_eq!(report.scan_id, "startup-owned");
+    assert_eq!(report.try_items.len(), 1);
+    assert_eq!(report.try_items[0].id, "stale-worker-preview");
+    state.startup_health.poll_ready();
+    state.startup_health.wait_ready(Duration::from_millis(100));
+    assert_eq!(
+        state.startup_health.report.as_ref().unwrap().scan_id,
+        "startup-owned"
+    );
+    assert_eq!(
+        state.startup_health.config.role.as_deref(),
+        Some("launch-config-snapshot")
+    );
+}
+
+#[test]
+fn cancelled_startup_health_handle_never_publishes_a_late_report() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let mut handle = HealthScanHandle::ready(HealthScanReport::new("cancelled", 0));
+    handle.cancel();
+    let mut state = InlineState::default();
+    state.startup_health.pending = Some(handle);
+    state.startup_health.wait_ready(Duration::from_millis(100));
+    assert!(state.startup_health.pending.is_none());
+    assert!(state.startup_health.report.is_none());
+    assert!(state.startup_health.rendered);
+    state.startup_health.poll_ready();
+    assert!(state.startup_health.report.is_none());
+}
+
+#[test]
+fn shell_ready_finishes_startup_health_even_when_the_startup_banner_is_hidden() {
+    use crate::diagnostics::health::runtime::HealthScanHandle;
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("0")));
+    let mut state = InlineState::default();
+    state.startup_health.pending =
+        Some(HealthScanHandle::ready(HealthScanReport::new("hidden", 0)));
+    let mut ready = crate::types::ShellEvent::user_input_intercepted("session", "");
+    ready.kind = crate::types::ShellEventKind::ShellReady;
+    let mut output = Vec::new();
+    render_startup_banner(
+        &[ready],
+        &crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter),
+        "bash",
+        &mut state,
+        &mut output,
+    )
+    .unwrap();
+    assert!(state.startup_health.pending.is_none());
+    assert_eq!(
+        state.startup_health.report.as_ref().unwrap().scan_id,
+        "hidden"
+    );
+    assert!(state.startup_health.rendered);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn path_bootstrap_probe_marks_only_its_child_as_an_internal_cosh_shell() {
+    let before = std::env::var_os("COSH_INTERNAL_SHELL");
+    let command = bootstrap_path_command("bash", "-lc");
+    assert!(command
+        .get_envs()
+        .any(|(name, value)| name == "COSH_INTERNAL_SHELL" && value == Some(OsStr::new("1"))));
+    assert_eq!(std::env::var_os("COSH_INTERNAL_SHELL"), before);
+}
+
+#[test]
+fn trusted_login_path_bootstrap_does_not_execute_shadowed_bash() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let selected = directory.path().join("verified-bash");
+    let log = directory.path().join("executed-programs");
+    std::fs::write(&selected, "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$COSH_TEST_PATH_PROGRAMS\"\nprintf '\\n__COSH_PATH_BEGIN__/usr/bin:/bin__COSH_PATH_END__\\n'\n").unwrap();
+    std::fs::write(directory.path().join("bash"), "#!/bin/sh\nexit 23\n").unwrap();
+    for path in [&selected, &directory.path().join("bash")] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _path = ScopedEnvVar::set("PATH", Some(directory.path().as_os_str()));
+    let _log = ScopedEnvVar::set("COSH_TEST_PATH_PROGRAMS", Some(log.as_os_str()));
+    let _enabled = ScopedEnvVar::set("COSH_SHELL_BOOTSTRAP_PATH", None);
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        true,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &LoginEffectGuard::new(),
+        Some(selected.to_str().unwrap()),
+    );
+    assert!(!log.exists(), "managed login owns its PATH discovery");
+    bootstrap_process_path_from_shell(
+        &RawShellKind::Bash,
+        false,
+        true,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+        &LoginEffectGuard::new(),
+        Some(selected.to_str().unwrap()),
+    );
+    let executed = std::fs::read_to_string(log).unwrap();
+    assert!(!executed.is_empty());
+    assert!(executed
+        .lines()
+        .all(|line| line == selected.to_str().unwrap()));
+}
+
+#[test]
+fn user_facing_startup_explains_the_shell_without_internal_migration_details() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let mut state = InlineState::default();
+    state.startup_auth.resolved = Some(false);
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    event.cwd = Some("/tmp".into());
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("AI Shell"), "{text}");
+    assert!(
+        text.contains("Run commands")
+            && text.contains("/help")
+            && !text.contains("natural language"),
+        "{text}"
+    );
+    assert!(text.contains("/auth"), "{text}");
+    assert!(
+        !text.contains("cosh-switch") && !text.contains("Adapter:"),
+        "{text}"
+    );
+}
+
+#[test]
+fn user_facing_startup_does_not_advertise_questions_when_ai_is_disabled() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let _banner = ScopedEnvVar::set("COSH_SHELL_STARTUP_BANNER", Some(OsStr::new("1")));
+    let mut state = InlineState::default();
+    state.personalization.ai_disabled = true;
+    let mut event = crate::types::ShellEvent::user_input_intercepted("session", "");
+    event.kind = crate::types::ShellEventKind::ShellReady;
+    event.input = None;
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_startup_banner(&[event], &adapter, "bash", &mut state, &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("AI is disabled"), "{text}");
+    assert!(text.contains("/help"), "{text}");
+    assert!(
+        !text.contains("ask questions in natural language"),
+        "{text}"
+    );
 }

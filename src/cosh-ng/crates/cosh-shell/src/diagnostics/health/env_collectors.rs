@@ -6,6 +6,7 @@
 //! finding when something needs attention. One collector failing never blocks
 //! the others.
 
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -13,23 +14,72 @@ use crate::config::{project_hook_trust, CoshConfig, ProjectHookTrust};
 
 use super::builder::HealthReportBuilder;
 use super::model::{
-    HealthFactCategory, HealthFactSource, HealthFactValue, HealthFinding, HealthFindingCategory,
-    HealthMessageId, HealthSeverity,
+    HealthCollector, HealthFactCategory, HealthFactSource, HealthFactValue, HealthFinding,
+    HealthFindingCategory, HealthMessageId, HealthSeverity, HealthUnavailableReason,
 };
+
+mod permissions;
+use permissions::collect_permissions;
+#[cfg(all(test, target_os = "linux"))]
+use permissions::open_anonymous_probe;
+pub(crate) use permissions::{classify_permissions, PermissionsReadiness};
 
 /// Run every environment collector into `builder`. Collectors are independent;
 /// each contributes facts/findings without depending on the others.
-pub(crate) fn run_env_collectors(
+#[cfg(test)]
+fn run_env_collectors(
     builder: &mut HealthReportBuilder,
     config: &CoshConfig,
     cwd: &Path,
     elapsed_ms: u128,
 ) {
-    collect_provider(builder, config, elapsed_ms);
-    collect_config(builder, config, elapsed_ms);
-    collect_hooks(builder, config, cwd, elapsed_ms);
-    collect_pty(builder, elapsed_ms);
-    collect_permissions(builder, elapsed_ms);
+    let config_sample = OnceCell::new();
+    for collector in [
+        HealthCollector::Provider,
+        HealthCollector::Config,
+        HealthCollector::Hooks,
+        HealthCollector::Pty,
+        HealthCollector::Permissions,
+    ] {
+        run_environment_check(
+            builder,
+            collector,
+            config,
+            cwd,
+            elapsed_ms,
+            true,
+            &config_sample,
+        );
+    }
+}
+
+pub(super) fn run_environment_check(
+    builder: &mut HealthReportBuilder,
+    collector: HealthCollector,
+    config: &CoshConfig,
+    cwd: &Path,
+    elapsed_ms: u128,
+    allow_write_probe: bool,
+    config_sample: &OnceCell<EnvironmentConfigSample>,
+) {
+    match collector {
+        HealthCollector::Provider => collect_provider(builder, config, elapsed_ms, config_sample),
+        HealthCollector::Config => collect_config(
+            builder,
+            config,
+            elapsed_ms,
+            config_sample.get_or_init(EnvironmentConfigSample::read),
+        ),
+        HealthCollector::Hooks => collect_hooks(builder, config, cwd, elapsed_ms),
+        HealthCollector::Pty => collect_pty(builder, elapsed_ms),
+        HealthCollector::Permissions if allow_write_probe => {
+            collect_permissions(builder, elapsed_ms)
+        }
+        HealthCollector::Permissions => {
+            builder.declare_check(collector, false);
+        }
+        _ => {}
+    }
 }
 
 fn env_finding(
@@ -126,42 +176,12 @@ fn env_credentials_present(kind: crate::adapter::AdapterKind, provider_type: &st
 /// config.  cosh-core reads only `[ai].active_provider` (defaulting to
 /// `"default"`) and looks up that single entry — credentials on a non-active
 /// provider are invisible to it, so the doctor must not count them either.
-fn config_credentials_present(kind: crate::adapter::AdapterKind) -> bool {
+fn config_credentials_present(
+    kind: crate::adapter::AdapterKind,
+    provider: Option<&toml::value::Table>,
+) -> bool {
     use crate::adapter::AdapterKind;
-    let Some(home) = std::env::var_os("HOME") else {
-        return false;
-    };
-    let path = PathBuf::from(home).join(".copilot-shell/config.toml");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let Ok(value) = content.parse::<toml::Value>() else {
-        return false;
-    };
-    // Resolve the active provider name, mirroring cosh-core's
-    // `resolve_provider()`: `COSH_AI_PROVIDER` env var overrides, then
-    // `[ai].active_provider`, default to "default".
-    let active_provider = std::env::var("COSH_AI_PROVIDER")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            value
-                .get("ai")
-                .and_then(|ai| ai.get("active_provider"))
-                .and_then(toml::Value::as_str)
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "default".to_string());
-    let Some(providers) = value
-        .get("ai")
-        .and_then(|ai| ai.get("providers"))
-        .and_then(toml::Value::as_table)
-    else {
-        return false;
-    };
-    // Check only the active provider entry — non-active entries are ignored by
-    // cosh-core and must not satisfy the doctor either.
-    let Some(provider) = providers.get(active_provider.as_str()) else {
+    let Some(provider) = provider else {
         return false;
     };
     let field = |key: &str| provider.get(key).and_then(toml::Value::as_str);
@@ -187,62 +207,53 @@ fn config_credentials_present(kind: crate::adapter::AdapterKind) -> bool {
     }
 }
 
-fn provider_credentials_present(adapter: &str) -> bool {
+fn provider_credentials_from_sample(
+    adapter: &str,
+    sample: &OnceCell<EnvironmentConfigSample>,
+) -> bool {
     let Some(kind) = crate::adapter::AdapterKind::parse(adapter) else {
         return false;
     };
     if kind == crate::adapter::AdapterKind::Fake {
         return true;
     }
-    // Resolve the active provider type from config so both env and config
-    // credential checks are gated by it.  cosh-core reads `provider_type`
-    // (default "generic") and branches: "aliyun" ignores api_key / generic
-    // API-key env vars, so env credentials alone must not satisfy an aliyun
-    // active provider.
-    let provider_type = resolve_active_provider_type();
-    env_credentials_present(kind, &provider_type) || config_credentials_present(kind)
-}
-
-/// Read `[ai].active_provider` (default `"default"`), look up that entry in
-/// `[ai.providers.*]`, and return its `provider_type` (default `"generic"`).
-/// When no config file is readable, falls back to `"generic"`.
-fn resolve_active_provider_type() -> String {
-    let home = match std::env::var_os("HOME") {
-        Some(h) => h,
-        None => return "generic".to_string(),
-    };
-    let path = PathBuf::from(home).join(".copilot-shell/config.toml");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return "generic".to_string();
-    };
-    let Ok(value) = content.parse::<toml::Value>() else {
-        return "generic".to_string();
-    };
+    let sample = sample.get_or_init(EnvironmentConfigSample::read);
     let active = std::env::var("COSH_AI_PROVIDER")
         .ok()
-        .filter(|v| !v.trim().is_empty())
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| {
-            value
-                .get("ai")
-                .and_then(|ai| ai.get("active_provider"))
-                .and_then(toml::Value::as_str)
+            sample
+                .value
+                .as_ref()?
+                .get("ai")?
+                .get("active_provider")?
+                .as_str()
                 .map(String::from)
         })
-        .unwrap_or_else(|| "default".to_string());
-    value
-        .get("ai")
-        .and_then(|ai| ai.get("providers"))
-        .and_then(toml::Value::as_table)
-        .and_then(|providers| providers.get(&active))
-        .and_then(|p| p.get("type"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("generic")
-        .to_string()
+        .unwrap_or_else(|| "default".into());
+    let provider = sample
+        .value
+        .as_ref()
+        .and_then(|value| value.get("ai")?.get("providers")?.get(&active)?.as_table());
+    let provider_type = provider
+        .and_then(|value| value.get("type")?.as_str())
+        .unwrap_or("generic");
+    env_credentials_present(kind, provider_type) || config_credentials_present(kind, provider)
 }
 
-fn collect_provider(builder: &mut HealthReportBuilder, config: &CoshConfig, elapsed_ms: u128) {
+#[cfg(test)]
+fn provider_credentials_present(adapter: &str) -> bool {
+    provider_credentials_from_sample(adapter, &OnceCell::new())
+}
+
+fn collect_provider(
+    builder: &mut HealthReportBuilder,
+    config: &CoshConfig,
+    elapsed_ms: u128,
+    sample: &OnceCell<EnvironmentConfigSample>,
+) {
     let adapter = config.adapter_default.trim();
-    let has_credentials = provider_credentials_present(adapter);
+    let has_credentials = provider_credentials_from_sample(adapter, sample);
     builder
         .add_fact(
             HealthFactCategory::Provider,
@@ -310,32 +321,50 @@ impl ConfigFileStatus {
     }
 }
 
+pub(super) struct EnvironmentConfigSample {
+    value: Option<toml::Value>,
+    status: ConfigFileStatus,
+}
+
+impl EnvironmentConfigSample {
+    pub(super) fn read() -> Self {
+        let path = std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".copilot-shell/config.toml"));
+        let content = path.map(std::fs::read_to_string);
+        match content {
+            None => Self {
+                value: None,
+                status: ConfigFileStatus::consumable(),
+            },
+            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Self {
+                value: None,
+                status: ConfigFileStatus::consumable(),
+            },
+            Some(Err(_)) => Self {
+                value: None,
+                status: ConfigFileStatus {
+                    readable: false,
+                    parseable: false,
+                },
+            },
+            Some(Ok(content)) => {
+                let value = content.parse::<toml::Value>().ok();
+                let parseable = value.is_some() || config_content_consumable(&content);
+                Self {
+                    value,
+                    status: ConfigFileStatus {
+                        readable: true,
+                        parseable,
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 fn config_file_status() -> ConfigFileStatus {
-    let Some(home) = std::env::var_os("HOME") else {
-        // No HOME is reported through the separate home_present check.
-        return ConfigFileStatus::consumable();
-    };
-    let path = PathBuf::from(home).join(".copilot-shell/config.toml");
-    // A missing file is fine: cosh-shell runs on defaults and creates it later.
-    if !path.exists() {
-        return ConfigFileStatus::consumable();
-    }
-    // An existing file the user intended to configure with: a read failure
-    // (permissions, directory) blocks loading. For parse, mirror what the shell
-    // actually consumes: load_config_file_into runs both parse_simple_config
-    // (legacy `key = value`) and parse_toml_config, so a file is consumable if
-    // it is valid TOML, is recognized by the legacy simple parser, or carries
-    // no meaningful content.
-    match std::fs::read_to_string(&path) {
-        Ok(content) => ConfigFileStatus {
-            readable: true,
-            parseable: config_content_consumable(&content),
-        },
-        Err(_) => ConfigFileStatus {
-            readable: false,
-            parseable: false,
-        },
-    }
+    EnvironmentConfigSample::read().status
 }
 
 /// Recognized keys of the legacy simple `key = value` config parser
@@ -361,10 +390,6 @@ const SIMPLE_CONFIG_KEYS: &[&str] = &[
 ];
 
 fn config_content_consumable(content: &str) -> bool {
-    // Valid TOML loads cleanly.
-    if content.parse::<toml::Value>().is_ok() {
-        return true;
-    }
     let mut has_meaningful_line = false;
     for line in content.lines() {
         let line = line.trim();
@@ -383,11 +408,16 @@ fn config_content_consumable(content: &str) -> bool {
     !has_meaningful_line
 }
 
-fn collect_config(builder: &mut HealthReportBuilder, config: &CoshConfig, elapsed_ms: u128) {
+fn collect_config(
+    builder: &mut HealthReportBuilder,
+    config: &CoshConfig,
+    elapsed_ms: u128,
+    sample: &EnvironmentConfigSample,
+) {
     let home_present = std::env::var_os("HOME")
         .map(|home| !home.is_empty())
         .unwrap_or(false);
-    let status = config_file_status();
+    let status = sample.status;
     builder
         .add_fact(
             HealthFactCategory::Config,
@@ -606,93 +636,6 @@ fn collect_pty(builder: &mut HealthReportBuilder, elapsed_ms: u128) {
 }
 
 // ─── Permissions ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PermissionsReadiness {
-    Ok,
-    Unwritable,
-}
-
-/// Pure classification for config-directory writability. No I/O.
-pub(crate) fn classify_permissions(writable: bool) -> PermissionsReadiness {
-    if writable {
-        PermissionsReadiness::Ok
-    } else {
-        PermissionsReadiness::Unwritable
-    }
-}
-
-fn config_state_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".copilot-shell"))
-}
-
-fn dir_writable(path: &Path) -> bool {
-    // Probe actual writability by trying to create a temporary file.  This
-    // catches cases that `metadata().permissions().readonly()` misses: a
-    // read-only parent (HOME) when the target does not exist, or a directory
-    // with write bit but no execute/search bit.
-    let probe_dir = if path.is_dir() {
-        path.to_path_buf()
-    } else if let Some(parent) = path.parent() {
-        if parent.is_dir() {
-            parent.to_path_buf()
-        } else {
-            return false;
-        }
-    } else {
-        return false;
-    };
-    let probe = probe_dir.join(format!(".cosh-write-probe-{}", std::process::id()));
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-fn collect_permissions(builder: &mut HealthReportBuilder, elapsed_ms: u128) {
-    let dir = config_state_dir();
-    let (path_str, writable) = match &dir {
-        Some(path) => (path.display().to_string(), dir_writable(path)),
-        None => (String::new(), false),
-    };
-    builder
-        .add_fact(
-            HealthFactCategory::Permissions,
-            "permissions.state_dir",
-            HealthFactValue::String(path_str.clone()),
-            None,
-            HealthFactSource::Derived,
-            elapsed_ms,
-        )
-        .add_fact(
-            HealthFactCategory::Permissions,
-            "permissions.state_dir_writable",
-            HealthFactValue::Bool(writable),
-            None,
-            HealthFactSource::Derived,
-            elapsed_ms,
-        )
-        .add_check_done("permissions");
-
-    if classify_permissions(writable) == PermissionsReadiness::Unwritable {
-        let mut args = BTreeMap::new();
-        args.insert("path".to_string(), path_str);
-        builder.add_finding(env_finding(
-            "env-permissions",
-            HealthMessageId::HealthFindingPermissionsUnwritable,
-            HealthMessageId::HealthRemediationPermissions,
-            args,
-            vec!["permissions.state_dir_writable".to_string()],
-        ));
-    }
-}
 
 #[cfg(test)]
 #[path = "env_collector_tests.rs"]

@@ -8,12 +8,28 @@
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
+use super::cli_args::{parse_raw_shell, LaunchOptions, RawShellKind, ResumeLaunch};
+
+mod exec;
+mod raw;
+pub(crate) use exec::{exec_gateway, exec_shell};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Invocation {
     /// Allowlist hit: start the interactive TUI.
     Tui(TuiEntry),
     /// Everything else: replace this process with the inner shell.
     ExecShell(ExecPlan),
+    UsageError(&'static str),
+    Guide(Vec<OsString>),
+    Login(Vec<OsString>),
+    ShellIntegration(&'static str),
+    HealthWorker,
+    LoginInvitationWorker,
+    LoginShellPlanWorker,
+    LoginEditor,
+    LoginLifecycle(Vec<OsString>),
+    Health(Vec<OsString>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,15 +38,23 @@ pub(crate) struct GatewayPlan {
     pub(crate) args: Vec<OsString>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TuiEntry {
-    pub(crate) login: bool,
-    /// Arguments consumed by the TUI after any entry subcommand is removed.
-    pub(crate) launch_args: Vec<OsString>,
+    pub(crate) login_argv0: bool,
+    pub(crate) adapter_name: Option<String>,
+    pub(crate) shell_kind: Option<RawShellKind>,
+    pub(crate) launch_options: LaunchOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecOrigin {
+    Primary,
+    Raw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecPlan {
+    pub(crate) origin: ExecOrigin,
     /// `--shell` override consumed from the cosh-owned leading options.
     pub(crate) shell_override: Option<OsString>,
     /// argv[0] passed through verbatim (login `-` prefix included) so the
@@ -70,22 +94,11 @@ fn login_argv0(argv0: &OsStr) -> bool {
 }
 
 /// Standalone allowlist flags recognized by the classifier. Single vocabulary
-/// source shared by the classifier scan, the launch-side adapter scan
-/// (`cli_args::adapter_name_from_args`), and the vocabulary-contract test, so
-/// adding a flag here mechanically updates all three. Exec handling remains
+/// source used by the classifier and the launch-parser vocabulary-contract
+/// test, so adding a flag also checks that launch parsing consumes it.
+/// Exec handling remains
 /// flag-specific; value-carrying flags (`--shell`, `--resume`) stay explicit.
 pub(crate) const TUI_STANDALONE_FLAGS: &[&str] = &["-l", "--login", "--isolated"];
-
-/// Single source of truth for the login-shell bit: argv[0] carries the
-/// login `-` prefix (login(1)/su convention) or an explicit `-l`/`--login`
-/// flag appears anywhere in argv. Shared by the classifier and the TUI
-/// bootstrap so the two sites cannot drift.
-pub(crate) fn is_login_invocation<A: AsRef<OsStr>>(argv0: &OsStr, args: &[A]) -> bool {
-    login_argv0(argv0)
-        || args
-            .iter()
-            .any(|arg| matches!(arg.as_ref().to_str(), Some("-l") | Some("--login")))
-}
 
 /// Classify one invocation of the transparency contract entry.
 ///
@@ -115,20 +128,79 @@ pub(crate) fn classify_invocation(
     stdout_tty: bool,
     stderr_tty: bool,
 ) -> Invocation {
+    if args.first().and_then(|arg| arg.to_str())
+        == Some(crate::diagnostics::health::runtime::PRIVATE_HEALTH_WORKER_FLAG)
+    {
+        return if args.len() == 1 {
+            Invocation::HealthWorker
+        } else {
+            Invocation::UsageError("private health worker does not accept arguments")
+        };
+    }
+    if args.first().and_then(|arg| arg.to_str())
+        == Some(crate::runtime::login::invitation::WORKER_FLAG)
+    {
+        return if args.len() == 1 {
+            Invocation::LoginInvitationWorker
+        } else {
+            Invocation::UsageError("private login invitation worker does not accept arguments")
+        };
+    }
+    if args.first().and_then(|arg| arg.to_str()) == Some(crate::runtime::login::editor::EDITOR_FLAG)
+    {
+        return if args.len() == 3
+            && args[1].to_str() == Some("3")
+            && args[2] == OsStr::new(crate::runtime::login::editor::TEMP_PATH)
+        {
+            Invocation::LoginEditor
+        } else {
+            Invocation::UsageError("invalid private login editor invocation")
+        };
+    }
+    if args.first().and_then(|arg| arg.to_str()) == Some(crate::runtime::login::probe::WORKER_FLAG)
+    {
+        return if args.len() == 1 {
+            Invocation::LoginShellPlanWorker
+        } else {
+            Invocation::UsageError("private login shell query does not accept arguments")
+        };
+    }
+    if args.first().and_then(|arg| arg.to_str()) == Some("--__cosh-login-lifecycle-v1") {
+        return Invocation::LoginLifecycle(args[1..].to_vec());
+    }
     if args.first().and_then(|arg| arg.to_str()) == Some("raw") {
-        // Keep the legacy non-interactive escape hatches (`raw -c` and
-        // `raw --`) transparent, but treat every other raw shape as the
-        // explicit TUI request that the direct cosh-shell entry accepts.
-        if let Some(args) = normalize_raw_invocation(args) {
-            return classify_invocation(argv0, &args, stdin_tty, stdout_tty, stderr_tty);
-        }
-
-        return Invocation::Tui(TuiEntry {
-            login: is_login_invocation(argv0, args),
-            launch_args: args[1..].to_vec(),
-        });
+        return raw::classify_raw_invocation(
+            argv0,
+            &args[1..],
+            stdin_tty && stdout_tty && stderr_tty,
+        );
     }
 
+    if args.first().and_then(|arg| arg.to_str()) == Some("shell-integration") {
+        return match (args.get(1).and_then(|arg| arg.to_str()), args.len()) {
+            (Some("compat"), 2) => Invocation::ShellIntegration("compat"),
+            (Some("advise"), 2) => Invocation::ShellIntegration("advise"),
+            (Some("--__compat-worker-v2"), 2) => {
+                Invocation::ShellIntegration("--__compat-worker-v2")
+            }
+            _ => Invocation::UsageError("usage: cosh shell-integration compat|advise"),
+        };
+    }
+    if args.first().and_then(|arg| arg.to_str()) == Some("login") {
+        return Invocation::Login(args[1..].to_vec());
+    }
+    if args.first().and_then(|arg| arg.to_str()) == Some("health") {
+        return Invocation::Health(args[1..].to_vec());
+    }
+    if args.first().and_then(|arg| arg.to_str()) == Some("guide") {
+        return Invocation::Guide(args[1..].to_vec());
+    }
+
+    let mut entry = TuiEntry {
+        login_argv0: login_argv0(argv0),
+        ..Default::default()
+    };
+    entry.launch_options.login = entry.login_argv0;
     let mut kept: Vec<OsString> = Vec::new();
     let mut shell_override: Option<OsString> = None;
     let mut isolated = false;
@@ -138,9 +210,11 @@ pub(crate) fn classify_invocation(
         match arg.to_str() {
             Some("--isolated") => {
                 isolated = true;
+                entry.launch_options.isolated = true;
                 idx += 1;
             }
             Some(text) if TUI_STANDALONE_FLAGS.contains(&text) => {
+                entry.launch_options.login = true;
                 kept.push(arg.clone());
                 idx += 1;
             }
@@ -150,6 +224,9 @@ pub(crate) fn classify_invocation(
                     .and_then(|value| value.to_str())
                     .is_some_and(|value| !value.is_empty() && !value.starts_with('-')) =>
             {
+                entry
+                    .shell_kind
+                    .get_or_insert_with(|| parse_raw_shell(&args[idx + 1].to_string_lossy()));
                 shell_override = Some(args[idx + 1].clone());
                 idx += 2;
             }
@@ -158,10 +235,33 @@ pub(crate) fn classify_invocation(
                     && !text["--shell=".len()..].is_empty()
                     && !text["--shell=".len()..].starts_with('-') =>
             {
+                entry
+                    .shell_kind
+                    .get_or_insert_with(|| parse_raw_shell(&text["--shell=".len()..]));
                 shell_override = Some(OsString::from(&text["--shell=".len()..]));
                 idx += 1;
             }
+            Some("--context") => {
+                if let Err(error) =
+                    parse_failure_context(&mut entry.launch_options, args.get(idx + 1))
+                {
+                    return Invocation::UsageError(error);
+                }
+                idx += 2;
+            }
+            Some("--ask") => {
+                if let Err(error) =
+                    parse_initial_question(&mut entry.launch_options, args.get(idx + 1))
+                {
+                    return Invocation::UsageError(error);
+                }
+                idx += 2;
+            }
             Some("--resume") => {
+                if entry.launch_options.initial_question.is_some() {
+                    return Invocation::UsageError("--ask cannot be combined with --resume");
+                }
+                entry.launch_options.resume = Some(ResumeLaunch::Picker);
                 kept.push(arg.clone());
                 idx += 1;
                 if args
@@ -169,21 +269,39 @@ pub(crate) fn classify_invocation(
                     .and_then(|value| value.to_str())
                     .is_some_and(|value| !value.starts_with('-'))
                 {
+                    entry.launch_options.resume = Some(ResumeLaunch::Session(
+                        args[idx].to_string_lossy().into_owned(),
+                    ));
                     kept.push(args[idx].clone());
                     idx += 1;
                 }
             }
             Some(text) if text.starts_with("--resume=") => {
+                if entry.launch_options.initial_question.is_some() {
+                    return Invocation::UsageError("--ask cannot be combined with --resume");
+                }
+                let value = &text["--resume=".len()..];
+                entry.launch_options.resume = Some(if value.is_empty() {
+                    ResumeLaunch::Picker
+                } else {
+                    ResumeLaunch::Session(value.to_string())
+                });
                 kept.push(arg.clone());
                 idx += 1;
             }
             _ => {
+                if entry.launch_options.initial_question.is_some()
+                    || entry.launch_options.failure_context.is_some()
+                {
+                    return Invocation::UsageError("--ask cannot be combined with shell arguments");
+                }
                 // First non-cosh token (including a `--shell` without a
                 // usable value): the rest of argv belongs to the inner shell
                 // byte-for-byte (no reordering, no interpretation).
                 let mut rest = kept;
                 rest.extend(args[idx..].iter().cloned());
                 return Invocation::ExecShell(ExecPlan {
+                    origin: ExecOrigin::Primary,
                     shell_override,
                     arg0: argv0.to_os_string(),
                     args: rest,
@@ -193,13 +311,19 @@ pub(crate) fn classify_invocation(
         }
     }
 
+    if entry.launch_options.failure_context.is_some()
+        && entry.launch_options.initial_question.is_none()
+    {
+        return Invocation::UsageError("--context requires --ask");
+    }
+    if entry.launch_options.initial_question.is_some() && !(stdin_tty && stdout_tty && stderr_tty) {
+        return Invocation::UsageError("--ask requires an interactive terminal");
+    }
     if stdin_tty && stdout_tty && stderr_tty {
-        Invocation::Tui(TuiEntry {
-            login: is_login_invocation(argv0, args),
-            launch_args: args.to_vec(),
-        })
+        Invocation::Tui(entry)
     } else {
         Invocation::ExecShell(ExecPlan {
+            origin: ExecOrigin::Primary,
             shell_override,
             arg0: argv0.to_os_string(),
             args: kept,
@@ -208,202 +332,37 @@ pub(crate) fn classify_invocation(
     }
 }
 
-/// Extract the passthrough candidate from a `cosh-shell raw [adapter] …`
-/// invocation. `raw` is an explicit TUI request, so only an explicit `-c`
-/// command string or a leading `--` diverts to passthrough (legacy
-/// contract); every other shape — including unknown raw-surface flags such
-/// as `--run` — returns `None` and stays on the TUI launch path.
-pub(crate) fn normalize_raw_invocation(args: &[OsString]) -> Option<Vec<OsString>> {
-    if args.first().and_then(|arg| arg.to_str()) != Some("raw") {
-        return None;
+fn parse_failure_context(
+    options: &mut LaunchOptions,
+    value: Option<&OsString>,
+) -> Result<(), &'static str> {
+    if options.failure_context.is_some() || options.resume.is_some() {
+        return Err("--context requires one --ask invocation");
     }
-
-    let mut out: Vec<OsString> = Vec::new();
-    let mut skipped_adapter = false;
-    let mut idx = 1;
-    while idx < args.len() {
-        let arg = &args[idx];
-        match arg.to_str() {
-            // Legacy gate: `--` only diverts when it is the first normalized
-            // token; after cosh-owned flags it stays a TUI launch error
-            // surface, matching the pre-classifier scan.
-            Some("--") => {
-                if !out.is_empty() {
-                    return None;
-                }
-                out.extend(args[idx..].iter().cloned());
-                return Some(out);
-            }
-            Some("-c") => {
-                out.extend(args[idx..].iter().cloned());
-                return Some(out);
-            }
-            Some("--shell") => {
-                out.push(arg.clone());
-                if let Some(value) = args.get(idx + 1) {
-                    out.push(value.clone());
-                    idx += 2;
-                } else {
-                    idx += 1;
-                }
-            }
-            Some("--isolated") | Some("--login") | Some("-l") => {
-                out.push(arg.clone());
-                idx += 1;
-            }
-            Some(text) if text.starts_with("--shell=") => {
-                out.push(arg.clone());
-                idx += 1;
-            }
-            Some(text) if !text.starts_with('-') && !skipped_adapter => {
-                skipped_adapter = true;
-                idx += 1;
-            }
-            _ => return None,
-        }
-    }
-
-    None
+    let id = value
+        .and_then(|value| value.to_str())
+        .filter(|id| crate::config::guide::valid_context_id(id))
+        .ok_or("--context requires a valid event ID")?;
+    options.failure_context = Some(id.to_string());
+    Ok(())
 }
 
-/// Execute the inner-shell plan, preserving shell-owned argv and SIGPIPE state
-/// outside the cosh-owned isolation contract. Isolated Bash execs suppress its
-/// startup inputs and reject login shells (Bash cannot suppress logout files);
-/// isolated Zsh execs use `-f` only with no shell arguments and
-/// reject arguments before exec; unsupported targets retain `--isolated` and
-/// fail loudly. Returns 2 for isolation rejection, or 127/126 when exec fails.
-pub(crate) fn exec_shell(plan: ExecPlan) -> i32 {
-    use std::os::unix::process::CommandExt;
-
-    let shell = plan
-        .shell_override
-        .or_else(|| std::env::var_os("COSH_SHELL_DEFAULT_SHELL").filter(|value| !value.is_empty()))
-        .unwrap_or_else(|| OsString::from("bash"));
-    let mut command = std::process::Command::new(&shell);
-    if plan.isolated {
-        match entry_basename(&shell) {
-            b"bash" | b"cosh-shell-bash" => {
-                if bash_login_requested(&plan.arg0, &plan.args) {
-                    let program = String::from_utf8_lossy(entry_basename(&plan.arg0));
-                    eprintln!("{program}: isolated Bash login shells are not supported");
-                    return 2;
-                }
-                // Bash long options must precede single-character options.
-                // `--norc` also covers bash's remote-daemon startup path.
-                command.args(["--noprofile", "--norc"]);
-                command.env_remove("BASH_ENV");
-                command.env_remove("ENV");
-            }
-            b"zsh" | b"cosh-shell-zsh" => {
-                if !plan.args.is_empty() {
-                    let program = String::from_utf8_lossy(entry_basename(&plan.arg0));
-                    eprintln!("{program}: isolated Zsh shell arguments are not supported");
-                    return 2;
-                }
-                command.arg("-f");
-            }
-            _ => {
-                // Unsupported targets retain the fail-loud contract instead
-                // of silently claiming isolation that was not established.
-                command.arg("--isolated");
-            }
-        }
+fn parse_initial_question(
+    options: &mut LaunchOptions,
+    value: Option<&OsString>,
+) -> Result<(), &'static str> {
+    if options.resume.is_some() {
+        return Err("--ask cannot be combined with --resume");
     }
-    command.args(&plan.args).arg0(&plan.arg0);
-    unsafe {
-        command.pre_exec(crate::shell_host::sigpipe::restore_in_child);
+    if options.initial_question.is_some() {
+        return Err("--ask may only be specified once");
     }
-    let error = command.exec();
-
-    let program = String::from_utf8_lossy(entry_basename(&plan.arg0)).into_owned();
-    let shell = shell.to_string_lossy();
-    // Match the shell wording for exec failures instead of Rust's
-    // "(os error N)" suffix, keeping stderr bytes shell-shaped.
-    let reason = match error.kind() {
-        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
-        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
-        _ => error.to_string(),
-    };
-    eprintln!("{program}: {shell}: {reason}");
-    if error.kind() == std::io::ErrorKind::NotFound {
-        127
-    } else {
-        126
-    }
-}
-
-fn bash_login_requested(argv0: &OsStr, args: &[OsString]) -> bool {
-    if login_argv0(argv0) {
-        return true;
-    }
-    let mut args = args.iter();
-    let mut long_options = true;
-    while let Some(arg) = args.next() {
-        let bytes = arg.as_bytes();
-        match bytes {
-            b"-" | b"--" => break,
-            b"--login" | b"-login" => return true,
-            b"--rcfile" | b"-rcfile" | b"--init-file" | b"-init-file" if long_options => {
-                args.next();
-            }
-            // Bash accepts long names with one dash before its short options.
-            b"-debug" | b"-debugger" | b"-dump-po-strings" | b"-dump-strings" | b"-help"
-            | b"-noediting" | b"-noprofile" | b"-norc" | b"-posix" | b"-pretty-print"
-            | b"-protected" | b"-restricted" | b"-verbose" | b"-version" | b"-wordexp"
-                if long_options => {}
-            _ if bytes.starts_with(b"--") => {}
-            _ if matches!(bytes.first(), Some(b'-' | b'+')) => {
-                long_options = false;
-                for option in &bytes[1..] {
-                    match option {
-                        // Bash treats both -l and +l as a login request.
-                        b'l' => return true,
-                        b'o' | b'O' => {
-                            args.next();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Bash finishes option parsing before the command/script operand.
-            _ => break,
-        }
-    }
-    false
-}
-
-/// Replace the installed `cosh` entry with its sibling Gateway binary.
-pub(crate) fn exec_gateway(plan: GatewayPlan) -> i32 {
-    use std::os::unix::process::CommandExt;
-
-    let gateway = match std::env::current_exe().ok().and_then(|executable| {
-        executable
-            .parent()
-            .map(|parent| parent.join("cosh-gateway"))
-    }) {
-        Some(gateway) => gateway,
-        None => {
-            eprintln!("cosh: cosh-gateway: cannot resolve sibling executable");
-            return 126;
-        }
-    };
-    let mut command = std::process::Command::new(&gateway);
-    command.args(&plan.args);
-    unsafe {
-        command.pre_exec(crate::shell_host::sigpipe::restore_in_child);
-    }
-    let error = command.exec();
-    let reason = match error.kind() {
-        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
-        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
-        _ => error.to_string(),
-    };
-    eprintln!("cosh: {}: {reason}", gateway.display());
-    if error.kind() == std::io::ErrorKind::NotFound {
-        127
-    } else {
-        126
-    }
+    let question = value
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("--ask requires a non-empty question")?;
+    options.initial_question = Some(question.to_string());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -425,6 +384,18 @@ mod tests {
         match invocation {
             Invocation::ExecShell(plan) => plan.args,
             Invocation::Tui(entry) => panic!("expected ExecShell, got Tui({entry:?})"),
+            Invocation::UsageError(error) => panic!("unexpected usage error: {error}"),
+            Invocation::Guide(args) => panic!("unexpected guide command: {args:?}"),
+            Invocation::HealthWorker => panic!("unexpected health worker"),
+            Invocation::LoginShellPlanWorker => panic!("unexpected login shell plan worker"),
+            Invocation::LoginInvitationWorker => panic!("unexpected login invitation worker"),
+            Invocation::LoginEditor => panic!("unexpected login editor"),
+            Invocation::LoginLifecycle(args) => panic!("unexpected lifecycle: {args:?}"),
+            Invocation::Health(args) => panic!("unexpected health command: {args:?}"),
+            Invocation::Login(args) => panic!("unexpected login command: {args:?}"),
+            Invocation::ShellIntegration(operation) => {
+                panic!("unexpected shell integration: {operation}")
+            }
         }
     }
 
@@ -433,8 +404,7 @@ mod tests {
         assert_eq!(
             classify("cosh", &[], ALL_TTY),
             Invocation::Tui(TuiEntry {
-                login: false,
-                launch_args: os(&[]),
+                ..TuiEntry::default()
             })
         );
     }
@@ -463,8 +433,12 @@ mod tests {
         assert_eq!(
             classify("-cosh", &[], ALL_TTY),
             Invocation::Tui(TuiEntry {
-                login: true,
-                launch_args: os(&[]),
+                login_argv0: true,
+                launch_options: LaunchOptions {
+                    login: true,
+                    ..LaunchOptions::default()
+                },
+                ..TuiEntry::default()
             })
         );
         match classify("-cosh", &["-c", "id"], ALL_TTY) {
@@ -479,8 +453,11 @@ mod tests {
             assert_eq!(
                 classify("cosh", &[flag], ALL_TTY),
                 Invocation::Tui(TuiEntry {
-                    login: true,
-                    launch_args: os(&[flag]),
+                    launch_options: LaunchOptions {
+                        login: true,
+                        ..LaunchOptions::default()
+                    },
+                    ..TuiEntry::default()
                 })
             );
             assert_eq!(
@@ -673,15 +650,18 @@ mod tests {
     }
 
     #[test]
-    fn login_invocation_shares_one_truth_for_argv0_and_flags() {
-        assert!(is_login_invocation(OsStr::new("-cosh"), &os(&[])));
-        assert!(is_login_invocation(OsStr::new("cosh"), &os(&["-l"])));
-        assert!(is_login_invocation(
-            OsStr::new("cosh"),
-            &os(&["--isolated", "--login"])
-        ));
-        assert!(!is_login_invocation(OsStr::new("cosh"), &os(&["-lc"])));
-        assert!(!is_login_invocation(OsStr::new("/usr/bin/cosh"), &os(&[])));
+    fn login_invocation_is_carried_by_the_classification_result() {
+        for (argv0, args, login) in [
+            ("-cosh", vec![], true),
+            ("cosh", vec!["-l"], true),
+            ("cosh", vec!["--isolated", "--login"], true),
+            ("/usr/bin/cosh", vec![], false),
+        ] {
+            let Invocation::Tui(entry) = classify(argv0, &args, ALL_TTY) else {
+                panic!("expected Tui")
+            };
+            assert_eq!(entry.launch_options.login, login);
+        }
     }
 }
 

@@ -10,6 +10,13 @@ bash or zsh must own the session without Cosh hooks, observation, or insights.
 Structured JSON and JSONL interfaces remain available for automation and
 Agent integration.
 
+Bash-default images can preinstall Cosh without changing users' login shells.
+Run `cosh` for an AI Shell or `cosh --ask 'your question'` to start with a question.
+`--ask` explicitly enables AI for that initial question even with `COSH_SHELL_AI=off`; authentication and approvals still apply, and later input retains its disabled state.
+Optional Bash startup integration belongs to the image's system package;
+installing the Cosh RPM alone does not enable it. See
+[Bash guidance and login-shell controls](../../docs/user-guide/en/cosh-ng/shell/bash-guidance.md).
+
 By default a login shell (for example `cosh --login`) launches Bash with a real
 login identity on Bash 4+; set `shell.login_identity = false` to keep the previous
 non-login (`--rcfile`) startup. Cosh falls back automatically when the bounded

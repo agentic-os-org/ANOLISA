@@ -111,6 +111,7 @@ fn collector_label(collector: HealthCollector) -> &'static str {
 
 fn unavailable_reason(reason: HealthUnavailableReason) -> &'static str {
     match reason {
+        HealthUnavailableReason::MissingContext => "missing_context",
         HealthUnavailableReason::Unsupported => "unsupported",
         HealthUnavailableReason::PermissionDenied => "permission_denied",
         HealthUnavailableReason::CommandMissing => "command_missing",

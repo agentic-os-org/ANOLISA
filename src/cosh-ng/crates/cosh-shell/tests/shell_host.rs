@@ -1,3 +1,13 @@
+#[path = "shell_host/login_lifecycle.rs"]
+mod login_lifecycle;
+
+#[path = "shell_host/bash_integration.rs"]
+mod bash_integration;
+
+#[cfg(target_os = "linux")]
+#[path = "shell_host/bootstrap.rs"]
+mod bootstrap;
+
 use std::collections::HashSet;
 use std::io::{self, BufRead, Read, Write};
 use std::process::Command;

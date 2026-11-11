@@ -17,7 +17,9 @@ use crate::raw_input::{
 };
 use crate::types::ShellEvent;
 
-use super::bootstrap::{assistance_state_file, start_bash_session, start_zsh_session, PtySession};
+use super::bootstrap::{
+    assistance_state_file, start_bash_session, start_relay_session, start_zsh_session, PtySession,
+};
 use super::io_loop::{read_until_streaming_with_presentation, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellEventView, ShellHostConfig, ShellHostOutput};
@@ -369,7 +371,7 @@ where
         Some(control) => input_classifier.with_assistance_control(control.clone()),
         None => input_classifier,
     };
-    let mut session = start_session(config)?;
+    let mut session = start_relay_session(config, &mut output, start_session)?;
     session.parser.set_prompt_cwd(input_classifier.prompt_cwd());
     session
         .parser

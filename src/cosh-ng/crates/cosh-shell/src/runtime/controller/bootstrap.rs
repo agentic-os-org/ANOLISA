@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::approval::handoff::trust_key_from_command;
 use crate::config::parse_recommendations_environment_override;
-use crate::diagnostics::health::{spawn_startup_health_scan, startup_health_scan_enabled_for_env};
+use crate::diagnostics::health::runtime::start_startup_health_scan;
+use crate::diagnostics::health::startup_health_scan_enabled_for_env;
 use crate::hooks::{
     dirs_for_hook_loading, load_hook_feedback_preferences, load_project_hooks_with_consent,
     project_hook_root_from_cwd,
@@ -13,6 +14,7 @@ use crate::recommendation::personal_analysis_runtime::AnalyzerCancellation;
 use crate::recommendation::personal_runtime::PersonalRuntime;
 use crate::runtime::cli_args::{LaunchOptions, RawShellKind, ResumeLaunch};
 use crate::runtime::prelude::*;
+use crate::runtime::startup::session::{self, integration_for_launch};
 use crate::runtime::startup::{
     bootstrap_process_path_from_shell, exported_bash_functions_posix_compatible,
     resolve_bash_for_r2,
@@ -60,18 +62,6 @@ pub(crate) fn run_host_demo() -> i32 {
     render_loop_from_events(&output.events)
 }
 
-// #R2 A11: resume forces Enhanced so its marker path is present, which is the
-// precondition for the login-identity inject to fire (the adapter only reaches
-// the R2 branch when marker_path is Some). Without this override a resume under
-// a Native default would keep the login identity lost.
-fn integration_for_launch(resume_active: bool, configured: ShellIntegration) -> ShellIntegration {
-    if resume_active {
-        ShellIntegration::Enhanced
-    } else {
-        configured
-    }
-}
-
 fn managed_shell_started(effects: &LoginEffectGuard) -> bool {
     effects.has(LoginEffectSource::ManagedShell)
 }
@@ -81,19 +71,25 @@ pub(crate) fn run_raw(
     shell_kind: RawShellKind,
     launch_options: LaunchOptions,
 ) -> i32 {
-    // args_os: argv[0] may be arbitrary bytes (the classifier admits any
-    // byte sequence whose basename is `cosh`), so String iteration would
-    // panic here.
-    let args = std::env::args_os().collect::<Vec<_>>();
-
     let Some(kind) = AdapterKind::parse(adapter_name) else {
         let adapter_name = crate::evidence::redact_sensitive_text(adapter_name).0;
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
 
+    let Ok(failure_context) = session::load_failure_context(&launch_options) else {
+        eprintln!(
+            "Cosh: failure context is unavailable or expired; run cosh to start a new session."
+        );
+        return 2;
+    };
+    let trusted_bash = launch_options.trusted_login_bash.clone();
+    let shell_kind = if trusted_bash.is_some() {
+        RawShellKind::Bash
+    } else {
+        shell_kind
+    };
     let adapter = build_adapter(kind);
-
     let work_dir =
         std::env::temp_dir().join(format!("cosh-shell-raw-session-{}", std::process::id()));
     let _work_dir_cleanup = TempSessionDir::new(work_dir.clone());
@@ -105,11 +101,15 @@ pub(crate) fn run_raw(
             .map(|duration| duration.as_nanos())
             .unwrap_or_default()
     );
+    let compact_startup = launch_options.initial_question.is_some();
     let mut config = ShellHostConfig::new(session_id, work_dir);
     config.bound_interactive_transcript();
+    if let Some(path) = &trusted_bash {
+        config.bash_path = path.clone();
+    }
 
-    let isolated = args.iter().any(|a| a == "--isolated")
-        || std::env::var("COSH_SHELL_ISOLATED").as_deref() == Ok("1");
+    let isolated =
+        launch_options.isolated || std::env::var("COSH_SHELL_ISOLATED").as_deref() == Ok("1");
     if isolated {
         config.native_mode = false;
         if let Ok(prompt) = std::env::var("COSH_POC_PS1") {
@@ -118,9 +118,7 @@ pub(crate) fn run_raw(
             }
         }
     }
-    let login = args
-        .first()
-        .is_some_and(|argv0| crate::runtime::invocation::is_login_invocation(argv0, &args[1..]));
+    let login = launch_options.login;
     config.login_shell = login;
 
     // Only a fully terminal-backed session may fall open to an interactive
@@ -132,6 +130,7 @@ pub(crate) fn run_raw(
             && std::io::stdout().is_terminal()
             && std::io::stderr().is_terminal()
     };
+    config.initial_output_newline = compact_startup && all_tty;
 
     // Missing/unsupported shell selections are user-facing usage errors, not a
     // fresh-login lockout; report them before any fail-open consideration so an
@@ -150,7 +149,8 @@ pub(crate) fn run_raw(
     }
 
     let effects = config.login_effect_guard();
-    let fail_open = FreshLoginFailOpen::new(login, all_tty, isolated, effects.clone());
+    let fail_open = FreshLoginFailOpen::new(login, all_tty, isolated, effects.clone())
+        .with_bash_path(&config.bash_path);
     let cosh_config = load_config();
     config.status_symbols = cosh_config.status_symbols;
     // #R2 gate: sourced from shell.login_identity (default on; flip-on gate
@@ -175,11 +175,8 @@ pub(crate) fn run_raw(
         );
         return 2;
     };
-    // Resume is an explicit Agent action. It needs the ShellReady boundary
-    // that opens the requested provider session even when Native is the
-    // configured default.
-    config.integration =
-        integration_for_launch(launch_options.resume.is_some(), configured_integration);
+    // Explicit Agent startup needs ShellReady even under a Native default.
+    config.integration = integration_for_launch(&launch_options, configured_integration);
     let enhanced_integration = config.integration.uses_markers();
     let startup_path_enabled = std::env::var("COSH_SHELL_BOOTSTRAP_PATH").as_deref() != Ok("0");
     if config.native_mode && enhanced_integration {
@@ -189,6 +186,7 @@ pub(crate) fn run_raw(
             startup_path_enabled,
             &config.winsize,
             &effects,
+            trusted_bash.as_deref(),
         );
     }
     // #R2: only probe when every other R2 leg holds, and freeze the same
@@ -231,6 +229,9 @@ pub(crate) fn run_raw(
     }
 
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    inline_state.startup_session.compact = compact_startup;
+    inline_state.startup_session.initial_question = launch_options.initial_question;
+    inline_state.startup_session.failure_context = failure_context;
     inline_state.assistance_control = assistance_control;
     inline_state.shell_session_id = Some(config.session_id.clone());
     let zsh = matches!(&shell_kind, RawShellKind::Zsh);
@@ -264,7 +265,10 @@ pub(crate) fn run_raw(
     let mut startup_path_receiver = None;
     if enhanced_integration {
         inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|_| !compact_startup)
+        {
             let root = home.join(".copilot-shell/cosh/recommendations");
             let configured_enabled = cosh_config.recommendations.enabled;
             let environment_override = recommendations_environment_override;
@@ -288,7 +292,8 @@ pub(crate) fn run_raw(
                     }
                 });
         }
-        if matches!(&shell_kind, RawShellKind::Bash)
+        if !compact_startup
+            && matches!(&shell_kind, RawShellKind::Bash)
             && config.native_mode
             && cosh_config.recommendations.enabled
             && recommendations_environment_override != Some(false)
@@ -304,11 +309,13 @@ pub(crate) fn run_raw(
         config.set_shell_environment_observer(move |snapshot| {
             snapshot_publisher.publish(snapshot);
         });
-        if startup_health_scan_enabled_for_env(&cosh_config.health) {
+        if !compact_startup && startup_health_scan_enabled_for_env(&cosh_config.health) {
+            inline_state.startup_health.config = cosh_config.health.clone();
             inline_state.startup_health.pending =
-                Some(spawn_startup_health_scan(cosh_config.health.clone()));
+                start_startup_health_scan(cosh_config.health.clone());
         }
-        let startup_auth_core = super::startup_auth::probe_core(&adapter, cosh_config.ai_enabled);
+        let startup_auth_core =
+            super::startup_auth::probe_core(&adapter, cosh_config.ai_enabled, compact_startup);
         let managed_bash_login = startup_path_enabled
             && config.native_mode
             && login
@@ -316,7 +323,9 @@ pub(crate) fn run_raw(
         (inline_state.startup_auth.pending, startup_path_receiver) =
             super::startup_auth::arm(&mut config, startup_auth_core, managed_bash_login);
     }
-    if startup_upgrade_check_enabled_for_env() && crate::runtime::startup::startup_banner_enabled()
+    if !compact_startup
+        && startup_upgrade_check_enabled_for_env()
+        && crate::runtime::startup::startup_banner_enabled()
     {
         if let Some(notice) = read_cached_notice(env!("CARGO_PKG_VERSION")) {
             inline_state.startup_upgrade.resolved = Some(Some(notice));
@@ -631,59 +640,4 @@ fn load_hook_engine(cosh_config: &CoshConfig) -> HookEngine {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
-
-    #[test]
-    fn managed_shell_phase_depends_only_on_managed_shell_effect() {
-        let effects = LoginEffectGuard::new();
-        assert!(!managed_shell_started(&effects));
-
-        effects.mark_possible(LoginEffectSource::PathBootstrapProbe);
-        effects.mark_possible(LoginEffectSource::R2CapabilityProbe);
-        assert!(!managed_shell_started(&effects));
-
-        effects.mark_possible(LoginEffectSource::ManagedShell);
-        assert!(managed_shell_started(&effects));
-    }
-
-    #[test]
-    fn temp_session_dir_guard_removes_session_directory_on_drop() {
-        let dir = std::env::temp_dir().join(format!(
-            "cosh-shell-temp-session-cleanup-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-
-        {
-            let _cleanup = TempSessionDir::new(dir.clone());
-            fs::create_dir_all(dir.join("output-refs")).expect("create output refs");
-            fs::write(dir.join("history"), "echo ok\n").expect("write history");
-            fs::write(dir.join("output-refs/cmd-1.txt"), "ok\n").expect("write output ref");
-        }
-
-        assert!(!dir.exists(), "temp session dir should be removed on drop");
-    }
-
-    #[test]
-    fn resume_forces_enhanced_marker_path_for_r2() {
-        // #R2 A11: a resume under a Native default must be upgraded to Enhanced,
-        // and Enhanced must carry markers (the R2 branch is gated on marker_path
-        // being Some). If the override regresses to `configured`, the first
-        // assert fails; if Enhanced ever stopped emitting markers, the second.
-        assert_eq!(
-            integration_for_launch(true, ShellIntegration::Native),
-            ShellIntegration::Enhanced,
-        );
-        assert!(integration_for_launch(true, ShellIntegration::Native).uses_markers());
-        assert_eq!(
-            integration_for_launch(false, ShellIntegration::Native),
-            ShellIntegration::Native,
-        );
-        assert_eq!(
-            integration_for_launch(false, ShellIntegration::Enhanced),
-            ShellIntegration::Enhanced,
-        );
-    }
-}
+mod tests;

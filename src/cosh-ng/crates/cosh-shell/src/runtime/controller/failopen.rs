@@ -18,6 +18,7 @@ pub(super) enum FailOpenFailure {
 pub(super) struct FreshLoginFailOpen {
     eligible: bool,
     effects: LoginEffectGuard,
+    bash_path: String,
 }
 
 impl FreshLoginFailOpen {
@@ -30,7 +31,13 @@ impl FreshLoginFailOpen {
         Self {
             eligible: login && all_tty && !isolated,
             effects,
+            bash_path: "bash".into(),
         }
+    }
+
+    pub(super) fn with_bash_path(mut self, path: &str) -> Self {
+        self.bash_path = path.to_owned();
+        self
     }
 
     fn may_fall_open(&self, failure: FailOpenFailure) -> bool {
@@ -47,7 +54,7 @@ impl FreshLoginFailOpen {
             return None;
         }
         eprintln!("{diagnostic}");
-        Some(exec_native_login_bash())
+        Some(exec_native_login_bash(&self.bash_path))
     }
 }
 
@@ -69,22 +76,31 @@ pub(super) fn maybe_inject_failopen_panic(phase: &str, effects: &LoginEffectGuar
     }
 }
 
+fn native_login_bash_command(path: &str) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(path);
+    command
+        .arg0("-bash")
+        .arg("-i")
+        .env("COSH_INTERNAL_SHELL", "1");
+    command
+}
+
 /// Replace this process with a clean native interactive login `bash` — the
 /// interactive-login counterpart to the `ExecShell` classifier branch, so a
 /// fresh login is never locked out when cosh's own startup fails.
 ///
 /// The child is a real login shell (`argv[0] = -bash`, so it runs the login
-/// startup files) with no cosh marker and no injected `$ENV`, and restores the
+/// startup files), marks the shell internal to suppress Cosh guidance, and restores the
 /// inherited SIGPIPE disposition (on Linux) via `pre_exec`. It still inherits
 /// this process's environment, so it is not a pristine login environment.
 /// Callers must ensure the terminal is restored to a sane mode (the raw-mode
 /// guard dropped) first, since `exec` never returns on success. Returns 127/126
 /// only when `bash` itself cannot be executed (already the hard-lock domain).
-fn exec_native_login_bash() -> i32 {
+fn exec_native_login_bash(path: &str) -> i32 {
     use std::os::unix::process::CommandExt;
 
-    let mut command = std::process::Command::new("bash");
-    command.arg0("-bash").arg("-i");
+    let mut command = native_login_bash_command(path);
     unsafe {
         command.pre_exec(crate::shell_host::sigpipe::restore_in_child);
     }
@@ -105,6 +121,29 @@ fn exec_native_login_bash() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_fallback_keeps_the_verified_absolute_bash_program() {
+        let fallback = FreshLoginFailOpen::new(true, true, false, LoginEffectGuard::new())
+            .with_bash_path("/usr/bin/bash");
+        let command = native_login_bash_command(&fallback.bash_path);
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("/usr/bin/bash"));
+        assert!(fallback.may_fall_open(FailOpenFailure::InvalidIntegration));
+    }
+
+    #[test]
+    fn early_login_fallback_is_marked_internal_without_spawning() {
+        let command = native_login_bash_command("bash");
+        assert!(command
+            .get_envs()
+            .any(|(name, value)| name == "COSH_INTERNAL_SHELL"
+                && value == Some(std::ffi::OsStr::new("1"))));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("-i")]
+        );
+    }
+
     use crate::shell_host::LoginEffectSource::{
         ManagedShell, PathBootstrapProbe, R2CapabilityProbe,
     };

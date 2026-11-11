@@ -53,6 +53,11 @@ mod failed_command;
 #[cfg(target_os = "linux")]
 #[path = "raw_cli/failopen.rs"]
 mod failopen;
+#[path = "raw_cli/failure_context.rs"]
+mod failure_context;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/health_banner.rs"]
+mod health_banner;
 #[path = "raw_cli/heavy.rs"]
 mod heavy;
 #[path = "raw_cli/host_executed.rs"]

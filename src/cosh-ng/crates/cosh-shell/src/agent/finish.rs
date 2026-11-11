@@ -241,6 +241,9 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         start_pending_agent_run(pending, adapter, state, output)?;
     }
 
+    if evidence_requests.notices.is_empty() && evidence_requests.card_ids.is_empty() {
+        crate::runtime::login::invitation::note_completed_run(state, &active_run);
+    }
     Ok(())
 }
 

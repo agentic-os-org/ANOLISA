@@ -1,10 +1,10 @@
 %define anolis_release 1
 %global debug_package %{nil}
+%bcond_with login_lifecycle
 %if ! 0%{?_libexecdir_cosh:1}
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
 %endif
 %{!?_skilldir_cosh:%global _skilldir_cosh %{_datadir}/anolisa/skills}
-%define cosh_replacement_ready ( [ -x "%{_bindir}/cosh" ] && rpm -q --qf '%%{NAME}\\n' -f "%{_bindir}/cosh" 2>/dev/null | awk '$0 == "copilot-shell" { found=1 } END { exit found ? 0 : 1 }' )
 
 Name:           cosh-ng
 Version:        @VERSION@
@@ -19,12 +19,16 @@ BuildRequires:  cargo
 BuildRequires:  bash
 BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
+Requires(pre):    /usr/bin/stat
 Requires(post):   lua
 Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
 Requires(postun): /usr/bin/awk /usr/bin/cat /usr/bin/cp /usr/bin/dirname /usr/bin/id /usr/bin/mkdir /usr/bin/mktemp /usr/bin/mv /usr/bin/readlink /usr/bin/rm /usr/bin/rmdir /usr/bin/stat
 Requires(posttrans): /usr/bin/cat /usr/bin/dirname /usr/bin/id /usr/bin/rm /usr/bin/rmdir /usr/bin/stat
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
+%if %{with login_lifecycle}
+Provides:       cosh-login-lifecycle-v1
+%endif
 Conflicts:      copilot-shell
 Conflicts:      anolisa < 0.3.21
 
@@ -36,7 +40,7 @@ providing cross-distro structured system operations with JSON output for AI Agen
 %setup -q
 
 %build
-cargo build --workspace --release
+cargo build --locked --workspace --release
 
 %install
 rm -rf %{buildroot}
@@ -59,23 +63,17 @@ chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
 # TUI-vs-passthrough decision lives in cosh-shell's invocation classifier.
 ln -s %{_libexecdir_cosh}/cosh-shell %{buildroot}%{_bindir}/cosh
 
-# Install cosh-switch script
-cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
-#!/bin/bash
-set -e
-current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo "none")
-case "$current" in
-  cosh-ng)
-    echo "Current: cosh-ng -> switching to copilot-shell"
-    sudo yum swap cosh-ng copilot-shell ;;
-  copilot-shell)
-    echo "Current: copilot-shell -> switching to cosh-ng"
-    sudo yum swap copilot-shell cosh-ng ;;
-  *)
-    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
-esac
-EOF
-chmod 0755 %{buildroot}%{_bindir}/cosh-switch
+install -m 0755 packaging/login/cosh-switch %{buildroot}%{_bindir}/cosh-switch
+install -d %{buildroot}%{_libexecdir}/cosh
+sed 's|/usr/libexec/anolisa/cosh-ng/cosh-shell|%{_libexecdir_cosh}/cosh-shell|g' \
+    packaging/login/login-preflight > %{buildroot}%{_libexecdir}/cosh/login-preflight
+chmod 0755 %{buildroot}%{_libexecdir}/cosh/login-preflight
+
+install -m 0644 packaging/bash/cosh-integration.bash %{buildroot}%{_libexecdir_cosh}/cosh-integration.bash
+install -d %{buildroot}%{_datadir}/cosh
+%if %{with login_lifecycle}
+install -m 0644 packaging/login/login-capability.json %{buildroot}%{_datadir}/cosh/login-capability.json
+%endif
 
 # Install documentation
 install -d %{buildroot}%{_docdir}/%{name}
@@ -91,32 +89,58 @@ bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 %{_bindir}/cosh-cli
 %{_bindir}/cosh
 %{_bindir}/cosh-switch
+%dir %{_libexecdir}/cosh
+%{_libexecdir}/cosh/login-preflight
+%dir %{_datadir}/cosh
+%if %{with login_lifecycle}
+%{_datadir}/cosh/login-capability.json
+%endif
 %dir %{_libexecdir_cosh}
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
 %{_libexecdir_cosh}/resources.conf
+%{_libexecdir_cosh}/cosh-integration.bash
 %{_unitdir}/cosh-gateway@.service
 
 %{_skilldir_cosh}/manage-task-checkpoints/
 
+%pre
+cosh_login_path_safe() {
+  [ ! -L "$1" ] || return 1
+  if [ "$2" = d ]; then [ -d "$1" ] || return 1; else [ -f "$1" ] || return 1; fi
+  cosh_kind="$2"
+  cosh_metadata=$(/usr/bin/stat -c '%u %a %h %s' -- "$1" 2>/dev/null) || return 1
+  case "$cosh_metadata" in *[!0-9\ ]*|'') return 1 ;; esac
+  set -- $cosh_metadata
+  [ "$#" -eq 4 ] && [ "$1" -eq 0 ] || return 1
+  [ "$((0$2 & 022))" -eq 0 ] || return 1
+  if [ "$cosh_kind" = f ]; then
+    [ "$((0$2 & 077))" -eq 0 ] && [ "$3" -eq 1 ] && [ "$4" -le 8192 ] || return 1
+  fi
+}
+cosh_login_state_empty() {
+  for cosh_parent in / /var /var/lib /var/lib/cosh /var/lib/cosh/login; do
+    [ ! -L "$cosh_parent" ] || return 1
+    [ -e "$cosh_parent" ] || return 0
+    cosh_login_path_safe "$cosh_parent" d || return 1
+  done
+  for cosh_entry in /var/lib/cosh/login/* /var/lib/cosh/login/.[!.]* /var/lib/cosh/login/..?*; do
+    [ -e "$cosh_entry" ] || [ -L "$cosh_entry" ] || continue
+    [ "$cosh_entry" = /var/lib/cosh/login/.lock ] && cosh_login_path_safe "$cosh_entry" f || return 1
+  done
+}
+if [ -x /usr/libexec/cosh/login-preflight ]; then
+  /usr/libexec/cosh/login-preflight check-protocol 1 --record-version 1 --entry /usr/bin/cosh || exit 1
+elif ! cosh_login_state_empty; then
+  echo 'error: cannot replace cosh-ng: login state remains or its path is unsafe; use the controlled lifecycle backend first.' >&2
+  exit 1
+fi
+
 %preun
 if [ "$1" -eq 0 ]; then
-  if ! passwd_entries=$(getent passwd); then
-    echo "error: cannot uninstall cosh-ng: failed to enumerate passwd entries with getent." >&2
-    exit 1
-  fi
-  if [ -z "$passwd_entries" ]; then
-    echo "error: cannot uninstall cosh-ng: getent returned no passwd entries." >&2
-    exit 1
-  fi
-  if ! users=$(printf '%s\n' "$passwd_entries" | awk -F: '$7 == "%{_bindir}/cosh" { print $1 }'); then
-    echo "error: cannot uninstall cosh-ng: failed to inspect passwd login shells." >&2
-    exit 1
-  fi
-  if [ -n "$users" ] && ! %{cosh_replacement_ready}; then
-    echo "error: cannot uninstall cosh-ng while users still use %{_bindir}/cosh as their login shell:" >&2
-    printf '%s\n' "$users" >&2
+  if ! /usr/libexec/cosh/login-preflight check-erase; then
+    echo 'error: cannot uninstall cosh-ng: use login-preflight erase after restoring login accounts and resolving record conflicts.' >&2
     exit 1
   fi
   if [ -d /run/systemd/system ] && \

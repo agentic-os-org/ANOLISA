@@ -779,3 +779,66 @@ fn cleanup(root: &std::path::Path) {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn preserves_ancestor_links_and_relative_store_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let actual = base.join("actual");
+    ensure_directory(&actual.join("store")).unwrap();
+    symlink(&actual, base.join("alias")).unwrap();
+    let mut relative = PathBuf::new();
+    for _ in std::env::current_dir().unwrap().components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(base.join("alias/store").strip_prefix("/").unwrap());
+    let store = PersonalStore::open(&relative).unwrap();
+    store.initialize(100).unwrap();
+    assert!(store.load(100).unwrap().is_some());
+}
+
+#[test]
+fn preserves_leaf_error_classification() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let missing = root.join("missing");
+    assert_eq!(
+        open_owner_file(&missing, false).unwrap_err(),
+        StoreError::Io(io::ErrorKind::NotFound)
+    );
+    let invalid = root.join("invalid\0name");
+    assert_eq!(
+        open_owner_file(&invalid, false).unwrap_err(),
+        StoreError::Io(io::ErrorKind::NotFound)
+    );
+    assert_eq!(
+        open_owner_file(&invalid, true).unwrap_err(),
+        StoreError::Io(io::ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        create_owner_file(&invalid).unwrap_err(),
+        StoreError::Io(io::ErrorKind::InvalidInput)
+    );
+    let target = root.join("target");
+    let file = create_owner_file(&target).unwrap();
+    assert_eq!(
+        unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_GETFL) } & nix::libc::O_NONBLOCK,
+        0
+    );
+    let file = open_owner_file(&target, false).unwrap();
+    assert_eq!(
+        unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_GETFL) } & nix::libc::O_NONBLOCK,
+        0
+    );
+    let link = root.join("link");
+    symlink(&target, &link).unwrap();
+    assert_eq!(
+        open_owner_file(&link, false).unwrap_err(),
+        StoreError::UnsafePath(link.display().to_string())
+    );
+    assert_eq!(
+        create_owner_file(&target).unwrap_err(),
+        StoreError::Io(io::ErrorKind::AlreadyExists)
+    );
+}

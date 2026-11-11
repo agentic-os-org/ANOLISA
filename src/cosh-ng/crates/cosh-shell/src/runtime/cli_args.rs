@@ -1,4 +1,4 @@
-use crate::runtime::prelude::load_config;
+use crate::runtime::prelude::CoshConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawShellKind {
@@ -17,67 +17,11 @@ pub(crate) enum ResumeLaunch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LaunchOptions {
     pub(crate) resume: Option<ResumeLaunch>,
-}
-
-pub(crate) fn adapter_name_from_args(args: &[String]) -> Option<&str> {
-    let mut idx = 0;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--shell" => idx += 2,
-            "--resume" => {
-                idx += 1;
-                if args.get(idx).is_some_and(|value| !value.starts_with('-')) {
-                    idx += 1;
-                }
-            }
-            // Standalone allowlist flags share one vocabulary source with the
-            // classifier, so a token admitted into the TUI there can never be
-            // read as an adapter name here.
-            arg if crate::runtime::invocation::TUI_STANDALONE_FLAGS.contains(&arg) => idx += 1,
-            arg if arg.starts_with("--shell=") => idx += 1,
-            arg if arg.starts_with("--resume=") => idx += 1,
-            arg if arg.starts_with("--") => idx += 1,
-            arg => return Some(arg),
-        }
-    }
-
-    None
-}
-
-pub(crate) fn raw_shell_from_args_or_default(args: &[String], default_shell: &str) -> RawShellKind {
-    if let Some(shell) = raw_shell_from_args(args) {
-        return shell;
-    }
-
-    if let Some(shell) = std::env::var("COSH_SHELL_RAW_SHELL")
-        .ok()
-        .as_deref()
-        .map(parse_raw_shell)
-    {
-        return shell;
-    }
-
-    shell_from_default_or_auto(default_shell)
-}
-
-pub(crate) fn raw_shell_from_args(args: &[String]) -> Option<RawShellKind> {
-    let mut idx = 0;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--shell" => {
-                return Some(match args.get(idx + 1) {
-                    Some(value) if !value.starts_with("--") => parse_raw_shell(value),
-                    _ => RawShellKind::MissingShellValue,
-                });
-            }
-            arg if arg.starts_with("--shell=") => {
-                return Some(parse_raw_shell(arg.trim_start_matches("--shell=")));
-            }
-            _ => idx += 1,
-        }
-    }
-
-    None
+    pub(crate) initial_question: Option<String>,
+    pub(crate) failure_context: Option<String>,
+    pub(crate) login: bool,
+    pub(crate) isolated: bool,
+    pub(crate) trusted_login_bash: Option<String>,
 }
 
 pub(crate) fn parse_raw_shell(value: &str) -> RawShellKind {
@@ -111,46 +55,20 @@ pub(crate) fn shell_from_default_or_auto(value: &str) -> RawShellKind {
     RawShellKind::Bash
 }
 
-pub(crate) fn launch_options_from_args(args: &[String]) -> LaunchOptions {
-    let mut options = LaunchOptions::default();
-    let mut idx = 0;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--shell" => idx += 2,
-            "--resume" => {
-                options.resume = match args.get(idx + 1) {
-                    Some(value) if !value.starts_with('-') => {
-                        idx += 2;
-                        Some(ResumeLaunch::Session(value.clone()))
-                    }
-                    _ => {
-                        idx += 1;
-                        Some(ResumeLaunch::Picker)
-                    }
-                };
-            }
-            arg if arg.starts_with("--resume=") => {
-                let value = arg.trim_start_matches("--resume=");
-                options.resume = Some(if value.is_empty() {
-                    ResumeLaunch::Picker
-                } else {
-                    ResumeLaunch::Session(value.to_string())
-                });
-                idx += 1;
-            }
-            _ => idx += 1,
-        }
-    }
-    options
-}
-
-pub(crate) fn configured_raw_invocation(args: &[String]) -> (String, RawShellKind, LaunchOptions) {
-    let config = load_config();
-    let adapter_name = adapter_name_from_args(args)
-        .unwrap_or(&config.adapter_default)
-        .to_string();
-    let shell_kind = raw_shell_from_args_or_default(args, &config.shell_default);
-    let launch_options = launch_options_from_args(args);
+pub(crate) fn configured_raw_invocation(
+    parsed: super::invocation::TuiEntry,
+    config: &CoshConfig,
+) -> (String, RawShellKind, LaunchOptions) {
+    let adapter_name = parsed
+        .adapter_name
+        .unwrap_or_else(|| config.adapter_default.clone());
+    let shell_kind = parsed.shell_kind.unwrap_or_else(|| {
+        std::env::var("COSH_SHELL_RAW_SHELL")
+            .ok()
+            .map(|shell| parse_raw_shell(&shell))
+            .unwrap_or_else(|| shell_from_default_or_auto(&config.shell_default))
+    });
+    let launch_options = parsed.launch_options;
     (adapter_name, shell_kind, launch_options)
 }
 
@@ -173,10 +91,74 @@ fn cosh_shell_default_state_path_for_home(home: &std::path::Path) -> std::path::
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_name_from_args, cosh_shell_default_state_path_for_home, launch_options_from_args,
-        parse_raw_shell, raw_shell_from_args, shell_from_default_or_auto, RawShellKind,
-        ResumeLaunch,
+        cosh_shell_default_state_path_for_home, parse_raw_shell, shell_from_default_or_auto,
+        LaunchOptions, RawShellKind, ResumeLaunch,
     };
+
+    fn parse_raw_invocation(args: &[String]) -> super::super::invocation::TuiEntry {
+        use super::super::invocation::{classify_invocation, Invocation};
+        use std::ffi::{OsStr, OsString};
+        let mut args_os = vec![OsString::from("raw")];
+        args_os.extend(args.iter().map(OsString::from));
+        match classify_invocation(OsStr::new("cosh-shell"), &args_os, true, true, true) {
+            Invocation::Tui(entry) => entry,
+            other => panic!("expected Tui, got {other:?}"),
+        }
+    }
+
+    fn adapter_name_from_args(args: &[String]) -> Option<String> {
+        parse_raw_invocation(args).adapter_name
+    }
+
+    fn raw_shell_from_args(args: &[String]) -> Option<RawShellKind> {
+        parse_raw_invocation(args).shell_kind
+    }
+
+    fn launch_options_from_args(args: &[String]) -> LaunchOptions {
+        parse_raw_invocation(args).launch_options
+    }
+
+    #[test]
+    fn raw_launch_collects_options_in_one_result() {
+        let args = [
+            "qwen",
+            "--shell",
+            "zsh",
+            "--resume",
+            "session-1",
+            "--login",
+            "--isolated",
+        ]
+        .map(str::to_string);
+        let parsed = parse_raw_invocation(&args);
+        assert_eq!(parsed.adapter_name, Some("qwen".to_string()));
+        assert_eq!(parsed.shell_kind, Some(RawShellKind::Zsh));
+        assert_eq!(
+            parsed.launch_options.resume,
+            Some(ResumeLaunch::Session("session-1".into()))
+        );
+        assert!(parsed.launch_options.login);
+        assert!(parsed.launch_options.isolated);
+    }
+
+    #[test]
+    fn raw_launch_consumes_shell_value_before_startup_flags() {
+        let args = ["--shell", "--isolated"].map(str::to_string);
+        let parsed = parse_raw_invocation(&args);
+        assert_eq!(parsed.shell_kind, Some(RawShellKind::MissingShellValue));
+        assert!(!parsed.launch_options.isolated);
+    }
+
+    #[test]
+    fn raw_launch_repeated_shell_values_are_not_startup_flags() {
+        for value in ["-l", "--login", "--isolated"] {
+            let args = ["fake", "--shell", "bash", "--shell", value].map(str::to_string);
+            let parsed = parse_raw_invocation(&args);
+            assert_eq!(parsed.shell_kind, Some(RawShellKind::Bash));
+            assert!(!parsed.launch_options.login);
+            assert!(!parsed.launch_options.isolated);
+        }
+    }
 
     #[test]
     fn raw_shell_selection_uses_explicit_arg_only() {
@@ -224,11 +206,11 @@ mod tests {
         );
         assert_eq!(
             adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "qwen".to_string()]),
-            Some("qwen")
+            Some("qwen".to_string())
         );
         assert_eq!(
             adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "co".to_string()]),
-            Some("co")
+            Some("co".to_string())
         );
         assert_eq!(
             adapter_name_from_args(&[
@@ -238,7 +220,7 @@ mod tests {
                 "--shell".to_string(),
                 "zsh".to_string(),
             ]),
-            Some("cosh-core")
+            Some("cosh-core".to_string())
         );
         assert_eq!(
             adapter_name_from_args(&[

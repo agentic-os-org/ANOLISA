@@ -9,6 +9,7 @@ Use this page to start `cosh` and control a running session. Run `/help` to see 
 | Command | Use |
 |---|---|
 | `cosh` | Start Enhanced Assisted with Agent and slash-command routing. |
+| `cosh --ask 'your question'` | Start an interactive AI Shell with an initial question. |
 | `COSH_SHELL_INTEGRATION=native cosh` | Start Native without Cosh hooks, observation, or insights. |
 | `cosh --shell zsh` | Select zsh explicitly. |
 | `cosh --isolated` | Skip user rcfiles. |
@@ -21,6 +22,12 @@ If no shell is selected, `cosh` uses its configured or detected bash/zsh and fal
 Integration is selected at startup. Enhanced is the default. Set
 `shell.integration = "native"` in the user config for persistent hook-free
 sessions, or use the environment variable for one launch.
+
+`--ask` selects Enhanced for this session even when Native is configured; it does
+not change the saved integration preference. The question is Agent input, not a
+Shell command. After the answer, continue with commands or natural language.
+See [Bash guidance and login-shell controls](bash-guidance.md) for startup
+guidance, independent health-display controls, and default-login management.
 
 For command or redirected-stdin execution, place `--isolated` before shell-owned
 options: `cosh --isolated -c '<command>'`. Bash skips startup files and removes

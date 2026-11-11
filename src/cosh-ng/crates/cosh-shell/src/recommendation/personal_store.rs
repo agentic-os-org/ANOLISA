@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::config::private_state;
 use crate::recommendation::personal_crypto::{derive_epoch_key, random_bytes, random_hex};
 use crate::recommendation::personal_model::{
     CandidateSource, RecommendationState, RECOMMENDATION_SCHEMA_VERSION,
@@ -331,11 +332,8 @@ impl PersonalStore {
         ensure_directory(&self.root)?;
         let path = self.root.join(LOCK_FILE);
         let file = open_owner_file(&path, true)?;
-        let result =
-            unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
-        if result != 0 {
-            return Err(io::Error::last_os_error().into());
-        }
+        private_state::try_lock_exclusive(&file)
+            .map_err(|error| private_state_error(&path, error))?;
         Ok(StoreLock { file })
     }
 
@@ -599,21 +597,18 @@ fn validate_metadata(
     metadata: &fs::Metadata,
     directory: bool,
 ) -> Result<(), StoreError> {
-    let correct_type = if directory {
-        metadata.file_type().is_dir()
-    } else {
-        metadata.file_type().is_file()
-    };
-    let euid = unsafe { nix::libc::geteuid() };
-    if !correct_type
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != euid
-        || metadata.mode() & 0o077 != 0
-        || (!directory && metadata.nlink() != 1)
-    {
-        Err(StoreError::UnsafePath(path.display().to_string()))
-    } else {
-        Ok(())
+    private_state::validate_metadata(metadata, directory)
+        .map_err(|error| private_state_error(path, error))
+}
+
+fn private_state_error(path: &Path, error: private_state::Error) -> StoreError {
+    match error {
+        private_state::Error::Io(io::ErrorKind::WouldBlock) | private_state::Error::LockBusy => {
+            StoreError::LockBusy
+        }
+        private_state::Error::Io(kind) => StoreError::Io(kind),
+        private_state::Error::UnsafePath => StoreError::UnsafePath(path.display().to_string()),
+        private_state::Error::TooLarge => StoreError::StateTooLarge,
     }
 }
 
@@ -623,28 +618,12 @@ pub(super) fn open_owner_file(path: &Path, create: bool) -> Result<File, StoreEr
     } else if !create {
         return Err(StoreError::Io(io::ErrorKind::NotFound));
     }
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(create)
-        .create(create)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-    let file = options.open(path)?;
-    validate_metadata(path, &file.metadata()?, false)?;
-    Ok(file)
+    private_state::open_owner_file_leaf(path, create)
+        .map_err(|error| private_state_error(path, error))
 }
 
 fn create_owner_file(path: &Path) -> Result<File, StoreError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)?;
-    validate_metadata(path, &file.metadata()?, false)?;
-    Ok(file)
+    private_state::create_owner_file_leaf(path).map_err(|error| private_state_error(path, error))
 }
 
 fn sync_directory(path: &Path) -> Result<(), StoreError> {

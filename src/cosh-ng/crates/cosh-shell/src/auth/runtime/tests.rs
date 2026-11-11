@@ -1278,3 +1278,44 @@ fn failed_activation_rearms_capture_and_accepts_fresh_retry() {
         "fresh retry was swallowed by handled-card deduplication"
     );
 }
+
+#[test]
+fn cancelling_auth_releases_only_the_run_waiting_for_its_control_request() {
+    use crate::runtime::prelude::{
+        AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
+    };
+    for (event_run, control_id, cancelled) in [
+        ("run-1", "auth-init-retry-1", true),
+        ("other-run", "auth-init-retry-1", false),
+        ("run-1", "other-control", false),
+    ] {
+        let mut state = InlineState::default();
+        let (mut active, _responses) =
+            crate::agent::run::test_support::test_active_run_with_id("run-1");
+        active.governed_events.push(GovernedEvent {
+            event: AgentEvent::AuthRequired {
+                run_id: event_run.into(),
+                request_id: control_id.into(),
+                reason: "missing credentials".into(),
+                error_message: None,
+                providers: Vec::new(),
+            },
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::DisplayOnly,
+            reason: "test".into(),
+            display_text: "test".into(),
+            auto_execute: false,
+        });
+        state.agent_run.active = Some(active);
+        let mut auth = slash_auth_state(&["openai_compat"], SysomMenu::default());
+        auth.backend = AuthBackend::ActiveRun;
+        auth.request_id = "auth-init-retry-1".into();
+        state.auth.state = Some(auth);
+
+        super::cancel_auth_panel(&mut state, &mut Vec::new()).unwrap();
+
+        assert!(state.auth.state.is_none());
+        assert_eq!(state.agent_run.active.is_none(), cancelled);
+        assert_eq!(state.agent_run.needs_prompt_after_run, cancelled);
+    }
+}

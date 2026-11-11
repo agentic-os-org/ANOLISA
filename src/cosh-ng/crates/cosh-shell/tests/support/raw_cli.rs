@@ -983,13 +983,14 @@ fn raw_cli_git_fixture() -> &'static Path {
         .as_path()
 }
 
-struct RawCliOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+#[derive(Debug)]
+pub(crate) struct RawCliOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
-fn wait_for_raw_cli_output(mut child: Child) -> RawCliOutput {
+pub(crate) fn wait_for_raw_cli_output(mut child: Child) -> RawCliOutput {
     let readers = start_raw_cli_output_readers(&mut child);
     wait_for_raw_cli_output_with_readers(child, readers)
 }

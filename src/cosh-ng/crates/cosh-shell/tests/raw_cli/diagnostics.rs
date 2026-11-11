@@ -77,6 +77,11 @@ fn diagnostics_export_collects_sources_without_leaking_secrets() {
 /// together with the renderer.
 #[test]
 fn diagnostics_export_health_checks_match_doctor_cli() {
+    #[cfg(target_os = "linux")]
+    let home_directory = tempfile::tempdir_in("/dev/shm").expect("anonymous-probe filesystem");
+    #[cfg(target_os = "linux")]
+    let home = home_directory.path().to_path_buf();
+    #[cfg(not(target_os = "linux"))]
     let home = temp_shell_home("diagnostics-doctor-parity");
     let output = home.join("bundle.json");
 
@@ -137,5 +142,46 @@ fn diagnostics_export_health_checks_match_doctor_cli() {
         );
     }
 
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn doctor_keeps_completed_checks_across_worker_exit_races() {
+    #[cfg(target_os = "linux")]
+    let home_directory = tempfile::tempdir_in("/dev/shm").expect("anonymous-probe filesystem");
+    #[cfg(target_os = "linux")]
+    let home = home_directory.path().to_path_buf();
+    #[cfg(not(target_os = "linux"))]
+    let home = temp_shell_home("doctor-worker-exit-race");
+    for iteration in 0..80 {
+        let child = Command::new(env!("CARGO_BIN_EXE_cosh-shell"))
+            .arg("doctor")
+            .env("HOME", &home)
+            .env("COSH_SHELL_HEALTH_SCAN", "disabled")
+            .env("COSH_SHELL_LANG", "en-US")
+            .env("LC_ALL", "en_US.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("spawn doctor");
+        let output = wait_for_raw_cli_output(child);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            matches!(output.status.code(), Some(0..=2)),
+            "iteration={iteration} status={:?}\nstdout={stdout}\nstderr={stderr}",
+            output.status
+        );
+        let checks = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("checks: "))
+            .unwrap_or_default();
+        assert_eq!(
+            checks, "config, hooks, permissions, provider, pty",
+            "iteration={iteration}\nstdout={stdout}\nstderr={stderr}"
+        );
+    }
     let _ = fs::remove_dir_all(home);
 }

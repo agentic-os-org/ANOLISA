@@ -588,3 +588,88 @@ fn failed_run_cleanup_preserves_explicit_handoff_recovery_contract() {
         .push("disable provider resume for shell handoff fallback".to_string());
     assert!(failed_run_has_no_recovery(&run));
 }
+
+#[test]
+fn completed_visible_body_records_a_candidate_without_printing_the_login_invitation() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut run = active_run(&adapter, "answer-body", Language::EnUs);
+    crate::agent::events::render_active_agent_event(
+        &mut run,
+        AgentEvent::TextDelta {
+            run_id: "answer-body".into(),
+            text: "This is a visible answer.".into(),
+        },
+        &mut Vec::new(),
+        None,
+    )
+    .unwrap();
+    crate::agent::events::render_active_agent_event(
+        &mut run,
+        AgentEvent::AgentCompleted {
+            run_id: "answer-body".into(),
+            summary: String::new(),
+        },
+        &mut Vec::new(),
+        None,
+    )
+    .unwrap();
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(run);
+    let mut output = Vec::new();
+    finish_active_agent_run(&mut state, &mut output, &adapter).unwrap();
+    assert!(
+        state.startup_session.login_invitation.is_pending(),
+        "finish must only record the visible completion candidate"
+    );
+    assert!(!String::from_utf8_lossy(&output).contains("cosh login set"));
+}
+
+#[test]
+fn failed_cancelled_and_blank_runs_do_not_record_a_login_invitation_candidate() {
+    for (text, terminal) in [
+        (
+            "Visible partial answer",
+            AgentEvent::AgentFailed {
+                run_id: "body-gate".into(),
+                error: "error".into(),
+                error_code: None,
+                max_turns: None,
+            },
+        ),
+        (
+            "Visible partial answer",
+            AgentEvent::AgentCancelled {
+                run_id: "body-gate".into(),
+                reason: "cancelled".into(),
+            },
+        ),
+        (
+            "   \n",
+            AgentEvent::AgentCompleted {
+                run_id: "body-gate".into(),
+                summary: String::new(),
+            },
+        ),
+    ] {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut run = active_run(&adapter, "body-gate", Language::EnUs);
+        render_active_agent_event(
+            &mut run,
+            AgentEvent::TextDelta {
+                run_id: "body-gate".into(),
+                text: text.into(),
+            },
+            &mut Vec::new(),
+            None,
+        )
+        .unwrap();
+        render_active_agent_event(&mut run, terminal, &mut Vec::new(), None).unwrap();
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(run);
+        finish_active_agent_run(&mut state, &mut Vec::new(), &adapter).unwrap();
+        assert!(
+            !state.startup_session.login_invitation.is_pending(),
+            "{text:?}"
+        );
+    }
+}

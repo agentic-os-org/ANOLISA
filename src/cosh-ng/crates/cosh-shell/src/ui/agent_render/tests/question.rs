@@ -366,6 +366,7 @@ fn custom_option_cursor_matches_long_unbroken_rendered_input() {
 #[test]
 fn plain_tty_question_cursor_uses_plain_panel_columns() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 90,
         plain: true,
         styled: true,
@@ -415,6 +416,7 @@ fn question_panel_multiple_empty_feedback_replaces_heading() {
 #[test]
 fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 60,
         plain: false,
         styled: true,
@@ -462,6 +464,7 @@ fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
 #[test]
 fn question_panel_default_ghost_is_dim_gray() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -514,6 +517,7 @@ fn disabled_question_input_visual_has_no_ghost_or_cursor() {
 #[test]
 fn question_panel_other_required_ghost_is_dim_yellow() {
     let renderer = RatatuiInlineRenderer {
+        column_limit: None,
         width: 100,
         plain: false,
         styled: true,

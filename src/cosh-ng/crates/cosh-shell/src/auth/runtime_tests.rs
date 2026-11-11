@@ -45,7 +45,10 @@ fn governed_auth_required_with_error(
 #[test]
 fn retry_auth_request_surfaces_validation_error() {
     let mut state = InlineState::default();
-    state.auth.completed_ids.insert("auth-req-1".to_string());
+    state
+        .auth
+        .completed_ids
+        .insert("auth-run-1-req-1".to_string());
     let event = governed_auth_required_with_error(
         "req-1-retry-1",
         vec![provider("openai_compat", "OpenAI Compatible")],
@@ -56,7 +59,7 @@ fn retry_auth_request_surfaces_validation_error() {
     let mut output = Vec::new();
     render_auth_panel(&mut state, &ids, &mut output).expect("render retry auth");
 
-    assert_eq!(ids, vec!["auth-req-1-retry-1".to_string()]);
+    assert_eq!(ids, vec!["auth-run-1-req-1-retry-1".to_string()]);
     assert!(String::from_utf8(output)
         .expect("utf8 auth panel")
         .contains("invalid base_url"));
@@ -72,7 +75,7 @@ fn record_auth_required_promotes_aliyun_from_legacy_order() {
     ];
     let mut state = InlineState::default();
     let ids = record_auth_required(&mut state, &[governed_auth_required(legacy)]);
-    assert_eq!(ids, vec!["auth-req-1".to_string()]);
+    assert_eq!(ids, vec!["auth-run-1-req-1".to_string()]);
 
     let stored = state.auth.state.expect("auth state recorded");
     let ids: Vec<&str> = stored.providers.iter().map(|p| p.id.as_str()).collect();
@@ -656,7 +659,7 @@ printf '%s\n' '{"success":false,"data":{"provider_updated":true,"error_code":"io
     let mut output = Vec::new();
     send_auth_response(Some(&adapter), &mut state, &mut output).unwrap();
     assert!(state.auth.state.is_none());
-    assert!(state.auth.completed_ids.contains("auth-req-1"));
+    assert!(state.auth.completed_ids.contains("auth-run-1-req-1"));
     assert!(state.personalization.foreground_model.is_none());
     assert!(!state.auth.ecs_trial.auto_use_allowed);
     assert!(state.auth.ecs_trial.cancelled_question);
@@ -665,4 +668,27 @@ printf '%s\n' '{"success":false,"data":{"provider_updated":true,"error_code":"io
     assert!(!text.contains("Credentials were not saved"), "{text}");
     assert!(!text.contains("SECRET_MUST_NOT_RENDER"), "{text}");
     assert!(!text.contains("Auth configured"), "{text}");
+}
+
+#[test]
+fn cancelling_auth_allows_the_next_run_to_reuse_the_core_control_id() {
+    let mut state = InlineState::default();
+    for owner in ["first-run", "second-run"] {
+        let mut event = governed_auth_required_with_error(
+            "auth-init",
+            vec![provider("openai_compat", "OpenAI Compatible")],
+            None,
+        );
+        if let AgentEvent::AuthRequired { run_id, .. } = &mut event.event {
+            *run_id = owner.into();
+        }
+        let (mut active, _responses) =
+            crate::agent::run::test_support::test_active_run_with_id(owner);
+        active.governed_events.push(event.clone());
+        state.agent_run.active = Some(active);
+        assert_eq!(record_auth_required(&mut state, &[event.clone()]).len(), 1);
+        cancel_auth_panel(&mut state, &mut Vec::new()).unwrap();
+        assert!(state.agent_run.active.is_none());
+        assert!(record_auth_required(&mut state, &[event]).is_empty());
+    }
 }

@@ -1312,6 +1312,48 @@ fn raw_cli_cosh_entry_isolated_dash_c_preserves_signal_status() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn raw_cli_primary_passthrough_preserves_ignored_sigchld_disposition() {
+    let probe = |binary: &str| {
+        let mut command = raw_cli_command(binary);
+        command
+            .arg0("cosh")
+            .args(["-c", "printf 'OK\\n'; exec /bin/cat /proc/self/status"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                let mut action: nix::libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = nix::libc::SIG_IGN;
+                nix::libc::sigemptyset(&mut action.sa_mask);
+                if nix::libc::sigaction(nix::libc::SIGCHLD, &action, std::ptr::null_mut()) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = command.output().expect("run inherited SIGCHLD probe");
+        assert!(output.status.success(), "{binary}: {output:?}");
+        assert!(output.stderr.is_empty(), "{binary}: {output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.starts_with("OK\n"), "{binary}: {stdout}");
+        let mask = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("SigIgn:"))
+            .expect("read inherited signal mask");
+        u64::from_str_radix(mask.trim(), 16).expect("parse inherited signal mask")
+    };
+    let sigchld = 1u64 << (nix::libc::SIGCHLD - 1);
+    let native = probe("/bin/bash") & sigchld;
+    assert_ne!(
+        native, 0,
+        "native Bash must retain inherited SIGCHLD ignore"
+    );
+    assert_eq!(probe(env!("CARGO_BIN_EXE_cosh-shell")) & sigchld, native);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn raw_cli_passthrough_preserves_ignored_sigpipe_disposition() {
     // An ignored SIGPIPE inherited by the cosh entry must reach the inner
     // shell (captured before the Rust runtime rewrite, restored in
@@ -1400,6 +1442,17 @@ fn interactive_pty_probe(
     ready: &str,
     done: &str,
 ) -> String {
+    interactive_pty_probe_with_env(program, args, home, ready, done, &[])
+}
+
+pub(super) fn interactive_pty_probe_with_env(
+    program: &str,
+    args: &[&str],
+    home: &Path,
+    ready: &str,
+    done: &str,
+    extra_envs: &[(&str, &str)],
+) -> String {
     use std::fs::File;
     use std::io::{self, Read};
     use std::os::fd::AsRawFd;
@@ -1434,6 +1487,7 @@ fn interactive_pty_probe(
         .env("COSH_RECOMMENDATIONS_ENABLED", "0")
         .env("LC_ALL", "C")
         .env("COSH_SHELL_DEFAULT_SHELL", "bash")
+        .envs(extra_envs.iter().copied())
         .current_dir(home)
         .stdin(Stdio::from(slave.try_clone().expect("clone PTY stdin")))
         .stdout(Stdio::from(slave.try_clone().expect("clone PTY stdout")))
@@ -1537,4 +1591,817 @@ fn raw_cli_cosh_entry_default_enhanced_reaches_user_prompt() {
         "default Enhanced must not emit status symbol lines: {output}"
     );
     assert_ordered(&visible, &["__RC_READY__ ", "__DONE__<loaded>"]);
+}
+
+#[test]
+fn raw_cli_raw_launch_consumed_shell_values_preserve_login_argv0() {
+    // Isolated Enhanced launches expose parsed login intent through COSH_LOGIN_SHELL.
+    for argv0 in ["cosh", "cosh-shell", "-cosh", "-cosh-shell"] {
+        for value in ["-l", "--login"] {
+            let mut command = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"));
+            command
+                .arg0(argv0)
+                .args(["raw", "fake", "--shell", "bash", "--shell", value])
+                .env("COSH_SHELL_ISOLATED", "1")
+                .env_remove("COSH_LOGIN_SHELL")
+                .env("COSH_SHELL_STARTUP_BANNER", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().expect("spawn raw login ownership probe");
+            child
+                .stdin
+                .take()
+                .expect("probe stdin")
+                .write_all(b"printf '__LOGIN_MARKER_%s__\\n' \"${COSH_LOGIN_SHELL-unset}\"\nexit\n")
+                .expect("write raw login ownership probe");
+            let output = wait_for_raw_cli_output(child);
+            let text = String::from_utf8_lossy(&output.stdout);
+            let expected = if argv0.starts_with('-') {
+                "__LOGIN_MARKER_1__"
+            } else {
+                "__LOGIN_MARKER_unset__"
+            };
+            assert!(
+                output.status.success(),
+                "argv0={argv0}, value={value}, output={output:?}"
+            );
+            assert!(
+                text.contains(expected),
+                "argv0={argv0}, value={value}, output={output:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn raw_cli_ask_rejects_non_interactive_before_runtime_initialization() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        for args in [
+            vec!["--ask", "question"],
+            vec!["raw", "fake", "--ask", "question"],
+        ] {
+            let home = tempfile::tempdir().expect("ask usage fixture home");
+            let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(args)
+                .env("HOME", home.path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run non-interactive ask");
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("--ask requires an interactive terminal"),
+                "{output:?}"
+            );
+            assert!(!home.path().join(".copilot-shell/logs").exists());
+        }
+    }
+}
+
+#[test]
+fn raw_cli_ask_after_shell_boundary_remains_shell_argv() {
+    let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+        .arg0("cosh")
+        .args([
+            "-c",
+            "printf '%s|%s' \"$1\" \"$2\"",
+            "name",
+            "--ask",
+            "--login",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run ask-shaped shell arguments");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"--ask|--login");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_ask_uses_enhanced_for_native_config_without_executing_or_recording_question() {
+    for raw in [false, true] {
+        let home = tempfile::Builder::new()
+            .prefix("ask-fixtures-cosh-initial-question-")
+            .tempdir()
+            .expect("ask fixture home");
+        let config = "[shell]\nadapter_default = 'fake'\nintegration = 'native'\n";
+        write_cosh_config(home.path(), config);
+        fs::write(home.path().join(".bashrc"), "COSH_RC_PROBE=loaded\nPS1='__ASK_PROMPT__ '\nPROMPT_COMMAND='history -w \"$HOME/history.snapshot\"'\n").expect("write ask shell fixture");
+        let sentinel = home.path().join("initial-prompt-must-not-execute");
+        let question = "touch initial-prompt-must-not-execute";
+        let args = if raw {
+            vec!["raw", "fake", "--ask", question]
+        } else {
+            vec!["--ask", question]
+        };
+        let output = interactive_pty_probe_with_env(
+            env!("CARGO_BIN_EXE_cosh-shell"),
+            &args,
+            home.path(),
+            "Received shell prompt request:",
+            "__DONE__<loaded>",
+            &[
+                ("COSH_SHELL_STARTUP_BANNER", "1"),
+                ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-warning"),
+                ("COSH_RECOMMENDATIONS_ENABLED", "1"),
+                ("COSH_SHELL_LANG", "en-US"),
+            ],
+        );
+        let visible = strip_ansi_escape(&output).replace('\r', "");
+        assert!(visible.contains("Cosh AI Shell"), "{output}");
+        assert!(
+            visible.contains(&format!("__ASK_PROMPT__ {question}")),
+            "{output}"
+        );
+        assert!(
+            visible.contains("Run commands or ask AI questions."),
+            "{output}"
+        );
+        assert!(
+            !visible
+                .to_lowercase()
+                .contains("read-only tools auto-approved"),
+            "{output}"
+        );
+        assert!(!visible.contains("████"), "{output}");
+        assert!(
+            !visible.contains("Prompt recommendations are on"),
+            "{output}"
+        );
+        assert!(!visible.contains("Memory:"), "{output}");
+        assert!(
+            !sentinel.exists(),
+            "initial question executed as shell code: {output}"
+        );
+        let history = fs::read_to_string(home.path().join("history.snapshot"))
+            .expect("read native shell history snapshot");
+        assert!(
+            !history.contains(question),
+            "initial question entered shell history: {history}"
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join(".copilot-shell/config.toml")).unwrap(),
+            config
+        );
+    }
+}
+
+#[test]
+fn raw_cli_guide_owned_namespace_updates_current_user_without_tui() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().expect("guide fixture home");
+        #[cfg(target_os = "linux")]
+        let runtime = tempfile::tempdir_in("/dev/shm").expect("local guide fixture runtime");
+        #[cfg(not(target_os = "linux"))]
+        let runtime = tempfile::tempdir().expect("guide fixture runtime");
+        for directory in [home.path(), runtime.path()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .expect("make guide fixture directory private");
+        }
+        let home_path = home.path().canonicalize().expect("canonical guide home");
+        let runtime_path = runtime
+            .path()
+            .canonicalize()
+            .expect("canonical guide runtime");
+        for (leaf, enabled) in [
+            ("off", false),
+            ("status", false),
+            ("on", true),
+            ("status", true),
+        ] {
+            let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(["guide", leaf])
+                .env("HOME", &home_path)
+                .env("XDG_RUNTIME_DIR", &runtime_path)
+                .env("SUDO_USER", "guide-test-must-not-target-this-user")
+                .env("COSH_SHELL_LANG", "en-US")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run owned guide command");
+            assert!(
+                output.status.success(),
+                "argv0={argv0}, leaf={leaf}, {output:?}"
+            );
+            assert!(output.stderr.is_empty(), "{output:?}");
+            assert!(!output.stdout.is_empty());
+            let preference: serde_json::Value = serde_json::from_slice(
+                &fs::read(
+                    home.path()
+                        .join(".copilot-shell/cosh/guide/preferences.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(preference["guide_enabled"], enabled);
+            assert!(!home.path().join(".copilot-shell/logs").exists());
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("Cosh AI Shell"));
+        }
+        let invalid = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+            .arg0(argv0)
+            .args(["guide", "invalid"])
+            .env("HOME", &home_path)
+            .env("XDG_RUNTIME_DIR", &runtime_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run invalid owned guide command");
+        assert_eq!(invalid.status.code(), Some(2), "{invalid:?}");
+        assert!(invalid.stdout.is_empty());
+        assert!(!invalid.stderr.is_empty());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_ask_preserves_an_empty_native_prompt_and_keeps_shell() {
+    let home = tempfile::Builder::new()
+        .prefix("cosh-ask-no-prompt-")
+        .tempdir()
+        .unwrap();
+    write_cosh_config(
+        home.path(),
+        "[shell]\nadapter_default='fake'\nintegration='native'\n",
+    );
+    fs::write(
+        home.path().join(".bashrc"),
+        "PS1=''\nCOSH_RC_PROBE=loaded\n",
+    )
+    .unwrap();
+    let output = interactive_pty_probe_with_env(
+        env!("CARGO_BIN_EXE_cosh-shell"),
+        &["--ask", "original question"],
+        home.path(),
+        "Received shell prompt request:",
+        "__DONE__<loaded>",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+    assert!(
+        output.contains("Received shell prompt request:"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("initial question was not submitted"),
+        "{output}"
+    );
+    assert!(!output.contains("◆"), "{output}");
+}
+
+#[test]
+fn raw_cli_private_health_worker_dispatches_before_configuration_without_tui() {
+    let flag = "--__cosh-health-worker-v1";
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".copilot-shell")).unwrap();
+        fs::write(
+            home.path().join(".copilot-shell/config.toml"),
+            "invalid = [",
+        )
+        .unwrap();
+        for extra in [false, true] {
+            let mut command = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"));
+            command.arg0(argv0).arg(flag);
+            if extra {
+                command.arg("unexpected");
+            }
+            let output = command
+                .env("HOME", home.path())
+                .env("COSH_SHELL_DEFAULT_SHELL", "/missing-health-worker-shell")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2), "{argv0}: {output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            if extra {
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("private health worker does not accept arguments"));
+            } else {
+                assert!(
+                    output.stderr.is_empty(),
+                    "unisolated worker should fail quietly: {output:?}"
+                );
+            }
+            assert!(!home.path().join(".copilot-shell/logs").exists());
+        }
+    }
+}
+
+#[test]
+fn raw_cli_private_health_worker_flag_in_shell_owned_tail_stays_shell_data() {
+    let flag = "--__cosh-health-worker-v1";
+    let home = tempfile::tempdir().unwrap();
+    let script = home.path().join("shell-owned.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf '__WORKER_TAIL__%s__\\n' \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    for argv0 in ["cosh", "cosh-shell"] {
+        for args in [
+            vec!["-c", "printf '__WORKER_TAIL__%s__\\n' \"$1\"", "_", flag],
+            vec![script.to_str().unwrap(), flag],
+            vec!["--", script.to_str().unwrap(), flag],
+            vec![
+                "raw",
+                "fake",
+                "-c",
+                "printf '__WORKER_TAIL__%s__\\n' \"$1\"",
+                "_",
+                flag,
+            ],
+        ] {
+            let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(&args)
+                .env("HOME", home.path())
+                .env("COSH_SHELL_DEFAULT_SHELL", "/bin/bash")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{argv0} {args:?}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                format!("__WORKER_TAIL__{flag}__")
+            );
+            assert!(output.stderr.is_empty(), "{output:?}");
+        }
+    }
+}
+
+#[test]
+fn raw_cli_login_owned_namespace_rejects_bad_usage_before_configuration_or_tui() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".copilot-shell")).unwrap();
+        fs::write(
+            home.path().join(".copilot-shell/config.toml"),
+            "invalid = [",
+        )
+        .unwrap();
+        for args in [
+            vec!["login"],
+            vec!["login", "invalid"],
+            vec!["login", "status", "--yes"],
+            vec!["login", "set", "--user"],
+        ] {
+            let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(&args)
+                .env("HOME", home.path())
+                .env("COSH_SHELL_DEFAULT_SHELL", "/missing-login-shell")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{argv0} {args:?}: {output:?}"
+            );
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("usage: cosh login"));
+            assert!(!home.path().join(".copilot-shell/logs").exists());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_login_status_uses_effective_uid_and_ignores_shell_and_sudo_user_environment() {
+    let uid = unsafe { nix::libc::geteuid() };
+    let passwd = fs::read_to_string("/etc/passwd").unwrap();
+    let username = passwd
+        .lines()
+        .find_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            (fields.len() == 7 && fields[2].parse::<u32>().ok() == Some(uid))
+                .then(|| fields[0].to_string())
+        })
+        .unwrap();
+    let release = fs::read_to_string("/etc/os-release").unwrap();
+    let supported = release
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .any(|(key, value)| key == "ID" && value.trim_matches('"') == "alinux")
+        && release
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .any(|(key, value)| {
+                let value = value.trim_matches('"');
+                key == "VERSION_ID" && (value == "4" || value.starts_with("4."))
+            });
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+            .arg0(argv0)
+            .args(["login", "status"])
+            .env("HOME", home.path())
+            .env("SUDO_USER", "login-test-not-the-target")
+            .env("SHELL", "/untrusted/test/shell")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        if supported {
+            assert!(output.status.success(), "{output:?}");
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                text.contains(&format!("User: {username} (UID {uid})")),
+                "{output:?}"
+            );
+            assert!(!text.contains("/untrusted/test/shell"));
+            assert!(output.stderr.is_empty());
+        } else {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Alibaba Cloud Linux 4"));
+        }
+        assert!(!home.path().join(".copilot-shell/logs").exists());
+    }
+}
+
+#[test]
+fn raw_cli_login_messages_follow_environment_language_without_opening_config() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        for (language, locale, chinese) in [
+            (Some("zh-CN"), "C.UTF-8", true),
+            (Some("en-US"), "zh_CN.UTF-8", false),
+            (Some("auto"), "zh_CN.UTF-8", true),
+            (Some("invalid"), "zh_CN.UTF-8", true),
+            (None, "C.UTF-8", false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            fs::create_dir(home.path().join(".copilot-shell")).unwrap();
+            nix::unistd::mkfifo(
+                &home.path().join(".copilot-shell/config.toml"),
+                nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+            )
+            .unwrap();
+            for action in ["invalid", "status"] {
+                let mut command = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"));
+                command
+                    .arg0(argv0)
+                    .args(["login", action])
+                    .env("HOME", home.path())
+                    .env("LC_ALL", locale)
+                    .env("LANG", "C")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                if let Some(language) = language {
+                    command.env("COSH_SHELL_LANG", language);
+                } else {
+                    command.env_remove("COSH_SHELL_LANG");
+                }
+                let output = wait_for_raw_cli_output(command.spawn().unwrap());
+                let text = String::from_utf8_lossy(&output.stdout);
+                let error = String::from_utf8_lossy(&output.stderr);
+                if action == "invalid" {
+                    assert_eq!(output.status.code(), Some(2), "{output:?}");
+                    assert!(text.is_empty(), "{output:?}");
+                    assert!(
+                        error.contains(if chinese {
+                            "用法：cosh login"
+                        } else {
+                            "usage: cosh login"
+                        }),
+                        "{language:?}/{locale}: {output:?}"
+                    );
+                } else if !text.is_empty() {
+                    assert!(error.is_empty(), "{output:?}");
+                    assert!(
+                        text.contains(if chinese {
+                            "当前登录 Shell："
+                        } else {
+                            "Current login shell:"
+                        }),
+                        "{language:?}/{locale}: {output:?}"
+                    );
+                } else {
+                    assert_eq!(output.status.code(), Some(1), "{output:?}");
+                    assert!(
+                        error.contains(if chinese {
+                            "操作未完成"
+                        } else {
+                            "cosh login:"
+                        }),
+                        "{language:?}/{locale}: {output:?}"
+                    );
+                }
+                assert!(!home.path().join(".copilot-shell/logs").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn raw_cli_shell_integration_private_worker_rejects_unsupervised_invocation_without_io() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        let child = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+            .arg0(argv0)
+            .args(["shell-integration", "--__compat-worker-v2"])
+            .env("HOME", home.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = wait_for_raw_cli_output(child);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        assert!(fs::read_dir(home.path()).unwrap().next().is_none());
+    }
+}
+
+#[test]
+fn raw_cli_shell_integration_early_dispatch_uses_only_the_nul_protocol() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        for operation in ["compat", "advise"] {
+            let home = tempfile::tempdir().unwrap();
+            fs::create_dir(home.path().join(".copilot-shell")).unwrap();
+            fs::write(
+                home.path().join(".copilot-shell/config.toml"),
+                "invalid = [",
+            )
+            .unwrap();
+            let budget = if operation == "compat" { "100" } else { "50" };
+            #[cfg(target_os = "linux")]
+            let absolute = {
+                let mut now: nix::libc::timespec = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut now) },
+                    0
+                );
+                (now.tv_sec as u64 * 1_000_000
+                    + now.tv_nsec as u64 / 1000
+                    + budget.parse::<u64>().unwrap() * 1000
+                    - 1000)
+                    .to_string()
+            };
+            #[cfg(not(target_os = "linux"))]
+            let absolute = "1".to_string();
+            let mut fields = vec![
+                "2",
+                "external-bash",
+                if operation == "compat" {
+                    "registration"
+                } else {
+                    "activation"
+                },
+                if operation == "compat" {
+                    ""
+                } else {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                absolute.as_str(),
+                budget,
+            ];
+            if operation == "advise" {
+                fields.extend([
+                    "cargo build",
+                    "1",
+                    "/tmp",
+                    "0",
+                    "observed_command_fragment",
+                    "external_unshadowed",
+                    "host",
+                    "session",
+                    "0",
+                ]);
+            }
+            let mut input = fields.join("\0").into_bytes();
+            input.push(0);
+            let mut child = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(["shell-integration", operation])
+                .env("HOME", home.path())
+                .env(
+                    "COSH_SHELL_DEFAULT_SHELL",
+                    "/missing-shell-integration-shell",
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&input).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{argv0}/{operation}: {output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let frame = output
+                .stdout
+                .strip_suffix(&[0])
+                .expect("NUL-terminated response");
+            let fields = frame.split(|byte| *byte == 0).collect::<Vec<_>>();
+            assert_eq!(fields.len(), 8, "{output:?}");
+            assert_eq!(fields[0], b"2");
+            assert_eq!(fields[1], b"DISABLE");
+            assert!(
+                fields[2] == b"incompatible_runtime"
+                    || fields[2] == b"deadline_exceeded"
+                    || fields[2] == b"verification_unavailable",
+                "{output:?}"
+            );
+            assert!(!home.path().join(".copilot-shell/logs").exists());
+        }
+    }
+}
+
+#[test]
+fn raw_cli_shell_integration_rejects_unknown_or_extra_leaf_without_starting_runtime() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        for args in [
+            vec!["shell-integration"],
+            vec!["shell-integration", "unknown"],
+            vec!["shell-integration", "compat", "extra"],
+        ] {
+            let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(&args)
+                .env(
+                    "COSH_SHELL_DEFAULT_SHELL",
+                    "/missing-shell-integration-shell",
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+        }
+    }
+}
+
+#[test]
+fn raw_cli_health_banner_early_dispatch_is_quiet_and_management_is_independent() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        for path in [home.path(), runtime.path()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home_path = home.path().canonicalize().unwrap();
+        let runtime_path = runtime.path().canonicalize().unwrap();
+        let invoke = |args: &[&str]| {
+            raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(args)
+                .env("HOME", &home_path)
+                .env("XDG_RUNTIME_DIR", &runtime_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap()
+        };
+        let quiet = invoke(&["health", "banner"]);
+        assert!(quiet.status.success(), "{quiet:?}");
+        assert!(
+            quiet.stdout.is_empty() && quiet.stderr.is_empty(),
+            "{quiet:?}"
+        );
+        assert!(!home_path.join(".copilot-shell").exists());
+        for (leaf, enabled) in [
+            ("off", false),
+            ("status", false),
+            ("on", true),
+            ("status", true),
+        ] {
+            let output = invoke(&["health", "banner", leaf]);
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let value: serde_json::Value = serde_json::from_slice(
+                &fs::read(home_path.join(".copilot-shell/cosh/guide/preferences.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value["banner_enabled"], enabled);
+            assert_eq!(value["guide_enabled"], true);
+            assert!(!home_path.join(".copilot-shell/logs").exists());
+            assert!(!home_path.join(".copilot-shell/config.toml").exists());
+        }
+        for args in [
+            vec!["health"],
+            vec!["health", "invalid"],
+            vec!["health", "banner", "invalid"],
+        ] {
+            assert_eq!(invoke(&args).status.code(), Some(2));
+        }
+    }
+}
+
+#[test]
+fn raw_cli_login_invitation_worker_is_private_early_and_rejects_extra_arguments() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        for extra in [false, true] {
+            let mut command = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"));
+            command
+                .arg0(argv0)
+                .arg("--__cosh-login-invitation-worker-v1");
+            if extra {
+                command.arg("extra");
+            }
+            let output = command
+                .env("HOME", home.path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if extra { 2 } else { 1 }),
+                "{output:?}"
+            );
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(!home.path().join(".copilot-shell").exists());
+        }
+    }
+}
+
+#[test]
+fn raw_cli_login_private_management_handlers_dispatch_without_startup_state() {
+    for argv0 in ["cosh", "cosh-shell"] {
+        let home = tempfile::tempdir().unwrap();
+        for (args, expected) in [
+            (vec!["--__cosh-login-shell-plan-v1"], 1),
+            (vec!["--__cosh-login-shell-plan-v1", "extra"], 2),
+            (vec!["--__cosh-login-editor-v1"], 2),
+            (vec!["--__cosh-login-lifecycle-v1"], 2),
+            (vec!["--__cosh-login-lifecycle-v1", "invalid"], 2),
+        ] {
+            let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+                .arg0(argv0)
+                .args(&args)
+                .env("HOME", home.path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
+            assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+            assert!(!home.path().join(".copilot-shell").exists());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_ask_explicit_request_keeps_later_ai_disabled_and_shell_available() {
+    let home = tempfile::tempdir().unwrap();
+    write_cosh_config(
+        home.path(),
+        "[shell]\nadapter_default='fake'\nintegration='native'\n",
+    );
+    fs::write(
+        home.path().join(".bashrc"),
+        "COSH_RC_PROBE=loaded\nPS1='explicit$ '\n",
+    )
+    .unwrap();
+    let sentinel = home.path().join("must-not-execute");
+    let question = format!("touch '{}'", sentinel.display());
+    let output = interactive_pty_probe_with_env(
+        env!("CARGO_BIN_EXE_cosh-shell"),
+        &["--ask", &question],
+        home.path(),
+        "Received shell prompt request:",
+        "__DONE__<loaded>",
+        &[("COSH_SHELL_AI", "off"), ("COSH_SHELL_LANG", "en-US")],
+    );
+    assert!(
+        output.contains("Received shell prompt request:"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Only this --ask request uses AI"),
+        "{output}"
+    );
+    assert!(
+        output.contains("remains off for subsequent input"),
+        "{output}"
+    );
+    assert!(!sentinel.exists(), "{output}");
 }

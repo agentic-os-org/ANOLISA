@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "packaging/rpm/cosh-ng.spec.in"
 SECTION = re.compile(
-    r"^%(?:package|description|prep|build|install|files|preun|post|postun|posttrans|changelog)(?:\s|$)",
+    r"^%(?:package|description|prep|build|install|files|pre|preun|post|postun|posttrans|changelog)(?:\s|$)",
     re.MULTILINE,
 )
 
@@ -27,6 +27,11 @@ def section(source: str, header: str) -> str:
 
 def expand(source: str, macros: dict[str, str]) -> str:
     """Expand only the path macros used by the fixture's install recipe."""
+    source = re.sub(
+        r"(?ms)^%if %\{with login_lifecycle\}\n(.*?)^%endif\n",
+        lambda match: match[1] if macros.get("with login_lifecycle") == "1" else "",
+        source,
+    )
     for _ in range(8):
         updated = re.sub(r"%\{([^}]+)\}", lambda m: macros.get(m[1], m[0]), source)
         if updated == source:
@@ -75,6 +80,10 @@ class RpmPackageTests(unittest.TestCase):
                     "LICENSE",
                     "README.md",
                     "packaging/payload.sh",
+                    "packaging/login/cosh-switch",
+                    "packaging/login/login-preflight",
+                    "packaging/login/login-capability.json",
+                    "packaging/bash/cosh-integration.bash",
                     "packaging/systemd/cosh-gateway@.service.in",
                     "skills/manage-task-checkpoints/SKILL.md",
                 ):
@@ -92,6 +101,7 @@ class RpmPackageTests(unittest.TestCase):
                     "buildroot": str(stage),
                     "_bindir": "/usr/bin",
                     "_docdir": "/usr/share/doc",
+                    "_libexecdir": "/usr/libexec",
                     "_datadir": "/usr/share",
                     "_unitdir": "/usr/lib/systemd/system",
                     "_libexecdir_cosh": (
@@ -109,7 +119,9 @@ class RpmPackageTests(unittest.TestCase):
                 )
                 ownership = file_entries(self.source, "%files", macros)
                 files = [p for p in stage.rglob("*") if p.is_symlink() or p.is_file()]
-                self.assertEqual(len(files), 11)
+                self.assertEqual(len(files), 13)
+                self.assertFalse((stage / "etc/profile.d").exists())
+                self.assertFalse((stage / "etc/bashrc").exists())
                 for path in files:
                     installed = "/" + str(path.relative_to(stage))
                     matches = sum(
@@ -127,7 +139,9 @@ class RpmPackageTests(unittest.TestCase):
                 self.assertEqual(
                     os.readlink(stage / "usr/bin/cosh"), macros["_libexecdir_cosh"] + "/cosh-shell"
                 )
-                self.assertIn("cosh-ng)", (stage / "usr/bin/cosh-switch").read_text())
+                self.assertIn("login-preflight swap-to-copilot", (stage / "usr/bin/cosh-switch").read_text())
+                preflight = stage / "usr/libexec/cosh/login-preflight"
+                self.assertIn(macros["_libexecdir_cosh"] + "/cosh-shell", preflight.read_text())
                 resources = stage / macros["_libexecdir_cosh"].lstrip("/") / "resources.conf"
                 self.assertEqual(
                     resources.read_text().splitlines(),
