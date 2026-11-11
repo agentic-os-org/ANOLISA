@@ -71,7 +71,7 @@
         "code": "credential_injected",
         "rule": 0,
         "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
@@ -138,7 +138,7 @@
         "code": "credential_injected",
         "rule": 0,
         "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
@@ -167,7 +167,7 @@
         "code": "credential_injected",
         "rule": 0,
         "authorization": "token tkn_SyntheticReal0SyntheticReal0Syntheti",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
@@ -196,7 +196,7 @@
         "code": "credential_injected",
         "rule": 0,
         "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
@@ -225,7 +225,7 @@
         "code": "credential_injected",
         "rule": 0,
         "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
@@ -280,11 +280,11 @@
         "code": "credential_injected",
         "rule": 1,
         "authorization": "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ==",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
-      "name": "upload pack streams",
+      "name": "upload pack injects without response rewriting",
       "facts": {
         "port": 15001,
         "tls": true,
@@ -309,11 +309,11 @@
         "code": "credential_injected",
         "rule": 2,
         "authorization": "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ==",
-        "responseRewrite": "none"
+        "responseRewrite": false
       }
     },
     {
-      "name": "receive pack is buffered",
+      "name": "receive pack injects with response rewriting",
       "facts": {
         "port": 15001,
         "tls": true,
@@ -338,7 +338,7 @@
         "code": "credential_injected",
         "rule": 3,
         "authorization": "Basic eC1hY2Nlc3MtdG9rZW46dGtuX1N5bnRoZXRpY1JlYWwwU3ludGhldGljUmVhbDBTeW50aGV0aQ==",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {
@@ -1023,7 +1023,7 @@
         "code": "credential_injected",
         "rule": 0,
         "authorization": "Bearer tkn_SyntheticReal0SyntheticReal0Syntheti",
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       }
     },
     {

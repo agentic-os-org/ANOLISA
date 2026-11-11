@@ -277,7 +277,7 @@ mod tests {
                         "effect":"allow", "category":"network", "action":"use_credential",
                         "target":{"type":"http_request", "credentialId":"github",
                             "scheme":"https", "host":"api.github.com", "path":"/repos/**",
-                            "methods":["GET"], "responseRewrite":"buffered"}
+                            "methods":["GET"], "responseRewrite":true}
                     }]
                 }))
                 .unwrap(),

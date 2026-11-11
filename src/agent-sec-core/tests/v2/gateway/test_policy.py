@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import random
 import sys
+import tracemalloc
 import unittest
 from pathlib import Path
 
@@ -217,6 +219,16 @@ class LoadTest(unittest.TestCase):
                 plan["rules"][0]["match"][key] = value
                 self.assert_load_error(runtime_files(plans={plan["scopeId"]: plan}))
 
+    def test_response_rewrite_requires_a_boolean(self) -> None:
+        for value in ("buffered", "none", "true", "false", 0, 1, None, [], {}):
+            with self.subTest(value=value):
+                plan = plan_for(PLAN["scopeId"])
+                plan["rules"][0]["responseRewrite"] = value
+                self.assert_load_error(runtime_files(plans={plan["scopeId"]: plan}))
+        plan = plan_for(PLAN["scopeId"])
+        del plan["rules"][0]["responseRewrite"]
+        self.assert_load_error(runtime_files(plans={plan["scopeId"]: plan}))
+
     def test_because_control_characters_are_rejected(self) -> None:
         plan = plan_for("00000000-0000-4000-8000-000000000001")
         plan["rules"][0]["because"] = "line\nbreak"
@@ -282,6 +294,81 @@ class RewriteTest(unittest.TestCase):
         self.assertNotIn(VALUES["real"].encode(), rewritten)
         self.assertEqual(len(rewritten), len(body))
         self.assertEqual(rewritten.count(VALUES["fake"].encode()), 2)
+
+
+class StreamingRewriteTest(unittest.TestCase):
+    def test_partitions_preserve_ordered_whole_body_substitution(self) -> None:
+        authorization = f"Bearer {VALUES['real']}"
+        cases = [
+            (b"safe ABCDE and ABCDE ABC", (("ABCDE", "MASK"),)),
+            (b"aaaaaaabaababab", (("aaa", "X"), ("ab", "longer"))),
+            (b"abcabcABCD", (("abc", "AB"), ("ABCD", "safe"))),
+            (b"xxyxyx", (("x", "yz"), ("z", "!"))),
+            ("雪ABCDE🌊ABC".encode(), (("ABCDE", "MASK"),)),
+            (b"a" * 1024 + b"b", (("a" * 512 + "b", "short"),)),
+            (
+                f"{authorization} / {VALUES['real']} / {authorization}".encode(),
+                (
+                    (authorization, f"Bearer {VALUES['fake']}"),
+                    (VALUES["real"], VALUES["fake"]),
+                ),
+            ),
+        ]
+        randomizer = random.Random(0)
+        for body, pairs in cases:
+            partitions = [
+                [body[:split], body[split:]] for split in range(len(body) + 1)
+            ]
+            partitions.append([body[index : index + 1] for index in range(len(body))])
+            for _ in range(10):
+                cuts = sorted(
+                    {
+                        0,
+                        len(body),
+                        *(randomizer.randrange(len(body)) for _ in range(20)),
+                    }
+                )
+                partitions.append(
+                    [body[start:end] for start, end in zip(cuts, cuts[1:])]
+                )
+            expected = policy.rewrite_bytes(body, pairs)
+            for chunks in partitions:
+                with self.subTest(length=len(body), chunks=len(chunks), pairs=pairs):
+                    rewriter = policy.StreamingRewriter(pairs)
+                    actual = b"".join(rewriter(chunk) for chunk in chunks if chunk)
+                    self.assertEqual(actual + rewriter(b""), expected)
+
+    def test_candidate_prefix_is_withheld_until_replaced(self) -> None:
+        pairs = (("Bearer ABCDE", "Bearer MASK"), ("ABCDE", "MASK"))
+        for prefix, suffix, expected in [
+            (b"safe ABC", b"DE world", b"MASK world"),
+            (b"safe Bearer ABC", b"DE world", b"Bearer MASK world"),
+        ]:
+            with self.subTest(prefix=prefix):
+                rewriter = policy.StreamingRewriter(pairs)
+                self.assertEqual(rewriter(prefix), b"safe ")
+                self.assertEqual(rewriter(suffix), expected)
+                self.assertEqual(rewriter(b""), b"")
+
+    def test_near_match_and_eof_release_only_unmatched_bytes(self) -> None:
+        rewriter = policy.StreamingRewriter((("ABABAC", "MASK"),))
+        self.assertEqual(rewriter(b"safe ABABA"), b"safe ")
+        self.assertEqual(rewriter(b"B"), b"AB")
+        self.assertEqual(rewriter(b"AC tail ABA"), b"MASK tail ")
+        self.assertEqual(rewriter(b""), b"ABA")
+
+    def test_stream_state_does_not_grow_with_total_body(self) -> None:
+        block = b"x" * 65536
+        rewriter = policy.StreamingRewriter((("ABCDE", "MASK"),))
+        tracemalloc.start()
+        try:
+            for _ in range(160):
+                self.assertEqual(rewriter(block), block)
+            self.assertEqual(rewriter(b""), b"")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1024 * 1024)
 
 
 if __name__ == "__main__":

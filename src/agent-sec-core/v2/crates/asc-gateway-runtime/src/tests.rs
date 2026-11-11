@@ -456,7 +456,7 @@ impl Fixture {
             "policyName": format!("{name}-{index}"), "template": {"specVersion": "0.1", "rules": [{
                 "effect": "allow", "category": "network", "action": "use_credential", "target": {
                     "type": "http_request", "credentialId": "github", "scheme": "https",
-                    "host": "api.github.com", "path": format!("/policy-{index}/**"), "methods": ["GET"], "responseRewrite": "buffered"
+                    "host": "api.github.com", "path": format!("/policy-{index}/**"), "methods": ["GET"], "responseRewrite": true
                 }, "because": "credential execution contract"
             }]}});
             serde_json::from_value(document).unwrap()
@@ -2767,7 +2767,7 @@ fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_
                     "policyRevision": 1, "ruleIndex": 0},
                 "match": {"scheme": "https", "host": "api.github.com", "path": "/policy-0/**",
                     "methods": ["GET"], "credentialId": "github"},
-                "responseRewrite": "buffered",
+                "responseRewrite": true,
                 "because": "credential execution contract"
             }]
         })

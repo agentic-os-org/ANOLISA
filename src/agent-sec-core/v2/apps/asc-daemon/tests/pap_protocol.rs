@@ -1417,7 +1417,7 @@ fn credential_administration_requires_authenticated_root_and_scope_owner_is_not_
     let template = json!({"specVersion":"0.1","rules":[{
         "effect":"allow","category":"network","action":"use_credential",
         "target":{"type":"http_request","credentialId":"github","scheme":"https",
-            "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":"buffered"}}]});
+            "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":true}}]});
     let file = serde_json::to_value(file_policy(vec!["/protected".into()])).unwrap();
     for authored in [
         template.clone(),

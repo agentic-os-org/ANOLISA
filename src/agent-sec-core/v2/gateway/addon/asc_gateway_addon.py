@@ -16,7 +16,7 @@ import logging
 import os
 import stat
 import time
-import zlib
+from collections.abc import Iterator
 
 import asc_gateway_policy as policy
 from mitmproxy import ctx, exceptions, http
@@ -24,11 +24,18 @@ from mitmproxy.addons.termlog import TermLogHandler
 from mitmproxy.log import LegacyLogEvents
 from mitmproxy.net.http.http1 import expected_http_body_size
 from mitmproxy.proxy import commands, events, layer
-from mitmproxy.proxy.layers.http import HttpLayer, HttpStream, ResponseData
+from mitmproxy.proxy.layers.http import (
+    Http2Server,
+    HttpLayer,
+    HttpStream,
+    ResponseData,
+)
 
 POLL_SECONDS = 0.5
 RETRY_SECONDS = 5.0
-RESPONSE_BUFFER_LIMIT = 8 * 1024 * 1024
+RESPONSE_CHUNK_SIZE = 64 * 1024
+H2_PENDING_LIMIT = 8 * 1024 * 1024
+H2_PENDING_CHUNKS = 1024
 MANIFEST_NAME = "active.json"
 STATUS_DIR = "status"
 HEALTH_NAME = "health.json"
@@ -51,6 +58,7 @@ _SAFE_DIAGNOSTICS = frozenset(
         "agent-sec-gateway rejected request",
         "agent-sec-gateway responseheaders hook failed",
         "agent-sec-gateway response hook failed",
+        "agent-sec-gateway downstream HTTP/2 queue limit exceeded",
         "agent-sec-gateway upstream error; injected flow killed",
     }
 )
@@ -168,64 +176,61 @@ class _GatewayHttpLayer(HttpLayer):
         # The stream callback reserves b"" for EOF, but HTTP/2 allows empty nonterminal DATA.
         if isinstance(event, ResponseData) and not event.data:
             return
+        if isinstance(child, Http2Server) and isinstance(event, ResponseData):
+            flow = self.streams[event.stream_id].flow
+            if _injected(flow) is not None:
+                if not flow.live:
+                    return
+                frame_size = child.h2_conn.max_outbound_frame_size
+                chunks = (len(event.data) + frame_size - 1) // frame_size
+                pending = 0
+                for queue in child.h2_conn.stream_buffers.values():
+                    chunks += len(queue)
+                    if chunks > H2_PENDING_CHUNKS:
+                        break
+                    pending += sum(len(chunk.data) for chunk in queue)
+                # Bound both bytes and traversal cost when downstream flow control stalls.
+                if (
+                    chunks > H2_PENDING_CHUNKS
+                    or pending + len(event.data) > H2_PENDING_LIMIT
+                ):
+                    child.h2_conn.stream_buffers.clear()
+                    child.h2_conn.stream_trailers.clear()
+                    logger.error(
+                        "agent-sec-gateway downstream HTTP/2 queue limit exceeded"
+                    )
+                    _abort_flow(flow)
+                    return
         yield from super().event_to_child(child, event)
 
 
-class _BufferedResponse:
-    def __init__(
-        self,
-        flow: http.HTTPFlow,
-        decision: policy.Decision,
-        encoding: str,
-        rejection: bytes | None = None,
-    ) -> None:
+class _StreamingResponse:
+    def __init__(self, flow: http.HTTPFlow, decision: policy.Decision) -> None:
         self.flow = flow
-        self.decision = decision
-        self.body = bytearray()
-        self.received = 0
+        self.rewriter = policy.StreamingRewriter(decision.replacements)
         self.failed = False
-        self.rejection = rejection
-        self.decoder = zlib.decompressobj(31) if encoding == "gzip" else None
 
-    def __call__(self, chunk: bytes) -> bytes | list[bytes]:
+    def __call__(self, chunk: bytes) -> Iterator[bytes]:
         if self.failed:
-            return []
+            return
         try:
             if chunk:
-                self.received += len(chunk)
-                if self.received > RESPONSE_BUFFER_LIMIT:
-                    raise ValueError("encoded response exceeds limit")
-                if self.rejection is not None:
-                    return []
-                decoded = (
-                    self.decoder.decompress(
-                        chunk, RESPONSE_BUFFER_LIMIT + 1 - len(self.body)
+                for start in range(0, len(chunk), RESPONSE_CHUNK_SIZE):
+                    if not self.flow.live:
+                        return
+                    rewritten = self.rewriter(
+                        chunk[start : start + RESPONSE_CHUNK_SIZE]
                     )
-                    if self.decoder is not None
-                    else chunk
-                )
-                if len(self.body) + len(decoded) > RESPONSE_BUFFER_LIMIT:
-                    raise ValueError("decoded response exceeds limit")
-                self.body.extend(decoded)
-                if self.decoder is not None and self.decoder.unused_data:
-                    raise ValueError("trailing compressed response data")
-                return []
-            if self.rejection is not None:
-                return self.rejection
-            if self.decoder is not None and not self.decoder.eof:
-                raise ValueError("incomplete compressed response")
-            body = policy.rewrite_bytes(bytes(self.body), self.decision.replacements)
-            self.body.clear()
-            if self.decoder is not None:
-                encoder = zlib.compressobj(wbits=31)
-                body = encoder.compress(body) + encoder.flush()
-            return body
+                    if rewritten:
+                        yield rewritten
+            else:
+                rewritten = self.rewriter(b"")
+                if rewritten:
+                    yield rewritten
         except Exception:  # noqa: BLE001 - unchecked bodies must never reach clients
             self.failed = True
-            self.body.clear()
             logger.error("agent-sec-gateway response hook failed")
             _abort_flow(self.flow)
-            return []
 
 
 class SecretGateway:
@@ -429,49 +434,34 @@ class SecretGateway:
         if decision.action == policy.ACTION_INJECT:
             assert decision.authorization is not None
             request.headers["Authorization"] = decision.authorization
-            if decision.response_rewrite == policy.REWRITE_BUFFERED:
-                # Only encodings the rewriter can decode may come back.
-                request.headers["Accept-Encoding"] = "gzip"
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         response = flow.response
         if response is None:
             return
         decision = _injected(flow)
-        if decision is None:
+        if decision is None or not decision.response_rewrite:
             response.stream = True
             return
         try:
+            encoding = response.headers.get("Content-Encoding", "").strip().lower()
             _rewrite_fields(response.headers, decision)
-            if decision.response_rewrite != policy.REWRITE_BUFFERED:
-                response.stream = True
-                return
-            response.headers.pop("ETag", None)
-            response.headers.pop("Content-MD5", None)
             if expected_http_body_size(flow.request, response) == 0:
                 response.headers.pop("Transfer-Encoding", None)
                 response.stream = True
                 return
-            length = response.headers.get("Content-Length", "")
-            if length.isdigit() and int(length) > RESPONSE_BUFFER_LIMIT:
-                flow.kill()
+            if encoding not in ("identity", ""):
+                # Encoded bodies are intentionally outside the byte-rewrite contract.
+                response.stream = True
                 return
-            encoding = (
-                response.headers.get("Content-Encoding", "identity").strip().lower()
-            )
-            if encoding not in ("identity", "gzip", ""):
-                rejected = _reject_response("response_encoding_unsupported", 502)
-                flow.response = rejected
-                rejected.stream = _BufferedResponse(
-                    flow, decision, "identity", rejected.raw_content
-                )
-                return
+            response.headers.pop("ETag", None)
+            response.headers.pop("Content-MD5", None)
             response.headers.pop("Content-Length", None)
             if flow.request.is_http2 or flow.request.is_http3:
                 response.headers.pop("Transfer-Encoding", None)
             else:
                 response.headers["Transfer-Encoding"] = "chunked"
-            response.stream = _BufferedResponse(flow, decision, encoding)
+            response.stream = _StreamingResponse(flow, decision)
         except Exception:  # noqa: BLE001 - an unchecked response must not be delivered
             logger.error("agent-sec-gateway responseheaders hook failed")
             flow.kill()
@@ -496,11 +486,14 @@ class SecretGateway:
     def _inspect_response(self, flow: http.HTTPFlow, decision: policy.Decision) -> None:
         response = flow.response
         assert response is not None
+        if not decision.response_rewrite:
+            return
         if response.trailers is not None:
             _rewrite_fields(response.trailers, decision)
         if (
-            decision.response_rewrite == policy.REWRITE_BUFFERED
-            and not isinstance(response.stream, _BufferedResponse)
+            response.headers.get("Content-Encoding", "").strip().lower()
+            in ("identity", "")
+            and not isinstance(response.stream, _StreamingResponse)
             and expected_http_body_size(flow.request, response) != 0
         ):
             flow.kill()

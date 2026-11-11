@@ -31,17 +31,6 @@ pub enum HttpMethod {
     Delete,
 }
 
-/// Response handling after credential injection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResponseRewrite {
-    /// Buffer a bounded body and replace echoed credentials with their fake.
-    #[serde(rename = "buffered")]
-    Buffered,
-    /// Stream bodies that cannot echo the credential unchanged.
-    #[serde(rename = "none")]
-    Passthrough,
-}
-
 pub(super) fn validate(target: &Resource, prefix: &str) -> Result<(), ValidationError> {
     let Resource::HttpRequest {
         credential_id,

@@ -31,8 +31,6 @@ CARRIER_HEADER_TOKEN = "header_token"
 CARRIER_BASIC_PASSWORD = "basic_password"
 CARRIERS = frozenset({CARRIER_HEADER_TOKEN, CARRIER_BASIC_PASSWORD})
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
-REWRITE_BUFFERED = "buffered"
-REWRITE_NONE = "none"
 
 ACTION_FORWARD = "forward"
 ACTION_INJECT = "inject"
@@ -54,7 +52,7 @@ class Rule:
     path: re.Pattern[str]
     methods: frozenset[str]
     credential_id: str
-    response_rewrite: str
+    response_rewrite: bool
 
 
 @dataclass(frozen=True)
@@ -109,7 +107,7 @@ class Decision:
     code: str
     scope_id: str | None = None
     rule: int | None = None
-    response_rewrite: str | None = None
+    response_rewrite: bool | None = None
     authorization: str | None = field(default=None, repr=False)
     # Injected authorization and bare real values mapped back before delivery.
     replacements: tuple[tuple[str, str], ...] = field(default=(), repr=False)
@@ -276,7 +274,7 @@ def _parse_rule(item: object, position: int, credentials: set[str]) -> Rule:
     what = f"plan rule {position}"
     rule = _object(item, {"source", "match", "responseRewrite", "because"}, what)
     _require(
-        rule["responseRewrite"] in (REWRITE_BUFFERED, REWRITE_NONE), f"{what} rewrite"
+        isinstance(rule["responseRewrite"], bool), f"{what} rewrite must be boolean"
     )
     because = _string(rule["because"], what)
     _require(
@@ -299,7 +297,7 @@ def _parse_rule(item: object, position: int, credentials: set[str]) -> Rule:
     credential = _dns_label(match["credentialId"], f"{what} credential")
     _require(credential in credentials, f"{what} names a credential outside the plan")
     rewrite = rule["responseRewrite"]
-    assert isinstance(rewrite, str)
+    assert isinstance(rewrite, bool)
     return Rule(
         host=_host(match["host"], f"{what} host"),
         path=compile_path_pattern(_string(match["path"], f"{what} path")),
@@ -591,3 +589,54 @@ def rewrite_bytes(body: bytes, replacements: tuple[tuple[str, str], ...]) -> byt
     for real, fake in replacements:
         body = body.replace(real.encode(), fake.encode())
     return body
+
+
+class _StreamReplacement:
+    def __init__(self, real: str, fake: str) -> None:
+        self.real = real.encode()
+        self.fake = fake.encode()
+        self.pending = b""
+        self.prefix = [0] * len(self.real)
+        matched = 0
+        for index in range(1, len(self.real)):
+            while matched and self.real[index] != self.real[matched]:
+                matched = self.prefix[matched - 1]
+            if self.real[index] == self.real[matched]:
+                matched += 1
+            self.prefix[index] = matched
+
+    def rewrite(self, chunk: bytes, final: bool) -> bytes:
+        body = self.pending + chunk
+        output = bytearray()
+        start = 0
+        while (position := body.find(self.real, start)) != -1:
+            output.extend(body[start:position])
+            output.extend(self.fake)
+            start = position + len(self.real)
+        kept = 0
+        if not final:
+            # Only an unmatched suffix can still become a cross-chunk match.
+            for byte in body[max(start, len(body) - len(self.real) + 1) :]:
+                while kept and byte != self.real[kept]:
+                    kept = self.prefix[kept - 1]
+                if byte == self.real[kept]:
+                    kept += 1
+        end = len(body) - kept
+        output.extend(body[start:end])
+        self.pending = body[end:]
+        return bytes(output)
+
+
+class StreamingRewriter:
+    """Matches across chunks with the same ordered substitutions as rewrite_bytes."""
+
+    def __init__(self, replacements: tuple[tuple[str, str], ...]) -> None:
+        self.stages = tuple(
+            _StreamReplacement(real, fake) for real, fake in replacements
+        )
+
+    def __call__(self, chunk: bytes) -> bytes:
+        final = not chunk
+        for stage in self.stages:
+            chunk = stage.rewrite(chunk, final)
+        return chunk

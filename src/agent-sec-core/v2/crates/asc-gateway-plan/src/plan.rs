@@ -1,9 +1,7 @@
 use std::collections::BTreeSet;
 
 use asc_credential_store::{CredentialId, ScopeId};
-pub use asc_policy_types::authoring::{
-    HttpMethod as Method, HttpScheme as Scheme, ResponseRewrite,
-};
+pub use asc_policy_types::authoring::{HttpMethod as Method, HttpScheme as Scheme};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use serde::{Deserialize, Serialize};
 
@@ -78,8 +76,9 @@ pub struct Rule {
     /// Request facts that must all hold.
     #[serde(rename = "match")]
     pub matcher: RequestMatch,
-    /// How the response to an injected request is inspected.
-    pub response_rewrite: ResponseRewrite,
+    /// Rewrite echoed credentials in response headers, uncompressed bodies and trailers.
+    /// False leaves the entire response unchanged; request injection is independent.
+    pub response_rewrite: bool,
     /// Operator-facing reason.
     pub because: String,
 }

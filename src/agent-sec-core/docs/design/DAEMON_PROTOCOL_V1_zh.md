@@ -1085,7 +1085,11 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
   group/other 无权限的 `secretFile` 中，由 daemon 读取，不进入 params/result。
 - 权限复用既有 `policy.templates.*`、`policy.scopes.*` 与 Binding lifecycle。原生
   `specVersion=0.1` 的凭据规则是 `allow/network/use_credential`，target `http_request` 包含
-  `credentialId/scheme/host/path/methods/responseRewrite`。凭据 Policy 不混合 file、不支持
+  `credentialId/scheme/host/path/methods/responseRewrite`。响应开关要求
+  `responseRewrite` 必填且仅为 JSON bool `true/false`；缺失、null、数字、字符串（含旧
+  `buffered/none`）均拒绝，不默认、不兼容旧值。`true` 重写注入后响应的 headers、未压缩
+  正文与 trailers；`false` 全部不重写，与旧 `none` 仍替换 headers/trailers 的行为不同。
+  请求 Authorization 注入独立，不检查请求 body。凭据 Policy 不混合 file、不支持
   where/previous。凭据 Scope 要求非 root ownerUid 与持续 process selector，固定 Policy
   revision 快照；只对凭据 Policy/Scope 增加 root 限制，不改变普通 file 用法、权限或快照。
 - `policy.scopes.create` 可在无匹配进程时准备 fake/port/plan。先 enable、owner 查询、配置
@@ -1094,6 +1098,18 @@ obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本�
 - 同 Scope 多实例与重启共享稳定 fake；实例退出仅清理自身 Binding。Scope 删除先关闭
   admission 并撤销该 Scope fake，包括空 Scope，保留清理责任到完成，不删除 real、不停止
   Agent。恢复重新核对 canonical Scope/Binding 和完整实例身份，不单凭 PID 授权。
+
+响应修订的完整语义见 [网关设计 §4.3](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)。
+开启时未压缩正文有界流式替换，压缩 body 原样透传，仍可能把 real 返回 Agent；仅
+headers/trailers 替换无法补救。Plan 与作者字段同样严格为 bool。
+
+这也是内嵌 JSON 状态格式的不兼容修订：旧 `PreparedPolicy`、Scope `policySnapshots`、
+Binding 内嵌 Policy 与 pinnedScope 中的字符串不能直接读取。不能携带旧策略滚动升级，
+必须另行备份、显式转换或按生命周期清理并重建全部相关记录及固定 Scope 快照；仅更新
+latest Policy 不会更新 Scope，不得偷偷覆盖不可变快照。迁移与回退边界见
+[网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
+响应验收使用内部 mock，外部 API 不作为验收条件；测试结果不替代最终安装制品与存量
+数据迁移的验证。
 
 批准的 result 契约使用 camelCase：
 
