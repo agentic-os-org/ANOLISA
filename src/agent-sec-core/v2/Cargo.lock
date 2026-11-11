@@ -733,6 +733,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-sandbox-docker"
+version = "1.2.1"
+dependencies = [
+ "asc-pep-runtime",
+ "asc-sandbox-types",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "asc-sandbox-types"
 version = "1.2.1"
 dependencies = [
