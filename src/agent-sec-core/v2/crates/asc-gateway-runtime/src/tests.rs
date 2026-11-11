@@ -1,6 +1,6 @@
 //! Execution and retirement contracts through real PAP persistence and public deployment ports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::Path;
@@ -22,7 +22,7 @@ use asc_policy_types::process_discovery::ProcessIdentity as CanonicalProcess;
 use asc_policy_types::scope::{
     PolicyReference, PreparedScope, ProcessMatcher, ScopeSelector, ScopeStatus,
 };
-use asc_policy_types::target::{PreparedApply, TargetBindingPlan};
+use asc_policy_types::target::{FailureKind, PreparedApply, TargetBindingPlan};
 
 use crate::{
     GATEWAY_BINDING_FORMAT, GatewayAccount, GatewayBindingClient, GatewayConfig, GatewayError,
@@ -62,6 +62,8 @@ impl TestProcess {
         }
     }
 }
+type RouteHook = Box<dyn FnOnce(&mut HostLog) + Send>;
+type ScopeHook = Box<dyn FnOnce(&mut HostLog) -> Result<(), GatewayError> + Send>;
 #[derive(Default)]
 struct HostLog {
     cgroup_failure: Option<&'static str>,
@@ -76,9 +78,18 @@ struct HostLog {
     failed_operation: Option<&'static str>,
     changed_on_attach: Option<u32>,
     failed_attach: Option<u32>,
+    exit_on_attach: Option<u32>,
+    exit_after_attach: Option<u32>,
+    fork_on_attach: Option<(u32, u32)>,
     fence: Option<(String, String)>,
     process_failure: Option<(u32, GatewayErrorKind)>,
     owner_sensitive_on_start: bool,
+    // Fires once inside route(), right after the first Binding passed verification.
+    on_route: Option<RouteHook>,
+    // Fires once when the given cgroup's members are next enumerated.
+    on_scope_read: Option<(String, ScopeHook)>,
+    // Root of the latest process-tree read, i.e. the Binding whose members are being checked.
+    last_tree_root: u32,
 }
 #[derive(Clone, Default)]
 struct FakeHost(Arc<Mutex<HostLog>>);
@@ -178,6 +189,10 @@ impl Host for FakeHost {
         if log.failed_attach == Some(pin.pid) {
             return Err(GatewayError::unavailable("attachment interrupted"));
         }
+        if log.exit_on_attach == Some(pin.pid) {
+            log.processes.remove(&pin.pid);
+            return Err(GatewayError::unavailable("busctl call failed"));
+        }
         log.moves.push(pin.pid);
         let changed = log.changed_on_attach == Some(pin.pid);
         let process = log.processes.get_mut(&pin.pid).unwrap();
@@ -185,13 +200,23 @@ impl Host for FakeHost {
         if changed {
             process.start += 1;
         }
+        if log.exit_after_attach == Some(pin.pid) {
+            log.processes.remove(&pin.pid);
+        }
+        if let Some((parent, child)) = log.fork_on_attach
+            && parent == pin.pid
+        {
+            // Forked just before the move, so the child still inherits the source cgroup.
+            log.processes.insert(child, TestProcess::new(parent));
+        }
         Ok(())
     }
     fn remove_scope(&self, _: &str) -> Result<(), GatewayError> {
         Ok(())
     }
     fn process_tree(&self, root: u32) -> Result<Vec<ProcessIdentity>, GatewayError> {
-        let log = self.log();
+        let mut log = self.log();
+        log.last_tree_root = root;
         if let Some((pid, kind)) = log.process_failure
             && pid == root
         {
@@ -226,8 +251,16 @@ impl Host for FakeHost {
     }
     fn scope_processes(&self, path: &str) -> Result<Vec<ProcessIdentity>, GatewayError> {
         let expected = format!("/{path}");
-        Ok(self
-            .log()
+        let mut log = self.log();
+        if log
+            .on_scope_read
+            .as_ref()
+            .is_some_and(|(cgroup, _)| *cgroup == expected)
+        {
+            let (_, hook) = log.on_scope_read.take().unwrap();
+            hook(&mut log)?;
+        }
+        Ok(log
             .processes
             .iter()
             .filter(|(_, p)| p.cgroup == expected)
@@ -259,8 +292,11 @@ impl Host for FakeHost {
             .ok_or_else(GatewayError::process_exited)
     }
     fn cgroup_exists(&self, path: &str) -> bool {
-        self.log()
-            .processes
+        let mut log = self.log();
+        if let Some(hook) = log.on_route.take() {
+            hook(&mut log);
+        }
+        log.processes
             .values()
             .any(|p| p.cgroup == format!("/{path}"))
     }
@@ -329,6 +365,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        // Diagnostics are formatted (into a sink) so their field expressions run under test.
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let repository =
@@ -1436,9 +1477,22 @@ fn overlapping_attachment_faults_preserve_sources_across_restart_and_retry() {
         } else {
             fixture.host.log().failed_attach = Some(if fault == "before-root" { 77 } else { 80 });
         }
-        assert!(client.create(&prepared).error.is_some(), "{fault}");
-        assert_eq!(fixture.rules(), crate::nft::render_delete(), "{fault}");
-        assert!(!fixture.host.log().active);
+        // A descendant left behind stays unrouted without failing the Binding.
+        let failed = client.create(&prepared).error.is_some();
+        assert_eq!(failed, fault != "after-root", "{fault}");
+        if fault == "persist" {
+            // Losing durable cleanup responsibility is a control-plane fault: fail closed.
+            assert_eq!(fixture.rules(), crate::nft::render_delete(), "{fault}");
+            assert!(!fixture.host.log().active);
+        } else {
+            // An unmovable root fails only its Binding; existing routes keep serving.
+            assert!(fixture.host.log().active, "{fault}");
+            assert_cgroup_routes(
+                &fixture,
+                &sources.values().cloned().collect(),
+                sources.len(),
+            );
+        }
         if fault == "persist" {
             fs::remove_dir(&state_file).unwrap();
             fs::rename(&retained, &state_file).unwrap();
@@ -1739,25 +1793,425 @@ fn recovery_isolates_invalid_ready_instances_but_unknown_host_failures_close_all
 }
 
 #[test]
-fn failed_attachment_retains_cleanup_and_stops_proxy_without_killing_targets() {
+fn failed_root_attachment_retains_cleanup_and_keeps_gateway_serving() {
+    for fault in ["changed", "exited"] {
+        let fixture = Fixture::new();
+        let service = fixture.service();
+        fixture.key(REAL);
+        let scope = fixture.scope("failed", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        let client = GatewayBindingClient::new(service.clone());
+        let healthy = fixture.instance(&scope, 88, &[]).remove(0);
+        assert!(
+            client
+                .create(&Fixture::prepared(&client, &healthy))
+                .error
+                .is_none()
+        );
+        fixture.transition(&healthy, BindingStatus::Ready);
+        let healthy_routes = BTreeSet::from([fixture.host.log().processes[&88].cgroup.clone()]);
+        let binding = fixture.instance(&scope, 77, &[88]).remove(0);
+        {
+            let mut log = fixture.host.log();
+            if fault == "changed" {
+                log.changed_on_attach = Some(77);
+            } else {
+                log.exit_on_attach = Some(77);
+            }
+            log.operations.clear();
+        }
+        let prepared = Fixture::prepared(&client, &binding);
+        let failure = client.create(&prepared).error.unwrap();
+        let expected = if fault == "changed" {
+            (FailureKind::Rejected, "GATEWAY_PROCESS_IDENTITY_REJECTED")
+        } else {
+            (FailureKind::Retryable, "GATEWAY_PROCESS_EXITED")
+        };
+        assert_eq!((failure.kind, failure.code.as_str()), expected, "{fault}");
+        let scopes = service.status(0).scopes;
+        assert_eq!(scopes.len(), 1, "{fault}");
+        assert_eq!(
+            scopes[0].bindings.iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([&binding.binding_id, &healthy.binding_id]),
+            "{fault}"
+        );
+        assert!(fixture.host.log().active, "{fault}");
+        assert!(fixture.host.log().operations.is_empty(), "{fault}");
+        assert_eq!(
+            fixture.host.log().processes.contains_key(&77),
+            fault == "changed"
+        );
+        assert_cgroup_routes(&fixture, &healthy_routes, 1);
+        assert!(client.delete(&[prepared.target]).error.is_none(), "{fault}");
+        assert_cgroup_routes(&fixture, &healthy_routes, 1);
+    }
+}
+
+#[test]
+fn descendant_exit_or_late_fork_during_attachment_keeps_binding_and_gateway_serving() {
+    for fault in ["exit-on-attach", "exit-after-attach", "late-fork"] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("forking", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            log.processes.insert(77, TestProcess::new(0));
+            log.processes.insert(78, TestProcess::new(77));
+            match fault {
+                "exit-on-attach" => log.exit_on_attach = Some(78),
+                "exit-after-attach" => log.exit_after_attach = Some(78),
+                _ => log.fork_on_attach = Some((77, 79)),
+            }
+            log.operations.clear();
+        }
+        let binding = fixture.instance(&scope, 77, &[]).remove(0);
+        let client = GatewayBindingClient::new(service.clone());
+        let created = client.create(&Fixture::prepared(&client, &binding));
+        assert!(created.error.is_none(), "{fault}: {:?}", created.error);
+        let cgroup = {
+            let log = fixture.host.log();
+            assert!(log.active, "{fault}");
+            assert!(log.operations.is_empty(), "{fault}");
+            if fault == "late-fork" {
+                assert_eq!(log.processes[&79].cgroup, "/user.slice");
+            }
+            log.processes[&77].cgroup.clone()
+        };
+        assert_ne!(cgroup, "/user.slice", "{fault}");
+        assert_cgroup_routes(&fixture, &BTreeSet::from([cgroup]), 1);
+        drop(client);
+        drop(service);
+        fixture.service().recover().unwrap();
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+    }
+}
+
+#[test]
+fn invalid_cgroup_member_withdraws_only_that_route() {
     let fixture = Fixture::new();
-    let service = fixture.service();
     fixture.key(REAL);
-    let scope = fixture.scope("failed", 1);
+    let service = fixture.service();
+    let scope = fixture.scope("intruder", 1);
     service.prepare_scope(&scope).unwrap();
-    let binding = fixture.instance(&scope, 77, &[]).remove(0);
-    fixture.host.log().changed_on_attach = Some(77);
+    service.enable().unwrap();
     let client = GatewayBindingClient::new(service.clone());
-    let prepared = Fixture::prepared(&client, &binding);
-    assert!(client.create(&prepared).error.is_some());
-    assert_eq!(
-        serde_json::to_value(service.status(0).scopes).unwrap(),
-        serde_json::json!([{"scopeId": "failed", "bindings": [binding.binding_id]}])
+    let mut discovered = Vec::new();
+    for pid in [77, 88] {
+        let binding = fixture.instance(&scope, pid, &discovered).remove(0);
+        assert!(
+            client
+                .create(&Fixture::prepared(&client, &binding))
+                .error
+                .is_none()
+        );
+        fixture.transition(&binding, BindingStatus::Ready);
+        discovered.push(pid);
+    }
+    let (invalid, healthy) = {
+        let mut log = fixture.host.log();
+        let invalid = log.processes[&77].cgroup.clone();
+        let mut intruder = TestProcess::new(0);
+        intruder.uid = 4002;
+        intruder.groups = vec![4002];
+        intruder.cgroup = invalid.clone();
+        log.processes.insert(90, intruder);
+        log.operations.clear();
+        (invalid, log.processes[&88].cgroup.clone())
+    };
+    let binding = fixture.instance(&scope, 99, &discovered).remove(0);
+    assert!(
+        client
+            .create(&Fixture::prepared(&client, &binding))
+            .error
+            .is_none()
     );
-    assert!(!fixture.host.log().active);
-    assert!(fixture.host.log().processes.contains_key(&77));
-    assert_eq!(fixture.rules(), crate::nft::render_delete());
-    assert!(client.delete(&[prepared.target]).error.is_none());
+    assert!(fixture.host.log().active);
+    assert!(fixture.host.log().operations.is_empty());
+    let added = fixture.host.log().processes[&99].cgroup.clone();
+    assert_cgroup_routes(&fixture, &BTreeSet::from([healthy, added]), 2);
+    assert!(!fixture.rules().contains(invalid.trim_start_matches('/')));
+}
+
+fn ready_binding(
+    fixture: &Fixture,
+    client: &GatewayBindingClient,
+    scope: &PreparedScope,
+    pid: u32,
+    existing: &[u32],
+) -> PreparedBinding {
+    let binding = fixture.instance(scope, pid, existing).remove(0);
+    let created = client.create(&Fixture::prepared(client, &binding));
+    assert!(created.error.is_none(), "{pid}: {:?}", created.error);
+    fixture.transition(&binding, BindingStatus::Ready);
+    binding
+}
+
+fn foreign_member(cgroup: String, parent: u32) -> TestProcess {
+    let mut process = TestProcess::new(parent);
+    process.uid = 4002;
+    process.groups = vec![4002];
+    process.cgroup = cgroup;
+    process
+}
+
+#[test]
+fn failed_deployment_reroutes_only_when_enabled_and_fails_closed_if_rerouting_fails() {
+    for case in ["disabled", "reroute-fails"] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let healthy_scope = fixture.scope("a-healthy", 1);
+        let failing_scope = fixture.scope("b-failing", 1);
+        service.prepare_scope(&healthy_scope).unwrap();
+        service.prepare_scope(&failing_scope).unwrap();
+        let client = GatewayBindingClient::new(service.clone());
+        if case == "reroute-fails" {
+            service.enable().unwrap();
+            ready_binding(&fixture, &client, &healthy_scope, 88, &[]);
+        }
+        {
+            let mut log = fixture.host.log();
+            log.exit_on_attach = Some(77);
+            // Unknown evidence about the healthy Binding surfaces only while rerouting.
+            log.process_failure = Some((88, GatewayErrorKind::Internal));
+            log.operations.clear();
+        }
+        let binding = fixture.instance(&failing_scope, 77, &[]).remove(0);
+        let failure = client
+            .create(&Fixture::prepared(&client, &binding))
+            .error
+            .unwrap();
+        let log = fixture.host.log();
+        if case == "disabled" {
+            assert_eq!(failure.code, "GATEWAY_PROCESS_EXITED");
+            assert!(log.operations.is_empty());
+            assert!(log.rules.is_empty());
+        } else {
+            assert_eq!(failure.code, "GATEWAY_INTERNAL_ERROR");
+            assert!(!log.active);
+            assert_eq!(log.operations, vec!["stop", "unroute"]);
+            assert_eq!(log.rules.last().unwrap(), &crate::nft::render_delete());
+        }
+    }
+}
+
+/// Bindings for a child and its parent, whose Binding reuses the child's cgroup as its root.
+fn shared_fixture(
+    fixture: &Fixture,
+    client: &GatewayBindingClient,
+    scope: &PreparedScope,
+) -> String {
+    {
+        let mut log = fixture.host.log();
+        log.processes.insert(77, TestProcess::new(0));
+        log.processes.insert(78, TestProcess::new(77));
+    }
+    ready_binding(fixture, client, scope, 78, &[]);
+    ready_binding(fixture, client, scope, 77, &[78]);
+    let shared = fixture.host.log().processes[&78].cgroup.clone();
+    assert!(fixture.rules().contains(shared.trim_start_matches('/')));
+    shared
+}
+
+#[test]
+fn shared_cgroup_with_invalid_member_is_unrouted_whichever_binding_checks_first() {
+    for root_exits in [false, true] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let shared_scope = fixture.scope("a-shared", 1);
+        let unrelated = fixture.scope("b-unrelated", 1);
+        service.prepare_scope(&shared_scope).unwrap();
+        service.prepare_scope(&unrelated).unwrap();
+        service.enable().unwrap();
+        let client = GatewayBindingClient::new(service.clone());
+        let shared = shared_fixture(&fixture, &client, &shared_scope);
+        // The member appears after whichever Binding the routing pass verifies first; the
+        // parent's root may then exit before its final recheck while the child keeps C live.
+        let group = shared.clone();
+        fixture.host.log().on_route = Some(Box::new(move |log: &mut HostLog| {
+            log.processes.insert(90, foreign_member(group.clone(), 0));
+            if root_exits {
+                log.on_scope_read = Some((
+                    group,
+                    Box::new(|log: &mut HostLog| {
+                        let root = log.last_tree_root;
+                        log.processes.remove(&root);
+                        Ok(())
+                    }),
+                ));
+            }
+        }));
+        ready_binding(&fixture, &client, &unrelated, 99, &[]);
+        let healthy = fixture.host.log().processes[&99].cgroup.clone();
+        assert!(fixture.host.log().active, "{root_exits}");
+        assert!(fixture.rules().contains(healthy.trim_start_matches('/')));
+        assert!(
+            !fixture.rules().contains(shared.trim_start_matches('/')),
+            "{root_exits}"
+        );
+    }
+}
+
+#[test]
+fn parent_deployment_fails_when_a_later_sharer_denies_its_root_cgroup() {
+    // Binding IDs are random, so repeat until both verification orders are almost surely seen.
+    for _ in 0..8 {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let shared_scope = fixture.scope("a-shared", 1);
+        let healthy_scope = fixture.scope("b-healthy", 1);
+        service.prepare_scope(&shared_scope).unwrap();
+        service.prepare_scope(&healthy_scope).unwrap();
+        service.enable().unwrap();
+        let client = GatewayBindingClient::new(service.clone());
+        ready_binding(&fixture, &client, &healthy_scope, 88, &[]);
+        {
+            let mut log = fixture.host.log();
+            log.processes.insert(77, TestProcess::new(0));
+            log.processes.insert(78, TestProcess::new(77));
+        }
+        ready_binding(&fixture, &client, &shared_scope, 78, &[]);
+        let shared = fixture.host.log().processes[&78].cgroup.clone();
+        let healthy = fixture.host.log().processes[&88].cgroup.clone();
+        // The parent reuses the child's cgroup as its root; a foreign member arrives after
+        // whichever of the two sharers the routing pass verifies first.
+        let group = shared.clone();
+        fixture.host.log().on_route = Some(Box::new(move |log: &mut HostLog| {
+            log.processes.insert(90, foreign_member(group, 0));
+        }));
+        let parent = fixture.instance(&shared_scope, 77, &[78]).remove(0);
+        let created = client.create(&Fixture::prepared(&client, &parent));
+        assert!(created.error.is_some(), "parent reported deployed");
+        assert!(fixture.host.log().active);
+        assert_cgroup_routes(&fixture, &BTreeSet::from([healthy]), 1);
+        assert!(!fixture.rules().contains(shared.trim_start_matches('/')));
+    }
+}
+
+#[test]
+fn member_io_failure_before_root_exit_still_fails_recovery_closed() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let scope = fixture.scope("a-shared", 1);
+    service.prepare_scope(&scope).unwrap();
+    service.enable().unwrap();
+    let client = GatewayBindingClient::new(service.clone());
+    let shared = shared_fixture(&fixture, &client, &scope);
+    let responsibilities = service.status(0).scopes;
+    drop(client);
+    drop(service);
+    {
+        let mut log = fixture.host.log();
+        log.on_route = Some(Box::new(move |log: &mut HostLog| {
+            log.on_scope_read = Some((
+                shared,
+                Box::new(|log: &mut HostLog| {
+                    let root = log.last_tree_root;
+                    log.processes.remove(&root);
+                    Err(GatewayError::internal("cannot read cgroup.procs: EIO"))
+                }),
+            ));
+        }));
+        log.operations.clear();
+    }
+    let restarted = fixture.service();
+    assert!(restarted.recover().is_err());
+    let log = fixture.host.log();
+    assert!(log.on_route.is_none() && log.on_scope_read.is_none());
+    assert!(!log.active);
+    assert_eq!(log.operations, vec!["stop", "unroute"]);
+    drop(log);
+    assert_eq!(restarted.status(0).scopes, responsibilities);
+}
+
+#[test]
+fn late_unknown_failures_while_recovery_routes_still_fail_closed() {
+    for kind in [GatewayErrorKind::Internal, GatewayErrorKind::Unavailable] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let first = fixture.scope("a-first", 1);
+        let second = fixture.scope("b-second", 1);
+        service.prepare_scope(&first).unwrap();
+        service.prepare_scope(&second).unwrap();
+        service.enable().unwrap();
+        let client = GatewayBindingClient::new(service.clone());
+        ready_binding(&fixture, &client, &first, 88, &[]);
+        ready_binding(&fixture, &client, &second, 77, &[]);
+        let responsibilities = service.status(0).scopes;
+        drop(client);
+        drop(service);
+        {
+            let mut log = fixture.host.log();
+            // Pins are already rebuilt; the failure surfaces only in the final routing pass.
+            log.on_route = Some(Box::new(move |log: &mut HostLog| {
+                log.process_failure = Some((77, kind));
+            }));
+            log.operations.clear();
+        }
+        let restarted = fixture.service();
+        assert!(restarted.recover().is_err(), "{kind:?}");
+        let log = fixture.host.log();
+        assert!(log.on_route.is_none(), "{kind:?}");
+        assert!(!log.active, "{kind:?}");
+        assert_eq!(log.operations, vec!["stop", "unroute"], "{kind:?}");
+        assert_eq!(
+            log.rules.last().unwrap(),
+            &crate::nft::render_delete(),
+            "{kind:?}"
+        );
+        drop(log);
+        assert_eq!(restarted.status(0).scopes, responsibilities, "{kind:?}");
+    }
+}
+
+#[test]
+fn deployment_fails_when_its_route_is_withheld_after_initial_verification() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let healthy_scope = fixture.scope("a-healthy", 1);
+    let late_scope = fixture.scope("b-late", 1);
+    service.prepare_scope(&healthy_scope).unwrap();
+    service.prepare_scope(&late_scope).unwrap();
+    service.enable().unwrap();
+    let client = GatewayBindingClient::new(service.clone());
+    let healthy = ready_binding(&fixture, &client, &healthy_scope, 88, &[]);
+    let healthy_routes = BTreeSet::from([fixture.host.log().processes[&88].cgroup.clone()]);
+    // The healthy scope routes first; the new root then forks an invalid descendant.
+    fixture.host.log().on_route = Some(Box::new(|log: &mut HostLog| {
+        let group = log.processes[&99].cgroup.clone();
+        log.processes.insert(100, foreign_member(group, 99));
+    }));
+    let binding = fixture.instance(&late_scope, 99, &[]).remove(0);
+    let failure = client
+        .create(&Fixture::prepared(&client, &binding))
+        .error
+        .unwrap();
+    assert_eq!(
+        (failure.kind, failure.code.as_str()),
+        (FailureKind::Rejected, "GATEWAY_PROCESS_IDENTITY_REJECTED")
+    );
+    assert!(fixture.host.log().on_route.is_none());
+    assert!(fixture.host.log().active);
+    assert_cgroup_routes(&fixture, &healthy_routes, 1);
+    let bindings: BTreeSet<_> = service
+        .status(0)
+        .scopes
+        .into_iter()
+        .flat_map(|scope| scope.bindings)
+        .collect();
+    assert_eq!(
+        bindings,
+        BTreeSet::from([healthy.binding_id, binding.binding_id])
+    );
 }
 #[test]
 fn publication_rechecks_owner_permissions_before_routing() {

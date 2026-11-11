@@ -15,7 +15,7 @@ use asc_policy_types::target::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::service::Inner;
+use crate::service::{Inner, diagnose};
 use crate::state::{Attachment, State};
 use crate::{GatewayError, GatewayErrorKind, GatewayService, ProcessIdentity};
 
@@ -194,6 +194,48 @@ impl GatewayService {
         attachment: &Attachment,
         uid: u32,
     ) -> Result<(), GatewayError> {
+        match self.check_pinned(inner, id, attachment, uid)? {
+            Ok(()) => Ok(()),
+            Err(RouteFault::Stale(error) | RouteFault::Members(error)) => Err(error),
+        }
+    }
+    /// Splits Binding-local faults from unknown host evidence, which must fail closed.
+    pub(crate) fn check_pinned(
+        &self,
+        inner: &Inner,
+        id: &ResourceId,
+        attachment: &Attachment,
+        uid: u32,
+    ) -> Result<Result<(), RouteFault>, GatewayError> {
+        // Failed deployments and unrecoverable instances intentionally keep no pin.
+        if !inner.pins.contains_key(id) {
+            return Ok(Err(RouteFault::Stale(GatewayError::unavailable(
+                "Binding has no live execution pin",
+            ))));
+        }
+        let (scope_id, pins) = match self.verify_root(inner, id, attachment, uid) {
+            Ok(found) => found,
+            Err(error) => return local(error).map(|error| Err(RouteFault::Stale(error))),
+        };
+        // Exited members are tolerated, so only enumerating the root itself reports an exit;
+        // any other member failure is independent evidence that a later root exit cannot erase.
+        match self.verify_members(inner, scope_id, pins, attachment, uid) {
+            Ok(()) => {}
+            Err(error) if error.is_process_exited() => return Ok(Err(RouteFault::Stale(error))),
+            Err(error) => return local(error).map(|error| Err(RouteFault::Members(error))),
+        }
+        match self.verify_instance(&pins[0], &attachment.process) {
+            Ok(()) => Ok(Ok(())),
+            Err(error) => local(error).map(|error| Err(RouteFault::Stale(error))),
+        }
+    }
+    fn verify_root<'a>(
+        &self,
+        inner: &'a Inner,
+        id: &ResourceId,
+        attachment: &Attachment,
+        uid: u32,
+    ) -> Result<(&'a ScopeId, &'a [ProcessIdentity]), GatewayError> {
         let scope_id = inner
             .state
             .scopes
@@ -215,26 +257,71 @@ impl GatewayService {
                 "Binding root left its exact cgroup",
             ));
         }
-        for process in pins {
-            match self.verify_owned_attachment(&inner.state, scope_id, process, uid) {
-                Ok(()) => {}
-                Err(error) if error.is_process_exited() && process.pid != root.pid => {}
-                Err(error) => return Err(error),
-            }
+        self.verify_owned_attachment(&inner.state, scope_id, root, uid)?;
+        Ok((scope_id, pins))
+    }
+    /// Validates every non-root pin, descendant and member of the Binding's cgroups.
+    fn verify_members(
+        &self,
+        inner: &Inner,
+        scope_id: &ScopeId,
+        pins: &[ProcessIdentity],
+        attachment: &Attachment,
+        uid: u32,
+    ) -> Result<(), GatewayError> {
+        let root = &pins[0];
+        for process in &pins[1..] {
+            self.verify_tree_member(&inner.state, scope_id, process, root, uid)?;
         }
         // Existing descendants may exit; newly inherited descendants still need immediate
         // UID/group/cgroup validation before any route is handed back to the data plane.
-        let current = self.host.process_tree(root.pid)?;
-        for process in &current {
-            self.verify_owned_attachment(&inner.state, scope_id, process, uid)?;
+        for process in &self.host.process_tree(root.pid)? {
+            if process.pid != root.pid {
+                self.verify_tree_member(&inner.state, scope_id, process, root, uid)?;
+            }
         }
         // Shared groups retain siblings and reparented descendants after root cleanup.
         for path in attachment.cgroups() {
             for process in self.host.scope_processes(path)? {
-                self.verify_owned_attachment(&inner.state, scope_id, &process, uid)?;
+                if process.pid != root.pid {
+                    self.verify_live_member(&inner.state, scope_id, &process, root, uid)?;
+                }
             }
         }
-        self.verify_instance(root, &attachment.process)
+        Ok(())
+    }
+    /// Validates a root-tree member; one outside every gateway cgroup is never routed.
+    fn verify_tree_member(
+        &self,
+        state: &State,
+        scope_id: &ScopeId,
+        process: &ProcessIdentity,
+        root: &ProcessIdentity,
+        uid: u32,
+    ) -> Result<(), GatewayError> {
+        if process.pid != root.pid {
+            match self.check_overlap(state, scope_id, process) {
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(()),
+                Err(error) if error.is_process_exited() => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        self.verify_live_member(state, scope_id, process, root, uid)
+    }
+    /// Validates a routed-cgroup member; only non-root members may have exited meanwhile.
+    fn verify_live_member(
+        &self,
+        state: &State,
+        scope_id: &ScopeId,
+        process: &ProcessIdentity,
+        root: &ProcessIdentity,
+        uid: u32,
+    ) -> Result<(), GatewayError> {
+        match self.verify_owned_attachment(state, scope_id, process, uid) {
+            Err(error) if error.is_process_exited() && process.pid != root.pid => Ok(()),
+            result => result,
+        }
     }
     pub(crate) fn recover_attachments(&self, inner: &mut Inner) -> Result<(), GatewayError> {
         inner.pins.clear();
@@ -275,11 +362,11 @@ impl GatewayService {
                         ));
                     }
                     for process in &pins {
-                        self.verify_owned_attachment(&inner.state, id, process, domain.uid)?;
+                        self.verify_tree_member(&inner.state, id, process, root, domain.uid)?;
                     }
                     for path in attachment.cgroups() {
                         for process in self.host.scope_processes(path)? {
-                            self.verify_owned_attachment(&inner.state, id, &process, domain.uid)?;
+                            self.verify_live_member(&inner.state, id, &process, root, domain.uid)?;
                         }
                     }
                     self.verify_instance(root, &attachment.process)?;
@@ -296,8 +383,9 @@ impl GatewayService {
                     {
                         // Keep durable cleanup ownership, but never pin a replacement or
                         // an escaped instance; unrelated healthy Bindings must still recover.
-                        eprintln!(
-                            "gateway attachment recovery rejected an instance; cleanup responsibility retained"
+                        diagnose(
+                            "gateway attachment recovery rejected an instance; cleanup responsibility retained",
+                            format_args!("binding_id={binding_id} error={error}"),
                         );
                         continue;
                     }
@@ -320,14 +408,43 @@ impl GatewayService {
         let mut inner = self.lock();
         let scope = self.admitted_binding(&binding)?;
         let mut plan = self.gather_attachment(&inner, &scope, &cleanup)?;
-        self.gather_shared_attachments(&inner, &binding, &scope, &mut plan)
-            .map_err(|error| self.fail_closed(error))?;
-        self.validate_attachment_plan(&inner, &binding, &scope, &plan, &plan.pins[0])
-            .map_err(|error| self.fail_closed(error))?;
-        self.persist_attachment_plan(&mut inner, &binding, &plan)?;
-        self.attach_unowned(&inner, &binding, &scope, &plan)
-            .and_then(|()| self.verify_attachment_plan(&mut inner, &binding, &scope, plan))
-            .map_err(|error| self.fail_closed(error))
+        let mut attached = self
+            .gather_shared_attachments(&inner, &binding, &scope, &mut plan)
+            .and_then(|()| {
+                self.validate_attachment_plan(&inner, &binding, &scope, &plan, &plan.pins[0])
+            });
+        if attached.is_ok() {
+            self.persist_attachment_plan(&mut inner, &binding, &plan)?;
+            attached = self
+                .attach_unowned(&inner, &binding, &scope, &plan)
+                .and_then(|()| self.verify_attachment_plan(&mut inner, &binding, &scope, plan));
+        }
+        attached.map_err(|error| self.isolate_binding(&mut inner, &binding.binding_id, error))
+    }
+    /// Withdraws only `id`'s routes after a failed deployment, retaining its cleanup duty;
+    /// the gateway fails closed only if recomputing the routes fails.
+    fn isolate_binding(
+        &self,
+        inner: &mut Inner,
+        id: &ResourceId,
+        error: GatewayError,
+    ) -> GatewayError {
+        diagnose(
+            "gateway Binding deployment failed; withdrawing only its routes",
+            format_args!("binding_id={id} error={error}"),
+        );
+        inner.pins.remove(id);
+        let rerouted = if inner.state.enabled {
+            self.active_plans(inner)
+                .and_then(|plans| self.route(inner, &plans))
+                .map(drop)
+        } else {
+            Ok(())
+        };
+        match rerouted {
+            Ok(()) => error,
+            Err(route_error) => self.fail_closed(route_error),
+        }
     }
     fn gather_attachment(
         &self,
@@ -580,9 +697,33 @@ impl GatewayService {
                 .rsplit('/')
                 .next()
                 .ok_or_else(|| GatewayError::internal("empty execution slice"))?;
-            self.host
-                .attach_to_scope(instance_scope, &self.config.slice, process)?;
-            self.verify_attachment(process, cgroup, plan.uid)?;
+            let moved = self
+                .host
+                .attach_to_scope(instance_scope, &self.config.slice, process)
+                .and_then(|()| self.verify_attachment(process, cgroup, plan.uid));
+            match moved {
+                Ok(()) => {}
+                // A descendant that could not move stays unrouted; one that moved but no longer
+                // validates is rejected by the cgroup membership check before routing.
+                Err(error) if process.pid != root.pid => {
+                    if !error.is_process_exited() {
+                        diagnose(
+                            "gateway left a Binding descendant unattached",
+                            format_args!(
+                                "binding_id={} pid={} error={error}",
+                                binding.binding_id, process.pid
+                            ),
+                        );
+                    }
+                }
+                // systemd reports a vanished PID as a generic call failure; report the exit.
+                Err(error) => {
+                    return Err(match self.host.verify_process(process) {
+                        Err(exited) if exited.is_process_exited() => exited,
+                        _ => error,
+                    });
+                }
+            }
         }
         self.validate_attachment_plan(inner, binding, scope, plan, root)
     }
@@ -609,7 +750,10 @@ impl GatewayService {
         self.verify_pinned(inner, &binding.binding_id, &plan.attachment, plan.uid)?;
         if inner.state.enabled {
             let plans = self.active_plans(inner)?;
-            self.route(inner, &plans)?;
+            // Never confirm a deployment whose own credential route was just withheld.
+            if let Some(error) = self.route(inner, &plans)?.remove(&binding.binding_id) {
+                return Err(error.context("Binding failed routing verification"));
+            }
         }
         self.validate_attachment_plan(
             inner,
@@ -853,7 +997,33 @@ fn target_of(cleanup: &Cleanup) -> Result<TargetRef, GatewayError> {
             .map_err(|_| GatewayError::internal("cannot encode gateway cleanup"))?,
     })
 }
+/// A Binding-local reason to withhold routes.
+pub(crate) enum RouteFault {
+    /// The Binding's own root is unpinned, gone or changed; only its references lapse.
+    Stale(GatewayError),
+    /// A live member of its cgroups is invalid; no Binding may route those cgroups.
+    Members(GatewayError),
+}
+
+/// Keeps process exits and identity/ownership rejections local; anything else is unknown
+/// host evidence that must fail closed.
+fn local(error: GatewayError) -> Result<GatewayError, GatewayError> {
+    if error.is_process_exited()
+        || matches!(
+            error.kind(),
+            GatewayErrorKind::PermissionDenied | GatewayErrorKind::Conflict
+        )
+    {
+        Ok(error)
+    } else {
+        Err(error)
+    }
+}
+
 fn failure(error: &GatewayError) -> Failure {
+    if error.is_process_exited() {
+        return Failure::new(FailureKind::Retryable, "GATEWAY_PROCESS_EXITED");
+    }
     let (kind, code) = match error.kind() {
         GatewayErrorKind::InvalidArgument => (FailureKind::Rejected, "GATEWAY_INVALID_BINDING"),
         GatewayErrorKind::PermissionDenied => {
