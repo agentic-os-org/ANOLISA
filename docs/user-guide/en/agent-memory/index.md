@@ -463,6 +463,25 @@ A missing store root is an export error, not an empty archive. Scan and read fai
 
 Rust API callers using `ExportFilter.include_tasks = false` exclude the `tasks/` subtree before traversal or reading, so unreadable task directories or files do not block the requested export. The MCP `mem_export` tool includes tasks and retains error reporting for them.
 
+`mem_import` checks memory and task paths before an `overwrite` clears existing
+Markdown files. Empty, non-Markdown, duplicate, absolute, traversal, reserved and
+symlink paths skip the whole-store clear. Valid entries still import, including
+replacing matching paths, while invalid entries appear in the error list.
+`dry_run=true` performs validation without writing or creating a backup.
+For a valid overwrite, an existing regular Markdown file that will be cleared
+may become a directory, such as `notes/old.md` for `notes/old.md/new.md`.
+The preview accounts for this conversion; symlink ancestors remain invalid.
+
+Before clearing a valid archive's destination, `overwrite` saves an AMA backup
+under `<mount>/.anolisa/import-backup-<ULID>.json`, readable only by its owner.
+Export, write or sync failure aborts before clearing or importing. The result
+includes a `Backup:` path after a successful backup and clear. To recover missing
+memories, read that file on the host and pass its contents as `json_data` to
+`mem_import` with `strategy="skip-existing"`; existing paths remain unchanged.
+Backups remain until manually removed. This is not an automatic rollback:
+later write failures can leave a partial import. Pause other writers during an
+overwrite to keep the backup and imported state consistent.
+
 ### Error code semantics
 
 | MCP code | Meaning |
