@@ -403,19 +403,32 @@ pub fn extract_response_content(
             // delivered them, and counting both would double the call.
             "response.output_item.added" => {
                 if let Some(item) = resp.get("item") {
-                    // A custom (freeform) tool is announced the same way as a
-                    // function call; only the kind differs. The message parser
-                    // and the chatml reader both accept it, so a captured
-                    // turn that called one must count its name here too.
-                    if matches!(
-                        item.get("type").and_then(|t| t.as_str()),
-                        Some("function_call" | "custom_tool_call")
-                    ) {
-                        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                            if !name.is_empty() {
-                                return Some((String::new(), None, vec![format!("{name}: ")]));
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        // A custom (freeform) tool is announced the same way as a
+                        // function call; only the kind differs. The message parser
+                        // and the chatml reader both accept it, so a captured
+                        // turn that called one must count its name here too.
+                        Some("function_call" | "custom_tool_call") => {
+                            if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                                if !name.is_empty() {
+                                    return Some((String::new(), None, vec![format!("{name}: ")]));
+                                }
                             }
                         }
+                        // Codex's `local_shell_call` names the tool implicitly
+                        // and carries the whole argv in `action`. The live
+                        // message parser and the collector already read it, so
+                        // a shell-only turn must not count zero output tokens.
+                        Some("local_shell_call") => {
+                            if let Some(action) = item.get("action") {
+                                return Some((
+                                    String::new(),
+                                    None,
+                                    vec![format!("shell: {action}")],
+                                ));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1829,6 +1842,45 @@ mod tests {
         // exact string they expect.
         let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
         assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// Codex's Responses protocol announces a shell call as
+    /// `local_shell_call`, with the argv in `action` and the tool name
+    /// implicit. The live message parser and the collector already read that
+    /// shape, but the manual counter and drain estimate counted a shell-only
+    /// turn as zero output tokens.
+    #[test]
+    fn test_responses_api_local_shell_call_yields_a_tool_call() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "local_shell_call",
+                "id": "lsc_1",
+                "call_id": "call_shell",
+                "action": {"type": "exec", "command": ["ls", "-l"]},
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&added)).expect("the shell call must be extracted");
+        assert_eq!(content, "");
+        assert!(reasoning.is_none());
+        assert_eq!(
+            tool_calls,
+            vec![format!(
+                "shell: {}",
+                serde_json::json!({"type": "exec", "command": ["ls", "-l"]})
+            )]
+        );
+
+        let (_, _, merged) = merge_response_output_text(&[added]);
+        assert_eq!(
+            merged,
+            vec![format!(
+                "shell: {}",
+                serde_json::json!({"type": "exec", "command": ["ls", "-l"]})
+            )]
+        );
     }
 
     /// A custom (freeform) tool call is announced and streamed exactly like a
