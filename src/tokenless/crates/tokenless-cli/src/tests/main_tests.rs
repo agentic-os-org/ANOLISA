@@ -2078,3 +2078,72 @@ fn warn_soft_survives_an_unwritable_stderr() {
     }
     drop(dev_full);
 }
+
+/// Builds RTK arguments from string literals.
+fn rtk_args_literal(values: &[&str]) -> Vec<OsString> {
+    values.iter().map(OsString::from).collect()
+}
+
+#[test]
+fn rtk_args_consume_the_option_terminator_before_the_command() {
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["--", "ls", "/tmp"])),
+        rtk_args_literal(&["ls", "/tmp"])
+    );
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["--", "--version"])),
+        rtk_args_literal(&["--version"])
+    );
+    // RTK's pre-command options take no values, so the delimiter can follow one.
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["-v", "--", "ls"])),
+        rtk_args_literal(&["-v", "ls"])
+    );
+    // Only the first marker is the delimiter; a second one names a command.
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["--", "--", "ls"])),
+        rtk_args_literal(&["--", "ls"])
+    );
+    // A delimiter with no command leaves RTK an empty command line.
+    assert_eq!(rtk_args(rtk_args_literal(&["--"])), Vec::<OsString>::new());
+}
+
+#[test]
+fn rtk_args_keep_markers_after_the_command_and_help_flags() {
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["run", "--", "echo", "hi"])),
+        rtk_args_literal(&["run", "--", "echo", "hi"])
+    );
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["--version"])),
+        rtk_args_literal(&["--version"])
+    );
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["--help"])),
+        rtk_args_literal(&["--help"])
+    );
+    // No delimiter: RTK still receives every argument unchanged.
+    assert_eq!(
+        rtk_args(rtk_args_literal(&["-v", "ls"])),
+        rtk_args_literal(&["-v", "ls"])
+    );
+    assert_eq!(rtk_args(rtk_args_literal(&[])), Vec::<OsString>::new());
+}
+
+#[test]
+#[cfg(unix)]
+fn rtk_args_handle_non_utf8_arguments() {
+    use std::os::unix::ffi::OsStringExt;
+
+    // A non-UTF-8 option-like argument still counts as an option; the
+    // delimiter after it is consumed without decoding the argument.
+    let non_utf8 = OsString::from_vec(vec![b'-', 0xff]);
+    assert_eq!(
+        rtk_args(vec![
+            non_utf8.clone(),
+            OsString::from("--"),
+            OsString::from("ls")
+        ]),
+        vec![non_utf8, OsString::from("ls")]
+    );
+}
