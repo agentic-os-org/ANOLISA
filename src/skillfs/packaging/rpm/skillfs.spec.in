@@ -77,6 +77,10 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/skills/skillfs-mount/
 
 %changelog
+* Wed Nov 11 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.7-1
+- Preserve shell instructions across pip-only, wrapped, and multiline commands.
+- Fix live skill discovery, managed process identity, parsing, and usage logs.
+
 * Fri Nov 06 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.6-1
 - Split core and skill resources and transfer discovery ownership to ANOLISA.
 - Release managed-process, virtual-slot, parsing and command adaptation fixes.
