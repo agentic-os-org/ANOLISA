@@ -206,7 +206,7 @@ where
         validate_policy_name(policy_name)
             .map_err(|message| PapError::InvalidPolicyName(message.to_owned()))?;
         if let PolicySource::Cedar(cedar) = template {
-            asc_policy_cedar::validate(cedar)
+            asc_policy_cedar::request_authorization_eligible(cedar)
                 .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
         }
         let (update_existing, mut selected_id) = match target {
@@ -278,6 +278,45 @@ where
     /// Rejects empty or oversized selections, missing policies, and storage failures.
     pub fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
         self.repository.current_policies(ids)
+    }
+
+    /// Derives request policies independently of Scope and Binding assignments.
+    ///
+    /// # Errors
+    /// Rejects an inconsistent/unavailable read or any invalid Cedar member; never
+    /// returns a partial set. Runtime-specific compatibility is checked by the PDP.
+    pub fn authorization_policies(
+        &self,
+    ) -> Result<asc_policy_types::cedar::AuthorizationPolicySet, PapError> {
+        use asc_policy_types::cedar::{AuthorizationPolicy, AuthorizationPolicySet};
+        use sha2::{Digest, Sha256};
+
+        let mut policies = Vec::new();
+        for policy in self.repository.all_current_policies()? {
+            if let PolicySource::Cedar(source) = policy.template {
+                let eligible =
+                    asc_policy_cedar::request_authorization_eligible(&source).map_err(|error| {
+                        PapError::InvalidCedar(format!(
+                            "{} revision {}: {}",
+                            policy.policy_id,
+                            policy.revision.get(),
+                            error.diagnostic()
+                        ))
+                    })?;
+                if eligible {
+                    policies.push(AuthorizationPolicy {
+                        policy_id: policy.policy_id,
+                        revision: policy.revision,
+                        source,
+                    });
+                }
+            }
+        }
+        let bytes = serde_json::to_vec(&policies).map_err(|_| PapError::Persistence)?;
+        Ok(AuthorizationPolicySet {
+            version: format!("{:x}", Sha256::digest(bytes)),
+            policies,
+        })
     }
 
     /// Lists current Policy records.

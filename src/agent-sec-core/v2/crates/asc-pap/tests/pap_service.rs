@@ -115,6 +115,10 @@ impl PapRepository for FakeRepository {
         self.inner.get_policy(id, revision)
     }
 
+    fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.inner.all_current_policies()
+    }
+
     fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
         self.inner.current_policies(ids)
     }
@@ -1226,6 +1230,44 @@ fn assignment_snapshots_survive_policy_update_delete_and_later_discovery() {
     assert!(wire.get("policyTemplates").is_none());
     assert_eq!(wire["policySnapshots"], serde_json::json!([original]));
     assert_eq!(repo.list_policies(10, 0).unwrap().total, 0);
+}
+
+#[test]
+fn request_policy_resolution_does_not_rewrite_existing_scope_or_binding() {
+    use asc_pap::ScopeBindingSink;
+    let (pap, _) = service();
+    let pap = pap.with_scope_discovery(Arc::new(Discovery));
+    let original = pap
+        .create_policy("deployment", &policy_template("/a"))
+        .unwrap();
+    let scope = assignment(&pap, &original);
+    let instance = serde_json::from_str::<PreparedBinding>(COMPLETE_BINDING)
+        .unwrap()
+        .scope
+        .process;
+    pap.sync_instances(&scope.scope_id, std::slice::from_ref(&instance))
+        .unwrap();
+    let before = pap.list_bindings(10, 0).unwrap();
+    let explicit = serde_json::from_value(serde_json::json!({
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system","revision":1},
+            "text":"permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);"
+        }
+    })).unwrap();
+    let current = pap
+        .update_policy(&original.policy_id, "request policy", &explicit)
+        .unwrap();
+    assert_eq!(
+        pap.authorization_policies().unwrap().policies[0].revision,
+        current.revision
+    );
+    assert_eq!(pap.get_scope(&scope.scope_id).unwrap(), scope);
+    assert_eq!(pap.list_bindings(10, 0).unwrap(), before);
+    pap.delete_policy_revision(&current.policy_id, current.revision)
+        .unwrap();
+    assert!(pap.authorization_policies().unwrap().policies.is_empty());
+    assert_eq!(pap.get_scope(&scope.scope_id).unwrap(), scope);
+    assert_eq!(pap.list_bindings(10, 0).unwrap(), before);
 }
 
 #[test]

@@ -154,8 +154,7 @@ fn prepare(permissions: &Path, client: &DaemonAuthorizationClient) -> Result<u8,
     let mut runtime = PepRuntime::new(SandboxBackend::installed()?);
     let (request, decision) = runtime.authorize(
         &AgentPrincipal {
-            agent_id: format!("cosh:{}", input.session_id),
-            agent_type: "cosh".into(),
+            agent_type: Some("cosh".into()),
         },
         launch,
         &read_permissions(permissions)?,

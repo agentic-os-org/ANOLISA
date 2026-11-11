@@ -240,6 +240,104 @@ fn runtime_cedar(text: &str) -> asc_policy_types::authoring::PolicySource {
 }
 
 #[test]
+fn effective_set_tracks_membership_without_scope_assignments() {
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository);
+    let empty = pap.authorization_policies().unwrap();
+    pap.create_policy("native", &binding().policy.template)
+        .unwrap();
+    let bare = runtime_cedar(
+        r#"permit(principal, action == SecCore::Action::"process.spawn", resource)
+        when { principal has agent_type && principal.agent_type == "codex" };"#,
+    );
+    let deployment = pap.create_policy("deployment", &bare).unwrap();
+    assert_eq!(pap.authorization_policies().unwrap(), empty);
+
+    let specific = runtime_cedar(
+        r#"permit(principal == SecCore::Subject::"agent-a",
+        action == SecCore::Action::"process.spawn", resource);"#,
+    );
+    let a = pap.create_policy("subject-a", &specific).unwrap();
+    let first = pap.authorization_policies().unwrap();
+    assert_eq!(first.policies.len(), 1);
+    assert_eq!(first.policies[0].policy_id, a.policy_id);
+    assert_eq!(first.policies[0].revision, a.revision);
+    let all = runtime_cedar(
+        r#"forbid(principal is SecCore::Subject,
+        action == SecCore::Action::"network.use", resource);"#,
+    );
+    let b = pap.create_policy("global restriction", &all).unwrap();
+    let second = pap.authorization_policies().unwrap();
+    assert_eq!(second.policies.len(), 2);
+    assert_ne!(first.version, second.version);
+    pap.delete_policy_revision(&b.policy_id, b.revision)
+        .unwrap();
+    assert_eq!(pap.authorization_policies().unwrap(), first);
+
+    pap.update_policy(&a.policy_id, "deployment only", &bare)
+        .unwrap();
+    assert_eq!(pap.authorization_policies().unwrap(), empty);
+    pap.update_policy(&deployment.policy_id, "now explicit", &specific)
+        .unwrap();
+    let enabled = pap.authorization_policies().unwrap();
+    assert_eq!(enabled.policies.len(), 1);
+    assert_eq!(enabled.policies[0].policy_id, deployment.policy_id);
+    assert!(pap.list_scopes(100, 0).unwrap().items.is_empty());
+    assert!(pap.list_bindings(100, 0).unwrap().items.is_empty());
+}
+
+#[test]
+fn mixed_headers_reject_whole_policy_at_admission_and_resolution() {
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository.clone());
+    let mixed = runtime_cedar(
+        r#"
+        permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);
+        forbid(principal, action == SecCore::Action::"process.spawn", resource);
+    "#,
+    );
+    let error = pap.create_policy("mixed", &mixed).unwrap_err();
+    assert!(error.to_string().contains("mixed bare and constrained"));
+    // Defensive read: repositories may already contain sources predating admission checks.
+    let mut stored = binding().policy;
+    stored.template = mixed;
+    repository.put_policy(&stored).unwrap();
+    let error = pap.authorization_policies().unwrap_err().to_string();
+    assert!(error.contains(stored.policy_id.as_str()));
+    assert!(error.contains("mixed bare and constrained"));
+}
+
+#[test]
+fn invalid_stored_sources_or_schema_never_produce_a_partial_set() {
+    for (text, revision) in [
+        ("not cedar", 1),
+        (
+            "permit(principal is SecCore::Subject, action, resource);",
+            2,
+        ),
+    ] {
+        let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+        let pap = PapService::new(repository.clone());
+        pap.create_policy(
+            "valid",
+            &runtime_cedar("permit(principal is SecCore::Subject, action, resource);"),
+        )
+        .unwrap();
+        let mut stored = binding().policy;
+        stored.template = runtime_cedar(text);
+        let asc_policy_types::authoring::PolicySource::Cedar(source) = &mut stored.template else {
+            unreachable!()
+        };
+        source.schema.revision = asc_foundation_types::Revision::new(revision).unwrap();
+        repository.put_policy(&stored).unwrap();
+        assert!(matches!(
+            pap.authorization_policies(),
+            Err(PapError::InvalidCedar(_))
+        ));
+    }
+}
+
+#[test]
 fn runtime_cedar_admission_validates_before_replacing_the_current_revision() {
     let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let pap = PapService::new(repository.clone());

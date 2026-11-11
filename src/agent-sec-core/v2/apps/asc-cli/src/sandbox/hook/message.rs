@@ -240,7 +240,7 @@ mod tests {
     fn fixture(verdict: DecisionVerdict) -> (AuthorizationRequest, Decision) {
         let request: AuthorizationRequest = serde_json::from_value(json!({
             "type": "os", "request_id": "request", "execution_id": "execution",
-            "principal": {"agent_id": "test", "agent_type": "cosh"},
+            "principal": {"agent_type": "cosh"},
             "launch": {"program": "/bin/bash", "resolved_program": "/usr/bin/bash",
                 "args": ["-c", "rm -rf cache"], "cwd": "/work"},
             "requested_permissions": {"version": 1,

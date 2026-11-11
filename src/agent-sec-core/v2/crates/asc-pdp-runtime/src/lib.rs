@@ -11,7 +11,7 @@ mod request;
 use asc_daemon_protocol::authorization::OsPermissionSet;
 use asc_daemon_protocol::authorization::{AuthorizationRequest, Decision};
 use asc_policy_types::Validate;
-use asc_policy_types::cedar::CedarPolicySource;
+use asc_policy_types::cedar::{AuthorizationPolicySet, CedarPolicySource};
 use cedar_policy::Schema;
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +37,9 @@ pub struct PolicySnapshot {
 
 /// A version-pinned PDP.
 pub struct PdpRuntime {
-    snapshot: PolicySnapshot,
+    version: String,
+    environment_permissions: OsPermissionSet,
+    ttl_seconds: u64,
     schema: Schema,
     layers: Vec<PolicyLayer>,
 }
@@ -66,9 +68,41 @@ impl PdpRuntime {
             layers.push(PolicyLayer::new(task)?);
         }
         Ok(Self {
-            snapshot,
+            version: snapshot.version,
+            environment_permissions: snapshot.environment_permissions,
+            ttl_seconds: snapshot.ttl_seconds,
             schema,
             layers,
+        })
+    }
+
+    /// Loads one PAP-derived set with global Cedar forbid precedence.
+    /// Legacy baseline/task publications must still use [`Self::from_snapshot`]:
+    /// their intersection semantics cannot be reproduced by unioning grants.
+    ///
+    /// # Errors
+    /// Rejects invalid metadata, ineligible members, incompatible schemas or OS
+    /// projections. The empty set is valid and denies every request.
+    pub fn from_policy_set(
+        snapshot: AuthorizationPolicySet,
+        environment_permissions: OsPermissionSet,
+        ttl_seconds: u64,
+    ) -> Result<Self, PdpError> {
+        if snapshot.version.is_empty() || !(1..=3600).contains(&ttl_seconds) {
+            return Err(PdpError::Configuration(
+                "publication version and a TTL in 1..=3600 seconds are required".into(),
+            ));
+        }
+        environment_permissions.validate()?;
+        let reference = asc_policy_cedar::schema::embedded_reference();
+        let schema = asc_policy_cedar::schema::load_schema(&reference)?;
+        let layer = PolicyLayer::from_members(&snapshot.policies)?;
+        Ok(Self {
+            version: snapshot.version,
+            environment_permissions,
+            ttl_seconds,
+            schema,
+            layers: vec![layer],
         })
     }
 
@@ -84,7 +118,7 @@ impl PdpRuntime {
 
     /// Immutable publication identity used by this runtime.
     pub fn policy_version(&self) -> &str {
-        &self.snapshot.version
+        &self.version
     }
 }
 

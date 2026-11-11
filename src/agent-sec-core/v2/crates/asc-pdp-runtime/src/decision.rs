@@ -156,14 +156,14 @@ impl PdpRuntime {
 
     fn base_decision(&self, input: &AuthorizationRequest, now: u64) -> Result<Decision, PdpError> {
         let expires_at = now
-            .checked_add(self.snapshot.ttl_seconds)
+            .checked_add(self.ttl_seconds)
             .ok_or_else(|| PdpError::Configuration("decision expiry overflow".into()))?;
         Ok(Decision {
             decision_id: uuid::Uuid::new_v4().to_string(),
             request_id: input.request_id.clone(),
             execution_id: input.execution_id.clone(),
             request_digest: input.digest()?,
-            policy_version: self.snapshot.version.clone(),
+            policy_version: self.version.clone(),
             expires_at,
             principal: input.principal.clone(),
             launch: input.launch.clone(),

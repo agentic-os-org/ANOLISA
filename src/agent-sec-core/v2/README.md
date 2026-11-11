@@ -69,11 +69,18 @@ permission format and the [execution design](../docs/design/LINUX_SANDBOX_PEP_DE
 for preparation, installation and process-lifetime boundaries.
 
 `asc-pep-runtime::PepRuntime` adds authorization for embedding applications through
-`DaemonAuthorizationClient`. The daemon reads current PAP-selected Cedar policies,
+`DaemonAuthorizationClient`. The daemon reads PAP's current effective Cedar policy set,
 returns ALLOW/DENY/MODIFY/STEP_UP/DEFER, and records owner-bound execution receipts
 through `authorization.evaluate` and `authorization.report`. Approval remains in
-the application, and execution uses the same local backend. `--authorization-config`
-selects Policy IDs and an OS-permission ceiling; it does not load policy snapshot files.
+the application, and execution uses the same local backend. PAP includes Cedar sources
+whose statements all have explicit principal headers; Cedar matches the request against
+the combined set independently of Scope/Binding assignments. `--authorization-config`
+loads root-owned JSON containing only `environment_permissions` (the OS-permission
+ceiling) and `ttl_seconds` (the decision acceptance deadline). The old `baseline_policy`
+and `task_policy` keys are rejected. Review their previous intersection semantics before
+adapting request policies to the combined set; see the
+[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for configuration
+and migration.
 
 The current crates are:
 
@@ -87,8 +94,9 @@ The current crates are:
 - `asc-pep-runtime`: command and path preparation, strict sandbox execution and
   installation-handshake supervision, plus upper-PEP authorization, approval and
   receipt handling for embedding applications.
-- `asc-pdp-runtime`: OS request evaluation using Cedar, policy-range intersection,
-  advice handling and five-state decisions under the requested and environment limits.
+- `asc-pdp-runtime`: OS request evaluation over a combined Cedar policy set, advice
+  handling and five-state decisions under the requested and environment limits.
+  The legacy `from_snapshot` API retains baseline/task intersection semantics.
 - `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
   whole-network permission schema, strict SDK validation, common-subset checks
   through `validate` and official typed PST output through `pst`. Agent Hook

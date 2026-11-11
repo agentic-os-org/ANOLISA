@@ -217,12 +217,10 @@ Each successful update is available to the next authorization request.
 
 Enable authorization with
 `agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`.
-This root-owned configuration selects PAP policy IDs and runtime limits; it does
-not contain Cedar policy text or accept a policy snapshot file:
+This root-owned configuration sets runtime limits. It contains no policy IDs or Cedar source:
 
 ```json
 {
-  "baseline_policy": "<policy ID returned by PAP>",
   "environment_permissions": {
     "version": 1,
     "filesystem": {"default": "deny", "rules": [
@@ -235,18 +233,49 @@ not contain Cedar policy text or accept a policy snapshot file:
 }
 ```
 
-An optional `task_policy` selects another PAP policy ID. Both sources must use
-`schema: {schemaId: "seccore.system", revision: 1}`. Baseline and task are evaluated
-independently. `environment_permissions` caps the permissions returned for each
-`type: "os"` request. The sandbox executor enforces them on the launched process
-tree. AgentSight uses Scope/Binding to select other host processes. Configuration and its parent
+Requests supply only the optional `principal.agent_type`, for example
+`{"principal":{"agent_type":"cosh"}}`. No Agent identity or UID registration is required.
+The type is a caller-supplied classification, not an authenticated identity; this
+stage does not isolate individual Agents by identity. `environment_permissions`
+caps each OS request. Configuration and its parent
 directories must be root-owned and not writable by group or other users; restart
-the daemon to change this selection or its runtime limits.
+the daemon after changing runtime limits.
 
-Every evaluate reads the selected policies' current revisions from PAP together.
-The compiled cache is reused only while those revisions remain current. Missing,
-deleted or unusable policies stop authorization; the daemon does not fall back to
-an earlier policy. Existing Scope/Binding assignments retain their fixed revisions.
+PAP derives the request policy set from all current sources using exact
+`schema: {schemaId: "seccore.system", revision: 1}` references. Every statement in
+an included source must have an explicit principal header. For current requests,
+use `principal is SecCore::Subject` and match `agent_type` in the condition:
+
+```cedar
+permit(principal is SecCore::Subject,
+       action == SecCore::Action::"process.spawn", resource)
+when { principal has agent_type && principal.agent_type == "cosh" };
+```
+
+This rule grants process launch only; add the required file/network policies for
+the application. A missing type does not match this condition.
+Native JSON and sources whose headers are all bare `principal` remain outside this
+route. A principal reference only inside `when` does not opt in. Mixed bare and
+constrained headers in one stored source are rejected. Every rule intended to
+jointly constrain requests, including permits and forbids, must have an explicit
+principal header. Splitting alone does not preserve those constraints: a separated
+bare-principal forbid stays outside the request policy set. Only split rules that
+are intended for different processing paths. This is an ANOLISA loading convention,
+not a Cedar enable flag.
+
+Each evaluate pulls one consistent current-policy snapshot. Its digest covers
+membership, revisions, schemas and source text. Unchanged sets reuse the compiled
+cache; changed sets replace it only after complete validation. Read, validation or
+runtime compatibility errors block authorization without stale fallback. Creation,
+deletion and eligibility changes take effect on the next request; an empty set
+replaces the cache and denies. Matching forbids override permits across the whole
+set. Scope/Binding deployment, pinned revisions and cleanup remain independent.
+
+The old `baseline_policy` and `task_policy` configuration keys are rejected. Their
+previous intersection semantics must be reviewed explicitly when adapting request
+policies: two permit sources in the new set combine grants. Express additional
+restrictions as forbids or constrain every applicable permit. Legacy deployment
+policies are not rewritten automatically.
 
 The PEP must accept a decision within `ttl_seconds`. Once accepted for that one
 invocation, approval waiting, installation and execution do not expire with that
@@ -287,8 +316,8 @@ Existing guard-matched shell commands now use PDP authorization. This does not b
 command matching or cover native file tools. Without this variable the existing behavior
 remains. Once configured, an invalid permission file, unavailable daemon or failed
 authorization blocks execution, without falling back to the legacy sandbox or unsandboxed execution.
-Requests use `agent_type: "cosh"` and `agent_id: "cosh:<session_id>"`; Cedar must allow
-that subject and the `/bin/bash -c` invocation.
+Requests supply `principal.agent_type: "cosh"`. Cedar must allow this type and
+the `/bin/bash -c` invocation. Session IDs do not establish authority.
 
 The hook prepares authorization through the private `sandbox hook prepare` entry point.
 ALLOW/MODIFY replace the command with its authorized execution entry point; STEP_UP uses

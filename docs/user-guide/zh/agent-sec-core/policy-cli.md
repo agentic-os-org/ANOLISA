@@ -336,8 +336,10 @@ Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保�
 
 Sandbox 运行时授权复用同一组 Policy 对象，使用
 `schema: {schemaId: "seccore.system", revision: 1}`。OS 授权 PDP 支持 Agent 主体、`process.spawn` 及 permit 上约定的 advice。
-按 [Sandbox 指南](sandbox.md#接入策略授权)在 daemon 授权配置中选择基线和可选任务 Policy ID。
-每次求值一起读取所选策略的当前版本；更新成功后影响后续请求，策略缺失或删除时停止新授权。
+按 [Sandbox 指南](sandbox.md#接入策略授权)配置 daemon 的权限上限和决定有效期。
+每次求值从 PAP 一起读取当前策略，纳入所有语句均有显式 principal header 的 Cedar 源码；
+无需配置 Policy ID。使用 `principal is SecCore::Subject` 并按可选的 `agent_type` 匹配请求。
+更新或删除影响后续请求；集合为空时拒绝，读取或校验失败时停止新授权。
 已有 Scope/Binding 快照和已经接收的决定继续保留各自绑定的版本。
 
 ## 管理 Scope

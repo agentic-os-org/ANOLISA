@@ -30,3 +30,25 @@ pub struct CedarPolicySource {
     /// Original Cedar text, potentially containing multiple policy statements.
     pub text: String,
 }
+
+/// Current PAP member of the derived request-authorization set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizationPolicy {
+    /// Repository identity used to namespace statement diagnostics.
+    pub policy_id: ResourceId,
+    /// Current content revision from the same repository read.
+    pub revision: Revision,
+    /// Complete source, including annotations and exact schema reference.
+    pub source: CedarPolicySource,
+}
+
+/// Derived data, never a persisted Scope assignment or activation record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizationPolicySet {
+    /// Digest of ordered membership, revisions, schemas and source content.
+    pub version: String,
+    /// Complete eligible current set; an empty set denies by default.
+    pub policies: Vec<AuthorizationPolicy>,
+}

@@ -27,6 +27,35 @@ pub fn validate(source: &CedarPolicySource) -> Result<Vec<ValidationWarning>, Ce
     Ok(warnings)
 }
 
+/// Checks the temporary explicit-principal opt-in for request authorization.
+/// Bare headers stay on the deployment path, even when conditions mention principal.
+///
+/// # Errors
+/// Rejects invalid source or a stored policy mixing bare and constrained headers.
+pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool, CedarError> {
+    let (policies, _) = validation::parse_and_validate(source)?;
+    let mut bare = false;
+    let mut explicit = false;
+    for policy in policies.policies() {
+        if matches!(
+            policy.principal_constraint(),
+            cedar_policy::PrincipalConstraint::Any
+        ) {
+            bare = true;
+        } else {
+            explicit = true;
+        }
+    }
+    if bare && explicit {
+        return Err(CedarError::Unsupported {
+            policy_id: "policy-set".into(),
+            reason: "mixed bare and constrained principal headers; request authorization requires \
+                     explicit principal headers on every permit and forbid",
+        });
+    }
+    Ok(explicit)
+}
+
 /// Produces official PST for translation after the same checks as [`validate`].
 ///
 /// Accepts source and an exact schema reference; no prior validation call is

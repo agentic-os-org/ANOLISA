@@ -905,11 +905,17 @@ OS 权限和命令，不访问 daemon、不读取其数据库、不取得策略�
 其余命令继续遵循已有 daemon 所有权规则。上层应用需要授权时使用 `asc-pep-runtime`，
 通过现有 client/UDS 调用 `authorization.evaluate/claim/report`；daemon 始终不执行目标命令。
 
-`agent-sec-daemon --authorization-config <file>` 配置 PAP 的 baseline_policy、可选 task_policy、
-environment_permissions 和 ttl_seconds。配置不含策略正文；文件及祖先目录由 root 管理，
+`agent-sec-daemon --authorization-config <file>` 配置 `environment_permissions` 和 `ttl_seconds`。
+配置不含策略正文或策略 ID；文件及祖先目录由 root 管理，
 不可被组/其他用户写入。未配置时授权接口返回 unavailable，不影响其他服务。
-每次 evaluate 从 PAP 同一事务读取当前策略；版本未变时复用编译结果。策略更新成功后
-影响下一次授权；删除或不可用时失败，不退回旧版本。Scope/Binding 仍使用固定版本。
+请求主体只含可选 `agent_type`，由接入方提供，Cosh Hook 使用 `cosh`。
+本阶段不认证 Agent 身份/类型，不要求 UID 登记；类型只用于策略分类匹配。
+内核 peer UID 仍用于 claim/report 的凭据归属校验，不参与策略主体选择。
+每次 evaluate 从 PAP 单个事务读取全部当前策略，排除原生 JSON 与全裸 principal header 的
+Cedar 源码，混合 header 整份报错。有效集摘要覆盖成员、revision、schema 与正文；缓存锁覆盖
+读取及加载，版本未变才复用，完整候选成功才替换。创建、删除和资格变更在下一次请求刷新；
+空集默认拒绝，读取或加载失败清空缓存。旧 baseline/task 配置报错，不自动把限制变成授权并集。
+Scope/Binding 的选择、固定版本、部署和清理均不改变。
 PEP 须在 expires_at 前接收决定；接收后的 ask 等待、安装和运行不再因该期限失败，
 策略更新不撤回已接收的决定。MODIFY 在事实齐备时由 PDP 同次完成最终授权；缺事实才 DEFER。
 
@@ -925,6 +931,8 @@ PEP 须在 expires_at 前接收决定；接收后的 ask 等待、安装和运�
 | TTY 输入、默认信号行为、父进程退出及后台子进程清理 | `v2/apps/asc-cli/tests/sandbox.rs`（`ASC_SANDBOX_INTEGRATION=1`） |
 | Cosh Hook 授权、一次性交接、拒绝清理、越界写保护 | `tests/e2e/linux-sandbox/authorized_cli.py` 与原版 Cosh 的 `cosh_host.py` 端到端用例 |
 | 真实授权、ask 后直行、版本更新、双存储回执 | `tests/e2e/linux-sandbox/authorized_cli.py` |
+| agent_type 分类匹配、PAP 全集刷新、删除后空集 DENY | `tests/e2e/linux-sandbox/authorized_cli.py`；`v2/apps/asc-daemon/src/authorization.rs` |
+| 新请求策略不改写已有 Scope/Binding 快照 | `v2/crates/asc-pap/tests/pap_service.rs::request_policy_resolution_does_not_rewrite_existing_scope_or_binding` |
 
 这些 fixture 不替代 RPM/systemd、多架构或完整 DPROC 安装验收。可执行命令由
 `.github/workflows/ci.yaml` 维护。

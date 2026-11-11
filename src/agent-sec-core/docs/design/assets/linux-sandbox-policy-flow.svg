@@ -18,7 +18,7 @@
   <g>
     <rect x="30" y="28" width="294" height="102" rx="12" fill="#eef3fd" stroke="#b4c6e5"/>
     <text x="51" y="69" class="head">PAP · 策略管理</text>
-    <text x="51" y="103" class="body">管理基线策略与任务策略</text>
+    <text x="51" y="103" class="body">管理策略并推导有效策略集</text>
 
     <rect x="536" y="28" width="294" height="102" rx="12" fill="#eef3fd" stroke="#b4c6e5"/>
     <text x="557" y="69" class="head">PDP · 授权决策</text>

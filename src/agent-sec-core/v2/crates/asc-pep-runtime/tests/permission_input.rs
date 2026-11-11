@@ -568,8 +568,7 @@ when {{ resource.path == {} || resource.path like {} }};
     );
     let client = Client::new(baseline);
     let principal = AgentPrincipal {
-        agent_id: "cedar-test".into(),
-        agent_type: "cosh".into(),
+        agent_type: Some("cosh".into()),
     };
     let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
     let mut runtime = PepRuntime::new(SandboxBackend::new(dir.path().join("unused-helper")));
@@ -646,8 +645,7 @@ when {{ resource.path == {} }};"#,
     );
     let client = Client::new("permit(principal, action, resource);".into());
     let principal = AgentPrincipal {
-        agent_id: "bound-cedar".into(),
-        agent_type: "cosh".into(),
+        agent_type: Some("cosh".into()),
     };
     let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
     let input = PermissionInput::parse(&source).unwrap();
@@ -732,8 +730,7 @@ fn directory_exclusions_survive_pdp_compaction_and_check_hardlinked_descendants(
         )
     };
     let principal = AgentPrincipal {
-        agent_id: "hardlink-test".into(),
-        agent_type: "cosh".into(),
+        agent_type: Some("cosh".into()),
     };
     let launch = prepare_launch("/usr/bin/true", vec![], &cwd, BTreeMap::new()).unwrap();
     let mut runtime = PepRuntime::new(SandboxBackend::new(helper));
