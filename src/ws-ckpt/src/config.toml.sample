@@ -44,5 +44,6 @@
 # A persisted mount must remain mounted at the same path; no automatic relocation.
 # Changing this pin intentionally selects a different root. Previous snapshots
 # become invisible and startup can prune unpinned indexes in /var/lib/ws-ckpt.
-# Switching back does not recover pruned records. Back up state and data first.
+# Switching back does not recover pruned records; leftover subvolumes return as
+# pinned orphans (see `ws-ckpt list --orphans`). Back up state and data first.
 # `ws-ckpt daemon --mount-path` configures only the BtrfsLoop mount point.

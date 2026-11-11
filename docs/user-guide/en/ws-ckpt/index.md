@@ -368,7 +368,11 @@ it is not rejected as implicit drift. An explicit backend-type switch also
 does not adopt data from the previous backend. In either case, previous
 snapshots become invisible and startup reconciliation can prune unpinned
 snapshot records from `/var/lib/ws-ckpt/indexes`. **Pointing back does not
-recover pruned records.** Stop the daemon and back up the manifest, indexes
+recover pruned records**; their message, creation time and ancestry are lost.
+Snapshot subvolumes still on the previous root reappear as pinned
+[recovered orphans](#snapshot-recovery-after-an-interrupted-cleanup) that
+auto-cleanup skips; review them with `ws-ckpt list --orphans` and delete them
+explicitly. Stop the daemon and back up the manifest, indexes
 and snapshot data before an intentional switch. This setting does not migrate
 any data.
 

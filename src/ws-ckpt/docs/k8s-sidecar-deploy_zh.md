@@ -133,7 +133,8 @@ Pod 使用同一镜像运行两个容器。
    数据位于 `/shared-btrfs/ws-ckpt-data`。`--mount-path` 不配置 BtrfsBase。
    未显式指定位置时，重启使用 `state.json` 中记录的挂载；路径缺失、未挂载、
    不是 btrfs 或只读就报错，不改选另一个挂载。修改显式挂载点需重启，旧快照可能
-   不再可见、未 pinned 的索引记录可能被清除，切回也不会恢复。应先备份状态和数据。
+   不再可见、未 pinned 的索引记录可能被清除，切回也不会恢复；残留子卷会以 pinned
+   孤儿重新出现（见 `ws-ckpt list --orphans`）。应先备份状态和数据。
 
 8. 两个容器需要共享 `/etc/ws-ckpt`。
    `ws-ckpt config --global` 会直接写入
