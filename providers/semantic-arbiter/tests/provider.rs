@@ -172,6 +172,9 @@ fn invalid_config_and_duplicate_fields_are_sanitized() {
             "/tools/Bash",
             json!({"command_pointer":"/command","operation":"replace"}),
         ),
+        // The patch grammar is OpenClaw's; the fixture binds a Qoder adapter.
+        ("/tools/apply_patch", json!({"patch_pointer":"/input"})),
+        ("/tools/Write", json!({"patch_pointer":"/input"})),
         (
             "/resources",
             json!({fixture.root.path().join("build.sh").to_str().unwrap():"command:unresolved"}),
@@ -326,7 +329,10 @@ fn explicit_single_path_delete_is_advisory_and_rejects_extra_targets() {
             assert!(server.received.try_recv().is_err());
         } else {
             assert_eq!(diagnostic["code"], "shadow_evaluated");
-            assert_eq!(dir.get("evaluation")["candidate"]["operation"], "delete");
+            assert_eq!(
+                dir.get("evaluation")["candidate"]["changes"],
+                json!([{"operation":"delete","resource_id":"greeting"}])
+            );
             assert_eq!(
                 dir.get("result")["evaluation"]["outcome"]["control"]["candidate"],
                 if preserve { "block" } else { "allow" }
@@ -411,11 +417,6 @@ fn mismatches_missing_identity_and_unmapped_tools_are_uncovered() {
         ("/event/tool/call_id", Value::Null, "missing_identity"),
         ("/event/tool/native_name", json!("Bash"), "unmapped_tool"),
         (
-            "/event/tool/native_name",
-            json!("MultiEdit"),
-            "unmapped_tool",
-        ),
-        (
             "/event/tool/input",
             json!({"file_path":"greeting.txt","content":"ok","other_path":"private.txt"}),
             "unsupported_input",
@@ -488,7 +489,10 @@ fn unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint() {
         let dir = fixture.records().pop().unwrap();
         assert_eq!(dir.get("result")["status"], status);
         let evaluation = dir.get("evaluation");
-        assert_eq!(evaluation["candidate"]["resource_id"], derived);
+        assert_eq!(
+            evaluation["candidate"]["changes"],
+            json!([{"operation":"replace","resource_id":derived}])
+        );
         // Only an unconstrained or permitted identity reaches the model.
         let asked = dir.has("model_request");
         assert_eq!(asked, preserve.is_empty() && allowed != vec!["greeting"]);

@@ -24,47 +24,63 @@ pub(crate) const SOURCE_REVISION: &str = "git-v1";
 const TIMEOUT_MS: u64 = 5_000;
 /// Lifetime of one collected fact, and the age the registry tolerates for it.
 const VALID_FOR_MS: u64 = 30_000;
-/// One rebuild fact describes one candidate target.
-const MAX_ITEMS: usize = 1;
-/// Serialized ceiling for a single bound rebuild fact.
-const MAX_BYTES: usize = 1_024;
+/// One rebuild fact per candidate change.
+const MAX_ITEMS: usize = semantic_arbiter::contract::MAX_CANDIDATE_CHANGES;
+/// Serialized ceiling for one bound rebuild fact per change.
+const MAX_BYTES: usize = MAX_ITEMS * 1_024;
 /// Domain separating rebuild evidence identities from every other derived identity.
 const IDENTITY_DOMAIN: &str = "git-rebuild-evidence";
 
-/// Establishes whether a candidate target's current bytes are recoverable from git.
+/// Establishes whether each candidate target's current bytes are recoverable from git.
 ///
 /// This is a local policy input, not a model capability: the deterministic check consumes
-/// the fact without consulting a decision model, so its result is reproducible offline.
+/// the facts without consulting a decision model, so its result is reproducible offline.
 ///
-/// Constructed per request, because the resource identity it speaks for and the path that
-/// identity denotes are both fixed by that request. The arbiter core never sees the path.
+/// Constructed per request, because the resource identities it speaks for and the paths
+/// they denote are both fixed by that request. The arbiter core never sees the paths.
 pub(crate) struct GitRebuildSource {
     descriptor: EvidenceSourceDescriptor,
-    resource_id: String,
+    targets: Vec<Target>,
     /// Git working directory for every invocation.
     workspace: PathBuf,
     /// Repository-discovery ceiling, or `None` when nothing lies above the workspace.
     ceiling: Option<PathBuf>,
-    /// Candidate target: absolute, and lexically inside `workspace`.
-    path: PathBuf,
-    /// Target relative to `workspace`; the form every git pathspec here uses.
-    relative: String,
     ingress: Ingress,
 }
 
+struct Target {
+    resource_id: String,
+    /// Absolute, and lexically inside the workspace.
+    path: PathBuf,
+    /// Relative to the workspace; the form every git pathspec here uses.
+    relative: String,
+}
+
 impl GitRebuildSource {
-    /// Bind one resource identity to its workspace-relative target.
+    /// Bind each `(resource identity, absolute path)` pair to its workspace-relative target.
     ///
-    /// Returns `None` when either path is not absolute, when `path` is not strictly inside
-    /// `workspace`, or when its relative form contains an empty, `.` or `..` component that
-    /// would let git resolve outside the bound workspace.
-    pub(crate) fn new(
-        resource_id: &str,
-        workspace: &str,
-        path: &str,
-        ingress: Ingress,
-    ) -> Option<Self> {
-        let relative = relative_to(path, workspace)?;
+    /// Returns `None` for an empty, oversized or repeated identity list, when either path
+    /// is not absolute, when a path is not strictly inside `workspace`, or when its relative
+    /// form contains an empty, `.` or `..` component that would let git resolve outside the
+    /// bound workspace.
+    pub(crate) fn new(workspace: &str, targets: &[(&str, &str)], ingress: Ingress) -> Option<Self> {
+        if targets.is_empty() || targets.len() > MAX_ITEMS {
+            return None;
+        }
+        let mut bound: Vec<Target> = Vec::with_capacity(targets.len());
+        for (resource_id, path) in targets {
+            if bound
+                .iter()
+                .any(|target| target.resource_id == *resource_id)
+            {
+                return None;
+            }
+            bound.push(Target {
+                resource_id: (*resource_id).to_owned(),
+                path: PathBuf::from(path),
+                relative: relative_to(path, workspace)?,
+            });
+        }
         let workspace = PathBuf::from(workspace);
         // The ceiling must be the parent, not the workspace itself: git consults the ceiling
         // only when it walks out of a directory, so listing the workspace would still let it
@@ -83,20 +99,18 @@ impl GitRebuildSource {
                 max_age_ms: VALID_FOR_MS,
                 timeout_ms: TIMEOUT_MS,
             },
-            resource_id: resource_id.to_owned(),
+            targets: bound,
             workspace,
             ceiling,
-            path: PathBuf::from(path),
-            relative,
             ingress,
         })
     }
 
     /// Compare the target's working-tree blob against every blob git retains for it.
-    async fn classify(&self) -> RebuildResult {
+    async fn classify(&self, target: &Target) -> RebuildResult {
         // Stat rather than open, so a missing target is reported without invoking git while
         // an unreadable one stays undetermined instead of being mistaken for absence.
-        match tokio::fs::symlink_metadata(&self.path).await {
+        match tokio::fs::symlink_metadata(&target.path).await {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return RebuildResult::Absent
             }
@@ -107,16 +121,16 @@ impl GitRebuildSource {
         // matching smudge filter reproduces the working bytes, so the content is recoverable
         // even though a raw byte comparison would report it as unique.
         let Some(working) = self
-            .git(&["hash-object", "--", self.relative.as_str()], 0)
+            .git(&["hash-object", "--", target.relative.as_str()], 0)
             .await
         else {
             return RebuildResult::Unknown;
         };
         let index = self
-            .git(&["ls-files", "-s", "--", self.relative.as_str()], 1)
+            .git(&["ls-files", "-s", "--", target.relative.as_str()], 1)
             .await;
         let head = self
-            .git(&["ls-tree", "HEAD", "--", self.relative.as_str()], 2)
+            .git(&["ls-tree", "HEAD", "--", target.relative.as_str()], 2)
             .await;
         if index.as_deref() == Some(working.as_str()) || head.as_deref() == Some(working.as_str()) {
             RebuildResult::Identical
@@ -177,31 +191,46 @@ impl EvidenceSource for GitRebuildSource {
     ) -> Pin<Box<dyn Future<Output = Result<EvidenceSourceOutput, EvidenceSourceError>> + Send + 'a>>
     {
         Box::pin(async move {
-            // A source speaks only for the candidate it was constructed with; any other
-            // resource is an explicit coverage gap, never a fact about something else.
-            if request.candidate.resource_id != self.resource_id {
-                return Ok(EvidenceSourceOutput {
-                    evidence: vec![],
-                    gaps: vec![Scenario::Preservation],
-                });
+            // A source speaks only for the resources it was constructed with. One change
+            // it cannot describe is an explicit coverage gap for the whole candidate,
+            // never a partial set of facts that would read as complete.
+            let mut targets = Vec::with_capacity(request.candidate.changes.len());
+            for change in &request.candidate.changes {
+                match self
+                    .targets
+                    .iter()
+                    .find(|target| target.resource_id == change.resource_id)
+                {
+                    Some(target) => targets.push(target),
+                    None => {
+                        return Ok(EvidenceSourceOutput {
+                            evidence: vec![],
+                            gaps: vec![Scenario::Preservation],
+                        })
+                    }
+                }
             }
             // Measured before the git work and in the ingress clock domain, which the
             // registry also uses for its staleness recheck. A fresh system-clock reading
             // could jump ahead of it and get the whole batch discarded as stale.
             let captured_at_ms = self.ingress.now_ms();
-            let result = self.classify().await;
-            let id = crate::mapping::identity(IDENTITY_DOMAIN, &json!([self.resource_id]))
-                .map_err(|_| EvidenceSourceError::Unavailable)?;
-            Ok(EvidenceSourceOutput {
-                evidence: vec![SourceEvidence {
+            let mut evidence = Vec::with_capacity(targets.len());
+            for target in targets {
+                let result = self.classify(target).await;
+                let id = crate::mapping::identity(IDENTITY_DOMAIN, &json!([target.resource_id]))
+                    .map_err(|_| EvidenceSourceError::Unavailable)?;
+                evidence.push(SourceEvidence {
                     id,
                     captured_at_ms,
                     valid_until_ms: captured_at_ms.saturating_add(VALID_FOR_MS),
                     fact: EvidenceFact::Rebuild {
-                        resource_id: self.resource_id.clone(),
+                        resource_id: target.resource_id.clone(),
                         result,
                     },
-                }],
+                });
+            }
+            Ok(EvidenceSourceOutput {
+                evidence,
                 gaps: vec![],
             })
         })
@@ -237,7 +266,7 @@ mod tests {
     use super::*;
     use semantic_arbiter::check::check;
     use semantic_arbiter::contract::{
-        AnswerValue, Binding, Budget, Candidate, Operation, Reason, Task, TaskOrigin,
+        AnswerValue, Binding, Budget, Candidate, Change, Operation, Reason, Task, TaskOrigin,
     };
     use semantic_arbiter::evidence::EvidenceSourceRegistry;
     use semantic_arbiter::protocol::{
@@ -282,22 +311,39 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "init"]);
     }
 
-    fn source(workspace: &Path, relative: &str) -> GitRebuildSource {
+    fn resource_id(relative: &str) -> String {
+        format!("path:{}", relative.replace('/', ":"))
+    }
+
+    fn source(workspace: &Path, relatives: &[&str]) -> GitRebuildSource {
         let ingress = Ingress::capture().expect("clock must be available");
+        let owned: Vec<_> = relatives
+            .iter()
+            .map(|relative| {
+                let path = workspace.join(relative);
+                (
+                    resource_id(relative),
+                    path.to_str().expect("utf-8 path").to_owned(),
+                )
+            })
+            .collect();
+        let pairs: Vec<_> = owned
+            .iter()
+            .map(|(id, path)| (id.as_str(), path.as_str()))
+            .collect();
         GitRebuildSource::new(
-            &format!("path:{}", relative.replace('/', ":")),
             workspace.to_str().expect("utf-8 workspace"),
-            workspace.join(relative).to_str().expect("utf-8 path"),
+            &pairs,
             ingress,
         )
         .expect("fixture paths are contained")
     }
 
     async fn classify(workspace: &Path, relative: &str) -> RebuildResult {
-        let source = source(workspace, relative);
+        let source = source(workspace, &[relative]);
         assert_eq!(source.descriptor().source_id, SOURCE_ID);
         assert_eq!(source.descriptor().provenance, Provenance::LocalVerifier);
-        source.classify().await
+        source.classify(&source.targets[0]).await
     }
 
     #[tokio::test]
@@ -452,13 +498,18 @@ mod tests {
             ("work", "/work/file.txt"),
             ("/work", "file.txt"),
         ] {
+            let targets = [("path:a.txt", "/work/a.txt"), ("path:file.txt", path)];
             assert!(
-                GitRebuildSource::new("path:file.txt", workspace, path, ingress).is_none(),
+                GitRebuildSource::new(workspace, &targets, ingress).is_none(),
                 "{workspace} + {path} must not bind"
             );
         }
+        let file = ("path:file.txt", "/work/file.txt");
+        assert!(GitRebuildSource::new("/work", &[], ingress).is_none());
+        assert!(GitRebuildSource::new("/work", &[file, file], ingress).is_none());
         assert!(
-            GitRebuildSource::new("path:file.txt", "/work", "/work/file.txt", ingress).is_some()
+            GitRebuildSource::new("/work", &[("path:a.txt", "/work/a.txt"), file], ingress)
+                .is_some()
         );
     }
 
@@ -485,8 +536,10 @@ mod tests {
     async fn foreign_candidate_reports_a_gap_instead_of_evidence() {
         let dir = tempfile::tempdir().expect("tempdir");
         committed(dir.path());
-        let source = source(dir.path(), "tracked.txt");
-        let mut request = preservation_request("path:other:file.txt");
+        std::fs::write(dir.path().join("other.txt"), "v1\n").expect("fixture write");
+        let source = source(dir.path(), &["tracked.txt"]);
+        // The bound change alone would yield a fact; the unbound one voids the batch.
+        let mut request = preservation_request(&["tracked.txt", "other.txt"]);
         request.budget.deadline_ms = source.ingress.now_ms() + 5_000;
         let mut registry = EvidenceSourceRegistry::new();
         registry.register(source).expect("descriptor must be valid");
@@ -504,15 +557,18 @@ mod tests {
         assert_eq!(collection.gaps[0].source_id, SOURCE_ID);
     }
 
-    /// Deterministic preservation end to end: collected git fact in, outcome out, no model.
-    async fn preservation_outcome(relative: &str) -> (Reason, AnswerValue) {
+    /// Deterministic preservation end to end: collected git facts in, outcome out, no model.
+    ///
+    /// `modified` files get new working bytes; every other target keeps its committed bytes.
+    async fn preservation_outcome(relatives: &[&str], modified: &[&str]) -> (Reason, AnswerValue) {
         let dir = tempfile::tempdir().expect("tempdir");
         committed(dir.path());
-        std::fs::write(dir.path().join(relative), "v2\n").expect("fixture write");
-        let resource_id = format!("path:{}", relative.replace('/', ":"));
-        let source = source(dir.path(), relative);
+        for relative in modified {
+            std::fs::write(dir.path().join(relative), "v2\n").expect("fixture write");
+        }
+        let source = source(dir.path(), relatives);
         let ingress = Ingress::capture().expect("clock must be available");
-        let mut request = preservation_request(&resource_id);
+        let mut request = preservation_request(relatives);
         request.budget.deadline_ms = ingress.now_ms() + 5_000;
         let mut registry = EvidenceSourceRegistry::new();
         registry.register(source).expect("descriptor must be valid");
@@ -536,7 +592,7 @@ mod tests {
         (answer.reason, answer.value)
     }
 
-    fn preservation_request(resource_id: &str) -> CheckRequest {
+    fn preservation_request(relatives: &[&str]) -> CheckRequest {
         let now_ms = Ingress::capture()
             .expect("clock must be available")
             .now_ms();
@@ -570,8 +626,13 @@ mod tests {
                 preserve_resource_ids: vec![],
             }),
             candidate: Candidate {
-                operation: Operation::Replace,
-                resource_id: resource_id.into(),
+                changes: relatives
+                    .iter()
+                    .map(|relative| Change {
+                        operation: Operation::Replace,
+                        resource_id: resource_id(relative),
+                    })
+                    .collect(),
                 native_tool: None,
             },
             evidence: vec![],
@@ -582,7 +643,7 @@ mod tests {
     #[tokio::test]
     async fn unique_content_requires_a_snapshot_without_a_model() {
         assert_eq!(
-            preservation_outcome("tracked.txt").await,
+            preservation_outcome(&["tracked.txt"], &["tracked.txt"]).await,
             (Reason::NeedsSnapshot, AnswerValue::NeedsSnapshot)
         );
     }
@@ -590,7 +651,25 @@ mod tests {
     #[tokio::test]
     async fn untracked_content_is_undetermined_and_blocks() {
         assert_eq!(
-            preservation_outcome("untracked.txt").await,
+            preservation_outcome(&["untracked.txt"], &["untracked.txt"]).await,
+            (Reason::Undetermined, AnswerValue::Unknown)
+        );
+    }
+
+    #[tokio::test]
+    async fn every_changed_file_contributes_to_one_preservation_answer() {
+        // A missing file alone is allowed; the unique sibling still needs a snapshot.
+        assert_eq!(
+            preservation_outcome(&["never-existed.txt", "tracked.txt"], &["tracked.txt"]).await,
+            (Reason::NeedsSnapshot, AnswerValue::NeedsSnapshot)
+        );
+        // An undetermined file outranks a sibling that only needs a snapshot.
+        assert_eq!(
+            preservation_outcome(
+                &["tracked.txt", "untracked.txt"],
+                &["tracked.txt", "untracked.txt"]
+            )
+            .await,
             (Reason::Undetermined, AnswerValue::Unknown)
         );
     }

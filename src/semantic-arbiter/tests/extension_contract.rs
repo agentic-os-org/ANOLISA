@@ -330,7 +330,7 @@ async fn invalid_custom_answer_is_rejected_centrally() {
 async fn custom_unit_cannot_remove_deterministic_snapshot_protection() {
     let mut request = request();
     request.evidence[0].fact = EvidenceFact::Rebuild {
-        resource_id: request.candidate.resource_id.clone(),
+        resource_id: request.candidate.changes[0].resource_id.clone(),
         result: RebuildResult::Unique,
     };
     let reply = ModelReply {
@@ -359,7 +359,7 @@ async fn deterministic_hard_block_never_calls_custom_decision() {
         .as_mut()
         .unwrap()
         .preserve_resource_ids
-        .push(request.candidate.resource_id.clone());
+        .push(request.candidate.changes[0].resource_id.clone());
     let run = Evaluator::with_units(
         config(),
         FixtureBackend::new(Ok(ModelReply {

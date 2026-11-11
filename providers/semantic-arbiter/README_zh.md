@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-这是一个 observe-only AW Provider，用于记录明确配置的单文件变更和 shell 命令与任务范围之间的语义判断。
+这是一个 observe-only AW Provider，用于记录明确配置的文件变更、shell 命令和 OpenClaw patch 与任务范围之间的语义判断。
 它通过 Semantic Arbiter 公共 API，将完整原生工具调用与同一会话中采集到的用户 prompt 进行比较。
 它面向受控的 shadow 评估：即使语义结果为 `block`，也不会产生任何 AW effect，更不会执行工具、落实 obligation 或授予权限。
 
@@ -12,9 +12,13 @@
 
 这些记录只是本地观察，不是身份认证、执行 receipt、arbiter 可信进程内 `EvaluationRecord` 的持久化替代品，也不是文件系统身份的证明。配置或派生的 workspace/resource ID 只是操作者范围内的标签，不构成关于所指文件的任何证据。路径检查只处理字符串：Provider 不打开 candidate 文件，不验证符号链接、硬链接、挂载点、实际效果或原生工具语义。原生权限和安全检查始终独立且具有权威性。
 
-精确配置的 `tool.native_name`：`Edit`、`Write`、`edit`、`write` 映射为 `replace`；`Delete`、`delete` 映射为 `delete`。每个映射只选取一个顶层 `/file_path` 或 `/path` 字符串。Write 输入必须包含该路径和字符串 `content`；Edit 输入必须包含该路径、字符串 `old_string` 和 `new_string`，可选布尔字段 `replace_all`/`allow_multiple`。Delete 输入只能包含选定路径。这些是操作者显式声明的输入契约，不表示每个 Agent 都提供这些名称。未知输入字段、MultiEdit、多资源文件调用和其他方言都标记为 uncovered，不进行推理。这个受限映射不认证原生工具行为。
+精确配置的 `tool.native_name`：`Edit`、`Write`、`edit`、`write` 映射为 `replace`；`Delete`、`delete` 映射为 `delete`。每个映射只选取一个顶层 `/file_path` 或 `/path` 字符串。Write 输入必须包含该路径和字符串 `content`；Edit 输入必须包含该路径、字符串 `old_string` 和 `new_string`，可选布尔字段 `replace_all`/`allow_multiple`。Delete 输入只能包含选定路径。这些是操作者显式声明的输入契约，不表示每个 Agent 都提供这些名称。未知输入字段和其他方言都标记为 uncovered，不进行推理。这个受限映射不认证原生工具行为。
 
-配置为 `Bash` 或 `bash` 的工具使用 `command_pointer: /command`。其输入还可包含 `description`、`timeout`、`run_in_background` 和 `dir_path`；任何其他字段都标记为 uncovered。命令字符串只做词法切分，从不执行或展开。重定向目标和常见写入命令（`rm`、`rmdir`、`unlink`、`touch`、`mkdir`、`tee`、`truncate`、`cp`、`mv`、`ln`、`sed -i`、`sort -o`、`git rm`/`mv`/`checkout --`/`restore`）的操作数成为命名目标；heredoc 正文和引号内文本视为数据。只有一个目标成为 candidate：保留目标，或包含保留资源的递归目标优先，并且不调用模型直接阻断；否则在非空 allowed 列表下取第一个超出列表的目标；否则取第一个命名目标。无法归属任何目标时（脚本、解释器、未列出的程序、命令替换、变量、`find` 动作、`git reset --hard`/`clean`、`cd` 之后或另一 `dir_path` 下的相对路径），candidate 为 `command:unresolved`，由模型判断完整命令。在非空 allowed 列表下，该占位符属于超出范围，除非你列出 `command:unresolved`。只包含只读部分的命令不产生 candidate，以 `no_mutation` 跳过。词法分析看不到程序内部执行的写入：这是用于 shadow 评估的映射，不是隔离手段。
+每个已映射调用都成为一个 candidate，以 1–64 项 `changes` 列出受影响的每个资源，每项为 `{"operation":"replace"|"delete","resource_id":...}`。同一资源只出现一次；一次调用既写入又删除同一资源时，该项为 `delete`。变更项更多的调用以 `oversized_candidate` 记为 uncovered。任一变更涉及保留资源时，不调用模型直接阻断；否则在非空 allowed 列表下，任一变更超出列表时同样不调用模型直接阻断；否则由模型判断完整调用。
+
+配置为 `Bash` 或 `bash` 的工具使用 `command_pointer: /command`。其输入还可包含 `description`、`timeout`、`run_in_background` 和 `dir_path`；任何其他字段都标记为 uncovered。命令字符串只做词法切分，从不执行或展开。重定向目标和常见写入命令（`rm`、`rmdir`、`unlink`、`touch`、`mkdir`、`tee`、`truncate`、`cp`、`mv`、`ln`、`sed -i`、`sort -o`、`git rm`/`mv`/`checkout --`/`restore`）的操作数成为命名目标；heredoc 正文和引号内文本视为数据。每个目标按命令顺序成为一项变更。递归目标或 workspace 本身还会对其下每个保留资源产生一项变更。无法归属的目标（`cd` 之后或另一 `dir_path` 下的相对路径，或 workspace 本身），以及词法分析完全无法归属的部分（脚本、解释器、未列出的程序、命令替换、变量、`find` 动作、`git reset --hard`/`clean`），会加入占位变更 `command:unresolved`，由模型判断完整命令。在非空 allowed 列表下，该占位符属于超出范围，除非你列出 `command:unresolved`。只包含只读部分的命令不产生 candidate，以 `no_mutation` 跳过。词法分析看不到程序内部执行的写入：这是用于 shadow 评估的映射，不是隔离手段。
+
+adapter 为 `openclaw` 时，名为 `apply_patch` 或 `apply-patch` 的工具可使用 `patch_pointer: /input`；输入只能包含该字符串。其 `*** Begin Patch` 信封按 OpenClaw 自身 patch 解析器的语法解析（包括对 CRLF、首尾空白和 heredoc 包裹的容忍），从不实际应用。`Add File` 和 `Update File` 映射为 `replace`，`Delete File` 映射为 `delete`，`Move to` 映射为目标的 `replace` 加源文件的 `delete`。原生解析器会拒绝的输入记为 `unsupported_input`。任一 hunk 路径以 `@` 或 `~` 开头、指向 workspace 本身或位于其外时，整个调用记为 `unmapped_resource`，因为 OpenClaw 会按已存在文件或 home 目录解析这类路径。AW OpenClaw adapter 目前既不提供 `event.native.cwd`，也不投递 `input.submit`，因此所有 OpenClaw 调用都记为 `context_mismatch`；补齐 cwd 后，在 prompt 也被采集之前，调用仍记为 `task_unavailable`。
 
 ## 配置与运行
 
@@ -84,6 +88,6 @@ AW 单请求上限为 1 MiB；arbiter 单 evaluation 上限为 256 KiB，完整�
 
 ## 验证与归属
 
-测试使用真实 binary、本地 HTTP fixture 和公共 AW Host，不使用真实 Agent、远程模型或真实凭据。必需契约检查包括 allow/deny 时空 effects、完整 candidate、独立权限配置、按会话采集 prompt 的顺序/重复投递/大小限制、闭合私有配置与 scenario 校验、独立重建及并行会话/实例上下文、身份校验、不支持/超限输入不生成任务记录、畸形配置、凭据/模型错误、私有权限、符号链接替换、会话数与实际字节配额、有界/并发准入且推理前释放锁、进程被杀及原始准备/锁等待/HTTP deadline。这些是契约检查，不是原生 Agent 采用效果或生产模型质量的证据。
+测试使用真实 binary、本地 HTTP fixture 和公共 AW Host，不使用真实 Agent、远程模型或真实凭据。必需契约检查包括 allow/deny 时空 effects、完整 candidate、多变更 Bash 与 apply_patch 映射、独立权限配置、按会话采集 prompt 的顺序/重复投递/大小限制、闭合私有配置与 scenario 校验、独立重建及并行会话/实例上下文、身份校验、不支持/超限输入不生成任务记录、畸形配置、凭据/模型错误、私有权限、符号链接替换、会话数与实际字节配额、有界/并发准入且推理前释放锁、进程被杀及原始准备/锁等待/HTTP deadline。这些是契约检查，不是原生 Agent 采用效果或生产模型质量的证据。
 
 维护者/联系方式：通过仓库 issue 联系 ANOLISA 维护者。源码位于本目录及 `src/aw`、`src/semantic-arbiter` 公共库；使用仓库 Apache-2.0 许可证。参见 [Provider 贡献指南](../README_zh.md)。删除独立安装的 binary 或私有数据前，先禁用 AW step/provider 并停止活动调用。

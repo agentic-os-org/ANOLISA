@@ -84,9 +84,9 @@ cargo run --example evidence_source
 
 ### 完整原生候选
 
-消费方可在 `candidate.native_tool` 中提供非空白 `name`（最多 128 个 UTF-8 字节）和完整的 `input` JSON 对象（紧凑 JSON 最多 65536 字节）。整个请求仍受 262144 字节上限约束，不能通过截断输入满足限制。原生工具名和参数是不可信数据，不授予权限，也不替代已声明的资源上限。`task-scope-v3` 问题会考虑所有提供的参数。
+消费方可在 `candidate.native_tool` 中提供非空白 `name`（最多 128 个 UTF-8 字节）和完整的 `input` JSON 对象（紧凑 JSON 最多 65536 字节）。整个请求仍受 262144 字节上限约束，不能通过截断输入满足限制。原生工具名和参数是不可信数据，不授予权限，也不替代已声明的资源上限。`task-scope-v4` 问题会考虑列出的全部变更和所有提供的参数。
 
-存在 `native_tool` 时，`binding.candidate_revision` 必须等于公共 Rust API `contract::candidate_revision(&candidate)` 的结果。该函数对完整候选使用递归对象键排序、紧凑 JSON 和域 `semantic-arbiter/v1alpha1\0candidate\0` 计算摘要。操作、资源、工具名或参数变化都需要新的版本及匹配的证据绑定。两个判定命令均拒绝嵌套重复 JSON 键。不携带原生数据的请求保留现有候选版本格式和输入摘要。
+存在 `native_tool` 时，`binding.candidate_revision` 必须等于公共 Rust API `contract::candidate_revision(&candidate)` 的结果。该函数对完整候选使用递归对象键排序、紧凑 JSON 和域 `semantic-arbiter/v1alpha1\0candidate\0` 计算摘要。任一变更、变更顺序、工具名或参数的变化都需要新的版本及匹配的证据绑定。两个判定命令均拒绝嵌套重复 JSON 键。不携带原生数据的请求接受调用方自定的候选版本标签。
 
 ### 配置后端
 
@@ -303,13 +303,11 @@ make check
 
 ### AW 旁路观测
 
-使用独立的[语义 Provider](../../../../providers/semantic-arbiter/README_zh.md)，将受支持的原生单文件调用与操作者任务比较，而不改变执行。该 Provider 尚无安装器/RPM 集成，请遵循其源码构建说明。Provider 命令配置为 `aw-provider-semantic-arbiter`，不能使用本核心 CLI。使用前查看配套合成 [JSON](../../../../providers/semantic-arbiter/examples/config.json) 和 [AW YAML](../../../../providers/semantic-arbiter/examples/aw.yaml) 模板，替换路径并提供真实操作者任务。
+使用独立的[语义 Provider](../../../../providers/semantic-arbiter/README_zh.md)，将显式映射的原生文件编辑、shell 命令和 OpenClaw patch 与同一会话的用户 prompt 比较，而不改变执行。该 Provider 尚无安装器/RPM 集成，请遵循其源码构建说明。Provider 命令配置为 `aw-provider-semantic-arbiter`，不能使用本核心 CLI。使用前查看配套合成 [JSON](../../../../providers/semantic-arbiter/examples/config.json) 和 [AW YAML](../../../../providers/semantic-arbiter/examples/aw.yaml) 模板，并替换其中路径。
 
-Provider 私有配置要求 `version: 1`，且只接受已声明字段。不填写 `task.session_id`；会话身份由 AW 事件提供。这不改变 `aw/v1alpha1`、`aw-provider/v1alpha1` 或两种核心判断协议。不可变的 AW Host 配置固定一份任务模板：`task.version`、`task.text`、provenance 以及可选 allowed/preserved 资源限制。保留 `model.config_revision: aw_request`；调用时替换为完整 AW 请求配置修订的域分离哈希。须核验任务原文字节的 provenance 摘要；`user_prompt_verbatim` 仍是操作者断言，不是经过认证的原生任务发现。
+Provider 私有配置要求 `version: 1`，只接受已声明字段，且不包含任务文本。这不改变 `aw/v1alpha1`、`aw-provider/v1alpha1` 或两种核心判断协议。在 `input.submit` 和 `tool.before` 上同时启用同一个 `evaluate_task_scope` step：每次 `input.submit` 把一轮 prompt 追加到所属会话，每次 `tool.before` 用该会话已采集的全部轮次判断。prompt 是未经认证的用户输入，不授予任何权限；资源限制只来自 `task.allowed_resource_ids` 和 `task.preserve_resource_ids`。保留 `model.config_revision: aw_request`；调用时替换为完整 AW 请求配置修订的域分离哈希。
 
-每个原生会话在首个合法且受支持的 `tool.before` 通过投影和大小检查后，独立获得配置中的任务。AW 已提供经过校验的 event/session、instance、binding 和配置修订。Provider 将完整元组 `[adapter, binding_id, instance_id, native_session_id]` 哈希为有效 `session_id`。后续以 EOF 分隔请求的独立进程确定性重建相同任务上下文；不使用持久化首事件锁存、当前会话单例或数据库，记录也不是会话状态。不同会话/实例可并行推理；相同原生 session 字符串在另一 binding/instance 中属于不同作用域。新增会话无需修改配置。不同任务须使用独立 AW 配置/实例，不通过 prompt/历史发现任务，也不自动分配多任务。
-
-原生 session 必须非空白、最多 512 个 UTF-8 字节且不含控制字符，不与预设 session 比较。Adapter、cwd 和 instance/binding/call 身份校验仍然有效：Provider cwd 与 `event.native.cwd` 都必须等于配置的 workspace。只覆盖显式映射的受支持单文件输入；不支持的操作、上下文错误和超限 candidate 标为 `uncovered`，不推理、不生成 `05-task.json`。完整原生参数上限仍为 64 KiB，evaluation 上限为 256 KiB；超限输入完整保留在 `00-input.json`，绝不截断后发给模型。
+Provider 将完整元组 `[adapter, binding_id, instance_id, native_session_id]` 哈希为有效 `session_id`，因此不同会话和实例各自独立记录与推理。原生 session 必须非空白、最多 512 个 UTF-8 字节且不含控制字符。Provider cwd 与 `event.native.cwd` 都必须等于配置的 workspace。每个已映射调用成为一个包含 1–64 项变更的 candidate，每个受影响资源一项；变更涉及保留资源或超出非空 allowed 列表时，不调用模型直接阻断。未映射的工具或输入、上下文错误、没有已采集 prompt 的会话和超限 candidate 标为 `uncovered`，不进行推理。完整原生参数上限仍为 64 KiB，evaluation 上限为 256 KiB；超限输入完整保留在该调用的 `input` 行中，绝不截断后发给模型。
 
 配置受支持的 Agent 和已获授权的 backend 后，从与配置完全一致的 workspace 启动 AW：
 
@@ -317,8 +315,8 @@ Provider 私有配置要求 `version: 1`，且只接受已声明字段。不填�
 aw run --config /absolute/path/to/aw.yaml --agent target
 ```
 
-**先取得数据保留和出站载荷授权。** 私有存储包含完整 AW 请求、任务/candidate 原文和模型观察；AW `metadata_only` 审计不会关闭它。预先创建运行时用户所有、mode 为 `0700` 且各级路径均无符号链接的根目录，尽量置于 Agent 可写 workspace 之外。各调用目录保持私有，文件为 `0600`。`05-task.json` 格式版本 1 记录 `native_session_id`、作用域隔离的 `session_id`、AW `adapter`/`binding_id`/`instance_id`、`config_revision` 哈希、`task_version`、provenance、声明/投影原文摘要和 `text_bytes`，仅在投影合法且通过大小检查后写入。它不重复任务原文，也不构成授权。
+**先取得数据保留和出站载荷授权。** 私有存储包含完整 AW 请求、以明文保存的每条已采集 prompt、原生参数和模型观察；AW `metadata_only` 审计不会关闭它。预先创建运行时用户所有、mode 为 `0700` 且各级路径均无符号链接的根目录，尽量置于 Agent 可写 workspace 之外。每个会话有一个私有目录，内含 `task.json`（已采集轮次）和 `calls.jsonl`（每个调用阶段一行）；无法识别会话的调用写入 `unbound.jsonl`。所有文件均为 `0600`。
 
-配额仍为 `max_records: 1..=10000` 和 `max_storage_bytes: 4 MiB..=1 GiB`；每份记录（包括不完整记录）固定占用 4 MiB 预留量。根目录配额 `flock` 竞争通过 Tokio 协作等待，只消耗原始 ingress 预算的剩余时间，耗尽时跳过推理。锁在推理前释放。等待输入、解析、投影、等待锁、持久化和推理共用原始 AW `budget_ms` 与模型 timeout 的较小值：无独立续期 deadline，也无网络重试。部分记录仍占用预留量；手动检查、归档或删除自有记录前，须停止使用根目录的进程。
+配额为 `max_sessions`、`max_session_bytes` 和 `max_storage_bytes`，按磁盘上的实际字节计算。根目录配额 `flock` 竞争只消耗原始 ingress 预算的剩余时间，耗尽时跳过推理；锁在推理前释放。等待输入、解析、投影、等待锁、持久化和推理共用原始 AW `budget_ms` 与模型 timeout 的较小值：无独立续期 deadline，也无网络重试。手动检查、归档或删除自有记录前，须停止使用根目录的进程。
 
-保留 `effects: [observe]` 和 `on_error: report`。合法调用始终返回 `status: ok`、原始请求 digest 和 `effects: []`，即使建议为 `block` 或发生语义错误。检查 `40-result.json` 中的 `evaluated`、`uncovered`、`skipped`，并查看留存 evaluation 中的实际判断。任何记录或不支持/未确认结果均不授予权限、不落实保护，也不证明执行；原生安全和权限检查仍具有权威性。
+保留 `effects: [observe]` 和 `on_error: report`。合法调用始终返回 `status: ok`、原始请求 digest 和 `effects: []`，即使建议为 `block` 或发生语义错误。查看每个调用 `result` 行中的 `evaluated`、`uncovered`、`skipped`，并查看留存 evaluation 中的实际判断。任何记录或不支持/未确认结果均不授予权限、不落实保护，也不证明执行；原生安全和权限检查仍具有权威性。

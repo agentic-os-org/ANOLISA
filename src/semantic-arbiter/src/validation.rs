@@ -108,7 +108,18 @@ pub(crate) fn request(value: &CheckRequest) -> Result<(), ContractError> {
 }
 
 pub(crate) fn candidate(value: &Candidate) -> Result<(), ContractError> {
-    id(&value.resource_id)?;
+    require(
+        !value.changes.is_empty() && value.changes.len() <= crate::contract::MAX_CANDIDATE_CHANGES,
+        ContractError::InvalidInput,
+    )?;
+    let mut seen = HashSet::new();
+    for change in &value.changes {
+        id(&change.resource_id)?;
+        require(
+            seen.insert(&change.resource_id),
+            ContractError::InvalidInput,
+        )?;
+    }
     if let Some(native) = &value.native_tool {
         require(
             !native.name.trim().is_empty() && native.name.len() <= 128 && native.input.is_object(),

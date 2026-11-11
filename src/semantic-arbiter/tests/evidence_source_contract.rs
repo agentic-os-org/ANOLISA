@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use semantic_arbiter::check::check;
 use semantic_arbiter::contract::{
-    Binding, Budget, Candidate, EvidenceFact, Operation, Provenance, Reason, RebuildResult,
+    Binding, Budget, Candidate, Change, EvidenceFact, Operation, Provenance, Reason, RebuildResult,
     Scenario, Task, TaskOrigin,
 };
 use semantic_arbiter::deadline::Ingress;
@@ -176,8 +176,10 @@ fn request(now_ms: u64) -> CheckRequest {
             preserve_resource_ids: vec![],
         }),
         candidate: Candidate {
-            operation: Operation::Replace,
-            resource_id: "resource-1".into(),
+            changes: vec![Change {
+                operation: Operation::Replace,
+                resource_id: "resource-1".into(),
+            }],
             native_tool: None,
         },
         evidence: vec![],
@@ -626,7 +628,7 @@ async fn registration_selection_and_context_are_validated_before_collection() {
         );
     }
     let mut invalid_context = request.clone();
-    invalid_context.candidate.resource_id.clear();
+    invalid_context.candidate.changes[0].resource_id.clear();
     assert_eq!(
         registry
             .collect(

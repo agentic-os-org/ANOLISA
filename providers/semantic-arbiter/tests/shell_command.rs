@@ -10,14 +10,15 @@ use serde_json::json;
 
 #[test]
 fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
-    // (command, extra input, allowed ceiling, expected code, resource, control, model called)
-    for (command, extra, ceiling, code, resource, control, model) in [
+    let unresolved = ("replace", "command:unresolved");
+    // (command, extra input, allowed ceiling, expected code, changes, control, model called)
+    for (command, extra, ceiling, code, changes, control, model) in [
         (
             "echo hi > greeting.txt",
             None,
             false,
             "shadow_evaluated",
-            "greeting",
+            vec![("replace", "greeting")],
             "block",
             false,
         ),
@@ -26,7 +27,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             None,
             false,
             "shadow_evaluated",
-            "greeting",
+            vec![("replace", "greeting")],
             "block",
             false,
         ),
@@ -35,7 +36,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             None,
             false,
             "shadow_evaluated",
-            "greeting",
+            vec![("delete", "command:unresolved"), ("delete", "greeting")],
             "block",
             false,
         ),
@@ -44,7 +45,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             None,
             true,
             "shadow_evaluated",
-            "private",
+            vec![("replace", "private")],
             "block",
             false,
         ),
@@ -53,16 +54,36 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             None,
             false,
             "shadow_evaluated",
-            "path:new.txt",
+            vec![("replace", "path:new.txt")],
             "allow",
             true,
+        ),
+        // Every target is a change; a resource any part deletes is reported deleted.
+        (
+            "touch new.txt private.txt && rm -f private.txt",
+            None,
+            false,
+            "shadow_evaluated",
+            vec![("replace", "path:new.txt"), ("delete", "private")],
+            "allow",
+            true,
+        ),
+        // The preserved second target blocks the call although the first is permitted.
+        (
+            "touch new.txt; echo hi >> greeting.txt",
+            None,
+            false,
+            "shadow_evaluated",
+            vec![("replace", "path:new.txt"), ("replace", "greeting")],
+            "block",
+            false,
         ),
         (
             "python build.py",
             None,
             false,
             "shadow_evaluated",
-            "command:unresolved",
+            vec![unresolved],
             "allow",
             true,
         ),
@@ -71,7 +92,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             None,
             true,
             "shadow_evaluated",
-            "command:unresolved",
+            vec![unresolved],
             "block",
             false,
         ),
@@ -80,7 +101,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             Some(("dir_path", json!("sub"))),
             false,
             "shadow_evaluated",
-            "command:unresolved",
+            vec![unresolved],
             "allow",
             true,
         ),
@@ -89,7 +110,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             None,
             false,
             "no_mutation",
-            "",
+            vec![],
             "",
             false,
         ),
@@ -98,7 +119,7 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
             Some(("shell", json!(true))),
             false,
             "unsupported_input",
-            "",
+            vec![],
             "",
             false,
         ),
@@ -128,8 +149,13 @@ fn shell_commands_project_named_targets_and_leave_the_rest_to_the_model() {
         }
         let dir = &fixture.records()[0];
         let evaluation = dir.get("evaluation");
+        let expected: Vec<_> = changes
+            .iter()
+            .map(|(operation, id)| json!({"operation":operation,"resource_id":id}))
+            .collect();
         assert_eq!(
-            evaluation["candidate"]["resource_id"], resource,
+            evaluation["candidate"]["changes"],
+            json!(expected),
             "{command}"
         );
         assert_eq!(

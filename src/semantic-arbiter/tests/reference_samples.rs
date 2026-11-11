@@ -138,8 +138,8 @@ fn input_digest_has_a_fixed_domain_separated_vector() {
     let bytes = include_bytes!("../examples/preservation-allow.json");
     let request = decode_request(bytes).unwrap();
     // Independently computed with Python hashlib over the domain prefix and typed JSON.
-    let expected = "sha256:8697479930b097001cd968179ece5288e787fdf1803303f0a4abb9321c9f00fe";
-    assert_eq!(serde_json::to_vec(&request).unwrap().len(), 1257);
+    let expected = "sha256:52e6e552817f0ad58580c4b20e3e84d5569c01dabb343b81bf2a183e6719d0d2";
+    assert_eq!(serde_json::to_vec(&request).unwrap().len(), 1271);
     assert_eq!(input_digest(&request).unwrap(), expected);
     assert_eq!(check(&request).unwrap().input_digest, expected);
 

@@ -24,8 +24,8 @@ use semantic_arbiter::protocol;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-const PRESERVATION: &str = "preservation-v2";
-const TASK_SCOPE: &str = "task-scope-v3";
+const PRESERVATION: &str = "preservation-v3";
+const TASK_SCOPE: &str = "task-scope-v4";
 
 fn config() -> ModelConfig {
     ModelConfig::decode(
@@ -286,7 +286,7 @@ async fn projection_preserves_task_candidate_and_selected_evidence_provenance_on
         assert_eq!(question.as_object().unwrap().len(), 2);
         let text = question["instructions"].as_str().unwrap();
         assert!(text.contains("authoritative_task.text"));
-        assert!(text.contains("candidate.operation"));
+        assert!(text.contains("candidate.changes"));
         assert!(!text.contains(request.task.as_ref().unwrap().text.as_str()));
         assert!(id == PRESERVATION || id == TASK_SCOPE);
     }
@@ -309,7 +309,7 @@ async fn hard_task_constraints_skip_inference_even_with_favorable_fixture_answer
                 .as_mut()
                 .unwrap()
                 .preserve_resource_ids
-                .push(request.candidate.resource_id.clone()),
+                .push(request.candidate.changes[0].resource_id.clone()),
             "outside" => {
                 request.task.as_mut().unwrap().allowed_resource_ids =
                     vec!["unrelated-result".into()]
@@ -407,7 +407,7 @@ fn inhibit_preservation(request: &mut EvaluationRequest, case: &str) -> Reason {
             let mut conflict = request.evidence[0].clone();
             conflict.id = "conflicting-proof".into();
             conflict.fact = EvidenceFact::Rebuild {
-                resource_id: request.candidate.resource_id.clone(),
+                resource_id: request.candidate.changes[0].resource_id.clone(),
                 result: RebuildResult::Unique,
             };
             request.evidence.push(conflict);
@@ -423,7 +423,7 @@ fn inhibit_preservation(request: &mut EvaluationRequest, case: &str) -> Reason {
         }
         "unknown" => {
             request.evidence[0].fact = EvidenceFact::Rebuild {
-                resource_id: request.candidate.resource_id.clone(),
+                resource_id: request.candidate.changes[0].resource_id.clone(),
                 result: RebuildResult::Unknown,
             };
             Reason::Undetermined
@@ -694,7 +694,7 @@ async fn configured_thresholds_are_inclusive_independent_and_conservatively_norm
 async fn semantic_permission_keeps_the_local_snapshot_obligation_and_workspace_binding() {
     let mut request = request();
     request.evidence[0].fact = EvidenceFact::Rebuild {
-        resource_id: request.candidate.resource_id.clone(),
+        resource_id: request.candidate.changes[0].resource_id.clone(),
         result: RebuildResult::Unique,
     };
     let (run, _) = evaluate(&request, &[(PRESERVATION, 0.0), (TASK_SCOPE, 1.0)]).await;
@@ -942,7 +942,7 @@ async fn original_input_configuration_and_actual_observation_cannot_be_substitut
             json!("A different authoritative task with identical resource lists."),
         ),
         ("/task/origin", json!("native_user")),
-        ("/candidate/operation", json!("delete")),
+        ("/candidate/changes/0/operation", json!("delete")),
         ("/budget/deadline_ms", json!(request.budget.deadline_ms + 1)),
         ("/evidence/0/source_revision", json!("source-v2")),
         (

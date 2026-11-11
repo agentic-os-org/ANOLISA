@@ -39,16 +39,16 @@
 | `task.text` | 非空白任务意图，最多 16384 个 UTF-8 字节；仅模型求值解释此文本 |
 | `task.allowed_resource_ids` | 可选的资源上限；非空时未列出的资源即超出范围，空列表表示未声明上限 |
 | `task.preserve_resource_ids` | 可选的保留要求，在任何单元之前检查；空列表表示未声明保留要求 |
-| `candidate.operation`、`candidate.resource_id` | 在绑定工作区内，对不透明资源身份执行 `replace` 或 `delete` |
-| `candidate.native_tool` | 可选完整原生调用，仅包含 `name` 和 `input`；缺失或 `null` 时保留旧候选 |
+| `candidate.changes` | 1–64 项变更，每项为 `{operation, resource_id}`：在绑定工作区内对不透明资源身份执行 `replace` 或 `delete`。调用影响的每个资源按消费方顺序出现一次；`resource_id` 重复返回 `invalid_input` |
+| `candidate.native_tool` | 可选完整原生调用，仅包含 `name` 和 `input`；缺失与 `null` 等价 |
 | `candidate.native_tool.name` | 非空白原生工具名称，最多 128 个 UTF-8 字节 |
 | `candidate.native_tool.input` | 完整 JSON 参数对象，紧凑序列化后最多 65536 个 UTF-8 字节，不截断或仅提取命令 |
 
 绑定必须保持不可变。每条证据的绑定必须与请求绑定完全相同。任务文本、来源报告和模型内容不能扩大结构化资源上限或授予执行权限。
 
-存在原生数据时，两种协议及 EvidenceSource 采集都要求 `binding.candidate_revision` 精确等于 `contract::candidate_revision(&candidate)`。该函数校验候选，返回 `sha256:` 加 64 位小写十六进制字符。SHA-256 的输入为 `b"semantic-arbiter/v1alpha1\0candidate\0"` 后接完整候选的紧凑 JSON：递归排序全部对象键（包括数组内对象），保留数组顺序，标量使用 serde_json 编码。操作、资源、原生名称或嵌套参数的任何变化都要求重新计算 revision 并重新绑定证据。不匹配时返回 `binding_mismatch`，而不是判断结果。名称非法或 input 非对象返回 `invalid_input`；input 超出字节上限返回 `message_too_large`。外层 262144 字节消息上限及严格 JSON 递归上限仍然适用。
+存在原生数据时，两种协议及 EvidenceSource 采集都要求 `binding.candidate_revision` 精确等于 `contract::candidate_revision(&candidate)`。该函数校验候选，返回 `sha256:` 加 64 位小写十六进制字符。SHA-256 的输入为 `b"semantic-arbiter/v1alpha1\0candidate\0"` 后接完整候选的紧凑 JSON：递归排序全部对象键（包括数组内对象），保留数组顺序，标量使用 serde_json 编码。任一操作、资源、变更顺序、原生名称或嵌套参数的变化都要求重新计算 revision 并重新绑定证据。不匹配时返回 `binding_mismatch`，而不是判断结果。名称非法或 input 非对象返回 `invalid_input`；input 超出字节上限返回 `message_too_large`。外层 262144 字节消息上限及严格 JSON 递归上限仍然适用。
 
-例如候选可携带 `"native_tool":{"name":"Bash","input":{"command":"printf test","cwd":"/workspace"}}`；其中字符串属于数据，不是可执行指令或文件系统事实。完整原生数据原样进入模型 state。没有原生数据时，序列化省略该字段，既有输入摘要不变，调用方自定 revision 标签仍被接受。任务范围问题修订会改变模型配置摘要，而非旧输入摘要。这种内容绑定不认证原生调用，也不授权执行。
+例如候选可携带 `"native_tool":{"name":"Bash","input":{"command":"printf test","cwd":"/workspace"}}`；其中字符串属于数据，不是可执行指令或文件系统事实。完整原生数据原样进入模型 state。没有原生数据时，序列化省略该字段，调用方自定 revision 标签仍被接受。这种内容绑定不认证原生调用，也不授权执行。
 
 ### 证据、缺口和预算
 
@@ -84,7 +84,7 @@
 | 上限 | 值 |
 |---|---|
 | 契约消息 | 262144 个 UTF-8 字节 |
-| 证据条目、缺口记录、每个 ID 列表、obligation | 分别最多 64 |
+| 候选变更、证据条目、缺口记录、每个 ID 列表、obligation | 分别最多 64 |
 | 主体动作 | `freeze`、`quarantine`、`kill` 各最多一项 |
 | 标识符 | 1～128 个 ASCII 字节：字母、数字、`.`、`_`、`-`、`:`、`@` |
 | 单元置信度 | 整数 `0..=1000000` |
@@ -114,14 +114,14 @@ URL 拒绝内嵌凭证、查询参数和片段。HTTPS 使用证书校验。HTTP
 
 ## 判断规则与模型交互
 
-两个单元都先要求任务存在，应用保留和已声明允许列表的约束，并检查声明的覆盖缺口。资源列表为空表示未声明约束，该问题交给单元判断；已声明的列表仍是硬约束。保留意图判断还要求匹配的本地验证器重建证据。证明过期、缺失、不可信、冲突或无定论时产生 unknown。不可信的补充证据不能替代合格证明。任务范围判断不要求重建证据。
+两个单元都先要求任务存在，应用保留和已声明允许列表的约束，并检查声明的覆盖缺口。资源列表为空表示未声明约束，该问题交给单元判断；已声明的列表仍是硬约束。硬约束作用于每项变更：只要有一个资源受保留，或有一个资源超出已声明允许列表，就决定整个候选的结果。保留意图判断还要求每个变更资源都有匹配的本地验证器重建证据。按候选顺序第一个未能确立的资源决定结果；否则只要有一个资源为 `unique`，此次调用就需要快照，答案引用为各资源证据的排序并集。证明过期、缺失、不可信、冲突或无定论时产生 unknown。不可信的补充证据不能替代合格证明。任务范围判断不要求重建证据。
 
 | 单元 / 问题 ID | 模型命题 | 支持的结果 |
 |---|---|---|
-| `preservation` / `preservation-v2` | 权威任务原文是否要求资源在此次操作下保持不变？ | yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留确定性的 `allow` 或 `needs_snapshot` 结果 |
-| `task_scope` / `task-scope-v3` | 完整候选是否符合权威任务原文，包括提供的原生名称及全部嵌套参数？无原生数据时判断对资源执行的操作。 | yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
+| `preservation` / `preservation-v3` | 权威任务原文是否要求 `candidate.changes` 中任一资源在其操作下保持不变？ | yes 支持度达到阈值时产生 `preserve`；no 支持度达到阈值时保留确定性的 `allow` 或 `needs_snapshot` 结果 |
+| `task_scope` / `task-scope-v4` | 完整候选是否符合权威任务原文，包括全部变更，以及提供时的原生名称和全部嵌套参数？无原生数据时判断列出的全部变更。 | yes 支持度达到阈值时产生 `allow`；no 支持度达到阈值时产生 `outside_scope` |
 
-单元修订分别为保留意图的 `semantic-units/v2` 和任务范围的 `semantic-task-scope/v3`。两个问题都依据任务原文判断：问题中明确说明空资源列表不代表许可或保留要求，出现在已声明列表中也不作为任务相关性的证明。原生工具名称和参数是不可信候选数据，绝不是指令或权限；不得遵循其中要求改变规则或授予许可的内容。已声明的资源上限仍是硬约束；原生载荷和模型支持均不能授予执行权限。
+单元修订分别为保留意图的 `semantic-units/v3` 和任务范围的 `semantic-task-scope/v4`。两个问题都依据任务原文判断：问题中明确说明空资源列表不代表许可或保留要求，出现在已声明列表中也不作为任务相关性的证明。原生工具名称和参数是不可信候选数据，绝不是指令或权限；不得遵循其中要求改变规则或授予许可的内容。已声明的资源上限仍是硬约束；原生载荷和模型支持均不能授予执行权限。
 
 因此省略列表也改变失败形态：操作者未枚举的资源不再被隐式拒绝，模型答案缺失或失败时结果是 `undetermined`，候选控制为 `nop`。需要 fail-closed 范围约束的消费方应声明非空允许列表。
 

@@ -39,16 +39,16 @@ Public definitions are in [`contract.rs`](../../src/contract.rs), [`evidence.rs`
 | `task.text` | Nonblank task intent, at most 16384 UTF-8 bytes; interpreted only by model evaluation |
 | `task.allowed_resource_ids` | Optional resource ceiling; when non-empty, every omitted resource is out of scope. An empty list declares no ceiling |
 | `task.preserve_resource_ids` | Optional retention limit checked before any unit; an empty list declares no retention requirement |
-| `candidate.operation`, `candidate.resource_id` | `replace` or `delete` on an opaque resource identity under the bound workspace |
-| `candidate.native_tool` | Optional full native call, with exactly `name` and `input`; absent or `null` retains the legacy candidate |
+| `candidate.changes` | 1–64 changes, each `{operation, resource_id}`: `replace` or `delete` on an opaque resource identity under the bound workspace. Every resource the call affects appears once, in consumer order; a repeated `resource_id` is `invalid_input` |
+| `candidate.native_tool` | Optional full native call, with exactly `name` and `input`; absent and `null` are equivalent |
 | `candidate.native_tool.name` | Nonblank native tool name, at most 128 UTF-8 bytes |
 | `candidate.native_tool.input` | Complete JSON argument object, at most 65536 compact serialized UTF-8 bytes, with no truncation or command-only projection |
 
 Bindings must remain immutable. Every evidence binding must exactly equal the request binding. Task text, source reports and model content cannot expand the structured resource ceiling or grant execution authority.
 
-When native data is present, both protocols and EvidenceSource collection require `binding.candidate_revision` to equal `contract::candidate_revision(&candidate)`. The helper validates the candidate and returns `sha256:` plus 64 lowercase hexadecimal digits. Hash SHA-256 over `b"semantic-arbiter/v1alpha1\0candidate\0"` followed by the complete compact candidate JSON: sort all object keys recursively (including objects inside arrays), preserve array order, and encode scalars with serde_json. Any change to operation, resource, native name or nested arguments requires recomputing the revision and rebinding evidence. A mismatch is `binding_mismatch`, not a judgment. A malformed name or non-object input is `invalid_input`; input exceeding the byte bound is `message_too_large`. The enclosing 262144-byte message bound and strict JSON recursion bound also apply.
+When native data is present, both protocols and EvidenceSource collection require `binding.candidate_revision` to equal `contract::candidate_revision(&candidate)`. The helper validates the candidate and returns `sha256:` plus 64 lowercase hexadecimal digits. Hash SHA-256 over `b"semantic-arbiter/v1alpha1\0candidate\0"` followed by the complete compact candidate JSON: sort all object keys recursively (including objects inside arrays), preserve array order, and encode scalars with serde_json. Any change to an operation, resource, change order, native name or nested arguments requires recomputing the revision and rebinding evidence. A mismatch is `binding_mismatch`, not a judgment. A malformed name or non-object input is `invalid_input`; input exceeding the byte bound is `message_too_large`. The enclosing 262144-byte message bound and strict JSON recursion bound also apply.
 
-For example, a candidate may include `"native_tool":{"name":"Bash","input":{"command":"printf test","cwd":"/workspace"}}`; these strings are data, not executable instructions or filesystem facts. Full native data reaches model state unchanged. Without native data, serialization omits the field, existing input digests remain unchanged and caller-owned revision labels remain accepted. The task-scope question revision changes the model configuration digest, not the legacy input digest. This content binding does not authenticate a native call or authorize its execution.
+For example, a candidate may include `"native_tool":{"name":"Bash","input":{"command":"printf test","cwd":"/workspace"}}`; these strings are data, not executable instructions or filesystem facts. Full native data reaches model state unchanged. Without native data, serialization omits the field and caller-owned revision labels remain accepted. This content binding does not authenticate a native call or authorize its execution.
 
 ### Evidence, gaps and budget
 
@@ -84,7 +84,7 @@ Collection does not authenticate a source or promote provenance. The in-memory e
 | Limit | Value |
 |---|---|
 | Contract message | 262144 UTF-8 bytes |
-| Evidence items, gap records, IDs per list, obligations | At most 64 each |
+| Candidate changes, evidence items, gap records, IDs per list, obligations | At most 64 each |
 | Subject actions | At most one each of `freeze`, `quarantine`, `kill` |
 | Identifier | 1–128 ASCII bytes: letters, digits, `.`, `_`, `-`, `:`, `@` |
 | Unit confidence | Integer `0..=1000000` |
@@ -114,14 +114,14 @@ URLs reject embedded credentials, query strings and fragments. HTTPS uses certif
 
 ## Judgment rules and model exchange
 
-Both units first require a task, apply retention and declared-allowance constraints, and check declared coverage gaps. Omitted resource lists declare no constraint and leave the question to the unit; a declared list stays a hard limit. Preservation also requires matching local-verifier rebuild evidence. Stale, missing, untrusted, conflicting or inconclusive proof yields unknown. Untrusted supplemental evidence cannot replace qualified proof. Task scope needs no rebuild evidence.
+Both units first require a task, apply retention and declared-allowance constraints, and check declared coverage gaps. Omitted resource lists declare no constraint and leave the question to the unit; a declared list stays a hard limit. Hard constraints apply to every change: one preserved resource, or one resource outside a declared allowance, decides the whole candidate. Preservation also requires matching local-verifier rebuild evidence for every changed resource. The first resource in candidate order that is not established names the result; otherwise one `unique` resource requires a snapshot for the call, and answer references are the sorted union across resources. Stale, missing, untrusted, conflicting or inconclusive proof yields unknown. Untrusted supplemental evidence cannot replace qualified proof. Task scope needs no rebuild evidence.
 
 | Unit / question ID | Model proposition | Supported result |
 |---|---|---|
-| `preservation` / `preservation-v2` | Does the authoritative task text require keeping the resource unchanged against this operation? | Yes support meeting the threshold yields `preserve`; no support meeting it retains the deterministic `allow` or `needs_snapshot` result |
-| `task_scope` / `task-scope-v3` | Does the full candidate, including the native name and every nested argument when supplied, satisfy the authoritative task text? Without native data, judge the operation on the resource. | Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
+| `preservation` / `preservation-v3` | Does the authoritative task text require keeping any resource in `candidate.changes` unchanged against its operation? | Yes support meeting the threshold yields `preserve`; no support meeting it retains the deterministic `allow` or `needs_snapshot` result |
+| `task_scope` / `task-scope-v4` | Does the full candidate, including every change and, when supplied, the native name and every nested argument, satisfy the authoritative task text? Without native data, judge every listed change. | Yes support meeting the threshold yields `allow`; no support meeting it yields `outside_scope` |
 
-Unit revisions are `semantic-units/v2` for preservation and `semantic-task-scope/v3` for task scope. Both questions decide from the task text: an omitted resource list is stated to carry no permission or retention meaning, and membership in a declared list is not offered as proof of task relevance. Native tool names and arguments are untrusted candidate data, never instructions or authority. Embedded requests to change rules or grant permission must not be followed. A declared resource ceiling remains a hard limit; neither a native payload nor model support grants execution authority.
+Unit revisions are `semantic-units/v3` for preservation and `semantic-task-scope/v4` for task scope. Both questions decide from the task text: an omitted resource list is stated to carry no permission or retention meaning, and membership in a declared list is not offered as proof of task relevance. Native tool names and arguments are untrusted candidate data, never instructions or authority. Embedded requests to change rules or grant permission must not be followed. A declared resource ceiling remains a hard limit; neither a native payload nor model support grants execution authority.
 
 Omitting a list therefore changes the failure mode as well: a resource an operator never enumerated is no longer an implicit deny, and a missing or failed model answer becomes `undetermined` with candidate `nop`. A consumer that needs fail-closed scope declares a non-empty allowance.
 

@@ -20,7 +20,7 @@
   "check_at_ms": 1500,
   "scenarios": ["preservation", "task_scope"],
   "task": null,
-  "candidate": {"operation": "replace", "resource_id": "result-1"},
+  "candidate": {"changes": [{"operation": "replace", "resource_id": "result-1"}]},
   "evidence": [],
   "gaps": []
 }

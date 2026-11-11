@@ -46,6 +46,7 @@ fn default_scenarios() -> Vec<Scenario> {
 pub(crate) enum ToolMapping {
     File(FileMapping),
     Command(CommandMapping),
+    Patch(PatchMapping),
 }
 
 /// A tool whose input names exactly one file.
@@ -61,6 +62,13 @@ pub(crate) struct FileMapping {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CommandMapping {
     pub command_pointer: String,
+}
+
+/// The OpenClaw `apply_patch` tool, whose envelope may touch several files.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PatchMapping {
+    pub patch_pointer: String,
 }
 
 impl Config {
@@ -115,6 +123,12 @@ impl Config {
                 ToolMapping::Command(command) => {
                     ["Bash", "bash"].contains(&name.as_str())
                         && command.command_pointer == "/command"
+                }
+                // The envelope grammar is mirrored from OpenClaw only.
+                ToolMapping::Patch(patch) => {
+                    ["apply_patch", "apply-patch"].contains(&name.as_str())
+                        && self.adapter == "openclaw"
+                        && patch.patch_pointer == "/input"
                 }
             };
             if !valid {

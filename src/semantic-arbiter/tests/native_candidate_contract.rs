@@ -22,12 +22,12 @@ use semantic_arbiter::protocol::{self, CheckRequest, ContractError};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-fn legacy() -> CheckRequest {
+fn without_native() -> CheckRequest {
     protocol::decode_request(include_bytes!("../examples/preservation-allow.json")).unwrap()
 }
 
 fn native() -> CheckRequest {
-    let mut request = legacy();
+    let mut request = without_native();
     request.scenarios = vec![Scenario::TaskScope];
     request.evidence.clear();
     request.candidate.native_tool = Some(NativeTool {
@@ -64,14 +64,13 @@ fn canonical_revision_has_a_fixed_domain_and_sorts_every_object() {
     let digest = candidate_revision(&request.candidate).unwrap();
     assert_eq!(
         digest,
-        "sha256:7c76afa977ae4d0d4702bdd56380f5c29ae5cf3156788efa7580cb2d292886bf"
+        "sha256:cff1262eb9b002ae45b0651eba67a04fd9d3921552cc64a529b1ad27f0e7ca08"
     );
     let reordered: Candidate = serde_json::from_str(
         r#"{
-            "resource_id":"result-1",
             "native_tool":{"input":{"nested":{"a":"first","z":"last"},
                 "command":"printf test","z":[{"a":1,"b":2},false,null]},"name":"Bash"},
-            "operation":"replace"
+            "changes":[{"resource_id":"result-1","operation":"replace"}]
         }"#,
     )
     .unwrap();
@@ -83,8 +82,8 @@ fn canonical_revision_has_a_fixed_domain_and_sorts_every_object() {
 fn every_candidate_mutation_requires_a_new_revision() {
     let original = native();
     for (path, replacement) in [
-        ("/operation", json!("delete")),
-        ("/resource_id", json!("other-result")),
+        ("/changes/0/operation", json!("delete")),
+        ("/changes/0/resource_id", json!("other-result")),
         ("/native_tool/name", json!("Write")),
         ("/native_tool/input/command", json!("printf changed")),
         ("/native_tool/input/nested/a", json!("changed")),
@@ -130,7 +129,7 @@ fn every_candidate_mutation_requires_a_new_revision() {
 
 #[test]
 fn evidence_must_be_rebound_when_native_data_is_added() {
-    let mut request = legacy();
+    let mut request = without_native();
     request.candidate = native().candidate;
     request.binding.candidate_revision = candidate_revision(&request.candidate).unwrap();
     assert_eq!(
@@ -279,26 +278,26 @@ fn native_recursion_boundary_matches_complete_request_decoding() {
 }
 
 #[test]
-fn absent_native_data_preserves_legacy_serialization_and_input_digests() {
-    let original = legacy();
+fn absent_native_data_is_omitted_from_serialization_and_digests() {
+    let original = without_native();
     assert_eq!(original.candidate.native_tool, None);
     assert_eq!(
         serde_json::to_string(&original.candidate).unwrap(),
-        r#"{"operation":"replace","resource_id":"result-1"}"#
+        r#"{"changes":[{"operation":"replace","resource_id":"result-1"}]}"#
     );
     assert_eq!(
         candidate_revision(&original.candidate).unwrap(),
-        "sha256:2091787f8534f660c89e956def47792c44e1c3e14f697f958b535004a0d05fcc"
+        "sha256:c187e6ae096eed27cb47531481954177b5a4ab5d084d7256d14f62526d619ccd"
     );
     assert_eq!(
         protocol::input_digest(&original).unwrap(),
-        "sha256:8697479930b097001cd968179ece5288e787fdf1803303f0a4abb9321c9f00fe"
+        "sha256:52e6e552817f0ad58580c4b20e3e84d5569c01dabb343b81bf2a183e6719d0d2"
     );
     let evaluation: EvaluationRequest =
         serde_json::from_value(evaluation_value(&original)).unwrap();
     assert_eq!(
         evaluation::input_digest(&evaluation).unwrap(),
-        "sha256:53bc5f12cc5317f8f3a5087c82263a90b8c730333d4ab842e0d58ac750eb1fd9"
+        "sha256:088233065e1f4dbc16b88c4d3bee57166d8383bdffae4adfa411f450973922e0"
     );
     let mut explicit_null = serde_json::to_value(&original).unwrap();
     explicit_null["candidate"]["native_tool"] = Value::Null;
@@ -367,7 +366,7 @@ async fn model_projection_contains_full_native_arguments_only_as_untrusted_data(
         calls[0].state["authoritative_task"],
         serde_json::to_value(&request.task).unwrap()
     );
-    let question = serde_json::to_value(&calls[0].questions["task-scope-v3"]).unwrap();
+    let question = serde_json::to_value(&calls[0].questions["task-scope-v4"]).unwrap();
     let instructions = question["instructions"].as_str().unwrap();
     for text in [
         "candidate.native_tool.name",
@@ -379,10 +378,10 @@ async fn model_projection_contains_full_native_arguments_only_as_untrusted_data(
         assert!(instructions.contains(text), "{text}");
     }
     assert!(!instructions.contains(marker));
-    assert_eq!(run.response.judgments[0].question_id, "task-scope-v3");
+    assert_eq!(run.response.judgments[0].question_id, "task-scope-v4");
     assert_eq!(
         run.response.judgments[0].unit_revision,
-        "semantic-task-scope/v3"
+        "semantic-task-scope/v4"
     );
 }
 

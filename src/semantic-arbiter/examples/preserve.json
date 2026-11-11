@@ -27,7 +27,7 @@
     "allowed_resource_ids": ["result-1"],
     "preserve_resource_ids": ["result-1"]
   },
-  "candidate": {"operation": "delete", "resource_id": "result-1"},
+  "candidate": {"changes": [{"operation": "delete", "resource_id": "result-1"}]},
   "evidence": [],
   "gaps": []
 }

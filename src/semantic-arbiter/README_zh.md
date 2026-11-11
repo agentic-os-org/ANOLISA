@@ -11,7 +11,7 @@ Agent 无关的语义判断组件，支持可配置决策模型后端与基于�
 - `describe` 以 JSON 列出支持的协议、场景、后端和消息上限。
 - `--help` 提供人可读的用法和示例；`help <command>` 解释各子命令。
 
-两种请求格式都可选携带 `candidate.native_tool: {"name":"Bash","input":{"command":"printf test"}}`。应提供完整原生参数对象，而不是提取后的命令摘要。名称须非空白且不超过 128 个 UTF-8 字节；紧凑 input JSON 最多 65536 字节。存在该字段时，使用 `contract::candidate_revision(&candidate)` 设置 `binding.candidate_revision`，证据也须保留相同绑定。带域分隔的 SHA-256 覆盖操作、资源和递归按键排序的原生数据。任务范围求值将全部参数视为不可信数据，而非指令或权限，且不执行其中任何内容。省略 `native_tool` 时保留旧序列化、输入摘要及调用方自定 revision；修订后的任务范围问题会改变模型配置摘要。
+候选通过 1–64 项 `changes` 列出调用影响的每个资源，每项为 `{"operation":"replace"|"delete","resource_id":...}`，同一资源只出现一次。两种请求格式都可选携带 `candidate.native_tool: {"name":"Bash","input":{"command":"printf test"}}`。应提供完整原生参数对象，而不是提取后的命令摘要。名称须非空白且不超过 128 个 UTF-8 字节；紧凑 input JSON 最多 65536 字节。存在该字段时，使用 `contract::candidate_revision(&candidate)` 设置 `binding.candidate_revision`，证据也须保留相同绑定。带域分隔的 SHA-256 按顺序覆盖全部变更及递归按键排序的原生数据。任务范围求值将全部参数视为不可信数据，而非指令或权限，且不执行其中任何内容。省略 `native_tool` 时序列化不包含该字段，调用方自定 revision 仍被接受。
 
 场景选择使用 `preservation` 和 `task_scope`。当前 `check` 输出 `allow/block`；当前 `evaluate` 输出 `nop/allow/block`。所有操作及未来场景共用完整 CandidateControl 契约，顺序为 `nop < allow < ask < block`。`ask` 表示确定性的审批决策；模型歧义不会产生 `ask`。类型、校验和 Approval Directive 投影现已预留，真实审批执行与 Adapter 准入仍待消费方集成。
 

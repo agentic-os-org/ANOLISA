@@ -1,7 +1,10 @@
 //! Strict request decoding and frozen evidence boundaries.
 
 use semantic_arbiter::check::check;
-use semantic_arbiter::contract::{AnswerValue, EvidenceFact, Reason, RebuildResult, Scenario};
+use semantic_arbiter::contract::{
+    AnswerValue, Change, EvidenceFact, Operation, Reason, RebuildResult, Scenario,
+    MAX_CANDIDATE_CHANGES,
+};
 use semantic_arbiter::outcome::CandidateControl;
 use semantic_arbiter::protocol::{
     decode_request, validate_request, CheckRequest, ContractError, MAX_EVIDENCE_ITEMS,
@@ -99,7 +102,7 @@ fn versions_and_closed_enums_reject_unregistered_values() {
         ("/mode", json!("offline_replay")),
         ("/scenarios/0", json!("unregistered_scenario")),
         ("/task/origin", json!("source_reported")),
-        ("/candidate/operation", json!("execute")),
+        ("/candidate/changes/0/operation", json!("execute")),
         ("/evidence/0/provenance", json!("trusted_model")),
         ("/evidence/0/fact/kind", json!("command")),
         (
@@ -435,4 +438,118 @@ fn a_later_allow_does_not_erase_a_block_or_a_coverage_gap() {
     assert_eq!(response.outcome.control.candidate, CandidateControl::Block);
     assert_eq!(response.outcome.obligations.len(), 1);
     assert_eq!(response.outcome.obligations[0].id, "audit");
+}
+
+fn change(operation: Operation, resource_id: &str) -> Change {
+    Change {
+        operation,
+        resource_id: resource_id.into(),
+    }
+}
+
+/// Two changed resources, each with its own local rebuild fact.
+fn two_changes(first: RebuildResult, second: RebuildResult) -> CheckRequest {
+    let mut value = request();
+    value.task.as_mut().unwrap().allowed_resource_ids = vec!["result-1".into(), "result-2".into()];
+    value.candidate.changes = vec![
+        change(Operation::Replace, "result-1"),
+        change(Operation::Delete, "result-2"),
+    ];
+    value.evidence[0].fact = EvidenceFact::Rebuild {
+        resource_id: "result-1".into(),
+        result: first,
+    };
+    let mut other = value.evidence[0].clone();
+    other.id = "rebuild-2".into();
+    other.fact = EvidenceFact::Rebuild {
+        resource_id: "result-2".into(),
+        result: second,
+    };
+    value.evidence.push(other);
+    value
+}
+
+#[test]
+fn candidate_changes_are_nonempty_unique_and_bounded() {
+    for replacement in [
+        json!([]),
+        json!([
+            {"operation": "replace", "resource_id": "result-1"},
+            {"operation": "delete", "resource_id": "result-1"}
+        ]),
+        json!([{"operation": "replace", "resource_id": "two words"}]),
+    ] {
+        let mut value = serde_json::to_value(request()).unwrap();
+        value["candidate"]["changes"] = replacement;
+        assert_rejection(&value, ContractError::InvalidInput);
+    }
+    let mut value = request();
+    value.candidate.changes = (0..MAX_CANDIDATE_CHANGES)
+        .map(|i| change(Operation::Replace, &format!("resource-{i}")))
+        .collect();
+    assert_eq!(validate_request(&value), Ok(()));
+    value
+        .candidate
+        .changes
+        .push(change(Operation::Replace, "resource-extra"));
+    assert_eq!(validate_request(&value), Err(ContractError::InvalidInput));
+}
+
+#[test]
+fn one_preserved_or_unlisted_change_decides_the_whole_candidate() {
+    let mut value = two_changes(RebuildResult::Identical, RebuildResult::Identical);
+    value.scenarios = vec![Scenario::Preservation, Scenario::TaskScope];
+    value.task.as_mut().unwrap().preserve_resource_ids = vec!["result-2".into()];
+    let preserved = check(&value).unwrap();
+    assert!(preserved
+        .answers
+        .iter()
+        .all(|answer| answer.reason == Reason::Preserved));
+    assert_eq!(preserved.outcome.control.candidate, CandidateControl::Block);
+
+    let mut value = two_changes(RebuildResult::Identical, RebuildResult::Identical);
+    value.scenarios = vec![Scenario::Preservation, Scenario::TaskScope];
+    value.task.as_mut().unwrap().allowed_resource_ids = vec!["result-1".into()];
+    let outside = check(&value).unwrap();
+    assert!(outside
+        .answers
+        .iter()
+        .all(|answer| answer.reason == Reason::OutsideScope));
+    assert_eq!(outside.outcome.control.candidate, CandidateControl::Block);
+}
+
+#[test]
+fn preservation_needs_every_changed_resource_established() {
+    let both = check(&two_changes(
+        RebuildResult::Identical,
+        RebuildResult::Identical,
+    ))
+    .unwrap();
+    assert_eq!(both.answers[0].reason, Reason::Allowed);
+    assert_eq!(both.answers[0].evidence_refs, ["rebuild-1", "rebuild-2"]);
+
+    // One unique resource is enough to require a recovery point for the call.
+    let snapshot = check(&two_changes(
+        RebuildResult::Identical,
+        RebuildResult::Unique,
+    ))
+    .unwrap();
+    assert_eq!(snapshot.answers[0].reason, Reason::NeedsSnapshot);
+    assert_eq!(
+        snapshot.answers[0].evidence_refs,
+        ["rebuild-1", "rebuild-2"]
+    );
+
+    // A snapshot cannot stand in for a resource whose state is unknown.
+    let unknown = check(&two_changes(RebuildResult::Unique, RebuildResult::Unknown)).unwrap();
+    assert_eq!(unknown.answers[0].reason, Reason::Undetermined);
+    assert_eq!(unknown.outcome.control.candidate, CandidateControl::Block);
+
+    // Evidence for the first resource does not cover the second.
+    let mut missing = two_changes(RebuildResult::Identical, RebuildResult::Identical);
+    missing.evidence.pop();
+    let response = check(&missing).unwrap();
+    assert_eq!(response.answers[0].reason, Reason::MissingEvidence);
+    assert_eq!(response.answers[0].evidence_refs, ["rebuild-1"]);
+    assert_eq!(response.outcome.control.candidate, CandidateControl::Block);
 }

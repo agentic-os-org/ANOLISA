@@ -273,7 +273,7 @@ pub fn evaluated_text(
             "turns":turns,"text_bytes":text.len()
         })
     );
-    let candidate = json!({"operation":"replace","resource_id":"greeting",
+    let candidate = json!({"changes":[{"operation":"replace","resource_id":"greeting"}],
         "native_tool":{"name":"Write","input":event["tool"]["input"]}});
     assert_eq!(evaluation["candidate"], candidate);
     let typed =

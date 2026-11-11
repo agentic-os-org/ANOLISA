@@ -60,14 +60,29 @@ pub enum Operation {
     Delete,
 }
 
-/// Frozen operation projection; check never resolves the resource on disk.
+/// One resource effect of a candidate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Candidate {
+pub struct Change {
     /// Consumer-owned operation type.
     pub operation: Operation,
     /// Opaque resource identity under the bound workspace.
     pub resource_id: String,
+}
+
+/// Maximum number of changes in one candidate, matching the evidence item limit
+/// so every changed resource can carry its own fact.
+pub const MAX_CANDIDATE_CHANGES: usize = crate::protocol::MAX_EVIDENCE_ITEMS;
+
+/// Frozen operation projection; check never resolves a resource on disk.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Candidate {
+    /// Every resource the call affects, each named once, in consumer order.
+    ///
+    /// Every change passes the deterministic gates, so one preserved or
+    /// out-of-scope resource decides the whole candidate.
+    pub changes: Vec<Change>,
     /// Full native call retained as untrusted data, never instructions or authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_tool: Option<NativeTool>,

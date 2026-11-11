@@ -1,7 +1,8 @@
 //! Explicit lexical projection only; no filesystem identity or authorization attestation.
 
 use semantic_arbiter::contract::{
-    Binding, Budget, Candidate, NativeTool, Operation, Task, TaskOrigin,
+    Binding, Budget, Candidate, Change, NativeTool, Operation, Task, TaskOrigin,
+    MAX_CANDIDATE_CHANGES,
 };
 use semantic_arbiter::deadline::Ingress;
 use semantic_arbiter::evaluation::{EvaluationMode, EvaluationRequest, EVALUATION_API_VERSION};
@@ -10,9 +11,10 @@ use sha2::{Digest, Sha256};
 
 use crate::command;
 use crate::config::{
-    derive, resolve, single_file_input, CommandMapping, Config, FileMapping, ToolMapping,
-    COMMAND_PREFIX, DERIVED_PREFIX,
+    derive, resolve, single_file_input, CommandMapping, Config, FileMapping, PatchMapping,
+    ToolMapping, COMMAND_PREFIX, DERIVED_PREFIX,
 };
+use crate::patch::{self, Step};
 use crate::session::{digest, CapturedTask};
 
 /// Fields a mapped shell tool may carry besides the command itself.
@@ -104,13 +106,16 @@ pub(crate) fn project(
         .ok_or("unmapped_tool")?;
     let mapping = config.tools.get(name).ok_or("unmapped_tool")?;
     let input = &event["tool"]["input"];
-    let (operation, resource_id) = match mapping {
-        ToolMapping::File(file) => file_resource(name, file, input, config)?,
-        ToolMapping::Command(shell) => command_resource(input, shell, config)?,
+    let changes = match mapping {
+        ToolMapping::File(file) => vec![file_change(name, file, input, config)?],
+        ToolMapping::Command(shell) => command_changes(input, shell, config)?,
+        ToolMapping::Patch(patch) => patch_changes(input, patch, config)?,
     };
+    if changes.len() > MAX_CANDIDATE_CHANGES {
+        return Err("oversized_candidate");
+    }
     let candidate = Candidate {
-        operation,
-        resource_id,
+        changes,
         native_tool: Some(NativeTool {
             name: name.into(),
             input: input.clone(),
@@ -171,12 +176,12 @@ pub(crate) fn project(
     Ok((evaluation, task.turns))
 }
 
-fn file_resource(
+fn file_change(
     name: &str,
     mapping: &FileMapping,
     input: &Value,
     config: &Config,
-) -> Result<(Operation, String), &'static str> {
+) -> Result<Change, &'static str> {
     if !single_file_input(name, mapping, input) {
         return Err("unsupported_input");
     }
@@ -185,24 +190,25 @@ fn file_resource(
         .and_then(Value::as_str)
         .ok_or("unsupported_input")?;
     let resolved = resolve(path, &config.workspace_path).ok_or("unmapped_resource")?;
-    let resource_id = match config.resources.get(&resolved) {
-        Some(label) => label.clone(),
-        None => derive(&resolved, &config.workspace_path).ok_or("unmapped_resource")?,
-    };
-    Ok((mapping.operation, resource_id))
+    Ok(Change {
+        operation: mapping.operation,
+        resource_id: identify(&resolved, config).ok_or("unmapped_resource")?,
+    })
 }
 
-/// Picks the one named target that decides the deterministic gate.
+/// Projects every named target, in command order, as one change.
 ///
-/// A preserved target wins, then one outside a declared allowance, then the
-/// first named target. A command with no attributable target is projected as
-/// `command:unresolved`, so the model judges the full call; under a declared
-/// allowance that placeholder is outside scope unless the operator lists it.
-fn command_resource(
+/// A recursive target also changes each preserved resource below it, so the
+/// gate blocks it without the model. A target the lexer cannot attribute
+/// (scripts, interpreters, unlisted programs, substitutions, variables, the
+/// workspace itself, or a relative path after `cd` or under another
+/// `dir_path`) becomes `command:unresolved`, which the model judges from the
+/// full call; under a declared allowance it is outside scope unless listed.
+fn command_changes(
     input: &Value,
     mapping: &CommandMapping,
     config: &Config,
-) -> Result<(Operation, String), &'static str> {
+) -> Result<Vec<Change>, &'static str> {
     let fields = input.as_object().ok_or("unsupported_input")?;
     let text = input
         .pointer(&mapping.command_pointer)
@@ -223,66 +229,114 @@ fn command_resource(
         Some(_) => return Err("unsupported_input"),
     };
     let analysis = command::analyze(text);
-    let mut unresolved = analysis.unresolved;
-    let mut targets = vec![];
+    let mut changes = vec![];
     for target in analysis.targets {
-        if !target.path.starts_with('/') && (target.base_unknown || rebased) {
-            unresolved = true;
-            continue;
-        }
-        let Some(path) = locate(&target.path, workspace) else {
-            unresolved = true;
+        let operation = target.operation;
+        let located = if !target.path.starts_with('/') && (target.base_unknown || rebased) {
+            None
+        } else {
+            locate(&target.path, workspace)
+        };
+        let Some(path) = located else {
+            add(&mut changes, operation, unresolved_id());
             continue;
         };
-        if path == workspace {
-            targets.push((target.operation, None, path, true));
-            continue;
-        }
-        match config
-            .resources
-            .get(&path)
-            .cloned()
-            .or_else(|| derive(&path, &config.workspace_path))
-        {
-            Some(id) => targets.push((target.operation, Some(id), path, target.tree)),
-            None => unresolved = true,
-        }
-    }
-    let task = &config.task;
-    for (operation, id, path, tree) in &targets {
-        if let Some(id) = id
-            .as_ref()
-            .filter(|id| task.preserve_resource_ids.contains(id))
-        {
-            return Ok((*operation, id.clone()));
-        }
-        if *tree {
+        let whole = path == workspace;
+        let id = if whole { None } else { identify(&path, config) };
+        add(&mut changes, operation, id.unwrap_or_else(unresolved_id));
+        if target.tree || whole {
             let below = format!("{path}/");
-            let contained = task.preserve_resource_ids.iter().find(|kept| {
-                resource_path(kept, config).is_some_and(|kept| kept.starts_with(&below))
-            });
-            if let Some(kept) = contained {
-                return Ok((*operation, kept.clone()));
+            for kept in &config.task.preserve_resource_ids {
+                if resource_path(kept, config).is_some_and(|kept| kept.starts_with(&below)) {
+                    add(&mut changes, operation, kept.clone());
+                }
             }
         }
     }
-    if !task.allowed_resource_ids.is_empty() {
-        let outside = targets.iter().find(|(_, id, _, _)| {
-            id.as_ref()
-                .is_none_or(|id| !task.allowed_resource_ids.contains(id))
-        });
-        if let Some((operation, id, _, _)) = outside {
-            return Ok((*operation, id.clone().unwrap_or_else(unresolved_id)));
+    if analysis.unresolved {
+        add(&mut changes, Operation::Replace, unresolved_id());
+    }
+    if changes.is_empty() {
+        return Err("no_mutation");
+    }
+    Ok(changes)
+}
+
+/// Projects every hunk of an OpenClaw patch; any unnamed file leaves the call uncovered.
+fn patch_changes(
+    input: &Value,
+    mapping: &PatchMapping,
+    config: &Config,
+) -> Result<Vec<Change>, &'static str> {
+    let text = input
+        .pointer(&mapping.patch_pointer)
+        .and_then(Value::as_str)
+        .ok_or("unsupported_input")?;
+    if input.as_object().is_none_or(|fields| fields.len() != 1) {
+        return Err("unsupported_input");
+    }
+    let steps = patch::parse(text).ok_or("unsupported_input")?;
+    let workspace = config.workspace_path.trim_end_matches('/');
+    let named = |path: &str| {
+        // OpenClaw resolves `@` against existing files and `~` against home.
+        if path.starts_with(['@', '~']) {
+            return None;
+        }
+        locate(path, workspace)
+            .filter(|path| path != workspace)
+            .and_then(|path| identify(&path, config))
+    };
+    let mut changes = vec![];
+    for step in steps {
+        match step {
+            Step::Write(path) => add(
+                &mut changes,
+                Operation::Replace,
+                named(&path).ok_or("unmapped_resource")?,
+            ),
+            Step::Remove(path) => add(
+                &mut changes,
+                Operation::Delete,
+                named(&path).ok_or("unmapped_resource")?,
+            ),
+            Step::Move { from, to } => {
+                let from = named(&from).ok_or("unmapped_resource")?;
+                let to = named(&to).ok_or("unmapped_resource")?;
+                // A move onto its own source only rewrites the file.
+                if from != to {
+                    add(&mut changes, Operation::Replace, to);
+                    add(&mut changes, Operation::Delete, from);
+                } else {
+                    add(&mut changes, Operation::Replace, to);
+                }
+            }
         }
     }
-    if let Some((operation, Some(id), _, _)) = targets.iter().find(|target| target.1.is_some()) {
-        return Ok((*operation, id.clone()));
+    Ok(changes)
+}
+
+/// Names each resource once; a resource any step deletes is reported as deleted.
+fn add(changes: &mut Vec<Change>, operation: Operation, resource_id: String) {
+    match changes
+        .iter_mut()
+        .find(|change| change.resource_id == resource_id)
+    {
+        Some(change) if operation == Operation::Delete => change.operation = operation,
+        Some(_) => {}
+        None => changes.push(Change {
+            operation,
+            resource_id,
+        }),
     }
-    match targets.first() {
-        Some((operation, ..)) => Ok((*operation, unresolved_id())),
-        None if unresolved => Ok((Operation::Replace, unresolved_id())),
-        None => Err("no_mutation"),
-    }
+}
+
+/// Explicit label of a workspace path, else its derived identity.
+fn identify(path: &str, config: &Config) -> Option<String> {
+    config
+        .resources
+        .get(path)
+        .cloned()
+        .or_else(|| derive(path, &config.workspace_path))
 }
 
 fn unresolved_id() -> String {
@@ -340,4 +394,109 @@ pub(crate) fn budget(
         // Even an empty evidence array occupies two JSON bytes.
         max_evidence_bytes: 2,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn openclaw(records: &std::path::Path) -> Config {
+        Config::decode(&json!({
+            "version":1,
+            "task":{"allowed_resource_ids":[],"preserve_resource_ids":["greeting"]},
+            "adapter":"openclaw","workspace_path":"/work","workspace_id":"workspace",
+            "tools":{"apply_patch":{"patch_pointer":"/input"}},
+            "resources":{"/work/greeting.txt":"greeting","/work/private.txt":"private"},
+            "model":{"config_revision":"aw_request","backend":{"kind":"bailian",
+                "endpoint_url":"http://127.0.0.1:1/unused","model":"unused","key_env":"UNUSED"},
+                "timeout_ms":2000,"max_response_bytes":4096,"transport":"loopback_test"},
+            "record_dir":records,"max_sessions":1,"max_session_bytes":88080384u64,
+            "max_storage_bytes":88080384u64
+        }))
+        .unwrap()
+    }
+
+    fn changes(patch: &str) -> Result<Vec<(Operation, String)>, &'static str> {
+        let records = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(records.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = openclaw(records.path());
+        let ToolMapping::Patch(mapping) = &config.tools["apply_patch"] else {
+            unreachable!("the fixture maps apply_patch as a patch tool");
+        };
+        let changes = patch_changes(&json!({ "input": patch }), mapping, &config)?;
+        Ok(changes
+            .into_iter()
+            .map(|change| (change.operation, change.resource_id))
+            .collect())
+    }
+
+    fn patch(hunks: &str) -> String {
+        format!("*** Begin Patch\n{hunks}\n*** End Patch")
+    }
+
+    #[test]
+    fn every_hunk_becomes_one_change_per_resource() {
+        let multi = patch(
+            "*** Add File: notes/new.txt\n+hello\n*** Update File: greeting.txt\n@@\n-a\n+b\n\
+             *** Delete File: /work/private.txt\n*** Update File: a.txt\n*** Move to: b.txt\n-x\n+y",
+        );
+        let replace = |id: &str| (Operation::Replace, id.to_owned());
+        let delete = |id: &str| (Operation::Delete, id.to_owned());
+        assert_eq!(
+            changes(&multi),
+            Ok(vec![
+                replace("path:notes:new.txt"),
+                replace("greeting"),
+                delete("private"),
+                replace("path:b.txt"),
+                delete("path:a.txt"),
+            ])
+        );
+        // A move onto its own source rewrites the file in place.
+        let onto_itself =
+            patch("*** Update File: ./greeting.txt\n*** Move to: greeting.txt\n-a\n+b");
+        assert_eq!(changes(&onto_itself), Ok(vec![replace("greeting")]));
+        // Deleting then re-adding still names the resource once, as deleted.
+        let readd = patch("*** Delete File: greeting.txt\n*** Add File: greeting.txt\n+new");
+        assert_eq!(changes(&readd), Ok(vec![delete("greeting")]));
+    }
+
+    #[test]
+    fn any_file_without_a_workspace_identity_leaves_the_patch_uncovered() {
+        for path in [
+            "@greeting.txt",
+            "~/greeting.txt",
+            "../outside.txt",
+            "/etc/passwd",
+            ".",
+        ] {
+            let hunks = format!("*** Add File: notes/new.txt\n+x\n*** Delete File: {path}");
+            assert_eq!(changes(&patch(&hunks)), Err("unmapped_resource"), "{path}");
+        }
+    }
+
+    #[test]
+    fn malformed_or_extended_input_is_unsupported() {
+        let records = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(records.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = openclaw(records.path());
+        let ToolMapping::Patch(mapping) = &config.tools["apply_patch"] else {
+            unreachable!("the fixture maps apply_patch as a patch tool");
+        };
+        let valid = patch("*** Delete File: private.txt");
+        for input in [
+            json!({"input":"*** Begin Patch\n*** Delete File: private.txt"}),
+            json!({"input":valid,"cwd":"/elsewhere"}),
+            json!({"input":["*** Begin Patch"]}),
+            json!({"patch":valid}),
+        ] {
+            assert_eq!(
+                patch_changes(&input, mapping, &config).map(|_| ()),
+                Err("unsupported_input"),
+                "{input}"
+            );
+        }
+    }
 }

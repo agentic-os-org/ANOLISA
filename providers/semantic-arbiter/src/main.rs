@@ -4,6 +4,7 @@ mod command;
 mod config;
 mod evaluate;
 mod mapping;
+mod patch;
 mod session;
 mod storage;
 // Feeds the deterministic preservation check, which this observe-only shadow evaluation does

@@ -5,8 +5,8 @@ use std::pin::Pin;
 
 use semantic_arbiter::check::check;
 use semantic_arbiter::contract::{
-    Binding, Budget, Candidate, EvidenceFact, Operation, Provenance, RebuildResult, Scenario, Task,
-    TaskOrigin,
+    Binding, Budget, Candidate, Change, EvidenceFact, Operation, Provenance, RebuildResult,
+    Scenario, Task, TaskOrigin,
 };
 use semantic_arbiter::deadline::Ingress;
 use semantic_arbiter::evidence::{
@@ -72,8 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             preserve_resource_ids: vec![],
         }),
         candidate: Candidate {
-            operation: Operation::Replace,
-            resource_id: "resource-example".into(),
+            changes: vec![Change {
+                operation: Operation::Replace,
+                resource_id: "resource-example".into(),
+            }],
             native_tool: None,
         },
         evidence: vec![],

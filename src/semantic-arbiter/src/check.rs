@@ -92,14 +92,21 @@ fn evaluate_unit(
     let Some(task) = &request.task else {
         return (Reason::MissingTask, vec![]);
     };
-    let resource = &request.candidate.resource_id;
-    if task.preserve_resource_ids.contains(resource) {
+    let changes = &request.candidate.changes;
+    if changes
+        .iter()
+        .any(|change| task.preserve_resource_ids.contains(&change.resource_id))
+    {
         return (Reason::Preserved, vec![]);
     }
     // An omitted allowance declares no ceiling, so scope is left to the semantic
     // units instead of denying every resource an operator did not enumerate. A
     // declared allowance keeps excluding each resource it omits.
-    if !task.allowed_resource_ids.is_empty() && !task.allowed_resource_ids.contains(resource) {
+    if !task.allowed_resource_ids.is_empty()
+        && changes
+            .iter()
+            .any(|change| !task.allowed_resource_ids.contains(&change.resource_id))
+    {
         return (Reason::OutsideScope, vec![]);
     }
     if request.gaps.iter().any(|gap| gap.scenario == unit) {
@@ -108,6 +115,38 @@ fn evaluate_unit(
     if unit == Scenario::TaskScope {
         return (Reason::Allowed, vec![]);
     }
+    let mut refs = vec![];
+    let mut failure = None;
+    let mut needs_snapshot = false;
+    for change in changes {
+        let (reason, mut resource_refs) = preservation(request, now_ms, &change.resource_id);
+        refs.append(&mut resource_refs);
+        match reason {
+            Reason::Allowed => {}
+            Reason::NeedsSnapshot => needs_snapshot = true,
+            // The first unestablished resource in candidate order names the failure;
+            // a snapshot cannot stand in for a resource whose state is unknown.
+            _ => {
+                failure.get_or_insert(reason);
+            }
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    let reason = match failure {
+        Some(reason) => reason,
+        None if needs_snapshot => Reason::NeedsSnapshot,
+        None => Reason::Allowed,
+    };
+    (reason, refs)
+}
+
+/// Rebuild judgment for one changed resource.
+fn preservation(
+    request: &crate::validation::Input<'_>,
+    now_ms: u64,
+    resource: &str,
+) -> (Reason, Vec<String>) {
     let matching: Vec<_> = request
         .evidence
         .iter()
