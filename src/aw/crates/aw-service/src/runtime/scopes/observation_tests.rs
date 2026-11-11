@@ -59,7 +59,11 @@ fn observation_start_failure_cancels_acknowledged_scope_and_drains_resources() {
         "query_bytes":1048576, "max_items":32, "max_bytes":262144,
     });
     runtime.bytes = serde_json::to_vec(&document).unwrap();
-    runtime.contexts = evidence::Contexts::new(&runtime.bytes).unwrap();
+    let configuration = aw_config::Validator::new()
+        .unwrap()
+        .parse(&runtime.bytes)
+        .unwrap();
+    runtime.contexts = evidence::Contexts::new(&configuration).unwrap();
     let task = fixture.task(std::process::id(), std::process::id());
     let (entered, ready) = mpsc::sync_channel(1);
     let (resume, proceed) = mpsc::sync_channel(1);

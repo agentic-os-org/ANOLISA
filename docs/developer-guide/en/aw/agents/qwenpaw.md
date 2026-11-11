@@ -81,6 +81,26 @@ configuration. Custom entrypoints and nonliteral versions retain the native
 `--version` probe within the same five-second budget. App launch, native Hook
 installation and readiness checks still use the original command.
 
+## Separate HTTP startup and first protected work
+
+Measure launch-to-HTTP, HTTP-to-Agent-ready and first-Hook latency separately.
+An HTTP listener can precede Agent and plugin startup; its availability alone
+does not establish that protected requests can run.
+
+For deployments using the [sec-core first-use barrier](../providers/sec-core.md#overlap-backend-and-agent-startup),
+the external supervisor can remove backend health from the App launch prerequisite.
+On a CPU-limited container, start scanner prewarm after the HTTP milestone to
+avoid competing with the App's early imports, or initialize capabilities on first
+use. Warm only capabilities referenced by the active policy. HTTP startup is
+then independent of backend readiness; required Hook installation, policy
+admission and the actual check still precede protected model or tool work.
+Starting the backend or prewarm at that milestone belongs to the supervisor;
+`aw run` does not schedule or own those external processes.
+If App initialization itself performs protected operations, start the backend
+independently of HTTP availability so those operations cannot wait on a backend
+whose startup requires their completion. Defer only explicit scanner prewarm in
+that case; the first actual check still initializes its required capability.
+
 ## Keep the native App startup command
 
 For an initialized QwenPaw installation in a dedicated Python environment, install

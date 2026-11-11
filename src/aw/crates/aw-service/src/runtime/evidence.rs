@@ -55,7 +55,7 @@ use aw_adapter::association::source_matches_adapter;
 
 pub(super) struct Contexts {
     sources: BTreeMap<String, Settings>,
-    registry: Registry,
+    registry: &'static Registry,
     // Claims live until the owning instance has drained all its observation work.
     sessions: Mutex<SessionClaims>,
 }
@@ -119,11 +119,8 @@ impl Cell {
 }
 
 impl Contexts {
-    pub(super) fn new(bytes: &[u8]) -> Result<Self> {
-        let document = aw_config::Validator::new()?
-            .parse(bytes)?
-            .as_value()
-            .clone();
+    pub(super) fn new(configuration: &aw_config::Configuration) -> Result<Self> {
+        let document = configuration.as_value();
         let mut sources = BTreeMap::new();
         for (target, agent) in document["spec"]["agents"]
             .as_object()
@@ -156,7 +153,7 @@ impl Contexts {
         }
         Ok(Self {
             sources,
-            registry: Registry::new().map_err(contract)?,
+            registry: crate::public_projection::registry()?,
             sessions: Mutex::new(SessionClaims::default()),
         })
     }
@@ -340,7 +337,7 @@ impl Runtime {
             .and_then(|()| projection::snapshot(seed, query, status, gap, deadline))
             .and_then(|value| {
                 aw_contracts::evidence::validate_context(
-                    &self.contexts.registry,
+                    self.contexts.registry,
                     &value,
                     &seed.subject,
                     revision,
