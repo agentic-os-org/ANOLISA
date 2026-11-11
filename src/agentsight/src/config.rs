@@ -2335,15 +2335,15 @@ mod tests {
     #[test]
     fn test_default_agents_json_rule_count_matches_docs() {
         let (cmdline_rules, https_rules, _) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
-        assert_eq!(cmdline_rules.len(), 36);
+        assert_eq!(cmdline_rules.len(), 37);
         let allow = cmdline_rules.iter().filter(|r| r.allow).count();
-        assert_eq!(allow, 35);
+        assert_eq!(allow, 36);
         assert_eq!(https_rules.len(), 4);
         let qoder = cmdline_rules
             .iter()
             .filter(|r| r.agent_name.as_deref() == Some("QoderCLI"))
             .count();
-        assert_eq!(qoder, 3);
+        assert_eq!(qoder, 4);
     }
 
     #[test]

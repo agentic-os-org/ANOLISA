@@ -460,4 +460,24 @@ mod tests {
             Some("OpenClaw")
         );
     }
+
+    #[test]
+    fn test_default_rules_capture_qoder_node_with_v8_flag() {
+        assert_eq!(
+            match_default_rules(&["node", "/tmp/qodercli.js"], "").as_deref(),
+            Some("QoderCLI")
+        );
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "/usr/bin/node",
+                    "--max-old-space-size=64",
+                    "/tmp/qodercli.js",
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("QoderCLI")
+        );
+    }
 }

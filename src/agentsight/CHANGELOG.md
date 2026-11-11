@@ -32,7 +32,7 @@
 - Document LLM query authentication in the dashboard guide.
 
 ### Upgrade notes
-- Configuration moves from schema 5 to 6. The upgrade merges top-level sections only: sections already present, such as `cmdline` and `https`, are kept as they are and do not receive new default entries. A configuration carried over from 0.15.3 therefore lacks the Qoder CLI rules; to observe Qoder CLI, add `cmdline.allow` entries with `agent_name` `QoderCLI` for `qodercli*`, `*/qodercli*` and `*qodercli*`, and add `*.qoder.sh` to the `https` rules, as in the shipped default `src/agentsight/agentsight.json`.
+- Configuration moves from schema 5 to 6. The upgrade merges top-level sections only: sections already present, such as `cmdline` and `https`, are kept as they are and do not receive new default entries. A configuration carried over from 0.15.3 therefore lacks the Qoder CLI rules; to observe Qoder CLI, add `cmdline.allow` entries with `agent_name` `QoderCLI` for `["qodercli*"]`, `["*/qodercli*"]`, `["*node*", "*qodercli*"]` and `["*node*", "*", "*qodercli*"]`, and add `*.qoder.sh` to the `https` rules, as in the shipped default `src/agentsight/agentsight.json`.
 - The pre-upgrade file is saved beside the active configuration as `<file>.bak.<timestamp>`, for example `/etc/agentsight/config.json.bak.<timestamp>` for RPM installations.
 - The enforcer map layout changed, so stale pinned engines are reinstalled on upgrade rather than reusing incompatible pins.
 

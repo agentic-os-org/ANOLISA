@@ -32,7 +32,7 @@
 - 在 dashboard 指南中说明 LLM 查询的鉴权方式。
 
 ### 升级说明
-- 配置 schema 从 5 升到 6。升级只按顶层节合并：已存在的节（如 `cmdline`、`https`）原样保留，不会补入新的默认条目。因此从 0.15.3 沿用的配置不含 Qoder CLI 规则；如需观测 Qoder CLI，请参照随附默认配置 `src/agentsight/agentsight.json`，在 `cmdline.allow` 中添加 `agent_name` 为 `QoderCLI`、规则为 `qodercli*`、`*/qodercli*`、`*qodercli*` 的条目，并在 `https` 规则中加入 `*.qoder.sh`。
+- 配置 schema 从 5 升到 6。升级只按顶层节合并：已存在的节（如 `cmdline`、`https`）原样保留，不会补入新的默认条目。因此从 0.15.3 沿用的配置不含 Qoder CLI 规则；如需观测 Qoder CLI，请参照随附默认配置 `src/agentsight/agentsight.json`，在 `cmdline.allow` 中添加 `agent_name` 为 `QoderCLI`、规则分别为 `["qodercli*"]`、`["*/qodercli*"]`、`["*node*", "*qodercli*"]`、`["*node*", "*", "*qodercli*"]` 的四个条目，并在 `https` 规则中加入 `*.qoder.sh`。
 - 升级前的文件会保存在当前配置旁，命名为 `<文件名>.bak.<时间戳>`，例如 RPM 安装为 `/etc/agentsight/config.json.bak.<时间戳>`。
 - enforcer 的 map 布局有变，升级时会重新安装过期的已 pin 引擎，而不是复用不兼容的 pin。
 

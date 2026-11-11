@@ -223,7 +223,7 @@ header；字节超限还包含 `truncated=true`。其他生命周期移除继续
 表示第一个参数含 `node`、下一个参数含 `claude` 的进程。
 
 随包发布的规则覆盖 Hermes、Codex、Runloop、cosh（`Cosh`）、cosh-ng（`CoshNG`）、OpenClaw、
-Claude Code、Qwen Code、AgentScope 和 Qoder CLI，共 35 条。
+Claude Code、Qwen Code、AgentScope 和 Qoder CLI，共 36 条。
 
 Qoder CLI 规则覆盖原生、带版本号的二进制和 Node 启动器，其旧版
 `*.qoder.sh` 网关已包含在 `https` 中。配置迁移会保留已有的 `cmdline`
