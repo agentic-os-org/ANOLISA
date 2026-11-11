@@ -774,8 +774,18 @@ function findNode(node, predicate) {
 function renderCausalPanel() {
   const { calls, stubs } = deferredFetchStubs(['runCausalAttribution']);
   const driver = createHooksDriver();
+  const navigations = [];
+  const navigate = (path) => navigations.push(path);
+  class ApiRequestError extends Error {
+    constructor(message, status = 400, body = { error: 'llm_not_configured' }) {
+      super(message);
+      this.status = status;
+      this.body = body;
+    }
+  }
   const moduleStubs = {
-    '../utils/apiClient': { ...stubs },
+    'react-router-dom': { useNavigate: () => navigate },
+    '../utils/apiClient': { ...stubs, ApiRequestError },
   };
   const module = loadPageModule('src/components/CausalAttributionPanel.tsx', moduleStubs, driver);
   const panel = module.CausalAttributionPanel;
@@ -788,7 +798,7 @@ function renderCausalPanel() {
   assert.equal(driver.slots[0].value, '', 'slot 0 must be the complaint field');
   assert.equal(driver.slots[3].value, null, 'slot 3 must be caseData');
   rendered.effects[0](); // mount: load this (session, round)'s history
-  return { calls, driver, panel, rendered };
+  return { calls, driver, panel, rendered, ApiRequestError, navigations };
 }
 
 test('causal attribution: an empty round must clear the previous panel state', () => {
@@ -918,6 +928,108 @@ test('causal attribution: a run superseded by a round switch must discard its re
     assert.equal(driver.slots[1].value, false, 'round 2 must not be left loading by round 1');
   } finally {
     (calls ? calls.runCausalAttribution : []).forEach((call) =>
+      call.resolve({ case: null, cached: false }),
+    );
+    if (runPromise) await runPromise;
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('causal attribution: missing LLM configuration shows guidance instead of the raw API error', async () => {
+  const previousWindow = global.window;
+  global.window = { setInterval: () => 1, clearInterval: () => {} };
+  let setup;
+  let runPromise;
+  try {
+    setup = renderCausalPanel();
+    const { calls, driver, panel, ApiRequestError, navigations } = setup;
+    const props = { sessionId: 'sess-1', roundIndex: 0, roundLabel: '第 1 轮' };
+    driver.slots[0].setter('这轮不符合预期');
+    let rendered = driver.render(panel, props);
+    const runButton = findNode(
+      rendered.element,
+      (node) => node.type === 'button' && elementText(node).join('').includes('发起归因'),
+    );
+    assert.ok(runButton, 'the run button must exist');
+
+    runPromise = runButton.props.onClick();
+    const rawMessage = 'API http://203.0.113.10:7396/api/causal-attribution -> 400: '
+      + '{"error":"llm_not_configured","message":"LLM API key not configured"}';
+    calls.runCausalAttribution[0].reject(new ApiRequestError(rawMessage));
+    await runPromise;
+
+    rendered = driver.render(panel, props);
+    const pageText = elementText(rendered.element).join('');
+    assert.ok(pageText.includes('当前未配置 LLM，无法发起因果归因'));
+    assert.ok(pageText.includes('请先前往「优化设置」填写 API Key 与模型后再试'));
+    assert.ok(!pageText.includes(rawMessage), 'the raw URL, status, and JSON must not render');
+    assert.ok(!pageText.includes('查看详情'), 'the configuration error needs no debug details');
+
+    const settingsButton = findNode(
+      rendered.element,
+      (node) => node.type === 'button' && elementText(node).join('') === '前往优化设置',
+    );
+    assert.ok(settingsButton, 'the guidance must link to optimization settings');
+    settingsButton.props.onClick();
+    assert.deepEqual(navigations, ['/settings']);
+  } finally {
+    (setup ? setup.calls.runCausalAttribution : []).forEach((call) =>
+      call.resolve({ case: null, cached: false }),
+    );
+    if (runPromise) await runPromise;
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('causal attribution: an unrecognized error hides raw API details behind a disclosure', async () => {
+  const previousWindow = global.window;
+  global.window = { setInterval: () => 1, clearInterval: () => {} };
+  let setup;
+  let runPromise;
+  try {
+    setup = renderCausalPanel();
+    const { calls, driver, panel, ApiRequestError } = setup;
+    const props = { sessionId: 'sess-1', roundIndex: 0, roundLabel: '第 1 轮' };
+    driver.slots[0].setter('这轮不符合预期');
+    let rendered = driver.render(panel, props);
+    const runButton = findNode(
+      rendered.element,
+      (node) => node.type === 'button' && elementText(node).join('').includes('发起归因'),
+    );
+    assert.ok(runButton, 'the run button must exist');
+
+    runPromise = runButton.props.onClick();
+    const rawMessage = 'API http://203.0.113.10:7396/api/causal-attribution -> 500: '
+      + '{"error":"internal_error"}';
+    calls.runCausalAttribution[0].reject(
+      new ApiRequestError(rawMessage, 500, { error: 'internal_error' }),
+    );
+    await runPromise;
+
+    rendered = driver.render(panel, props);
+    const summary = findNode(
+      rendered.element,
+      (node) => node.type === 'p' && elementText(node).join('') === '归因失败，请稍后重试。',
+    );
+    assert.ok(summary, 'only a short failure message is shown by default');
+
+    const disclosure = findNode(rendered.element, (node) => node.type === 'details');
+    assert.ok(disclosure, 'debug details must be available on demand');
+    assert.equal(disclosure.props.open, undefined, 'debug details must start collapsed');
+    assert.ok(elementText(disclosure).join('').includes('查看详情'));
+    assert.ok(elementText(disclosure).join('').includes(rawMessage));
+    assert.equal(
+      findNode(
+        rendered.element,
+        (node) => node.type === 'button' && elementText(node).join('') === '前往优化设置',
+      ),
+      null,
+      'an unrelated failure must not direct the user to LLM settings',
+    );
+  } finally {
+    (setup ? setup.calls.runCausalAttribution : []).forEach((call) =>
       call.resolve({ case: null, cached: false }),
     );
     if (runPromise) await runPromise;
