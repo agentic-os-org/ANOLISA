@@ -1058,3 +1058,38 @@ async fn auto_capture_defaults_to_allow_when_consent_is_missing() {
     let note = std::fs::read_to_string(tmp.path().join("user-tester").join(path)).unwrap();
     assert!(note.contains("source: auto-capture"));
 }
+
+#[tokio::test]
+async fn task_save_clamps_out_of_range_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+
+    // Values >= 256 used to wrap through `as u8` before the 0-100 clamp.
+    let cases: &[(u64, u32, &str)] = &[
+        (90, 100, "progress=100%"),
+        (91, 101, "progress=100%"),
+        (92, 255, "progress=100%"),
+        (93, 256, "progress=100%"),
+        (94, 300, "progress=100%"),
+        (95, 42, "progress=42%"),
+    ];
+    for (id, progress, expected) in cases {
+        let resp = call_tool(
+            &mut reader,
+            &mut stdin,
+            *id,
+            "memory_task_save",
+            json!({"title": format!("clamp {progress}"), "progress": progress}),
+        )
+        .await;
+        let text = extract_text(&resp);
+        assert!(
+            text.contains(expected),
+            "progress {progress}: expected {expected}, got: {text}"
+        );
+    }
+
+    drop(stdin);
+    let _ = child.kill().await;
+}

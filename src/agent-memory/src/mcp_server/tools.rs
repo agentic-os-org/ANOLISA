@@ -456,7 +456,8 @@ impl MemoryMcpServer {
             &self.svc,
             &title,
             status.as_deref(),
-            progress.map(|p| p as u8),
+            // Clamp before narrowing: a bare `as u8` wraps values >= 256 (256 -> 0).
+            progress.map(|p| p.min(100) as u8),
             next_steps,
             blockers,
             files_modified,
