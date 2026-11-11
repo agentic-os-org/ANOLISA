@@ -58,8 +58,8 @@ enabled = true
 # ranking (a negative lambda makes the decay factor grow with age).
 time_decay_lambda = 0.01   # half-life ~69 days
 time_decay_alpha  = 0.3    # time contributes 30% of score boost
-# Cold archival: files with 0 access_count older than this many days
-# are excluded from normal search.
+# Cold archival: files that have neither been modified nor searched
+# within this many days are excluded from normal search.
 cold_after_days       = 30
 exclude_cold_on_search = true
 

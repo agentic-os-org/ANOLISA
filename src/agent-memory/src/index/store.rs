@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, ToSql, params};
 
 use crate::error::{MemoryError, Result};
 
@@ -31,6 +31,48 @@ pub struct BM25Store {
 /// version; a newer DB causes the open to fail so a downgraded binary
 /// doesn't silently corrupt rows it doesn't understand.
 pub(crate) const SCHEMA_VERSION: i64 = 5;
+
+/// SQLite busy timeout for ordinary index work: long enough to ride out an
+/// external tool probing the db file, short enough that a wedged writer
+/// cannot hang the index worker forever.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Busy timeout for best-effort search-access bookkeeping.
+///
+/// That write runs *after* a search has already produced its hits, while the
+/// caller holds the `IndexHandle` mutex. Spending `BUSY_TIMEOUT` there would
+/// let another connection's write lock stall an otherwise successful search —
+/// and every other operation sharing that handle — so bookkeeping gets a much
+/// shorter budget and is simply dropped when the lock is busy.
+const ACCESS_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Paths bound into one bookkeeping UPDATE. One statement per hit would make
+/// a contended writer lock cost one timeout per hit; batching keeps it at one
+/// timeout per query. The chunk stays far below SQLite's bound-parameter
+/// limit even on old builds (999).
+const ACCESS_UPDATE_CHUNK: usize = 200;
+
+/// Shortens the connection's SQLite busy timeout for a best-effort write and
+/// restores `BUSY_TIMEOUT` on drop, so neither an early return nor a panic can
+/// leave the connection with the wrong timeout.
+struct BriefBusyTimeout<'conn> {
+    conn: &'conn Connection,
+}
+
+impl<'conn> BriefBusyTimeout<'conn> {
+    /// `None` when the timeout could not be shortened — callers must then skip
+    /// the write rather than run it under the full `BUSY_TIMEOUT`.
+    fn new(conn: &'conn Connection) -> Option<Self> {
+        conn.busy_timeout(ACCESS_BUSY_TIMEOUT).ok()?;
+        Some(Self { conn })
+    }
+}
+
+impl Drop for BriefBusyTimeout<'_> {
+    fn drop(&mut self) {
+        let _ = self.conn.busy_timeout(BUSY_TIMEOUT);
+    }
+}
 
 /// What the index currently records for one path.
 ///
@@ -64,7 +106,7 @@ impl BM25Store {
         // per commit).
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
 
         // Derive mount_root from db_path: bm25.db lives at
         // <mount_root>/.anolisa/index/bm25.db, so mount_root is three
@@ -359,7 +401,9 @@ impl BM25Store {
     /// (case-sensitive; see `category_glob_pattern`). Filtering in Rust
     /// *after* the limit instead would return zero hits whenever another
     /// category filled the unfiltered top-k window, which is exactly what bm25
-    /// term-frequency/length normalization produces.
+    /// term-frequency/length normalization produces. Because the filter runs
+    /// before access bookkeeping, a hit it drops never reaches the caller and
+    /// never re-warms its file.
     pub fn search_scoped(
         &self,
         query: &str,
@@ -367,6 +411,23 @@ impl BM25Store {
         exclude_cold: bool,
         agent_scope: Option<&str>,
         category: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_scoped_inner(query, top_k, exclude_cold, agent_scope, category, true)
+    }
+
+    /// Shared BM25/LIKE query implementation.
+    ///
+    /// `record_access` is true for caller-facing searches. Hybrid search
+    /// passes false for its two candidate queries and records one access
+    /// against the merged hits it actually returns.
+    fn search_scoped_inner(
+        &self,
+        query: &str,
+        top_k: usize,
+        exclude_cold: bool,
+        agent_scope: Option<&str>,
+        category: Option<&str>,
+        record_access: bool,
     ) -> Result<Vec<SearchHit>> {
         if query.trim().is_empty() {
             return Err(MemoryError::InvalidArgument("empty search query".into()));
@@ -395,14 +456,18 @@ impl BM25Store {
         let tokens: Vec<&str> = fts_q.split_whitespace().collect();
         let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
         if needs_like_fallback {
-            return self.search_like(
+            let hits = self.search_like(
                 &tokens,
                 top_k,
                 cold_filter,
                 superseded_filter,
                 &scope,
                 category,
-            );
+            )?;
+            if record_access {
+                self.record_access_hits(&hits);
+            }
+            return Ok(hits);
         }
 
         // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
@@ -518,8 +583,13 @@ impl BM25Store {
             .collect();
 
         // Best match first — `score` is "higher is better" on every path.
+        // `category` was already applied in SQL before the `LIMIT`, so what
+        // remains is exactly what the caller will see.
         out.sort_by(|a, b| b.score.total_cmp(&a.score));
 
+        if record_access {
+            self.record_access_hits(&out);
+        }
         Ok(out)
     }
 
@@ -685,11 +755,80 @@ impl BM25Store {
         self.search(query, top_k, false)
     }
 
-    /// Compact the index: mark old, never-accessed files as cold and
-    /// remove them from the FTS index. Returns the number of files compacted.
+    /// Record that search hits were surfaced to the caller.
     ///
-    /// Cold criteria: `access_count == 0 AND age > cold_after_days`.
-    /// Files with `access_count > 0` are never compacted (warm protection).
+    /// `hits` must be the list the caller actually receives — category filter
+    /// included — so a hit that was filtered away on the way out cannot keep
+    /// its file warm.
+    ///
+    /// These are the only writers of `access_count` / `last_accessed_ms`.
+    /// A hit also re-warms its row, so a deep search that surfaces an
+    /// archived memory makes it visible to normal search again. The
+    /// bookkeeping is best-effort *and* bounded: one batched UPDATE per query
+    /// under `ACCESS_BUSY_TIMEOUT`, dropped when the write lock is busy, so it
+    /// can neither fail nor stall the search that produced the hits.
+    fn record_access_hits(&self, hits: &[SearchHit]) {
+        self.record_access_paths(hits.iter().map(|hit| hit.path.as_str()));
+    }
+
+    fn record_access_paths<'a, I>(&self, paths: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        // Deduplicate: one query charges a file once even if two ranked rows
+        // agree on the path, and it keeps the bound-parameter count down.
+        let mut unique: Vec<&str> = Vec::new();
+        for path in paths {
+            if !unique.contains(&path) {
+                unique.push(path);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // The read that produced these hits already succeeded, so this write
+        // must not be able to stall the search: one batched UPDATE per chunk
+        // (never one per hit) under `ACCESS_BUSY_TIMEOUT`. A busy error drops
+        // the bookkeeping for that chunk and nothing else.
+        let Some(_brief_timeout) = BriefBusyTimeout::new(&self.conn) else {
+            tracing::debug!("cannot shorten busy timeout; skipping search-access update");
+            return;
+        };
+        for chunk in unique.chunks(ACCESS_UPDATE_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "UPDATE files \
+                 SET access_count = access_count + 1, \
+                     last_accessed_ms = ?, \
+                     is_cold = 0 \
+                 WHERE path IN ({placeholders})"
+            );
+            let mut args: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
+            args.push(&now_ms);
+            args.extend(chunk.iter().map(|path| path as &dyn ToSql));
+            if let Err(e) = self.conn.execute(&sql, args.as_slice()) {
+                tracing::debug!(
+                    "cannot record search access for {} hit(s): {e}",
+                    chunk.len()
+                );
+            }
+        }
+    }
+
+    /// Compact the index: mark stale files as cold so normal search filters
+    /// them out. Cold rows remain in the FTS index for deep search. Returns
+    /// the number of files compacted.
+    ///
+    /// Cold criteria: neither `mtime_ms` nor `last_accessed_ms` is within
+    /// `cold_after_days`. A recently searched file therefore stays warm even
+    /// when its mtime is old, while a one-time search cannot protect it
+    /// forever.
     pub fn compact(&mut self, cold_after_days: u64) -> Result<usize> {
         let now_ms: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -702,8 +841,10 @@ impl BM25Store {
         // Find files eligible for cold marking.
         let cold_paths: Vec<String> = {
             let mut stmt = tx.prepare(
-                "SELECT path FROM files WHERE access_count = 0 \
-                 AND mtime_ms < ?1 AND is_cold = 0",
+                "SELECT path FROM files \
+                 WHERE is_cold = 0 \
+                   AND mtime_ms < ?1 \
+                   AND COALESCE(last_accessed_ms, 0) < ?1",
             )?;
             let rows = stmt.query_map(params![cutoff_ms], |r| r.get::<_, String>(0))?;
             rows.flatten().collect()
@@ -891,17 +1032,40 @@ impl BM25Store {
     /// are filtered before ranking so they never consume the `top_k` budget.
     /// Vector rows without a matching `files` entry remain eligible.
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<(String, f64)>> {
-        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search)
+        self.search_vec_with_cold(query_vec, top_k, self.exclude_cold_on_search, None, true)
+    }
+
+    /// Vector search for a caller-facing request: the store's cold policy plus
+    /// the caller's `category` filter, applied before access bookkeeping.
+    pub(crate) fn search_vec_category(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
+        self.search_vec_with_cold(
+            query_vec,
+            top_k,
+            self.exclude_cold_on_search,
+            category,
+            true,
+        )
     }
 
     // Keep this override private: vector searches use the store default,
     // while hybrid searches pass their per-call cold policy. Superseded and
     // optionally cold rows are filtered before ranking; standalone vectors stay eligible.
+    //
+    // `record_access` is true for caller-facing searches. Hybrid search
+    // passes false for its candidate query and charges one access to the
+    // merged hits it actually returns.
     fn search_vec_with_cold(
         &self,
         query_vec: &[f32],
         top_k: usize,
         exclude_cold: bool,
+        category: Option<&str>,
+        record_access: bool,
     ) -> Result<Vec<(String, f64)>> {
         let q_norm = l2_normalise(query_vec);
 
@@ -943,6 +1107,16 @@ impl BM25Store {
         // edge-case values (subnormals, -0.0).
         scores.sort_by(|a, b| b.1.total_cmp(&a.1));
         scores.truncate(top_k);
+        let scores: Vec<(String, f64)> = match category {
+            Some(category) => scores
+                .into_iter()
+                .filter(|(path, _)| matches_category(path, category))
+                .collect(),
+            None => scores,
+        };
+        if record_access {
+            self.record_access_paths(scores.iter().map(|(path, _)| path.as_str()));
+        }
         Ok(scores)
     }
 
@@ -957,7 +1131,7 @@ impl BM25Store {
         query_vec: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_hybrid_inner(query, query_vec, top_k, self.exclude_cold_on_search)
+        self.search_hybrid_inner(query, query_vec, top_k, self.exclude_cold_on_search, None)
     }
 
     /// Hybrid search with explicit cold control.
@@ -968,7 +1142,26 @@ impl BM25Store {
         top_k: usize,
         exclude_cold: bool,
     ) -> Result<Vec<SearchHit>> {
-        self.search_hybrid_inner(query, query_vec, top_k, exclude_cold)
+        self.search_hybrid_inner(query, query_vec, top_k, exclude_cold, None)
+    }
+
+    /// Hybrid search for a caller-facing request: the store's cold policy plus
+    /// the caller's `category` filter, applied to the merged hits before the
+    /// single access is charged.
+    pub(crate) fn search_hybrid_category(
+        &self,
+        query: &str,
+        query_vec: &[f32],
+        top_k: usize,
+        category: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid_inner(
+            query,
+            query_vec,
+            top_k,
+            self.exclude_cold_on_search,
+            category,
+        )
     }
 
     fn search_hybrid_inner(
@@ -977,10 +1170,23 @@ impl BM25Store {
         query_vec: &[f32],
         top_k: usize,
         exclude_cold: bool,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
+        // Run both candidate search strategies. Neither filters by category
+        // nor records an access yet: hybrid search charges one access to the
+        // merged hits it actually returns, not to every candidate used to rank
+        // them.
+        //
         // A row decode failure makes a fallback result untrustworthy, even
         // when the other strategy succeeds with no matches.
-        let bm25_hits = match self.search(query, top_k * 2, exclude_cold) {
+        let bm25_hits = match self.search_scoped_inner(
+            query,
+            top_k * 2,
+            exclude_cold,
+            None,
+            None,
+            false,
+        ) {
             Err(e) if is_row_decode_error(&e) => {
                 tracing::error!(
                     "hybrid search: BM25 row decode failed (tables=files/files_fts, db={}): {e}; {ROW_DECODE_RECOVERY}",
@@ -990,7 +1196,13 @@ impl BM25Store {
             }
             result => result,
         };
-        let vec_hits = match self.search_vec_with_cold(query_vec, top_k * 2, exclude_cold) {
+        let vec_hits = match self.search_vec_with_cold(
+            query_vec,
+            top_k * 2,
+            exclude_cold,
+            None,
+            false,
+        ) {
             Err(e) if is_row_decode_error(&e) => {
                 tracing::error!(
                     "hybrid search: vector row decode failed (table=files_vec, db={}): {e}; {ROW_DECODE_RECOVERY}",
@@ -1024,11 +1236,14 @@ impl BM25Store {
             return Ok(Vec::new());
         }
         if vec_hits.is_empty() {
-            return Ok(bm25_hits.into_iter().take(top_k).collect());
+            let hits: Vec<SearchHit> = bm25_hits.into_iter().take(top_k).collect();
+            let hits = retain_category(hits, category);
+            self.record_access_hits(&hits);
+            return Ok(hits);
         }
         if bm25_hits.is_empty() {
             // Reconstruct SearchHit from vector-only results.
-            return Ok(vec_hits
+            let hits: Vec<SearchHit> = vec_hits
                 .into_iter()
                 .take(top_k)
                 .map(|(path, score)| SearchHit {
@@ -1037,7 +1252,10 @@ impl BM25Store {
                     score,
                     suspicious: false,
                 })
-                .collect());
+                .collect();
+            let hits = retain_category(hits, category);
+            self.record_access_hits(&hits);
+            return Ok(hits);
         }
 
         // RRF: score = Σ 1/(k + rank_i) for each result set.
@@ -1080,7 +1298,7 @@ impl BM25Store {
         merged.sort_by(|a, b| b.1.total_cmp(&a.1));
         merged.truncate(top_k);
 
-        Ok(merged
+        let hits: Vec<SearchHit> = merged
             .into_iter()
             .map(|(path, score)| {
                 let (snippet, suspicious) = snippets.remove(&path).unwrap_or_default();
@@ -1091,7 +1309,10 @@ impl BM25Store {
                     suspicious,
                 }
             })
-            .collect())
+            .collect();
+        let hits = retain_category(hits, category);
+        self.record_access_hits(&hits);
+        Ok(hits)
     }
 
     pub fn count(&self) -> Result<usize> {
@@ -1188,6 +1409,34 @@ fn strip_snippet_markers(s: &str) -> String {
         }
     }
     out
+}
+
+// ── category filter (shared by the BM25, LIKE, vector and hybrid paths) ──
+
+/// Category predicate for caller-facing searches.
+///
+/// Facts live under `facts/<category>/<ulid>.md`, so the category is the
+/// second path component. Anything outside that layout (a note, a session
+/// log, a bare filename) has no category and never matches a filter.
+fn matches_category(path: &str, category: &str) -> bool {
+    path.split('/').nth(1) == Some(category)
+}
+
+/// Apply the caller's `category` filter to a ranked hit list.
+///
+/// The BM25 and LIKE paths filter in SQL instead (see `category_filter_sql`);
+/// this covers the paths whose candidates are ranked in Rust — the hybrid
+/// merge, which runs it *before* `record_access_hits` so a hit the filter
+/// drops is neither returned to the caller nor charged as an access. Repeated
+/// category-restricted searches therefore cannot keep unrelated memories warm.
+fn retain_category(hits: Vec<SearchHit>, category: Option<&str>) -> Vec<SearchHit> {
+    match category {
+        Some(category) => hits
+            .into_iter()
+            .filter(|hit| matches_category(&hit.path, category))
+            .collect(),
+        None => hits,
+    }
 }
 
 // ── agent scope helpers (shared by MATCH and LIKE search paths) ───────
@@ -2643,6 +2892,282 @@ mod tests {
         assert_eq!(hits2[0].path, "new.md");
     }
 
+    fn access_stats(s: &BM25Store, path: &str) -> (i64, i64) {
+        s.conn
+            .query_row(
+                "SELECT access_count, COALESCE(last_accessed_ms, 0) FROM files WHERE path = ?1",
+                params![path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn search_records_access_statistics() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("alpha.md", 1_000, 16, "alpha memory", None)
+            .unwrap();
+        s.upsert("beta.md", 1_000, 16, "beta memory", None).unwrap();
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert_eq!(s.search("alpha", 5, true).unwrap().len(), 1);
+        assert_eq!(s.search("alpha", 5, true).unwrap().len(), 1);
+        assert_eq!(s.search("beta", 5, true).unwrap().len(), 1);
+
+        let (alpha_count, alpha_last) = access_stats(&s, "alpha.md");
+        let (beta_count, beta_last) = access_stats(&s, "beta.md");
+        assert_eq!(alpha_count, 2);
+        assert_eq!(beta_count, 1);
+        assert!(alpha_last >= before);
+        assert!(beta_last >= before);
+    }
+
+    #[test]
+    fn search_vec_records_access() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("vector.md", 1_000, 16, "vector memory", None)
+            .unwrap();
+        s.upsert_vec("vector.md", &[1.0, 0.0]).unwrap();
+
+        let hits = s.search_vec(&[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "vector.md");
+        assert_eq!(access_stats(&s, "vector.md").0, 1);
+    }
+
+    #[test]
+    fn search_hybrid_records_merged_hit_once() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("hybrid.md", 1_000, 16, "hybrid memory", None)
+            .unwrap();
+        s.upsert_vec("hybrid.md", &[1.0, 0.0]).unwrap();
+
+        let hits = s.search_hybrid("hybrid", &[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "hybrid.md");
+        assert_eq!(access_stats(&s, "hybrid.md").0, 1);
+    }
+
+    #[test]
+    fn search_category_filter_gates_access_recording() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("facts/interest/old.md", 1_000, 16, "walrus interest", None)
+            .unwrap();
+        s.upsert("facts/lesson/new.md", 1_000, 16, "walrus lesson", None)
+            .unwrap();
+
+        // Only the hit that survives the category filter reaches the caller,
+        // so only that one may be charged an access.
+        let hits = s
+            .search_scoped("walrus", 5, true, None, Some("lesson"))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "facts/lesson/new.md");
+        assert_eq!(access_stats(&s, "facts/interest/old.md"), (0, 0));
+        assert_eq!(access_stats(&s, "facts/lesson/new.md").0, 1);
+
+        // A category that matches nothing returns nothing and records nothing,
+        // so repeated category-restricted searches cannot keep an unrelated
+        // memory warm: compaction still archives it.
+        let hits = s
+            .search_scoped("walrus", 5, true, None, Some("nonexistent"))
+            .unwrap();
+        assert!(hits.is_empty());
+        assert_eq!(access_stats(&s, "facts/interest/old.md"), (0, 0));
+        assert_eq!(
+            s.compact(30).unwrap(),
+            1,
+            "a category-filtered hit must not protect its file"
+        );
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn category_filter_gates_vec_and_hybrid_access() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        for path in ["facts/interest/a.md", "facts/lesson/b.md"] {
+            s.upsert(path, 1_000, 16, "walrus vector memory", None)
+                .unwrap();
+            s.upsert_vec(path, &[1.0, 0.0]).unwrap();
+        }
+
+        // Vector path: the candidate the filter drops is never charged.
+        let hits = s
+            .search_vec_category(&[1.0, 0.0], 5, Some("lesson"))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "facts/lesson/b.md");
+        assert_eq!(access_stats(&s, "facts/interest/a.md"), (0, 0));
+        assert_eq!(access_stats(&s, "facts/lesson/b.md").0, 1);
+
+        // Hybrid path: the two candidate queries charge nothing on their own
+        // and the merged result charges the single surviving hit exactly once.
+        let hits = s
+            .search_hybrid_category("walrus", &[1.0, 0.0], 5, Some("lesson"))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "facts/lesson/b.md");
+        assert_eq!(access_stats(&s, "facts/interest/a.md"), (0, 0));
+        assert_eq!(
+            access_stats(&s, "facts/lesson/b.md").0,
+            2,
+            "one hybrid search charges one access"
+        );
+    }
+
+    #[test]
+    fn search_access_bookkeeping_does_not_wait_per_hit() {
+        // Disk-backed: a second connection holding the writer lock is the only
+        // way to observe how long bookkeeping is prepared to wait.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let mut s = BM25Store::open_for_test(&path).unwrap();
+        for i in 0..3 {
+            s.upsert(&format!("f{i}.md"), 1_000, 16, "walrus memory", None)
+                .unwrap();
+        }
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = std::time::Instant::now();
+        let hits = s.search("walrus", 3, true).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            hits.len(),
+            3,
+            "the WAL read must not depend on the writer lock"
+        );
+        // Per-hit bookkeeping waited out the full busy_timeout once per hit
+        // (~15 s for three hits). One batched UPDATE under
+        // ACCESS_BUSY_TIMEOUT keeps the search bounded however many hits it
+        // returns, so it must not spend even a single BUSY_TIMEOUT here.
+        assert!(
+            elapsed < BUSY_TIMEOUT,
+            "bookkeeping must not wait per hit: search took {elapsed:?}"
+        );
+
+        // The contended write is dropped rather than retried: nothing recorded.
+        assert_eq!(access_stats(&s, "f0.md"), (0, 0));
+        drop(blocker);
+
+        // Best-effort only — bookkeeping resumes as soon as the lock is free.
+        assert_eq!(s.search("walrus", 3, true).unwrap().len(), 3);
+        assert_eq!(access_stats(&s, "f0.md").0, 1);
+        assert_eq!(access_stats(&s, "f2.md").0, 1);
+    }
+
+    #[test]
+    fn compact_keeps_searched_files_warm() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let old_ms = now_ms - 100 * 86_400_000;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("searched.md", old_ms, 24, "walrus unique knowledge", None)
+            .unwrap();
+        s.upsert("untouched.md", old_ms, 24, "other unique knowledge", None)
+            .unwrap();
+
+        // The agent searches `searched.md` and gets it back — once through
+        // the MATCH path (3+ char term) and once through the LIKE fallback
+        // (2-char term).
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+        let hits = s.search("wa", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "searched.md");
+
+        let compacted = s.compact(30).unwrap();
+        assert_eq!(compacted, 1, "only the never-searched file may go cold");
+
+        let hits = s.search("walrus", 5, true).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a searched memory must stay searchable after compact"
+        );
+        assert_eq!(hits[0].path, "searched.md");
+        let hits = s.search("other", 5, true).unwrap();
+        assert!(hits.is_empty(), "the untouched file is cold");
+    }
+
+    #[test]
+    fn compact_cools_after_search_warmth_expires() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let day_ms = 86_400_000;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "searched.md",
+            now_ms - 50 * day_ms,
+            24,
+            "walrus unique knowledge",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.search("walrus", 5, true).unwrap().len(), 1);
+        assert_eq!(
+            s.compact(30).unwrap(),
+            0,
+            "a recent search keeps the file warm"
+        );
+
+        // Age only the recorded access; the file mtime stays old.
+        s.conn
+            .execute(
+                "UPDATE files SET last_accessed_ms = ?1 WHERE path = 'searched.md'",
+                params![now_ms - 40 * day_ms],
+            )
+            .unwrap();
+
+        assert_eq!(
+            s.compact(30).unwrap(),
+            1,
+            "an expired search no longer protects the file"
+        );
+        assert!(s.search("walrus", 5, true).unwrap().is_empty());
+        assert_eq!(s.search_deep("walrus", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compact_deep_search_rewarms_cold_file() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 100 * 86_400_000,
+            20,
+            "gamma unique knowledge",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.compact(30).unwrap(), 1);
+        assert!(s.search("gamma", 5, true).unwrap().is_empty());
+
+        let hits = s.search_deep("gamma", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "old.md");
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
+        assert_eq!(s.search("gamma", 5, true).unwrap().len(), 1);
+    }
+
     #[test]
     fn compact_marks_old_files_cold() {
         let now_ms = std::time::SystemTime::now()
@@ -2734,9 +3259,10 @@ mod tests {
         )
         .unwrap();
 
-        // Before compact: visible in search.
-        let hits = s.search("unique", 5, true).unwrap();
-        assert_eq!(hits.len(), 1);
+        // Before compact: present and warm. Probe the counts rather than
+        // searching, because a caller-facing search records an access and
+        // would legitimately protect the file from compaction.
+        assert_eq!(s.warm_cold_counts().unwrap(), (1, 0));
 
         // Compact.
         s.compact(30).unwrap();

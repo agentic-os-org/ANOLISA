@@ -62,7 +62,7 @@ async fn until(mut f: impl FnMut() -> bool, message: &str) {
 }
 fn note_score(index: &IndexHandle, q: &[f32]) -> Option<f64> {
     index
-        .search_vec(q, 10)
+        .search_vec(q, 10, None)
         .unwrap()
         .into_iter()
         .find(|h| h.path == "note.md")
@@ -138,7 +138,7 @@ async fn startup_text_failure_must_not_backfill_new_body_into_old_row() {
     let vector = note_score(&index, &[0.0, 1.0]);
     assert!(
         index
-            .search_vec(&[1.0, 0.0], 10)
+            .search_vec(&[1.0, 0.0], 10, None)
             .unwrap()
             .iter()
             .any(|hit| hit.path == "healthy.md" && hit.score > 0.9),
@@ -200,7 +200,7 @@ async fn failed_text_insert_must_not_publish_a_standalone_vector() {
     .await;
     assert!(index.search("newcobalt", 10).unwrap().is_empty());
     let had_vector = index
-        .search_vec(&[0.0, 1.0], 10)
+        .search_vec(&[0.0, 1.0], 10, None)
         .unwrap()
         .iter()
         .any(|h| h.path == "fresh.md");
@@ -211,7 +211,7 @@ async fn failed_text_insert_must_not_publish_a_standalone_vector() {
         || {
             !index.search("newcobalt", 10).unwrap().is_empty()
                 && index
-                    .search_vec(&[0.0, 1.0], 10)
+                    .search_vec(&[0.0, 1.0], 10, None)
                     .unwrap()
                     .iter()
                     .any(|h| h.path == "fresh.md" && h.score > 0.9)
