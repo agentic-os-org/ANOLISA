@@ -725,7 +725,7 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺 20 ms 中断单次匹配。
 100 条自定义发现之后首次省略命中会停止后续匹配。自定义规则直接采用 fancy-regex 原生语义；
 与 Python 不同本身不构成错误，invalid_regex 仅用于实际解析/编译/引擎限制或加载求值失败。
-检测语义版本 `scanner_version=2.1.1` 纳入规则标识，成功/失败报告及审计均保留；
+检测语义版本 `scanner_version=2.1.2` 纳入规则标识，成功/失败报告及审计均保留；
 内置 engine 为 regex_v2，自定义为 fancy_regex。2.0.0 修复空 claims JWT 的候选漏报，
 接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
 2.0.1 与保留的 Python 检测器同步要求完整卡号表达式、支持网络的前缀/长度组合及 Luhn；
@@ -740,6 +740,11 @@ V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺
 `+0.12/-0.35` 权重、低置信度阈值和 email/private-key 例外不变。冻结 V1 语料保留原始
 记录；兼容测试显式分类 `sk-test987…` 及 `LTAI5tQnKxExampleToken12` 上下文的置信度变化，
 其他预期字段继续逐项比较。
+
+2.1.2 为 API key、邮箱、中国身份证号、阿里云 AccessKey ID 和 Bearer 标签加入 CJK 正文边界，
+覆盖汉字、假名和谚文；API key 的合法尾部符号不因相邻 CJK 被截断。其他 Unicode 连续词、
+邮箱句点/域名延续、通用字段值和上下文评分不变。六个变化的 V1 观察由兼容测试显式分类，
+`v1.json` 和保留的 Python 检测器不变；准确 span、脱敏及反例见 `tests/cjk_boundaries.rs`。
 
 差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 234 个
 V1 合成用例及单测验证。完整差异、未来 Evidence 边界和回滚见

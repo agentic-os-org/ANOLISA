@@ -129,7 +129,7 @@ fn custom_patterns_use_the_versioned_native_dialect() {
             CoverageStatus::Complete,
             "{pattern}"
         );
-        assert_eq!(report.summary.scanner_version, "2.1.1");
+        assert_eq!(report.summary.scanner_version, "2.1.2");
         let spans: Vec<_> = report
             .findings
             .iter()

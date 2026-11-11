@@ -62,7 +62,7 @@ Builtin word and decimal classes are frozen to Python 3.11 / Unicode 14; exhaust
 scalar classification and case-folding fixtures protect the V1 boundary semantics.
 Elapsed time, additive V2 metadata and the explicitly upgraded engine identity are excluded from comparisons.
 
-Detection semantics are versioned as `summary.scanner_version=2.1.1`, included in `ruleset_id`
+Detection semantics are versioned as `summary.scanner_version=2.1.2`, included in `ruleset_id`
 and successful/failed reports and audit results. Built-in engine identity is `regex_v2`; custom
 identity is `fancy_regex`. This version is independent of the package version. Version 2.0.0 fixes
 empty-claims JWT detection, retains nonrecursive structural checks for large integers/deep JSON,
@@ -85,6 +85,18 @@ The `.invalid` substring marker, positive-context normalization, scoring weights
 threshold, and email/private-key exemptions are unchanged. `tests/compatibility.rs` explicitly
 classifies the confidence differences for `sk-test987…` and `LTAI5tQnKxExampleToken12` contexts
 without rewriting the frozen V1 corpus or ignoring other expected fields.
+
+Version 2.1.2 treats CJK prose as a boundary for API keys, email addresses, Chinese IDs,
+Alibaba Cloud access key IDs and Bearer labels. `CJK_WORD_RANGES` is the intersection of the
+frozen Python word table with Unicode 16 Han/Hiragana/Katakana/Hangul Script_Extensions from
+the locked regex-syntax 0.8.11 tables. Generic fields, context scoring, custom rules and other
+Unicode continuations retain their previous semantics. API keys keep all permitted suffix
+bytes before CJK prose; email period/domain-continuation checks remain unchanged.
+`tests/compatibility.rs` explicitly upgrades six named V1 observations, including an API-key
+span previously cut at an internal hyphen, while retaining the original `v1.json` and its
+provenance. `tests/cjk_boundaries.rs` defines spans, redaction and negative controls;
+the existing CLI/daemon suite covers text, stdin and file inputs and sanitized audit.
+Python V1 is an unchanged historical oracle; these changes apply only to the Rust V2 scanner.
 
 The top-level V1 fields remain `ok`, `verdict`, `summary`, `findings`, `elapsed_ms`,
 and optional `redacted_text`. `summary` separates execution status from coverage:
@@ -204,7 +216,7 @@ and bounded shutdown; PII adds no second propagation or output pipeline.
 | Identity | UID/GID/PID from UDS peer; trace and `agent_name` never confer authority |
 | Trace | Top-level CLI `--trace-context`, V1 aliases/trim/256-character limits; shared Context/top-level carrier; opaque labels are not OTel IDs |
 | Rules | Versioned change from V1 per-user/next-scan reload to central/startup load |
-| Detection version | `scanner_version=2.1.1`; builtin quality changes and native custom syntax have separate cases |
+| Detection version | `scanner_version=2.1.2`; builtin quality changes and native custom syntax have separate cases |
 | Regex | Native fancy-regex; actual invalid syntax, YAML alias/multiple-document rejection, execution budgets/engine limits |
 | Runtime | Rust detector/client/daemon; retained V1 is an independent rollback oracle |
 

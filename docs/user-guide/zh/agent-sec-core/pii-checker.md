@@ -42,7 +42,7 @@ V2 保留原有顶层结果字段，在 `summary` 中增加证据元数据：
 | `coverage.reasons` | 输入截断、规则无效、匹配受限或扫描失败的安全错误码 |
 | `input_sha256` | 检测器收到文本的 SHA-256，不代表未收到的原始内容 |
 | `scanned_input_sha256`、`scanned_bytes` | 实际扫描前缀的摘要及字节数 |
-| `scanner_version` | 检测语义版本；V2 当前为 `2.1.1` |
+| `scanner_version` | 检测语义版本；V2 当前为 `2.1.2` |
 | `ruleset_id` | scanner 版本及不可变内置/自定义规则配置的标识 |
 
 `bytes_scanned` 保留 V1 前缀计数，可能包含被 `scanned_bytes` 排除的不完整 UTF-8 尾部。
@@ -73,7 +73,7 @@ coverage `unavailable`，CLI 退出 `1`。单次正则调用受引擎回溯上�
 ## 检测语义版本
 
 `summary.scanner_version` 标识检测行为，独立于 AgentSecCore 包版本和 RPC schema。
-V2 的成功/失败扫描报告及审计结果均记录 `2.1.1`；内置 finding 的 engine 为 `regex_v2`，
+V2 的成功/失败扫描报告及审计结果均记录 `2.1.2`；内置 finding 的 engine 为 `regex_v2`，
 自定义 finding 为 `fancy_regex`。`ruleset_id` 包含此版本、内置模式及自定义配置，
 即使 YAML 内容不变，引擎行为变化仍可追溯。CI 的 commit SHA 标识被测构建，不是检测语义版本。
 
@@ -89,6 +89,14 @@ V2 的成功/失败扫描报告及审计结果均记录 `2.1.1`；内置 finding
   也不会因此将 coverage 标记为 partial。
 
 2.1.1 修正置信度评分中的测试标记词边界，详见[内置检测](#内置检测)。
+
+2.1.2 可识别紧邻汉字、假名或谚文的受支持 API key、邮箱、中国身份证号、阿里云 AccessKey ID
+及 `Bearer` 标签。例如 `中文sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ中文`
+会检出完整密钥，周围中文不计入该发现的 span。此类文字前的 `_`、`-`、`=` 仍属于 API key。
+其他 Unicode 字母保留既有的连续词检查，不会从 `élise@company.cn` 截取 `lise@company.cn`；
+ASCII 句点后仍可能延续域名，因此 `alice@company.cn.中国` 等形式继续拒绝局部匹配。
+通用 secret-field 值仍支持 Unicode，不会在 CJK 字符处截断。此变更仅适用于 V2，
+保留的 Python V1 检测器不变。
 
 保留的 V1 语料验证不变行为，独立的正反例和资源限制用例定义 V2 变化。这些检查覆盖支持的格式，
 不代表对任意数据零误报漏报。短密钥、无标签密钥、11 类之外的格式和上下文歧义，

@@ -85,6 +85,43 @@ def _scan(daemon, *args, input_text=None):
     return json.loads(result.stdout)
 
 
+@pytest.mark.parametrize("source", ["tool_input", "tool_output", "model_input"])
+def test_cjk_adjacent_key_is_redacted_in_all_input_channels(
+    source, pii_daemon, pii_environment, tmp_path
+):
+    key = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ-="
+    text = f"中文api_key={key}カギ"
+    input_file = tmp_path / "cjk.txt"
+    input_file.write_text(text)
+    for args, stdin in [
+        (["--text", text], None),
+        (["--stdin"], text),
+        (["--input", str(input_file)], None),
+    ]:
+        report = _scan(
+            pii_daemon,
+            *args,
+            "--source",
+            source,
+            "--raw-evidence",
+            "--redact-output",
+            input_text=stdin,
+        )
+        assert report["verdict"] == "deny"
+        assert report["summary"]["scanner_version"] == "2.1.2"
+        assert report["summary"]["coverage"] == {"status": "complete", "reasons": []}
+        [finding] = report["findings"]
+        assert finding["type"] == "api_key"
+        assert finding["raw_evidence"] == key
+        assert finding["span"] == {"start": 10, "end": 10 + len(key)}
+        assert report["redacted_text"] == "中文api_key=sk-a...[REDACTED]...IJ-=カギ"
+    assert input_file.read_text() == text
+    events = _events(pii_environment)
+    assert len(events) == 3
+    assert all(event["details"]["request"]["source"] == source for event in events)
+    assert key not in json.dumps(events)
+
+
 @pytest.mark.parametrize("context, confidence", [("latest", 0.78), ("test-only", None)])
 def test_negative_context_words_and_sanitized_audit(
     context, confidence, pii_daemon, pii_environment
@@ -99,7 +136,7 @@ def test_negative_context_words_and_sanitized_audit(
         "--raw-evidence",
         "--redact-output",
     )
-    assert report["summary"]["scanner_version"] == "2.1.1"
+    assert report["summary"]["scanner_version"] == "2.1.2"
     if confidence is None:
         assert report["findings"] == []
         assert report["verdict"] == "pass"
@@ -155,7 +192,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
         }
         assert report["ok"] and report["verdict"] == "deny"
         assert report["summary"]["source"] == source
-        assert report["summary"]["scanner_version"] == "2.1.1"
+        assert report["summary"]["scanner_version"] == "2.1.2"
         assert report["summary"]["coverage"] == {"status": "complete", "reasons": []}
         assert not report["summary"].get("findings_truncated", False)
         assert not report["summary"].get("redacted_text_omitted", False)
@@ -175,7 +212,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
     for event in events:
         assert event["result"] == "succeeded"
         assert event["details"]["request"]["text_length"] == len(text)
-        assert event["details"]["result"]["summary"]["scanner_version"] == "2.1.1"
+        assert event["details"]["result"]["summary"]["scanner_version"] == "2.1.2"
         assert event["details"]["result"]["summary"]["source"] == source
     audit = json.dumps(events)
     for forbidden in [
