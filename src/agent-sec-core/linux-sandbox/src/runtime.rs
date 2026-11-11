@@ -678,6 +678,13 @@ fn run_outer(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
     let helper = checked_helper()?;
     let prepared = prepare(spec)?;
     let bwrap = checked_bwrap()?;
+    if !prepared.root_writable && prepared.mounts.iter().any(|mount| mount.write) {
+        // A failed diagnostic write must not reject an otherwise valid invocation.
+        let _ = writeln!(
+            std::io::stderr(),
+            "linux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing"
+        );
+    }
     let mut command = Command::new(bwrap);
     command.env_clear().args([
         "--die-with-parent",

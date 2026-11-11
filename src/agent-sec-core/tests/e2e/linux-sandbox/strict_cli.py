@@ -10,8 +10,96 @@ import tempfile
 from pathlib import Path
 
 
+def hardlink_boundary(cli: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="asc-hardlink-cli-") as directory:
+        root = Path(directory).resolve()
+        allowed = root / "allowed"
+        allowed.mkdir()
+        outside = root / "secret"
+        outside.write_text("original")
+        alias = allowed / "alias"
+        permission = {
+            "version": 1,
+            "filesystem": {
+                "default": "deny",
+                "rules": [
+                    {"effect": "allow", "path": "/", "rights": ["read"]},
+                    {"effect": "allow", "path": str(allowed), "rights": ["write"]},
+                ],
+            },
+            "execution": {"deny_paths": []},
+            "network": {"mode": "off"},
+        }
+        permission_path = root / "permissions.json"
+        command = [
+            str(cli),
+            "sandbox",
+            "run",
+            "--permissions",
+            str(permission_path),
+            "--",
+        ]
+        environment = dict(
+            os.environ, AGENT_SEC_DAEMON_SOCKET=str(root / "absent.sock")
+        )
+        warning = "linux-sandbox: warning: pre-existing hardlinks"
+
+        def run(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+            permission_path.write_text(json.dumps(permission))
+            return subprocess.run(
+                command + ["/bin/sh", "-c", script, "sh", *args],
+                cwd=allowed,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        # An ordinary allowed file is writable; the default-denied path and
+        # attempts to create a new cross-mount alias remain protected.
+        benign = run(
+            'printf allowed > local; ! printf changed > "$1" && ! ln "$1" alias && printf target-output',
+            str(outside),
+        )
+        assert benign.returncode == 0, benign
+        assert benign.stdout == "target-output", benign.stdout
+        assert benign.stderr.count(warning) == 1, benign.stderr
+        assert (allowed / "local").read_text() == "allowed"
+        assert outside.read_text() == "original"
+        assert not alias.exists()
+
+        # The warning describes a boundary, not a detected link or a new denial.
+        os.link(outside, alias)
+        linked = run("printf changed > alias; printf target-output")
+        assert linked.returncode == 0, linked
+        assert linked.stdout == "target-output", linked.stdout
+        assert linked.stderr.count(warning) == 1, linked.stderr
+        assert outside.read_text() == "changed"
+
+        permission["filesystem"]["rules"].append(
+            {"effect": "deny", "path": str(outside), "rights": ["write"]}
+        )
+        failed = run("touch started")
+        assert failed.returncode != 0, failed
+        assert "denied object has hardlink aliases" in failed.stderr, failed.stderr
+        assert not (allowed / "started").exists()
+        assert outside.read_text() == "changed"
+
+        for rights in (["read"], ["write"]):
+            permission["filesystem"]["rules"] = [
+                {"effect": "allow", "path": "/", "rights": rights}
+            ]
+            unrestricted = run("printf target-output")
+            assert unrestricted.returncode == 0, unrestricted
+            assert unrestricted.stdout == "target-output", unrestricted.stdout
+            assert warning not in unrestricted.stderr, unrestricted.stderr
+        print("Hardlink boundary warning CLI acceptance passed")
+
+
 def main() -> None:
     cli = Path(sys.argv[1]).resolve()
+    hardlink_boundary(cli)
     with tempfile.TemporaryDirectory(prefix="asc-strict-cli-") as directory:
         work = Path(directory).resolve()
         (work / "key").write_text("secret")
