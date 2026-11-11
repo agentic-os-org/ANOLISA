@@ -146,6 +146,17 @@ CLI 与 daemon 须同步升级为 request v1/candidate v1，其它版本不兼�
 PDP 映射与 sandbox 接入由后续工作负责。详见
 [单次命令 Cedar API](docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)。
 
+`agent-sec-cli intent init` 从显式规则在本地生成经过校验的 Cedar，
+无需 daemon、模型或网络：
+
+```bash
+agent-sec-cli intent init --deny-network
+agent-sec-cli intent init --allow-read '/data/**' --allow-write '/data/out/**' --deny-network
+```
+
+输出是未批准的预览：forbid 优先于 permit，未被 permit 列出的一切默认拒绝。详见
+[Intent init 命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#intent-init从显式规则本地生成-cedar)。
+
 ## 安全防护架构
 
 ```
