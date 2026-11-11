@@ -4,6 +4,7 @@
 //! deduplication. The worker submits selected instances to PAP for Binding admission.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use asc_policy_types::Validate;
@@ -25,6 +26,8 @@ pub struct ProcessFingerprint {
     pub inode: u64,
     /// Verified kernel UID; absent when credentials could not be safely observed.
     pub uid: Option<u32>,
+    /// Whole `/proc/PID/cmdline` arguments; empty unless the selector matches them.
+    pub arguments: Vec<OsString>,
 }
 
 /// One verified process snapshot supplied by the procfs adapter.
@@ -106,6 +109,16 @@ impl ScopeDiscoveryState {
         self.owner_uid.is_some()
     }
 
+    /// Whether the procfs adapter must read `/proc/PID/cmdline` arguments.
+    pub fn requires_arguments(&self) -> bool {
+        matches!(
+            self.selector,
+            ScopeSelector::Process {
+                matcher: ProcessMatcher::CmdlineArg { .. }
+            }
+        )
+    }
+
     /// Applies a scan. `present` includes PIDs whose metadata could not be read.
     /// File selections survive failed reads and prune absence only on complete scans.
     /// Credential selections require current verified ownership before submission.
@@ -134,6 +147,9 @@ impl ScopeDiscoveryState {
             if self.owner_uid.is_none() {
                 fingerprint.uid = None;
             }
+            if !self.requires_arguments() {
+                fingerprint.arguments.clear();
+            }
             // A successfully observed replacement proves the previous instance exited.
             if self
                 .instances
@@ -157,6 +173,12 @@ impl ScopeDiscoveryState {
                     ScopeSelector::Process {
                         matcher: ProcessMatcher::Executable { executable },
                     } => fingerprint.executable.as_os_str() == std::ffi::OsStr::new(executable),
+                    ScopeSelector::Process {
+                        matcher: ProcessMatcher::CmdlineArg { cmdline_arg },
+                    } => fingerprint
+                        .arguments
+                        .iter()
+                        .any(|argument| argument == std::ffi::OsStr::new(cmdline_arg)),
                     ScopeSelector::Pid { pid } => {
                         let selected = *pid == identity.pid
                             && self.pinned_pid.as_ref().is_none_or(|p| p == &identity);
@@ -249,6 +271,7 @@ mod tests {
                 device: 1,
                 inode: 2,
                 uid: None,
+                arguments: Vec::new(),
             },
         }
     }
@@ -384,6 +407,62 @@ mod tests {
             1
         );
         assert_eq!(state.instances().next().unwrap().start_time, 2);
+    }
+
+    fn with_arguments(pid: u32, arguments: &[&str]) -> ProcessObservation {
+        let mut observation = process(pid, 1, "/usr/bin/node-24");
+        observation.fingerprint.arguments = arguments.iter().map(OsString::from).collect();
+        observation
+    }
+
+    #[test]
+    fn cmdline_arg_matches_one_whole_argument_at_any_position() {
+        let mut assigned = scope();
+        assigned.selector = ScopeSelector::Process {
+            matcher: ProcessMatcher::CmdlineArg {
+                cmdline_arg: "/usr/local/bin/qodercli".to_owned(),
+            },
+        };
+        let mut state = ScopeDiscoveryState::for_scope(assigned).unwrap();
+        assert!(state.requires_arguments());
+        assert!(!self::state().requires_arguments());
+        let present = BTreeSet::from([10, 20, 30, 40, 50]);
+        let scan = || {
+            vec![
+                with_arguments(10, &["node", "/usr/local/bin/qodercli", "chat"]),
+                with_arguments(20, &["node", "/opt/other.js"]),
+                with_arguments(30, &["node", "/usr/local/bin/qodercli-other"]),
+                with_arguments(40, &["node", "--require=/usr/local/bin/qodercli"]),
+                with_arguments(50, &["python3", "-u", "/usr/local/bin/qodercli"]),
+            ]
+        };
+        let first = state.reconcile(scan(), &present, true);
+        assert_eq!(first.instances_selected, 2);
+        assert_eq!(
+            state.instances().map(|i| i.pid).collect::<Vec<_>>(),
+            vec![10, 50]
+        );
+        assert_eq!(state.reconcile(scan(), &present, true).cached, 5);
+        let replaced = state.reconcile(
+            vec![with_arguments(10, &["node", "/opt/other.js"])],
+            &BTreeSet::from([10]),
+            true,
+        );
+        assert_eq!(replaced.matched_checks, 1);
+        assert_eq!(state.instances().count(), 0);
+    }
+
+    #[test]
+    fn non_cmdline_selectors_ignore_argument_changes() {
+        let mut state = state();
+        let present = BTreeSet::from([10]);
+        let mut observation = process(10, 1, "/bin/agent");
+        observation.fingerprint.arguments = vec!["agent".into()];
+        state.reconcile(vec![observation], &present, true);
+        let mut changed = process(10, 1, "/bin/agent");
+        changed.fingerprint.arguments = vec!["agent".into(), "--other".into()];
+        assert_eq!(state.reconcile(vec![changed], &present, true).cached, 1);
+        assert_eq!(state.instances().count(), 1);
     }
 
     #[test]

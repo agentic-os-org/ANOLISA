@@ -50,6 +50,24 @@ pub enum ProcessMatcher {
     },
     /// Exact normalized absolute executable path; no prefix or glob matching.
     Executable { executable: String },
+    /// Exact normalized absolute path equal to one whole `/proc/PID/cmdline` argument.
+    ///
+    /// Identifies script Agents whose executable is a shared interpreter. Arguments are
+    /// caller-controlled, so this identifies processes within the owner UID; it does not
+    /// authenticate them.
+    CmdlineArg {
+        #[serde(rename = "cmdlineArg")]
+        cmdline_arg: String,
+    },
+}
+
+fn is_normalized_absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path != "/"
+        && !path.contains("//")
+        && !path.ends_with('/')
+        && !path.chars().any(char::is_control)
+        && !path.split('/').any(|part| matches!(part, "." | ".."))
 }
 
 impl Validate for ProcessMatcher {
@@ -66,19 +84,15 @@ impl Validate for ProcessMatcher {
                     "must be a kernel process name of 1..15 bytes",
                 ))
             }
-            Self::Executable { executable }
-                if !executable.starts_with('/')
-                    || executable == "/"
-                    || executable.contains("//")
-                    || executable.ends_with('/')
-                    || executable.chars().any(char::is_control)
-                    || executable.split('/').any(|part| matches!(part, "." | "..")) =>
-            {
+            Self::Executable { executable } if !is_normalized_absolute_path(executable) => {
                 Err(ValidationError::new(
                     "executable",
                     "must be a normalized absolute executable path",
                 ))
             }
+            Self::CmdlineArg { cmdline_arg } if !is_normalized_absolute_path(cmdline_arg) => Err(
+                ValidationError::new("cmdlineArg", "must be a normalized absolute path"),
+            ),
             _ => Ok(()),
         }
     }
@@ -179,9 +193,17 @@ mod tests {
             "{}",
             r#"{"processName":"agent","executable":"/bin/agent"}"#,
             r#"{"processName":"agent","extra":true}"#,
+            r#"{"executable":"/bin/node","cmdlineArg":"/usr/local/bin/agent"}"#,
         ] {
             assert!(serde_json::from_str::<ProcessMatcher>(input).is_err());
         }
+        assert_eq!(
+            serde_json::from_str::<ProcessMatcher>(r#"{"cmdlineArg":"/usr/local/bin/agent"}"#)
+                .unwrap(),
+            ProcessMatcher::CmdlineArg {
+                cmdline_arg: "/usr/local/bin/agent".to_owned()
+            }
+        );
         for path in ["relative", "/a/../b", "/a/./b", "/a//b", "/a/", "/"] {
             assert!(
                 ProcessMatcher::Executable {
@@ -189,6 +211,15 @@ mod tests {
                 }
                 .validate()
                 .is_err()
+            );
+            assert_eq!(
+                ProcessMatcher::CmdlineArg {
+                    cmdline_arg: path.to_owned()
+                }
+                .validate()
+                .unwrap_err()
+                .path,
+                "cmdlineArg"
             );
         }
         assert!(

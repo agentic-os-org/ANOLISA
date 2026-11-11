@@ -7,8 +7,10 @@ include!(concat!(
 ));
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,7 +120,10 @@ impl ScopeDiscoveryJob {
         interval: Duration,
         sink: Arc<dyn asc_pap::ScopeBindingSink>,
     ) -> Result<Self, PapError> {
-        let verify_uid = state.requires_owner_uid();
+        let facts = ProcessFacts {
+            uid: state.requires_owner_uid(),
+            arguments: state.requires_arguments(),
+        };
         let state = Arc::new(Mutex::new(state));
         let boot_id = fs::read_to_string(root.join("sys/kernel/random/boot_id"))
             .map_err(|_| PapError::Unavailable)?;
@@ -134,7 +139,7 @@ impl ScopeDiscoveryJob {
             while !worker_stop.load(Ordering::Acquire) {
                 let run_span = tracing::info_span!("scope_discovery.scan", scope_id = %worker_scope_id);
                 let entered = run_span.enter();
-                let scan = scan_proc(&root, boot_id.trim(), &worker_stop, verify_uid);
+                let scan = scan_proc(&root, boot_id.trim(), &worker_stop, facts);
                 if worker_stop.load(Ordering::Acquire) { break; }
                 match scan {
                     Ok(scan) => {
@@ -223,6 +228,16 @@ impl Drop for ScopeDiscoveryJob {
     }
 }
 
+/// Optional per-process facts; only read when the Scope selector depends on them.
+#[derive(Clone, Copy)]
+struct ProcessFacts {
+    uid: bool,
+    arguments: bool,
+}
+
+/// Bounds the per-process cmdline read repeated on every scan.
+const MAX_CMDLINE_BYTES: usize = 64 * 1024;
+
 struct ProcScan {
     observations: Vec<ProcessObservation>,
     present: BTreeSet<u32>,
@@ -234,7 +249,7 @@ fn scan_proc(
     root: &Path,
     boot_id: &str,
     stop: &AtomicBool,
-    verify_uid: bool,
+    facts: ProcessFacts,
 ) -> io::Result<ProcScan> {
     let mut scan = ProcScan {
         observations: Vec::new(),
@@ -260,7 +275,7 @@ fn scan_proc(
             continue;
         };
         scan.present.insert(pid);
-        match observe(root, boot_id, pid, verify_uid) {
+        match observe(root, boot_id, pid, facts) {
             Ok(observation) => scan.observations.push(observation),
             // Zombies, kernel threads and processes exiting during enumeration
             // legitimately have no exe link. Keep their last state until absent.
@@ -275,13 +290,13 @@ fn observe(
     root: &Path,
     boot_id: &str,
     pid: u32,
-    verify_uid: bool,
+    facts: ProcessFacts,
 ) -> io::Result<ProcessObservation> {
     let process = root.join(pid.to_string());
     let identity = read_identity(&process, boot_id, pid)?;
-    let fingerprint = read_fingerprint(&process, verify_uid)?;
+    let fingerprint = read_fingerprint(&process, facts)?;
     if identity != read_identity(&process, boot_id, pid)?
-        || fingerprint != read_fingerprint(&process, verify_uid)?
+        || fingerprint != read_fingerprint(&process, facts)?
     {
         return Err(io::Error::other(
             "process changed during observation; retry next scan",
@@ -314,7 +329,7 @@ fn read_identity(process: &Path, boot_id: &str, pid: u32) -> io::Result<ProcessI
     })
 }
 
-fn read_fingerprint(process: &Path, verify_uid: bool) -> io::Result<ProcessFingerprint> {
+fn read_fingerprint(process: &Path, facts: ProcessFacts) -> io::Result<ProcessFingerprint> {
     let exe = process.join("exe");
     let metadata = fs::metadata(&exe)?;
     Ok(ProcessFingerprint {
@@ -324,12 +339,38 @@ fn read_fingerprint(process: &Path, verify_uid: bool) -> io::Result<ProcessFinge
             .to_owned(),
         device: metadata.dev(),
         inode: metadata.ino(),
-        uid: if verify_uid {
+        uid: if facts.uid {
             read_uid(process).ok()
         } else {
             None
         },
+        arguments: if facts.arguments {
+            read_arguments(process)?
+        } else {
+            Vec::new()
+        },
     })
+}
+
+fn read_arguments(process: &Path) -> io::Result<Vec<OsString>> {
+    let mut bytes = Vec::new();
+    fs::File::open(process.join("cmdline"))?
+        .take(MAX_CMDLINE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CMDLINE_BYTES {
+        // A cut argument could equal a configured path that is only its prefix.
+        bytes.truncate(MAX_CMDLINE_BYTES);
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == 0)
+            .map_or(0, |end| end + 1);
+        bytes.truncate(complete);
+    }
+    Ok(bytes
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| OsString::from_vec(argument.to_vec()))
+        .collect())
 }
 
 fn read_uid(process: &Path) -> io::Result<u32> {
@@ -371,6 +412,11 @@ mod tests {
             .unwrap();
         (repository, policy)
     }
+
+    const FACTS: ProcessFacts = ProcessFacts {
+        uid: true,
+        arguments: true,
+    };
 
     struct Process(Child);
     impl Drop for Process {
@@ -622,17 +668,33 @@ mod tests {
         .unwrap();
         fs::write(process.join("comm"), "agent\n").unwrap();
         fs::write(
+            process.join("cmdline"),
+            b"node\0/usr/local/bin/agent\0\0chat\0",
+        )
+        .unwrap();
+        fs::write(
             process.join("status"),
             "Name:\tagent\nUid:\t1000\t1000\t1000\t1000\n",
         )
         .unwrap();
         let stop = AtomicBool::new(false);
-        let scan = scan_proc(directory.path(), "boot", &stop, true).unwrap();
+        let scan = scan_proc(directory.path(), "boot", &stop, FACTS).unwrap();
         assert_eq!(scan.observations[0].identity.start_time, 987);
         assert_eq!(scan.observations[0].fingerprint.uid, Some(1000));
+        assert_eq!(
+            scan.observations[0].fingerprint.arguments,
+            ["node", "/usr/local/bin/agent", "chat"].map(OsString::from)
+        );
+        let no_facts = ProcessFacts {
+            uid: false,
+            arguments: false,
+        };
+        let skipped = observe(directory.path(), "boot", 42, no_facts).unwrap();
+        assert!(skipped.fingerprint.arguments.is_empty());
+        assert_eq!(skipped.fingerprint.uid, None);
         fs::write(process.join("status"), "Uid:\t1000\t0\t1000\t1000\n").unwrap();
         assert_eq!(
-            observe(directory.path(), "boot", 42, true)
+            observe(directory.path(), "boot", 42, FACTS)
                 .unwrap()
                 .fingerprint
                 .uid,
@@ -640,24 +702,82 @@ mod tests {
         );
         fs::remove_file(process.join("status")).unwrap();
         assert_eq!(
-            observe(directory.path(), "boot", 42, true)
+            observe(directory.path(), "boot", 42, FACTS)
                 .unwrap()
                 .fingerprint
                 .uid,
             None
         );
         fs::write(process.join("stat"), "malformed").unwrap();
-        let scan = scan_proc(directory.path(), "boot", &stop, true).unwrap();
+        let scan = scan_proc(directory.path(), "boot", &stop, FACTS).unwrap();
         assert!(scan.complete);
         assert_eq!(scan.present, BTreeSet::from([42]));
         assert!(scan.observations.is_empty());
         assert_eq!(scan.unreadable, 1);
-        assert!(scan_proc(&directory.path().join("missing"), "boot", &stop, true).is_err());
+        assert!(scan_proc(&directory.path().join("missing"), "boot", &stop, FACTS).is_err());
         stop.store(true, Ordering::Release);
         assert!(
-            !scan_proc(directory.path(), "boot", &stop, true)
+            !scan_proc(directory.path(), "boot", &stop, FACTS)
                 .unwrap()
                 .complete
+        );
+    }
+
+    #[test]
+    fn djob_scope_selects_live_process_by_whole_cmdline_argument() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("agent");
+        let spawn = |argument: &Path| {
+            Process(
+                Command::new("/bin/sh")
+                    .args(["-c", "sleep 30; true"])
+                    .arg(argument)
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let selected = spawn(&marker);
+        let _prefix_only = spawn(&directory.path().join("agent-other"));
+        let policy = policies().1;
+        let scope: PreparedScope = serde_json::from_value(serde_json::json!({
+            "scopeId":"cmdline", "status":"ACTIVE",
+            "selector":{"kind":"process","match":{"cmdlineArg":marker}},
+            "policySnapshots":[policy]
+        }))
+        .unwrap();
+        let mut job = ScopeDiscoveryJob::spawn(
+            scope.scope_id.clone(),
+            ScopeDiscoveryState::for_scope(scope).unwrap(),
+            "/proc".into(),
+            Duration::from_millis(20),
+            Arc::new(TestSink),
+        )
+        .unwrap();
+        let instances = wait_for_instances(&job, 1);
+        assert_eq!(instances[0].pid, selected.0.id());
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(job.instances().unwrap(), instances);
+        job.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cmdline_reads_are_bounded_and_drop_a_truncated_argument() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = b"/usr/local/bin/agent";
+        let mut cmdline = b"node\0".to_vec();
+        cmdline.resize(MAX_CMDLINE_BYTES - target.len() - 1, b'x');
+        cmdline.push(0);
+        // The cut lands exactly after `target`, which is only a prefix of this argument.
+        cmdline.extend_from_slice(target);
+        cmdline.extend_from_slice(b"-suffix\0next\0");
+        fs::write(directory.path().join("cmdline"), &cmdline).unwrap();
+        let arguments = read_arguments(directory.path()).unwrap();
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(arguments[0], "node");
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.as_encoded_bytes() == target)
         );
     }
 }

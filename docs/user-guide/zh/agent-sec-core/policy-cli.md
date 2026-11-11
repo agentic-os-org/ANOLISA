@@ -280,9 +280,19 @@ Sandbox 运行时授权复用同一组 Policy 对象，使用
 ## 管理 Scope
 
 创建时提供 Policy ID、精确 revision 和一个 selector：`--process-name` 精确匹配 Linux
-进程名（1–15 bytes），`--executable` 精确匹配规范化绝对可执行路径，或 `--pid` 选择
-一个进程实例。名称/路径持续发现已有和后续进程；PID 固定第一次观察到的实例，不跟随
-PID 复用。目前拒绝 cgroup assignment。
+进程名（1–15 bytes），`--executable` 精确匹配规范化绝对可执行路径，`--cmdline-arg`
+精确匹配作为一个完整命令行参数出现的规范化绝对路径，或 `--pid` 选择一个进程实例。
+名称、可执行路径和命令行 selector 持续发现已有和后续进程；PID 固定第一次观察到的实例，
+不跟随 PID 复用。目前拒绝 cgroup assignment。
+
+`--cmdline-arg` 用于在 node、python 等共享解释器下运行的脚本型 Agent：这类进程的
+进程名和可执行路径只能标识解释器。传入用户实际运行的命令路径，即 `which` 的输出。
+`/proc/PID/cmdline` 中任一参数与该路径逐字节相等即命中；不解析符号链接，子串或前缀
+不匹配。例如在 shell 中运行 `qodercli` 得到 `node /usr/local/bin/qodercli ...`，
+`--cmdline-arg /usr/local/bin/qodercli` 可以选中它；通过其他路径启动脚本（如解析后的
+`.js` 文件或相对路径）不会命中。同一用户下以该路径为参数的其他进程（如用编辑器打开它）
+也会被选中。命令行参数由进程自身设置，因此该 selector 用于在 owner UID 内识别进程，
+不用于认证。
 
 **兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
 assignment。继续传入该参数的脚本会在本地报错，退出码为 2；请改用 `--pid`、
@@ -290,6 +300,7 @@ assignment。继续传入该参数的脚本会在本地报错，退出码为 2�
 
 ```bash
 agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1
+agent-sec-cli --socket "$SOCKET" scope create --cmdline-arg "$(which qodercli)" --policy-id "$POLICY_ID" --policy-revision 1
 agent-sec-cli --socket "$SOCKET" scope get --scope-id "$SCOPE_ID"
 agent-sec-cli --socket "$SOCKET" scope list --limit 100 --offset 0
 agent-sec-cli --socket "$SOCKET" scope delete --scope-id "$SCOPE_ID"

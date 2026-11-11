@@ -1013,8 +1013,11 @@ Scope update、Binding mutation 返回 `unknown_method`；Scope revision 参数�
 Scope 返回 `scopeId`、`selector`、`policySnapshots`（完整 PreparedPolicy）和 `status:ACTIVE`；
 没有 revision，不可 update。模板更新/删除不影响该 Scope 或未来实例。
 
-`match` 必须且只能包含 `processName` 或 `executable`。名称精确匹配 `/proc/PID/comm`
-（1–15 bytes），路径精确匹配 `/proc/PID/exe` 的规范化绝对路径；不做 glob/前缀匹配。
+`match` 必须且只能包含 `processName`、`executable` 或 `cmdlineArg`。名称精确匹配
+`/proc/PID/comm`（1–15 bytes），路径精确匹配 `/proc/PID/exe` 的规范化绝对路径；
+`cmdlineArg` 为规范化绝对路径，`/proc/PID/cmdline` 按 NUL 切分后任一参数逐字节相等即命中，
+不解析符号链接、不推断参数位置。单进程 cmdline 最多读取 64 KiB，被截断的末尾参数不参与
+匹配。均不做 glob/子串/前缀匹配。
 PID selector 固定首次观察到的实例；当前拒绝 cgroup assignment。未配置发现、调度不可用或
 32 个 discovery jobs 容量耗尽时返回 unavailable。
 

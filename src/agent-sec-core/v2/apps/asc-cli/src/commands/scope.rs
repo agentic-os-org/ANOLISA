@@ -58,6 +58,10 @@ pub(crate) struct Selector {
     /// Exact normalized absolute executable path.
     #[arg(long)]
     executable: Option<String>,
+    /// Exact normalized absolute path equal to one whole /proc/PID/cmdline argument,
+    /// such as a script Agent's command path from `which`; no realpath or substring match.
+    #[arg(long, value_name = "PATH")]
+    cmdline_arg: Option<String>,
 }
 
 impl ScopeCommand {
@@ -99,16 +103,26 @@ impl ScopeCommand {
 
 impl Selector {
     fn value(&self) -> ScopeSelector {
-        match (self.pid, &self.process_name, &self.executable) {
-            (Some(pid), None, None) => ScopeSelector::Pid { pid },
-            (None, Some(name), None) => ScopeSelector::Process {
+        match (
+            self.pid,
+            &self.process_name,
+            &self.executable,
+            &self.cmdline_arg,
+        ) {
+            (Some(pid), None, None, None) => ScopeSelector::Pid { pid },
+            (None, Some(name), None, None) => ScopeSelector::Process {
                 matcher: ProcessMatcher::Name {
                     process_name: name.clone(),
                 },
             },
-            (None, None, Some(path)) => ScopeSelector::Process {
+            (None, None, Some(path), None) => ScopeSelector::Process {
                 matcher: ProcessMatcher::Executable {
                     executable: path.clone(),
+                },
+            },
+            (None, None, None, Some(path)) => ScopeSelector::Process {
+                matcher: ProcessMatcher::CmdlineArg {
+                    cmdline_arg: path.clone(),
                 },
             },
             _ => unreachable!("clap requires exactly one selector; fields are private"),

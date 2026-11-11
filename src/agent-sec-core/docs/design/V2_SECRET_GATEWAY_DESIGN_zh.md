@@ -80,8 +80,11 @@ Policy 使用既有 `specVersion: "0.1"`、`rules` JSON，不增加独立授权�
 
 ### 2.2 Scope 准备与发现
 
-root 通过既有 `scope create` 指定精确 Policy ID/revision、owner UID，以及 `--process-name`
-或 `--executable` 持续 selector。kernel comm 限制为 15 字节；executable 为规范化绝对路径。
+root 通过既有 `scope create` 指定精确 Policy ID/revision、owner UID，以及 `--process-name`、
+`--executable` 或 `--cmdline-arg` 持续 selector。kernel comm 限制为 15 字节；executable 为
+规范化绝对路径；node/python 等脚本型 Agent 的 exe 与 comm 只标识解释器，使用
+`--cmdline-arg <命令路径>` 匹配 `/proc/PID/cmdline` 中逐字节相等的完整参数。cmdline 可由
+进程自身设置，只在 owner UID 内识别进程，与 cgroup 不是 UID 内部隔离边界的前提一致。
 凭据 Scope 必须有非 root owner；普通 file Scope 的权限、selector 和快照行为保持不变。
 
 创建 Scope 固定完整 Policy 快照，校验 owner 与网关秘密读取权限，预留端口并签发稳定 fake。
