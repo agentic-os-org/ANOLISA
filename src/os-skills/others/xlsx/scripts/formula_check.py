@@ -27,6 +27,7 @@ Exit code:
     1 — errors detected (or file cannot be opened)
 """
 
+import posixpath
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -82,6 +83,21 @@ def get_defined_names(z: zipfile.ZipFile) -> set[str]:
     return names
 
 
+def resolve_sheet_target(target: str) -> str:
+    """Resolve a `workbook.xml.rels` Target to its member name in the package.
+
+    OPC allows a Target to be relative to the part owning the rels
+    (`worksheets/sheet1.xml`), to use `.`/`..` segments
+    (`./worksheets/sheet1.xml`), or to be package-absolute
+    (`/xl/worksheets/sheet1.xml`). Concatenating `xl/` onto whatever was
+    there produced member names that do not exist in the archive, and the
+    caller treated a missing member as "nothing to check".
+    """
+    if target.startswith("/"):
+        return posixpath.normpath(target).lstrip("/")
+    return posixpath.normpath(posixpath.join("xl", target))
+
+
 def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
     """Return dict of {r:id -> xl/worksheets/sheetN.xml} from workbook.xml.rels."""
     rels_xml = z.read("xl/_rels/workbook.xml.rels")
@@ -91,10 +107,7 @@ def get_sheet_files(z: zipfile.ZipFile) -> dict[str, str]:
         rid = rel.get("Id", "")
         target = rel.get("Target", "")
         if "worksheets" in target:
-            # Target may be relative: "worksheets/sheet1.xml" -> "xl/worksheets/sheet1.xml"
-            if not target.startswith("xl/"):
-                target = "xl/" + target
-            mapping[rid] = target
+            mapping[rid] = resolve_sheet_target(target)
     return mapping
 
 
@@ -194,6 +207,19 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
 
             ws_file = sheet_files.get(rid)
             if not ws_file or ws_file not in z.namelist():
+                # A sheet the workbook declares but whose part cannot be read
+                # is not "nothing to check": skipping it let this validator
+                # print PASS for a workbook whose formulas it never parsed.
+                results["errors"].append({
+                    "type": "missing_sheet_part",
+                    "sheet": sheet_name,
+                    "part": ws_file or "(no relationship)",
+                    "message": (
+                        f"sheet '{sheet_name}' has no readable part "
+                        f"({ws_file or 'no relationship'}) in the package"
+                    ),
+                })
+                results["error_count"] += 1
                 continue
 
             results["sheets_checked"].append(sheet_name)
@@ -400,6 +426,8 @@ def main() -> None:
                 print(f"         Defined names: {e.get('defined_names', [])}")
             elif e["type"] == "malformed_error_cell":
                 print(f"  [FAIL] [{e['sheet']}!{e['cell']}] malformed error cell: {e['detail']}")
+            elif e["type"] == "missing_sheet_part":
+                print(f"  [FAIL] {e['message']}")
             elif e["type"] == "file_error":
                 print(f"  [FAIL] File error: {e['message']}")
         print()
