@@ -195,6 +195,34 @@ impl InterruptionStore {
             > 0
     }
 
+    /// Whether an OOM-sourced `agent_crash` for `pid` was recorded within the
+    /// last `window_secs`.
+    ///
+    /// The serve-mode HealthChecker stamps its crash at *detection* time,
+    /// while a `dmesg -T` kill is stamped at the kill second. The two values
+    /// for one crash therefore never match exactly, so dmesg recovery needs a
+    /// time-window check rather than [`Self::oom_event_exists`].
+    pub fn oom_event_exists_recent(&self, pid: i32, window_secs: u64) -> bool {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let window_ns = i64::try_from(window_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000_000_000);
+        let cutoff_ns = now_ns.saturating_sub(window_ns);
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT COUNT(*) FROM interruption_events
+             WHERE interruption_type='agent_crash' AND pid=?1 AND occurred_at_ns > ?2
+               AND detail LIKE '%\"oom\":true%'",
+            params![pid, cutoff_ns],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
     /// Return the maximum occurred_at_ns of OOM-sourced agent_crash events.
     /// Returns 0 if no such events exist.
     pub fn latest_oom_event_ns(&self) -> i64 {
@@ -1702,6 +1730,33 @@ mod tests {
         assert!(!store.oom_event_exists(9999, 8_000_000_000));
         assert!(!store.oom_event_exists(1111, 7_000_000_000));
         assert_eq!(store.latest_oom_event_ns(), 7_000_000_000);
+    }
+
+    /// A HealthChecker-recorded crash is stamped at detection time, not at
+    /// the dmesg kill second. Exact-timestamp dedup misses it; the window
+    /// check must match, and must not match a different pid or a row older
+    /// than the window.
+    #[test]
+    fn oom_event_exists_recent_matches_a_detection_time_row() {
+        let store = temp_store();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos() as i64;
+        let mut event = make_event("conv-oom-recent", InterruptionType::AgentCrash);
+        event.interruption_id = "int-oom-recent".to_string();
+        event.pid = Some(9999);
+        event.occurred_at_ns = now_ns - 120_000_000_000;
+        event.detail = Some(r#"{"oom":true,"source":"healthchecker+dmesg"}"#.to_string());
+        store.insert(&event).unwrap();
+
+        assert!(store.oom_event_exists_recent(9999, 300));
+        assert!(
+            !store.oom_event_exists(9999, now_ns - 30_000_000_000),
+            "the dmesg kill second is not the detection timestamp"
+        );
+        assert!(!store.oom_event_exists_recent(9999, 60));
+        assert!(!store.oom_event_exists_recent(1111, 300));
     }
 
     #[test]
