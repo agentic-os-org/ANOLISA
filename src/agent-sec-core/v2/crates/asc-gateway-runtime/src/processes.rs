@@ -315,3 +315,20 @@ fn capacity() -> GatewayError {
         "process snapshot exceeds 4096 processes/threads or the procfs read limit",
     )
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use rustix::io::Errno;
+
+    #[test]
+    fn only_missing_or_reaped_pids_count_as_process_exit() {
+        let vanished = |errno: Errno| {
+            super::process_vanished(&std::io::Error::from_raw_os_error(errno.raw_os_error()))
+        };
+        assert!(vanished(Errno::NOENT));
+        assert!(vanished(Errno::SRCH));
+        for unexpected in [Errno::ACCESS, Errno::IO, Errno::PERM, Errno::INVAL] {
+            assert!(!vanished(unexpected), "{unexpected:?}");
+        }
+    }
+}

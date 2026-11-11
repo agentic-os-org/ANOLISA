@@ -589,6 +589,19 @@ mod tests {
     }
 
     #[test]
+    fn reaped_process_identity_lookups_report_process_exit() {
+        let host = SystemHost;
+        let own = std::process::id();
+        assert!(host.process_cgroup(own).unwrap().starts_with('/'));
+        assert!(host.process_fence(own).unwrap().1.starts_with("pid:["));
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(host.process_cgroup(pid).unwrap_err().is_process_exited());
+        assert!(host.process_fence(pid).unwrap_err().is_process_exited());
+    }
+
+    #[test]
     fn timeout_reaps() {
         let input = "x".repeat(2 * 1024 * 1024);
         for stdin in [None, Some(input.as_str())] {
