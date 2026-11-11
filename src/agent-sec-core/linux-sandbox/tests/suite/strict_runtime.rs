@@ -420,20 +420,54 @@ fn strict_runtime_does_not_reopen_denied_parent_via_rename() {
 }
 
 #[test]
-fn strict_runtime_hides_helper_status_descriptors() {
+fn strict_runtime_blocks_helper_descriptor_and_memory_access() {
     if !enabled() {
         return;
     }
     let work = tempfile::tempdir().unwrap();
     let script = r#"python3 - <<'PYTHON'
 import os
-# The trusted setup/wait helper is the PID namespace's init process.
+
+def assert_cannot_open(path):
+    for access in (os.O_RDONLY, os.O_WRONLY):
+        try:
+            fd = os.open(path, access | os.O_NONBLOCK | os.O_CLOEXEC)
+        except PermissionError:
+            continue
+        os.close(fd)
+        raise AssertionError(f'opened trusted helper path: {path}, access={access}')
+
+# Prove that procfs link/open operations work for a descriptor we own.
+with open('/dev/null', 'rb') as control:
+    path = f'/proc/self/fd/{control.fileno()}'
+    assert os.readlink(path)
+    for access in (os.O_RDONLY, os.O_WRONLY):
+        os.close(os.open(path, access | os.O_NONBLOCK | os.O_CLOEXEC))
+
+# PID 1 is the live setup/wait helper; missing targets must not count as denial.
+os.stat('/proc/1/fd')
+os.stat('/proc/1/mem')
+# The fixture supplies all three stdio descriptors even if enumeration is denied.
+descriptors = {'0', '1', '2'}
 try:
-    os.listdir('/proc/1/fd')
+    visible = set(os.listdir('/proc/1/fd'))
 except PermissionError:
     pass
 else:
-    raise SystemExit('target can inspect trusted helper descriptors')
+    assert descriptors <= visible
+    assert any(int(fd) > 2 for fd in visible), 'helper status descriptor is missing'
+    descriptors.update(visible)
+
+for fd in sorted(descriptors):
+    path = f'/proc/1/fd/{fd}'
+    try:
+        os.readlink(path)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError(f'read trusted helper descriptor link: {path}')
+    assert_cannot_open(path)
+assert_cannot_open('/proc/1/mem')
 PYTHON"#;
     let (output, statuses) = run(&spec(work.path(), script));
     assert!(
@@ -441,6 +475,7 @@ PYTHON"#;
         "{} {statuses:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(statuses.contains(&BackendStatus::Started));
 }
 
 #[test]
