@@ -306,6 +306,127 @@ else
     fail "uninstall left the marketplace directory or the binary behind"
 fi
 
+# ── A host with no HOME never trips an unbound variable ─────────────────────
+# Both the install prefix and the marketplace location must be resolved
+# lazily: under `set -u` an eager $HOME expansion aborts the script before it
+# can report anything. The stub binary is rebuilt here because the real
+# uninstall above removed it.
+write_tokenless_stub
+NOHOME_BIN_DIR="$SANDBOX/nohome-bin"
+mkdir -p "$NOHOME_BIN_DIR"
+cp "$TOKENLESS_BIN" "$NOHOME_BIN_DIR/tokenless"
+cargo_log_size() {
+    if [ -f "$CARGO_LOG" ]; then wc -c < "$CARGO_LOG"; else echo 0; fi
+}
+# Scenario 1: binary on PATH, no codex CLI - the run reaches the "skipped
+# registration" exit with HOME unset and no TOKENLESS_INSTALL_PREFIX.
+nohome_out="$(env -i PATH="$NOHOME_BIN_DIR:/usr/bin:/bin" ANOLISA_DRY_RUN=1 \
+    CODEX_BIN="$SANDBOX/bin/missing-codex" bash "$INSTALL_SH" 2>&1)"
+nohome_rc=$?
+if [ "$nohome_rc" -eq 0 ]; then
+    pass "a HOME-less dry run with the binary on PATH exits cleanly"
+else
+    fail "a HOME-less dry run with the binary on PATH: expected exit 0, got $nohome_rc: ${nohome_out}"
+fi
+expect_no_line "a HOME-less dry run never trips an unbound variable" \
+    "unbound variable" "$nohome_out"
+expect_line "a HOME-less dry run reports the skipped codex registration" \
+    "DRY-RUN: no codex CLI found, so the registration and the marketplace directory are both skipped" \
+    "$nohome_out"
+
+# Scenario 1 in real mode: the dry run above can only catch the shared
+# precheck aborting, so its exit-code assertion proves little. #8771 reported
+# the REAL run reaching the install.sh "codex CLI not found" exit — assert
+# that path directly: same shape without ANOLISA_DRY_RUN.
+nohome_real_out="$(env -i PATH="$NOHOME_BIN_DIR:/usr/bin:/bin" \
+    CODEX_BIN="$SANDBOX/bin/missing-codex" bash "$INSTALL_SH" 2>&1)"
+nohome_real_rc=$?
+if [ "$nohome_real_rc" -eq 0 ]; then
+    pass "a HOME-less real run with the binary on PATH exits cleanly"
+else
+    fail "a HOME-less real run with the binary on PATH: expected exit 0, got $nohome_real_rc: ${nohome_real_out}"
+fi
+expect_no_line "a HOME-less real run never trips an unbound variable" \
+    "unbound variable" "$nohome_real_out"
+expect_line "a HOME-less real run reports the skipped codex registration" \
+    "codex CLI not found — skipping plugin registration." \
+    "$nohome_real_out"
+
+# Scenarios 2-4 need a host with no absolute tokenless fallback.
+if [ -n "$HOST_BIN" ]; then
+    skip "host has $HOST_BIN, so the HOME-less no-binary scenarios cannot be exercised here"
+else
+    mv "$TOKENLESS_BIN" "$SANDBOX/tokenless.saved"
+
+    # Scenario 2: dry run, no binary, no prefix, codex stub on PATH - the
+    # preview names the build, says where the binary would have gone, and
+    # refuses the registration instead of printing "/.agents/plugins".
+    nohome_preview_out="$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin" ANOLISA_DRY_RUN=1 \
+        bash "$INSTALL_SH" 2>&1)"
+    expect_line "a HOME-less dry run without the binary previews the build" \
+        "DRY-RUN: cargo build --release -p tokenless-cli in $SRCDIR_EXPECTED" "$nohome_preview_out"
+    expect_line "a HOME-less dry run without the binary names the missing prefix" \
+        "DRY-RUN: no install prefix (set TOKENLESS_INSTALL_PREFIX or HOME), so the built binary has nowhere to go" \
+        "$nohome_preview_out"
+    expect_line "a HOME-less dry run refuses the registration it cannot resolve" \
+        "DRY-RUN: no marketplace location (set XDG_DATA_HOME or HOME), so the registration is refused" \
+        "$nohome_preview_out"
+    expect_no_line "a HOME-less dry run trips no unbound variable" \
+        "unbound variable" "$nohome_preview_out"
+
+    # Scenario 3: real run, no binary, no prefix - the build path refuses with
+    # a clear message (exit 1) instead of dying on an unbound $HOME or calling
+    # cargo with nowhere to install.
+    cargo_before="$(cargo_log_size)"
+    nohome_build_out="$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin" \
+        CARGO_LOG="$CARGO_LOG" bash "$INSTALL_SH" 2>&1)"
+    nohome_build_rc=$?
+    cargo_after="$(cargo_log_size)"
+    if [ "$nohome_build_rc" -eq 1 ]; then
+        pass "a HOME-less real run without a prefix refuses with exit 1"
+    else
+        fail "a HOME-less real run without a prefix: expected exit 1, got $nohome_build_rc: ${nohome_build_out}"
+    fi
+    expect_line "a HOME-less real run without a prefix reports the missing prefix" \
+        "ERROR: no install prefix: set TOKENLESS_INSTALL_PREFIX (or HOME) so the built binary has a destination" \
+        "$nohome_build_out"
+    expect_no_line "a HOME-less real run without a prefix trips no unbound variable" \
+        "unbound variable" "$nohome_build_out"
+    if [ "$cargo_before" = "$cargo_after" ]; then
+        pass "the refused HOME-less run never invokes cargo"
+    else
+        fail "the refused HOME-less run invoked cargo"
+    fi
+
+    # Scenario 4: real run, binary on PATH, codex CLI on PATH, no HOME and no
+    # XDG_DATA_HOME - the marketplace path refuses with a clear message
+    # (exit 1) instead of an unbound $HOME at the ${XDG_DATA_HOME:-$HOME/...}
+    # fallback.
+    cargo_before="$(cargo_log_size)"
+    nohome_mkt_out="$(env -i PATH="$NOHOME_BIN_DIR:$SANDBOX/bin:/usr/bin:/bin" \
+        CARGO_LOG="$CARGO_LOG" bash "$INSTALL_SH" 2>&1)"
+    nohome_mkt_rc=$?
+    cargo_after="$(cargo_log_size)"
+    if [ "$nohome_mkt_rc" -eq 1 ]; then
+        pass "a HOME-less real run with a codex CLI refuses at the marketplace path"
+    else
+        fail "a HOME-less real run with a codex CLI: expected exit 1, got $nohome_mkt_rc: ${nohome_mkt_out}"
+    fi
+    expect_line "a HOME-less real run with a codex CLI reports the missing marketplace location" \
+        "ERROR: no marketplace location: set XDG_DATA_HOME (or HOME) so the plugin tree has a destination" \
+        "$nohome_mkt_out"
+    expect_no_line "a HOME-less real run with a codex CLI trips no unbound variable" \
+        "unbound variable" "$nohome_mkt_out"
+    if [ "$cargo_before" = "$cargo_after" ]; then
+        pass "the marketplace-refused HOME-less run never invokes cargo"
+    else
+        fail "the marketplace-refused HOME-less run invoked cargo"
+    fi
+
+    mv "$SANDBOX/tokenless.saved" "$TOKENLESS_BIN"
+fi
+rm -rf "$NOHOME_BIN_DIR"
+
 echo ""
 echo "Codex adapter tests: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]
