@@ -337,6 +337,38 @@ fn kongche_only_waiting_capture_allows_opening_settings() {
 }
 
 #[test]
+fn trial_i18n_session_suppression_is_distinct_from_cancellation() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        let mut notices = Vec::new();
+        for allowed in [true, false] {
+            let mut state = InlineState {
+                language,
+                ..InlineState::default()
+            };
+            state.auth.ecs_trial.auto_use_allowed = allowed;
+            let mut flow = TrialFlow::new(progress(1, "waiting_activation"));
+            flow.phase = TrialPhase::Cancelling;
+            state.auth.ecs_trial.flow = Some(flow);
+            let adapter = AdapterInstance::CoshCore(CoshCoreAdapter::new("/not-used", false));
+            let mut output = Vec::new();
+            poll(&adapter, &mut state, &mut output).unwrap();
+            notices.push(String::from_utf8(output).unwrap());
+            assert_eq!(state.auth.ecs_trial.auto_use_allowed, allowed);
+            assert!(state.auth.ecs_trial.cancelled_question);
+            assert!(state.auth.ecs_trial.flow.is_none());
+        }
+        assert_ne!(notices[0], notices[1]);
+        let confirmation = match language {
+            crate::Language::EnUs => "Automatic access is disabled for this session.",
+            crate::Language::ZhCn => "✓ 本次会话不再提示免配置接入。",
+        };
+        assert!(notices[1].contains(confirmation), "{}", notices[1]);
+        assert!(!notices[0].contains(confirmation));
+        assert!(notices[1].contains("/auth"));
+    }
+}
+
+#[test]
 fn kongche_idle_after_failed_progress_keeps_the_specific_failure() {
     let mut state = InlineState {
         language: crate::config::Language::EnUs,
