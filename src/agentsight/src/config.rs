@@ -1543,7 +1543,19 @@ impl AgentsightConfig {
     /// Load configuration from a JSON string, appending rules to existing ones.
     ///
     /// Parses `verbose`, `log_path`, `cmdline`, `https` and `http` fields.
+    ///
+    /// A rejected document leaves the configuration untouched. Callers keep
+    /// using the previous values when this returns an error, so a field that
+    /// was parsed before the failing one must not take effect.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
+        let mut next = self.clone();
+        next.apply_json_fields(json)?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Apply one parsed document to this configuration.
+    fn apply_json_fields(&mut self, json: &str) -> Result<(), String> {
         // The --config and FFI `load_config()` entry point: one leading BOM
         // (see [`strip_leading_bom`]) must not fail the whole load and leave
         // the tracer on embedded defaults without the user's rules.
@@ -2139,6 +2151,32 @@ mod tests {
         config
             .load_from_json(r#"{"storage":{"max_total_size_mb":0}}"#)
             .unwrap();
+    }
+
+    /// A rejected document must not leave the fields parsed before the
+    /// failing one in effect: the caller reports the error and continues on
+    /// the previous configuration, so a typo in `storage` must not also flip
+    /// the content-upload switch or the cgroup filter.
+    #[test]
+    fn a_rejected_document_leaves_the_configuration_unchanged() {
+        let mut config = AgentsightConfig::new();
+        assert!(!config.trace_enabled);
+        assert!(!config.cgroup_filter_enabled);
+
+        let error = config
+            .load_from_json(
+                r#"{
+                    "schema_version": 6,
+                    "traceEnabled": true,
+                    "cgroup_filter_enabled": true,
+                    "storage": {"max_total_size_mb": 8}
+                }"#,
+            )
+            .unwrap_err();
+
+        assert!(error.contains("must be zero or at least 9"));
+        assert!(!config.trace_enabled);
+        assert!(!config.cgroup_filter_enabled);
     }
 
     #[test]
