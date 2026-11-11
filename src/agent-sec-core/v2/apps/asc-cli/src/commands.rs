@@ -38,7 +38,7 @@ pub(crate) enum Command {
     /// Run a command locally with explicitly supplied sandbox permissions.
     #[command(subcommand)]
     Sandbox(crate::sandbox::SandboxCommand),
-    /// Propose unapproved Cedar candidates through the daemon.
+    /// Generate unapproved Cedar: daemon proposals from tasks, local init from explicit rules.
     #[command(subcommand)]
     Intent(intent::IntentCommand),
     /// Collect observability records through the daemon.

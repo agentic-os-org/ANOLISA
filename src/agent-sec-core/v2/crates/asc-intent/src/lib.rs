@@ -1,6 +1,7 @@
-//! Generates unapproved Cedar candidates from a task or a hook command/cwd.
-//! Base policy is never updated; permission mapping, PDP intersection and execution happen
-//! downstream. The generation flow lives in `policy_generator.rs`.
+//! Generates unapproved Cedar candidates from a task, a hook command/cwd or explicit local rules;
+//! base policy is never updated and permission mapping, PDP intersection and execution happen
+//! downstream. The model flow lives in `policy_generator.rs`; the deterministic, model-free flow
+//! lives in `spec.rs`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -9,6 +10,7 @@ mod intent_extraction;
 mod policy_generator;
 mod policy_summary;
 mod policy_validation;
+mod spec;
 
 pub use intent_extraction::{
     CommandInput, DRAFT_VERSION, INTENT_BUDGET, IntentError, MAX_COMMAND_BYTES, MAX_CWD_BYTES,
@@ -24,3 +26,4 @@ pub use policy_summary::{ActionCategory, PathScope, Permission, PolicySummary, s
 pub use policy_validation::{
     Artifact, CEDAR_SCHEMA, MAX_POLICY_BYTES, PolicyError, prepare_policy,
 };
+pub use spec::{IntentSpec, SPEC_VERSION, SpecError, compile_spec};

@@ -174,6 +174,18 @@ For hook integration, the source-tree V2 API `intent.propose_command` accepts
 updates base policies, maps OS permissions or executes commands; PDP mapping and
 sandbox integration remain separate. See the [Command Cedar API](v2/README.md#command-cedar-api).
 
+`agent-sec-cli intent init` generates validated Cedar locally from explicit
+rules, with no daemon, model or network:
+
+```bash
+agent-sec-cli intent init --deny-network
+agent-sec-cli intent init --allow-read '/data/**' --allow-write '/data/out/**' --deny-network
+```
+
+The output is an unapproved preview: forbid overrides permit, and anything no
+permit names stays denied by default. See the
+[Intent init reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-init-generate-cedar-locally-from-explicit-rules).
+
 ## Security Architecture
 
 ```
