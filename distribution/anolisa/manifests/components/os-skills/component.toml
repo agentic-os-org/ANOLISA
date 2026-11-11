@@ -52,9 +52,6 @@ source = "{datadir}/skills/setup-mcp/"
 name = "aliyun-ecs"
 source = "{datadir}/skills/aliyun-ecs/"
 
-[[adapters.openclaw.skills]]
-name = "github"
-source = "{datadir}/skills/github/"
 
 [[adapters.openclaw.skills]]
 name = "kernel-dev"
@@ -84,21 +81,9 @@ source = "{datadir}/skills/clawhub-skill-mng/"
 name = "cosh-guide"
 source = "{datadir}/skills/cosh-guide/"
 
-[[adapters.openclaw.skills]]
-name = "humanizer"
-source = "{datadir}/skills/humanizer/"
 
-[[adapters.openclaw.skills]]
-name = "image-gen"
-source = "{datadir}/skills/image-gen/"
 
-[[adapters.openclaw.skills]]
-name = "pdf-reader"
-source = "{datadir}/skills/pdf-reader/"
 
-[[adapters.openclaw.skills]]
-name = "xlsx"
-source = "{datadir}/skills/xlsx/"
 
 [[adapters.openclaw.skills]]
 name = "alinux-cve-query"
@@ -112,21 +97,11 @@ source = "{datadir}/skills/alinux-admin/"
 name = "backup-restore"
 source = "{datadir}/skills/backup-restore/"
 
-[[adapters.openclaw.skills]]
-name = "regex-mastery"
-source = "{datadir}/skills/regex-mastery/"
 
-[[adapters.openclaw.skills]]
-name = "shell-scripting"
-source = "{datadir}/skills/shell-scripting/"
 
 [[adapters.openclaw.skills]]
 name = "storage-resize"
 source = "{datadir}/skills/storage-resize/"
-
-[[adapters.openclaw.skills]]
-name = "upgrade-alinux-kernel"
-source = "{datadir}/skills/upgrade-alinux-kernel/"
 
 [[adapters]]
 framework = "hermes"
@@ -166,9 +141,6 @@ source = "{datadir}/skills/setup-mcp/"
 name = "aliyun-ecs"
 source = "{datadir}/skills/aliyun-ecs/"
 
-[[adapters.hermes.skills]]
-name = "github"
-source = "{datadir}/skills/github/"
 
 [[adapters.hermes.skills]]
 name = "kernel-dev"
@@ -198,21 +170,9 @@ source = "{datadir}/skills/clawhub-skill-mng/"
 name = "cosh-guide"
 source = "{datadir}/skills/cosh-guide/"
 
-[[adapters.hermes.skills]]
-name = "humanizer"
-source = "{datadir}/skills/humanizer/"
 
-[[adapters.hermes.skills]]
-name = "image-gen"
-source = "{datadir}/skills/image-gen/"
 
-[[adapters.hermes.skills]]
-name = "pdf-reader"
-source = "{datadir}/skills/pdf-reader/"
 
-[[adapters.hermes.skills]]
-name = "xlsx"
-source = "{datadir}/skills/xlsx/"
 
 [[adapters.hermes.skills]]
 name = "alinux-cve-query"
@@ -226,21 +186,11 @@ source = "{datadir}/skills/alinux-admin/"
 name = "backup-restore"
 source = "{datadir}/skills/backup-restore/"
 
-[[adapters.hermes.skills]]
-name = "regex-mastery"
-source = "{datadir}/skills/regex-mastery/"
 
-[[adapters.hermes.skills]]
-name = "shell-scripting"
-source = "{datadir}/skills/shell-scripting/"
 
 [[adapters.hermes.skills]]
 name = "storage-resize"
 source = "{datadir}/skills/storage-resize/"
-
-[[adapters.hermes.skills]]
-name = "upgrade-alinux-kernel"
-source = "{datadir}/skills/upgrade-alinux-kernel/"
 
 [component.contract]
 schema_version = "1.0"

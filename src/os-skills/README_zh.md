@@ -29,13 +29,9 @@
 ### 系统管理
 - **alinux-admin** — ALinux 4 系统管理（systemd、SSH、firewalld、NetworkManager）
 - **backup-restore** — 系统备份与恢复
-- **regex-mastery** — 正则表达式指南
-- **shell-scripting** — Bash/Zsh 脚本编写与自动化
 - **storage-resize** — 阿里云磁盘扩容（XFS/EXT4/Btrfs）
-- **upgrade-alinux-kernel** — ALinux 内核升级
 
 ### 开发运维
-- **github** — GitHub 工作流与集成
 - **kernel-dev** — ALinux 4 内核研发自动化（SRPM 和 Upstream 方式）
 - **sysom-agentsight** — 系统诊断工具
 - **sysom-diagnosis** — SysOM 诊断与调优
@@ -46,10 +42,10 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
-## 技能退场计划
+## 已退场技能
 
-为聚焦系统运维，OS Skills 计划将下列八个技能移出默认技能包，并逐步结束对内置副本的常规维护。
-仍需这些能力的用户可按需使用上游技能、工具或官方文档。当前技能包仍包含全部八个技能。
+为聚焦系统运维，OS Skills 已将下列八个技能移出默认技能包，并结束对内置副本的常规维护。
+仍需这些能力的用户可按需使用上游技能、工具或官方文档。
 
 - `github` — [GitHub CLI](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md)
 - `humanizer` — [Humanizer](https://github.com/blader/humanizer)

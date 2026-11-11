@@ -29,13 +29,9 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### System Admin
 - **alinux-admin** — ALinux 4 system management (systemd, SSH, firewalld, NetworkManager)
 - **backup-restore** — System backup and restore
-- **regex-mastery** — Regular expression guide
-- **shell-scripting** — Bash/Zsh scripting and automation
 - **storage-resize** — Alibaba Cloud disk expansion (XFS/EXT4/Btrfs)
-- **upgrade-alinux-kernel** — ALinux kernel upgrade
 
 ### DevOps
-- **github** — GitHub workflows and integration
 - **kernel-dev** — ALinux 4 kernel development automation (SRPM & upstream)
 - **sysom-agentsight** — System diagnostics tool
 - **sysom-diagnosis** — SysOM diagnostics and tuning
@@ -49,12 +45,12 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
-## Planned Skill Retirement
+## Removed Skills
 
-To focus on OS operations, OS Skills plans to remove the following eight skills
-from its default bundle and wind down routine maintenance of the bundled copies.
+To focus on OS operations, OS Skills removed the following eight skills from its
+default bundle and wound down routine maintenance of the bundled copies.
 Users who need these capabilities can use upstream skills, tools, or official
-documentation. The current bundle still includes all eight skills.
+documentation.
 
 - `github` — [GitHub CLI](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md)
 - `humanizer` — [Humanizer](https://github.com/blader/humanizer)
