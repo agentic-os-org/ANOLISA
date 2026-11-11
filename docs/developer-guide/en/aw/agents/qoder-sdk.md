@@ -71,7 +71,7 @@ aw status --config /absolute/aw.yaml
 aw stop --config /absolute/aw.yaml
 ```
 
-`startDaemon()` confirms prewarm readiness; `createQuery()` confirms Query readiness after the SDK handshake. [Validate native behavior](../validation.md), including allow, block, Post failure and cleanup.
+`startDaemon()` confirms daemon readiness; `createQuery()` confirms Query readiness after the SDK handshake. [Validate native behavior](../validation.md), including allow, block, Post failure and cleanup.
 For security composition, use the [SDK example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml), replace paths and start sec-core first.
 
 The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.
@@ -160,8 +160,12 @@ AW admission failures must propagate. Application entries support `.js` and `.mj
 
 Use `await bridge.startup({options})` for one-shot prewarming. It initializes without
 a prompt and checks scope validity again on `warm.query(prompt)`. Await `warm.close()`
-for an unused instance. SDK/Worker files remain unchanged when AW starts and stops;
-removing AW integration means restarting through the application's native factories.
+for an unused instance. Each warm object accepts one Query and holds its instance
+and task scope until closed; close it before an idle policy update. Follow
+[traffic readiness](../deployment/lifecycle.md#prepare-before-accepting-traffic)
+to overlap its preparation with configured input scanners. SDK/Worker files remain
+unchanged when AW starts and stops; removing AW integration means restarting
+through the application's native factories.
 
 Native in-process SDK MCP servers retain schema transforms and defaults: AW checks
 the parsed handler input, then checks the final SDK response after output validation

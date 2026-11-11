@@ -27,6 +27,36 @@ aw service serve --config /absolute/aw.yaml --state-dir /absolute/private/state
 
 Service reuse requires matching protocol and startup configuration. After edits, [update the policy](policy-updates.md) or stop the old service before restarting.
 
+## Prepare before accepting traffic
+
+Keep separate readiness checks for the AW service, configured Provider backends
+and the actual native request object. A reachable backend socket can precede
+scanner initialization; a running SDK daemon can precede Query or session
+initialization. The application or its supervisor owns the final traffic gate.
+
+Start independent services concurrently using their deployed identities,
+configuration and data directories. Retain authenticated backend checks and AW
+audit health checks. Once the framework's native daemon is ready, initialize a
+real request object through its admitted AW factory while warming the scanners
+used by that target. On a CPU-limited container, this staging avoids competing
+with the daemon's initial module loading. Measure both timings before choosing
+the application's startup order.
+
+For [Qoder SDK](../agents/qoder-sdk.md), `bridge.startup({options})` prepares one
+actual Query without a prompt. Reuse the request's daemon, cwd, model, settings
+and permissions. The [sec-core input warmup](../providers/sec-core.md#warm-input-scanners)
+prepares the configured input scanner independently. Other frameworks retain
+their documented session/client factories and native readiness checks.
+
+Accept traffic only after all required preparations succeed. Join concurrent
+preparations on failure and close any created Query/session, including unused
+warm objects. Stop admission and drain these objects before a policy update or
+shutdown. Readiness and warmup never replace per-request Hook checks.
+
+Record launch-to-daemon-ready, launch-to-request-and-scanners-ready and first
+response latency separately. Include service startup in cold-start measurements;
+work moved before traffic admission still contributes to total startup time.
+
 ## Stop and upgrade
 
 Stop dispatch, drain tasks and close SDK clients, then exit the Agent and run `aw stop --config FILE`.

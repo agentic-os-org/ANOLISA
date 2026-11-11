@@ -82,6 +82,28 @@ independently managed system service, `/etc` configuration and backend data.
 Upgrade or remove that backend through its owning system package. AW currently
 has no automatic service installation, upgrade or removal bridge.
 
+## Warm input scanners
+
+For a target using fast Prompt checks and input PII checks, prepare the same
+daemon's scanners before accepting traffic. These commands were verified with
+sec-core 1.2.0; check the deployed CLI's help when using another release:
+
+```bash
+SEC_CORE_SOCKET=/run/agent-sec-core/daemon.sock
+agent-sec-cli --socket "$SEC_CORE_SOCKET" --timeout-ms 10000 \
+  scan-prompt warmup --mode fast
+printf 'AW startup readiness\n' | \
+  agent-sec-cli --socket "$SEC_CORE_SOCKET" --timeout-ms 10000 \
+  scan-pii --stdin --source user_input --format json
+```
+
+Prompt warmup must succeed and the harmless PII probe must return
+`verdict: pass`. A daemon health reply alone does not establish scanner readiness.
+Keep the backend's actual identity, Skill directories and startup configuration;
+warmup must reach the socket used by `transport.argv`. Each real input is still
+scanned. See [traffic readiness](../deployment/lifecycle.md#prepare-before-accepting-traffic)
+for overlapping scanner preparation with a framework's admitted request object.
+
 ## Configure a Provider
 
 Copy [the complete sample](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/agent-sec-core/examples/aw.yaml)
