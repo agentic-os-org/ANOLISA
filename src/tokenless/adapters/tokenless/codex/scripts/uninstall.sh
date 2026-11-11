@@ -35,23 +35,51 @@ if [[ "${1:-}" == "--non-interactive" ]]; then
     INTERACTIVE=0
 fi
 
-PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
+# The shared helpers own the HOME normalization (absolute or empty) every
+# root below derives from, so they are sourced before the roots are resolved.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=./_common.sh
+source "$SCRIPT_DIR/_common.sh"
+
+# An explicit prefix is authoritative: silently falling back to HOME would
+# remove a different installation than the one the caller named.
+PREFIX_OVERRIDE="$(abs_or_empty "${TOKENLESS_INSTALL_PREFIX:-}")"
+if [[ -n "${TOKENLESS_INSTALL_PREFIX:-}" && -z "$PREFIX_OVERRIDE" ]]; then
+    echo "[tokenless] TOKENLESS_INSTALL_PREFIX must be an absolute path" >&2
+    exit 1
+fi
+PREFIX="${PREFIX_OVERRIDE:-${USER_HOME:+$USER_HOME/.local}}"
+if [[ -z "$PREFIX" ]]; then
+    echo "[tokenless] TOKENLESS_INSTALL_PREFIX or HOME must be set" >&2
+    exit 1
+fi
 BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
-MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
+# A relative XDG_DATA_HOME is ignored, as the XDG basedir spec requires.
+MARKETPLACE_ROOT="$(abs_or_empty "${XDG_DATA_HOME:-}")"
+if [[ -z "$MARKETPLACE_ROOT" && -n "$USER_HOME" ]]; then
+    MARKETPLACE_ROOT="$USER_HOME/.local/share"
+fi
+MARKETPLACE_DIR=""
+if [[ -n "$MARKETPLACE_ROOT" ]]; then
+    MARKETPLACE_DIR="$MARKETPLACE_ROOT/anolisa/codex-marketplace"
+fi
+CODEX_HOME_DIR="$(abs_or_empty "${CODEX_HOME:-}")"
+if [[ -z "$CODEX_HOME_DIR" && -n "$USER_HOME" ]]; then
+    CODEX_HOME_DIR="$USER_HOME/.codex"
+fi
+CODEX_CONFIG=""
+if [[ -n "$CODEX_HOME_DIR" ]]; then
+    CODEX_CONFIG="$CODEX_HOME_DIR/config.toml"
+fi
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 DEREGISTER_ONLY=0
 if [[ "${TOKENLESS_DEREGISTER_ONLY:-0}" == "1" ]]; then
     DEREGISTER_ONLY=1
 fi
-
-# Resolve codex binary via shared helper (see _common.sh).
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=./_common.sh
-source "$SCRIPT_DIR/_common.sh"
 
 echo "[tokenless] Codex plugin uninstall"
 
@@ -67,18 +95,38 @@ if [ "$DRY_RUN" = "1" ]; then
     if [ -n "$CODEX_BIN" ]; then
         echo "DRY-RUN: ${CODEX_BIN} plugin remove tokenless@${MARKETPLACE_NAME} (only when it is registered)"
         echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is registered)"
-        echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there and the registration is confirmed gone)"
+        if [[ -n "$MARKETPLACE_DIR" ]]; then
+            echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there and the registration is confirmed gone)"
+        else
+            echo "DRY-RUN: neither HOME nor XDG_DATA_HOME is set, so there is no marketplace directory to remove"
+        fi
     else
         # No CLI to ask, so the real path decides on config.toml alone; the same
         # read-only check decides here, or the preview would report a kept
         # directory while the run deletes it.
-        codex_config="${CODEX_HOME:-$HOME/.codex}/config.toml"
-        if [[ -f "$codex_config" ]] && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$codex_config" 2>/dev/null; then
-            echo "DRY-RUN: no codex CLI resolved and ${codex_config} still names tokenless, so the real run keeps"
-            echo "DRY-RUN: ${MARKETPLACE_DIR} and exits 1"
+        if [[ -z "$CODEX_CONFIG" ]]; then
+            echo "DRY-RUN: no codex CLI resolved and the Codex config cannot be located, so the real run keeps"
+            echo "DRY-RUN: the registration and exits 1"
+            if [[ -n "$MARKETPLACE_DIR" ]]; then
+                echo "DRY-RUN: ${MARKETPLACE_DIR} is kept"
+            else
+                echo "DRY-RUN: no marketplace directory is known, so nothing is removed there"
+            fi
+        elif [[ -f "$CODEX_CONFIG" ]] \
+            && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$CODEX_CONFIG" 2>/dev/null; then
+            echo "DRY-RUN: no codex CLI resolved and ${CODEX_CONFIG} still names tokenless, so the real run keeps"
+            if [[ -n "$MARKETPLACE_DIR" ]]; then
+                echo "DRY-RUN: ${MARKETPLACE_DIR} and exits 1"
+            else
+                echo "DRY-RUN: the registration and exits 1 (no marketplace directory is known)"
+            fi
         else
-            echo "DRY-RUN: no codex CLI resolved and ${codex_config} records no tokenless registration:"
-            echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there), and the real run exits 0"
+            echo "DRY-RUN: no codex CLI resolved and Codex records no tokenless registration"
+            if [[ -n "$MARKETPLACE_DIR" ]]; then
+                echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there), and the real run exits 0"
+            else
+                echo "DRY-RUN: (no marketplace directory is known), and the real run exits 0"
+            fi
         fi
     fi
     # The component binary is a separate decision: the real path removes it
@@ -184,16 +232,24 @@ else
     # retry from, so "cannot confirm" is reported as a failure rather than as
     # "confirmed absent". Where Codex has no config at all it was never installed
     # here and nothing was ever registered, which really is a clean state.
-    CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-    if [[ -f "${CODEX_HOME_DIR}/config.toml" ]] \
-       && grep -Eq "tokenless|${MARKETPLACE_NAME}" "${CODEX_HOME_DIR}/config.toml" 2>/dev/null; then
-        echo "[tokenless] ERROR: codex CLI not found and ${CODEX_HOME_DIR}/config.toml still mentions" >&2
+    if [[ -z "$CODEX_CONFIG" ]]; then
+        # Not knowing where Codex keeps its config is not the same as knowing
+        # there is none: HOME and CODEX_HOME are both unusable, so a surviving
+        # registration cannot be ruled out and the caller must not delete the
+        # shared resources this script's exit 0 releases.
+        echo "[tokenless] ERROR: neither HOME nor CODEX_HOME is usable, so the Codex config cannot" >&2
+        echo "[tokenless] ERROR: be located and the registration cannot be confirmed gone. Marketplace" >&2
+        echo "[tokenless] ERROR: directory kept. Set HOME or CODEX_HOME and run this script again." >&2
+        DEREGISTER_FAILED=1
+    elif [[ -f "$CODEX_CONFIG" ]] \
+       && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$CODEX_CONFIG" 2>/dev/null; then
+        echo "[tokenless] ERROR: codex CLI not found and ${CODEX_CONFIG} still mentions" >&2
         echo "[tokenless] ERROR: the tokenless plugin or the ${MARKETPLACE_NAME} marketplace, so the" >&2
         echo "[tokenless] ERROR: registration cannot be confirmed gone. Marketplace directory kept." >&2
         echo "[tokenless] Put codex back on PATH and run this script again." >&2
         DEREGISTER_FAILED=1
     else
-        echo "[tokenless] codex CLI not found and ${CODEX_HOME_DIR}/config.toml records no tokenless"
+        echo "[tokenless] codex CLI not found and Codex records no tokenless"
         echo "[tokenless] registration; nothing to deregister."
     fi
 fi
@@ -203,7 +259,13 @@ fi
 #    marketplace entry aimed at a directory that no longer exists, and the failure
 #    is only reported at the end of this script.
 if [[ $DEREGISTER_FAILED -eq 1 ]]; then
-    echo "[tokenless] Keeping marketplace directory ${MARKETPLACE_DIR}: the Codex registration was not removed."
+    if [[ -n "$MARKETPLACE_DIR" ]]; then
+        echo "[tokenless] Keeping marketplace directory ${MARKETPLACE_DIR}: the Codex registration was not removed."
+    else
+        echo "[tokenless] No marketplace directory is known (HOME and XDG_DATA_HOME are unusable), so nothing is kept there."
+    fi
+elif [[ -z "$MARKETPLACE_DIR" ]]; then
+    echo "[tokenless] neither HOME nor XDG_DATA_HOME is set — no marketplace directory to remove."
 elif [[ -d "$MARKETPLACE_DIR" ]]; then
     rm -rf "$MARKETPLACE_DIR"
     echo "[tokenless] Removed marketplace directory: $MARKETPLACE_DIR"
