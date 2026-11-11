@@ -104,6 +104,14 @@ PID namespace、PID、start time、UID 和组；目标及已有后代快照逐�
 保护的成员；重试只增加经过核验的引用，不丢弃已有责任。所有路径仍核验完整进程身份，
 拒绝跨 Scope 或无拥有者的网关 cgroup。先删父或先删子都不会撤除其它 Binding 仍引用的
 路径；实例退出只撤除对应执行责任，不撤销共享 fake。
+
+单个 Binding 的故障只撤除该 Binding 的引流，网关与其它 Binding 继续服务：接管期间根进程
+退出返回可重试的 `GATEWAY_PROCESS_EXITED`；后代在迁移中退出直接忽略，其它后代迁移失败
+只记录诊断，由 cgroup 成员核验兜底。cgroup 中存在身份无效的存活成员时，该 cgroup 对所有
+引用它的 Binding 均不引流；部署自身根路径被撤除时以原始错误失败，不确认部署。未知宿主
+错误、投影持久化、nft 与发布失败仍按 fail-closed 撤流。诊断以 `asc_process_diagnostic`
+目标写入 daemon stderr，经 systemd 进入 journald（`journalctl -u agent-sec-core-v2`）。
+
 匹配实例重启由 discovery 重新接管，fake
 保持稳定。同 UID 多 Scope 有不同 fake，但同一用户仍可读取彼此 fake；cgroup 不是 UID
 内部的安全隔离边界。

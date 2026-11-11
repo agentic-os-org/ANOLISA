@@ -77,68 +77,96 @@ impl ProcessIdentity {
     }
 }
 
+/// Snapshots `root` and its live descendants; only the root must survive the snapshot.
 pub(crate) fn snapshot(root: u32) -> Result<Vec<ProcessIdentity>, GatewayError> {
     let mut processes = vec![capture(root)?];
     let mut seen = BTreeSet::from([root]);
     let mut thread_count = 0;
     let mut index = 0;
     while index < processes.len() {
-        let process = &processes[index];
-        let parent_pid = process.pid;
-        process.verify()?;
-        let tasks_path = format!("/proc/{}/task", process.pid);
-        let tasks = std::fs::read_dir(&tasks_path).map_err(|error| {
-            if process_vanished(&error) {
-                GatewayError::process_exited()
-            } else {
-                GatewayError::io(
-                    "cannot list process threads",
-                    Path::new(&tasks_path),
-                    &error,
-                )
-            }
-        })?;
-        let mut children = BTreeSet::new();
-        for task in tasks {
-            thread_count += 1;
-            if thread_count > MAX_PROCESS_TREE {
-                return Err(capacity());
-            }
-            let task = task.map_err(|error| {
-                GatewayError::io("cannot read process thread", Path::new(&tasks_path), &error)
-            })?;
-            for child in read_proc(&task.path().join("children"))?.split_whitespace() {
-                let pid = child
-                    .parse::<u32>()
-                    .map_err(|_| GatewayError::internal("invalid procfs child PID"))?;
-                children.insert(pid);
-                if children.len() > MAX_PROCESS_TREE {
-                    return Err(capacity());
-                }
-            }
-        }
-        process.verify()?;
-        for pid in children {
+        let parent_pid = processes[index].pid;
+        // Exited or reparented descendants carry no traffic; cgroup membership checks cover
+        // any process that left this tree.
+        let children = unless_exited(
+            index != 0,
+            children_of(&processes[index], &mut thread_count),
+        )?;
+        for pid in children.unwrap_or_default() {
             if seen.insert(pid) {
                 if processes.len() == MAX_PROCESS_TREE {
                     return Err(capacity());
                 }
-                // A child gone after enumeration fails the snapshot, without moving any target.
-                let child = capture(pid)?;
-                if child.parent_pid != parent_pid {
-                    return Err(GatewayError::unavailable(format!(
-                        "child {pid} of {parent_pid} exited, was reparented or its PID was reused"
-                    )));
+                if let Some(child) = unless_exited(true, capture(pid))?
+                    && child.parent_pid == parent_pid
+                {
+                    processes.push(child);
                 }
-                processes.push(child);
             }
         }
         index += 1;
     }
-    for process in &processes {
-        process.verify()?;
+    let mut live = Vec::with_capacity(processes.len());
+    for (index, process) in processes.into_iter().enumerate() {
+        if unless_exited(index != 0, process.verify())?.is_some() {
+            live.push(process);
+        }
     }
-    Ok(processes)
+    Ok(live)
+}
+
+/// Turns a process exit into `None` when `tolerated`; every other result passes through.
+fn unless_exited<T>(
+    tolerated: bool,
+    result: Result<T, GatewayError>,
+) -> Result<Option<T>, GatewayError> {
+    match result {
+        Err(error) if tolerated && error.is_process_exited() => Ok(None),
+        result => result.map(Some),
+    }
+}
+
+fn children_of(
+    process: &ProcessIdentity,
+    thread_count: &mut usize,
+) -> Result<BTreeSet<u32>, GatewayError> {
+    process.verify()?;
+    let tasks_path = format!("/proc/{}/task", process.pid);
+    let tasks = std::fs::read_dir(&tasks_path).map_err(|error| {
+        if process_vanished(&error) {
+            GatewayError::process_exited()
+        } else {
+            GatewayError::io(
+                "cannot list process threads",
+                Path::new(&tasks_path),
+                &error,
+            )
+        }
+    })?;
+    let mut children = BTreeSet::new();
+    for task in tasks {
+        *thread_count += 1;
+        if *thread_count > MAX_PROCESS_TREE {
+            return Err(capacity());
+        }
+        let task = task.map_err(|error| {
+            GatewayError::io("cannot read process thread", Path::new(&tasks_path), &error)
+        })?;
+        // A thread may exit mid-enumeration; the final verify proves the process survived.
+        let Some(listed) = unless_exited(true, read_proc(&task.path().join("children")))? else {
+            continue;
+        };
+        for child in listed.split_whitespace() {
+            let pid = child
+                .parse::<u32>()
+                .map_err(|_| GatewayError::internal("invalid procfs child PID"))?;
+            children.insert(pid);
+            if children.len() > MAX_PROCESS_TREE {
+                return Err(capacity());
+            }
+        }
+    }
+    process.verify()?;
+    Ok(children)
 }
 
 pub(crate) fn scope_snapshot(path: &str) -> Result<Vec<ProcessIdentity>, GatewayError> {
@@ -192,7 +220,10 @@ pub(crate) fn scope_snapshot(path: &str) -> Result<Vec<ProcessIdentity>, Gateway
         directories.extend(children);
         index += 1;
     }
-    pids.into_iter().map(capture).collect()
+    // Members that exit between listing and capture carry no traffic.
+    pids.into_iter()
+        .filter_map(|pid| unless_exited(true, capture(pid)).transpose())
+        .collect()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -299,10 +330,8 @@ fn read_proc(path: &Path) -> Result<String, GatewayError> {
     Ok(text)
 }
 
-/// Whether a procfs access failed because the process is gone.
-///
-/// A PID directory read while its process is being reaped fails with `ESRCH` rather than
-/// `ENOENT`; both only prove exit while procfs itself is still mounted.
+/// Whether a procfs access failed because the process is gone: a PID being reaped yields
+/// `ESRCH` rather than `ENOENT`, and either only proves exit while procfs is mounted.
 pub(crate) fn process_vanished(error: &std::io::Error) -> bool {
     (error.kind() == std::io::ErrorKind::NotFound
         || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()))
@@ -329,6 +358,58 @@ mod tests {
         assert!(vanished(Errno::SRCH));
         for unexpected in [Errno::ACCESS, Errno::IO, Errno::PERM, Errno::INVAL] {
             assert!(!vanished(unexpected), "{unexpected:?}");
+        }
+    }
+    #[test]
+    fn snapshot_survives_descendants_exiting_mid_enumeration() {
+        let mut root = std::process::Command::new("sh")
+            .args(["-c", "while :; do /bin/true; done"])
+            .spawn()
+            .unwrap();
+        let snapshots: Vec<_> = (0..200).map(|_| super::snapshot(root.id())).collect();
+        root.kill().unwrap();
+        root.wait().unwrap();
+        for snapshot in snapshots {
+            assert_eq!(snapshot.unwrap()[0].pid, root.id());
+        }
+    }
+    #[test]
+    fn exited_root_fails_snapshot_as_process_exit() {
+        let mut root = std::process::Command::new("/bin/true").spawn().unwrap();
+        let pid = root.id();
+        root.wait().unwrap();
+        assert!(super::snapshot(pid).unwrap_err().is_process_exited());
+    }
+    #[test]
+    fn scope_snapshot_survives_members_exiting_mid_enumeration() {
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+        let path = own
+            .lines()
+            .find_map(|line| line.strip_prefix("0::/"))
+            .unwrap()
+            .to_owned();
+        if !crate::nft::is_safe_cgroup_path(&path) {
+            return;
+        }
+        assert!(
+            super::scope_snapshot("agent-sec-absent.scope")
+                .unwrap()
+                .is_empty()
+        );
+        let mut churn = std::process::Command::new("sh")
+            .args(["-c", "while :; do /bin/true; done"])
+            .spawn()
+            .unwrap();
+        let snapshots: Vec<_> = (0..100).map(|_| super::scope_snapshot(&path)).collect();
+        churn.kill().unwrap();
+        churn.wait().unwrap();
+        for snapshot in snapshots {
+            assert!(
+                snapshot
+                    .unwrap()
+                    .iter()
+                    .any(|process| process.pid == churn.id())
+            );
         }
     }
 }

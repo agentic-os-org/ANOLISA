@@ -20,6 +20,7 @@ use asc_policy_types::identifiers::ResourceId;
 use asc_policy_types::scope::{PreparedScope, ScopeStatus};
 use serde::Serialize;
 
+use crate::binding::RouteFault;
 use crate::files::Owner;
 use crate::host::{GatewayAccount, Host};
 use crate::nft::{self, Redirect};
@@ -832,11 +833,14 @@ impl GatewayService {
         &self,
         inner: &Inner,
         plans: &BTreeMap<ScopeId, (PreparedScope, Plan)>,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<BTreeMap<ResourceId, GatewayError>, GatewayError> {
+        let mut withheld = BTreeMap::new();
         if !inner.state.enabled {
-            return Ok(());
+            return Ok(withheld);
         }
         let mut routes = BTreeMap::new();
+        let mut denied = BTreeSet::new();
+        let mut accepted = Vec::new();
         for (id, (scope, plan)) in plans {
             let domain = &inner.state.scopes[id];
             // Publication waits may change owner permissions, but not the immutable compiled snapshot.
@@ -857,16 +861,47 @@ impl GatewayService {
                 {
                     continue;
                 }
-                match self.verify_pinned(inner, binding_id, attachment, domain.uid) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == GatewayErrorKind::Unavailable => continue,
-                    Err(error) => return Err(error),
+                if let Err(fault) = self.check_pinned(inner, binding_id, attachment, domain.uid)? {
+                    let (error, invalid_members) = match fault {
+                        RouteFault::Stale(error) => (error, false),
+                        RouteFault::Members(error) => (error, true),
+                    };
+                    if invalid_members || inner.pins.contains_key(binding_id) {
+                        diagnose(
+                            "gateway withheld routes from an unverifiable Binding",
+                            format_args!(
+                                "binding_id={binding_id} invalid_members={invalid_members} error={error}"
+                            ),
+                        );
+                    }
+                    // Negative membership evidence is authoritative for the cgroup, whichever
+                    // Binding references it and in whatever order they are checked.
+                    if invalid_members {
+                        denied.extend(attachment.cgroups().map(str::to_owned));
+                    }
+                    withheld.insert(binding_id.clone(), error);
+                    continue;
                 }
+                accepted.push((binding_id, attachment.cgroup.as_str()));
                 for path in attachment.cgroups() {
                     if self.host.cgroup_exists(path) {
                         routes.insert(path.to_owned(), (id, domain.port));
                     }
                 }
+            }
+        }
+        routes.retain(|path, _| !denied.contains(path));
+        // A Binding that verified before another found an invalid member in its root cgroup
+        // has lost its own route, so it must not be reported as deployed either.
+        for (binding_id, root) in accepted {
+            if denied.contains(root) {
+                withheld.insert(
+                    binding_id.clone(),
+                    GatewayError::new(
+                        GatewayErrorKind::Conflict,
+                        "Binding root cgroup holds an invalid member",
+                    ),
+                );
             }
         }
         for (scope, _) in plans.values() {
@@ -885,7 +920,7 @@ impl GatewayService {
             self.canonical(scope)
                 .map_err(|error| self.fail_closed(error))?;
         }
-        Ok(())
+        Ok(withheld)
     }
     pub(crate) fn fail_closed(&self, error: GatewayError) -> GatewayError {
         withdraw_on_failure(&self.config, self.host.as_ref(), error)
@@ -917,11 +952,20 @@ impl GatewayService {
     }
 }
 
+/// Writes a gateway fault and its original error to the daemon diagnostic log.
+pub(crate) fn diagnose(event: &str, detail: std::fmt::Arguments<'_>) {
+    tracing::warn!(target: "asc_process_diagnostic", "{event}: {detail}");
+}
+
 fn withdraw_on_failure(
     config: &GatewayConfig,
     host: &dyn Host,
     error: GatewayError,
 ) -> GatewayError {
+    diagnose(
+        "gateway failing closed: stopping proxy and withdrawing traffic",
+        format_args!("error={error}"),
+    );
     // Construction can fail before an instance exists; never trust the projection to decide cleanup.
     let runtime = RuntimeDirectory {
         root: config.runtime_dir.clone(),
@@ -940,6 +984,11 @@ fn withdraw_on_failure(
     if failures.is_empty() {
         error.context("gateway stopped and traffic withdrawn; cleanup responsibility retained")
     } else {
+        tracing::error!(
+            target: "asc_process_diagnostic",
+            failures = %failures.join("; "),
+            "gateway fail-closed cleanup failed; operator must stop proxy and withdraw traffic"
+        );
         error.context(&format!(
             "gateway fail-closed cleanup failed ({}); operator must stop proxy and withdraw traffic; cleanup responsibility retained",
             failures.join("; ")

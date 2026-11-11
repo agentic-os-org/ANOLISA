@@ -496,6 +496,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
