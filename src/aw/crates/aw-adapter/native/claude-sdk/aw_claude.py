@@ -119,6 +119,11 @@ class Bridge:
         specific = result.get("hookSpecificOutput", {}) if isinstance(result, dict) else {}
         if not isinstance(specific, dict):
             raise CallbackFailure("invalid_native_response")
+        updated_input = specific.get("updatedInput")
+        if (hook["event"] == "tool.before" and isinstance(updated_input, dict)
+                and result == {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "updatedInput": updated_input}}):
+            return result
         updated = specific.get("updatedToolOutput")
         original = payload.get("tool_response")
         # Native MCP tools adopt a string replacement of the whole

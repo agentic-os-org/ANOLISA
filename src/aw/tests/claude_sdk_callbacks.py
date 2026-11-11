@@ -206,3 +206,18 @@ async def check_preserved_callbacks() -> None:
         assert calls == [mode]
         assert json.dumps(original) == '{"nested": ' * 500 + "{}" + "}" * 500
     print("5 preserved callback/nested-input/isolation scenarios passed")
+
+
+async def check_input_replacement(output: Path) -> None:
+    from unittest.mock import AsyncMock
+    from aw_claude import Bridge
+    config = output / "input-replacement.json"
+    hook = {"event":"tool.before","step":"checked","on_error":"block","budget_ms":1000,"replace_result":False}
+    config.write_text(json.dumps({"executable":"unused","binding":"unused","ready_path":"unused","ready_token":"fixture","hooks":[hook]}))
+    with patch.dict(os.environ, AW_CLAUDE_CONFIG=str(config)):
+        bridge = Bridge()
+    replacement = {"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"checked","timeout":7}}}
+    with patch.object(bridge, "_transport", AsyncMock(return_value=(0,json.dumps(replacement).encode()))):
+        result = await bridge.callback({"hook_event_name":"PreToolUse","tool_use_id":"call","tool_input":{"command":"original","timeout":7}}, "call", {})
+    assert result == replacement
+    assert "permissionDecision" not in result["hookSpecificOutput"]

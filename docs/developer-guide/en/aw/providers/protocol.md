@@ -169,10 +169,10 @@ preserved; admission does not schedule distinct events or choose parallelism.
 | Request | Admission result |
 | --- | --- |
 | `input.submit`: `observe`, `block` | Accepted with Provider and Adapter support; tool selectors and raw native-hook steps are rejected |
-| `tool.before`: `observe`, `block` | Accepted when the selected operation and Adapter both support every requested effect |
+| `tool.before`: `observe`, `block`, `replace_input` | Accepted when the selected operation and Adapter both support every requested effect |
 | `tool.after`: `observe` | Accepted when both sides support it |
 | `tool.after`: `replace_result` | One structured step with trusted text-replacement capability |
-| `ask`, input replacement or a block after execution | Rejected |
+| `ask` or a block after execution | Rejected |
 | An enabled event outside submission and the two tool events | Rejected, including when `required: false` |
 | A guard such as `security.violation` | Rejected; final-check ordering is not implemented by this profile |
 | Event and step `match.tools` | Accepted; the Host invokes only tools matching both selectors |
@@ -268,7 +268,7 @@ reject unsupported projections/effects rather than ignoring them.
 
 ### Tokenless composition
 
-PreTool returns complete retry suggestions through `block`; each new call passes security and native permissions again. PostTool replaces only authorized text slots.
+PreTool can return one `replace_input` effect with an object `input` retaining every original argument key. It must be the first applicable before step and its sole effect; every before step uses `on_error: block`. Later checks see the candidate and the last successful callback publishes it under the same identity and budget, preserving native authorization. Legacy `block` retry suggestions remain supported. PostTool replaces only authorized text slots. SDK-managed MCP handler input replacement is rejected before checking the candidate; unchanged MCP calls and PostTool processing keep their existing routes.
 See the [Tokenless reference](tokenless.md) for RTK ownership, result classification and telemetry.
 Current recovery capability is `none`; Schema/BeforeModel and Retrieve seams are not available.
 See [Core execution](../../../../../src/aw/docs/design/en/core-execution.md) for the separate plan API contract.

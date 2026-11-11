@@ -146,7 +146,12 @@ class ArchiveTests(Fixture):
                             role = identity.removeprefix("aw-provider-")
                             self.assertEqual(
                                 templates,
-                                {f"templates/{role}.json", "templates/sec-core-tokenless.json"},
+                                {
+                                    f"templates/{role}.json",
+                                    "templates/sec-core-tokenless.json",
+                                    "templates/tokenless-openclaw.json",
+                                    "templates/sec-core-tokenless-openclaw.json",
+                                },
                             )
                 self.assertFalse((self.repo / "src/tokenless").exists())
                 self.assertFalse((self.repo / "src/agent-sec-core").exists())
@@ -202,7 +207,15 @@ class ArchiveTests(Fixture):
         expected = {
             "sec-core": {"PROVIDERS_DIR", "SEC_CORE_CLI", "SOCKET"},
             "tokenless": {"PROVIDERS_DIR", "TOKENLESS_CLI", "STATE"},
+            "tokenless-openclaw": {"PROVIDERS_DIR", "TOKENLESS_CLI", "STATE"},
             "sec-core-tokenless": {
+                "PROVIDERS_DIR",
+                "SEC_CORE_CLI",
+                "SOCKET",
+                "TOKENLESS_CLI",
+                "STATE",
+            },
+            "sec-core-tokenless-openclaw": {
                 "PROVIDERS_DIR",
                 "SEC_CORE_CLI",
                 "SOCKET",
@@ -218,7 +231,7 @@ class ArchiveTests(Fixture):
             self.assertNotIn("/libexec/aw/providers", text)
 
     def test_security_templates_scope_fail_closed_scans_to_mapped_native_tools(self) -> None:
-        for name in ("sec-core", "sec-core-tokenless"):
+        for name in ("sec-core", "sec-core-tokenless", "sec-core-tokenless-openclaw"):
             with self.subTest(template=name):
                 template = json.loads((package.TEMPLATES / f"{name}.json").read_text())
                 config = template["providers"]["security"]["config"]
@@ -226,9 +239,15 @@ class ArchiveTests(Fixture):
                 before = template["events"]["tool.before"]
                 self.assertTrue(before["required"])
                 scan = next(step for step in before["steps"] if step["id"] == "scan-code")
-                self.assertEqual(
-                    scan["match"]["tools"], ["native:qoder:Bash", "native:openclaw:exec"]
-                )
+                expected_tools = {
+                    "sec-core": ["native:qoder:Bash", "native:openclaw:exec"],
+                    "sec-core-tokenless": ["native:qoder:Bash", "native:openclaw:exec"],
+                    "sec-core-tokenless-openclaw": [
+                        "native:qoder:Bash",
+                        "native:openclaw:exec",
+                    ],
+                }[name]
+                self.assertEqual(scan["match"]["tools"], expected_tools)
                 self.assertEqual(set(config["tools"]), {"Bash", "exec"})
                 self.assertEqual(scan["on_error"], "block")
                 after = template["events"]["tool.after"]
@@ -236,6 +255,43 @@ class ArchiveTests(Fixture):
                     step for step in after["steps"] if step["id"] == "observe-completion"
                 )
                 self.assertEqual(observe["match"], scan["match"])
+
+    def test_combined_template_routes_rewrite_and_scan_for_both_agents(self) -> None:
+        template = json.loads((package.TEMPLATES / "sec-core-tokenless.json").read_text())
+        before = template["events"]["tool.before"]["steps"]
+        self.assertEqual([step["id"] for step in before], [
+            "rewrite-command", "scan-code", "retry-command-openclaw"
+        ])
+        self.assertEqual(before[0]["match"]["tools"], ["native:qoder:Bash"])
+        self.assertEqual(before[0]["effects"], ["replace_input"])
+        self.assertEqual(before[1]["match"]["tools"], [
+            "native:qoder:Bash", "native:openclaw:exec"
+        ])
+        self.assertEqual(before[1]["on_error"], "block")
+        self.assertEqual(before[2]["match"]["tools"], ["native:openclaw:exec"])
+        self.assertEqual(before[2]["effects"], ["block"])
+
+    def test_tokenless_template_routes_rewrite_and_retry_for_both_agents(self) -> None:
+        template = json.loads((package.TEMPLATES / "tokenless.json").read_text())
+        before = template["events"]["tool.before"]["steps"]
+        self.assertEqual([step["id"] for step in before], [
+            "rewrite-command", "retry-command-openclaw"
+        ])
+        self.assertEqual(before[0]["match"]["tools"], ["native:qoder:Bash"])
+        self.assertEqual(before[0]["effects"], ["replace_input"])
+        self.assertEqual(before[0]["on_error"], "block")
+        self.assertEqual(before[1]["match"]["tools"], ["native:openclaw:exec"])
+        self.assertEqual(before[1]["effects"], ["block"])
+        self.assertEqual(before[1]["on_error"], "report")
+
+    def test_openclaw_templates_keep_legacy_retry_after_security_scan(self) -> None:
+        for name in ("tokenless-openclaw", "sec-core-tokenless-openclaw"):
+            with self.subTest(template=name):
+                template = json.loads((package.TEMPLATES / f"{name}.json").read_text())
+                steps = template["events"]["tool.before"]["steps"]
+                self.assertEqual(steps[-1]["id"], "rewrite-command")
+                self.assertEqual(steps[-1]["effects"], ["block"])
+                self.assertEqual(steps[-1]["on_error"], "report")
 
     def test_invalid_architecture_or_missing_inputs_publish_nothing(self) -> None:
         self.prepare("core")

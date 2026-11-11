@@ -23,6 +23,9 @@ use support::{Fixture, Service};
 mod tool_scope;
 
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
+    if output.status.code() == Some(2) {
+        return true;
+    }
     match adapter {
         "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {
             output.status.code() == Some(2)
@@ -202,3 +205,6 @@ print(json.dumps(reply))
         service.released(&f);
     }
 }
+
+#[path = "pretool/input_rewrite.rs"]
+mod input_rewrite;

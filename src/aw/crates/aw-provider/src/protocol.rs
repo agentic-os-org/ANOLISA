@@ -156,6 +156,7 @@ impl Protocol {
             for effect in array(&value["allowed_effects"])? {
                 if effect != "observe"
                     && !(before && effect == "block")
+                    && !(value["event"]["name"] == "tool.before" && effect == "replace_input")
                     && !(!before
                         && effect == "replace_result"
                         && value["event"]["name"] == "tool.after")
@@ -289,6 +290,26 @@ impl Protocol {
                 }
                 let mut replacements = 0;
                 for effect in array(&value["effects"])? {
+                    if effect["type"] == "replace_input"
+                        && (value["effects"].as_array().map(Vec::len) != Some(1)
+                            || request.0["event"]["name"] != "tool.before")
+                    {
+                        return Err(Error::Invalid(
+                            "input replacement must be a sole pre-tool effect",
+                        ));
+                    }
+                    if effect["type"] == "replace_input"
+                        && request.0["event"]["tool"]["input"]
+                            .as_object()
+                            .zip(effect["input"].as_object())
+                            .is_none_or(|(original, candidate)| {
+                                original.keys().any(|key| !candidate.contains_key(key))
+                            })
+                    {
+                        return Err(Error::Invalid(
+                            "input replacement must retain original argument keys",
+                        ));
+                    }
                     if effect["type"] == "replace_result" {
                         replacements += 1;
                         if replacements > 1 {

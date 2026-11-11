@@ -40,7 +40,7 @@ pub(crate) const QODER: Profile = Profile {
     adapter: &super::super::qoder::Qoder,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };
@@ -50,7 +50,7 @@ pub(crate) const QODER_SDK: Profile = Profile {
     adapter: &super::super::adapters::qoder_sdk::QoderSdk,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };
@@ -66,7 +66,7 @@ pub(crate) const HERMES: Profile = Profile {
     adapter: &super::super::adapters::hermes::Hermes,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };
@@ -76,7 +76,7 @@ pub(crate) const QWENPAW: Profile = Profile {
     adapter: &super::super::adapters::qwenpaw::QwenPaw,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };
@@ -86,7 +86,7 @@ pub(crate) const PI: Profile = Profile {
     adapter: &super::super::adapters::pi::Pi,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };
@@ -96,7 +96,7 @@ pub(crate) const CLAUDE_SDK: Profile = Profile {
     adapter: &super::super::adapters::claude_sdk::ClaudeSdk,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };
@@ -106,7 +106,7 @@ pub(crate) const AGENTSCOPE: Profile = Profile {
     adapter: &super::super::adapters::agentscope::AgentScope,
     events: &[
         ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block"]),
+        ("tool.before", &["observe", "block", "replace_input"]),
         ("tool.after", &["observe", "replace_result"]),
     ],
 };

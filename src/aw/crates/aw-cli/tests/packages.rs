@@ -21,6 +21,7 @@ mod validation;
 
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
     process::{Command, Output},
@@ -167,6 +168,112 @@ fn config_init_accepts_xdg_state_beside_payloads_under_the_prefix() {
 fn make_private_dir(path: &std::path::Path) {
     fs::create_dir_all(path).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn packaged_templates_route_both_agents_without_losing_security_scans() {
+    use aw_core::admission::{preflight, AdapterCapabilities};
+
+    for (template, qoder_steps, openclaw_steps, has_scan) in [
+        (
+            "tokenless",
+            vec!["rewrite-command"],
+            vec!["retry-command-openclaw"],
+            false,
+        ),
+        (
+            "sec-core-tokenless",
+            vec!["rewrite-command", "scan-code"],
+            vec!["scan-code", "retry-command-openclaw"],
+            true,
+        ),
+        (
+            "sec-core-tokenless-openclaw",
+            vec!["scan-code", "rewrite-command"],
+            vec!["scan-code", "rewrite-command"],
+            true,
+        ),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        let config_path = root.join("aw.yaml");
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../distribution/packaging/aw/templates")
+            .join(format!("{template}.json"));
+        success(
+            Command::new(env!("CARGO_BIN_EXE_aw"))
+                .args(["config", "init", "--prefix"])
+                .arg(root.join("prefix"))
+                .arg("--config")
+                .arg(&config_path)
+                .arg("--state-dir")
+                .arg(root.join("state"))
+                .arg("--template")
+                .arg(&template_path)
+                .args([
+                    "--template-var",
+                    "PROVIDERS_DIR=/tmp/aw-providers",
+                    "--template-var",
+                    "SEC_CORE_CLI=/bin/true",
+                    "--template-var",
+                    "TOKENLESS_CLI=/bin/true",
+                    "--template-var",
+                    "SOCKET=/tmp/aw-review.sock",
+                    "--qoder",
+                    "/bin/true",
+                    "--node",
+                    "/bin/true",
+                    "--openclaw",
+                    "/bin/true",
+                ])
+                .output()
+                .unwrap(),
+        );
+        let bytes = fs::read(&config_path).unwrap();
+        let config = aw_config::Validator::new().unwrap().parse(&bytes).unwrap();
+        for (target, adapter, native_name, expected) in [
+            ("qoder", "qoder", "Bash", &qoder_steps),
+            ("openclaw", "openclaw", "exec", &openclaw_steps),
+        ] {
+            let mut before_effects = vec!["observe".into(), "block".into()];
+            if adapter == "qoder" {
+                before_effects.push("replace_input".into());
+            }
+            let capabilities = AdapterCapabilities {
+                adapter: adapter.into(),
+                version: "fixture".into(),
+                entrypoint: "fixture".into(),
+                events: BTreeMap::from([
+                    ("tool.before".into(), before_effects),
+                    (
+                        "tool.after".into(),
+                        vec!["observe".into(), "replace_result".into()],
+                    ),
+                ]),
+                failure_actions: BTreeMap::new(),
+            };
+            let steps = preflight(&config, target, &capabilities).unwrap();
+            let before: Vec<_> = steps
+                .iter()
+                .filter(|step| step.event == "tool.before")
+                .collect();
+            assert_eq!(
+                before
+                    .iter()
+                    .map(|step| step.step_id.as_str())
+                    .collect::<Vec<_>>(),
+                expected.clone(),
+                "{template}: {target}"
+            );
+            if has_scan {
+                assert!(before.iter().any(|step| step.step_id == "scan-code"
+                    && step.matches_tool(
+                        &json!({"agent":{"adapter":adapter},"tool":{"native_name":native_name}})
+                    )));
+            }
+        }
+    }
 }
 
 #[test]

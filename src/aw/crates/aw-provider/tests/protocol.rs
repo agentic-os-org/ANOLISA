@@ -315,7 +315,7 @@ fn responses_cannot_escalate_effects_or_change_request_binding() {
     assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
     for (event, effect) in [
         ("tool.before", "ask"),
-        ("tool.before", "replace_input"),
+        ("input.submit", "replace_input"),
         ("tool.after", "block"),
         ("tool.before", "replace_result"),
     ] {
@@ -571,5 +571,28 @@ fn operation_adapter_constraints_are_bounded_and_reference_declared_events() {
             ),
             "{reply}"
         );
+    }
+}
+
+#[test]
+fn input_replacement_is_a_single_bound_object_effect_before_execution() {
+    let protocol = Protocol::new().unwrap();
+    let request = protocol
+        .bind_invocation(invoke("tool.before", json!(["replace_input"])))
+        .unwrap();
+    let mut reply = response();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] =
+        json!([{"type":"replace_input","input":{"价格":1.25,"command":"new","nested":[1,false]}}]);
+    protocol.check_response(&request, &bytes(&reply)).unwrap();
+    for effects in [
+        json!([{"type":"replace_input"}]),
+        json!([{"type":"replace_input","input":"command"}]),
+        json!([{"type":"replace_input","input":{}},{"type":"replace_input","input":{}}]),
+        json!([{"type":"replace_input","input":{},"text":"approve"}]),
+        json!([{"type":"replace_input","input":{}},{"type":"observe"}]),
+    ] {
+        reply["effects"] = effects;
+        assert!(protocol.check_response(&request, &bytes(&reply)).is_err());
     }
 }

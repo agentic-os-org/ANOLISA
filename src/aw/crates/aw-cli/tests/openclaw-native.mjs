@@ -138,6 +138,7 @@ test('official before runner allows the tool when policy does not block', { time
   const f = await fixture(t, ['first'], []);
   const result = await f.runner.runBeforeToolCall(event, context);
   assert.notEqual(result?.block, true);
+  assert.deepEqual(result.params, { command: "native output", unicode: "你好" });
   assert.deepEqual(f.records().filter(row => row.phase === 'start').map(row => row.step), ['first']);
 });
 

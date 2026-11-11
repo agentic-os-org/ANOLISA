@@ -48,7 +48,12 @@ aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 原生包或 Makefile 安装时，`PROVIDERS_DIR` 取实际 Provider 根目录。同时需要安全
 检查时，安装并启动 [sec-core](security.md)，选择
 `sec-core-tokenless.json`，再提供该后端的 `SEC_CORE_CLI` 和 `SOCKET`。
-OpenClaw 使用[对应 Agent 参数](configuration.md#openclaw)，其他运行时见
+仅使用 OpenClaw 时选择 `tokenless-openclaw.json` 或
+`sec-core-tokenless-openclaw.json`，并使用[对应 Agent 参数](configuration.md#openclaw)。
+这两个模板沿用阻断与重试建议，因为先前的审批插件可能冻结原始参数。
+Qoder 和 OpenClaw 共用配置时，`tokenless.json` 让 Qoder 同次改写、OpenClaw 阻断后重试。
+需要安全检查时选择 `sec-core-tokenless.json`，扫描两者的
+Shell 工具。其他运行时见
 [集成参考](../../../developer-guide/zh/aw/providers/tokenless.md)。
 
 由 RPM 或其他管理者安装的 Provider 也可直接在 YAML 中通过绝对 `transport.argv`
@@ -56,7 +61,8 @@ OpenClaw 使用[对应 Agent 参数](configuration.md#openclaw)，其他运行�
 
 ## 运行时会发生什么
 
-- 执行前可能收到命令重试建议。AW 阻断原调用，Agent 重新发起建议的调用后，再次经过安全和原生权限检查。
+- 启用输入替换后，Tokenless 在同次工具调用内改写受支持的命令，后续安全步骤检查候选参数，再交给原生权限流程与执行器。
+- 已发布的 AW 0.1.0 使用重试建议。输入替换需要包含该能力的源码构建，首个 before 步骤声明 `[replace_input]`，所有 before 步骤使用 `on_error: block`；见[集成参考](../../../developer-guide/zh/aw/providers/tokenless.md#pretool-与权限行为)。
 - 执行后会处理受支持的成功文本结果。失败结果、图片和不支持的内容保持原样。
 - 压缩失败、超时或没有收益时保留原结果。安全检查的拒绝不会被压缩步骤覆盖。
 

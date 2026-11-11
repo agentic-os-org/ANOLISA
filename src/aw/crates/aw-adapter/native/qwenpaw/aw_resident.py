@@ -118,6 +118,7 @@ class Invocation:
     coordinator_closed: bool = False
     retirement: Any = None
     retired: bool = False
+    updated_input: dict | None = None
 
     def drained(self):
         task = self.entry.background_task if self.entry is not None else None
@@ -442,6 +443,9 @@ class ResidentMiddleware(MiddlewareBase):
             middleware = self.evaluate(self.config, hook)
             middleware.scope = self.scope
             replacement = await middleware._run(invocation.payload(event, response))
+            if isinstance(replacement, dict) and "aw_updated_input" in replacement:
+                invocation.updated_input = replacement["aw_updated_input"]
+                continue
             if replacement is not None:
                 if event == "tool.before":
                     return replacement
@@ -505,6 +509,11 @@ class ResidentMiddleware(MiddlewareBase):
         terminal = None
         try:
             denied = await self.hooks(invocation, "tool.before")
+            updated = invocation.updated_input
+            if denied is None and updated is not None:
+                call.input = frozen(updated)
+                invocation.call.input = call.input
+                invocation.arguments = frozen(updated)
             if denied is not None:
                 response = await self.hooks(invocation, "tool.after", denied)
                 invocation.native_done = True

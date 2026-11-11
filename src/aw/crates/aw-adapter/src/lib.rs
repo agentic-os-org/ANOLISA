@@ -93,3 +93,6 @@ fn read_file(path: impl AsRef<std::path::Path>, limit: usize) -> Result<Vec<u8>>
 
 #[cfg(test)]
 mod test_support;
+
+/// Native input replacement envelopes and callback snapshots.
+pub mod input;

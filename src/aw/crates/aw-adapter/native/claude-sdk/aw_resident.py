@@ -22,7 +22,7 @@ from claude_agent_sdk import (
 )
 from aw_claude import Bridge, CallbackFailure, _deny
 from aw_scope import Scope
-from aw_invocations import Invocations
+from aw_invocations import Invocations, digest
 from aw_model import ModelRelay
 from aw_transport import ManagedTransport
 
@@ -92,6 +92,9 @@ class ResidentBridge(Bridge):
             if phase == "after" or denied:
                 await self.invocations.finish(entry)
             else:
+                updated = reply.get("hookSpecificOutput", {}).get("updatedInput")
+                if updated is not None:
+                    entry.arguments = digest(updated)
                 entry.phase = "allowed"
         except Exception:
             reply = self.failure_reply(event, {})

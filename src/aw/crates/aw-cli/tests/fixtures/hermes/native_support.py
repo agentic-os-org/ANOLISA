@@ -1,6 +1,7 @@
 """Owned Hermes profile, dispatcher and callback fixtures."""
 
 from __future__ import annotations
+from contextvars import ContextVar
 import importlib.util
 import json
 import os
@@ -81,6 +82,7 @@ class NativeFixture(unittest.TestCase):
         os.environ["AW_HERMES_LAUNCH"] = str(launch)
         session = ModuleType("_aw_hermes_session")
         session.launch_path = str(launch)
+        session.rewritten_input = ContextVar("aw_test_rewritten_input", default=None)
         sys.modules[session.__name__] = session
         return launch
 

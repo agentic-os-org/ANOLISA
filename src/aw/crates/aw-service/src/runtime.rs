@@ -26,6 +26,7 @@ mod evidence;
 mod expired;
 pub(crate) mod facts;
 mod hooks;
+mod input;
 mod invocations;
 mod limits;
 mod policy;
@@ -282,8 +283,8 @@ impl Runtime {
             let automatic = native_input.is_some();
             let association = evidence::association(&host.capabilities().adapter, &value, native_input.as_deref());
             let candidate = value.clone();
-            let ordered = automatic && aw_adapter::completion::ordered_after(&host.capabilities().adapter, &value,
-                host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result()));
+            let ordered = automatic && ((value["name"] == "tool.before" && host.steps().iter().any(|step| step.event == "tool.before" && matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input")))) || aw_adapter::completion::ordered_after(&host.capabilities().adapter, &value,
+                host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result())));
             let event = match native_input {
                 Some(input) => host.hook_event(value, input, deadline, &cancelled),
                 None => host.event(value, deadline, &cancelled),
@@ -320,7 +321,7 @@ impl Runtime {
                             } else {
                                 let _ = ready.send(Ok(json!(handle)));
                             }
-                            runtime.event_loop((&thread_key, &instance_id), &event, (&cancelled, &context, execution.as_ref()), receiver, automatic, ordered);
+                            runtime.event_loop((&thread_key, &instance_id, &candidate), &event, (&cancelled, &context, execution.as_ref()), receiver, automatic, ordered);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -365,14 +366,15 @@ impl Runtime {
 
     fn event_loop(
         &self,
-        identity: (&str, &str),
+        identity: (&str, &str, &Value),
         event: &aw_host::Event<'_>,
         lease: (&AtomicBool, &evidence::Cell, Option<&policy::Execution>),
         receiver: Receiver<Job>,
         automatic: bool,
         ordered: bool,
     ) {
-        let (key, instance_id) = identity;
+        let (key, instance_id, original) = identity;
+        let rewrite = Mutex::new(input::State::default());
         let (cancelled, context, execution) = lease;
         let mut close = None;
         let mut claimed = BTreeSet::new();
@@ -456,6 +458,7 @@ impl Runtime {
                         }
                         let completed_steps = &completed_steps;
                         let completed_mask = &completed_mask;
+                        let rewrite = &rewrite;
                         children.push(scope.spawn(move || {
                             let _guard = CallGuard(&self.calls);
                             let result = (|| {
@@ -475,14 +478,44 @@ impl Runtime {
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
                                 // Queueing and durable audit can outlive the admitted owner.
                                 self.check_execution_admission(instance_id, execution)?;
-                                let invocation = match native_environment {
+                                let mut invocation = match native_environment {
                                     Some(environment) => {
                                         event.invoke_with_native_environment(&step, &environment)
                                     }
                                     None => event.invoke(&step),
                                 }
                                 .map_err(|_| rejected("step_rejected"))?;
-                                let (record, result) = audit::invocation(invocation);
+                                let replacement = match self.adopt_input(
+                                    instance_id,
+                                    event,
+                                    original,
+                                    &mut invocation,
+                                    rewrite,
+                                    index + 1 == step_count as usize,
+                                ) {
+                                    Ok(input) => input,
+                                    Err(_) => {
+                                        invocation.result = Err(aw_host::Failure::Protocol(
+                                            aw_provider::Error::Invalid(
+                                                "input replacement adoption failed",
+                                            ),
+                                        ));
+                                        invocation.failure_action =
+                                            Some(aw_host::FailureAction::Block);
+                                        None
+                                    }
+                                };
+                                let (record, mut result) = audit::invocation(invocation);
+                                if result["effects"].as_array().is_some_and(|effects| {
+                                    effects
+                                        .iter()
+                                        .any(|effect| effect["type"] == "replace_input")
+                                }) {
+                                    result["effects"] = serde_json::json!([]);
+                                }
+                                if let Some(input) = replacement {
+                                    result["input_replacement"] = input;
+                                }
                                 self.audit.append(key, record)?;
                                 Ok(result)
                             })();

@@ -96,7 +96,7 @@ class AwToolMiddleware(MiddlewareBase):
         payload = {**payload, **skill_metadata()}
         try:
             result = await self._evaluate(payload)
-            if self.hook["event"] == "tool.before" and result is None:
+            if self.hook["event"] == "tool.before" and (result is None or isinstance(result, dict)):
                 verify_skill()
             return result
         except (OSError, TimeoutError, CallbackFailure) as error:
@@ -136,6 +136,11 @@ class AwToolMiddleware(MiddlewareBase):
             )
         if code != 0:
             raise CallbackFailure(f"native_exit_{code}")
+        if (self.hook["event"] == "tool.before" and isinstance(directive, dict)
+                and "aw_updated_input" in directive):
+            if set(directive) != {"aw_updated_input"} or not isinstance(directive["aw_updated_input"], dict):
+                raise CallbackFailure("invalid_input_replacement")
+            return directive
         if self.hook["event"] == "tool.after" and isinstance(directive, dict) and "aw_replacement" in directive:
             try:
                 return ToolResponse.model_validate(directive["aw_replacement"])
@@ -160,13 +165,16 @@ class AwToolMiddleware(MiddlewareBase):
         }
         if self.hook["event"] == "tool.before":
             denied = await self._run(payload)
+            if isinstance(denied, dict) and "aw_updated_input" in denied:
+                call.input = json.dumps(denied["aw_updated_input"], ensure_ascii=False, allow_nan=False)
+                denied = None
             if denied is not None:
                 yield denied
                 return
         async for item in next_handler():
             # ToolChunk is intermediate; ToolResponse is the completed native result.
             if self.hook["event"] == "tool.after" and isinstance(item, ToolResponse):
-                replacement = await self._run({**payload, "tool_response": item.model_dump(mode="json")})
+                replacement = await self._run({**payload, "tool_call": call.model_dump(mode="json"), "tool_response": item.model_dump(mode="json")})
                 if replacement is not None:
                     item = replacement
             yield item
@@ -231,6 +239,10 @@ class AwReloadMiddleware(MiddlewareBase):
         terminal_chunk = None
         try:
             denied = await before._run({**payload, "event": "tool.before"})
+            if isinstance(denied, dict) and "aw_updated_input" in denied:
+                call.input = json.dumps(denied["aw_updated_input"], ensure_ascii=False, allow_nan=False)
+                payload["tool_call"] = call.model_dump(mode="json")
+                denied = None
             if denied is not None:
                 replacement = await after._run({**payload, "event": "tool.after", "tool_response": denied.model_dump(mode="json")})
                 finished = True

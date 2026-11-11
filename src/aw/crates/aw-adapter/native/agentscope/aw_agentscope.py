@@ -370,7 +370,7 @@ class AwToolMiddleware(MiddlewareBase):
         payload = {**payload, **skill_metadata()}
         try:
             result = await self._evaluate(payload)
-            if self.hook["event"] == "tool.before" and result is None:
+            if self.hook["event"] == "tool.before" and (result is None or isinstance(result, dict)):
                 verify_skill()
             return result
         except (OSError, TimeoutError, CallbackFailure) as error:
@@ -428,6 +428,11 @@ class AwToolMiddleware(MiddlewareBase):
             directive.get("action") in ("ask", "approve") or directive.get("decision") == "ask"
         ):
             raise CallbackFailure("unsupported_approval")
+        if (self.hook["event"] == "tool.before" and isinstance(directive, dict)
+                and "aw_updated_input" in directive):
+            if set(directive) != {"aw_updated_input"} or not isinstance(directive["aw_updated_input"], dict):
+                raise CallbackFailure("invalid_input_replacement")
+            return directive
         if (
             self.hook["event"] == "tool.after"
             and self.hook.get("replace_result") is True
@@ -464,6 +469,9 @@ class AwToolMiddleware(MiddlewareBase):
                     middleware, snapshot, _ = pending
                     await middleware._close_event(snapshot)
                     _pending_closes.get().pop("tool.before")
+            if isinstance(denied, dict) and "aw_updated_input" in denied:
+                call.input = json.dumps(denied["aw_updated_input"], ensure_ascii=False, allow_nan=False)
+                denied = None
             if denied is not None:
                 yield denied
                 return
@@ -472,7 +480,7 @@ class AwToolMiddleware(MiddlewareBase):
             # The outer invocation wrapper gates chunks for strict after routes.
             if self.hook["event"] == "tool.after" and isinstance(item, ToolResponse):
                 replacement = await self._run(
-                    {**payload, "tool_response": item.model_dump(mode="json")}
+                    {**payload, "tool_call": call.model_dump(mode="json"), "tool_response": item.model_dump(mode="json")}
                 )
                 if replacement is not None:
                     item = replacement

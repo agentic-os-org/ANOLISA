@@ -18,6 +18,23 @@ from middleware_support import MODULE, MiddlewareFixture
 
 
 class LifecycleTests(MiddlewareFixture):
+    async def test_checked_input_reaches_the_native_tool_once(self) -> None:
+        seen = []
+        class Probe(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload):
+                return 0, b'{"aw_updated_input":{"command":"checked","timeout":7}}', b""
+            async def _close_event(self, payload):
+                pass
+        async def tool(tool_call):
+            seen.append(json.loads(tool_call.input))
+            yield ToolResponse(content=[TextBlock(text="done")])
+        middleware = Probe({}, {"event":"tool.before","step":"last","on_error":"block","budget_ms":1000}, last_before=True)
+        invocation = MODULE.AwInvocationMiddleware()
+        agent = SimpleNamespace(_acting_middlewares=[invocation, middleware], _acting_impl=tool, state=SimpleNamespace(session_id="session"))
+        result = [item async for item in Agent._acting(agent, ToolCallBlock(id="call", name="bash", input='{"command":"original","timeout":7}'))]
+        self.assertEqual(seen, [{"command":"checked","timeout":7}])
+        self.assertEqual(len(result), 1)
+
     async def test_finalization_drains_every_phase_before_repropagating_cancellation(self) -> None:
         original = ToolResponse(content=[TextBlock(text="original")])
         for phase in ["tool.before", "tool.after"]:

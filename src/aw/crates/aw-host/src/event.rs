@@ -149,6 +149,56 @@ impl Host {
 }
 
 impl Event<'_> {
+    /// Adopt an admitted first-step input before any policy or native Hook runs.
+    ///
+    /// The Adapter supplies native bytes with the same identity and revised arguments.
+    /// Claims and the event deadline are retained; the input can change only once.
+    ///
+    /// # Errors
+    /// Rejects later/concurrent steps, unsupported events, invalid bounds or replay.
+    pub fn input_view(&self, input: Value, native_input: Vec<u8>) -> Result<(), Error> {
+        let first = self
+            .steps()
+            .next()
+            .ok_or(Error::Invalid("missing first step"))?;
+        let claimed = self
+            .claimed
+            .lock()
+            .map_err(|_| Error::Invalid("step claim poisoned"))?;
+        if self.name != "tool.before"
+            || self.native_input.is_none()
+            || claimed.len() != 1
+            || !claimed.contains(&first.step_id)
+            || !matches!(&first.execution, StepExecution::Provider { effects, .. } if effects == &["replace_input"])
+        {
+            return Err(Error::Invalid(
+                "input replacement requires the first native pre-tool step",
+            ));
+        }
+        let mut callback = self
+            .callback
+            .lock()
+            .map_err(|_| Error::Invalid("callback view poisoned"))?;
+        if callback.is_some() {
+            return Err(Error::Invalid("input was already replaced"));
+        }
+        let mut value = self.value.clone();
+        value["tool"]["input"] = input;
+        value["native"] = serde_json::from_slice(&native_input)
+            .map_err(|_| Error::Invalid("invalid revised native input"))?;
+        let candidate = self
+            .host
+            .hook_event(value, native_input, self.deadline, self.cancelled)?;
+        self.host.protocol.validate_event(&candidate.value)?;
+        *callback = Some((
+            candidate.value,
+            candidate
+                .native_input
+                .ok_or(Error::Invalid("missing revised native input"))?,
+        ));
+        Ok(())
+    }
+
     /// Select a later native completion view without renewing claims or budget.
     ///
     /// The Adapter must bind both views to the same original result. Only native

@@ -62,13 +62,14 @@ and adopts supported effects; a Provider implements policy through its protocol.
 Do not put framework-specific code into the service, Core or Provider Host.
 Optional panel views must not participate in tool admission or execution.
 
-Security denial and native permission denial retain precedence. Tokenless
-PreTool suggestions block the original call and require a fresh call through
-security and native authorization. They must not rewrite arguments in place or
-emit approval. PostTool compression changes only an authorized text slot at the
-final replacement step; preserve the native envelope, failure status and audit.
-Keep unsupported capabilities visible at admission. Configuration vocabulary
-and roadmap entries are not evidence of native support.
+Security denial and native permission denial retain precedence. An admitted
+`replace_input` step is the first applicable `tool.before` step, has that sole
+effect, and requires fail-closed before steps. Host binds the candidate input
+without renewing identity, claims or budget. Service checks all later Providers
+and native Hooks against that candidate and publishes it only with the final
+successful callback. Adapters adopt it within the same invocation and retain
+native authorization. Legacy Tokenless `block` suggestions remain explicit
+retry mode. Input replacement never emits native approval.
 
 ## Provider collaboration and framework architecture
 

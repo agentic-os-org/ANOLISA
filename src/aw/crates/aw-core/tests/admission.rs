@@ -231,7 +231,7 @@ fn adapter_evidence_cannot_expand_the_implemented_surface() {
     let providers = providers(&doc);
     for (event, effect) in [
         ("tool.before", "ask"),
-        ("tool.before", "replace_input"),
+        ("tool.after", "replace_input"),
         ("tool.after", "block"),
         ("permission.request", "observe"),
     ] {
@@ -472,3 +472,34 @@ fn disabled_events_and_steps_need_no_provider_evidence_and_preserve_order() {
 
 #[path = "admission/engine.rs"]
 mod engine;
+
+#[test]
+fn input_replacement_requires_one_initial_fail_closed_provider_step() {
+    let mut doc = document();
+    let mut caps = capabilities("qoder");
+    caps.events
+        .get_mut("tool.before")
+        .unwrap()
+        .push("replace_input".into());
+    let rewrite = json!({"id":"rewrite","provider":"policy","operation":"rewrite","effects":["replace_input"],"on_error":"block"});
+    let scan = doc["spec"]["events"]["tool.before"]["steps"][0].clone();
+    doc["spec"]["events"]["tool.before"]["steps"] = json!([rewrite, scan]);
+    let config = CONFIGURATION.parse(&bytes(&doc)).unwrap();
+    assert!(preflight(&config, "qoder", &caps).is_ok());
+    let mut report = scan.clone();
+    report["on_error"] = json!("report");
+    let mut mixed = rewrite.clone();
+    mixed["effects"] = json!(["replace_input", "block"]);
+    let mut second = rewrite.clone();
+    second["id"] = json!("rewrite-two");
+    for steps in [
+        json!([scan, rewrite]),
+        json!([rewrite, second]),
+        json!([rewrite, report]),
+        json!([mixed]),
+    ] {
+        doc["spec"]["events"]["tool.before"]["steps"] = steps;
+        let config = CONFIGURATION.parse(&bytes(&doc)).unwrap();
+        assert!(preflight(&config, "qoder", &caps).is_err());
+    }
+}

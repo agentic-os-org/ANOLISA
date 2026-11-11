@@ -60,6 +60,11 @@ passed through successive AW steps as new event snapshots. AW retains this
 native behavior. It does not claim that its check observes every plugin's final
 argument rewrite.
 
+An earlier `requireApproval` result can freeze parameters and discard AW's later
+replacement. This version therefore admits `observe` and `block` before effects,
+while Tokenless PreTool uses block-and-retry. PostTool result replacement remains
+available.
+
 Callbacks carry the original `{hook, event, context}` JSON. Structured Providers
 receive the normalized event plus this native payload. `sessionId`, `runId` and
 `toolCallId` are required. AW derives a stable call identifier from the run and

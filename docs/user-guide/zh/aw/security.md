@@ -59,7 +59,10 @@ aw run --config "$AW_HOME/security.yaml" --agent qoder
 安装时，`PROVIDERS_DIR` 取实际 Provider 根目录，例如 `/usr/libexec/aw/providers`
 或 `/usr/local/libexec/aw/providers`。同时需要压缩时，安装 Tokenless 后端和
 桥接程序，选择 `sec-core-tokenless.json`，并按 [Tokenless](tokenless.md)提供
-另外三个后端变量。OpenClaw 使用[对应启动参数](configuration.md#openclaw)。
+另外三个后端变量。仅使用 OpenClaw 时选择 `sec-core-tokenless-openclaw.json`，
+并使用[对应启动参数](configuration.md#openclaw)。Qoder 和 OpenClaw 共用配置时
+选择 `sec-core-tokenless.json`；它扫描两者的 Shell 工具，并保留各自的
+[Tokenless 行为](configuration.md#选择能力)。
 
 由 RPM 或其他管理者交付的 Provider 也可直接在 YAML 中通过绝对 `transport.argv`
 引用。

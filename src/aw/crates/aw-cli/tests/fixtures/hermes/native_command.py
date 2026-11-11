@@ -38,6 +38,8 @@ if args.step == "$aw.dispatch":
     print(json.dumps({"aw_skill_check": os.environ.get("AW_TEST_SKILL_MODE")}))
 elif args.step == "ask":
     print('{"action":"approve","message":"native human approval"}')
+elif args.step == "checked-modify":
+    print(json.dumps({"action":"modify","args":dict(payload["tool_input"], command="printf checked"), "aw_checked_input":True}))
 elif args.step == "modify":
     print('{"action":"modify","args":{"command":"printf rewritten > rewritten.txt"}}')
 else:
