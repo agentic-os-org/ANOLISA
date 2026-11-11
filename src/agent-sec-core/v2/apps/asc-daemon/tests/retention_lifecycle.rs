@@ -131,8 +131,8 @@ async fn startup_catch_up_runs_once_then_follows_the_cadence() {
     );
 
     await_calls(&script, 2, Duration::from_secs(2)).await;
-    assert!(diagnostics.joined().contains("retention pass completed"));
     assert!(task.shutdown().await);
+    assert!(diagnostics.joined().contains("retention pass completed"));
 }
 
 // DJOB-RET-002: a failed catch-up does not block admission (start still
