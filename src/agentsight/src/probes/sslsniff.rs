@@ -1516,6 +1516,70 @@ pub(super) fn scan_static_ssl_executable_paced(
     }
 }
 
+/// Maximum distance between SSL_read and SSL_write in the same compilation unit.
+const ADJACENCY_THRESHOLD: usize = 0x1000; // 4KB
+
+/// Resolve the Bun 2026 BoringSSL generation (Claude Code >= 2.1.315, #9762).
+///
+/// That rebuild re-emitted the `SSL_read` / `SSL_do_handshake` prologues and
+/// reordered `ssl_lib.cc` so `SSL_write` now *precedes* `SSL_read`. The legacy
+/// path assumes the old prologues and a write-after-read layout, so it cannot
+/// see this generation. Here the prologues are unique per build and `SSL_write`
+/// may sit on either side of `SSL_read` within [`ADJACENCY_THRESHOLD`]; the
+/// handshake follows the read, so the nearest match wins.
+fn resolve_bun2_ssl_offsets(
+    path: &str,
+    read_matches: &[usize],
+    handshake_matches: &[usize],
+    write_matches: &[usize],
+    verbose: bool,
+) -> StaticSslScan {
+    let [read_off] = read_matches else {
+        if verbose {
+            eprintln!(
+                "Static SSL: Bun2 SSL_read pattern has {} matches, expected 1 in {path}",
+                read_matches.len()
+            );
+        }
+        return StaticSslScan::NoOffsets;
+    };
+    let read_off = *read_off;
+    let Some(&hs_off) = handshake_matches
+        .iter()
+        .min_by_key(|&&o| o.abs_diff(read_off))
+    else {
+        if verbose {
+            eprintln!("Static SSL: Bun2 SSL_do_handshake pattern not found in {path}");
+        }
+        return StaticSslScan::NoOffsets;
+    };
+    let Some(&wr_off) = write_matches
+        .iter()
+        .filter(|&&o| o.abs_diff(read_off) < ADJACENCY_THRESHOLD)
+        .min_by_key(|&&o| o.abs_diff(read_off))
+    else {
+        if verbose {
+            eprintln!(
+                "Static SSL: Bun2 SSL_write has {} matches but none within {}B of SSL_read ({read_off:#x})",
+                write_matches.len(),
+                ADJACENCY_THRESHOLD
+            );
+        }
+        return StaticSslScan::NoOffsets;
+    };
+    log::debug!("Static SSL (Bun2) detected in {path}:");
+    log::debug!("  SSL_do_handshake: {hs_off:#x}");
+    log::debug!("  SSL_read:         {read_off:#x}");
+    log::debug!("  SSL_write:        {wr_off:#x}");
+    StaticSslScan::Offsets(StaticSslOffsets {
+        ssl_write: wr_off,
+        ssl_read: read_off,
+        ssl_do_handshake: hs_off,
+        write_is_ex: false,
+        read_is_ex: false,
+    })
+}
+
 fn find_static_ssl_offsets_with(
     path: &str,
     mut scan: impl FnMut(&str, &[&[u8]]) -> Option<Vec<Vec<usize>>>,
@@ -1545,8 +1609,18 @@ fn find_static_ssl_offsets_with(
         0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
         0xec, 0x18, 0x41, 0x89, 0xd7, 0x49, 0x89, 0xf6, 0x48, 0x89, 0xfb,
     ];
-    // Maximum distance between SSL_read and SSL_write in the same compilation unit.
-    const ADJACENCY_THRESHOLD: usize = 0x1000; // 4KB
+    // Bun's 2026 BoringSSL rebuild (Claude Code >= 2.1.315): SSL_read saves r12
+    // instead of rax and branches with a near jne; SSL_do_handshake shrinks to a
+    // two-register save. SSL_write keeps WRITE_PAT. Verified unique per build and
+    // absent from every earlier generation (#9762).
+    const READ_PAT_BUN2: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48, 0x83, 0xbf, 0x98,
+        0x00, 0x00, 0x00, 0x00, 0x0f, 0x85,
+    ];
+    const HANDSHAKE_PAT_BUN2: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x56, 0x53, 0x48, 0x89, 0xfb, 0x48, 0x8b, 0x47, 0x30, 0xc7,
+        0x80, 0xc4, 0x00, 0x00, 0x00, 0x00,
+    ];
     let verbose = config::verbose();
 
     // One streaming pass collects every pattern at once: the file is read in
@@ -1554,22 +1628,31 @@ fn find_static_ssl_offsets_with(
     // instead of its own size.
     let mut patterns: Vec<&[u8]> = vec![READ_PAT, WRITE_PAT];
     patterns.extend_from_slice(HANDSHAKE_PATS);
+    patterns.push(READ_PAT_BUN2);
+    patterns.push(HANDSHAKE_PAT_BUN2);
     let mut hits = match scan(path, &patterns) {
         Some(hits) => hits,
         None => return StaticSslScan::Failed,
     };
     // Drain the fixed slots high-index-first so the remaining vectors are
-    // exactly the handshake variants.
+    // exactly the legacy handshake variants.
+    let handshake_bun2 = hits.remove(5);
+    let read_bun2 = hits.remove(4);
     let write_matches = hits.remove(1);
     let read_matches = hits.remove(0);
     let handshake_hits = hits;
 
     // --- SSL_read: expect unique match ---
     if read_matches.is_empty() {
-        if verbose {
-            eprintln!("Static SSL: SSL_read pattern not found in {path}");
-        }
-        return StaticSslScan::NoOffsets;
+        // No legacy SSL_read prologue: try the Bun 2026 generation before giving
+        // up, so a reordered ssl_lib.cc still resolves (#9762).
+        return resolve_bun2_ssl_offsets(
+            path,
+            &read_bun2,
+            &handshake_bun2,
+            &write_matches,
+            verbose,
+        );
     }
     let read_off = if read_matches.len() == 1 {
         read_matches[0]
@@ -2635,6 +2718,24 @@ mod tests {
         0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
         0xec, 0x18, 0x41, 0x89, 0xd7, 0x49, 0x89, 0xf6, 0x48, 0x89, 0xfb,
     ];
+    const READ_BUN2_PAT: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48, 0x83, 0xbf, 0x98,
+        0x00, 0x00, 0x00, 0x00, 0x0f, 0x85,
+    ];
+    const HS_BUN2_PAT: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x56, 0x53, 0x48, 0x89, 0xfb, 0x48, 0x8b, 0x47, 0x30, 0xc7,
+        0x80, 0xc4, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// Zero-filled image for the Bun 2026 generation: SSL_write precedes
+    /// SSL_read and the handshake follows it (the reordered ssl_lib.cc layout).
+    fn build_bun2_ssl_image(write: usize, read: usize, hs: usize) -> Vec<u8> {
+        let mut img = vec![0u8; 0x5000];
+        img[write..write + WRITE_PAT_T.len()].copy_from_slice(WRITE_PAT_T);
+        img[read..read + READ_BUN2_PAT.len()].copy_from_slice(READ_BUN2_PAT);
+        img[hs..hs + HS_BUN2_PAT.len()].copy_from_slice(HS_BUN2_PAT);
+        img
+    }
 
     /// Zero-filled synthetic binary with the given prologues planted at file
     /// offsets; zeros cannot match any pattern, so matches are unambiguous.
@@ -2878,6 +2979,60 @@ mod tests {
             assert_eq!(off.ssl_read, 0x2000);
             assert_eq!(off.ssl_write, 0x2100);
         });
+    }
+
+    #[test]
+    fn static_ssl_offsets_matches_bun2_generation() {
+        // Regression for Claude Code >= 2.1.315 (#9762): the 2026 Bun rebuild
+        // changed the read/handshake prologues and put SSL_write before SSL_read.
+        // Offsets mirror the real 2.1.319 layout (write 0x1a0 before read,
+        // handshake 0x470 after), validated with kernel uprobes on live TLS.
+        let img = build_bun2_ssl_image(0x2000, 0x21a0, 0x2610);
+        with_static_ssl_fixture("bun2", &img, |path| {
+            let off = find_static_ssl_offsets(path).expect("Bun2 generation must be detected");
+            assert_eq!(off.ssl_write, 0x2000);
+            assert_eq!(off.ssl_read, 0x21a0);
+            assert_eq!(off.ssl_do_handshake, 0x2610);
+            assert!(!off.write_is_ex && !off.read_is_ex);
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_bun2_rejects_write_beyond_adjacency() {
+        // SSL_write must sit within ADJACENCY_THRESHOLD of SSL_read on either
+        // side; a distant write must not resolve.
+        let img = build_bun2_ssl_image(0x4000, 0x2000, 0x2100);
+        with_static_ssl_fixture("bun2-write-far", &img, |path| {
+            assert!(find_static_ssl_offsets(path).is_none());
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_bun2_requires_handshake() {
+        // Read + write present but no handshake prologue: must not resolve.
+        let mut img = vec![0u8; 0x5000];
+        img[0x2000..0x2000 + WRITE_PAT_T.len()].copy_from_slice(WRITE_PAT_T);
+        img[0x21a0..0x21a0 + READ_BUN2_PAT.len()].copy_from_slice(READ_BUN2_PAT);
+        with_static_ssl_fixture("bun2-no-hs", &img, |path| {
+            assert!(find_static_ssl_offsets(path).is_none());
+        });
+    }
+
+    #[test]
+    #[ignore = "needs a real Claude Code binary: AGENTSIGHT_CLAUDE_BIN=/path/claude cargo test --lib real_claude_binary_resolves -- --ignored --nocapture"]
+    fn real_claude_binary_resolves() {
+        // Maintainer aid for the next Bun rebuild: point this at a real
+        // claude.exe and confirm the detector still resolves all three offsets,
+        // then validate them with kernel uprobes on live TLS traffic (#9762).
+        let Ok(path) = std::env::var("AGENTSIGHT_CLAUDE_BIN") else {
+            eprintln!("set AGENTSIGHT_CLAUDE_BIN to a claude.exe to run this check");
+            return;
+        };
+        let off = find_static_ssl_offsets(&path).expect("real Claude binary must resolve");
+        eprintln!(
+            "resolved {}: write={:#x} read={:#x} handshake={:#x}",
+            path, off.ssl_write, off.ssl_read, off.ssl_do_handshake
+        );
     }
 
     #[test]
