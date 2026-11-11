@@ -73,6 +73,10 @@ pub fn memory_search(
         }
     };
 
+    index
+        .check_search_health()
+        .map_err(|e| audit_index_error(svc, mode, query, e))?;
+
     // Determine effective agent scope from parameter or config.
     // We never silently widen the visibility domain: an explicitly configured
     // `isolated`/`filter` scope with no `MCP_CLIENT_NAME` is a misconfiguration,
@@ -112,6 +116,9 @@ pub fn memory_search(
             let hits = index
                 .search_scoped(query, top_k.max(1), scope_ref, category)
                 .map_err(|e| audit_index_error(svc, "bm25", query, e))?;
+            index
+                .check_search_health()
+                .map_err(|e| audit_index_error(svc, mode, query, e))?;
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
@@ -158,6 +165,9 @@ pub fn memory_search(
                         .map_err(|e| {
                             audit_index_error(svc, &fallback_query_mode(mode), query, e)
                         })?;
+                    index
+                        .check_search_health()
+                        .map_err(|e| audit_index_error(svc, mode, query, e))?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
                             .path(sanitized_query_path(&fallback_query_mode(mode), query))
@@ -200,6 +210,9 @@ pub fn memory_search(
                 index.search_hybrid(query, &embedding.vector, top_k.max(1))
             })
             .map_err(|e| audit_index_error(svc, mode, query, e))?;
+            index
+                .check_search_health()
+                .map_err(|e| audit_index_error(svc, mode, query, e))?;
             let hits = filter_by_category(hits, category);
             let tokens = hits
                 .iter()

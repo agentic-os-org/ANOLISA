@@ -494,7 +494,13 @@ MEMORY_GIT_ENABLED=true MEMORY_GIT_AUTO_COMMIT=true agent-memory
 
 ### 全文搜索
 
-SQLite FTS5 BM25 索引，亚毫秒级查询。后台 tokio 任务通过 `inotify` 监听 mount，事件经 200 ms debounce 聚合后在单事务中应用。分词器用 `trigram`（对 ≥3 字符的子串匹配友好）。trigram 分词器以 3 字符滑窗生成 token，因此少于 3 字符的查询词（如中文的"花名""小云"）不产生任何 token，本会静默命中为空；`memory_search` 会识别这种情况并回退到 `body LIKE '%term%'` 子串扫描，确保短 CJK 查询仍能召回。`IN_Q_OVERFLOW` 时自动触发全量 rescan，不静默丢事件。
+SQLite FTS5 BM25 索引。后台线程通过 `inotify` 监听 mount，事件经 200 ms debounce 聚合，每个文件的索引更新在事务中完成。分词器用 `trigram`（对 ≥3 字符的子串匹配友好）。trigram 分词器以 3 字符滑窗生成 token，因此少于 3 字符的查询词（如中文的"花名""小云"）不产生任何 token，本会静默命中为空；`memory_search` 会识别这种情况并回退到 `body LIKE '%term%'` 子串扫描，确保短 CJK 查询仍能召回。`IN_Q_OVERFLOW` 时自动触发全量 rescan。
+
+启动或增量更新期间的索引写入失败会触发自动重扫；连续失败时，重试间隔从 1 秒
+逐步翻倍，最大为 64 秒。恢复无需再次修改文件或重启服务。已知失败尚未恢复时，
+`memory_search` 会报告 `search index is incomplete`，不会将空结果或不完整结果
+作为成功返回。恢复后重试搜索，或通过 `mem_grep` 直接检索文件。若错误持续，
+检查 index worker 告警中的失败路径与数据库错误；记忆文件仍可通过文件工具访问。
 
 索引仅收录不超过 4 MiB、格式受支持的 UTF-8 文本文件。已索引的文件超过此限制或变为非 UTF-8 后，旧的文本和向量条目会被移除并记录日志，文件本身不变。默认 16 MiB 写入限制和单次追加限制不保证文件可被索引：多次追加仍可能使文件超过 4 MiB。请将大型记忆拆分为较小文件以保持可检索。
 

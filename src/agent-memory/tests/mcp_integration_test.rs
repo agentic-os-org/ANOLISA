@@ -216,6 +216,108 @@ async fn grep_returns_matches_after_invalid_utf8_over_mcp() {
 }
 
 #[tokio::test]
+async fn search_reports_index_failure_and_recovers_without_file_changes() {
+    for startup in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+        handshake(&mut reader, &mut stdin).await;
+        let mount = tmp.path().join("user-tester");
+        let conn = rusqlite::Connection::open(mount.join(".anolisa/index/bm25.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_note BEFORE INSERT ON files
+             WHEN NEW.path = 'missed.md'
+             BEGIN SELECT RAISE(ABORT, 'controlled index failure'); END;",
+        )
+        .unwrap();
+        if startup {
+            child.kill().await.unwrap();
+            child.wait().await.unwrap();
+        }
+        std::fs::write(mount.join("missed.md"), "quartzretry").unwrap();
+        if startup {
+            (child, reader, stdin) = spawn_with_dir(tmp.path()).await;
+            handshake(&mut reader, &mut stdin).await;
+        }
+
+        let mut id = 10;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            id += 1;
+            let response = call_tool(
+                &mut reader,
+                &mut stdin,
+                id,
+                "memory_search",
+                json!({"query": "quartzretry", "mode": "bm25"}),
+            )
+            .await;
+            if response["result"]["isError"] == true {
+                let text = extract_text(&response);
+                assert!(text.contains("index is incomplete"), "{response}");
+                assert!(text.contains("mem_grep"), "{response}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "failure was hidden: {response}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The first retry must not clear the incomplete signal while the file still fails.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        id += 1;
+        let response = call_tool(
+            &mut reader,
+            &mut stdin,
+            id,
+            "memory_search",
+            json!({"query": "quartzretry", "mode": "hybrid"}),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        id += 1;
+        let read = call_tool(
+            &mut reader,
+            &mut stdin,
+            id,
+            "mem_read",
+            json!({"path": "missed.md"}),
+        )
+        .await;
+        assert_ne!(read["result"]["isError"], true, "{read}");
+        assert!(extract_text(&read).contains("quartzretry"));
+
+        // Changing the internal DB does not generate a watched filesystem event.
+        conn.execute_batch("DROP TRIGGER fail_note").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            id += 1;
+            let response = call_tool(
+                &mut reader,
+                &mut stdin,
+                id,
+                "memory_search",
+                json!({"query": "quartzretry", "mode": "bm25"}),
+            )
+            .await;
+            if response["result"]["isError"] != true {
+                let hits: Value = serde_json::from_str(&extract_text(&response)).unwrap();
+                assert_eq!(hits[0]["path"], "missed.md", "{response}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "retry did not recover: {response}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn write_read_grep_workflow() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;

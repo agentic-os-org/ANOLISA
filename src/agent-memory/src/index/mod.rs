@@ -11,12 +11,13 @@ pub mod store;
 pub mod worker;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
 use crate::embedding::EmbeddingProvider;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::ns::MountPoint;
 
 pub use store::BM25Store;
@@ -53,6 +54,7 @@ pub struct IndexHandle {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     /// Whether normal search excludes cold files.
     exclude_cold: bool,
+    incomplete: Arc<AtomicBool>,
 }
 
 impl IndexHandle {
@@ -73,6 +75,7 @@ impl IndexHandle {
         // Initial full scan + watcher in one worker.
         let emb_clone = embedding.clone();
         let worker = IndexWorker::spawn(mount.clone_lite(), Arc::clone(&store), emb_clone)?;
+        let incomplete = Arc::clone(&worker.incomplete);
 
         Ok(Self {
             store,
@@ -80,7 +83,18 @@ impl IndexHandle {
             db_path,
             embedding,
             exclude_cold,
+            incomplete,
         })
+    }
+
+    /// Refuse tool search results while known indexing failures await recovery.
+    pub(crate) fn check_search_health(&self) -> Result<()> {
+        if self.incomplete.load(Ordering::Acquire) {
+            return Err(MemoryError::Other(
+                "search index is incomplete; automatic retry is pending. Retry shortly or use mem_grep; inspect index worker warnings if the failure persists".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {

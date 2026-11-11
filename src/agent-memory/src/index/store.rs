@@ -239,7 +239,11 @@ impl BM25Store {
         agent_id: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.conn.transaction()?;
+        // Acquire the writer before reading; a deferred read-to-write upgrade
+        // can fail immediately with SQLITE_BUSY instead of using busy_timeout.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing_rowid: Option<i64> = tx
             .query_row(
                 "SELECT rowid FROM files WHERE path = ?1",
@@ -2385,6 +2389,36 @@ mod tests {
         assert!(
             err_msg.contains("downgrade"),
             "expected downgrade-refusal error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn upsert_waits_for_a_concurrent_writer() {
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        use std::time::Duration;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = BM25Store::open_for_test(tmp.path()).unwrap();
+        let holder = Connection::open(tmp.path()).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (result_tx, result_rx) = channel();
+        let writer = std::thread::spawn(move || {
+            let result = store.upsert("locked.md", 1, 6, "quartz", None);
+            result_tx.send(result).unwrap();
+            store
+        });
+
+        let early_result = result_rx.recv_timeout(Duration::from_millis(100));
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert!(matches!(early_result, Err(RecvTimeoutError::Timeout)));
+        result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        let store = writer.join().unwrap();
+        assert_eq!(
+            store.search("quartz", 5, false).unwrap()[0].path,
+            "locked.md"
         );
     }
 
