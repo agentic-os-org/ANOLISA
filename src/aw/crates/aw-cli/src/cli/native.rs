@@ -355,10 +355,7 @@ pub(super) fn release(args: &Arguments) -> Result<Exit> {
         .as_ref()
         .ok_or("not an application-owned binding")?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    let client = Client::connect(&root.socket, deadline)?;
-    if client.identity() != &root.binding.identity {
-        return Err("stale native service".into());
-    }
+    let client = Client::from_identity(&root.socket, root.binding.identity.clone());
     client.call(
         Operation::Registration {
             command: RegistrationCommand::Release {

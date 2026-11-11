@@ -37,10 +37,7 @@ pub(super) fn invoke_bound(
     let raw: Value = serde_json::from_slice(&input)?;
     let context = binding.native_context();
     let normalized = adapter.normalize(&context, event, &raw)?;
-    let client = Client::connect(&binding.socket, transport_deadline)?;
-    if client.identity() != &binding.binding.identity {
-        return Err("stale stable bridge binding".into());
-    }
+    let client = Client::from_identity(&binding.socket, binding.binding.identity.clone());
     let id = &binding.binding.instance_id;
     let key = if event == "input.submit" {
         normalized["session_id"]

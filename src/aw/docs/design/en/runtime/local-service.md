@@ -45,6 +45,12 @@ configuration bytes. Restarting the service invalidates existing clients and
 handles, even when the file is unchanged. Editing the file does not reload a
 running service.
 
+`Client::connect` discovers an unknown service identity. Callback transports
+with an already-issued binding use `Client::from_identity` to retain that
+identity without an extra Status exchange. Construction performs no I/O;
+every operation still checks the Unix peer, protocol, generation, configuration
+and deadline. A stale binding fails without rediscovery or automatic retry.
+
 | `operation.method` | Input beyond the envelope | Result |
 | --- | --- | --- |
 | `status` | None | PID, resource counts, audit health and unverified adoption status |

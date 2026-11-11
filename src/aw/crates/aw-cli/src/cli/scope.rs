@@ -113,10 +113,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
         Instant::now() + Duration::from_secs(if action == "open" { 30 } else { 5 })
     };
     let input = hook::read_input(deadline)?;
-    let client = Client::connect(&root.socket, deadline)?;
-    if client.identity() != &root.binding.identity {
-        return Err("stale SDK host binding".into());
-    }
+    let client = Client::from_identity(&root.socket, root.binding.identity.clone());
     if action == "ready" {
         let ready: Ready = serde_json::from_slice(&input)?;
         if !resident_policy || ready.pid != owner_pid {

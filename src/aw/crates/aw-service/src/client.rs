@@ -17,6 +17,18 @@ pub struct Client {
 }
 
 impl Client {
+    /// Reuse an identity already obtained from this service, without discovery.
+    ///
+    /// Construction performs no I/O. Each call authenticates the peer and checks
+    /// the protocol and retained generation/configuration on both ends. A stale
+    /// identity fails the call; it never triggers discovery or an implicit retry.
+    pub fn from_identity(socket: impl AsRef<Path>, identity: Identity) -> Self {
+        Self {
+            socket: socket.as_ref().to_owned(),
+            identity,
+        }
+    }
+
     /// Discover the daemon identity within the original caller deadline.
     ///
     /// # Errors
@@ -24,10 +36,7 @@ impl Client {
     pub fn connect(socket: impl AsRef<Path>, expires: Instant) -> Result<Self> {
         let response = exchange(socket.as_ref(), None, Operation::Status, expires, None)?;
         response_result(&response)?;
-        Ok(Self {
-            socket: socket.as_ref().to_owned(),
-            identity: response.identity,
-        })
+        Ok(Self::from_identity(socket, response.identity))
     }
 
     /// Immutable identity retained by all requests from this client.
@@ -149,6 +158,81 @@ fn response_result(response: &Response) -> Result<Value> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn retained_identity_skips_discovery_and_rejects_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        for replacement in ["none", "generation", "configuration", "protocol"] {
+            let directory = tempfile::tempdir_in("/tmp").unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let state = directory.path().join("state");
+            let endpoint = crate::endpoint::Endpoint::bind(&state).unwrap();
+            let identity = Identity {
+                generation: "retained-generation".into(),
+                config_revision: "a".repeat(64),
+            };
+            let client = Client::from_identity(state.join("aw.sock"), identity.clone());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            std::thread::scope(|scope| {
+                let responder = scope.spawn(|| {
+                    let mut stream = loop {
+                        match endpoint.listener().accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline, "client did not connect");
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(error) => panic!("accept: {error}"),
+                        }
+                    };
+                    let request: Request = ipc::read(&mut stream, deadline).unwrap();
+                    assert!(matches!(request.operation, Operation::RecentExecutions));
+                    assert_eq!(request.identity.as_ref(), Some(&identity));
+                    let mut current = identity.clone();
+                    match replacement {
+                        "generation" => current.generation = "new-generation".into(),
+                        "configuration" => current.config_revision = "b".repeat(64),
+                        _ => {}
+                    }
+                    let admitted = request.admit(&current).is_ok();
+                    ipc::write(
+                        &mut stream,
+                        &Response {
+                            api_version: if replacement == "protocol" {
+                                "aw-service/unsupported".into()
+                            } else {
+                                VERSION.into()
+                            },
+                            identity: current,
+                            result: admitted.then(|| serde_json::json!([])),
+                            error: (!admitted).then(|| "stale_service".into()),
+                            audit_key: None,
+                        },
+                        deadline,
+                    )
+                    .unwrap();
+                });
+                let result = client.call(Operation::RecentExecutions, deadline);
+                if replacement == "none" {
+                    assert_eq!(result.unwrap(), serde_json::json!([]));
+                } else {
+                    let expected = if replacement == "protocol" {
+                        "protocol_version"
+                    } else {
+                        "stale_service"
+                    };
+                    assert!(
+                        matches!(result, Err(crate::Error::Rejected(code)) if code == expected)
+                    );
+                }
+                responder.join().unwrap();
+                assert!(
+                    matches!(endpoint.listener().accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+                );
+            });
+        }
+    }
 
     #[test]
     fn discovery_rejects_daemons_without_idle_unbind_semantics() {

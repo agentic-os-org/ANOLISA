@@ -157,10 +157,7 @@ pub(super) fn invoke_bound(
         input,
         route.replacement_step.is_some(),
     )?;
-    let client = Client::connect(&binding.socket, deadline)?;
-    if client.identity() != &binding.binding.identity {
-        return Err("stale hook binding".into());
-    }
+    let client = Client::from_identity(&binding.socket, binding.binding.identity.clone());
     if close {
         let session_id = normalized["session_id"]
             .as_str()
