@@ -9,6 +9,24 @@
 
 ## [未发布]
 
+## [0.7.0] - 2026-11-12
+
+### 移除
+
+- 为聚焦系统运维，将八个通用技能移出默认技能包，并结束对内置副本的常规维护。
+  仍需这些能力的用户可使用上游技能、工具或官方文档：
+  - `github` — 通用 GitHub CLI 工作流，参见 GitHub CLI 技能
+  - `humanizer` — 写作指导，按需加载上游 Humanizer 技能
+  - `image-gen` — 通用图像生成，百炼接入交由使用它的产品维护
+  - `pdf-reader` — 通用 PDF 读取，由宿主工具 / PyMuPDF 适配提供
+  - `xlsx` — 通用表格，已由 MiniMax XLSX 技能覆盖
+  - `regex-mastery` — 通用正则指南，按需加载上游指南
+  - `shell-scripting` — 通用 Shell 脚本，由上游项目提供
+  - `upgrade-alinux-kernel` — ALinux 专用内核升级，交由发行版维护方
+- 移除 `pdf-reader` 与 `xlsx` 的配套回归测试，以及不再使用的 PyMuPDF 测试依赖。
+- 从 `alinux-admin` 的依赖列表移除已退场的 `shell-scripting`；其自带的 Shell
+  参考文档保持不变。
+
 ## [0.6.6] - 2026-11-12
 
 ### 变更
