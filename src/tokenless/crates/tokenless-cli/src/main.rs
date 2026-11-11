@@ -199,6 +199,36 @@ const RTK_SUBCOMMAND: &str = "rtk";
 /// Program name RTK prints in usage and recovery hints.
 const RTK_PROGRAM: &str = "tokenless rtk";
 
+/// Returns the arguments to hand to RTK, without the end-of-options marker
+/// before the command name.
+///
+/// RTK v0.49.0 parses its own command line and rejects a `--` before the
+/// command: clap fails the parse, then RTK's fallback executes `--` as a
+/// program and exits 127. POSIX.1-2017 XCU Guideline 10 makes the first `--`
+/// that is not an option-argument the end-of-options delimiter, and RTK's
+/// pre-command options take no values, so consume it at this hand-off. The RTK
+/// source is upstream code fetched by packaging/build/setup-rtk.sh, so
+/// Tokenless owns this argument normalization instead of patching the vendored
+/// parser; the standalone `rtk` target keeps upstream behavior and is not
+/// shipped. Markers after the command stay untouched, so
+/// `tokenless rtk run -- <command>` still forwards `--` to `run`.
+fn rtk_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut args = args.into_iter();
+    let mut forwarded = Vec::new();
+    for arg in args.by_ref() {
+        if arg == "--" {
+            break;
+        }
+        let is_option = arg.to_string_lossy().starts_with('-');
+        forwarded.push(arg);
+        if !is_option {
+            break;
+        }
+    }
+    forwarded.extend(args);
+    forwarded
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum DiffSortArg {
     Saved,
@@ -1353,10 +1383,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
-        // main() runs RTK before parsing so `--` and help flags reach it
-        // verbatim; a parsed `rtk` subcommand still runs RTK rather than relying
-        // on that.
-        Commands::Rtk { args } => process::exit(rtk::run(RTK_PROGRAM, args)),
+        // Defensive: main() hands `rtk` to RTK before the Tokenless parser
+        // sees it, so this arm normally does not run.
+        Commands::Rtk { args } => process::exit(rtk::run(RTK_PROGRAM, rtk_args(args))),
     }
 
     Ok(())
@@ -1558,11 +1587,13 @@ fn report_fatal(message: &str) {
 }
 
 fn main() {
-    // RTK parses its own arguments, including `--` and help flags, so they pass
-    // through verbatim instead of through the Tokenless parser.
+    // RTK parses its own arguments, including help flags, so they bypass the
+    // Tokenless parser. The end-of-options marker before the command is
+    // consumed first: RTK would run it as a program instead of treating it as
+    // a delimiter.
     let mut args = std::env::args_os().skip(1);
     if args.next().is_some_and(|arg| arg == RTK_SUBCOMMAND) {
-        process::exit(rtk::run(RTK_PROGRAM, args));
+        process::exit(rtk::run(RTK_PROGRAM, rtk_args(args)));
     }
     if let Err((msg, code)) = run() {
         report_fatal(&msg);

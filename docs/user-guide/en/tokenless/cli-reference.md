@@ -212,6 +212,11 @@ Tokenless links RTK 0.49.0 and exposes its commands as `tokenless rtk`. The beha
 below applies to that subcommand; a separately installed `rtk` on `PATH` can be a
 different version. Check `tokenless rtk --version` to confirm the bundled version.
 
+A `--` before the command is the end-of-options delimiter: Tokenless consumes it,
+so `tokenless rtk -- ls` runs the same command as `tokenless rtk ls` and
+`tokenless rtk -- --version` reports the bundled version. A `--` after the command
+name still reaches RTK unchanged, as in `tokenless rtk run -- echo hi`.
+
 ### Search flags
 
 `tokenless rtk grep` forwards native search flags to `grep`: `-l` lists matching file names,

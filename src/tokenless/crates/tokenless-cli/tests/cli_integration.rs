@@ -3270,7 +3270,7 @@ fn rewrite_child_ends_at_its_deadline_while_its_response_cannot_be_written() {
 }
 
 #[test]
-fn rtk_subcommand_passes_arguments_through_verbatim() {
+fn rtk_subcommand_forwards_help_and_version_flags() {
     let output = tokenless_bin().args(["rtk", "--version"]).output().unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
@@ -3279,6 +3279,88 @@ fn rtk_subcommand_passes_arguments_through_verbatim() {
     let output = tokenless_bin().args(["rtk", "--help"]).output().unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
+}
+
+#[test]
+fn rtk_subcommand_consumes_the_option_terminator_before_the_command() {
+    // The marker is consumed instead of forwarded: RTK would execute it as a
+    // program and exit 127.
+    let output = tokenless_bin()
+        .args(["rtk", "--", "--version"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
+
+    let output = tokenless_bin()
+        .args(["rtk", "--", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
+
+    // A delimiter with no command is not a program: RTK reports the same
+    // missing-command error as an empty command line.
+    let bare = tokenless_bin().args(["rtk"]).output().unwrap();
+    let marked = tokenless_bin().args(["rtk", "--"]).output().unwrap();
+    assert_eq!(marked.status.code(), bare.status.code());
+    assert_eq!(marked.stderr, bare.stderr);
+
+    // The delimiter no longer blocks RTK's fallback: an unknown program fails
+    // the same way with and without it.
+    let missing = format!("tokenless-missing-{}", std::process::id());
+    let bare = tokenless_bin()
+        .args(["rtk", missing.as_str()])
+        .output()
+        .unwrap();
+    let marked = tokenless_bin()
+        .args(["rtk", "--", missing.as_str()])
+        .output()
+        .unwrap();
+    assert!(!bare.status.success(), "{bare:?}");
+    assert_eq!(marked.status.code(), bare.status.code());
+    assert_eq!(marked.stderr, bare.stderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn rtk_subcommand_runs_the_same_command_with_and_without_the_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("note.txt"), "x").unwrap();
+
+    // `--` selects the same command as naming it directly.
+    let direct = tokenless_bin()
+        .args(["rtk", "ls"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let marked = tokenless_bin()
+        .args(["rtk", "--", "ls"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(direct.status.success(), "{direct:?}");
+    assert_eq!(marked.status.code(), direct.status.code(), "{marked:?}");
+    assert_eq!(marked.stdout, direct.stdout);
+    assert!(!marked.stdout.is_empty());
+
+    // The delimiter may follow RTK's pre-command options.
+    let output = tokenless_bin()
+        .args(["rtk", "-v", "--", "ls"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, direct.stdout);
+
+    // A delimiter after the command belongs to the command.
+    let output = tokenless_bin()
+        .args(["rtk", "run", "--", "echo", "hi"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\n");
 }
 
 #[test]

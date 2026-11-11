@@ -192,6 +192,10 @@ Tokenless 链接 RTK 0.49.0，并以 `tokenless rtk` 子命令提供其命令。
 子命令；`PATH` 中单独安装的 `rtk` 可能是其他版本。可通过 `tokenless rtk --version`
 确认随包版本。
 
+命令名前的 `--` 是选项结束分隔符，Tokenless 会消费它：`tokenless rtk -- ls` 与
+`tokenless rtk ls` 执行相同的命令，`tokenless rtk -- --version` 报告随包版本。
+命令名之后的 `--` 仍原样转交给 RTK，例如 `tokenless rtk run -- echo hi`。
+
 ### 搜索 Flag
 
 `tokenless rtk grep` 将原生搜索 Flag 转交给 `grep`：`-l` 列出匹配文件名，`-m N` 限制每个
