@@ -393,12 +393,9 @@ fn bounded_report_keeps_tail_deny_totals_full_redaction_and_one_terminal_event()
 
 #[test]
 fn oversized_single_raw_finding_retains_its_classification_without_raw_evidence() {
-    let rules = PiiRuleSet::from_yaml(
-        b"- type: large_secret\n  regex: 'BEGIN[A-Z]+END'\n  severity: deny\n",
-    )
-    .unwrap();
+    let rules = PiiRuleSet::builtin().unwrap();
     let request = PiiScanRequest {
-        text: format!("BEGIN{}END", "Q".repeat(600 * 1024)),
+        text: format!("Bearer {}", "Q".repeat(600 * 1024)),
         options: PiiScanOptions {
             raw_evidence: true,
             ..Default::default()
@@ -410,6 +407,7 @@ fn oversized_single_raw_finding_retains_its_classification_without_raw_evidence(
     assert_eq!(outcome.data["summary"]["total"], 1);
     assert_eq!(outcome.data["summary"]["findings_truncated"], true);
     let finding = &outcome.data["findings"][0];
+    assert_eq!(finding["type"], "bearer_token");
     assert_eq!(finding["severity"], "deny");
     assert_eq!(finding["metadata"]["evidence_omitted"], true);
     assert!(finding.get("raw_evidence").is_none());
