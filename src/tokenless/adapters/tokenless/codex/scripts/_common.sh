@@ -16,14 +16,23 @@ resolve_codex() {
         fi
         return
     fi
-    for candidate in codex /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
+    local USER_HOME="${HOME:-}"
+    case "$USER_HOME" in
+        /*) ;;
+        *) USER_HOME="" ;;
+    esac
+    local user_codex=""
+    if [[ -n "$USER_HOME" ]]; then
+        user_codex="$USER_HOME/.local/bin/codex"
+    fi
+    for candidate in codex /usr/local/bin/codex /usr/bin/codex "$user_codex"; do
         if command -v "$candidate" &>/dev/null; then
             echo "$candidate"
             return
         fi
     done
     # Last resort: direct path check
-    for candidate in /usr/local/bin/codex /usr/bin/codex "$HOME/.local/bin/codex"; do
+    for candidate in /usr/local/bin/codex /usr/bin/codex "$user_codex"; do
         if [[ -x "$candidate" ]]; then
             echo "$candidate"
             return
