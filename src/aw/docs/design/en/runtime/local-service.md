@@ -39,6 +39,11 @@ and one response; a frame is limited to 8 MiB. Native stdin and normalized event
 a separate 1 MiB limit; the frame accounts for JSON byte-array expansion.
 
 A request contains `api_version`, `identity`, `deadline_ns` and `operation`.
+`Client::connect_with_status` returns the authenticated discovery status with
+the retained client. Service adoption checks the revision, PID and audit health
+from that response without issuing another Status RPC. It is a snapshot at
+discovery time; subsequent calls still validate the retained identity.
+
 The initial `status` request may omit identity. Every subsequent request must
 match the service's fresh generation and the SHA-256 revision of its original
 configuration bytes. Restarting the service invalidates existing clients and

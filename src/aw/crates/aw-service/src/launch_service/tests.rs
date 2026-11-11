@@ -139,6 +139,58 @@ fn external_absence_has_no_filesystem_or_process_side_effects() {
 }
 
 #[test]
+fn discovery_status_is_reused_for_readiness() {
+    use std::{os::unix::net::UnixListener, thread};
+
+    for healthy in [true, false] {
+        let fixture = Fixture::new();
+        let mut value = config();
+        value["spec"]["daemon"]["state_dir"] = json!(fixture.0.join("state"));
+        value["spec"]["daemon"]["startup"] = json!("external");
+        let document = bytes(&value);
+        let paths = resolve(&document, None).unwrap();
+        files::private_directory(&paths.state_dir).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("fixture accept failed: {error}"),
+                    }
+                };
+                let request: Value = crate::ipc::read(&mut stream, deadline).unwrap();
+                assert_eq!(request["operation"]["method"], "status");
+                crate::ipc::write(&mut stream, &json!({
+                    "api_version":crate::VERSION,
+                    "identity":{"generation":"fixture", "config_revision":paths.config_revision},
+                    "result":{"pid":std::process::id(), "audit_healthy":healthy},
+                    "error":null, "audit_key":null,
+                }), deadline).unwrap();
+                // Closing the sole listener makes an accidental second discovery fail.
+                drop(listener);
+            });
+            let result = ensure_service(&document, Path::new("/must-not-be-executed"), deadline);
+            server.join().unwrap();
+            if healthy {
+                assert_eq!(result.unwrap().pid, std::process::id());
+            } else {
+                assert!(
+                    matches!(result, Err(crate::Error::Rejected(ref code)) if code == "service_audit_unavailable")
+                );
+            }
+        });
+    }
+}
+
+#[test]
 fn old_protocol_daemon_is_rejected_before_reuse_or_replacement() {
     use std::{os::unix::net::UnixListener, thread};
 

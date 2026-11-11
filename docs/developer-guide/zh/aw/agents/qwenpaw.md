@@ -59,6 +59,10 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 
 共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。
 
+识别出的绝对路径 Python 标准启动脚本，使用同一解释器与导入路径读取实际安装包的
+字面量版本，避免为版本探测加载 QwenPaw App 配置。自定义入口和动态版本继续使用
+原生 `--version`，共用五秒预算。App 启动、原生 Hook 安装与就绪检查继续使用原命令。
+
 ## 保留原生 App 启动命令
 
 已在独立 Python 环境中初始化 QwenPaw 时，可以一次安装 AW 启动模块，然后重启 App。

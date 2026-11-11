@@ -5,7 +5,7 @@ mod process;
 #[cfg(test)]
 mod tests;
 
-use crate::{rejected, Client, Operation, Result};
+use crate::{rejected, Client, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -211,11 +211,10 @@ fn connect(paths: &ServicePaths, deadline: Instant) -> Result<(Client, u32)> {
     {
         return Err(rejected("unsafe_service_socket"));
     }
-    let client = Client::connect(&paths.socket, deadline)?;
+    let (client, status) = Client::connect_with_status(&paths.socket, deadline)?;
     if client.identity().config_revision != paths.config_revision {
         return Err(rejected("service_revision_mismatch"));
     }
-    let status = client.call(Operation::Status, deadline)?;
     let pid = status
         .get("pid")
         .and_then(Value::as_u64)

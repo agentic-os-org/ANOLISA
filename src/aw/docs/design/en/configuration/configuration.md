@@ -15,6 +15,11 @@ declarative object shape without introducing Kubernetes APIs or dependencies.
 Provider instances are named objects referenced by ordered event steps; one
 implementation can have multiple instances with different private configuration.
 
+The compiled immutable configuration schema is shared within each process.
+Every document still passes parsing, shape and cross-field validation; no
+configuration or admission result is cached. Independent service processes
+continue to validate their own input.
+
 The schema is the authoritative field shape. A reusable offline validator parses
 bounded YAML or JSON documents into the JSON data model, validates that shape,
 then checks static relationships. JSON travels the same bounded path as a

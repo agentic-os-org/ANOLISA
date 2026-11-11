@@ -35,6 +35,10 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
 请求包含 `api_version`、`identity`、`deadline_ns` 和 `operation`。
+`Client::connect_with_status` 同时返回经过认证的发现状态与保留身份的客户端。
+服务复用直接核对该响应中的 revision、PID 与审计健康状态，省去第二次 Status RPC。
+该状态仅代表发现时刻，后续调用继续校验保留的身份。
+
 首次 `status` 请求可以不提供身份，后续请求必须匹配本次服务启动生成的 generation
 和原始配置字节的 SHA-256 revision。即使文件没有变化，重启也会使旧客户端与句柄
 失效。修改文件不会热更新正在运行的服务。
