@@ -2607,6 +2607,40 @@ mod tests {
         assert_eq!(filters.status(), StatusCode::OK);
     }
 
+    /// A label typo is a request error even when trajectory collection never
+    /// ran. Validation lived in the row filter behind the store-availability
+    /// early return, so `?label=goodd` answered `200 []` and read as "no such
+    /// trajectories"; `exclude_label` failed open the same way.
+    #[actix_web::test]
+    async fn trajectory_label_typos_are_rejected_without_a_store() {
+        let data = test_app_state_with_trajectory_store(None);
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/trajectories?label=goodd",
+            "/api/trajectories?exclude_label=uselesss",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // A valid filter over the absent store still degrades to an empty
+        // list, and an empty value is the UI clearing the filter.
+        for uri in ["/api/trajectories?label=good", "/api/trajectories?label="] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let rows: serde_json::Value = awtest::read_body_json(response).await;
+            assert_eq!(rows, serde_json::json!([]), "{uri}");
+        }
+    }
+
     // ─── Trajectory step query tests ───────────────────────────────────
 
     /// Store holding one trajectory whose steps cover several categories.
@@ -5867,6 +5901,9 @@ pub async fn list_trajectories(
     data: web::Data<AppState>,
     query: web::Query<TrajectoryQuery>,
 ) -> impl Responder {
+    if let Err(response) = validate_reuse_label_filters(&query) {
+        return response;
+    }
     let Some(tstore) = data.trajectory_store() else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
@@ -5925,6 +5962,43 @@ fn reuse_label_filter_requested(query: &TrajectoryQuery) -> bool {
     present(&query.label) || present(&query.exclude_label) || query.human_backed.is_some()
 }
 
+/// Parse one comma-separated reuse-label query value, rejecting unknown
+/// tokens.
+///
+/// Shared by the handler's early validation and the row filter so a typo is
+/// answered the same way whether or not the trajectory store exists.
+fn parse_reuse_label_tokens(
+    field: &str,
+    raw: &str,
+) -> Result<Vec<crate::reuse::TrajectoryLabel>, HttpResponse> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|token| {
+            crate::reuse::TrajectoryLabel::parse(token).ok_or_else(|| {
+                bad_request_response(format!("{field} '{token}' is not a known trajectory label"))
+            })
+        })
+        .collect()
+}
+
+/// Validate `label`/`exclude_label` before touching any store.
+///
+/// The filters are applied after the trajectory rows are read, but a malformed
+/// token is a request error independent of data availability: validating only
+/// inside the row filter made a typo answer `200 []` whenever `trajectories.db`
+/// was absent, which reads as "no such trajectories" for `label` and fails
+/// open for `exclude_label`.
+fn validate_reuse_label_filters(query: &TrajectoryQuery) -> Result<(), HttpResponse> {
+    if let Some(raw) = query.label.as_deref() {
+        parse_reuse_label_tokens("label", raw)?;
+    }
+    if let Some(raw) = query.exclude_label.as_deref() {
+        parse_reuse_label_tokens("exclude_label", raw)?;
+    }
+    Ok(())
+}
+
 /// A `reuse.db` read failure while resolving label filters.
 ///
 /// Collapsing it into an empty label set is not a safe default: `label=good`
@@ -5954,30 +6028,16 @@ fn filter_rows_by_reuse_labels(
     // Reject unknown tokens up front, like the reuse API: a typo used to be
     // dropped silently, which read as "no such trajectories" for `label` and
     // failed open (nothing excluded) for `exclude_label`.
-    let parse =
-        |field: &str, raw: &str| -> Result<Vec<crate::reuse::TrajectoryLabel>, HttpResponse> {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|token| {
-                    crate::reuse::TrajectoryLabel::parse(token).ok_or_else(|| {
-                        bad_request_response(format!(
-                            "{field} '{token}' is not a known trajectory label"
-                        ))
-                    })
-                })
-                .collect()
-        };
     let requested = query
         .label
         .as_deref()
-        .map(|raw| parse("label", raw))
+        .map(|raw| parse_reuse_label_tokens("label", raw))
         .transpose()?
         .filter(|labels| !labels.is_empty());
     let excluded = query
         .exclude_label
         .as_deref()
-        .map(|raw| parse("exclude_label", raw))
+        .map(|raw| parse_reuse_label_tokens("exclude_label", raw))
         .transpose()?
         .filter(|labels| !labels.is_empty());
 
