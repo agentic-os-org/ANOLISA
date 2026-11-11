@@ -18,6 +18,7 @@ path = "src/health.rs"
 
 [dependencies]
 asc-pep-runtime.workspace = true
+asc-sandbox-docker = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 crossterm = { workspace = true }

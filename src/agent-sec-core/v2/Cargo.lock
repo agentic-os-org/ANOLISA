@@ -251,6 +251,7 @@ dependencies = [
  "asc-policy-cedar",
  "asc-policy-repository-sqlite",
  "asc-policy-types",
+ "asc-sandbox-docker",
  "asc-security-events",
  "asc-telemetry",
  "chrono",
