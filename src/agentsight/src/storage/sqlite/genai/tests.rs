@@ -4494,6 +4494,41 @@ fn maintenance_prunes_dominant_evaluations_without_deleting_genai_events() {
 }
 
 #[test]
+fn maintenance_prunes_a_legacy_evaluation_table() {
+    // The sibling delete path already guards for an `evaluation_runs` table
+    // written before the `result_json` column existed. The candidate scan did
+    // not, so a store with that supported shape failed the whole maintenance
+    // pass on every attempt and never enforced its size limit.
+    let path = unique_size_test_db("legacy-evaluations");
+    let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE evaluation_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+             INSERT INTO evaluation_runs (created_at) VALUES ('2020-01-01 00:00:00');",
+        )
+        .unwrap();
+    }
+    grow_db(&store, 150, 10 * 1024);
+    assert!(store.get_total_db_size() > 1024 * 1024 * 9 / 10);
+
+    store
+        .maintain()
+        .expect("a legacy evaluation table must not fail size maintenance");
+
+    assert!(
+        store.effective_db_size() < 1024 * 1024 * 9 / 10,
+        "size maintenance must still converge, got {} bytes",
+        store.effective_db_size()
+    );
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
 fn maintenance_never_size_prunes_pending_calls() {
     let path = unique_size_test_db("pending-protected");
     let store = GenAISqliteStore::new_with_path(&path, size_test_policy()).unwrap();
