@@ -322,8 +322,12 @@ changing stored policy content or revisions. Unknown schema revisions are reject
 without fallback. Native templates remain supported in their existing shape.
 
 Policy creation success does not establish target PEP support. The current PEP
-Translator supports a Cedar `forbid` subset for deletion and ordinary-write
-restrictions; unsupported semantics reject the entire translation. Existing
+Translator supports a Cedar `forbid` subset for deletion, ordinary-write
+restrictions and exact-file read denial. Read denial uses `file.read` with an
+exact file path and requires AgentSight's `file_read_protection` capability;
+directory-tree read denial is unsupported. See [AgentSight's read-protection
+boundaries](../agentsight/integrations.md#deny-secret-file-reads).
+Unsupported semantics reject the entire translation. Existing
 Scope/Binding snapshots retain their saved Policy revision and schema when a
 Policy is updated or deleted. Source can be reloaded into an in-memory PST;
 neither AST nor PST is stored in SQLite. An older binary cannot read new Cedar

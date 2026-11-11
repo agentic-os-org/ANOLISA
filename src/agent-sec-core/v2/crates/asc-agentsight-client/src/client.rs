@@ -223,6 +223,9 @@ where
                 if target.protections.ordinary_write && !caps.ordinary_write_protection {
                     return Err(rejected("AGENTSIGHT_ORDINARY_WRITE_PROTECTION_UNAVAILABLE"));
                 }
+                if target.protections.read && !caps.file_read_protection {
+                    return Err(rejected("AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE"));
+                }
             }
         } else if !caps.file_delete_guard {
             return Err(rejected("AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE"));
@@ -267,6 +270,8 @@ struct EnforcementCapabilities {
     #[serde(default)]
     ordinary_write_protection: bool,
     #[serde(default)]
+    file_read_protection: bool,
+    #[serde(default)]
     static_mount_topology: bool,
 }
 
@@ -304,10 +309,14 @@ fn valid_file_protection(policy: &FileProtectionPolicy) -> bool {
     policy.version == FILE_PROTECTION_POLICY_VERSION
         && !policy.targets.is_empty()
         && policy.targets.len() <= 64
-        && policy
-            .targets
-            .iter()
-            .all(|target| target.protections.delete || target.protections.ordinary_write)
+        && policy.targets.iter().all(|target| {
+            (target.protections.delete
+                || target.protections.ordinary_write
+                || target.protections.read)
+                && (!target.protections.read
+                    || target.kind == FileProtectionTargetKind::ExactFile
+                        && target.exclusions.is_empty())
+        })
 }
 
 #[derive(Debug, Deserialize)]

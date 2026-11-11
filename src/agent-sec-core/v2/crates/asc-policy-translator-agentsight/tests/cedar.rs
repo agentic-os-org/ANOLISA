@@ -22,6 +22,12 @@ fn rule(condition: &str) -> String {
     )
 }
 
+fn read_rule(condition: &str) -> String {
+    format!(
+        "forbid(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when {{ {condition} }};"
+    )
+}
+
 fn translate(text: &str) -> Value {
     let TranslationOutcome::Translated(plan) =
         AgentSightTranslator.translate(&binding(text)).unwrap()
@@ -59,6 +65,65 @@ fn delete_and_write_keep_independent_scopes_and_merge_identical_targets() {
         json!({"delete":true,"ordinary_write":false})
     );
     assert_eq!(translate(&text), policy);
+}
+
+#[test]
+fn read_denial_preserves_exact_targets_and_merges_independent_protections() {
+    let read = read_rule(r#"resource.path == "/secret""#);
+    assert_eq!(
+        translate(&read)["targets"][0],
+        json!({"path":"/secret","kind":"exact_file",
+            "protections":{"delete":false,"ordinary_write":false,"read":true},"exclusions":[]})
+    );
+    let write = rule(
+        r#"[SecCore::WriteOperation::"write", SecCore::WriteOperation::"delete"].contains(context.input.operation) && resource.path == "/secret""#,
+    );
+    let policy = translate(&format!("{read}{write}"));
+    assert_eq!(policy["targets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        policy["targets"][0]["protections"],
+        json!({"delete":true,"ordinary_write":true,"read":true})
+    );
+    assert_eq!(translate(&format!("{write}{read}")), policy);
+
+    let policy = translate(
+        r#"forbid(principal, action in [SecCore::Action::"file.read"], resource)
+        when { ["/secret", "/public"].contains(resource.path) || resource.path == "/other" }
+        unless { resource.path != "/secret" };"#,
+    );
+    assert_eq!(policy, translate(&read));
+}
+
+#[test]
+fn unsupported_read_scopes_and_conditions_reject_the_whole_policy() {
+    let supported = rule(
+        r#"context.input.operation == SecCore::WriteOperation::"delete" && resource.path == "/safe""#,
+    );
+    for (condition, code) in [
+        (
+            r#"resource.path == "/secrets" || resource.path like "/secrets/*""#,
+            "UNSUPPORTED_READ_TARGET",
+        ),
+        (r#"resource.path != "/public""#, "UNBOUNDED_PATH_SCOPE"),
+        (
+            r#"resource.path == "/secret" && context.input.program == "/bin/cat""#,
+            "UNSUPPORTED_CONDITION",
+        ),
+    ] {
+        let TranslationOutcome::Rejected(error) = AgentSightTranslator
+            .translate(&binding(&format!("{supported}{}", read_rule(condition))))
+            .unwrap()
+        else {
+            panic!("must reject unsupported read constraint: {condition}");
+        };
+        assert_eq!(error.code, format!("CEDAR_RULE_1_{code}"));
+    }
+    let mixed = r#"forbid(principal, action in [SecCore::Action::"file.read", SecCore::Action::"file.write"], resource)
+        when { resource.path == "/secret" };"#;
+    assert!(matches!(
+        AgentSightTranslator.translate(&binding(mixed)).unwrap(),
+        TranslationOutcome::Rejected(_)
+    ));
 }
 
 #[test]
@@ -129,7 +194,7 @@ fn unsupported_conditions_reject_the_whole_policy_including_later_statements() {
         rule("[].contains(context.input.program)"),
         supported.replace("forbid", "permit"),
         supported.replace("resource is SecCore::File)", "resource == SecCore::File::\"a\")"),
-        "forbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/a\" };".into(),
+        "forbid(principal, action == SecCore::Action::\"file.exec\", resource) when { resource.path == \"/a\" };".into(),
     ] {
         assert!(matches!(AgentSightTranslator.translate(&binding(&text)).unwrap(), TranslationOutcome::Rejected(_)));
     }
@@ -204,7 +269,10 @@ fn boolean_lowering_matches_cedar_for_supported_request_conditions() {
         };
         forbid(principal, action == SecCore::Action::"file.write", resource)
         when { context.input.operation == SecCore::WriteOperation::"write" && (resource.path == "/other" || resource.path like "/other/*") }
-        unless { resource.path == "/other/cache" || resource.path like "/other/cache/*" };"#;
+        unless { resource.path == "/other/cache" || resource.path like "/other/cache/*" };
+        forbid(principal, action == SecCore::Action::"file.read", resource)
+        when { ["/config", "/tree/cache"].contains(resource.path) || resource.path == "/secret" }
+        unless { resource.path == "/tree/cache" };"#;
     let lowered = translate(source);
     // Baseline permit isolates forbid matching from Cedar's default-deny rule.
     let policies: cedar_policy::PolicySet = format!("permit(principal, action, resource);{source}")
@@ -217,6 +285,7 @@ fn boolean_lowering_matches_cedar_for_supported_request_conditions() {
         "/tree/cache",
         "/treehouse",
         "/config",
+        "/secret",
         "/other",
         "/other/cache",
         "/other/cache/new",
@@ -230,13 +299,22 @@ fn boolean_lowering_matches_cedar_for_supported_request_conditions() {
             None,
         )
         .unwrap();
-        for operation in ["delete", "write", "create", "rename", "setattr"] {
-            let context = cedar_policy::Context::from_json_value(json!({"input":{
-                "program":"/bin/test", "operation":{"__entity":{"type":"SecCore::WriteOperation","id":operation}}
-            }}), None).unwrap();
+        for operation in ["read", "delete", "write", "create", "rename", "setattr"] {
+            let input = if operation == "read" {
+                json!({"program":"/bin/test"})
+            } else {
+                json!({"program":"/bin/test", "operation":{"__entity":{"type":"SecCore::WriteOperation","id":operation}}})
+            };
+            let context =
+                cedar_policy::Context::from_json_value(json!({"input":input}), None).unwrap();
+            let action = if operation == "read" {
+                "file.read"
+            } else {
+                "file.write"
+            };
             let request = cedar_policy::Request::new(
                 "SecCore::Subject::\"test\"".parse().unwrap(),
-                "SecCore::Action::\"file.write\"".parse().unwrap(),
+                format!("SecCore::Action::\"{action}\"").parse().unwrap(),
                 "SecCore::File::\"request\"".parse().unwrap(),
                 context,
                 None,
@@ -248,6 +326,7 @@ fn boolean_lowering_matches_cedar_for_supported_request_conditions() {
                 == cedar_policy::Decision::Deny;
             let blocked = lowered["targets"].as_array().unwrap().iter().any(|target| {
                 let active = match operation {
+                    "read" => target["protections"]["read"].as_bool().unwrap_or(false),
                     "delete" => target["protections"]["delete"].as_bool().unwrap(),
                     "write" => target["protections"]["ordinary_write"].as_bool().unwrap(),
                     _ => false,

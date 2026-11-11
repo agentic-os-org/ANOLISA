@@ -14,6 +14,15 @@ fn structured_plan(delete: bool, write: bool) -> TargetBindingPlan {
     )
 }
 
+fn read_plan(delete: bool, write: bool) -> TargetBindingPlan {
+    plan_with_policy(
+        &json!({"version":1,"topology_mode":"static_at_apply","targets":[{
+            "path":"/secret","kind":"exact_file",
+            "protections":{"delete":delete,"ordinary_write":write,"read":true},"exclusions":[]
+        }]}),
+    )
+}
+
 fn plan_with_policy(policy: &Value) -> TargetBindingPlan {
     let mut plan = plan(7);
     let mut value: Value = serde_json::from_slice(&plan.content).unwrap();
@@ -69,6 +78,89 @@ fn structured_requests_match_the_http_contract_and_replay_exact_bytes() {
         assert_eq!(wire.requests()[1].body, wire.requests()[3].body);
         wire.consumed();
     }
+}
+
+#[test]
+fn read_requests_preserve_flags_and_replay_only_with_read_capability() {
+    for (delete, write) in [(false, false), (true, false), (false, true), (true, true)] {
+        let input = AgentSightClient::with_dependencies(Wire::new([]), Identity::default())
+            .prepare_apply(&read_plan(delete, write))
+            .unwrap();
+        let bytes = request_bytes(&input);
+        let request: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            request["file_protection_policy"]["targets"][0],
+            json!({"path":"/secret","kind":"exact_file",
+                "protections":{"delete":delete,"ordinary_write":write,"read":true},"exclusions":[]})
+        );
+        assert!(request.get("policy_dsl").is_none());
+        let mut health = structured_health();
+        health["capabilities"]["file_read_protection"] = json!(true);
+        let health = serde_json::to_vec(&health).unwrap();
+        let ack = json!({"request":request,"state":"enforced","domain_id":1});
+        let wire = Wire::new([
+            Ok(response(200, &health)),
+            Err(AgentSightTransportError::Unavailable),
+            Ok(response(200, &health)),
+            Ok(response(200, &serde_json::to_vec(&ack).unwrap())),
+        ]);
+        let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+        assert!(client.create(&input).error.is_some());
+        let result = client.create(&input);
+        assert!(result.error.is_none());
+        assert_eq!(result.observations[0].presence, Presence::Present);
+        assert_eq!(wire.requests()[1].body.as_ref().unwrap(), &bytes);
+        assert_eq!(wire.requests()[1].body, wire.requests()[3].body);
+        wire.consumed();
+    }
+}
+
+#[test]
+fn unavailable_read_capability_preserves_old_protection() {
+    for available in [None, Some(false)] {
+        let mut health = structured_health();
+        if let Some(available) = available {
+            health["capabilities"]["file_read_protection"] = json!(available);
+        }
+        let wire = Wire::new([Ok(response(200, &serde_json::to_vec(&health).unwrap()))]);
+        let client = AgentSightClient::with_dependencies(wire.clone(), Identity::default());
+        let input = client.prepare_apply(&read_plan(false, false)).unwrap();
+        let result = client.update(&[prepared(8).target], &input);
+        assert_eq!(
+            result.error.unwrap().code,
+            "AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE"
+        );
+        assert_eq!(wire.requests().len(), 1);
+        assert_eq!(wire.requests()[0].method, AgentSightHttpMethod::Get);
+        wire.consumed();
+    }
+}
+
+#[test]
+fn omitted_read_protection_in_acknowledgement_is_not_success() {
+    let input = AgentSightClient::with_dependencies(Wire::new([]), Identity::default())
+        .prepare_apply(&read_plan(false, false))
+        .unwrap();
+    let mut request: Value = serde_json::from_slice(&request_bytes(&input)).unwrap();
+    request["file_protection_policy"]["targets"][0]["protections"]
+        .as_object_mut()
+        .unwrap()
+        .remove("read");
+    let mut health = structured_health();
+    health["capabilities"]["file_read_protection"] = json!(true);
+    let wire = Wire::new([
+        Ok(response(200, &serde_json::to_vec(&health).unwrap())),
+        Ok(response(
+            200,
+            &serde_json::to_vec(&json!({"request":request,"state":"enforced","domain_id":1}))
+                .unwrap(),
+        )),
+    ]);
+    let client = AgentSightClient::with_dependencies(wire, Identity::default());
+    assert_eq!(
+        client.create(&input).error.unwrap().code,
+        "AGENTSIGHT_APPLY_RESPONSE_MISMATCH"
+    );
 }
 
 #[test]
@@ -164,6 +256,8 @@ fn malformed_structured_artifacts_never_prepare_a_request() {
         json!({"version":1,"topology_mode":"static_at_apply","targets":[]}),
         json!({"version":1,"topology_mode":"dynamic","targets":[]}),
         json!({"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/a","kind":"exact_file","protections":{"delete":false,"ordinary_write":false},"exclusions":[]}]}),
+        json!({"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/a","kind":"directory_tree","protections":{"delete":false,"ordinary_write":false,"read":true},"exclusions":[]}]}),
+        json!({"version":1,"topology_mode":"static_at_apply","targets":[{"path":"/a","kind":"exact_file","protections":{"delete":false,"ordinary_write":false,"read":true},"exclusions":[{"path":"/a/b","kind":"exact_entry"}]}]}),
         json!({"version":1,"topology_mode":"static_at_apply","targets":[],"ignored_condition":"program"}),
     ] {
         let mut input = structured_plan(true, true);
