@@ -206,7 +206,16 @@ def send_markdown(*, webhook: str, secret: str, title: str, text: str) -> None:
         raise RuntimeError(
             "DingTalk response was not valid UTF-8; outcome is unknown"
         ) from error
-    validate_response(decoded)
+        
+    # === 修复评审问题 2：响应校验失败应归为 unknown 而非 invalid_input ===
+    try:
+        validate_response(decoded)
+    except DeliveryRejected:
+        raise
+    except ValueError as error:
+        raise RuntimeError(
+            f"DingTalk response was invalid; outcome is unknown: {error}"
+        ) from error
 
 
 def send_analysis() -> int:
