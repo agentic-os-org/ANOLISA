@@ -44,9 +44,6 @@ pub enum CheckpointCommands {
         /// JSON metadata string
         #[arg(long)]
         metadata: Option<String>,
-        /// Pin this snapshot (prevent auto-cleanup)
-        #[arg(long, default_value_t = false)]
-        pin: bool,
         /// Custom daemon socket path
         #[arg(long, default_value = DEFAULT_SOCKET_PATH)]
         socket: String,
@@ -180,7 +177,6 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             id,
             message,
             metadata,
-            pin,
             socket,
         } => {
             if let Err(e) = validate_workspace_exists(&workspace) {
@@ -192,7 +188,7 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
                 &id,
                 message.as_deref(),
                 metadata.as_deref(),
-                pin,
+                false,
             ) {
                 Ok(result) => {
                     print_success(result, build_meta("checkpoint", distro, start, dry_run))

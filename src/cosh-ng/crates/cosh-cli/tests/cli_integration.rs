@@ -1256,6 +1256,39 @@ fn test_checkpoint_create_skipped_is_success() {
 }
 
 #[test]
+fn test_checkpoint_create_does_not_expose_pin() {
+    let output = cosh_bin()
+        .args(["checkpoint", "create", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("--pin"),
+        "help still lists --pin: {stdout}"
+    );
+
+    let rejected = cosh_bin()
+        .args([
+            "checkpoint",
+            "create",
+            "--workspace",
+            "/tmp",
+            "--id",
+            "snap-001",
+            "--pin",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        stderr.contains("--pin"),
+        "unexpected rejection message: {stderr}"
+    );
+}
+
+#[test]
 fn test_checkpoint_create_daemon_unavailable() {
     let output = cosh_bin()
         .args([
