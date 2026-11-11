@@ -95,7 +95,7 @@ pub fn extract_response_content(
     if let Some(choices) = resp.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
             // Support both "message" (standard response) and "delta" (SSE streaming) formats
-            let msg_or_delta = choice.get("message").or_else(|| choice.get("delta"));
+            let msg_or_delta = message_or_delta(choice);
 
             if let Some(msg) = msg_or_delta {
                 // Extract content
@@ -779,6 +779,20 @@ fn is_closing_response_event(chunk: &Value) -> bool {
 
 /// A choice that carries `message` instead of `delta` speaks in cumulative
 /// snapshots: each frame repeats the answer so far rather than an increment.
+/// Returns the message or delta object of a choice, treating an explicit
+/// `"message": null` as absent.
+///
+/// Some OpenAI-compatible gateways include `"message": null` next to a
+/// streaming `delta`. Preferring the present-but-null value hid the delta's
+/// content, refusal, reasoning and tool calls from the manual counter and the
+/// drain estimate.
+fn message_or_delta(choice: &Value) -> Option<&Value> {
+    choice
+        .get("message")
+        .filter(|value| !value.is_null())
+        .or_else(|| choice.get("delta").filter(|value| !value.is_null()))
+}
+
 fn carries_message_snapshot(chunk: &Value) -> bool {
     // The DashScope/Bailian native envelope is a snapshot too, and the most
     // literal one: it has no `choices[].delta` at all, and by default every
@@ -795,9 +809,12 @@ fn carries_message_snapshot(chunk: &Value) -> bool {
         .get("choices")
         .and_then(|c| c.as_array())
         .is_some_and(|choices| {
-            choices
-                .iter()
-                .any(|choice| choice.get("message").is_some() && choice.get("delta").is_none())
+            choices.iter().any(|choice| {
+                choice
+                    .get("message")
+                    .is_some_and(|message| !message.is_null())
+                    && choice.get("delta").is_none()
+            })
         })
 }
 
@@ -844,7 +861,7 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
                     .get("index")
                     .and_then(Value::as_u64)
                     .unwrap_or(choice_pos as u64);
-                let snapshot = choice.get("message");
+                let snapshot = choice.get("message").filter(|message| !message.is_null());
                 let message = snapshot.or_else(|| choice.get("delta"));
                 let Some(message) = message else {
                     continue;
@@ -979,7 +996,7 @@ fn collect_native_call_slots(chunk: &Value, slots: &mut std::collections::BTreeM
         .iter()
         .enumerate()
     {
-        let message = choice.get("message").or_else(|| choice.get("delta"));
+        let message = message_or_delta(choice);
         let Some(message) = message else {
             continue;
         };
@@ -1483,6 +1500,41 @@ mod tests {
         assert_eq!(content, "Hello there!");
         assert!(reasoning.is_empty());
         assert!(tool_calls.is_empty());
+    }
+
+    /// A gateway may emit `"message": null` alongside a streaming `delta`.
+    /// Treating the null value as a present message hid the delta's content
+    /// and tool calls from the manual counters and the drain estimate, while
+    /// the live message parser kept them.
+    #[test]
+    fn test_null_message_does_not_hide_delta() {
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "message": null, "delta": {"content": "hello there"}}]
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&chunk)).expect("the delta content must be extracted");
+        assert_eq!(content, "hello there");
+        assert!(reasoning.is_none());
+        assert!(tool_calls.is_empty());
+
+        let tool_chunk = serde_json::json!({
+            "choices": [{"index": 0, "message": null, "delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "lookup", "arguments": "{}"}}
+            ]}}]
+        });
+        let (_, _, tool_calls) = extract_response_content(Some(&tool_chunk))
+            .expect("the delta tool call must be extracted");
+        assert_eq!(tool_calls, vec!["lookup: {}".to_string()]);
+        assert_eq!(
+            merge_response_tool_calls(&[tool_chunk]),
+            vec!["lookup: {}".to_string()]
+        );
+
+        assert_eq!(
+            merge_response_output_text(&[chunk]).0,
+            "hello there",
+            "a null message must not turn a delta chunk into a snapshot"
+        );
     }
 
     /// An OpenAI-compatible gateway's final frame can be a whole `message`
