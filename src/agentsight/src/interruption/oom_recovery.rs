@@ -36,17 +36,22 @@ struct OomKillEvent {
 /// agent or that has a pending llm_call correlation; kills with neither
 /// signal are skipped as noise.
 ///
-/// Uses the latest existing OOM event timestamp in the DB as `since_ns` to
-/// avoid re-writing events from previous runs. Each event is also checked
-/// individually by (pid, occurred_at_ns) before insertion.
+/// Uses the latest existing OOM event timestamp in the DB as `since_ns`, widened
+/// by [`OOM_RECENCY_WINDOW_SECS`] because a serve-mode HealthChecker records the
+/// crash at detection time rather than at the dmesg kill second. Each event is
+/// also checked against recent OOM rows for the same pid before insertion.
 pub fn recover_oom_events(
     interruption_store: &Arc<InterruptionStore>,
     genai_store: Option<&Arc<GenAISqliteStore>>,
     _since_ns: i64,
 ) {
-    // Use the latest OOM event timestamp already in DB as the dedup cutoff
+    // Use the latest OOM event timestamp already in DB as the dedup cutoff.
+    // The stored value may be a detection time that follows the kill by up to
+    // the HealthChecker's polling lag; scanning only after it skipped kills
+    // that happened between the kill and the detection.
     let since_ns = interruption_store.latest_oom_event_ns();
-    log::info!("OOM recovery: scanning dmesg, since_ns={since_ns}");
+    let cutoff_ns = since_ns.saturating_sub(OOM_RECENCY_WINDOW_SECS.saturating_mul(1_000_000_000));
+    log::info!("OOM recovery: scanning dmesg, since_ns={since_ns}, cutoff_ns={cutoff_ns}");
 
     let events = match parse_dmesg_oom_events() {
         Ok(e) => e,
@@ -63,19 +68,22 @@ pub fn recover_oom_events(
 
     let mut written = 0usize;
     for ev in &events {
-        // Skip events strictly before the last recorded OOM timestamp. The
-        // boundary itself is not skipped: `dmesg -T` has one-second
-        // resolution, so a different pid killed in the same second as the
-        // recorded one still needs the per-event (pid, timestamp) check
-        // below. The comparison must not duplicate that check.
-        if since_ns > 0 && ev.timestamp_ns < since_ns {
+        // Skip events strictly before the widened cutoff. The boundary itself
+        // is not skipped: `dmesg -T` has one-second resolution, so a different
+        // pid killed in the same second as the recorded one still needs the
+        // per-event check below.
+        if cutoff_ns > 0 && ev.timestamp_ns < cutoff_ns {
             continue;
         }
 
-        // Per-event dedup: skip if already recorded with same (pid, timestamp)
-        if interruption_store.oom_event_exists(ev.pid, ev.timestamp_ns) {
+        // Per-event dedup by pid and a recent window, not an exact timestamp:
+        // a HealthChecker row is stamped at detection time while the dmesg
+        // kill carries the kill second, so the same crash never matches
+        // exactly. The window is the same one used to attribute a dmesg kill
+        // to a disappeared process.
+        if interruption_store.oom_event_exists_recent(ev.pid, OOM_RECENCY_WINDOW_SECS as u64) {
             log::debug!(
-                "OOM recovery: skip duplicate pid={} ts={}",
+                "OOM recovery: skip recently recorded pid={} ts={}",
                 ev.pid,
                 ev.timestamp_ns
             );
@@ -956,6 +964,112 @@ printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 4000102 (opencl
         assert!(
             istore.oom_event_exists(4_000_102, occurred_at_ns),
             "a distinct pid killed in the recorded second must still be recovered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A HealthChecker records the crash when it notices the process gone,
+    /// which can be seconds after the dmesg kill. Using its detection time as
+    /// a hard cutoff skipped every kill between the kill and the detection —
+    /// exactly the window recovery exists for. The other pid in the same
+    /// dmesg window must still be recovered, and the already-recorded one
+    /// must not be duplicated by the window dedup.
+    const FAKE_DMESG_DETECTION_LAG: &str = r#"#!/bin/sh
+printf '[%s] Out of memory: Killed process 4000201 (openclaw-gatewa) total-vm:1024kB\n' "$(date -u -d '30 seconds ago' '+%a %b %e %T %Y')"
+printf '[%s] Out of memory: Killed process 4000202 (openclaw-gatewa) total-vm:1024kB\n' "$(date -u -d '20 seconds ago' '+%a %b %e %T %Y')"
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn recovered_oom_kills_before_their_detection_time_are_not_skipped() {
+        const CHILD: &str = "AGENTSIGHT_OOM_DETECTION_LAG_CHILD";
+        let fake_dir = std::env::temp_dir().join(format!(
+            "agentsight-fake-dmesg-detection-lag-{}",
+            std::process::id()
+        ));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG_DETECTION_LAG).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::recovered_oom_kills_before_their_detection_time_are_not_skipped",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TZ", "UTC")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("oom-detection-lag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let db_path = dir.join("interruption_events.db");
+        let istore =
+            Arc::new(InterruptionStore::new_with_path(&db_path).expect("interruption store"));
+        let detected_at_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos() as i64;
+        // The serve-mode shape: the crash row is stamped when the checker
+        // noticed it, not when dmesg recorded the kill.
+        istore
+            .insert(&InterruptionEvent::new(
+                InterruptionType::AgentCrash,
+                None,
+                None,
+                None,
+                None,
+                Some(4_000_201),
+                Some("OpenClaw".to_string()),
+                detected_at_ns,
+                Some(serde_json::json!({"oom": true, "source": "healthchecker+dmesg"})),
+            ))
+            .expect("seed the detection-time crash");
+
+        recover_oom_events(&istore, None, 0);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("read the fixture database");
+        let count_for = |pid: i32| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM interruption_events WHERE interruption_type='agent_crash' AND pid=?1",
+                [pid],
+                |row| row.get(0),
+            )
+            .expect("count crash rows")
+        };
+        assert_eq!(
+            count_for(4_000_201),
+            1,
+            "the detection-time row already covers this kill"
+        );
+        assert_eq!(
+            count_for(4_000_202),
+            1,
+            "a kill that precedes the detection time must still be recovered"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
