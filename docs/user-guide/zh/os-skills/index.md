@@ -34,6 +34,26 @@ make -C src/os-skills install
 技能同名时，本地系统副本优先于 `/usr/share/anolisa/skills/` 中的 RPM 副本。
 同一集合应选择一种交付方式；管理旧的源码安装时，将 `SKILLS_DIR` 指向原目录。
 
+`make uninstall` 只删除 `make install` 记录在
+`<datadir>/anolisa/components/os-skills/install-manifest` 中的技能目录。
+缺少该记录时不会删除任何内容，并以非零状态退出，因此不会误删 os-skills
+从未安装过的同名技能目录。`make install` 反向同理：遇到不是自己安装的同名目录
+会直接拒绝，只有显式传入 `REPLACE_UNOWNED=1` 才会整体替换并记录，供后续卸载删除。
+只有 `1` 会开启替换；`0` 或不设置时保持拒绝，其他取值会在改动任何内容前报错。
+因此在此版本之前完成的安装，需要先执行一次 `REPLACE_UNOWNED=1 make install`，
+之后才能正常卸载。被记录的目录整体归 os-skills 管理，每次安装都会整体替换，
+请勿在这些目录中放置个人文件，自建技能请使用其他名称。安装失败或被中断时会放回原有技能，
+记录保持不变；若记录已写入新技能后才被中断，则保留新安装的技能，并提示再次执行 `make install`
+完成安装。若某一步无法撤销（例如集合目录变为只读），错误信息会指出遗留内容：
+未能删除的新副本，或仍保存原有技能的 `.os-skills.*/.old` 目录。记录会保留历次安装的技能名，
+新版本移除的技能在卸载时也会一并删除。
+RPM 安装请通过包管理器卸载，raw `anolisa install` 部署请使用
+`anolisa uninstall os-skills`，而不是 `make uninstall`。
+
+一份记录只对应一个集合：`make install` 会拒绝记录中未登记的目录，
+`make uninstall` 会连同技能一起删除记录，因此同时维护多个集合时请为每个
+集合单独指定 `MANIFEST=`。卸载其中一个集合不会影响其他集合的记录与共享组件元数据。
+
 ---
 
 ## 快速开始
