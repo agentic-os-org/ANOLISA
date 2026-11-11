@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-11
+
+### Fixed
+
+- Managed stop and orphan cleanup preserve unrelated processes sharing the
+  `skillfs` executable name
+  ([#9825](https://github.com/agentic-os-org/ANOLISA/pull/9825)).
+- Promoted Skill directories become readable and discoverable immediately
+  ([#9820](https://github.com/agentic-os-org/ANOLISA/pull/9820)).
+- Contract sections with valid closing hashes are parsed and validated correctly
+  ([#9826](https://github.com/agentic-os-org/ANOLISA/pull/9826)).
+- Command adaptation preserves pip-only installs, wrapped commands and multiline
+  shell data ([#9821](https://github.com/agentic-os-org/ANOLISA/pull/9821),
+  [#9824](https://github.com/agentic-os-org/ANOLISA/pull/9824),
+  [#9823](https://github.com/agentic-os-org/ANOLISA/pull/9823)).
+- Usage scripts skip non-UTF-8 records and count bare Skill directory references
+  when a recorded workspace is unavailable
+  ([#9822](https://github.com/agentic-os-org/ANOLISA/pull/9822),
+  [#9530](https://github.com/agentic-os-org/ANOLISA/pull/9530)).
+
 ## [0.5.6] - 2026-11-06
 
 ### Changed

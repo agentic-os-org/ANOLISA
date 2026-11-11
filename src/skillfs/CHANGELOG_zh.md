@@ -9,6 +9,24 @@
 
 ## [未发布]
 
+## [0.5.7] - 2026-11-11
+
+### 修复
+
+- managed stop 和孤儿进程清理保留与 `skillfs` 同名的无关进程
+  ([#9825](https://github.com/agentic-os-org/ANOLISA/pull/9825))。
+- 提升后的 Skill 目录立即可读并进入实时发现结果
+  ([#9820](https://github.com/agentic-os-org/ANOLISA/pull/9820))。
+- 正确解析和验证带结束井号的契约章节标题
+  ([#9826](https://github.com/agentic-os-org/ANOLISA/pull/9826))。
+- 命令适配保留 pip 专属安装、包装命令和跨行 shell 数据
+  ([#9821](https://github.com/agentic-os-org/ANOLISA/pull/9821)、
+  [#9824](https://github.com/agentic-os-org/ANOLISA/pull/9824)、
+  [#9823](https://github.com/agentic-os-org/ANOLISA/pull/9823))。
+- 用量统计脚本跳过非 UTF-8 日志记录，并在工作区不可用时统计仅指向 Skill 目录的引用
+  ([#9822](https://github.com/agentic-os-org/ANOLISA/pull/9822)、
+  [#9530](https://github.com/agentic-os-org/ANOLISA/pull/9530))。
+
 ## [0.5.6] - 2026-11-06
 
 ### 变更
