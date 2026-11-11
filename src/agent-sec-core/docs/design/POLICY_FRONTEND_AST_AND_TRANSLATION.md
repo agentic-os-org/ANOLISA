@@ -681,12 +681,20 @@ update/deletion and PST loading after close/reopen. Removing Cedar support
 requires handling existing Cedar snapshots; this change adds no SQL migration.
 
 The sandbox PDP evaluates `Subject.agent_type`, principal constraints, `process.spawn` and
-validated `warn`/`escalate`/`transform` advice on permit. It loads current PAP-selected
-source through `pst`, reconstructs the SDK `PolicySet`,
-and evaluates requests in process. Baseline and optional task policies are read
-together; updates affect later requests while Scope/Binding snapshots retain their
-saved revisions. Configuration selects Policy IDs, not policy snapshot files. See
-[sandbox authorization](LINUX_SANDBOX_PEP_DESIGN_zh.md) for decisions and receipts.
+validated `warn`/`escalate`/`transform` advice on permit. It loads the current effective
+policy set derived by PAP through `pst`, combines it into one SDK `PolicySet`, and
+evaluates requests in process. Each request consistently reads all current policies
+and includes Cedar sources whose statements all have explicit principal headers;
+a source mixing bare and constrained headers is rejected as a whole. Updates,
+deletions and eligibility changes affect later requests while Scope/Binding snapshots
+retain their saved revisions. Configuration contains only `environment_permissions`
+and `ttl_seconds`, which set the OS-permission ceiling and decision acceptance deadline.
+The old `baseline_policy` and `task_policy` keys are rejected. When adapting old request
+policies, review their previous intersection semantics: permits in the combined set
+can add grants, and matching forbids override permits across the set. See the
+[sandbox guide](../../../../docs/user-guide/en/agent-sec-core/sandbox.md) for configuration
+and migration, and [sandbox authorization](LINUX_SANDBOX_PEP_DESIGN_zh.md) for decisions
+and receipts.
 
 ### 8.7 Schema versioning and policy loading
 

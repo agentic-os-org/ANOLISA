@@ -33,7 +33,7 @@ impl PdpRuntime {
         advice: &mut Vec<ScopedAdvice>,
     ) -> Result<Projection, PdpError> {
         let requested = &input.requested_permissions;
-        let environment = &self.snapshot.environment_permissions;
+        let environment = &self.environment_permissions;
         if requested.network.mode == NetworkMode::Full {
             if environment.network.mode != NetworkMode::Full {
                 return Err(PdpError::Denied(
@@ -206,17 +206,9 @@ impl PdpRuntime {
         advice: &mut Vec<ScopedAdvice>,
     ) -> Result<Access, PdpError> {
         let mut read = rules_allow(&input.requested_permissions, path, FileRight::Read)
-            && rules_allow(
-                &self.snapshot.environment_permissions,
-                path,
-                FileRight::Read,
-            );
+            && rules_allow(&self.environment_permissions, path, FileRight::Read);
         let mut write = rules_allow(&input.requested_permissions, path, FileRight::Write)
-            && rules_allow(
-                &self.snapshot.environment_permissions,
-                path,
-                FileRight::Write,
-            );
+            && rules_allow(&self.environment_permissions, path, FileRight::Write);
         let mut read_advice = Vec::new();
         let mut write_advice = Vec::new();
         for (right, allowed, applicable) in [

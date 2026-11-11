@@ -53,8 +53,7 @@ fn request() -> AuthorizationRequest {
         request_id: "request-1".into(),
         execution_id: "execution-1".into(),
         principal: AgentPrincipal {
-            agent_id: "worker".into(),
-            agent_type: "codex".into(),
+            agent_type: Some("codex".into()),
         },
         launch: CommandRequest {
             program: "python3".into(),
@@ -64,6 +63,97 @@ fn request() -> AuthorizationRequest {
         },
         requested_permissions: permissions(),
     }
+}
+
+fn effective_runtime(sources: &[&str]) -> Result<PdpRuntime, asc_pdp_runtime::PdpError> {
+    use asc_policy_types::cedar::{AuthorizationPolicy, AuthorizationPolicySet};
+    let policies = sources
+        .iter()
+        .enumerate()
+        .map(|(index, text)| AuthorizationPolicy {
+            policy_id: ResourceId::new(format!("member-{index}")).unwrap(),
+            revision: Revision::new(1).unwrap(),
+            source: source(text),
+        })
+        .collect();
+    PdpRuntime::from_policy_set(
+        AuthorizationPolicySet {
+            version: "effective-1".into(),
+            policies,
+        },
+        permissions(),
+        60,
+    )
+}
+
+#[test]
+fn effective_set_matches_agent_type_and_preserves_global_forbid_precedence() {
+    let files = FILES.replace("principal,", "principal is SecCore::Subject,");
+    let command = COMMAND.replace("principal,", "principal is SecCore::Subject,");
+    // Each source has its own policy0; both must survive merging.
+    let runtime = effective_runtime(&[&files, &command]).unwrap();
+    assert_eq!(
+        runtime.evaluate(&request(), 100).unwrap().verdict,
+        DecisionVerdict::Allow
+    );
+    let mut other = request();
+    other.principal.agent_type = Some("qoder".into());
+    assert_eq!(
+        runtime.evaluate(&other, 100).unwrap().verdict,
+        DecisionVerdict::Deny
+    );
+    other = request();
+    other.principal.agent_type = None;
+    assert_eq!(
+        runtime.evaluate(&other, 100).unwrap().verdict,
+        DecisionVerdict::Deny
+    );
+    let deny = r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);"#;
+    let runtime = effective_runtime(&[&files, &command, deny]).unwrap();
+    assert_eq!(
+        runtime.evaluate(&request(), 100).unwrap().verdict,
+        DecisionVerdict::Deny
+    );
+    assert_eq!(
+        effective_runtime(&[])
+            .unwrap()
+            .evaluate(&request(), 100)
+            .unwrap()
+            .verdict,
+        DecisionVerdict::Deny
+    );
+}
+
+#[test]
+fn effective_set_keeps_advice_environment_ceiling_and_optional_type() {
+    let files = FILES.replace("principal,", "principal is SecCore::Subject,");
+    let command = r#"@advice("{\"verdict\":\"escalate\"}")
+        permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);"#;
+    let runtime = effective_runtime(&[&files, command]).unwrap();
+    let mut input = request();
+    input.principal.agent_type = None;
+    let decision = runtime.evaluate(&input, 100).unwrap();
+    assert_eq!(decision.verdict, DecisionVerdict::StepUp);
+    input.requested_permissions.network.mode = NetworkMode::Full;
+    assert_eq!(
+        runtime.evaluate(&input, 100).unwrap().verdict,
+        DecisionVerdict::Deny
+    );
+    assert!(effective_runtime(&[FILES]).is_err());
+}
+
+#[test]
+fn effective_set_does_not_ignore_a_forbid_evaluation_error() {
+    let files = FILES.replace("principal,", "principal is SecCore::Subject,");
+    let command = COMMAND.replace("principal,", "principal is SecCore::Subject,");
+    let failing = r#"forbid(principal is SecCore::Subject,
+        action == SecCore::Action::"process.spawn", resource)
+        when { context.input.arg_count + 9223372036854775807 > 0 };"#;
+    let runtime = effective_runtime(&[&files, &command, failing]).unwrap();
+    let decision = runtime.evaluate(&request(), 100).unwrap();
+    assert_eq!(decision.verdict, DecisionVerdict::Deny);
+    assert!(decision.reason.contains("evaluation failed"));
+    assert!(decision.reason.contains("member-2"));
 }
 
 #[test]
@@ -175,6 +265,25 @@ forbid(principal, action == SecCore::Action::"file.exec", resource);
 "#,
     );
     publication.task = Some(source("permit(principal, action, resource);"));
+    assert_eq!(
+        PdpRuntime::from_snapshot(publication)
+            .unwrap()
+            .evaluate(&request(), 100)
+            .unwrap()
+            .verdict,
+        DecisionVerdict::Deny
+    );
+}
+
+#[test]
+fn legacy_task_remains_an_intersection_even_without_explicit_forbids() {
+    let mut publication = snapshot("");
+    publication.task = Some(source(&format!(
+        r#"{FILES}
+        permit(principal, action == SecCore::Action::"process.spawn", resource)
+        when {{ resource.program == "another-program" }};
+    "#
+    )));
     assert_eq!(
         PdpRuntime::from_snapshot(publication)
             .unwrap()

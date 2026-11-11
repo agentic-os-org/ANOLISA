@@ -20,7 +20,9 @@ Owned data-directory permissions are repaired to 0700 after ancestor validation.
 Without AGENT_SEC_DATA_DIR, unsafe default ancestors select /var/lib/agent-sec/policy.\n\
 Conflicting databases or a directory selection that bypasses existing Policy state refuse startup.\n\
 Scopes start discovery jobs which create and reconcile their Bindings automatically.\n\
---authorization-config <ABSOLUTE_PATH> selects PAP policies and OS ceilings with root-owned JSON.\n\
+--authorization-config <ABSOLUTE_PATH> loads root-owned JSON with environment_permissions and ttl_seconds.\n\
+These set the OS-permission ceiling and decision acceptance deadline; PAP supplies the effective Cedar set.\n\
+Legacy baseline_policy and task_policy selection keys are rejected.\n\
 PII rules: --pii-rules <ABSOLUTE_PATH>, default /etc/agent-sec/pii-checker/rules.yaml.\n\
 Rules are compiled at startup; restart to apply updates.\n";
 
@@ -35,7 +37,7 @@ pub struct Cli {
     pub pii_rules: Option<PathBuf>,
     /// Optional root-owned `SkillSec` settings file.
     pub skillsec_config: Option<PathBuf>,
-    /// Root-owned PAP selection and OS ceilings; absent disables authorization RPCs.
+    /// Root-owned OS ceilings and decision TTL; absent disables authorization RPCs.
     pub authorization_config: Option<PathBuf>,
 }
 

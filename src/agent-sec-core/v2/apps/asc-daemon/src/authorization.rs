@@ -11,11 +11,8 @@ use asc_daemon_core::{AuthorizationError, AuthorizationEvaluator};
 use asc_daemon_protocol::authorization::{
     AuthorizationRequest, Decision, OsPermissionSet, RuleEffect, Validate,
 };
-use asc_foundation_types::ResourceId;
 use asc_pap::{PapRepository, PapService};
-use asc_pdp_runtime::{PdpRuntime, PolicySnapshot};
-use asc_policy_types::authoring::PolicySource;
-use asc_policy_types::policy::PreparedPolicy;
+use asc_pdp_runtime::PdpRuntime;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::digest::{SHA256, digest};
@@ -24,15 +21,10 @@ use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Policy selection and permission limits for OS authorization requests.
+/// Permission limits for OS authorization requests.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationConfig {
-    /// Mandatory PAP policy defining the authorization ceiling.
-    pub baseline_policy: ResourceId,
-    /// Optional PAP policy evaluated as an additional restriction.
-    #[serde(default)]
-    pub task_policy: Option<ResourceId>,
     /// Upper bound on OS permissions granted to each authorized process tree.
     pub environment_permissions: OsPermissionSet,
     /// Deadline to accept a decision, excluding subsequent approval waiting.
@@ -44,11 +36,6 @@ impl AuthorizationConfig {
         if self.ttl_seconds == 0 || self.ttl_seconds > 3600 {
             return Err(PublishedPolicyError::InvalidConfig(
                 "ttl_seconds must be in 1..=3600".into(),
-            ));
-        }
-        if self.task_policy.as_ref() == Some(&self.baseline_policy) {
-            return Err(PublishedPolicyError::InvalidConfig(
-                "baseline_policy and task_policy must be different".into(),
             ));
         }
         let permissions = &self.environment_permissions;
@@ -70,16 +57,9 @@ impl AuthorizationConfig {
         }
         Ok(())
     }
-
-    fn policy_ids(&self) -> Vec<ResourceId> {
-        std::iter::once(&self.baseline_policy)
-            .chain(self.task_policy.iter())
-            .cloned()
-            .collect()
-    }
 }
 
-/// Compiled cache for the current PAP revisions, reused only while both policy revisions match.
+/// Compiled cache for the complete current PAP authorization set.
 /// The cache never substitutes for a successful current-policy read.
 pub struct PapAuthorizationPolicy<R> {
     config: AuthorizationConfig,
@@ -88,7 +68,7 @@ pub struct PapAuthorizationPolicy<R> {
 }
 
 impl<R: PapRepository> PapAuthorizationPolicy<R> {
-    /// Loads root-owned deployment settings; selected policies may be created later through PAP.
+    /// Loads root-owned OS settings; policies may be created later through PAP.
     ///
     /// # Errors
     /// Rejects untrusted paths, malformed settings and invalid OS ceilings.
@@ -108,13 +88,9 @@ impl<R: PapRepository> PapAuthorizationPolicy<R> {
             .lock()
             .map_err(|_| PublishedPolicyError::State)?;
         let result = (|| {
-            // The single PAP read pins baseline and task to one consistent database view.
-            let policies = self.pap.current_policies(&self.config.policy_ids())?;
-            let versions: Vec<_> = policies
-                .iter()
-                .map(|policy| (&policy.policy_id, policy.revision))
-                .collect();
-            let bytes = serde_json::to_vec(&(&self.config, versions))?;
+            // Hold the cache lock across the read and load: an older read cannot publish last.
+            let mut policies = self.pap.authorization_policies()?;
+            let bytes = serde_json::to_vec(&(&self.config, &policies.version))?;
             let version = URL_SAFE_NO_PAD.encode(digest(&SHA256, &bytes).as_ref());
             if let Some(runtime) = active
                 .as_ref()
@@ -122,23 +98,17 @@ impl<R: PapRepository> PapAuthorizationPolicy<R> {
             {
                 return Ok(Arc::clone(runtime));
             }
-            let mut sources = policies.iter().map(cedar_source);
-            let baseline = sources
-                .next()
-                .ok_or(PublishedPolicyError::MissingPolicy)??;
-            let task = sources.next().transpose()?;
-            let runtime = Arc::new(PdpRuntime::from_snapshot(PolicySnapshot {
-                version,
-                baseline,
-                task,
-                environment_permissions: self.config.environment_permissions.clone(),
-                ttl_seconds: self.config.ttl_seconds,
-            })?);
+            policies.version = version;
+            let runtime = Arc::new(PdpRuntime::from_policy_set(
+                policies,
+                self.config.environment_permissions.clone(),
+                self.config.ttl_seconds,
+            )?);
             *active = Some(Arc::clone(&runtime));
             Ok(runtime)
         })();
         if result.is_err() {
-            // A removed or unsupported current policy must never fall back to an earlier grant.
+            // A failed current-set read or load must never fall back to an earlier grant.
             *active = None;
         }
         result
@@ -163,15 +133,6 @@ impl<R: PapRepository> AuthorizationEvaluator for PapAuthorizationPolicy<R> {
                 _ => AuthorizationError::Internal,
             }
         })
-    }
-}
-
-fn cedar_source(
-    policy: &PreparedPolicy,
-) -> Result<asc_policy_types::cedar::CedarPolicySource, PublishedPolicyError> {
-    match &policy.template {
-        PolicySource::Cedar(source) => Ok(source.clone()),
-        PolicySource::SecCore(_) => Err(PublishedPolicyError::UnsupportedSource),
     }
 }
 
@@ -251,12 +212,6 @@ pub enum PublishedPolicyError {
     /// The current PAP selection could not be loaded.
     #[error("cannot read current PAP policies: {0}")]
     Pap(#[from] asc_pap::PapError),
-    /// An incomplete repository result cannot authorize an operation.
-    #[error("PAP did not return the selected baseline policy")]
-    MissingPolicy,
-    /// This executor requires Cedar sources rather than legacy backend rules.
-    #[error("sandbox authorization requires Cedar policy sources")]
-    UnsupportedSource,
     /// Cedar or the OS policy compiler rejected the current policies.
     #[error("invalid authorization policy: {0}")]
     Compile(#[from] asc_pdp_runtime::PdpError),
@@ -269,6 +224,7 @@ pub enum PublishedPolicyError {
 mod tests {
     use super::*;
     use asc_policy_repository_sqlite::SqlitePolicyRepository;
+    use asc_policy_types::authoring::PolicySource;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn source(text: &str) -> PolicySource {
@@ -285,16 +241,15 @@ mod tests {
         PapAuthorizationPolicy<SqlitePolicyRepository>,
     ) {
         let pap = PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap()));
-        let baseline = pap
+        pap
             .create_policy(
                 "baseline",
                 &source(
-                    "permit(principal, action == SecCore::Action::\"process.spawn\", resource);",
+                    "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);",
                 ),
             )
             .unwrap();
         let config: AuthorizationConfig = serde_json::from_value(serde_json::json!({
-            "baseline_policy":baseline.policy_id,
             "environment_permissions":{"version":1,"filesystem":{"default":"deny","rules":[]},
                 "execution":{"deny_paths":[]},"network":{"mode":"off"}},
             "ttl_seconds":60
@@ -318,10 +273,10 @@ mod tests {
         ));
         let updated = pap
             .update_policy(
-                &authorization.config.baseline_policy,
+                &pap.list_policies(1, 0).unwrap().items[0].policy_id,
                 "baseline",
                 &source(
-                    "forbid(principal, action == SecCore::Action::\"process.spawn\", resource);",
+                    "forbid(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);",
                 ),
             )
             .unwrap();
@@ -329,8 +284,12 @@ mod tests {
         assert_ne!(first.policy_version(), second.policy_version());
         pap.delete_policy_revision(&updated.policy_id, updated.revision)
             .unwrap();
-        assert!(authorization.current_runtime().is_err());
-        assert!(authorization.active.lock().unwrap().is_none());
+        let empty = authorization.current_runtime().unwrap();
+        assert_ne!(second.policy_version(), empty.policy_version());
+        assert_eq!(
+            empty.evaluate(&request(), 100).unwrap().verdict,
+            asc_daemon_protocol::authorization::DecisionVerdict::Deny
+        );
     }
 
     #[test]
@@ -339,11 +298,11 @@ mod tests {
         authorization.current_runtime().unwrap();
         // PAP accepts this glob, but OS rules require exact paths or directory prefixes.
         let incompatible = source(
-            r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+            r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource)
                when { resource.path like "/work/sec*" };"#,
         );
         pap.update_policy(
-            &authorization.config.baseline_policy,
+            &pap.list_policies(1, 0).unwrap().items[0].policy_id,
             "baseline",
             &incompatible,
         )
@@ -356,25 +315,120 @@ mod tests {
     }
 
     #[test]
-    fn missing_task_does_not_drop_the_restriction() {
-        let (_, mut authorization) = fixture();
-        authorization.config.task_policy = Some(ResourceId::new("missing-task").unwrap());
-        assert!(authorization.current_runtime().is_err());
+    fn read_failure_clears_cache_and_new_members_replace_it() {
+        let (pap, authorization) = fixture();
+        let first = authorization.current_runtime().unwrap();
+        let added = pap.create_policy("new restriction", &source(
+            "forbid(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);"
+        )).unwrap();
+        let second = authorization.current_runtime().unwrap();
+        assert_ne!(first.policy_version(), second.policy_version());
+        pap.update_policy(
+            &added.policy_id,
+            "deployment only",
+            &source("forbid(principal, action == SecCore::Action::\"process.spawn\", resource);"),
+        )
+        .unwrap();
+        assert_eq!(
+            first.policy_version(),
+            authorization.current_runtime().unwrap().policy_version()
+        );
+
+        SqlitePolicyRepository::before_next_commit_for_test(|transaction| {
+            transaction.execute("DROP TABLE policies", []).unwrap();
+        });
+        pap.update_policy(
+            &added.policy_id,
+            "corrupted storage",
+            &source("forbid(principal, action == SecCore::Action::\"network.use\", resource);"),
+        )
+        .unwrap();
+        assert!(matches!(
+            authorization.current_runtime(),
+            Err(PublishedPolicyError::Pap(_))
+        ));
         assert!(authorization.active.lock().unwrap().is_none());
     }
 
     #[test]
-    fn config_rejects_policy_content_invalid_ttl_and_duplicate_selection() {
+    fn concurrent_refreshes_cannot_publish_an_old_snapshot_after_the_new_one() {
+        let (pap, authorization) = fixture();
+        let policy = pap.list_policies(1, 0).unwrap().items.remove(0);
+        let old = authorization.current_runtime().unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let authorization = &authorization;
+                scope.spawn(move || {
+                    for _ in 0..4 {
+                        authorization.current_runtime().unwrap();
+                    }
+                });
+            }
+            pap.update_policy(&policy.policy_id, "deny", &source(
+                "forbid(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);"
+            )).unwrap();
+            let latest = authorization.current_runtime().unwrap();
+            assert_ne!(latest.policy_version(), old.policy_version());
+        });
+        let latest = authorization.current_runtime().unwrap();
+        assert_ne!(latest.policy_version(), old.policy_version());
+        assert!(Arc::ptr_eq(
+            &latest,
+            authorization.active.lock().unwrap().as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn agent_type_matches_policy_without_identity_registration() {
+        use asc_daemon_protocol::authorization::DecisionVerdict;
+        let (pap, mut authorization) = fixture();
+        let policy = pap.list_policies(1, 0).unwrap().items.remove(0);
+        pap.update_policy(&policy.policy_id, "codex", &source(r#"
+            permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource)
+            when { principal has agent_type && principal.agent_type == "codex" };
+            permit(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource);
+        "#)).unwrap();
+        let mut input = request();
+        input.requested_permissions.filesystem.rules = serde_json::from_value(serde_json::json!([
+            {"effect":"allow","path":"/","rights":["read"]}
+        ]))
+        .unwrap();
+        authorization.config.environment_permissions = input.requested_permissions.clone();
+        assert_eq!(
+            authorization.evaluate(&input, 100).unwrap().verdict,
+            DecisionVerdict::Allow
+        );
+        for agent_type in [Some("qoder".into()), None] {
+            input.principal.agent_type = agent_type;
+            assert_eq!(
+                authorization.evaluate(&input, 100).unwrap().verdict,
+                DecisionVerdict::Deny
+            );
+        }
+    }
+
+    #[test]
+    fn config_rejects_legacy_selection_and_invalid_ttl() {
         let (_, authorization) = fixture();
-        let mut value = serde_json::to_value(&authorization.config).unwrap();
-        value["baseline"] = serde_json::json!({"text":"permit(principal, action, resource);"});
-        assert!(serde_json::from_value::<AuthorizationConfig>(value).is_err());
+        for key in ["baseline", "baseline_policy", "task_policy"] {
+            let mut value = serde_json::to_value(&authorization.config).unwrap();
+            value[key] = serde_json::json!("old-policy");
+            assert!(serde_json::from_value::<AuthorizationConfig>(value).is_err());
+        }
         let mut config = authorization.config;
         config.ttl_seconds = 0;
         assert!(config.validate().is_err());
-        config.ttl_seconds = 60;
-        config.task_policy = Some(config.baseline_policy.clone());
-        assert!(config.validate().is_err());
+    }
+
+    fn request() -> AuthorizationRequest {
+        serde_json::from_value(serde_json::json!({
+            "type":"os", "request_id":"r1", "execution_id":"e1",
+            "principal":{"agent_type":"codex"},
+            "launch":{"program":"true","resolved_program":"/usr/bin/true","args":[],"cwd":"/work"},
+            "requested_permissions":{"version":1,"filesystem":{"default":"deny","rules":[]},
+                "execution":{"deny_paths":[]},"network":{"mode":"off"}}
+        }))
+        .unwrap()
     }
 
     #[test]

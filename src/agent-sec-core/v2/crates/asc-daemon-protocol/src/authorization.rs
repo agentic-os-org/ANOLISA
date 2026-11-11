@@ -4,14 +4,13 @@ pub use asc_sandbox_types::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Logical Agent attribution; transport identity is established by the daemon.
+/// Caller-supplied Agent classification; individual identity is not modeled yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPrincipal {
-    /// Stable identifier used as the Cedar Subject UID.
-    pub agent_id: String,
     /// Agent family, for example codex or qoder.
-    pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Request family; future families use separate payloads.
@@ -75,7 +74,7 @@ pub struct AuthorizationRequest {
     pub request_id: String,
     /// Identifier of the invocation across authorization and execution.
     pub execution_id: String,
-    /// Logical Agent attributes.
+    /// Agent classification supplied by the caller.
     pub principal: AgentPrincipal,
     /// Fully prepared launch.
     pub launch: CommandRequest,
@@ -306,12 +305,7 @@ pub struct ClaimResponse {
 
 impl Validate for AuthorizationRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        for id in [
-            &self.request_id,
-            &self.execution_id,
-            &self.principal.agent_id,
-            &self.principal.agent_type,
-        ] {
+        for id in [&self.request_id, &self.execution_id] {
             if id.is_empty() || id.len() > 256 || id.contains('\0') {
                 return Err(ValidationError::new(
                     "identity",
@@ -319,8 +313,23 @@ impl Validate for AuthorizationRequest {
                 ));
             }
         }
+        self.principal.validate()?;
         self.launch.validate()?;
         self.requested_permissions.validate()
+    }
+}
+
+impl Validate for AgentPrincipal {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(agent_type) = &self.agent_type
+            && (agent_type.is_empty() || agent_type.len() > 256 || agent_type.contains('\0'))
+        {
+            return Err(ValidationError::new(
+                "principal.agent_type",
+                "expected a nonempty bounded type name",
+            ));
+        }
+        Ok(())
     }
 }
 

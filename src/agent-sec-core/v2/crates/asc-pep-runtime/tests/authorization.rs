@@ -65,8 +65,7 @@ fn now() -> u64 {
 }
 fn principal() -> AgentPrincipal {
     AgentPrincipal {
-        agent_id: "test-agent".into(),
-        agent_type: "codex".into(),
+        agent_type: Some("codex".into()),
     }
 }
 fn permissions(path: &std::path::Path) -> OsPermissionSet {

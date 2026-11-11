@@ -582,9 +582,14 @@ SQLite contracts 覆盖三处快照、更新/删除后的修订固定及关闭�
 撤销 Cedar 支持前需处理已有 Cedar 源码快照；本次未增加 SQL 迁移。
 
 Sandbox PDP 对 `Subject.agent_type`、主体条件、`process.spawn` 和 permit 上通过校验的
-`warn`/`escalate`/`transform` advice 求值。它通过 `pst` 加载 PAP 所选策略的当前源码，
-重建 SDK `PolicySet` 后在进程内求值。基线和可选任务策略一起读取；更新影响后续请求，
-Scope/Binding 快照仍保留原 revision。配置选择 Policy ID，不接收策略快照文件。
+`warn`/`escalate`/`transform` advice 求值。它通过 `pst` 加载 PAP 推导的当前有效策略集，
+合并为一个 SDK `PolicySet` 后在进程内求值。每次一致读取全部当前策略，纳入所有语句均有
+显式 principal header 的 Cedar 源码；混用裸 header 与显式约束的源码整份拒绝。
+更新、删除和集合资格变化影响后续请求，Scope/Binding 快照仍保留原 revision。
+配置只包含 `environment_permissions` 和 `ttl_seconds`，分别设置 OS 权限上限和决定接收期限。
+旧配置项 `baseline_policy`、`task_policy` 会被拒绝。调整旧请求策略时须核对原来的交集语义：
+合并集合中的 permit 可以增加授权，整个集合中匹配的 forbid 优先于 permit。
+配置与迁移见 [Sandbox 使用指南](../../../../docs/user-guide/zh/agent-sec-core/sandbox.md)，
 决策与回执见 [Sandbox 授权设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。
 
 ### 8.7 Schema 版本与策略加载

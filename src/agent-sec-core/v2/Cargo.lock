@@ -564,6 +564,7 @@ dependencies = [
  "asc-policy-types",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tracing",
  "uuid",

@@ -27,9 +27,6 @@ struct Options {
     /// OS permission JSON or Cedar request source, including runtime dependencies.
     #[arg(long)]
     permissions: PathBuf,
-    /// Logical Agent identity supplied by the embedding application.
-    #[arg(long)]
-    agent_id: String,
     /// Agent family, such as codex or qoder.
     #[arg(long)]
     agent_type: String,
@@ -115,8 +112,7 @@ fn run(options: Options) -> Result<u8, Box<dyn std::error::Error>> {
         .then_some(&mut approval as &mut dyn ApprovalHandler);
     let outcome = runtime.run(
         &AgentPrincipal {
-            agent_id: options.agent_id,
-            agent_type: options.agent_type,
+            agent_type: Some(options.agent_type),
         },
         launch,
         &permissions,

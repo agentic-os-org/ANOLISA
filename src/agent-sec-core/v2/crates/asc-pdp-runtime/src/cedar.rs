@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use asc_policy_cedar::advice::Advice;
-use asc_policy_types::cedar::CedarPolicySource;
+use asc_policy_types::cedar::{AuthorizationPolicy, CedarPolicySource};
 use cedar_policy::{Authorizer, Effect, PolicySet};
 
 use crate::{PdpError, path_conditions, request::Query};
@@ -20,6 +20,38 @@ pub(crate) struct Outcome {
 }
 
 impl PolicyLayer {
+    pub fn from_members(members: &[AuthorizationPolicy]) -> Result<Self, PdpError> {
+        let mut policies = PolicySet::new();
+        for member in members {
+            if !asc_policy_cedar::request_authorization_eligible(&member.source)? {
+                return Err(PdpError::Configuration(format!(
+                    "{} has bare principal headers",
+                    member.policy_id
+                )));
+            }
+            let source = PolicySet::from_pst(asc_policy_cedar::pst(&member.source)?)
+                .map_err(|error| PdpError::Evaluation(error.to_string()))?;
+            for policy in source.policies() {
+                // Length-prefix the repository ID so even IDs containing separators cannot collide.
+                let id = format!(
+                    "{}:{}:{}:{}",
+                    member.policy_id.as_str().len(),
+                    member.policy_id,
+                    member.revision.get(),
+                    policy.id()
+                );
+                policies
+                    .add(policy.new_id(cedar_policy::PolicyId::new(id)))
+                    .map_err(|error| PdpError::Evaluation(error.to_string()))?;
+            }
+        }
+        let boundaries = path_conditions::boundaries(&policies)?;
+        Ok(Self {
+            policies,
+            boundaries,
+        })
+    }
+
     pub fn new(source: &CedarPolicySource) -> Result<Self, PdpError> {
         let policies = PolicySet::from_pst(asc_policy_cedar::pst(source)?)
             .map_err(|error| PdpError::Evaluation(error.to_string()))?;

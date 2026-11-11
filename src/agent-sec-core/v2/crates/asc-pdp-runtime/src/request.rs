@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 
 use crate::PdpError;
 
+// shortcut: use one synthetic subject until authenticated Agent identities are supported.
+const SUBJECT_ID: &str = "request";
+
 pub(crate) struct Query {
     pub request: Request,
     pub entities: Entities,
@@ -96,10 +99,14 @@ fn query(
     let action = uid("Action", action)?;
     let context = Context::from_json_value(context, Some((schema, &action)))
         .map_err(|error| PdpError::Evaluation(error.to_string()))?;
+    let mut subject_attributes = serde_json::Map::new();
+    if let Some(agent_type) = &request.principal.agent_type {
+        subject_attributes.insert("agent_type".into(), json!(agent_type));
+    }
     let entities = Entities::from_json_value(
         json!([
-            {"uid": {"type": "SecCore::Subject", "id": request.principal.agent_id},
-             "attrs": {"agent_type": request.principal.agent_type}, "parents": []},
+            {"uid": {"type": "SecCore::Subject", "id": SUBJECT_ID},
+             "attrs": subject_attributes, "parents": []},
             {"uid": {"type": format!("SecCore::{resource_type}"), "id": resource_id},
              "attrs": attributes, "parents": []}
         ]),
@@ -107,7 +114,7 @@ fn query(
     )
     .map_err(|error| PdpError::Evaluation(error.to_string()))?;
     let request = Request::new(
-        uid("Subject", &request.principal.agent_id)?,
+        uid("Subject", SUBJECT_ID)?,
         action,
         uid(resource_type, resource_id)?,
         context,

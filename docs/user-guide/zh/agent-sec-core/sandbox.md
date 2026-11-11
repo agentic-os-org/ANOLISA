@@ -163,11 +163,10 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 [Policy 指南](policy-cli.md#cedar-policy-源码)。更新成功后，下一次授权请求使用新版本。
 
 通过 `agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`
-启用授权。此 root 配置只选择 PAP 策略 ID 和运行参数，不保存 Cedar 策略正文，也不接受策略快照文件：
+启用授权。此 root 配置设置运行参数，不保存策略 ID 或 Cedar 正文：
 
 ```json
 {
-  "baseline_policy": "<policy ID returned by PAP>",
   "environment_permissions": {
     "version": 1,
     "filesystem": {"default": "deny", "rules": [
@@ -180,13 +179,37 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 }
 ```
 
-可选 `task_policy` 指定另一份 PAP 策略 ID。两份策略均使用
-`schema: {schemaId: "seccore.system", revision: 1}`，分别求值。`environment_permissions` 限制每次 `type: "os"` 请求可获准的权限，
-由沙箱执行器约束此次启动的进程树。AgentSight 通过 Scope/Binding 选择要保护的主机进程。
-配置及祖先目录须由 root 管理，不可被组或其他用户写入；修改策略选择或运行参数后重启 daemon。
+请求主体只提供可选的 `principal.agent_type`，例如 `{"principal":{"agent_type":"cosh"}}`，
+无需登记 Agent 身份或 UID。类型由调用方提供，用于分类匹配，尚未认证；此阶段不按身份
+隔离单个 Agent。`environment_permissions` 限制每次 OS 请求的权限。
+配置及祖先目录须由 root 管理，不可被组或其他用户写入；调整运行参数后重启 daemon。
 
-每次 evaluate 从 PAP 一起读取所选策略的当前版本；版本未变时复用已编译结果。
-策略缺失、被删除或无法用于授权时停止，不回退旧策略。已有 Scope/Binding 继续使用各自固定版本。
+PAP 从全部当前策略推导请求策略集，按精确的
+`schema: {schemaId: "seccore.system", revision: 1}` 引用校验。
+纳入的源码中每条语句都必须有显式 principal header。当前请求使用
+`principal is SecCore::Subject`，在条件中匹配 `agent_type`：
+
+```cedar
+permit(principal is SecCore::Subject,
+       action == SecCore::Action::"process.spawn", resource)
+when { principal has agent_type && principal.agent_type == "cosh" };
+```
+
+此规则只授权进程启动，还须补充应用所需的文件/网络策略。缺少类型时不会匹配此条件。
+原生 JSON 和全部使用裸 `principal` header 的源码不进入此链路；仅在 `when` 中引用
+principal 不算加入。单份存储策略混用裸 header 与显式约束会报错。
+需要共同约束请求的每条规则，包括 permit 和 forbid，都必须使用显式 principal header。
+单纯拆分不能保留共同约束语义：拆出的裸 principal forbid 不会进入请求授权集。
+只有确实面向不同处理路径的规则才适合拆分。这是 ANOLISA 的加载约定，不是 Cedar 的启用字段。
+
+每次 evaluate 拉取一个一致的当前策略快照，摘要覆盖成员、版本、schema 和正文。
+未变化时复用编译缓存，变化后整体验证成功才替换。读取、验证或运行兼容性失败时停止授权，
+不回退旧策略。创建、删除和 header 资格变化在下一次请求生效；空集替换缓存并拒绝请求。
+整个集合中匹配的 forbid 优先于 permit。Scope/Binding 的部署、固定版本和清理独立保持原状。
+
+旧配置项 `baseline_policy`、`task_policy` 会明确报错。调整旧请求策略时必须人工核对原来的
+交集语义：新集合中的两份 permit 源码会合并授权。额外限制应表达为 forbid，或收紧所有
+适用的 permit。已有部署策略不会自动改写。
 
 PEP 须在 ttl_seconds 内一次性接收决定；接收后的审批等待、安装和运行不再因该期限失败。
 策略更新影响后续请求，已接收决定仍绑定原命令和权限；拒绝或执行失败后不能复用决定。
@@ -215,7 +238,8 @@ cosh
 
 这会把现有 guard 命中的 shell 命令切换到 PDP 授权；不扩大命令匹配范围，也不接管原生文件工具。
 未设置该变量时保留原行为。设置后，权限文件无效、daemon 不可用或授权失败均阻断，不回退旧沙箱或无隔离执行。
-请求使用 `agent_type: "cosh"` 和 `agent_id: "cosh:<session_id>"`，Cedar 策略须允许相应主体及 `/bin/bash -c` 调用。
+请求直接提供 `principal.agent_type: "cosh"`，Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
+会话 ID 不建立授权身份。
 
 Hook 通过私有 `sandbox hook prepare` 入口准备权限申请。ALLOW/MODIFY 替换为获准命令的执行入口；
 STEP_UP 使用 Cosh 原生 ask，warn 显示为通知。daemon 保管完整请求和决定，包装命令只携带决定 ID。
