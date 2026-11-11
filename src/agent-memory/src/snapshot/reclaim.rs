@@ -10,7 +10,7 @@
 //!    failed or the process died first. `list_tarballs` enumerates
 //!    `*.json` only, so the archive is invisible to every user-facing
 //!    operation while still occupying disk.
-//! 3. orphan `*.json` — a sidecar whose archive is gone. With no archive
+//! 3. orphan `*.json` — a sidecar without a regular archive file. With no archive
 //!    there is no restore path (`restore_tarball` checks the archive
 //!    first), so the sidecar is dead weight.
 //! 4. unparseable sidecar with an intact archive — a `write_sidecar`
@@ -32,6 +32,9 @@
 //!    lock, a staging directory past the age guard can be removed wholesale —
 //!    via `remove_restore_staging`, since a crashed extraction
 //!    reproduces archived (possibly read-only) directory modes.
+//! 6. invalid archive with a parseable sidecar — metadata alone cannot
+//!    establish recoverability. The same archive validation as rule 4
+//!    applies, and a rejected archive leaves its sidecar for rule 3.
 //!
 //! The sweeper is age-guarded: an artefact younger than
 //! `min_artifact_age_secs` is never touched, so an in-flight snapshot in
@@ -41,6 +44,7 @@
 //! staging directory even in another process. A busy or unavailable lock
 //! skips the sweep. The sweep runs once per mount open, not continuously.
 
+use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::Duration;
@@ -51,8 +55,8 @@ use crate::ns::MountPoint;
 
 /// What the anchored sidecar read found for one archive.
 enum SidecarState {
-    /// Parsed successfully — a healthy pair.
-    Healthy,
+    /// Parsed successfully; archive integrity is still unknown.
+    Parseable,
     /// Readable but unparseable — repairable.
     Corrupt,
     /// Resolvable but unreadable, or not there at all — not repairable.
@@ -84,9 +88,13 @@ pub const DEFAULT_MIN_ARTIFACT_AGE: Duration = Duration::from_secs(24 * 60 * 60)
 pub struct ReclaimReport {
     /// `*.partial` files and atomic-write staging tempfiles removed.
     pub partials_removed: usize,
-    /// `*.tar.gz` archives removed for having no sidecar.
+    /// `*.tar.gz` archives removed as orphaned, invalid, or tampered.
     pub archives_removed: usize,
-    /// `*.json` sidecars removed for having no archive.
+    /// Invalid archives discarded, included in `archives_removed`.
+    pub invalid_archives_removed: usize,
+    /// Archives retained because opening or reading them failed.
+    pub validation_failures: usize,
+    /// `*.json` sidecars removed for having no regular archive file.
     pub sidecars_removed: usize,
     /// Truncated sidecars whose archive was valid — repaired by
     /// regenerating the sidecar from the archive's metadata.
@@ -142,24 +150,16 @@ fn older_than_anchored(
 /// (headers, CRC, length) whose entries all pass the shared
 /// `EntryGate` — the archive-intrinsic refusals `restore_tarball` applies
 /// before extraction (entry type, `..` traversal, duplicate names,
-/// file/dir prefix collisions). Runtime failures (I/O errors, ENOSPC,
-/// staging permissions) are not visible to any pre-extraction check and
-/// are not claimed. Because the gate is the same code restore runs, the
-/// two sides cannot drift. A zero-entry archive is valid on purpose:
+/// file/dir prefix collisions). Filesystem read errors are propagated so
+/// a temporarily unreadable backup is retained. Runtime restore failures
+/// (ENOSPC, staging permissions) are outside this check. Sharing the gate
+/// with restore keeps both checks aligned. A zero-entry archive is valid:
 /// `create_tarball` legitimately produces one for an empty mount, and
-/// its truncated sidecar is worth repairing. Fails closed: an unreadable
-/// archive is treated as invalid. The fd is opened through the mount
-/// root (`safe_fs::open_read`), both to honor the anchored-path rule and
-/// because `File::open` on a FIFO blocks until a writer appears —
-/// `open_read` refuses the traversal before that can matter.
-fn archive_is_valid(root: std::os::fd::BorrowedFd<'_>, archive_rel: &Path) -> bool {
+/// its truncated sidecar is worth repairing.
+fn archive_is_valid(reader: impl Read) -> io::Result<bool> {
     use flate2::read::GzDecoder;
 
-    let file = match crate::safe_fs::open_read(root, archive_rel) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    let mut gz = GzDecoder::new(file);
+    let mut gz = GzDecoder::new(reader);
     let mut tar = ::tar::Archive::new(&mut gz);
     let mut gate = super::tar::EntryGate::new();
     match tar.entries() {
@@ -167,23 +167,37 @@ fn archive_is_valid(root: std::os::fd::BorrowedFd<'_>, archive_rel: &Path) -> bo
             for entry in entries {
                 let entry = match entry {
                     Ok(entry) => entry,
-                    Err(_) => return false,
+                    Err(error) => return archive_decode_error(error),
                 };
                 let ty = entry.header().entry_type();
                 let path = match entry.path() {
                     Ok(path) => path.to_path_buf(),
-                    Err(_) => return false,
+                    Err(_) => return Ok(false),
                 };
                 if gate.admit(ty, &path).is_err() {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
-        Err(_) => return false,
+        Err(error) => return archive_decode_error(error),
     }
     // Drain the rest so gzip's CRC/length check actually runs — tar stops
     // at its end marker before gzip validates the trailer.
-    std::io::copy(&mut tar.into_inner(), &mut std::io::sink()).is_ok()
+    match io::copy(&mut tar.into_inner(), &mut io::sink()) {
+        Ok(_) => Ok(true),
+        Err(error) => archive_decode_error(error),
+    }
+}
+
+fn archive_decode_error(error: io::Error) -> io::Result<bool> {
+    // File read failures retain errno through gzip/tar iteration. Parser
+    // failures use io::Error too, but have no OS code (including bad CRCs
+    // and truncated streams). Only those confirm corrupt archive bytes.
+    if error.raw_os_error().is_some() {
+        Err(error)
+    } else {
+        Ok(false)
+    }
 }
 
 /// One bounded sweep over the snapshots directory. Best-effort: individual
@@ -391,8 +405,7 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         let sidecar_state =
             match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), &sidecar_rel) {
                 Ok(body) => match serde_json::from_str::<super::SnapshotInfo>(&body) {
-                    // Parseable sidecar: a healthy pair, nothing to do.
-                    Ok(_) => SidecarState::Healthy,
+                    Ok(_) => SidecarState::Parseable,
                     Err(_) => SidecarState::Corrupt,
                 },
                 // A symlink or mount crossing on the resolution path is
@@ -407,26 +420,32 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
                 Err(_) => SidecarState::Absent,
             };
         match sidecar_state {
-            SidecarState::Healthy => continue,
-            // Truncated/corrupt sidecar on an intact archive: regenerate.
-            // Only the id must match the filename for list/restore to work;
-            // the remaining fields mirror what `create_tarball` writes.
-            SidecarState::Corrupt => {
+            SidecarState::Parseable | SidecarState::Corrupt => {
                 if !older_than_anchored(mount.root_fd.as_fd(), &archive_rel, min_age, now) {
                     report.kept_young += 1;
                     continue;
                 }
-                // Only repair when the archive passes the pre-extraction
-                // gate — an archive whose entries restore would refuse
-                // must not gain a fabricated sidecar advertising it
-                // forever (list shows it, restore fails, and neither sweep
-                // rule ever fires again). Runtime restore failures (I/O,
-                // ENOSPC) are outside any pre-extraction check and out of
-                // scope here. An invalid archive is deleted under the
-                // sidecar-less rule semantics below instead.
-                if !archive_is_valid(mount.root_fd.as_fd(), &archive_rel) {
+                // A parseable sidecar cannot establish archive integrity.
+                // Validate before keeping or repairing either kind of pair.
+                let valid = crate::safe_fs::open_read(mount.root_fd.as_fd(), &archive_rel)
+                    .and_then(|file| archive_is_valid(file).map_err(MemoryError::Io));
+                let valid = match valid {
+                    Ok(valid) => valid,
+                    Err(error) => {
+                        report.validation_failures += 1;
+                        tracing::warn!(
+                            "snapshot reclaim: cannot validate {}; retaining archive and sidecar: {error}",
+                            archive.display()
+                        );
+                        continue;
+                    }
+                };
+                if !valid {
                     match std::fs::remove_file(archive) {
-                        Ok(()) => report.archives_removed += 1,
+                        Ok(()) => {
+                            report.archives_removed += 1;
+                            report.invalid_archives_removed += 1;
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 "snapshot reclaim: could not remove {}: {e}",
@@ -437,6 +456,10 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
                     }
                     continue;
                 }
+                if matches!(sidecar_state, SidecarState::Parseable) {
+                    continue;
+                }
+                // Regenerate corrupt metadata only after validating its archive.
                 let id = archive
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -558,7 +581,7 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
     }
 
     for sidecar in &sidecars {
-        // Anchored existence probe, same reasoning as the archive loop: the
+        // Anchored type probe, same reasoning as the archive loop: the
         // sidecar's name comes from a directory listing, so the archive
         // path must never be probed through the absolute path.
         let archive_rel = snapshots_rel.join(format!(
@@ -569,9 +592,10 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
                 .map(|n| n.strip_suffix(".json").unwrap_or(n))
                 .unwrap_or_default()
         ));
-        if crate::safe_fs::exists(mount.root_fd.as_fd(), &archive_rel) {
-            // An archive is present; this sidecar was either healthy (skipped
-            // above) or repaired by the archive loop. Either way, done.
+        if crate::safe_fs::metadata(mount.root_fd.as_fd(), &archive_rel)
+            .is_ok_and(|metadata| metadata.is_file())
+        {
+            // A regular archive is present; directories cannot back snapshots.
             continue;
         }
         // The sidecar's own age check is anchored too: its name is just as
@@ -660,7 +684,7 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
 
     if report.total_removed() > 0
         || report.sidecars_repaired > 0
-        || report.removal_failures + report.tampered_pairs > 0
+        || report.removal_failures + report.validation_failures + report.tampered_pairs > 0
     {
         // Failures and tampering escalate to warn: neither resolves on its
         // own (a read-only staging dir, an unremovable orphan, planted
@@ -671,26 +695,57 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         macro_rules! summary {
             ($level:ident) => {
                 tracing::$level!(
-                    "snapshot reclaim: removed {} partial, {} orphaned archive, {} orphaned sidecar \
+                    "snapshot reclaim: removed {} partial, {} archive, {} orphaned sidecar \
                      file(s), repaired {} truncated sidecar(s), removed {} stale staging dir(s) \
-                     under {} ({} below the age guard, {} removal failures, {} tampered pair(s))",
+                     under {} ({} invalid archive(s) discarded, {} below the age guard, \
+                     {} removal failures, {} validation failures, {} tampered pair(s))",
                     report.partials_removed,
                     report.archives_removed,
                     report.sidecars_removed,
                     report.sidecars_repaired,
                     report.staging_dirs_removed,
                     dir.display(),
+                    report.invalid_archives_removed,
                     report.kept_young,
                     report.removal_failures,
+                    report.validation_failures,
                     report.tampered_pairs
                 );
             };
         }
-        if report.removal_failures + report.tampered_pairs > 0 {
+        if report.removal_failures + report.validation_failures + report.tampered_pairs > 0 {
             summary!(warn);
         } else {
             summary!(info);
         }
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_validation_propagates_filesystem_read_errors() {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = ::tar::Builder::new(gz);
+        let mut header = ::tar::Header::new_gnu();
+        header.set_size(7);
+        header.set_mode(0o600);
+        tar.append_data(&mut header, "notes.md", &b"backup\n"[..])
+            .unwrap();
+        let bytes = tar.into_inner().unwrap().finish().unwrap();
+        assert!(archive_is_valid(io::Cursor::new(&bytes)).unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        for offset in [0, bytes.len() / 2, bytes.len() - 8] {
+            // Reading a directory fails with EISDIR. Chain it after a valid
+            // prefix to exercise failures at open-stream, payload and trailer.
+            let reader =
+                io::Cursor::new(&bytes[..offset]).chain(std::fs::File::open(dir.path()).unwrap());
+            let error = archive_is_valid(reader).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(nix::libc::EISDIR), "{offset}");
+        }
+    }
 }

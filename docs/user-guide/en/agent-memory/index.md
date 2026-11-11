@@ -643,9 +643,22 @@ structurally valid — a full gzip stream whose entries all pass the same
 pre-extraction checks `restore` applies (only regular files and directories;
 no `..` traversal, duplicate file names, or a file landing on an
 already-extracted path) — by
-regenerating the sidecar from the archive's own metadata. An archive that
-fails those checks is also refused by `restore`, so it is deleted instead of
-being repaired into a snapshot that could never restore.
+regenerating the sidecar from the archive's own metadata. These checks also
+apply to archives with parseable sidecars once the archives exceed the age
+guard. Invalid archives are deleted and counted separately in the sweep
+summary; their sidecars are removed once they too exceed the age guard.
+Valid pairs are retained without rewriting their metadata. This validation
+reads each eligible archive in full during mount opening.
+If opening or reading an archive fails, the sweep retains the archive and
+its sidecar, logs a warning, and counts a validation failure. Permission or
+storage access failures do not establish corruption; restore access and
+open the mount again to retry validation.
+
+`mem_snapshot_list` excludes entries without a regular archive file; it does
+not perform a full integrity check. A directory named `<id>.tar.gz` cannot
+keep a stale sidecar alive: the sweep removes the sidecar after its age guard
+but leaves the directory and its contents untouched.
+
 The repair itself stages its replacement as a hidden `.memory-write-*.tmp`
 file next to the archives; one left by a hard kill mid-repair is removed by
 later sweeps once it ages past the guard.

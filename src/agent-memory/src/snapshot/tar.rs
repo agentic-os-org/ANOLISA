@@ -5,8 +5,8 @@
 //!
 //! - Create: walks the mount root EXCLUDING `.anolisa/`, writes a gzipped
 //!   tarball, then atomically renames into place.
-//! - List: scans the snapshots dir for sidecars and returns them oldest →
-//!   newest.
+//! - List: scans for sidecars backed by regular archive files and returns
+//!   them oldest → newest, without a full integrity check.
 //! - Restore: extracts into a sibling staging dir, then atomically swaps
 //!   the user-visible content (everything except `.anolisa/`) so a crash
 //!   mid-restore can never leave a half-extracted tree.
@@ -365,11 +365,13 @@ fn remove_quietly(path: &Path) {
     }
 }
 
+/// List sidecars backed by regular archive files, without checking integrity.
 pub fn list_tarballs(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
     let dir = snapshots_dir(mount);
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    let snapshots_rel = Path::new(mount.meta_dir_name()).join(SNAPSHOTS_DIR);
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
@@ -378,7 +380,15 @@ pub fn list_tarballs(mount: &MountPoint) -> Result<Vec<SnapshotInfo>> {
             continue;
         }
         if let Ok(info) = read_sidecar(&path) {
-            out.push(info);
+            if validate_snapshot_id(&info.id).is_err() {
+                continue;
+            }
+            let archive_rel = snapshots_rel.join(format!("{}.tar.gz", info.id));
+            if crate::safe_fs::metadata(mount.root_fd.as_fd(), &archive_rel)
+                .is_ok_and(|metadata| metadata.is_file())
+            {
+                out.push(info);
+            }
         }
     }
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
