@@ -25,6 +25,7 @@ use crate::error::{MemoryError, Result};
 use crate::safe_fs;
 use crate::service::MemoryService;
 
+const TOOL: &str = "mem_index_refresh";
 const INDEX_FILE: &str = "MEMORY.md";
 const MAX_LINES: usize = 200;
 const MAX_BYTES: usize = 25_600; // 25KB
@@ -164,15 +165,36 @@ pub fn write_index(svc: &MemoryService, entries: &[IndexEntry]) -> Result<()> {
     // truncate and overwrite its target outside the mount. openat2 with
     // RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS on the mount's root_fd refuses
     // the link instead of following it.
-    safe_fs::write(index_fd(svc), Path::new(INDEX_FILE), content.as_bytes())?;
+    let bytes = match safe_fs::write(index_fd(svc), Path::new(INDEX_FILE), content.as_bytes()) {
+        Ok(n) => n,
+        Err(e) => {
+            audit_refusal(svc, &e);
+            return Err(e);
+        }
+    };
 
     svc.audit_log(
-        AuditEntry::new("mem_index_refresh")
+        AuditEntry::new(TOOL)
             .path(INDEX_FILE.to_string())
-            .bytes(content.len() as u64),
+            .bytes(bytes),
     );
 
     Ok(())
+}
+
+/// Record a refused index operation on the audit chain before propagating it.
+///
+/// Same shape as the sibling mount tools (`write`, `read`, `append`, `edit`):
+/// an error only handed back to the caller never reaches the audit log, the
+/// session log or the journald fanout, so an attempted index write outside the
+/// mount would leave no trace anywhere. `AuditEntry::error` also flips `ok` to
+/// false, which journald exports as `ANOLISA_OK=false` at warning priority.
+fn audit_refusal(svc: &MemoryService, err: &MemoryError) {
+    svc.audit_log(
+        AuditEntry::new(TOOL)
+            .path(INDEX_FILE.to_string())
+            .error(err.to_string()),
+    );
 }
 
 /// Refresh the MEMORY.md index: scan all files and rebuild.
@@ -197,12 +219,17 @@ fn read_index(svc: &MemoryService) -> Result<Vec<IndexEntry>> {
     match safe_fs::read_to_string(index_fd(svc), Path::new(INDEX_FILE)) {
         Ok(content) => Ok(parse_index(&content)),
         Err(MemoryError::NotFound(_)) => Ok(Vec::new()),
-        Err(e) => Err(e),
+        Err(e) => {
+            audit_refusal(svc, &e);
+            Err(e)
+        }
     }
 }
 
 /// Update a single entry in the index (upsert).
-/// Called after memory_observe or mem_write to keep the index current.
+///
+/// Not wired into a tool path today: the MCP surface only exposes
+/// `mem_index_refresh`, which rebuilds the whole index from the tree.
 pub fn update_index_entry(svc: &MemoryService, entry: &IndexEntry) -> Result<()> {
     let mut entries = read_index(svc)?;
 
@@ -221,10 +248,16 @@ pub fn update_index_entry(svc: &MemoryService, entry: &IndexEntry) -> Result<()>
 
 /// Remove an entry from the index by path.
 pub fn remove_index_entry(svc: &MemoryService, path: &str) -> Result<()> {
-    // `safe_fs::exists` refuses a symlinked MEMORY.md, so the entry removal
-    // no-ops instead of rewriting the link's target below.
-    if !safe_fs::exists(index_fd(svc), Path::new(INDEX_FILE)) {
-        return Ok(());
+    // A missing index is a legitimate no-op. An index the guard refuses to
+    // open (a symlink planted at `MEMORY.md`) is not: nothing was removed, so
+    // the caller must see the refusal instead of a silent success.
+    match safe_fs::metadata(index_fd(svc), Path::new(INDEX_FILE)) {
+        Ok(_) => {}
+        Err(MemoryError::NotFound(_)) => return Ok(()),
+        Err(e) => {
+            audit_refusal(svc, &e);
+            return Err(e);
+        }
     }
 
     let entries: Vec<IndexEntry> = read_index(svc)?
