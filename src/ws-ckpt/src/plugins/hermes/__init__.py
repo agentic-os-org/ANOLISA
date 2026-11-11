@@ -131,8 +131,7 @@ def _on_session_end(
     """Handle on_session_end — create a checkpoint after the turn."""
     manager = get_manager()
 
-    restored = manager.skip_auto_checkpoint_workspaces.copy()
-    manager.skip_auto_checkpoint_workspaces.clear()
+    restored = manager.take_rollback_workspaces(session_id)
     if not manager.config.auto_checkpoint:
         return
     if restored:
