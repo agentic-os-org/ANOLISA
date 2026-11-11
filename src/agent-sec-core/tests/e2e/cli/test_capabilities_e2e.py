@@ -661,9 +661,11 @@ def test_capabilities_default_timeouts_match_every_hook_runtime() -> None:
     assert reported == _DEFAULT_TIMEOUTS
 
 
-def test_capabilities_cosh_sandbox_reports_switch_without_source_override() -> None:
+def test_capabilities_cosh_sandbox_reports_command_source() -> None:
     with _EnvPatch(
         AGENT_SEC_COSH_SANDBOX_ALL_SHELL=" TRUE ",
+        AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE="command",
+        AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS="/Run time/Runtime.Cedar",
     ):
         result = run_cli("capabilities", "--capability", "sandbox", "--output", "json")
     assert result.returncode == 0, result.stderr
@@ -674,7 +676,15 @@ def test_capabilities_cosh_sandbox_reports_switch_without_source_override() -> N
         "effective": True,
         "default": False,
     }
-    assert set(records[0]["env"]) == {"AGENT_SEC_COSH_SANDBOX_ALL_SHELL"}
+    assert records[0]["env"]["AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE"] == {
+        "effective": "command",
+        "default": "fixed",
+    }
+    assert records[0]["env"]["AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS"] == {
+        "effective": "/Run time/Runtime.Cedar",
+        "default": "",
+    }
+    assert "AGENT_SEC_COSH_SANDBOX_PERMISSIONS" not in records[0]["env"]
 
 
 def test_capabilities_table_keeps_the_documented_column_order() -> None:

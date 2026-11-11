@@ -562,7 +562,7 @@ Supported capability names are `code-scan`, `prompt-scan`, `pii-check`, `skill-l
 
 The configured L2 backend is a deliberate exception: a model name is only useful verbatim, so `PROMPT_SCANNER_L2_MODEL` is reported case-preserved (escaped and length-capped) as an `env` entry of `prompt-scan`. Its `default` — and the `effective` value when the variable is unset — is the default backend reported by the native scanner engine, and a name no backend supports is reported as configured plus a diagnostic, because the engine rejects it at construction and scans then fail rather than falling back. Because host hooks are fail-open on a failed scan, this diagnostic is usually the only place the misconfiguration is visible before prompts start flowing unscanned. It has no table column, so read it with `--capability prompt-scan --output json`.
 
-`sandbox` reports `MODE=all-shell` for `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` or `true`, `dangerous` when unset or `0`/`false`, and `blocked` for invalid values. Case and surrounding whitespace are ignored. `ENABLED` describes the guard, not this switch. JSON includes only the switch; the view does not read the installed default template or check authorization readiness. `TIMEOUT(s)=55` is the prepare budget; finish uses 10 seconds. See [Cosh sandbox authorization](sandbox.md#enable-authorization-in-cosh-ng) for installation and failure behavior.
+`sandbox` reports `MODE=all-shell` for `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` or `true`, `dangerous` when unset or `0`/`false`, and `blocked` for invalid values. Case and surrounding whitespace are ignored for this switch. `ENABLED` describes the guard, not this switch. JSON also reports the permission source (default `fixed`) and dynamic Cedar runtime preset literally; it does not validate those settings, read permission files or check authorization readiness. `TIMEOUT(s)=55` covers generation and prepare; finish uses 10 seconds. See [Cosh sandbox authorization](sandbox.md#enable-authorization-in-cosh-ng) for installation and failure behavior.
 
 View source and limits:
 
@@ -605,6 +605,8 @@ adapter code actually reads (✓ = read by that host, ✗ = not read):
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` | `false` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE` | `fixed` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` | unset | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 `PROMPT_SCANNER_L2_MODEL` is marked `✓*` because no adapter reads it directly:
 every host shells out to `agent-sec-cli scan-prompt`, which resolves the L2

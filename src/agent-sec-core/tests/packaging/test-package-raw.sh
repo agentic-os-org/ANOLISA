@@ -161,6 +161,8 @@ cli.chmod(0o755)
 environment = os.environ | {"PATH": str(cli_bin) + os.pathsep + os.environ["PATH"],
                             "PYTHONDONTWRITEBYTECODE": "1"}
 environment.pop("PYTHONPATH", None)
+environment.pop("AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE", None)
+environment.pop("AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS", None)
 payload = {"hook_event_name": "PreToolUse", "tool_name": "shell",
            "tool_input": {"command": "python3 skill.py"}, "cwd": str(temporary),
            "session_id": "raw-install-fixture"}
@@ -182,7 +184,8 @@ for enabled, decision in (("0", "allow"), ("1", "block")):
     else:
         arguments, request = json.loads(calls.read_text())
         assert arguments == ["sandbox", "hook", "prepare", "--permissions",
-                             layout["etcdir"] + "/sec-core/sandbox/permissions.json.template"]
+                             layout["etcdir"] + "/sec-core/sandbox/permissions.json.template",
+                             "--timeout-ms", "5000"]
         assert request["tool_input"] == payload["tool_input"]
         assert output["reason"] == "fixture policy denied"
 gateway = stage / "share/anolisa/sec-core/gateway"

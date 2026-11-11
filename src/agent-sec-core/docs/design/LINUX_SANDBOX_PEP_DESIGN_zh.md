@@ -339,12 +339,21 @@ RPC、PAP 当前版本读取和安全事件回执均已接入代码。本次拆�
 Cosh Hook 使用默认关闭的 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` 开关。开启 (`1/true`) 后，
 所有已接入的 `shell` / `run_shell_command` 原始命令（含 sudo）进入上层 PEP/PDP，明确
 禁止规则仍可提前阻断。关闭 (`0/false` 或未设置) 保留旧筛选和执行路径，非法值阻断。
-权限来源固定为核心包安装的 `/etc/agent-sec/sandbox/permissions.json.template`；不提供
+默认固定权限来源为核心包安装的 `/etc/agent-sec/sandbox/permissions.json.template`；不提供
 权限文件环境覆盖。prepare 在 Rust 中展开 `${cwd}` 并生成现有 `PermissionInput`，默认
 只读宿主、工作目录与 `/tmp` 可写、已有元数据只读、IP 网络关闭。模板的版本/字段/路径、
 root 所有权及父目录安全属性必须有效；配置或依赖失败不降级。模板不是 PDP 策略，不能
-通过批准扩大权限。未来命令意图接入继续在现有权限提供层生成当次输入，本次不调用模型。
+通过批准扩大权限。
 默认模板不得直接充当动态权限模式的运行时附加权限，以免隐式增加整个工作目录写权限。
+显式设置 `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` 后，Hook 将原始 command
+（含 sudo）和规范化 cwd 交给 `intent.propose_command`，不传用户任务。`candidate` 与
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 指定的 Cedar 预设通过
+`PermissionInput::with_runtime` 合并，保留 forbid，复用转换、调用校验和路径绑定。
+运行预设替代固定模板，其 cwd/tmp 许可和 Git 保护不自动继承。空候选仅申请运行预设；
+澄清、异常和超时阻断，无隐式放权。caveats 显示到原生通知/审批说明。候选按调用临时存放
+并在 prepare 后清理；不写 PAP，finish 无需候选文件或固定模板。
+当前 PAP 集合的参与条件及旧 task_policy 键移除见 Sandbox 指南；任务限制须实际参与
+请求策略集并以 forbid 或受约束的 permit 表达，不能依赖旧的分层交集语义。
 安装约束与回归见 DPROC-V2-SANDBOX-TEMPLATE-1。Hook 准备最终决定，
 通过 `authorization.claim(accept)` 在期限内接收；Cosh 原生 ask 后，前台执行入口用
 `claim(execute)` 一次性取回 daemon 保管的请求与决定，再调用 `PepRuntime::resume`。

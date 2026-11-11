@@ -327,7 +327,7 @@ route. On sends every hooked `shell` / `run_shell_command` call, including
 Explicitly prohibited commands can still be blocked first. Native file tools, MCP and
 other entry points are outside this Hook's coverage.
 
-The RPM core package automatically installs `/etc/agent-sec/sandbox/permissions.json.template`.
+In the default `fixed` mode, the RPM core package automatically installs `/etc/agent-sec/sandbox/permissions.json.template`.
 No permission-file environment variable or manual copy is needed. Source installation
 uses its existing `CONFIGDIR` layout and renders the matching path into the Hook; standard
 RPM installation uses the path above. Raw installation uses its owned configuration root,
@@ -361,7 +361,7 @@ writable root, with `.git` additionally supporting a pointer file. Missing paths
 There is no shell evaluation or arbitrary environment substitution. Rust prepare expands and validates
 the template per invocation, in memory, before the existing permission provider binds paths.
 Changed settings affect later requests, not an accepted invocation. This release does not
-invoke intent recognition or publish candidate policies to PAP.
+invoke intent recognition in fixed mode or publish candidate policies to PAP.
 
 PDP still decides allow, deny, modification or native approval; effective permissions cannot
 exceed the request. Approving a command does not enable networking or grant host root.
@@ -397,6 +397,80 @@ It reports `all-shell`, `dangerous`, or `blocked` for an invalid switch, and nev
 the template or proves daemon readiness, Hook loading, or host compatibility. Set the switch to `0` before
 restarting Cosh to restore legacy filtering. The former permission-file override has been
 removed; administrator defaults now belong in the installed template.
+
+### Generate permissions from the current command
+
+Use matching CLI/daemon builds that support `intent.propose_command`, with the
+daemon's intent model configured as described in the [Policy guide](policy-cli.md).
+Before starting Cosh, select the dynamic source and an explicit Cedar runtime preset:
+
+```bash
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
+export AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command
+export AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS=/absolute/path/runtime.cedar
+cosh
+```
+
+The source accepts exactly `fixed` (the unset default) or `command`. Invalid values
+block authorization. These settings only apply when all-shell authorization is enabled;
+they do not enable it themselves. The removed `AGENT_SEC_COSH_SANDBOX_PERMISSIONS`
+variable has no effect in either mode.
+
+Command mode uses the explicit runtime preset **instead of** the installed fixed
+JSON template. The template's cwd/tmp writes and Git protections are not inherited.
+Declare any required restrictions in the Cedar preset or applicable PAP policies.
+The preset must be raw Cedar or its source envelope, use the candidate's schema,
+and provide the known shell/loader/library access and initial `/bin/bash -c`
+invocation permit needed by this workload. Directory grants cover descendants;
+a whole-project grant already requests its contents even with an empty candidate.
+Do not add speculative writes or network access for unknown script behavior.
+An OS permission JSON preset is rejected because combining it would lose Cedar
+invocation and network restrictions.
+
+The Hook sends the exact original command, including `sudo`, and canonical cwd
+to `intent propose-command --format json`, before sandbox wrapping. It sends no
+original user task. Upstream must prepare the task restrictions in PAP and verify
+that they enter the current request policy set described above. This revision
+rejects the former `task_policy` selector: eligible policies combine permits,
+so use explicit forbids or constrain all applicable permits to enforce a task
+boundary. Merely creating an ineligible policy does not constrain execution.
+
+The Hook checks JSON `outcome`, independently of the exit code:
+
+- `candidate`: show `caveats`, combine Cedar with the runtime preset, then reuse
+  conversion, initial invocation validation and path binding. Forbids from either
+  source remain effective.
+- An empty candidate requests no business permissions. Only the explicit runtime
+  preset contributes grants; PDP can deny or narrow them.
+- `needs_clarification`: display the missing information and stop before authorization.
+- Unavailable interfaces, malformed responses, conversion failures and timeouts
+  block execution without a fixed-permission or unsandboxed fallback. Unknown
+  script internals remain caveats and never automatically increase permissions.
+
+Caveats remain complete in the Hook response. The current Cosh native approval
+panel can truncate long caveat lines; this integration does not guarantee that
+their full text is readable in that panel.
+
+Candidates are requests, never PAP writes. PDP determines `effective_permissions`
+from the active policy set and environment cap. The Cedar mapping limits above
+still apply: a nonexistent file literal fails preparation rather than implicitly
+granting write access to its parent directory.
+
+Intent generation has a 38-second CLI RPC budget inside a 40-second subprocess
+limit. Generation and prepare share 55 seconds inside the 60-second Hook budget.
+Each authorization RPC gets at most five seconds, bounded by one third of the
+remaining time after a one-second reserve. Finish uses an eight-second RPC inside
+ten seconds and the existing 15-second outer Hook. Native ask and target execution
+retain their existing lifecycle.
+
+Each candidate file is private to one invocation (mode 0600) and removed after
+prepare, including conversion failures and subprocess timeouts. The daemon keeps
+the accepted invocation; approval, execution and finish do not reread the file.
+Finish does not require a fixed template in command mode, and receipt failures
+never rerun the target. Set the source to `fixed` and ensure the installed template
+is valid before restarting Cosh to restore fixed authorization. Task collection,
+automatic task-policy publication, multi-task routing and AgentSight/Gateway
+integration remain outside this feature.
 
 The hook prepares authorization through the private `sandbox hook prepare` entry point.
 ALLOW/MODIFY replace the command with its authorized execution entry point; STEP_UP uses

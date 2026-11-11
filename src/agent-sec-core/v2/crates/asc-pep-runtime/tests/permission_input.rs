@@ -76,6 +76,123 @@ when { resource.path == "/work/private" || resource.path like "/work/private/*" 
 "#;
 
 #[test]
+fn empty_command_candidate_only_requests_the_runtime_preset() {
+    let preset = r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/usr" || resource.path like "/usr/*" };"#;
+    for candidate in ["", "  ", "// No business permissions"] {
+        let permissions = PermissionInput::parse(candidate)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(preset).unwrap())
+            .unwrap()
+            .resolve(&launch())
+            .unwrap();
+        assert!(allows(&permissions, "/usr/bin/true", FileRight::Read));
+        assert!(!allows(&permissions, "/work/secret", FileRight::Read));
+        assert!(!allows(&permissions, "/usr/bin/true", FileRight::Write));
+        assert_eq!(permissions.network.mode, NetworkMode::Off);
+    }
+}
+
+#[test]
+fn runtime_permits_preserve_candidate_and_preset_forbids() {
+    let permit = r#"permit(principal, action in [SecCore::Action::"file.read", SecCore::Action::"file.write", SecCore::Action::"network.use"], resource);"#;
+    let forbid = r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/work" || resource.path like "/work/*" };
+forbid(principal, action == SecCore::Action::"network.use", resource);"#;
+    for (candidate, runtime) in [(forbid, permit), (permit, forbid)] {
+        let input = PermissionInput::parse(candidate)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(runtime).unwrap())
+            .unwrap();
+        let permissions = input.resolve(&launch()).unwrap();
+        assert!(!allows(&permissions, "/work/private", FileRight::Read));
+        assert!(!allows(&permissions, "/work/private", FileRight::Write));
+        assert_eq!(permissions.network.mode, NetworkMode::Off);
+    }
+    let forbid_launch =
+        r#"forbid(principal, action == SecCore::Action::"process.spawn", resource);"#;
+    let permit_launch =
+        r#"permit(principal, action == SecCore::Action::"process.spawn", resource);"#;
+    assert!(
+        PermissionInput::parse(forbid_launch)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(permit_launch).unwrap())
+            .unwrap()
+            .resolve(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn combined_sources_bind_aliases_before_permission_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("secret");
+    let alias = dir.path().join("alias");
+    std::fs::write(&target, "secret").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let candidate = format!(
+        r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias)
+    );
+    let preset = format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(target)
+    );
+    let bound = PermissionInput::parse(&candidate)
+        .unwrap()
+        .with_runtime(PermissionInput::parse(&preset).unwrap())
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(!allows(
+        &bound.permissions,
+        target.to_str().unwrap(),
+        FileRight::Read
+    ));
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == alias.to_str().unwrap())
+    );
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == target.to_str().unwrap())
+    );
+}
+
+#[test]
+fn runtime_merge_rejects_json_malformed_and_oversized_sources() {
+    let preset = r#"permit(principal, action == SecCore::Action::"file.read", resource);"#;
+    let json = serde_json::to_string(&resolve(preset)).unwrap();
+    for candidate in [json.as_str(), "/*", "not Cedar"] {
+        assert!(
+            PermissionInput::parse(candidate)
+                .unwrap()
+                .with_runtime(PermissionInput::parse(preset).unwrap())
+                .is_err()
+        );
+    }
+    assert!(
+        PermissionInput::parse(preset)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(&json).unwrap())
+            .is_err()
+    );
+    let large = format!("// {}\n{preset}", "x".repeat(3 * 1024 * 1024));
+    assert!(
+        PermissionInput::parse(&large)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(&large).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
 fn cedar_regions_preserve_exclusions_and_directory_boundaries() {
     let permissions = resolve(TREE);
     assert!(allows(&permissions, "/usr/lib/libc.so", FileRight::Read));

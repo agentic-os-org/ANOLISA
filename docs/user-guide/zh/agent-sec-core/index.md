@@ -525,7 +525,7 @@ agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 
 当前配置的 L2 后端是一项有意保留的例外：模型名只有原样展示才有意义，因此 `PROMPT_SCANNER_L2_MODEL` 会作为 `prompt-scan` 的 `env` 条目原样上报（保留大小写，并做转义与长度封顶）。它的 `default`（以及变量未设置时的 `effective`）取自 native 扫描引擎上报的默认后端；若取值不属于引擎支持的后端，则原样上报并附一条 diagnostic——因为引擎会在构造期直接报错，扫描会失败而不是回退到默认后端。而宿主 hook 对失败的扫描一律 fail-open，因此这条 diagnostic 往往是该配置错误在 prompt 开始无防护流转前唯一的可见之处。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
 
-`sandbox` 在 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 或 `true` 时显示 `MODE=all-shell`，未设置或 `0`/`false` 时为 `dangerous`，非法值为 `blocked`；忽略大小写和前后空白。`ENABLED` 描述 guard，而非此开关。JSON 仅展示开关，不读取安装的默认模板或检查授权是否就绪。`TIMEOUT(s)=55` 为 prepare 期限，finish 为 10 秒。安装和失败行为见 [Cosh sandbox 授权](sandbox.md#在-cosh-ng-中启用授权)。
+`sandbox` 在 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 或 `true` 时显示 `MODE=all-shell`，未设置或 `0`/`false` 时为 `dangerous`，非法值为 `blocked`；此开关忽略大小写和前后空白。`ENABLED` 描述 guard，而非此开关。JSON 还原样展示权限来源（默认 `fixed`）与动态 Cedar 运行预设，不验证这些设置、不读取权限文件，也不检查授权是否就绪。`TIMEOUT(s)=55` 涵盖生成与 prepare，finish 为 10 秒。安装和失败行为见 [Cosh sandbox 授权](sandbox.md#在-cosh-ng-中启用授权)。
 
 视图来源和限制：
 
@@ -566,6 +566,8 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` | `false` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE` | `fixed` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` | 未设置 | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 `PROMPT_SCANNER_L2_MODEL` 标记为 `✓*`，因为没有任何 adapter 直接读取它：每个宿主都
 是调用 `agent-sec-cli scan-prompt` 子进程，由该命令解析 L2 后端，所以六家都会继承

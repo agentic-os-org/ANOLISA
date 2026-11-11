@@ -83,6 +83,10 @@ fn resolve_one(
     diagnostics: &mut Vec<String>,
 ) -> (EnvValue, EnvValue) {
     match spec.kind {
+        EnvKind::Literal(default) => (
+            EnvValue::text(raw.unwrap_or(default)),
+            EnvValue::text(default),
+        ),
         EnvKind::StrictBool(default) => (
             resolve_bool(spec.name, raw, default, true, diagnostics),
             EnvValue::Bool(default),

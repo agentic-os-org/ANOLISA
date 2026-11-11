@@ -24,13 +24,18 @@ each PDP permission request through `PermissionInput` or the Cosh sandbox Hook.
 See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
 for the permission format, runtime requirements and isolation boundaries.
 Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
-using PAP-managed Cedar policies selected by daemon `--authorization-config`.
+using the current eligible PAP-managed Cedar policy set and runtime limits from
+daemon `--authorization-config`.
 Successful Policy updates apply to subsequent authorization requests.
 Cosh opts into this flow with `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`, using its native
 approval UI and the installed default permission template. Every hooked `shell` /
 `run_shell_command` call is authorized, including ordinary Python scripts and original
 `sudo` commands. The switch defaults off; see the sandbox guide for configuration,
 permission boundaries and failure handling.
+Set `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` with an explicit Cedar
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` preset to generate permission requests
+from each original command and cwd. Candidates never update PAP; clarification,
+generation and conversion failures block execution.
 
 ## Background
 
@@ -140,8 +145,9 @@ incompatible. Candidates do not approve, install or enforce policies. See the
 For hook integration, the source-tree V2 API `intent.propose_command` accepts
 `command` and `cwd`, returning a Cedar candidate or clarification reasons; the
 `agent-sec-cli intent propose-command` subcommand exposes it to hook callers. Neither
-updates base policies, maps OS permissions or executes commands; PDP mapping and
-sandbox integration remain separate. See the [Command Cedar API](v2/README.md#command-cedar-api).
+updates base policies, maps OS permissions or executes commands. The opt-in Cosh
+Hook combines candidates with an explicit runtime preset and uses the existing
+PDP/sandbox lifecycle. See the [Command Cedar API](v2/README.md#command-cedar-api).
 
 `agent-sec-cli intent init` generates validated Cedar locally from explicit
 rules, with no daemon, model or network:

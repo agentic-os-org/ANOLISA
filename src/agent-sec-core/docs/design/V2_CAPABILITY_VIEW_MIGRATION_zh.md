@@ -46,8 +46,11 @@ V1/V2 视图同步新增仅 Cosh 提供的 `sandbox` 条目。原 6×5 组合保
 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` 默认 false，接受 `1/true`、`0/false`，忽略大小写
 和前后空白；非法值展示 `effective="invalid"`、`mode="blocked"` 和阻断诊断，不能
 回退到关闭。有效配置对应 `all-shell` 或 `dangerous`；`enabled` 仍描述 guard，
-不等同于全 shell 开关。删除权限文件变量，默认模板不由只读能力视图读取或验证。
-timeout 展示 prepare 子进程的 55 秒；finish 子进程为 10 秒，外层分别为 60 / 15 秒。
+不等同于全 shell 开关。旧权限文件覆盖变量已删除，默认模板不由只读能力视图读取或验证。
+`AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE`（默认 `fixed`）及
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS`（默认空）按字面值展示，不改变上述 mode，
+不归一化大小写或路径，也不验证动态授权是否就绪；仅 Hook 在启用授权时校验它们。
+timeout 展示生成与 prepare 共用的 55 秒；finish 子进程为 10 秒，外层分别为 60 / 15 秒。
 这一增量由 Python Hook/视图单测、Rust 视图测试和共享 CLI E2E 用例覆盖；下节历史
 迁移通过记录不包含新增 sandbox 条目，新增用例须按本次变更的实际验证结果验收。
 
