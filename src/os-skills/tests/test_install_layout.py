@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_HOME = object()
 
 
 class InstallLayoutTests(unittest.TestCase):
@@ -37,10 +38,13 @@ class InstallLayoutTests(unittest.TestCase):
         target: str = "install",
         uid: int = 0,
         xdg_data_home: str | Path | None = None,
+        destdir: str | Path | None = None,
+        home: object = _DEFAULT_HOME,
         **variables: object,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         for name in (
+            "HOME",
             "INSTALL_PROFILE",
             "PREFIX",
             "AWPRJ",
@@ -55,14 +59,22 @@ class InstallLayoutTests(unittest.TestCase):
             "MFLAGS",
         ):
             env.pop(name, None)
-        env["HOME"] = str(self.home)
+        if home is _DEFAULT_HOME:
+            env["HOME"] = str(self.home)
+        elif home is not None:
+            env["HOME"] = str(home)
         env["PATH"] = str(self.tools) + os.pathsep + env["PATH"]
         if xdg_data_home is not None:
             env["XDG_DATA_HOME"] = str(xdg_data_home)
         (self.tools / "id").write_text(f"#!/bin/sh\nprintf '%s\\n' '{uid}'\n")
         (self.tools / "id").chmod(0o755)
         return subprocess.run(
-            ["make", "--no-print-directory", target, f"DESTDIR={self.stage}"]
+            [
+                "make",
+                "--no-print-directory",
+                target,
+                f"DESTDIR={self.stage if destdir is None else destdir}",
+            ]
             + [f"{name}={value}" for name, value in variables.items()],
             cwd=self.source,
             env=env,
@@ -129,6 +141,36 @@ class InstallLayoutTests(unittest.TestCase):
             sorted(entry.name for entry in self.installed(self.root).iterdir()),
             ["home", "user data"],
         )
+
+    def test_user_profile_without_home_is_rejected(self) -> None:
+        result = self.make(uid=1000, home=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HOME", result.stderr)
+        self.assertFalse(self.installed("/.copilot-shell").exists())
+        self.assertFalse(self.installed("/.local").exists())
+
+    def test_user_profile_with_root_home_is_rejected(self) -> None:
+        result = self.make(uid=1000, home="/")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HOME", result.stderr)
+        self.assertFalse(self.installed("/.copilot-shell").exists())
+
+    def test_user_profile_without_home_accepts_explicit_paths(self) -> None:
+        directory = self.root / "custom skills"
+        result = self.make(
+            uid=1000,
+            home=None,
+            PREFIX=directory,
+            DATADIR=directory,
+            SKILLS_DIR=directory,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.installed(directory) / "example/SKILL.md").is_file())
+
+    def test_rejects_root_as_staging_root(self) -> None:
+        result = self.make("check-layout", destdir="/")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("other than /", result.stderr)
 
     def test_empty_namespace_selects_native_system_collection(self) -> None:
         self.assert_install("/usr/local/share/cosh-ng/skills", AWPRJ="")

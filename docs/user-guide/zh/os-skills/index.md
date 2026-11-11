@@ -31,6 +31,10 @@ make -C src/os-skills install
 使用 `SKILLS_DIR=/absolute/path` 可选择其他技能集合目录；卸载时使用相同的值。
 启动新的 cosh 会话后，运行 `/skills` 检查已安装的技能。
 
+`INSTALL_PROFILE=user` 的默认路径由 `HOME` 推导；`HOME` 未设置、为空、为相对路径
+或为 `/` 时安装直接失败，不会写到 `/` 下。没有家目录时，请显式传入 `PREFIX`、
+`DATADIR` 和 `SKILLS_DIR`。
+
 技能同名时，本地系统副本优先于 `/usr/share/anolisa/skills/` 中的 RPM 副本。
 同一集合应选择一种交付方式；管理旧的源码安装时，将 `SKILLS_DIR` 指向原目录。
 
