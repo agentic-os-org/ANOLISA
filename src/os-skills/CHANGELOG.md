@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-12
+
+### Removed
+
+- Retired eight general-purpose skills from the default bundle to focus on OS
+  operations, ending routine maintenance of the bundled copies. Users who need
+  these capabilities can use the upstream skills, tools, or official docs:
+  - `github` — general GitHub CLI workflows; see the GitHub CLI skill
+  - `humanizer` — writing guidance; load the upstream Humanizer skill
+  - `image-gen` — general image generation; product-specific Bailian integration
+    moves to the product that uses it
+  - `pdf-reader` — general PDF reading; host tools / PyMuPDF integrations
+  - `xlsx` — general spreadsheets; covered by the MiniMax XLSX skill
+  - `regex-mastery` — general regex guide; load the upstream guide
+  - `shell-scripting` — general shell scripting; upstream project guidance
+  - `upgrade-alinux-kernel` — ALinux-specific kernel upgrade; handed to
+    distribution maintainers
+- Removed the companion regression tests for `pdf-reader` and `xlsx`, and the
+  now-unused PyMuPDF test dependency.
+- Dropped the retired `shell-scripting` entry from `alinux-admin`'s dependency
+  list; its self-contained shell reference is unchanged.
+
 ## [0.6.6] - 2026-11-12
 
 ### Changed
