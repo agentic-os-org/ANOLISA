@@ -22,6 +22,15 @@ def merge(json_str, config_path):
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # The value guards below assume a mapping to read `mcpServers` from, and
+    # pasted JSON can have any root, so the root is checked first: a raw
+    # AttributeError here would be the one failure mode this script exists to
+    # turn into a diagnostic.
+    if not isinstance(new, dict):
+        print(f"ERROR: Input must be a JSON object, not {type(new).__name__}",
+              file=sys.stderr)
+        sys.exit(1)
+
     servers = new.get("mcpServers", {})
     if not isinstance(servers, dict):
         print("ERROR: mcpServers must be a JSON object", file=sys.stderr)
@@ -77,6 +86,11 @@ def check(config_path):
             data = json.load(f)
     except json.JSONDecodeError as e:
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(data, dict):
+        print(f"ERROR: {config_path} root is a JSON {type(data).__name__}, "
+              f"not an object", file=sys.stderr)
         sys.exit(1)
 
     servers = data.get("mcpServers", {})
