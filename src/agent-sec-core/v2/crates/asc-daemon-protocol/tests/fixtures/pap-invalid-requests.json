@@ -54,6 +54,11 @@
       "expectedError": {"code": "invalid_request", "message": "invalid selector at pid: must be positive"}
     },
     {
+      "name": "create scope with a relative cmdline argument",
+      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "process", "match": {"cmdlineArg": "bin/agent"}}}},
+      "expectedError": {"code": "invalid_request", "message": "invalid selector at cmdlineArg: must be a normalized absolute path"}
+    },
+    {
       "name": "update scope with zero cgroup ID",
       "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "cgroup_id", "cgroupId": 0}}},
       "expectedError": {"code": "unknown_method", "message": "daemon method is not implemented"}

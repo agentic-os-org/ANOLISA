@@ -344,10 +344,24 @@ snapshots and accepted decisions retain their own bound versions.
 
 Create an assignment with a Policy ID and exact revision, plus one selector:
 `--process-name` for an exact Linux process name (1–15 bytes), `--executable` for an
-exact normalized absolute executable path, or `--pid` for one process instance.
-Name and path selectors discover existing and future matching processes. PID
-selection pins the first observed instance and never follows PID reuse. Cgroup
-assignments are currently rejected.
+exact normalized absolute executable path, `--cmdline-arg` for an exact normalized
+absolute path that appears as one whole command-line argument, or `--pid` for one
+process instance. Name, executable and command-line selectors discover existing and
+future matching processes. PID selection pins the first observed instance and never
+follows PID reuse. Cgroup assignments are currently rejected.
+
+Use `--cmdline-arg` for script Agents that run under a shared interpreter such as
+node or python, where the process name and executable identify only the interpreter.
+Pass the command path users run, as printed by `which`. A process matches when any
+argument in `/proc/PID/cmdline` equals the path byte for byte. Symbolic links are
+not resolved, and substrings or prefixes do not match. For example, running
+`qodercli` from a shell produces `node /usr/local/bin/qodercli ...`, which
+`--cmdline-arg /usr/local/bin/qodercli` selects. Starting the script by another
+path, such as its resolved `.js` file or a relative path, does not match. Other
+processes of the same user that pass the path as an argument, such as an editor
+opening it, are also selected. Command-line arguments are set by the process, so
+this selector identifies processes within the owner UID; it does not authenticate
+them.
 
 **Breaking change:** `scope create --cgroup-id` has been removed. Cgroup assignments
 were not supported. Scripts that pass this option now fail locally with exit code 2;
@@ -355,6 +369,7 @@ select the intended processes with `--pid`, `--process-name`, or `--executable` 
 
 ```bash
 agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1
+agent-sec-cli --socket "$SOCKET" scope create --cmdline-arg "$(which qodercli)" --policy-id "$POLICY_ID" --policy-revision 1
 agent-sec-cli --socket "$SOCKET" scope get --scope-id "$SCOPE_ID"
 agent-sec-cli --socket "$SOCKET" scope list --limit 100 --offset 0
 agent-sec-cli --socket "$SOCKET" scope delete --scope-id "$SCOPE_ID"

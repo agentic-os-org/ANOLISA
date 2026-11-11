@@ -628,7 +628,7 @@ fn scope_create_excludes_unsupported_cgroup_selector() {
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
         let help = String::from_utf8(output.stdout).unwrap();
-        for selector in ["--pid", "--process-name", "--executable"] {
+        for selector in ["--pid", "--process-name", "--executable", "--cmdline-arg"] {
             assert!(help.contains(selector), "{help}");
         }
         assert!(!help.contains("--cgroup-id"), "{help}");
@@ -665,7 +665,11 @@ fn scope_owner_uid_maps_to_rpc_and_rejects_root_or_pid_credential_selection() {
         "--policy-revision",
         "1",
     ];
-    for (flag, value) in [("--process-name", "agent"), ("--executable", "/bin/agent")] {
+    for (flag, value) in [
+        ("--process-name", "agent"),
+        ("--executable", "/bin/agent"),
+        ("--cmdline-arg", "/usr/local/bin/agent"),
+    ] {
         let args = base.into_iter().chain([flag, value, "--owner-uid", "1000"]);
         let request = Cli::parse_from(args).unwrap().request().unwrap();
         assert_eq!(request.params["ownerUid"], 1000);
@@ -683,15 +687,23 @@ fn scope_owner_uid_maps_to_rpc_and_rejects_root_or_pid_credential_selection() {
 
 #[test]
 fn scope_create_encodes_name_and_path_assignments() {
-    for (flag, matcher) in [
-        ("--process-name", json!({"processName":"scope-agent"})),
-        ("--executable", json!({"executable":"/opt/agent"})),
+    for (flag, value, matcher) in [
+        (
+            "--process-name",
+            "scope-agent",
+            json!({"processName":"scope-agent"}),
+        ),
+        (
+            "--executable",
+            "/opt/agent",
+            json!({"executable":"/opt/agent"}),
+        ),
+        (
+            "--cmdline-arg",
+            "/usr/local/bin/agent",
+            json!({"cmdlineArg":"/usr/local/bin/agent"}),
+        ),
     ] {
-        let value = if flag == "--process-name" {
-            "scope-agent"
-        } else {
-            "/opt/agent"
-        };
         let request = Cli::parse_from([
             "agent-sec-cli",
             "scope",
@@ -721,6 +733,18 @@ fn scope_create_encodes_name_and_path_assignments() {
             "agent",
             "--executable",
             "/bin/agent"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::parse_from([
+            "agent-sec-cli",
+            "scope",
+            "create",
+            "--executable",
+            "/usr/bin/node",
+            "--cmdline-arg",
+            "/usr/local/bin/agent"
         ])
         .is_err()
     );
