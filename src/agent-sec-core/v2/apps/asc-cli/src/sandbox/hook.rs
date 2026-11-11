@@ -10,7 +10,7 @@ use asc_daemon_protocol::authorization::{
     ExecutionSpec,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, DaemonAuthorizationClient, PepError, PepRuntime, SandboxBackend,
+    ApprovalHandler, DaemonAuthorizationClient, LinuxSandboxBackend, PepError, PepRuntime,
     prepare_launch,
 };
 use clap::Subcommand;
@@ -83,7 +83,7 @@ impl HookCommand {
                     .ok_or_else(|| {
                         SandboxError::Execution("authorization already consumed".into())
                     })?;
-                let mut runtime = PepRuntime::new(SandboxBackend::installed()?);
+                let mut runtime = PepRuntime::new(LinuxSandboxBackend::installed()?);
                 let outcome = runtime.resume(accepted, &client, Some(&mut HostApproved))?;
                 if let Some(error) = outcome.receipt_error {
                     return Err(SandboxError::Execution(format!(
@@ -173,7 +173,7 @@ fn prepare(
     if let Some(preset) = runtime_permissions {
         permissions = permissions.with_runtime(read_permissions(preset)?)?;
     }
-    let mut runtime = PepRuntime::new(SandboxBackend::installed()?);
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::installed()?);
     let (request, decision) = runtime.authorize(
         &AgentPrincipal {
             agent_type: Some("cosh".into()),
