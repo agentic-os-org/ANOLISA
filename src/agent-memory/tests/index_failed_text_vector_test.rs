@@ -105,13 +105,12 @@ async fn incremental_text_failure_must_not_replace_preserved_vector() {
     assert!(new.is_empty());
     conn.execute_batch("DROP TRIGGER fail_text_update;")
         .unwrap();
-    std::fs::write(svc.mount.root.join("note.md"), format!("{NEW} recovered")).unwrap();
     until(
         || {
             !index.search("newcobalt", 10).unwrap().is_empty()
                 && note_score(&index, &[0.0, 1.0]).is_some_and(|s| s > 0.9)
         },
-        "a later successful event must reconcile both sides",
+        "retry must reconcile both sides without another filesystem event",
     )
     .await;
     drop(index);
@@ -130,7 +129,7 @@ async fn startup_text_failure_must_not_backfill_new_body_into_old_row() {
     let db = initial.db_path().to_owned();
     assert_eq!(initial.search("oldquartz", 10).unwrap().len(), 1);
     drop(initial);
-    let _conn = inject(&db);
+    let conn = inject(&db);
     std::fs::write(svc.mount.root.join("note.md"), NEW).unwrap();
     let index = IndexHandle::open(&svc.mount, Some(provider()), 0.0, 0.0, false).unwrap();
     let old = index.search("oldquartz", 10).unwrap();
@@ -151,11 +150,21 @@ async fn startup_text_failure_must_not_backfill_new_body_into_old_row() {
     );
     assert_eq!(old.len(), 1);
     assert!(new.is_empty());
-    drop(index);
     assert!(
         vector.is_none(),
         "failed text reconciliation must not publish the new content's vector beside the old text"
     );
+    conn.execute_batch("DROP TRIGGER fail_text_update;")
+        .unwrap();
+    until(
+        || {
+            !index.search("newcobalt", 10).unwrap().is_empty()
+                && note_score(&index, &[0.0, 1.0]).is_some_and(|s| s > 0.9)
+        },
+        "startup failure must recover without another filesystem event",
+    )
+    .await;
+    assert!(index.search("oldquartz", 10).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -206,7 +215,6 @@ async fn failed_text_insert_must_not_publish_a_standalone_vector() {
         .any(|h| h.path == "fresh.md");
     conn.execute_batch("DROP TRIGGER fail_text_insert;")
         .unwrap();
-    std::fs::write(svc.mount.root.join("fresh.md"), format!("{NEW} recovered")).unwrap();
     until(
         || {
             !index.search("newcobalt", 10).unwrap().is_empty()
@@ -216,7 +224,7 @@ async fn failed_text_insert_must_not_publish_a_standalone_vector() {
                     .iter()
                     .any(|h| h.path == "fresh.md" && h.score > 0.9)
         },
-        "a later successful event must index both representations",
+        "retry must index both representations without another filesystem event",
     )
     .await;
     drop(index);

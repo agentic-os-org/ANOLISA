@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as stdmpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,11 +28,13 @@ struct PendingEvents {
     rescan_retry: Option<Instant>,
     // Consecutive failed scans; reset only after successful recovery.
     rescan_attempts: u32,
+    incomplete: Arc<AtomicBool>,
 }
 
 impl PendingEvents {
     // Schedule and return the chosen delay, doubling up to a 64-second cap.
     fn schedule_rescan_retry(&mut self, now: Instant) -> Duration {
+        self.incomplete.store(true, Ordering::Release);
         let delay = RESCAN_RETRY_DELAY * (1 << self.rescan_attempts.min(6));
         self.rescan_attempts = self.rescan_attempts.saturating_add(1);
         self.rescan_retry = Some(now + delay);
@@ -46,6 +49,8 @@ pub struct IndexWorker {
     handle: Option<thread::JoinHandle<()>>,
     /// Sender to signal shutdown; the watcher thread polls for it.
     cancel_tx: stdmpsc::Sender<()>,
+    /// Shared with searches until a full recovery pass succeeds.
+    pub(super) incomplete: Arc<AtomicBool>,
 }
 
 impl IndexWorker {
@@ -71,9 +76,17 @@ impl IndexWorker {
         let (event_tx, event_rx) = stdmpsc::channel::<notify::Result<notify::Event>>();
         let watcher = watch_mount(&mount, event_tx)?;
 
-        // Preserve synchronous initial indexing. If it fails, the local
-        // watcher is dropped without starting an orphan worker thread.
-        full_scan(&mount, &store, embedding.as_deref(), rt_handle.as_ref())?;
+        // A failed initial scan still needs a live worker to retry after the
+        // writer releases its lock, even if no file changes again.
+        let mut pending = PendingEvents::default();
+        recover(
+            &mount,
+            &store,
+            embedding.as_deref(),
+            rt_handle.as_ref(),
+            &mut pending,
+        );
+        let incomplete = Arc::clone(&pending.incomplete);
 
         let (cancel_tx, cancel_rx) = stdmpsc::channel::<()>();
         let mount_clone = mount.clone();
@@ -92,6 +105,7 @@ impl IndexWorker {
                     rt_clone,
                     cancel_rx,
                     event_rx,
+                    pending,
                 ) {
                     tracing::warn!("index watcher exited: {e}");
                 }
@@ -101,6 +115,7 @@ impl IndexWorker {
         Ok(Self {
             handle: Some(handle),
             cancel_tx,
+            incomplete,
         })
     }
 
@@ -174,10 +189,8 @@ fn run_watcher(
     rt_handle: Option<tokio::runtime::Handle>,
     cancel_rx: stdmpsc::Receiver<()>,
     event_rx: stdmpsc::Receiver<notify::Result<notify::Event>>,
+    mut pending: PendingEvents,
 ) -> Result<()> {
-    // Debounce buffer: track unique paths touched since last flush
-    let mut pending = PendingEvents::default();
-
     loop {
         // Cancellation check (non-blocking)
         if cancel_rx.try_recv().is_ok() {
@@ -275,6 +288,7 @@ fn recover(
             pending.remove.clear();
             pending.rescan_retry = None;
             pending.rescan_attempts = 0;
+            pending.incomplete.store(false, Ordering::Release);
         }
         Err(e) => {
             let retry_delay = pending.schedule_rescan_retry(Instant::now());
@@ -304,14 +318,21 @@ fn flush_pending(
             recover(mount, store, embedding, rt_handle, pending);
         }
     } else if !pending.modify.is_empty() || !pending.remove.is_empty() {
-        flush(
+        if let Err(e) = flush(
             mount,
             store,
             embedding,
             rt_handle,
             &mut pending.modify,
             &mut pending.remove,
-        )?;
+        ) {
+            let retry_delay = pending.schedule_rescan_retry(Instant::now());
+            tracing::warn!(
+                root = %mount.root.display(), error = %e,
+                retry_delay_secs = retry_delay.as_secs(),
+                "index flush failed; full rescan scheduled"
+            );
+        }
     }
     Ok(())
 }
@@ -515,16 +536,21 @@ fn flush(
     // entire walk+extract pass.
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
     let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+    let mut first_error = None;
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
             tracing::warn!("index remove failed for {rel}: {e}");
+            first_error.get_or_insert(e);
         }
     }
     for rel in to_remove_files {
         match store.remove_file(&rel) {
             Ok(true) => tracing::info!("index entry evicted for {rel}: no longer indexable"),
             Ok(false) => {}
-            Err(e) => tracing::warn!("index file removal failed for {rel}: {e}"),
+            Err(e) => {
+                tracing::warn!("index file removal failed for {rel}: {e}");
+                first_error.get_or_insert(e);
+            }
         }
     }
     let mut failed_text = HashSet::new();
@@ -532,6 +558,7 @@ fn flush(
         if let Err(e) = store.upsert(&rel, mtime, size, &body, agent_id.as_deref()) {
             tracing::warn!("index upsert failed for {rel}: {e}");
             failed_text.insert(rel);
+            first_error.get_or_insert(e);
         }
     }
     for (rel, vec) in to_upsert_vec {
@@ -542,10 +569,11 @@ fn flush(
         }
         if let Err(e) = store.upsert_vec(&rel, &vec) {
             tracing::warn!("index vector upsert failed for {rel}: {e}");
+            first_error.get_or_insert(e);
         }
     }
 
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn full_scan(
@@ -557,6 +585,7 @@ fn full_scan(
     use walkdir::WalkDir;
 
     let mut failed_text = HashSet::new();
+    let mut first_error = None;
     {
         let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen: HashSet<String> = HashSet::new();
@@ -607,6 +636,7 @@ fn full_scan(
             if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body, agent_id.as_deref()) {
                 tracing::warn!("index full-scan upsert failed for {rel}: {e}");
                 failed_text.insert(rel.clone());
+                first_error.get_or_insert(e);
             }
             seen.insert(rel);
         }
@@ -618,6 +648,7 @@ fn full_scan(
             if !seen.contains(&p) {
                 if let Err(e) = store.remove_file(&p) {
                     tracing::warn!("index full-scan remove failed for {p}: {e}");
+                    first_error.get_or_insert(e);
                 }
             }
         }
@@ -629,7 +660,7 @@ fn full_scan(
     // file that never received a modify event after the provider was enabled.
     backfill_vectors(mount, store, embedding, rt_handle, &failed_text)?;
 
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Compute and store embeddings for every indexed file that lacks one.
@@ -675,15 +706,17 @@ fn backfill_vectors(
     }
 
     // Phase 3 (locked): write vectors.
+    let mut first_error = None;
     if !to_upsert.is_empty() {
         let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         for (rel, v) in to_upsert {
             if let Err(e) = store.upsert_vec(&rel, &v) {
                 tracing::warn!("index full-scan vec upsert failed for {rel}: {e}");
+                first_error.get_or_insert(e);
             }
         }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Drive an async embedding call from sync context, picking the blocking
@@ -974,11 +1007,17 @@ mod tests {
         )
         .unwrap();
         let embedding = CountingEmbedding::new();
-        flush_rels(
+        let result = flush(
             &mount,
             &store,
             Some(&embedding),
-            &["failed.md", "healthy.md"],
+            None,
+            &mut HashSet::from([mount.root.join("failed.md"), mount.root.join("healthy.md")]),
+            &mut HashSet::new(),
+        );
+        assert!(
+            result.is_err(),
+            "per-file failures must reach the retry scheduler"
         );
         let store = store.lock().unwrap();
         assert_eq!(embedding.calls(), 2);
@@ -1719,6 +1758,87 @@ mod tests {
             let store = store.lock().unwrap();
             assert!(store.mtime_for("later.md").is_some());
             assert!(store.mtime_for("unannounced.md").is_none());
+        }
+    }
+
+    #[test]
+    fn per_file_vector_and_removal_failures_keep_recovery_pending() {
+        for remove in [false, true] {
+            let (_tmp, mount, _) = setup();
+            let db = mount.meta_dir.join("retry.db");
+            let store = Arc::new(Mutex::new(BM25Store::open(&db, 0.0, 0.0, false).unwrap()));
+            seed_file(&mount, &store, "note.md");
+            let conn = rusqlite::Connection::open(db).unwrap();
+            let mut pending = PendingEvents::default();
+            if remove {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_write BEFORE DELETE ON files
+                     WHEN OLD.path = 'note.md'
+                     BEGIN SELECT RAISE(ABORT, 'controlled removal failure'); END;",
+                )
+                .unwrap();
+                fs::remove_file(mount.root.join("note.md")).unwrap();
+                pending.remove.insert(mount.root.join("note.md"));
+            } else {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_write BEFORE INSERT ON files_vec
+                     WHEN NEW.path = 'note.md'
+                     BEGIN SELECT RAISE(ABORT, 'controlled vector failure'); END;",
+                )
+                .unwrap();
+                write(&mount.root, "note.md", "heliotrope replacement");
+                pending.modify.insert(mount.root.join("note.md"));
+            }
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let embedding: Option<&dyn EmbeddingProvider> = Some(&TestEmbedding);
+            flush_pending(
+                &mount,
+                &store,
+                embedding,
+                Some(runtime.handle()),
+                &mut pending,
+                Instant::now(),
+            )
+            .unwrap();
+            assert!(pending.incomplete.load(Ordering::Acquire));
+            let retry_at = pending.rescan_retry.expect("partial flush must retry");
+            flush_pending(
+                &mount,
+                &store,
+                embedding,
+                Some(runtime.handle()),
+                &mut pending,
+                retry_at,
+            )
+            .unwrap();
+            assert_eq!(
+                pending.rescan_attempts, 2,
+                "partial full scan must remain pending"
+            );
+            assert!(pending.incomplete.load(Ordering::Acquire));
+            conn.execute_batch("DROP TRIGGER fail_write").unwrap();
+            let retry_at = pending.rescan_retry.unwrap();
+            flush_pending(
+                &mount,
+                &store,
+                embedding,
+                Some(runtime.handle()),
+                &mut pending,
+                retry_at,
+            )
+            .unwrap();
+            assert!(pending.rescan_retry.is_none());
+            assert!(!pending.incomplete.load(Ordering::Acquire));
+            let store = store.lock().unwrap();
+            assert_eq!(store.mtime_for("note.md").is_none(), remove);
+            assert_eq!(
+                store
+                    .search_vec(&[1.0, 0.0], 10)
+                    .unwrap()
+                    .iter()
+                    .any(|hit| hit.0 == "note.md"),
+                !remove
+            );
         }
     }
 
