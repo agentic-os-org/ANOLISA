@@ -34,9 +34,23 @@ impl Client {
     /// # Errors
     /// Rejects transport, framing, version and response errors.
     pub fn connect(socket: impl AsRef<Path>, expires: Instant) -> Result<Self> {
+        Self::connect_with_status(socket, expires).map(|(client, _)| client)
+    }
+
+    /// Discover the daemon and retain its authenticated Status response.
+    ///
+    /// Callers inspecting readiness can reuse the discovery result without a
+    /// second RPC. The returned status describes this discovery instant only.
+    ///
+    /// # Errors
+    /// Returns the same discovery errors as [`Self::connect`].
+    pub fn connect_with_status(
+        socket: impl AsRef<Path>,
+        expires: Instant,
+    ) -> Result<(Self, Value)> {
         let response = exchange(socket.as_ref(), None, Operation::Status, expires, None)?;
-        response_result(&response)?;
-        Ok(Self::from_identity(socket, response.identity))
+        let status = response_result(&response)?;
+        Ok((Self::from_identity(socket, response.identity), status))
     }
 
     /// Immutable identity retained by all requests from this client.

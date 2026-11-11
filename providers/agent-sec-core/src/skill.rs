@@ -34,7 +34,7 @@ pub(super) fn call(
     cli: &Path,
     socket: &Path,
     event: &Value,
-    timeout: Duration,
+    budget: impl FnOnce() -> Result<Duration, &'static str>,
 ) -> Result<&'static str, &'static str> {
     let submission = event["name"] == "input.submit";
     if submission
@@ -69,6 +69,7 @@ pub(super) fn call(
     if submission && !skill.digest.as_deref().is_some_and(valid_digest) {
         return Err("skill_resolution_error");
     }
+    let timeout = budget()?;
     let timeout_ms = timeout.as_millis().min(u32::MAX as u128);
     if timeout_ms == 0 {
         return Err("deadline_exceeded");

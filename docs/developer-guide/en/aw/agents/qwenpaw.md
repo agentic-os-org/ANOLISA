@@ -75,6 +75,12 @@ An ordinary configuration with no Providers or event steps still installs
 resident admission and cleanup middleware.
 The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.
 
+Recognized absolute Python console scripts read the installed literal version
+with their own interpreter and import path, without importing QwenPaw's App
+configuration. Custom entrypoints and nonliteral versions retain the native
+`--version` probe within the same five-second budget. App launch, native Hook
+installation and readiness checks still use the original command.
+
 ## Keep the native App startup command
 
 For an initialized QwenPaw installation in a dedicated Python environment, install

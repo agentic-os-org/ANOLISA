@@ -7,17 +7,14 @@ use crate::{
     trace_context,
 };
 use serde_json::{json, Value};
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{path::Path, time::Duration};
 
 pub(super) fn invoke(
     request: &Value,
     config: &Config,
     cli: &Path,
     socket: &Path,
-    remaining: Duration,
+    remaining: impl Fn() -> Result<Duration, &'static str>,
 ) -> Result<serde_json::Map<String, Value>, &'static str> {
     let policy = config.pii.as_ref().ok_or("pii_not_configured")?;
     let event = &request["event"];
@@ -39,13 +36,9 @@ pub(super) fn invoke(
     if enforcing && !admitted(request, action) {
         return Err("effect_not_admitted");
     }
-    let started = Instant::now();
     let trace = trace_context::from_event(event);
     let scan = |text: &str| {
-        let budget = remaining
-            .checked_sub(started.elapsed())
-            .filter(|d| !d.is_zero())
-            .ok_or("deadline_exceeded")?;
+        let budget = remaining()?;
         pii::call(cli, socket, text, source, &trace, budget).map_err(|error| error.code())
     };
     let verdict = scan_value(value, &scan)?;

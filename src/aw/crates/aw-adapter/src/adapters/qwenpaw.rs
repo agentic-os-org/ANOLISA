@@ -1,5 +1,7 @@
 //! QwenPaw App middleware; the native runtime owns tool scheduling.
 
+mod probe;
+
 use crate::{
     adapter::{
         self, Adapter, HookEvent, HookOutput, LaunchContext, LaunchInput, LaunchPlan,
@@ -171,8 +173,7 @@ impl Adapter for QwenPaw {
                 );
             }
         }
-        let output =
-            adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?;
+        let output = probe::version(&input.command, cancelled)?;
         let version = crate::version::reported(
             output
                 .strip_prefix("QwenPaw, version ")

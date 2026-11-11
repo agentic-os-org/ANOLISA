@@ -13,8 +13,8 @@ fn main() -> ExitCode {
 }
 
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    const USAGE: &str = "usage: aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH\n       aw-provider-sec-core --health --helper ABSOLUTE_PATH --socket ABSOLUTE_PATH";
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    const USAGE: &str = "usage: aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH [--wait-for-backend]\n       aw-provider-sec-core --health --helper ABSOLUTE_PATH --socket ABSOLUTE_PATH";
     if args.len() == 1 && args[0] == "--help" {
         println!("{USAGE}");
         return Ok(());
@@ -28,6 +28,10 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());
     }
+    let wait_for_backend = args.last().is_some_and(|arg| arg == "--wait-for-backend");
+    if wait_for_backend {
+        args.pop();
+    }
     if args.len() != 4 || args[0] != "--cli" || args[2] != "--socket" {
         return Err(USAGE.into());
     }
@@ -36,7 +40,12 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     if !cli.is_absolute() || !socket.is_absolute() {
         return Err("--cli and --socket must be absolute paths".into());
     }
-    aw_provider_sec_core::run(
+    let run = if wait_for_backend {
+        aw_provider_sec_core::run_with_backend_wait
+    } else {
+        aw_provider_sec_core::run
+    };
+    run(
         &mut std::io::stdin().lock(),
         &mut std::io::stdout().lock(),
         &cli,

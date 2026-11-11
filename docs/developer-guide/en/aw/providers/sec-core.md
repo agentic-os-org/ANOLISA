@@ -39,6 +39,35 @@ existing daemon. Both paths are required and absolute. `--help` prints usage.
 The process reads one EOF-terminated AW Provider JSON request on stdin and writes
 one response on stdout. It is normally launched by the Host, not interactively.
 
+## Overlap backend and Agent startup
+
+Append `--wait-for-backend` to the Provider's `transport.argv` to let the
+service owner start sec-core in parallel with the Agent. Keep AW Service
+readiness, policy admission and native Hook installation before protected work.
+The bridge still leaves daemon startup and shutdown to the external owner.
+
+```text
+aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH --wait-for-backend
+```
+
+Discovery, configuration validation and `observe_tool` do not wait. A scan or
+Skill check waits only while the configured socket is absent, within the same
+invocation budget used by the actual check. Socket appearance does not prove
+health or a safe verdict: the public CLI still authenticates the peer, initializes
+the required capability and performs the check. There is no scan retry.
+A missing socket at the deadline, an invalid socket path or a failed check remains
+a Provider error, handled by the configured `on_error` action. Without this flag,
+the existing immediate CLI invocation is unchanged.
+
+Paths that need no backend keep their local result: an unmapped tool configured
+as `observe`, plain Pi input with no requested Skill, and an empty Prompt scan
+do not wait. Input and effect validation also complete before any backend wait.
+
+For predictable first-request latency, warm the capabilities actually used by the
+policy in the background while the App initializes. Record App readiness,
+capability readiness and the first protected response separately. Waiting only
+on the first request shifts cold initialization into that request's latency.
+
 ## External backend and explicit health diagnostics
 
 The Provider package contains the bridge, schema, examples and configuration
