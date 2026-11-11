@@ -86,9 +86,9 @@ The CLI requires the new daemon with carrier support; upgrade the daemon first.
 `agent-sec-cli intent propose` analyzes task intent and outputs an unapproved
 composable Cedar policy candidate for human review of exact paths, directory subtrees,
 actions and conditions. It only outputs a candidate: it does not persist policy-management
-records, bind an execution process, or deploy enforcement. The Policy commands
-below use the existing JSON template format and cannot directly import this Cedar
-candidate.
+records, bind an execution process, or deploy enforcement. After human review, save
+the candidate Cedar text to a file and submit it with `policy create --file` as
+shown below; Policy admission still validates the source and schema.
 
 The LLM receives only the task text and the unified `seccore.cedarschema`,
 and directly returns `{"policy":"...","unresolved":[]}`. Rust parses the
@@ -440,12 +440,20 @@ not migrated or automatically rebuilt; clean up old deployments with the compati
 binary before arranging a fresh database.
 
 ```bash
-agent-sec-cli --socket "$SOCKET" policy create --name "protect files" --file policy.json
+agent-sec-cli --socket "$SOCKET" policy create --name "protect files" --language json --file policy.json
 agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
 agent-sec-cli --socket "$SOCKET" policy list --limit 100 --offset 0
-agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "protect files v2" --file policy-v2.json
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "protect files v2" --language json --file policy-v2.json
 agent-sec-cli --socket "$SOCKET" policy delete --policy-id "$POLICY_ID" --revision 2
 ```
+
+`--language` selects how `--file` is read: `cedar` (the default) reads raw Cedar
+text, and `json` reads a native template or a JSON source envelope.
+
+**Breaking change:** `policy create` and `policy update` now read `--file` as
+raw Cedar text unless `--language json` is given. Scripts that pass JSON files
+without it are rejected by the daemon with `invalid_argument` and no Policy
+change; add `--language json` to keep their behavior.
 
 Use the ID and revision returned by successful commands. These are reference
 examples, not a sequential script. Create a Scope while the desired Policy revision
@@ -462,8 +470,33 @@ cannot be updated.
 
 ## Cedar Policy source
 
-The same `policy create` and `policy update` commands accept a JSON source
-envelope in `--file`. Save this example as `cedar-policy.json`:
+The same `policy create` and `policy update` commands read a Cedar file
+directly. Save this example as `cedar-policy.cedar`:
+
+```cedar
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {
+    context.input.operation == SecCore::WriteOperation::"delete" &&
+    resource.path == "/workspace/important"
+};
+```
+
+```bash
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.cedar
+agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --schema-revision 1 --file cedar-policy-v2.cedar
+```
+
+The file must be UTF-8 and is stored verbatim. `--schema-id` defaults to
+`seccore.system` and `--schema-revision` to the revision of the schema embedded
+in the CLI; both apply only to `--language cedar`. The resolved reference is
+saved with the Policy, so a later upgrade does not change the schema of an
+existing Policy. `agent-sec-cli policy default` prints the built-in baseline as a
+Cedar file that these commands accept; `policy default --json` prints it as a
+JSON source envelope instead.
+
+A JSON source envelope names the schema inside the file and is imported with
+`--language json`:
 
 ```json
 {
@@ -476,9 +509,7 @@ envelope in `--file`. Save this example as `cedar-policy.json`:
 ```
 
 ```bash
-agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.json
-agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
-agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --file cedar-policy-v2.json
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --language json --file cedar-policy.json
 ```
 
 Get/list return the saved original text and exact schema reference. Invalid
@@ -602,12 +633,14 @@ items. Pages may stop early at the 3 MiB encoded item budget.
 | Result | Output | Exit status |
 |--------|--------|-------------|
 | Success | Method result as formatted JSON on stdout; stderr is empty | `0` |
+| Local `policy default` | Raw Cedar on stdout; `--json` selects a JSON source envelope; no daemon request | `0` |
 | Daemon rejection | JSON `{requestId,error:{code,message}}` on stderr; stdout is empty | `1` |
 | File, connection, response or output failure | Error explanation on stderr | `1` |
 | Invalid command-line arguments | Usage error on stderr | `2` |
 
-Template files are limited to 4 MiB and must contain valid JSON without unknown or duplicate
-fields. The complete encoded request and response each have a separate 4 MiB limit, including
+Policy source files are limited to 4 MiB. With `--language json`, they must contain valid
+JSON without unknown or duplicate fields; with `--language cedar`, they must contain
+UTF-8 Cedar text. The complete encoded request and response each have a separate 4 MiB limit, including
 the line delimiter. Passing the file-size check does not guarantee the assembled request fits;
 an oversized request is rejected before sending. The daemon additionally rejects a
 serialized Policy or complete Scope larger than 1 MiB before storing it.

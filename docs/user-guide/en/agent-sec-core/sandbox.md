@@ -212,7 +212,7 @@ public execution command remains `sandbox run`; authorization integration uses
 the library and daemon RPCs, then the same local execution backend.
 
 Store Cedar policies through the existing `policy create/update` commands. The
-policy file uses the source envelope shown in the [Policy guide](policy-cli.md).
+policy file is a raw Cedar file, as shown in the [Policy guide](policy-cli.md#cedar-policy-source).
 Each successful update is available to the next authorization request.
 
 Enable authorization with

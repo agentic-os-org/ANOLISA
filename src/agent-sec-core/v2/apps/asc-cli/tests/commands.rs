@@ -60,6 +60,7 @@ fn equals_syntax_option_looking_values_and_awkward_paths_are_preserved() {
         "policy".into(),
         "create".into(),
         "--name=--help".into(),
+        "--language=json".into(),
         "--file".into(),
         file.into_os_string(),
         "--socket=/run/asc.sock".into(),
@@ -252,6 +253,8 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
         "create",
         "--name",
         "test",
+        "--language",
+        "json",
         "--file",
         path.to_str().unwrap(),
     ];
@@ -303,6 +306,8 @@ fn policy_file_errors_retain_original_line_and_column() {
                 command,
                 "--name",
                 "test",
+                "--language",
+                "json",
                 "--file",
                 path.to_str().unwrap(),
             ];
@@ -912,7 +917,7 @@ fn assert_gateway_output(output: &std::process::Output, result: &Value, response
 }
 
 #[test]
-fn policy_commands_accept_tagged_cedar_source_files() {
+fn policy_commands_accept_raw_and_tagged_cedar_sources() {
     let directory = common::Directory::new();
     let file = directory.0.join("cedar-policy.json");
     let source = json!({"language":"cedar", "content":{
@@ -920,22 +925,29 @@ fn policy_commands_accept_tagged_cedar_source_files() {
         "text":"permit(principal, action, resource);"
     }});
     std::fs::write(&file, serde_json::to_vec(&source).unwrap()).unwrap();
+    let raw = directory.0.join("policy.cedar");
+    std::fs::write(&raw, source["content"]["text"].as_str().unwrap()).unwrap();
     for operation in ["create", "update"] {
-        let mut args = vec![
-            "agent-sec-cli",
-            "policy",
-            operation,
-            "--name",
-            "sandbox",
-            "--file",
-            file.to_str().unwrap(),
-        ];
-        if operation == "update" {
-            args.extend(["--policy-id", "sandbox-baseline"]);
+        // The envelope and the raw text plus default schema flags are one request.
+        for (language, path) in [("json", &file), ("cedar", &raw)] {
+            let mut args = vec![
+                "agent-sec-cli",
+                "policy",
+                operation,
+                "--name",
+                "sandbox",
+                "--language",
+                language,
+                "--file",
+                path.to_str().unwrap(),
+            ];
+            if operation == "update" {
+                args.extend(["--policy-id", "sandbox-baseline"]);
+            }
+            let request = Cli::parse_from(args).unwrap().request().unwrap();
+            assert_eq!(request.params["template"], source, "--language {language}");
+            assert_eq!(request.method, format!("policy.templates.{operation}"));
         }
-        let request = Cli::parse_from(args).unwrap().request().unwrap();
-        assert_eq!(request.params["template"], source);
-        assert_eq!(request.method, format!("policy.templates.{operation}"));
     }
     let mut with_trailing_data = serde_json::to_vec(&source).unwrap();
     with_trailing_data.extend_from_slice(b" {}");
@@ -947,6 +959,7 @@ fn policy_commands_accept_tagged_cedar_source_files() {
             "create",
             "--name",
             "sandbox",
+            "--language=json",
             "--file",
             file.to_str().unwrap()
         ])

@@ -204,8 +204,8 @@ The shared flow is:
 With the V2 daemon and Sight configured, commands from `src/agent-sec-core/v2` are:
 
 ```sh
-agent-sec-cli policy create --name prevent-delete --file fixtures/adapters/agentsight/cedar-file-protection/prevent-delete.json
-agent-sec-cli policy create --name prevent-write --file fixtures/adapters/agentsight/cedar-file-protection/prevent-write.json
+agent-sec-cli policy create --name prevent-delete --language json --file fixtures/adapters/agentsight/cedar-file-protection/prevent-delete.json
+agent-sec-cli policy create --name prevent-write --language json --file fixtures/adapters/agentsight/cedar-file-protection/prevent-write.json
 agent-sec-cli scope create --pid <PID> --policy-id <POLICY_ID> --policy-revision <REVISION>
 agent-sec-cli binding list
 agent-sec-cli scope delete --scope-id <SCOPE_ID>

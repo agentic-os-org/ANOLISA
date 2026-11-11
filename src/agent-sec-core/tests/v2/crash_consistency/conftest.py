@@ -161,7 +161,14 @@ class Recovery:
         path = self.directory / "policy.json"
         path.write_text(json.dumps(template))
         return self.daemon.request(
-            "policy", "create", "--name", name, "--file", str(path)
+            "policy",
+            "create",
+            "--name",
+            name,
+            "--language",
+            "json",
+            "--file",
+            str(path),
         )
 
     def scope(self, policy, process=None):

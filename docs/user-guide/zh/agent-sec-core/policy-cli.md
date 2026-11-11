@@ -71,8 +71,8 @@ CLI 要求支持 carrier 的新 daemon，应先升级 daemon。
 
 `agent-sec-cli intent propose` 将任务转换为可组合的待审 Cedar policy，供人工
 核对精确路径、目录子树、动作和条件。目前仅输出候选策略，不写入策略管理记录、不绑定执行
-进程，也不下发执行。下文的 Policy 管理命令使用现有 JSON 模板，不能直接导入此
-Cedar 候选。
+进程，也不下发执行。人工审阅后可将候选 Cedar 原文保存为文件，按下文示例使用
+`policy create --file` 提交；Policy 准入仍会校验源码和 schema。
 
 LLM 只接收任务文本和统一 `seccore.cedarschema`，直接返回
 `{"policy":"...","unresolved":[]}`。Rust 解析原始 Cedar、检查绝对路径表达式
@@ -360,12 +360,19 @@ unlink/write 共用底层操作映射。旧 kind JSON 和包含该格式的开�
 也不自动重建；已有部署应先用兼容的旧二进制完成清理，再安排新库。
 
 ```bash
-agent-sec-cli --socket "$SOCKET" policy create --name "protect files" --file policy.json
+agent-sec-cli --socket "$SOCKET" policy create --name "protect files" --language json --file policy.json
 agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
 agent-sec-cli --socket "$SOCKET" policy list --limit 100 --offset 0
-agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "protect files v2" --file policy-v2.json
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "protect files v2" --language json --file policy-v2.json
 agent-sec-cli --socket "$SOCKET" policy delete --policy-id "$POLICY_ID" --revision 2
 ```
+
+`--language` 决定 `--file` 的读取方式：`cedar`（缺省）读取 Cedar 原文，`json` 读取原生模板
+或 JSON 源码封装。
+
+**兼容性变更（Breaking change）**：除非传入 `--language json`，`policy create`、
+`policy update` 现在都把 `--file` 当作 Cedar 原文读取。未加该参数而传入 JSON 文件的脚本
+会被 daemon 以 `invalid_argument` 拒绝，Policy 不会变化；加上 `--language json` 即可保持原有行为。
 
 ID 和 revision 使用成功命令返回的值。这些是参考示例，并非顺序执行脚本；应在目标
 Policy revision 仍为 current 时创建 Scope。create/update 均要求名称和完整模板，
@@ -378,8 +385,30 @@ Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容�
 
 ## Cedar Policy 源码
 
-同一组 `policy create`、`policy update` 命令通过 `--file` 接受 JSON 源码封装。
-将以下示例保存为 `cedar-policy.json`：
+同一组 `policy create`、`policy update` 命令可直接读取 Cedar 文件。将以下示例保存为
+`cedar-policy.cedar`：
+
+```cedar
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {
+    context.input.operation == SecCore::WriteOperation::"delete" &&
+    resource.path == "/workspace/important"
+};
+```
+
+```bash
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.cedar
+agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --schema-revision 1 --file cedar-policy-v2.cedar
+```
+
+文件必须是 UTF-8，按原文保存。`--schema-id` 缺省为 `seccore.system`，`--schema-revision`
+缺省为 CLI 内置 schema 的 revision，两者仅用于 `--language cedar`。解析得到的引用随
+Policy 一起保存，之后升级不会改变已有 Policy 的 schema。`agent-sec-cli policy default`
+以 Cedar 文件形式输出内置基线，可直接用上述命令导入；`policy default --json` 改为输出
+JSON 源码封装。
+
+JSON 源码封装在文件内指定 schema，使用 `--language json` 导入：
 
 ```json
 {
@@ -392,9 +421,7 @@ Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容�
 ```
 
 ```bash
-agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.json
-agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
-agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --file cedar-policy-v2.json
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --language json --file cedar-policy.json
 ```
 
 Get/list 返回保存的原文及精确 schema 引用。语法、schema 或公共子集校验失败时返回
@@ -497,11 +524,13 @@ offset 按实际返回条数推进；达到 3 MiB 编码条目预算时可能提
 | 结果 | 输出 | 退出码 |
 |------|------|--------|
 | 成功 | stdout 输出格式化的结果 JSON，stderr 为空 | `0` |
+| 本地 `policy default` | stdout 输出 Cedar 原文；`--json` 改为 JSON 源码封装；不请求 daemon | `0` |
 | daemon 拒绝 | stderr 输出 JSON `{requestId,error:{code,message}}`，stdout 为空 | `1` |
 | 文件、连接、响应或输出失败 | stderr 输出错误说明 | `1` |
 | 命令行参数错误 | stderr 输出用法错误 | `2` |
 
-模板文件最大为 4 MiB，必须是有效 JSON，不能包含未知或重复字段。
+Policy 源码文件最大为 4 MiB。`--language json` 要求有效 JSON，不能包含未知或重复字段；
+`--language cedar` 要求 UTF-8 Cedar 原文。
 完整编码后的请求和响应各自另有 4 MiB 上限，包含行结束符。文件大小检查通过不保证
 组装后的请求符合上限；请求超限时不会发送。daemon 另在保存前拒绝编码后超过
 1 MiB 的 Policy 或完整 Scope。

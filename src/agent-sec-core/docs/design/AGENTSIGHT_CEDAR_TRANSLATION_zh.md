@@ -166,8 +166,8 @@ Apply 期间须保持目标访问及进程树稳定；并发下发、io_uring/AI
 V2 daemon 与 Sight 已配置时，在 `src/agent-sec-core/v2` 下运行：
 
 ```sh
-agent-sec-cli policy create --name prevent-delete --file fixtures/adapters/agentsight/cedar-file-protection/prevent-delete.json
-agent-sec-cli policy create --name prevent-write --file fixtures/adapters/agentsight/cedar-file-protection/prevent-write.json
+agent-sec-cli policy create --name prevent-delete --language json --file fixtures/adapters/agentsight/cedar-file-protection/prevent-delete.json
+agent-sec-cli policy create --name prevent-write --language json --file fixtures/adapters/agentsight/cedar-file-protection/prevent-write.json
 agent-sec-cli scope create --pid <PID> --policy-id <POLICY_ID> --policy-revision <REVISION>
 agent-sec-cli binding list
 agent-sec-cli scope delete --scope-id <SCOPE_ID>
