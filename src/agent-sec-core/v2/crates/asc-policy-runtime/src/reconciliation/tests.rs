@@ -1246,7 +1246,7 @@ fn storage_backoff_retains_original_write_and_does_not_spend_retry_budget() {
                     clock.as_ref(),
                     &queue,
                     expected,
-                    Duration::from_millis(1000),
+                    Duration::from_secs(1),
                 );
             }
             assert_eq!(status(&inner, 2), Some(BindingStatus::Ready));
@@ -1261,7 +1261,7 @@ fn storage_backoff_retains_original_write_and_does_not_spend_retry_budget() {
                     clock.as_ref(),
                     &queue,
                     id(1),
-                    Duration::from_millis(1000),
+                    Duration::from_secs(1),
                 );
                 let state = queue.state.lock().unwrap();
                 assert_eq!(
@@ -1296,7 +1296,7 @@ fn storage_backoff_retains_original_write_and_does_not_spend_retry_budget() {
                     clock.as_ref(),
                     &queue,
                     id(1),
-                    Duration::from_millis(1000),
+                    Duration::from_secs(1),
                 );
             }
             assert_eq!(status(&inner, 1), Some(BindingStatus::Ready));
