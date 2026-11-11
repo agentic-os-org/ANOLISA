@@ -288,7 +288,7 @@ Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON
 
 Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。原生 Bash 只把字符串 `stdout` 交给 Core，包括较短或为空的值；压缩后回填到原对象，`stderr` 和其他字段保持不变。其他结果形态沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。原生 Bash 只允许替换字符串 `stdout`，包括较短或为空的值；压缩后回填到原对象，`stderr` 和其他字段保持不变。`stdout` 缺失或不是字符串时不替换原结果，错误诊断仍可读取 `stderr`。其他可替换的结构化结果沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
 
 这也意味着原生 Bash 对象中的独立 `stderr` 字段不再压缩或生成检索标记；Hook 返回 `{}`
 表示不替换工具结果，不表示给模型返回空文本。Qoder 1.1.78 的真实 Bash 探针中，进程的

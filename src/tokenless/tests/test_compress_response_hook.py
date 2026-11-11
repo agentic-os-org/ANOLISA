@@ -141,6 +141,20 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
     elif behavior in ("wrong-protocol-version", "future-protocol-version"):
         version = 1 if behavior == "wrong-protocol-version" else 3
         script = prologue + f'respond(content[:40], "applied", protocol_version={version})\n'
+    elif behavior == "force-applied":
+        script = textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, sys
+            json.load(sys.stdin)
+            print(json.dumps({
+                "protocol_version": 2,
+                "operation": "post_tool",
+                "result": {
+                    "disposition": "applied",
+                    "output": json.dumps({"stdout": None, "stderr": "changed"}),
+                },
+            }))
+        """)
     else:
         raise ValueError(f"Unknown behavior: {behavior}")
 
@@ -1202,10 +1216,73 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
+    def test_qoder_non_string_stdout_cannot_replace_the_envelope(self) -> None:
+        binary = _create_mock_tokenless(self.tmpdir, "compress")
+        for stdout in (
+            {}, {"stdout": None}, {"stdout": {"nested": "value"}},
+            {"stdout": ["value"]}, {"stdout": 0},
+        ):
+            for stderr in ("warning", "warning line\n" * 30):
+                with self.subTest(stdout=stdout, stderr_length=len(stderr)):
+                    envelope = {
+                        **stdout,
+                        "stderr": stderr,
+                        "exit_code": 0,
+                        "metadata": "trace data " * 100,
+                    }
+                    result = _run_hook(
+                        {"tool_name": "Bash", "tool_response": envelope},
+                        agent_id="qoder-cli",
+                        mock_tokenless_path=binary,
+                        isolated_home=self.isolated_home,
+                    )
+                    self.assertEqual(result, {})
+                    with open(os.path.join(self.tmpdir, "request.json")) as captured:
+                        request = json.load(captured)
+                    self.assertFalse(request["capabilities"]["replace_output"])
+                    self.assertEqual(json.loads(request["content"]), envelope)
+
+    def test_qoder_non_string_stdout_keeps_error_diagnostics(self) -> None:
+        stderr = "bash: rg: command not found"
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": {
+                "stdout": None, "stderr": stderr, "exit_code": 127,
+            }},
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            request = json.load(captured)
+        self.assertFalse(request["capabilities"]["replace_output"])
+        self.assertEqual(request["content"], stderr)
+        specific = result["hookSpecificOutput"]
+        self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
+        self.assertNotIn("updatedToolOutput", specific)
+
+    def test_qoder_non_string_stdout_rejects_unexpected_applied_result(self) -> None:
+        binary = _create_mock_tokenless(self.tmpdir, "force-applied")
+        warnings = []
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": {
+                "stdout": None, "stderr": "warning", "exit_code": 0,
+            }},
+            agent_id="qoder-cli",
+            mock_tokenless_path=binary,
+            isolated_home=self.isolated_home,
+            stderr_sink=warnings,
+        )
+        self.assertEqual(result, {})
+        self.assertIn("non-replaceable Qoder output", "".join(warnings))
+
     def test_qoder_compresses_only_stdout_even_when_stderr_is_longer(self) -> None:
         stdout = "build step\n" * 30
         stderr = "warning\n" * 100
-        envelope = self._bash_envelope(stdout, stderr)
+        envelope = {
+            **self._bash_envelope(stdout, stderr),
+            "exit_code": 0,
+            "metadata": {"duration_ms": 123, "tags": ["one", "two"]},
+        }
         result = _run_hook(
             {"tool_name": "Bash", "tool_response": envelope},
             agent_id="qoder-cli",
@@ -1215,7 +1292,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
             self.assertEqual(json.load(captured)["content"], stdout)
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertEqual(updated, self._bash_envelope(stdout[:40], stderr))
+        self.assertEqual(updated, {**envelope, "stdout": stdout[:40]})
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
     def test_qwenwork_rewrapped_envelope_preserves_metadata(self):

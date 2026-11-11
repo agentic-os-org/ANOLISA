@@ -46,7 +46,11 @@ def post_tool_payload(call_id: str) -> dict:
         "session_id": "session-1",
         "tool_use_id": call_id,
         "tool_name": "Bash",
-        "tool_response": {"output": "x" * 80},
+        "tool_response": {
+            "stdout": json.dumps({"output": "x" * 400}),
+            "stderr": "warning",
+            "exit_code": 0,
+        },
     }
 
 
@@ -175,7 +179,14 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(self.requests()[-1]["input"]["capabilities"]["recovery"]["kind"], "none")
 
         second = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
-        self.assertIn("hookSpecificOutput", second)
+        self.assertEqual(
+            second["hookSpecificOutput"]["updatedToolOutput"],
+            {
+                "stdout": json.dumps({"output": "x" * 20}, separators=(",", ":")),
+                "stderr": "warning",
+                "exit_code": 0,
+            },
+        )
         self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "none")
 
     def test_state_is_isolated_by_tool_call(self) -> None:

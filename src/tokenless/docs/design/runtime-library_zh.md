@@ -62,8 +62,9 @@ PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，�
 前缀不在此识别范围。PostTool 复用该解析器识别 `command_output` 来源的搜索，
 与原生 `Grep` 工具一样，只调用 `SearchResultsCompressor`。统一入口识别带路径和行号的
 匹配记录及纯路径列表，格式识别和收益判断都保留在压缩器内部。关闭搜索压缩或没有候选时
-原样返回，即使设置 `force_json` 也不尝试其他领域压缩器。Qoder 原生 Bash Adapter 只将
-`stdout` 交给 Core，即使它较短、为空或 `stderr` 更长；回填结果时保留其他所有字段。
+原样返回，即使设置 `force_json` 也不尝试其他领域压缩器。Qoder 原生 Bash Adapter 只替换
+字符串 `stdout`，即使它较短、为空或 `stderr` 更长。`stdout` 缺失或不是字符串时禁用替换；
+错误诊断仍可读取 `stderr`。回填结果时保留其他所有字段。
 
 此保护覆盖包含已识别搜索的复合命令的完整输出。例如，`grep -q needle Cargo.toml && cargo build`
 也会保留完整构建日志，因为 Hook 不提供各子命令的输出边界。在能保证搜索匹配完整的混合输出

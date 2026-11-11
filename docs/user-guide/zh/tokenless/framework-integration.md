@@ -84,8 +84,9 @@ Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显
 无意义地启动子进程。
 
 原生 Shell 包装中的主要 `stdout` 或 `stderr` 字段从 200 字符起进入文本路由，让短日志
-与纯文本使用相同的领域压缩器；Qoder 原生 Bash 始终选择 `stdout`，包括较短或为空的值。
-其他字段保持不变。Qoder 原生 Bash 的 stdout、Claude Code
+与纯文本使用相同的领域压缩器；Qoder 原生 Bash 只选择字符串 `stdout`，包括较短或为空的值。
+`stdout` 缺失或不是字符串时，不替换原始结果。`stderr` 和其他字段保持不变；错误诊断仍可
+读取 `stderr`。Qoder 原生 Bash 的 stdout、Claude Code
 和千问办公继续返回对象。Cosh-NG 解包 `llmContent` 内的 Shell JSON 后，会把更新后的包装
 序列化为其要求的字符串替换值；OpenCode 继续保留字符串输出契约。
 
