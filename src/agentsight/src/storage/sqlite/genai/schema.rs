@@ -430,12 +430,22 @@ impl GenAISqliteStore {
         )?;
         let (evaluation_count, evaluation_bytes): (i64, i64) =
             if table_exists(&conn, "evaluation_runs")? {
-                conn.query_row(
-                    "SELECT COUNT(*), COALESCE(SUM(octet_length(result_json)), 0)
-                     FROM evaluation_runs",
+                // A database written before `result_json` existed is a
+                // supported shape — the delete path below guards for it — so
+                // the candidate scan must not query the column blindly.
+                let has_payload: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('evaluation_runs') \
+                     WHERE name = 'result_json')",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?
+                    |row| row.get(0),
+                )?;
+                let sql = if has_payload {
+                    "SELECT COUNT(*), COALESCE(SUM(octet_length(result_json)), 0)
+                     FROM evaluation_runs"
+                } else {
+                    "SELECT COUNT(*), COUNT(*) * 64 FROM evaluation_runs"
+                };
+                conn.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))?
             } else {
                 (0, 0)
             };
