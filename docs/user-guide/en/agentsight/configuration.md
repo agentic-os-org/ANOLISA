@@ -243,7 +243,7 @@ of command-line tokens with `*` wildcards; all tokens must match in order.
 matches a process whose first argument contains `node` and whose next argument contains `claude`.
 
 The shipped file covers Hermes, Codex, Runloop, cosh (`Cosh`), cosh-ng (`CoshNG`), OpenClaw,
-Claude Code, Qwen Code, AgentScope, and Qoder CLI — 35 rules in total.
+Claude Code, Qwen Code, AgentScope, and Qoder CLI — 36 rules in total.
 
 Qoder CLI rules cover native/versioned binaries and Node launchers. Its legacy
 `*.qoder.sh` gateway is included in `https`. Existing configurations retain their

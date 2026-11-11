@@ -7,7 +7,7 @@ components when they happen to be installed. Nothing on this page is required to
 
 ## Supported Agents
 
-Any process matched by a discovery rule is traced. The shipped rule set (35 rules) covers:
+Any process matched by a discovery rule is traced. The shipped rule set (36 rules) covers:
 
 | Agent | Reported name |
 |---|---|
