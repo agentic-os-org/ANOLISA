@@ -563,6 +563,25 @@ is `selective-claw.db` under `OPENCLAW_STATE_DIR`, or under `~/.openclaw` when t
 variable is unset. Setting the plugin's `enabled` option to `false` skips database,
 context engine and recall tool registration.
 
+#### Selective-Claw archive write failures
+
+Selective-Claw groups the message inserts of each bootstrap or history-reconciliation
+batch in one SQLite savepoint. A failed batch rolls back its inserts and propagates
+the original error, so an empty archive remains eligible for the initial import.
+Resolve the storage failure, such as exhausted capacity, then retry the failed
+operation. Previously partial imports from older code are not repaired automatically.
+
+An import inside a caller-owned SQLite transaction still needs the caller's commit.
+SQLite can itself abort that entire transaction on errors such as `SQLITE_FULL`;
+callers must handle that outer failure. Cleanup cannot guarantee rollback through an
+unusable connection. If savepoint cleanup also fails, the plugin logs that secondary
+error and still propagates the original import error. This warning alone does not
+establish whether SQLite has already ended the transaction. Reopen the plugin's
+database connection before reuse if cleanup cannot be completed. This batch
+boundary does not cover later summarization or
+assembly failures, other lifecycle calls, or earlier committed messages. No schema
+migration is required.
+
 ### Hermes
 
 The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the

@@ -321,29 +321,46 @@ export class SelectiveContextEngine implements ContextEngine {
   }
 
   private importMessages(sessionId: string, messages: AgentMessage[]): void {
-    let seq = this.store.getNextSeq(sessionId);
-    let turnSeq = this.store.getMaxTurnSeq(sessionId);
+    if (messages.length === 0) return;
 
-    for (const msg of messages) {
-      const role = this.normalizeRole(msg.role);
-      const content = this.extractContent(msg);
+    // A partial bootstrap looks complete to retries; keep the batch indivisible.
+    this.db.exec("SAVEPOINT selective_claw_import");
+    try {
+      let seq = this.store.getNextSeq(sessionId);
+      let turnSeq = this.store.getMaxTurnSeq(sessionId);
 
-      if (role === "user" || role === "system") {
-        turnSeq++;
-      } else if (turnSeq === 0) {
-        turnSeq = 1;
+      for (const msg of messages) {
+        const role = this.normalizeRole(msg.role);
+        const content = this.extractContent(msg);
+
+        if (role === "user" || role === "system") {
+          turnSeq++;
+        } else if (turnSeq === 0) {
+          turnSeq = 1;
+        }
+
+        this.store.createMessage({
+          sessionId,
+          seq,
+          turnSeq,
+          role,
+          content,
+          tokenCount: estimateTokens(content),
+          rawMessage: JSON.stringify(msg),
+        });
+        seq++;
       }
-
-      this.store.createMessage({
-        sessionId,
-        seq,
-        turnSeq,
-        role,
-        content,
-        tokenCount: estimateTokens(content),
-        rawMessage: JSON.stringify(msg),
-      });
-      seq++;
+      this.db.exec("RELEASE selective_claw_import");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK TO selective_claw_import");
+        this.db.exec("RELEASE selective_claw_import");
+      } catch (cleanupError) {
+        // SQLite may already have aborted the transaction. Keep its original error;
+        // releasing after a failed rollback could commit a partially written batch.
+        console.warn("[selective-claw] message import failed; savepoint cleanup also failed", cleanupError);
+      }
+      throw error;
     }
   }
 
