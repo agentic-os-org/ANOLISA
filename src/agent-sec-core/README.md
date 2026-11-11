@@ -99,16 +99,18 @@ refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
 PolicyTemplates are reusable policies with general rules; the PEP Translator
 supports native JSON file-deletion block rules. Policy create/update also accepts Cedar
 source envelopes with an exact schema reference. Cedar admission and source persistence are
-available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed. Native JSON requests and saved
-snapshots retain their format. Scopes save immutable Policy snapshots and own automatic
-Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
-the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
+available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed.
+Non-credential native JSON requests and saved snapshots retain their format; the approved
+Secret Gateway transition below is incompatible. Scopes save immutable Policy snapshots and
+own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI
+callers, configure the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
 
 **Breaking change:** `scope create --cgroup-id` has been removed because cgroup
 assignments were not supported. Update scripts to select the intended processes
 with `--pid`, `--process-name`, or `--executable`.
 
-The V2 **Secret Gateway preview** keeps real GitHub credentials out of Agent processes.
+The V2 **Secret Gateway preview** supplies fake GitHub credentials to Agent processes
+and injects real values into authorized HTTPS requests; it is not a complete response-leakage guarantee.
 The V2 `agent-sec-core` RPM starts the base daemon automatically but leaves the gateway off; root installs
 mitmproxy explicitly. Raw packages include the same gateway assets but start neither service; the daemon
 alone controls the gateway lifecycle, and uninstall refuses to proceed if routing withdrawal fails.
@@ -131,6 +133,18 @@ actual rule application, not an independent preflight. Wait separately for insta
 Key list returns active IDs only (`{"credentials":["github"]}`); add/remove return `{"credential":"github"}` and
 successful enable/disable return `{}`. See the
 [Secret Gateway design (Chinese)](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md).
+
+**Breaking response-contract change:** `responseRewrite` is a required JSON bool;
+old `buffered/none` values are rejected. When enabled, response headers, uncompressed bodies and
+trailers are rewritten; bodies use bounded streaming, not whole-response buffering. Compressed
+bodies pass through unchanged and can return real keys to the Agent. See
+[response coverage and streaming boundaries](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写).
+Old `PreparedPolicy`, Scope/Binding snapshots and pinnedScope require a separate backed-up
+conversion or complete rebuild of all related records; do not perform a rolling upgrade with old
+policies or silently overwrite immutable snapshots. See the
+[migration boundary](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界).
+Validation uses internal mock upstreams, not external APIs; published support depends on the
+corresponding release artifacts.
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an

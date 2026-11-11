@@ -6,13 +6,17 @@
 | 范围 | GitHub 凭据；复用原生 Policy/Scope/Binding 与 process discovery |
 | 相关文档 | [部署契约 §14](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md#14-target-v2-secret-gateway-进程权限与数据目录dproc-gw)、[daemon 协议 §18](DAEMON_PROTOCOL_V1_zh.md#18-target-v2-secret-gateway-管理) |
 
+本文面向维护 Policy 契约与网关实现的开发者，定义布尔响应开关、未压缩正文的有界流式
+替换和压缩正文透传边界。发布支持以对应版本的实际制品为准，源码行为不代表已发布能力。
+
 ## 1. 目标与授权对象
 
-Secret Gateway 让 Agent 只持有与真实 GitHub Token 同形的 fake。网关只在 Policy 允许的 HTTPS
-请求头中把 fake 换成真实值，并按响应模式处理真实值回显。设计前提是 Agent 仅持有 fake，
-无法从环境变量、文件、工具或其他渠道取得真实凭据；在此前提下，打印、保存或外发 Agent
-凭据只能泄露 fake，不能直接用于 GitHub 鉴权。这不是一般 DLP：请求正文不检查或改写，
-若 Agent 已从其他渠道取得真实凭据，本设计不保证阻止其通过正文外泄。
+Secret Gateway 让 Agent 只持有与真实 GitHub Token 同形的 fake，在 Policy 允许的 HTTPS
+请求 Authorization 中把 fake 换成真实值；响应是否反向替换由 `responseRewrite` 控制。
+设计前提是 Agent 无法从环境变量、文件、工具或其他渠道取得真实凭据。响应改写不是完整
+防泄漏保证：关闭改写或上游返回压缩正文时，真实 key 仍可能回到 Agent（见 §4.3），因此
+不能无条件声称 Agent 始终只会看到 fake。这也不是一般 DLP：请求正文不检查或改写，若
+Agent 已取得真实凭据，本设计不保证阻止其通过正文外泄。
 
 授权由 PAP 中的 Policy、Scope 和 Binding 负责：Policy 描述允许的请求，Scope 固定 Policy
 revision 与 owner UID 并持续选择进程，Binding 固定一次发现的进程实例。Credential Store 保存
@@ -52,7 +56,7 @@ Policy 使用既有 `specVersion: "0.1"`、`rules` JSON，不增加独立授权�
       "host": "api.github.com",
       "path": "/**",
       "methods": ["GET", "HEAD"],
-      "responseRewrite": "buffered"
+      "responseRewrite": true
     }
   }]
 }
@@ -64,19 +68,25 @@ Policy 使用既有 `specVersion: "0.1"`、`rules` JSON，不增加独立授权�
 - host 为精确小写 DNS 名，最长 253 字节；不支持通配 host。
 - path 最长 512 字节、必须绝对；`*` 为一段，`**` 跨多段，其余为字面段，不允许 `.`、`..`。
 - methods 是 1–6 个不重复的大写 `GET/HEAD/POST/PUT/PATCH/DELETE`。
-- `responseRewrite` 为 `buffered` 或 `none`。可选 `because` 最长 256 字节且不含控制字符。
+- `responseRewrite` 必填，且只接受 JSON bool `true` / `false`；不接受省略、null、字符串
+  `"true"` / `"false"`、数字或旧 `buffered` / `none`，不提供默认值或兼容别名。
+  `true` 重写注入后响应的 headers、未压缩正文和 trailers；`false` 全部不重写（详见 §4.3）。
+- 不提供 `auto` / `stream` 等技术配置；可选 `because` 最长 256 字节且不含控制字符。
 
-标准 GitHub Policy 的完整 JSON 位于 `v2/crates/asc-gateway-plan/policies/github.json`；RPM 将其安装为 `/usr/share/anolisa/sec-core/gateway/github-policy.json`：
+标准 GitHub Policy 的完整 JSON 位于 `v2/crates/asc-gateway-plan/policies/github.json`；RPM 将其安装为 `/usr/share/anolisa/sec-core/gateway/github-policy.json`。各规则的布尔开关如下：
 
-| host | path | method | 响应改写 |
+| host | path | method | responseRewrite |
 | --- | --- | --- | --- |
-| `api.github.com` | `/**` | GET、HEAD、POST、PUT、PATCH、DELETE | buffered |
-| `github.com` | `/**/info/refs` | GET | buffered |
-| `github.com` | `/**/git-upload-pack` | POST | none |
-| `github.com` | `/**/git-receive-pack` | POST | buffered |
+| `api.github.com` | `/**` | GET、HEAD、POST、PUT、PATCH、DELETE | `true` |
+| `github.com` | `/**/info/refs` | GET | `true` |
+| `github.com` | `/**/git-upload-pack` | POST | `false` |
+| `github.com` | `/**/git-receive-pack` | POST | `true` |
 
-上传接口、raw 内容、GitHub Enterprise 不在标准 Policy 中。Git upload-pack pack body 可能很大，
-因此保持流式转发；refs 和 receive-pack 仍缓冲检查。
+上传接口、raw 内容、GitHub Enterprise 不在标准 Policy 中。原 `buffered` 项改为 `true`，
+不再整包缓存；Git upload-pack 原 `none` 改为 `false`，headers、body、trailers 均不重写。
+旧 `none` 仍替换 headers/trailers，因此这一映射改变行为，并非兼容迁移。字节替换不是
+Git 或通用二进制协议解析；带 hash、签名或 framing 的内容即使长度不变，也不保证替换后
+协议正确。标准 Policy 的选择不构成任意二进制响应可安全改写的保证。
 
 ### 2.2 Scope 准备与发现
 
@@ -166,7 +176,7 @@ plan 的完整字段形状如下，示例只包含一条 HTTPS 规则：
       "methods": ["GET", "HEAD"],
       "credentialId": "github"
     },
-    "responseRewrite": "buffered",
+    "responseRewrite": true,
     "because": "GitHub REST API with github"
   }]
 }
@@ -175,7 +185,10 @@ plan 的完整字段形状如下，示例只包含一条 HTTPS 规则：
 `scopeId` 直接标识 Scope，`policies` 列出固定 revision，`credentials` 是凭据 ID 数组。
 每条规则仅有 `source`、`match`、`responseRewrite`、`because`；`source.ruleIndex` 是作者
 Policy 中的规则位置，数据面判定使用 rules 数组位置，不额外保存 index。`match.methods`
-为方法数组，`match.credentialId` 为单个凭据 ID。
+为方法数组，`match.credentialId` 为单个凭据 ID。Plan 的 `responseRewrite` 同样必填且严格为
+JSON bool，由 pinned Policy 原样投影；Rust 与 addon 均拒绝旧字符串、缺失或其他类型。
+示例保留 `agent-sec-gateway-plan/v1` 标签，但标签不代表与旧字符串格式兼容；旧 Plan 必须
+从已转换或重建的 canonical 快照重新生成，不能绕过 §5.1 的持久化兼容边界。
 
 携带本 Scope fake 的请求必须命中同时点名该凭据的规则，未授权固定 block；无托管凭据
 固定 allow，但仍执行安全校验。这两项是数据面语义，不是 plan 配置字段。plan 上限为
@@ -212,8 +225,9 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 
 ### 4.2 请求判定与响应
 
-请求在 `requestheaders` 阶段完成授权与 fake→真实值替换，不等待正文。请求正文原样流式
-传输，不解压、不缓存、不检查或改写；不再执行请求正文真实凭据检查。URL（含 query 的原始
+请求在 `requestheaders` 阶段完成授权与 Authorization fake→真实值注入，不等待正文；注入
+独立于 `responseRewrite`，`true` / `false` 均须经过相同授权与请求安全校验。请求正文原样
+流式传输，不解压、不缓存、不检查或改写。URL（含 query 的原始
 及 URL 解码形式）、header 值以及解析后的 Basic 用户名/密码中既有真实凭据拒绝仍保留。
 query 不作为凭据替换 carrier，Policy path 匹配不含 query。
 
@@ -231,24 +245,60 @@ HTTPS 端口与规范 path、method、Policy allow。常见拒绝码为 `gateway
 SNI/Host 不符为 421，内部异常 `gateway_error` 为 500。输出日志只允许 addon 的固定安全诊断，
 不输出请求字段、依赖解析消息或异常堆栈；内部 readiness 报告保留，底层故障日志细节减少。
 
-命中 allow 后只替换 Authorization token/Basic 密码，保留 Basic 用户名。仅注入后的响应需
-反向改写：header/trailer 中实际注入的 Authorization（含 Basic 编码）和裸真实值均改回 fake；
-响应防泄漏行为不因请求正文流式传输而改变。`buffered` 响应正文的累计 encoded 接收字节与
-累计 decoded 解压字节分别限 8 MiB，只接受 identity/gzip，并使用相同替换表。
-响应正文通过流式回调有界接收、增量解压，完整检查后才交付；改写后的安全响应头可能先发送。
-协议层过滤非终止空 DATA，只有 EndOfMessage 才触发最终改写，避免把 HTTP/2 的合法空帧
-误当作 EOF。上传未结束时上游已返回完整响应，先完成响应改写并停止上传，不等待请求 EOF；HTTP/1
-响应结束后关闭连接，HTTP/2 下游连接保留以便窗口更新后发送排队正文与 END_STREAM。
-此时上游连接关闭，复用该上游 HTTP/2 连接的其他流也可能受影响。超限或解压失败立即关闭两端
-连接，不交付部分正文；不支持的编码返回 502 或断开。
-移除 ETag 和 Content-MD5；有正文时移除 Content-Length，HTTP/1 使用 chunked framing，
-HTTP/2 使用原生 DATA framing。HEAD、204、304 等无正文响应保持无正文，保留表示长度，
-不添加 chunked framing。固定依赖不支持 HTTP/1 trailers，遇到此类响应直接断开，不交付
-未经检查的正文。`none` 保持 body 流式，不受此 buffered 限额影响。
-响应钩子异常或已注入请求的上游协议错误（含响应头解析与字段校验失败）均直接关闭客户端
-连接，不交付包含原始上游字节的代理错误页。字段校验失败不受 flow kill 约束，addon 在
-error hook 返回前同步关闭底层 writer，覆盖 HTTP/1 与 HTTP/2；同一 HTTP/2 连接的其它流也
-会断开。该行为依赖固定 mitmproxy 版本的连接实现，升级时须重跑对应黑盒用例。
+命中 allow 后只替换 Authorization token/Basic 密码，保留 Basic 用户名；不因响应开关关闭
+而跳过注入，也不修改请求 `Accept-Encoding`，压缩协商由客户端与上游决定。
+
+### 4.3 响应改写
+
+只对实际注入凭据的请求应用 `responseRewrite`。替换表将实际注入的 Authorization
+（含 Basic 编码）映射回原 fake Authorization，将裸真实值映射回 Scope fake；不提供
+任意编码或语义还原。未注入的响应保持普通流式转发。
+
+| responseRewrite | headers | body | trailers |
+| --- | --- | --- | --- |
+| `true` | 按替换表 real→fake | 未压缩正文有界流式替换；其他编码原样流式透传 | 按替换表 real→fake |
+| `false` | 不重写 | 原样流式透传 | 不重写 |
+
+`false` 关闭全部响应凭据改写，也不因该开关剥离校验头或长度头；它不等价于仍替换
+headers/trailers 的旧 `none`。正常 HTTP 传输与错误处理不因此停用。
+
+开启改写时，`Content-Encoding` 缺失、空值或 `identity` 的正文按连续字节流替换，不依赖
+network chunk 边界。每次输出已能确定不会参与后续匹配的前缀，仅保留可能构成替换源前缀
+的最小未决尾部；保留量受替换源长度约束，不随整篇正文增长。真实 key 或完整注入的
+Authorization 横跨 chunk 时仍应替换，真正 EOF 才处理最后尾部；非终止空 DATA 不是 EOF。
+没有整包缓存，也没有累计 encoded/decoded 正文的 8 MiB 限额。§3.1、§4.1 中的持久文件与
+快照容量限制不是正文限额。
+
+匹配器的尾部有界不等于底层传输队列有界：固定 mitmproxy 在下游 HTTP/2 窗口不足时
+继续接收上游数据并排队。网关处理已注入响应 DATA 时，将客户端连接的待发送正文队列
+限制为 8 MiB 和 1024 个待发 DATA 项，统计时先限制项数，避免微小分块导致无界扫描。
+超限清除排队正文/trailers 并关闭两端连接，不按累计响应大小终止正常读取。
+该资源保护同时作用于开启、关闭及压缩透传的已注入响应，同一客户端 HTTP/2 连接的其他
+流也可能断开。它不是用户需要选择的重写模式，不承诺未注入流或所有进程内存受此上限约束。
+
+为避免解压、重新压缩的处理成本与编码变换复杂度，任何其他 `Content-Encoding`，包括
+`gzip`、`br`、`deflate`，其正文原样透传，不解压、不扫描、不重新压缩，也不因为编码
+不受替换支持而拒绝；headers/trailers 仍按 `true` 替换。
+**明确 tradeoff：即使开启改写，压缩 body 仍可能把真实 key 返回 Agent。只替换
+headers/trailers 无法弥补正文泄漏；不能把压缩透传称为完整防泄漏保证。** 不强制上游返回
+identity，也不改客户端 `Accept-Encoding` 协商。
+
+SSE 可以按普通字节流处理：未压缩时替换物理字节连续的匹配，包括跨 network chunk 的
+匹配；不解析 SSE 事件或 JSON，不识别多个 JSON 事件在消费端语义拼接出的 key。压缩 SSE
+同样适用压缩正文透传边界。带 hash、签名或 framing 的二进制正文没有通用替换正确性保证。
+
+未压缩正文改写仍须保持 HTTP 长度/framing 一致：有正文时移除原 Content-Length、ETag
+和 Content-MD5，HTTP/1 使用 chunked，HTTP/2 使用原生 DATA；压缩正文不按解码结果改写
+长度或校验值。HEAD、204、304 等无正文响应保持无正文，保留表示长度，不添加 chunked
+framing。固定依赖不支持 HTTP/1 trailers，遇到此类协议错误仍中止，不能承诺成功转发。
+
+响应改写或传输失败时中止流/连接，不退回未检查的响应，也不发送包含原始上游字节的
+代理错误页。但 headers 和安全前缀可以已经发送，**已发响应不可撤回**，不能沿用旧完整
+缓存路径的“不交付任何部分正文”保证。已注入请求的上游响应头解析、字段校验等协议错误
+保持关闭连接边界；同步关闭底层 writer 的行为依赖固定 mitmproxy 版本，HTTP/2 同连接
+其它流也可能断开。上传未结束而上游先结束响应时，不等待请求 EOF，应完成响应收尾并
+停止上传；共享上游连接的其它流可能受影响。依赖升级时须通过内部 mock 黑盒重新验证
+这些连接边界。
 
 ## 5. 执行投影、发布与清理
 
@@ -311,7 +361,27 @@ Scope 删除先永久关闭 admission 并撤销 fake，再清理 Binding 和执�
 cgroup v2 预检失败发生在 enabled 状态改变之前。失败撤销同样删除整个 runtime。
 成功 disable 保留的 CA 位于 `/run`，主机重启仍丢失；直连 fake 不被替换，已有连接需重连。
 
+### 5.1 responseRewrite 的持久化兼容边界
+
+必填 bool 替代字符串是不兼容修订，不只是改作者 JSON 或标准 Policy 文件。旧 JSON
+`PreparedPolicy`、Scope `policySnapshots`、Binding 内嵌 Policy，以及任何保存固定 Scope
+快照的 `pinnedScope` 中，凡含旧 `buffered/none` 都不被新契约接受。SQLite 的表结构不变
+也不能证明内嵌 JSON 可读；Repository 会严格反序列化这些快照。
+
+**不能携带旧策略直接滚动升级。** 须单独安排配套备份及显式离线转换，或在旧版本仍能
+管理这些记录时按原生命周期撤销、清理并重建全部相关持久化记录与 pinnedScope。转换须
+覆盖所有内嵌副本并核对固定 revision/归属的一致性，不能只更新 latest Policy 或运行时 Plan；
+将旧 `none` 改成 `false` 还须接受 headers/trailers 不再替换的行为变化。不可在常规加载、
+恢复或 Policy update 中偷偷覆盖既有不可变 Scope/Binding 快照，也不自动兼容旧字段。
+重新发布的 Plan 只能来自转换或重建后的 canonical 快照。
+
+备份、转换/重建、回退与部署须作为独立迁移执行；没有自动迁移工具或旧格式滚动升级
+保证。回退须使用与旧二进制/旧 addon 配套的备份和策略，不能直接沿用 bool 快照；
+同时遵守本节已有的网关撤流与执行投影回退边界。
+
 ## 6. 交付与验证边界
+
+发布验证须检查最终 RPM/raw 包中的策略和 addon，不以源码测试替代安装制品验收。
 
 V2 RPM staging 只写 `DESTDIR`，包含 addon、policy 模块、gateway unit、daemon drop-in、installer
 和 provenance。安装自动启动基础 daemon，但默认不启动代理、不创建网关账户、不下载
@@ -340,11 +410,26 @@ raw 升级只更新文件，不因新增网关资产而启用或重启代理；�
 | 安装态闭环 | `tests/v2/systemd/test_gateway.py`；DPROC-GW-004 |
 | 默认关闭 | `tests/v2/e2e/test_daemon_process_e2e.py::test_default_start_and_restart_do_not_activate_gateway` |
 
+本次响应修订的验收只使用内部 mock 上游，不以真实 GitHub 或其他外部 API 为验收条件。
+这些入口用于分层验收，验证结果应分别报告；响应开关变更须覆盖以下边界：
+
+| 验证对象 | 必须观察的结果 |
+| --- | --- |
+| Policy/Plan 与持久化类型 | bool `true/false` 接受；缺失、null、数字、字符串及旧 `buffered/none` 拒绝；旧 PreparedPolicy/Scope/Binding 内嵌快照不静默转换 |
+| 请求与响应开关独立 | 两种 bool 都在请求头阶段授权并注入 Authorization；不等待/扫描/改写请求 body；`false` 的响应 headers/body/trailers 全部不替换 |
+| 未压缩连续字节流 | identity、缺失及空 Content-Encoding；真实值/Authorization 任意跨 chunk 仍被替换；尾部有界、EOF 收尾、非终止空 DATA 不截断；超过旧 8 MiB 的正文不因累计大小拒绝、不整包缓存 |
+| 压缩透传与协商 | `gzip/br/deflate` 正文字节与上游一致，不解压/扫描/重新压缩；Accept-Encoding 不变；`true` 只替换 headers/trailers，压缩 body 中 real 仍可返回 |
+| SSE 与二进制边界 | 未压缩 SSE 的物理连续匹配可替换；跨 JSON 事件语义拼接不识别；hash/framing 不宣称通用协议正确性 |
+| 收尾与失败 | HEAD/204/304 无正文及表示长度保持；响应长度/framing 一致；故障中止且不发送原始上游错误页，已发 headers/正文不可撤回；上游早结束不等待请求 EOF |
+| HTTP/2 待发送队列 | 客户端窗口停滞时超过待发预算中止并回收队列，上游不被完整积攒；正常窗口更新的大响应仍成功；共享代理继续服务 |
+| 标准 Git Policy | 原 buffered 项为 `true`、upload-pack 原 none 为 `false`；内部 mock clone/fetch/push，不能把成功例推导为所有二进制协议可改写 |
+
 安装态 E2E 保留显式 `ASC_GATEWAY_E2E_USER` gate，只在允许修改宿主 systemd/nft 的专用环境
 执行，不增加默认流量引流。测试使用独立 executable 路径与非 root owner，经真实 CLI 创建
 Policy/Scope，先 enable/owner 查询再启动 worker，等待真实 Binding 接管。用本机
-`198.18.0.1`、临时 CA 与 mock REST/Git 上游，证明上游收到 real、Agent 响应为 fake，以及
-clone/fetch/push、相同 secret 幂等、不同值拒绝覆盖、remove/add 后旧 fake 永久退役与新 Scope
-配置、撤销、多 Scope、多实例和空 Scope 删除。Token 随机生成，不访问
-外网 API；所有 Scope/Policy 资源 finally 清理。默认关闭测试只观察 `scopes=[]`、无 nft 表、
-无 runtime/凭据目录，不改变宿主网关状态。测试编写不等于已通过运行验证。
+`198.18.0.1`、临时 CA 与 mock REST/Git 上游，验证上游收到 real，`true` 的未压缩回显返回
+fake；`false` 与压缩 body 不能使用“Agent 响应必为 fake”的断言。还须验证 clone/fetch/push、
+相同 secret 幂等、不同值拒绝覆盖、remove/add 后旧 fake 永久退役与新 Scope 配置、撤销、
+多 Scope、多实例和空 Scope 删除。Token 随机生成，不访问外网 API；所有 Scope/Policy
+资源 finally 清理。默认关闭测试只观察 `scopes=[]`、无 nft 表、无 runtime/凭据目录，不改变
+宿主网关状态。文档矩阵或测试编写不等于已通过运行验证，安装态结果应独立报告。

@@ -214,7 +214,7 @@ fn credential_scope_release_responsibility_survives_restart_with_zero_or_last_bi
             serde_json::from_value(serde_json::json!({
                 "specVersion":"0.1","rules":[{"effect":"allow","category":"network","action":"use_credential",
                     "target":{"type":"http_request","credentialId":"github","scheme":"https",
-                        "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":"buffered"}}]
+                        "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":true}}]
             }))
             .unwrap(),
         );

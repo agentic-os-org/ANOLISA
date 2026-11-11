@@ -13,7 +13,7 @@
         "host": "api.github.com",
         "path": "/**",
         "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       },
       "because": "GitHub REST API with github"
     },
@@ -28,7 +28,7 @@
         "host": "github.com",
         "path": "/**/info/refs",
         "methods": ["GET"],
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       },
       "because": "Git ref discovery with github"
     },
@@ -43,7 +43,7 @@
         "host": "github.com",
         "path": "/**/git-upload-pack",
         "methods": ["POST"],
-        "responseRewrite": "none"
+        "responseRewrite": false
       },
       "because": "Git fetch with github"
     },
@@ -58,7 +58,7 @@
         "host": "github.com",
         "path": "/**/git-receive-pack",
         "methods": ["POST"],
-        "responseRewrite": "buffered"
+        "responseRewrite": true
       },
       "because": "Git push with github"
     }

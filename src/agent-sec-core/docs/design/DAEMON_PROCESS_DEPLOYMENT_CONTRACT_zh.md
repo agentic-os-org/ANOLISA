@@ -776,8 +776,13 @@ daemon 提供七个 `gateway.*` 方法。`enable`、`disable`、`key.add`、`key
 
 授权来自 canonical Policy/Scope/Binding。原生 `specVersion=0.1` Policy 通过
 `network/use_credential/http_request` 指定 credential、HTTPS、精确 host、有界 path、大写
-methods 与 responseRewrite。Scope 固定 Policy revision 完整快照、持续 process selector 与
-非 root owner UID。不同 file/credential Policy 可在同 Scope 执行，单 Policy 不混合。
+methods 与 `responseRewrite`。响应开关是必填 JSON bool `true/false`，
+拒绝缺失、null、数字、字符串及旧 `buffered/none`，不默认、不兼容旧值。`true` 替换注入后
+响应的 headers、未压缩正文与 trailers；`false` 全部不替换，与旧 `none` 行为不同。
+请求 Authorization 注入独立，不检查请求 body。Scope 固定 Policy revision 完整快照、持续
+process selector 与非 root owner UID。不同 file/credential Policy 可在同 Scope 执行，单 Policy
+不混合。响应算法与压缩/SSE/失败边界以 [网关设计 §4.3](V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)
+为准；开启改写仍可能经压缩 body 把 real 返回 Agent，仅 headers/trailers 替换无法弥补。
 
 Agent 自主启动。无进程时即可导入 key（不授权）、创建 Policy/Scope、准备稳定 fake/port/plan；
 再 enable，以 owner 查询 `credentials --scope <scopeId>`、配置 Agent 后启动。仅满足下述网关
@@ -826,6 +831,15 @@ raw 包包含相同网关静态资产，由组件 manifest 渲染 unit 和卸载
 `/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
 两者的父目录。运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest、plan 与
 secrets 快照为 0640，`status/` 归网关账户所有，`ca-bundle.pem` 为 0644。
+
+`responseRewrite` bool 修订不兼容旧内嵌 JSON：包括 `PreparedPolicy`、Scope
+`policySnapshots`、Binding 内嵌 Policy 与 pinnedScope。**不能携带旧策略直接滚动升级**；
+须单独备份、显式离线转换或在旧版本仍能管理记录时按生命周期清理并重建全部相关
+持久化记录与固定 Scope 快照。只更新标准 Policy、latest revision 或运行时 Plan 不足，
+不得在恢复/加载中偷偷覆盖不可变快照。`none→false` 同时接受 headers/trailers 不再替换的
+行为变化；回退需配套旧格式备份。完整边界见
+[网关设计 §5.1](V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
+未提供旧字段的自动迁移工具，迁移需在升级前单独完成并验证。
 
 主动 `disable` 先应用 nft delete 事务撤流，成功后停止 unit，两步均成功后才通过
 `remove_except_ca` 删除运行目录中除 `ca-bundle.pem` 外的全部内容（包括 `status/`），
@@ -877,10 +891,12 @@ await 后须重新验证 canonical 授权，过时操作不得恢复引流。
 | DPROC-GW-001 | 七个方法、分发与权限；凭据 root 限制不改变普通 file 权限 | `asc-daemon-protocol/tests/pap_contract.rs` |
 | DPROC-GW-002 | Scope 准备/删除、Binding 实例/后代身份、UID 查询、稳定 fake、generation、失败收敛、组隔离、目录权限 | `asc-gateway-runtime/src/tests.rs` |
 | DPROC-GW-003 | unit、drop-in 与静态文件 staging、安装/卸载边界 | `tests/v2/packaging/test_systemd.py` |
-| DPROC-GW-004 | 真实 CLI Policy/Scope、startup-before-agent、discovery/systemd/nft；mock REST real→fake；Git clone/fetch/push；跨 Scope、相同 secret 幂等/不同值拒绝覆盖、remove/add 后旧 fake 永久退役与新 Scope 配置、多实例与重启稳定 fake、空 Scope 删除；域外/UDP 放行；daemon/proxy 重启；关闭仅保留 CA | `tests/v2/systemd/test_gateway.py`；显式 `ASC_GATEWAY_E2E_USER`，本机 `198.18.0.1`、临时 CA 与 dummy Token，不访问外网 |
+| DPROC-GW-004 | 真实 CLI Policy/Scope、startup-before-agent、discovery/systemd/nft；mock REST 注入 real、`true` 未压缩回显为 fake；`false` 与压缩 body 不保证 fake；Git clone/fetch/push；跨 Scope、相同 secret 幂等/不同值拒绝覆盖、remove/add 后旧 fake 永久退役与新 Scope 配置、多实例与重启稳定 fake、空 Scope 删除；域外/UDP 放行；daemon/proxy 重启；关闭仅保留 CA | `tests/v2/systemd/test_gateway.py`；显式 `ASC_GATEWAY_E2E_USER`，本机 `198.18.0.1`、临时 CA 与 dummy Token，不访问外网 |
 
-验证入口不代表本次源码或最终 RPM 已通过运行测试。默认关闭 E2E 只观察 `scopes=[]`、无
-nft/runtime/凭据目录，不启用网关、不改变宿主网关状态。
+响应开关按 [网关设计 §6](V2_SECRET_GATEWAY_DESIGN_zh.md#6-交付与验证边界) 的内部 mock
+矩阵验收，真实 GitHub/其他外部 API 不作为验收条件。源码、代理黑盒与最终安装制品需
+分别验证；发布支持及存量迁移结果不能从源码检查或测试矩阵推导。
+默认关闭 E2E 只观察 `scopes=[]`、无 nft/runtime/凭据目录，不启用网关、不改变宿主网关状态。
 
 ## V2 sandbox 执行与授权接入（DPROC-SANDBOX-001）
 

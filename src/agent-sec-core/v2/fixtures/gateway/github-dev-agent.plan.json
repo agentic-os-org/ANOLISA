@@ -31,7 +31,7 @@
         ],
         "credentialId": "github"
       },
-      "responseRewrite": "buffered",
+      "responseRewrite": true,
       "because": "GitHub REST API with github"
     },
     {
@@ -49,7 +49,7 @@
         ],
         "credentialId": "github"
       },
-      "responseRewrite": "buffered",
+      "responseRewrite": true,
       "because": "Git ref discovery with github"
     },
     {
@@ -67,7 +67,7 @@
         ],
         "credentialId": "github"
       },
-      "responseRewrite": "none",
+      "responseRewrite": false,
       "because": "Git fetch with github"
     },
     {
@@ -85,7 +85,7 @@
         ],
         "credentialId": "github"
       },
-      "responseRewrite": "buffered",
+      "responseRewrite": true,
       "because": "Git push with github"
     }
   ]

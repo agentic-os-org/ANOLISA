@@ -10,7 +10,7 @@ mod http;
 pub use condition::{
     Comparison, Condition, HistoryCondition, HistoryEvent, HistoryLogic, Scalar, Value,
 };
-pub use http::{HttpMethod, HttpScheme, ResponseRewrite};
+pub use http::{HttpMethod, HttpScheme};
 
 /// Authored content, independent of Policy identity and Scope/Binding assignment.
 ///
@@ -137,8 +137,9 @@ pub enum Resource {
         path: String,
         /// Permitted request methods.
         methods: Vec<HttpMethod>,
-        /// Handling of the upstream response.
-        response_rewrite: ResponseRewrite,
+        /// Rewrite echoed credentials in response headers, uncompressed bodies and trailers.
+        /// False leaves the entire response unchanged; request injection is independent.
+        response_rewrite: bool,
     },
 }
 

@@ -55,6 +55,7 @@ def server_connect(data):
 
 # Only the standalone binary's bundled interpreter imports h2; the test runner is stdlib-only.
 H2_UPSTREAM_ADDON = """
+import base64
 import gzip
 import json
 import os
@@ -78,6 +79,7 @@ class H2Upstream:
         self.context.set_alpn_protocols(["h2"])
         self.stopped = threading.Event()
         self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", int(os.environ["ASC_TEST_H2_PORT"])))
         self.listener.listen(4)
         self.listener.settimeout(0.2)
@@ -138,31 +140,43 @@ class H2Upstream:
                 elif isinstance(event, StreamEnded):
                     headers = requests.pop(event.stream_id)
                     auth = headers.get("authorization", "")
-                    encoding = headers[":path"].rsplit("/", 1)[1]
+                    path = headers[":path"]
+                    trailers = path.startswith("/echo/h2-trailers/") or path == "/o/r.git/git-upload-pack"
+                    encoding = path.rsplit("/", 1)[1]
                     proof = {"authorization": auth, "alpn": stream.selected_alpn_protocol()}
-                    temporary = self.directory / ".h2-proof.tmp"
-                    temporary.write_text(json.dumps(proof))
-                    os.replace(temporary, self.directory / ("h2-proof-" + encoding + ".json"))
+                    if trailers:
+                        proof.update({"path": path, "method": headers[":method"]})
                     payload = json.dumps({"auth": auth}).encode()
                     if encoding == "gzip":
-                        payload = gzip.compress(payload)
+                        payload = gzip.compress(payload, mtime=0) if trailers else gzip.compress(payload)
                         split = len(payload) // 2
                     else:
                         # Split the actual received credential, not a preselected fake echo.
                         split = payload.index(auth.encode()) + len(auth) // 2
+                    if trailers:
+                        proof["body"] = base64.b64encode(payload).decode()
+                    temporary = self.directory / ".h2-proof.tmp"
+                    temporary.write_text(json.dumps(proof))
+                    os.replace(temporary, self.directory / ("h2-proof-" + encoding + ".json"))
                     response_headers = [
                         (":status", "200"), ("content-type", "application/json"),
                         ("content-length", str(len(payload))),
                     ]
                     if encoding == "gzip":
                         response_headers.append(("content-encoding", "gzip"))
+                    if trailers:
+                        response_headers.append(("x-echo", auth))
                     connection.send_headers(event.stream_id, response_headers)
                     connection.send_data(event.stream_id, payload[:split], end_stream=False)
                     stream.sendall(connection.data_to_send())
                     # Legal zero-length DATA does not signal EOF without END_STREAM.
                     connection.send_data(event.stream_id, b"", end_stream=False)
                     stream.sendall(connection.data_to_send())
-                    connection.send_data(event.stream_id, payload[split:], end_stream=True)
+                    connection.send_data(event.stream_id, payload[split:], end_stream=not trailers)
+                    if trailers:
+                        connection.send_headers(
+                            event.stream_id, [("x-echo-trailer", auth)], end_stream=True
+                        )
                     stream.sendall(connection.data_to_send())
             pending = connection.data_to_send()
             if pending:
@@ -181,6 +195,101 @@ class H2Upstream:
 
 
 addons = [H2Upstream()]
+"""
+
+# Decode wire responses with bundled h2/HPACK, never gateway flow objects.
+H2_CLIENT_ADDON = r"""
+import asyncio
+import base64
+import json
+import os
+import socket
+import ssl
+from pathlib import Path
+
+from h2.config import H2Configuration
+from h2.connection import H2Connection
+from h2.events import (
+    ConnectionTerminated, DataReceived, ResponseReceived,
+    StreamEnded, StreamReset, TrailersReceived,
+)
+from mitmproxy import ctx
+
+
+def exchange(request, context):
+    with socket.create_connection(("127.0.0.1", request["port"]), timeout=10) as raw:
+        target = request["connect"] + ":443"
+        raw.sendall(
+            f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode()
+        )
+        reply = bytearray()
+        while not reply.endswith(b"\r\n\r\n"):
+            chunk = raw.recv(1)
+            if not chunk or len(reply) >= 8192:
+                raise ConnectionError("CONNECT did not complete")
+            reply.extend(chunk)
+        if b" 200 " not in reply.split(b"\r\n", 1)[0]:
+            raise ConnectionError("CONNECT rejected")
+        with context.wrap_socket(raw, server_hostname=request["host"]) as stream:
+            alpn = stream.selected_alpn_protocol()
+            if alpn != "h2":
+                raise ValueError("HTTP/2 ALPN required")
+            connection = H2Connection(
+                config=H2Configuration(client_side=True, header_encoding="utf-8")
+            )
+            connection.initiate_connection()
+            connection.send_headers(1, [
+                (":method", request["method"]), (":scheme", "https"),
+                (":authority", request["host"]), (":path", request["path"]),
+                ("authorization", request["authorization"]),
+                ("accept-encoding", "gzip"),
+            ], end_stream=True)
+            stream.sendall(connection.data_to_send())
+            result = {"alpn": alpn, "headers": {}, "trailers": {}}
+            body = bytearray()
+            while True:
+                data = stream.recv(65535)
+                if not data:
+                    raise ConnectionError("HTTP/2 response ended before END_STREAM")
+                for event in connection.receive_data(data):
+                    if isinstance(event, (StreamReset, ConnectionTerminated)):
+                        raise ConnectionError(type(event).__name__)
+                    if getattr(event, "stream_id", None) != 1:
+                        continue
+                    if isinstance(event, ResponseReceived):
+                        result["headers"] = dict(event.headers)
+                    elif isinstance(event, TrailersReceived):
+                        result["trailers"] = dict(event.headers)
+                    elif isinstance(event, DataReceived):
+                        body.extend(event.data)
+                        connection.acknowledge_received_data(
+                            event.flow_controlled_length, event.stream_id
+                        )
+                    elif isinstance(event, StreamEnded):
+                        result["body"] = base64.b64encode(body).decode()
+                        return result
+                pending = connection.data_to_send()
+                if pending:
+                    stream.sendall(pending)
+
+
+class H2Client:
+    async def running(self):
+        try:
+            request = json.loads(os.environ["ASC_TEST_H2_REQUEST"])
+            # The pinned standalone cannot create client TLS contexts in worker threads.
+            context = ssl.create_default_context(cafile=request["ca"])
+            context.set_alpn_protocols(["h2"])
+            result = await asyncio.to_thread(exchange, request, context)
+        except Exception as error:
+            result = {"error": type(error).__name__, "reason": str(error)}
+        try:
+            Path(os.environ["ASC_TEST_H2_RESULT"]).write_text(json.dumps(result))
+        finally:
+            ctx.master.shutdown()
+
+
+addons = [H2Client()]
 """
 
 
@@ -308,6 +417,7 @@ class MockUpstream:
         self.progress: dict[str, tuple[int, int]] = {}
         self.finished: dict[str, threading.Event] = {}
         self.upload_started: dict[str, threading.Event] = {}
+        self.stream_steps: dict[str, tuple[threading.Event, threading.Event]] = {}
         upstream = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -353,8 +463,32 @@ class MockUpstream:
                         "path": self.path,
                         "authorization": auth,
                         "body": body,
+                        "accept_encoding": self.headers.get("Accept-Encoding"),
                     }
                 )
+                if self.path in upstream.stream_steps:
+                    release, finish = upstream.stream_steps[self.path]
+                    split = len(auth) // 2
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("X-Echo", auth)
+                    self.end_headers()
+                    prefix = b"data: " + auth[:split].encode()
+                    self.wfile.write(f"{len(prefix):x}\r\n".encode() + prefix + b"\r\n")
+                    self.wfile.flush()
+                    if not release.wait(10):
+                        self.close_connection = True
+                        return
+                    suffix = auth[split:].encode() + b"\n\n"
+                    self.wfile.write(f"{len(suffix):x}\r\n".encode() + suffix + b"\r\n")
+                    self.wfile.flush()
+                    if not finish.wait(10):
+                        self.close_connection = True
+                        return
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.close_connection = True
+                    return
                 if self.path.startswith("/invalid-headers/"):
                     raw_headers = (
                         auth.encode()
@@ -407,13 +541,16 @@ class MockUpstream:
                         + f"\r\n0\r\nX-Echo-Trailer: {auth}\r\n\r\n".encode()
                     )
                     return
-                if self.path in ("/large-chunked", "/gzip-large"):
+                if self.path in ("/large-chunked", "/gzip-large", "/tiny-chunked"):
                     compressed = self.path == "/gzip-large"
+                    tiny = self.path == "/tiny-chunked"
                     payload = (
-                        gzip.compress(auth.encode() + b"x" * (24 * 1024 * 1024))
-                        if compressed
+                        b"x" * 4096
+                        if tiny
                         else auth.encode() + b"x" * (24 * 1024 * 1024)
                     )
+                    if compressed:
+                        payload = gzip.compress(payload)
                     finished = threading.Event()
                     upstream.finished[self.path] = finished
                     upstream.progress[self.path] = (0, len(payload))
@@ -425,7 +562,7 @@ class MockUpstream:
                     else:
                         self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
-                    step = 128 if compressed else 64 * 1024
+                    step = 1 if tiny else 128 if compressed else 64 * 1024
                     sent = 0
                     try:
                         for offset in range(0, len(payload), step):
@@ -455,14 +592,14 @@ class MockUpstream:
                 }
                 if self.path.endswith("/git-upload-pack"):
                     payload, headers["Content-Type"] = (
-                        b"P" * BIG,
+                        auth.encode() + b"P" * (BIG - len(auth)),
                         "application/x-git-upload-pack-result",
                     )
                 elif self.path.startswith("/large"):
                     payload = json.dumps({"auth": auth, "pad": "x" * BIG}).encode()
                 elif self.path.startswith("/gzip"):
                     payload, headers["Content-Encoding"] = (
-                        gzip.compress(json.dumps({"auth": auth}).encode()),
+                        gzip.compress(json.dumps({"auth": auth}).encode(), mtime=0),
                         "gzip",
                     )
                 elif self.path.startswith("/brotli"):
@@ -796,20 +933,31 @@ class InjectionTest(GatewayCase):
         self.assertEqual(
             self.recorded("/trailers")[0]["authorization"], f"Bearer {REAL}"
         )
-        self.assertEqual(received.partition(b"\r\n\r\n")[2], b"")
         self.assertNotIn(REAL.encode(), received)
 
-    def test_gzip_body_is_rewritten(self) -> None:
+    def test_gzip_body_is_unchanged_while_headers_are_rewritten(self) -> None:
         response = self.send(
             "00000000-0000-4000-8000-000000000001",
             "GET",
             "/gzip",
-            headers=[("Authorization", f"token {FAKE}")],
+            headers=[
+                ("Authorization", f"token {FAKE}"),
+                ("Accept-Encoding", "gzip, br"),
+            ],
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(
-            json.loads(gzip.decompress(response.body))["auth"], f"token {FAKE}"
+            json.loads(gzip.decompress(response.body))["auth"], f"token {REAL}"
         )
+        self.assertEqual(
+            response.body,
+            gzip.compress(json.dumps({"auth": f"token {REAL}"}).encode(), mtime=0),
+        )
+        self.assertEqual(response.headers["X-Echo"], f"token {FAKE}")
+        self.assertEqual(response.headers["Content-Encoding"], "gzip")
+        self.assertEqual(int(response.headers["Content-Length"]), len(response.body))
+        self.assertEqual(response.headers["ETag"], '"e"')
+        self.assertEqual(self.recorded("/gzip")[0]["accept_encoding"], "gzip, br")
 
     def test_basic_password_is_injected_for_git(self) -> None:
         basic = base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
@@ -873,7 +1021,7 @@ class InjectionTest(GatewayCase):
                     # No dependency error page, including an encoded Basic password, may escape.
                     self.assertEqual(received, b"")
 
-    def test_upload_pack_streams_beyond_the_buffer_limit(self) -> None:
+    def test_disabled_rewrite_preserves_headers_and_large_body(self) -> None:
         basic = base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
         response = self.send(
             "00000000-0000-4000-8000-000000000001",
@@ -885,65 +1033,93 @@ class InjectionTest(GatewayCase):
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(len(response.body), BIG)
+        injected = self.recorded("/o/r.git/git-upload-pack")[0]["authorization"]
+        self.assertEqual(
+            base64.b64decode(injected.split()[1]), f"x-access-token:{REAL}".encode()
+        )
+        self.assertEqual(response.headers["X-Echo"], injected)
+        self.assertTrue(response.body.startswith(injected.encode()))
+        self.assertEqual(response.headers["ETag"], '"e"')
+        self.assertEqual(int(response.headers["Content-Length"]), BIG)
 
-    def test_oversized_buffered_response_is_not_delivered(self) -> None:
-        try:
-            response = self.send(
-                "00000000-0000-4000-8000-000000000001",
-                "GET",
-                "/large",
-                headers=[("Authorization", f"Bearer {FAKE}")],
-            )
-        except (OSError, http.client.HTTPException):
-            return  # the killed flow closes the connection
-        self.assertNotEqual(response.status, 200)
-        self.assertNotIn(REAL.encode(), response.body)
+    def test_large_response_rewrites_without_a_total_body_limit(self) -> None:
+        response = self.send(
+            "00000000-0000-4000-8000-000000000001",
+            "GET",
+            "/large",
+            headers=[("Authorization", f"Bearer {FAKE}")],
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.json(), {"auth": f"Bearer {FAKE}", "pad": "x" * BIG})
+        self.assertNotIn("Content-Length", response.headers)
 
-    def test_response_limits_abort_upstream_before_receiving_all_data(self) -> None:
+    def test_chunked_and_compressed_large_responses_complete(self) -> None:
         for path in ("/large-chunked", "/gzip-large"):
             with self.subTest(path=path):
-                received = bytearray()
-                with self.connection("00000000-0000-4000-8000-000000000001") as stream:
-                    stream.sendall(
-                        (
-                            f"GET {path} HTTP/1.1\r\nHost: api.github.com\r\n"
-                            f"Authorization: Bearer {FAKE}\r\nConnection: close\r\n\r\n"
-                        ).encode()
-                    )
-                    while True:
-                        try:
-                            chunk = stream.recv(4096)
-                        except (ConnectionResetError, ssl.SSLEOFError):
-                            break
-                        if not chunk:
-                            break
-                        received.extend(chunk)
-                self.assertEqual(
-                    [request["authorization"] for request in self.recorded(path)],
-                    [f"Bearer {REAL}"],
+                response = self.send(
+                    "00000000-0000-4000-8000-000000000001",
+                    "GET",
+                    path,
+                    headers=[("Authorization", f"Bearer {FAKE}")],
                 )
-                self.assertTrue(
-                    self.mock.finished[path].wait(10), "upstream did not stop"
-                )
+                self.assertEqual(response.status, 200)
+                compressed = path == "/gzip-large"
+                body = gzip.decompress(response.body) if compressed else response.body
+                expected = f"Bearer {REAL if compressed else FAKE}".encode()
+                self.assertEqual(body, expected + b"x" * (24 * 1024 * 1024))
+                self.assertEqual(response.headers["X-Echo"], f"Bearer {FAKE}")
+                self.assertTrue(self.mock.finished[path].wait(10))
                 sent, total = self.mock.progress[path]
-                self.assertLess(
-                    sent, total, "limit must abort before consuming the whole response"
-                )
-                self.assertNotIn(REAL.encode(), received)
-                self.assertEqual(received.partition(b"\r\n\r\n")[2], b"")
+                self.assertEqual(sent, total)
                 self.assertIsNone(
                     self.process.poll(), "the shared proxy must remain usable"
                 )
 
-    def test_unsupported_encoding_is_rejected(self) -> None:
+    def test_other_content_encoding_passes_through(self) -> None:
         response = self.send(
             "00000000-0000-4000-8000-000000000001",
             "GET",
             "/brotli",
             headers=[("Authorization", f"Bearer {FAKE}")],
         )
-        self.assertEqual(response.status, 502)
-        self.assertEqual(response.json()["error"], "response_encoding_unsupported")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"not brotli")
+        self.assertEqual(response.headers["Content-Encoding"], "br")
+        self.assertEqual(response.headers["X-Echo"], f"Bearer {FAKE}")
+        self.assertEqual(response.headers["ETag"], '"e"')
+
+    def test_split_key_is_withheld_and_sse_event_arrives_before_eof(self) -> None:
+        basic = base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
+        for authorization in (f"Bearer {FAKE}", f"Basic {basic}"):
+            with self.subTest(scheme=authorization.split()[0]):
+                path = f"/echo/stream-{authorization.split()[0]}"
+                release, finish = threading.Event(), threading.Event()
+                self.mock.stream_steps[path] = (release, finish)
+                try:
+                    with self.connection(
+                        "00000000-0000-4000-8000-000000000001"
+                    ) as stream:
+                        stream.settimeout(3)
+                        stream.sendall(
+                            f"GET {path} HTTP/1.1\r\nHost: api.github.com\r\n"
+                            f"Authorization: {authorization}\r\nConnection: close\r\n\r\n".encode()
+                        )
+                        response = http.client.HTTPResponse(stream)
+                        response.begin()
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read1(4096), b"data: ")
+                        release.set()
+                        self.assertEqual(
+                            response.read1(4096), authorization.encode() + b"\n\n"
+                        )
+                        finish.set()
+                        self.assertEqual(response.read(), b"")
+                        response.close()
+                    injected = self.recorded(path)[0]["authorization"]
+                    self.assertNotEqual(injected, authorization)
+                finally:
+                    release.set()
+                    finish.set()
 
     def test_upload_streams_before_eof_and_preserves_body_bytes(self) -> None:
         for label, authorization, encoding, chunked in [
@@ -1154,15 +1330,15 @@ class Http2InjectionTest(GatewayCase):
         # Negotiate client HTTP/2 independently of the HTTP/1-only mock upstream.
         return super().start_mitmdump("--set", "connection_strategy=lazy", *extra)
 
-    def test_http2_buffered_body_is_withheld_and_rewritten(self) -> None:
+    def test_http2_streamed_body_is_rewritten(self) -> None:
         for path, upload in [
-            ("/echo/h2-buffered", False),
+            ("/echo/h2-streamed", False),
             ("/echo/early-upload", True),
         ]:
             with self.subTest(path=path):
-                self._buffered_response(path, upload)
+                self._streamed_response(path, upload)
 
-    def _buffered_response(self, path: str, upload: bool) -> None:
+    def _streamed_response(self, path: str, upload: bool) -> None:
         block = bytearray()
         headers = [
             (":method", "POST" if upload else "GET"),
@@ -1217,6 +1393,55 @@ class Http2InjectionTest(GatewayCase):
         self.assertEqual(json.loads(body)["auth"], f"Bearer {FAKE}")
         self.assertNotIn(REAL.encode(), body)
         self.assertEqual(self.recorded(path)[0]["authorization"], f"Bearer {REAL}")
+
+    def test_stalled_http2_window_aborts_before_buffering_entire_response(self) -> None:
+        # Gateway budgets: 8 MiB queued bytes, 1024 queued DATA items; plus socket slack.
+        for path, bound in (
+            ("/large-chunked", 16 * 1024 * 1024),
+            ("/tiny-chunked", 2048),
+        ):
+            with self.subTest(path=path):
+                self._stalled_http2_response(path, bound)
+
+    def _stalled_http2_response(self, path: str, bound: int) -> None:
+        block = bytearray()
+        for name, value in (
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "api.github.com"),
+            (":path", path),
+            ("authorization", f"Bearer {FAKE}"),
+        ):
+            key, raw = name.encode(), value.encode()
+            block.extend(bytes((0, len(key))) + key + bytes((len(raw),)) + raw)
+        received = bytearray()
+        with self.connection(
+            "00000000-0000-4000-8000-000000000001", alpn="h2"
+        ) as stream:
+            stream.settimeout(5)
+            stream.sendall(
+                b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+                + b"\x00\x00\x06\x04\x00\x00\x00\x00\x00"
+                + b"\x00\x04\x00\x00\x00\x00"
+                + len(block).to_bytes(3, "big")
+                + b"\x01\x05\x00\x00\x00\x01"
+                + block
+            )
+            while True:
+                try:
+                    chunk = stream.recv(65536)
+                except (ConnectionResetError, ssl.SSLEOFError):
+                    break
+                if not chunk:
+                    break
+                received.extend(chunk)
+        self.assertNotIn(REAL.encode(), received)
+        self.assertTrue(self.mock.finished[path].wait(10))
+        sent, _ = self.mock.progress[path]
+        self.assertLessEqual(
+            sent, bound, "a stalled client must stop near the queue budget"
+        )
+        self.assertIsNone(self.process.poll(), "the shared gateway must survive")
 
     def test_http2_rejected_upload_without_length_closes_before_data(self) -> None:
         block = bytearray()
@@ -1335,8 +1560,8 @@ class Http2UpstreamInjectionTest(GatewayCase):
                 "-s",
                 str(script),
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             cwd=self.workdir,
             env={
                 **os.environ,
@@ -1348,7 +1573,9 @@ class Http2UpstreamInjectionTest(GatewayCase):
         try:
             deadline = time.monotonic() + 30
             while True:
-                self.assertIsNone(process.poll(), "HTTP/2 upstream mitmdump exited")
+                if process.poll() is not None:
+                    output, _ = process.communicate()
+                    self.fail("HTTP/2 upstream mitmdump exited: " + output.decode())
                 try:
                     with socket.create_connection(
                         ("127.0.0.1", self.h2_port), timeout=0.2
@@ -1362,12 +1589,123 @@ class Http2UpstreamInjectionTest(GatewayCase):
         finally:
             process.terminate()
             try:
-                process.wait(timeout=10)
+                process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=10)
+                process.communicate(timeout=10)
 
-    def test_empty_nonterminal_http2_data_preserves_identity_and_gzip_rewrite(
+    def _h2_response(
+        self, host: str, path: str, authorization: str, *, method: str = "GET"
+    ) -> dict[str, object]:
+        script = self.workdir / "h2_client_addon.py"
+        script.write_text(H2_CLIENT_ADDON)
+        result_path = self.workdir / "h2-client-result.json"
+        result_path.unlink(missing_ok=True)
+        client_port = free_port()
+        while client_port in (*self.ports.values(), self.h2_port):
+            client_port = free_port()
+        result = subprocess.run(
+            [
+                MITMDUMP,
+                "--mode",
+                f"regular@127.0.0.1:{client_port}",
+                "--set",
+                f"confdir={self.workdir / 'conf'}",
+                "--set",
+                "flow_detail=0",
+                "-s",
+                str(script),
+            ],
+            check=False,
+            timeout=40,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=self.workdir,
+            env={
+                **os.environ,
+                "ASC_TEST_H2_REQUEST": json.dumps(
+                    {
+                        "port": self.ports["00000000-0000-4000-8000-000000000001"],
+                        "connect": H2_IP,
+                        "host": host,
+                        "path": path,
+                        "method": method,
+                        "authorization": authorization,
+                        "ca": str(self.workdir / "conf" / "mitmproxy-ca-cert.pem"),
+                    }
+                ),
+                "ASC_TEST_H2_RESULT": str(result_path),
+                "TMPDIR": str(self.workdir),
+            },
+        )
+        self.assertEqual(result.returncode, 0, "HTTP/2 client mitmdump failed")
+        response = json.loads(result_path.read_text())
+        self.assertNotIn(
+            "error", response, "HTTP/2 wire client failed: " + str(response)
+        )
+        self.assertEqual(response["alpn"], "h2")
+        self.assertEqual(response["headers"][":status"], "200")
+        self.assertFalse((self.workdir / "h2-error.json").exists())
+        proof = json.loads(
+            (self.workdir / f"h2-proof-{path.rsplit('/', 1)[1]}.json").read_text()
+        )
+        self.assertEqual(proof["alpn"], "h2")
+        self.assertEqual((proof["path"], proof["method"]), (path, method))
+        self.assertIsNone(self.process.poll(), "the gateway must remain usable")
+        return response
+
+    def test_http2_trailers_are_rewritten_with_headers_and_identity_body(self) -> None:
+        with self.h2_upstream():
+            response = self._h2_response(
+                "api.github.com", "/echo/h2-trailers/identity", f"Bearer {FAKE}"
+            )
+            proof = json.loads((self.workdir / "h2-proof-identity.json").read_text())
+            self.assertEqual(proof["authorization"], f"Bearer {REAL}")
+            self.assertEqual(response["headers"]["x-echo"], f"Bearer {FAKE}")
+            self.assertEqual(response["trailers"], {"x-echo-trailer": f"Bearer {FAKE}"})
+            body = base64.b64decode(response["body"], validate=True)
+            self.assertEqual(json.loads(body), {"auth": f"Bearer {FAKE}"})
+            self.assertNotIn(REAL.encode(), body)
+
+    def test_http2_disabled_rewrite_preserves_headers_body_and_trailers(self) -> None:
+        presented = (
+            "Basic " + base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
+        )
+        injected = (
+            "Basic " + base64.b64encode(f"x-access-token:{REAL}".encode()).decode()
+        )
+        with self.h2_upstream():
+            response = self._h2_response(
+                "github.com", "/o/r.git/git-upload-pack", presented, method="POST"
+            )
+            proof = json.loads(
+                (self.workdir / "h2-proof-git-upload-pack.json").read_text()
+            )
+            self.assertEqual(proof["authorization"], injected)
+            self.assertEqual(response["headers"]["x-echo"], injected)
+            self.assertEqual(response["trailers"], {"x-echo-trailer": injected})
+            body = base64.b64decode(response["body"], validate=True)
+            self.assertEqual(body, json.dumps({"auth": injected}).encode())
+            self.assertEqual(int(response["headers"]["content-length"]), len(body))
+
+    def test_http2_gzip_preserves_body_but_rewrites_headers_and_trailers(self) -> None:
+        with self.h2_upstream():
+            response = self._h2_response(
+                "api.github.com", "/echo/h2-trailers/gzip", f"Bearer {FAKE}"
+            )
+            proof = json.loads((self.workdir / "h2-proof-gzip.json").read_text())
+            self.assertEqual(proof["authorization"], f"Bearer {REAL}")
+            self.assertEqual(response["headers"]["x-echo"], f"Bearer {FAKE}")
+            self.assertEqual(response["trailers"], {"x-echo-trailer": f"Bearer {FAKE}"})
+            self.assertEqual(response["headers"]["content-encoding"], "gzip")
+            body = base64.b64decode(response["body"], validate=True)
+            self.assertEqual(body, base64.b64decode(proof["body"], validate=True))
+            self.assertEqual(
+                json.loads(gzip.decompress(body)), {"auth": f"Bearer {REAL}"}
+            )
+            self.assertEqual(int(response["headers"]["content-length"]), len(body))
+
+    def test_empty_nonterminal_http2_data_preserves_rewrite_and_encoded_passthrough(
         self,
     ) -> None:
         with self.h2_upstream():
@@ -1396,9 +1734,10 @@ class Http2UpstreamInjectionTest(GatewayCase):
                     if encoding == "gzip":
                         self.assertEqual(response.headers["content-encoding"], "gzip")
                         body = gzip.decompress(body)
-                    self.assertEqual(json.loads(body), {"auth": f"Bearer {FAKE}"})
-                    self.assertNotIn(REAL.encode(), body)
-                    self.assertNotIn(REAL.encode(), response.body)
+                    expected = REAL if encoding == "gzip" else FAKE
+                    self.assertEqual(json.loads(body), {"auth": f"Bearer {expected}"})
+                    if encoding == "identity":
+                        self.assertNotIn(REAL.encode(), body)
                     self.assertIsNone(
                         self.process.poll(), "the gateway must remain usable"
                     )

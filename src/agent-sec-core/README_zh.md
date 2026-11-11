@@ -86,14 +86,16 @@ daemon 自己拥有的叶目录权限会先修复为 `0700`。
 详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
 PolicyTemplate 是包含通用规则的可复用策略；PEP Translator 对原生 JSON 支持文件删除 block 规则。
 现有 Policy create/update 命令也接受携带精确 schema 引用的 Cedar 源码封装，完成准入校验和源码保存；
-Cedar `forbid` 删除/普通写入限制已接入翻译与部署。原生 JSON 请求及保存快照保持原有格式。
+Cedar `forbid` 删除/普通写入限制已接入翻译与部署。非凭据原生 JSON 请求及保存快照保持
+原有格式；下述已批准的 Secret Gateway 修订不兼容旧格式。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
 
 **兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
 assignment。请更新脚本，使用 `--pid`、`--process-name` 或 `--executable` 选择目标进程。
 
-V2 **Secret Gateway 预览能力**让真实 GitHub 凭据不进入 Agent 进程。
+V2 **Secret Gateway 预览能力**向 Agent 进程提供 fake GitHub 凭据，只在获授权的 HTTPS
+请求中注入真实值；不提供完整的响应防泄漏保证。
 V2 `agent-sec-core` RPM 自动启动基础 daemon，但网关默认关闭；root 显式安装 mitmproxy。
 raw 包包含相同网关资产，但不启动两个服务；网关启停仅由 daemon 管理，卸载时撤流失败则拒绝删除。
 `gateway key add github --secret-file /root/github.token` 只导入，不授权；相同 secret 幂等成功，
@@ -111,6 +113,15 @@ cgroup v1、不改挂载。nftables `socket cgroupv2` 仅在实际规则应用�
 实例 Binding `READY` 仍需另行等待。key list 只列 active IDs（`{"credentials":["github"]}`），add/remove 返回
 `{"credential":"github"}`，enable/disable 成功返回 `{}`。
 参阅 [Secret Gateway 设计](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md)。
+
+**不兼容响应契约变更**：`responseRewrite` 是必填 JSON bool，拒绝旧 `buffered/none`。
+开启时重写响应头、未压缩正文和 trailers；正文采用有界流式处理，不缓存完整响应。
+压缩正文原样透传，仍可能把真实 key 返回 Agent，详见
+[响应覆盖与流式边界](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#43-响应改写)。旧
+`PreparedPolicy`、Scope/Binding 快照与 pinnedScope 须另行备份、显式转换或全部重建相关
+记录，不能携带旧策略滚动升级或偷偷覆盖不可变快照，详见
+[迁移边界](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#51-responserewrite-的持久化兼容边界)。
+验收使用内部 mock 上游，不调用外部 API；发布支持以对应版本的实际制品为准。
 
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
