@@ -531,6 +531,32 @@ mod tests {
     use super::*;
     use rustix::process::{WaitOptions, waitpid};
 
+    fn process_disappeared(error: &std::io::Error) -> bool {
+        // procfs can return ESRCH when the task disappears after opening stat.
+        error.kind() == std::io::ErrorKind::NotFound
+            || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
+    }
+
+    #[test]
+    fn process_disappearance_errors() {
+        use rustix::io::Errno;
+        use std::io::{Error, ErrorKind};
+
+        for (error, disappeared) in [
+            (Error::from(ErrorKind::NotFound), true),
+            (Error::from_raw_os_error(Errno::NOENT.raw_os_error()), true),
+            (Error::from_raw_os_error(Errno::SRCH.raw_os_error()), true),
+            (
+                Error::from_raw_os_error(Errno::ACCESS.raw_os_error()),
+                false,
+            ),
+            (Error::from_raw_os_error(Errno::IO.raw_os_error()), false),
+            (Error::from(ErrorKind::Other), false),
+        ] {
+            assert_eq!(process_disappeared(&error), disappeared, "{error:?}");
+        }
+    }
+
     fn assert_dead_and_reaped(marker: &std::path::Path) {
         let pids: Vec<Pid> = std::fs::read_to_string(marker)
             .unwrap()
@@ -547,7 +573,7 @@ mod tests {
             let path = format!("/proc/{pid}/stat");
             loop {
                 match std::fs::read_to_string(&path) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error) if process_disappeared(&error) => break,
                     Ok(stat)
                         if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
                             matches!(rest.as_bytes().first(), Some(b'Z' | b'X'))
