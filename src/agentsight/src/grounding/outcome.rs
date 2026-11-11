@@ -547,7 +547,8 @@ fn is_probe(call: &ToolCall) -> bool {
 /// Quotes make a separator literal: `pgrep -f "agent|worker"` is one command,
 /// and splitting at the quoted `|` gave the probe a second head that is not a
 /// probe command. Inside double quotes a backslash escapes the next byte;
-/// inside single quotes nothing does.
+/// inside single quotes nothing does. Outside quotes a backslash escapes the
+/// next byte as well (`\;`, `\|`, `\"`).
 fn command_segments(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
@@ -565,6 +566,14 @@ fn command_segments(command: &str) -> Vec<&str> {
                 quote = None;
             }
             i += 1;
+            continue;
+        }
+        // Outside quotes a backslash escapes the next byte too, so `\;`, `\|`
+        // and `\"` are data. Without this, an over-escaped command such as
+        // `test -d \"$d\" || mkdir ...` opened a quote that never closed and
+        // swallowed the real chain into the first segment.
+        if byte == b'\\' {
+            i += 2;
             continue;
         }
         if byte == b'\'' || byte == b'"' {
