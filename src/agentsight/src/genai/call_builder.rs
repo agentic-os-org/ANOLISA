@@ -1973,6 +1973,53 @@ mod tests {
         assert_eq!(response.messages[0].finish_reason.as_deref(), Some("STOP"));
     }
 
+    /// A prompt blocked by Gemini's safety filter arrives as
+    /// `promptFeedback.blockReason` with no candidates. The parser used to
+    /// drop that signal, leaving the built call with no finish reason, so the
+    /// detector reported `empty_response` instead of `safety_filter`.
+    #[test]
+    fn blocked_gemini_prompt_reaches_the_built_response_as_a_safety_stop() {
+        use crate::analyzer::message::gemini::{
+            GeminiContent, GeminiParser, GeminiPart, GeminiRequest,
+        };
+
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let http = make_http(path, None, None);
+        let response = GeminiParser::parse_response(&serde_json::json!({
+            "promptFeedback": {"blockReason": "SAFETY"}
+        }))
+        .expect("a blocked prompt is a Gemini response");
+        let message = ParsedApiMessage::GeminiMessage {
+            request: Some(GeminiRequest {
+                model: "gemini-2.5-flash".to_string(),
+                contents: vec![GeminiContent {
+                    role: Some("user".to_string()),
+                    parts: vec![GeminiPart {
+                        text: Some("blocked input".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                system_instruction: None,
+                generation_config: None,
+                stream: false,
+            }),
+            response: Some(response),
+        };
+        let parsed = Some(&message);
+
+        let built = builder.build_response(&parsed, &http, &None, true, false);
+
+        assert_eq!(
+            built
+                .messages
+                .last()
+                .and_then(|message| message.finish_reason.as_deref()),
+            Some("SAFETY"),
+            "the detector reads the last output message's finish reason"
+        );
+    }
+
     /// The original defect was not just an empty builder: the whole call was
     /// semantically empty and the compact delivery path discarded it. Drive
     /// `build_llm_call_with_raw` through the same `HttpContext` shape the
