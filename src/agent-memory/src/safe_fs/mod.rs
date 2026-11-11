@@ -61,7 +61,12 @@ fn openat2_owned(root: BorrowedFd<'_>, rel: &Path, how: OpenHow) -> Result<Owned
 /// Resolve `rel` against `root` with sandbox flags, opening for the
 /// requested access. The returned `File` borrows nothing from `root`;
 /// dropping it closes the underlying fd.
-fn open_in_root(root: BorrowedFd<'_>, rel: &Path, flags: OFlag, mode: Mode) -> Result<File> {
+pub(crate) fn open_in_root(
+    root: BorrowedFd<'_>,
+    rel: &Path,
+    flags: OFlag,
+    mode: Mode,
+) -> Result<File> {
     let how = OpenHow::new()
         .flags(flags | OFlag::O_CLOEXEC)
         .mode(mode)
