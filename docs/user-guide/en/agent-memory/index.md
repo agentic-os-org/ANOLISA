@@ -318,6 +318,10 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `mem_promote` | `session_path`, `store_path` | — | copy session scratch file into a new persistent-store file |
 | `mem_session_log` | — | — | current session JSONL |
 
+`mem_grep` skips lines containing invalid UTF-8 and continues searching later
+lines in the same file. Returned line numbers are 1-based positions in the
+original file, including skipped lines.
+
 `mem_write(overwrite=false)` and `mem_promote` refuse existing destinations. On a
 write failure, they remove the incomplete file they created so the same request
 can be retried; a cleanup failure is reported alongside the write error. This is
