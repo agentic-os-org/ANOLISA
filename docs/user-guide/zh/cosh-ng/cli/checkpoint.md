@@ -34,7 +34,9 @@ cosh-cli checkpoint diff --workspace /home/agent/project --from before-change --
 cosh-cli checkpoint restore before-change --workspace /home/agent/project
 ```
 
-其他可选参数包括：`create` 的 `--pin` 和 `--metadata <json>`，`delete` 的 `--force` 和 `--workspace <path>`，以及 `cleanup` 的 `--keep <count>`。`list` 和 `status` 省略 `--workspace` 时，会查询守护进程记录的所有工作区。
+其他可选参数包括：`create` 的 `--metadata <json>`，`delete` 的 `--force` 和 `--workspace <path>`，以及 `cleanup` 的 `--keep <count>`。`list` 和 `status` 省略 `--workspace` 时，会查询守护进程记录的所有工作区。
+
+`create` 不提供快照 pin：它创建的每个快照都会被守护进程的按数量与按时间清理策略自动清理。
 
 `recover` 由 daemon 判断工作区状态，因此初始化中断后原路径不存在时也可使用。
 恢复成功且仍有迁移数据或备份需要检查时，JSON 响应仍为 `ok: true`，并在
