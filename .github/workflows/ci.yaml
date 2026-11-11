@@ -732,14 +732,15 @@ jobs:
         run: |
           cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent
           cargo test --locked -p asc-cli --test health_probe nonroot_server_is_rejected_before_health_request_is_sent
-      - name: Verify actual Linux isolation
+      - name: Verify actual Linux isolation as non-root and root
         if: ${{ !cancelled() }}
         working-directory: src/agent-sec-core/linux-sandbox
         env:
           ASC_SANDBOX_INTEGRATION: '1'
         run: |
+          test "$(id -u)" -ne 0
           RUSTFLAGS="-C target-feature=+crt-static" cargo llvm-cov --locked --no-fail-fast --no-report --target x86_64-unknown-linux-gnu -- --skip bwrap_seccomp
-          sudo env ASC_SANDBOX_INTEGRATION=1 LLVM_PROFILE_FILE="$PWD/target/llvm-cov-target/root-%p-%m.profraw" "$(find target/llvm-cov-target/x86_64-unknown-linux-gnu/debug/deps -maxdepth 1 -type f -executable -name 'all-*' | head -1)" strict_runtime_enforces_write_and_read_carveouts --nocapture
+          sudo env ASC_SANDBOX_INTEGRATION=1 LLVM_PROFILE_FILE="$PWD/target/llvm-cov-target/root-%p-%m.profraw" "$(find target/llvm-cov-target/x86_64-unknown-linux-gnu/debug/deps -maxdepth 1 -type f -executable -name 'all-*' | head -1)" suite::strict_runtime:: --nocapture
           sudo chown "$(id -u):$(id -g)" target/llvm-cov-target/*.profraw
           cargo llvm-cov report --target x86_64-unknown-linux-gnu --cobertura --output-path ../rust-sandbox-coverage.xml
       - name: Build runnable CLI and helper
