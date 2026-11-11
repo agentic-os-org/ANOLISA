@@ -210,19 +210,71 @@ impl GatewayService {
     }
     /// Durably projects an active assignment and issues its fakes without starting agents.
     /// Disabled gateways can prepare; credentials remain unavailable until CA/generation readiness.
+    /// Startup recovery of an admitted Scope uses [`Self::restore_scope`] instead.
     /// # Errors
-    /// Rejects stale canonical snapshots, retired assignments or missing credentials.
+    /// Rejects stale canonical snapshots, retired assignments or credentials that cannot
+    /// issue a fake.
     pub fn prepare_scope(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
         let mut inner = self.lock();
+        let plan = self.prepare_locked(&mut inner, scope)?;
+        self.verify_issued_fakes(&mut inner, scope, &plan)?;
+        self.publish_prepared(&mut inner, scope)
+    }
+
+    /// Restores an already admitted Scope during startup recovery.
+    ///
+    /// A retired credential assignment keeps its tombstone, so restoration must
+    /// not reject the Scope: independent file Policies still need discovery.
+    /// Publication keeps excluding credentials without an active fake.
+    /// # Errors
+    /// Rejects stale canonical snapshots or assignments that cannot be projected.
+    pub fn restore_scope(&self, scope: &PreparedScope) -> Result<(), GatewayError> {
+        let mut inner = self.lock();
         self.prepare_locked(&mut inner, scope)?;
+        self.publish_prepared(&mut inner, scope)
+    }
+
+    fn publish_prepared(
+        &self,
+        inner: &mut Inner,
+        scope: &PreparedScope,
+    ) -> Result<(), GatewayError> {
         if inner.state.enabled {
-            self.apply(&mut inner)
-                .map_err(|error| self.fail_closed(error))?;
+            self.apply(inner).map_err(|error| self.fail_closed(error))?;
         }
         self.canonical(scope)
             .map_err(|error| self.fail_closed(error))
     }
-    fn prepare_locked(&self, inner: &mut Inner, scope: &PreparedScope) -> Result<(), GatewayError> {
+    /// A retired credential assignment keeps its tombstone, so preparation must reject
+    /// the Scope instead of reporting success without a fake.
+    fn verify_issued_fakes(
+        &self,
+        inner: &mut Inner,
+        scope: &PreparedScope,
+        plan: &Plan,
+    ) -> Result<(), GatewayError> {
+        if plan.credentials.is_empty() {
+            return Ok(());
+        }
+        let id = ScopeId::new(scope.scope_id.as_str())?;
+        let store = self.store(inner, false)?;
+        for credential in &plan.credentials {
+            if store.fake(credential, &id).is_none() {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::Conflict,
+                    format!(
+                        "credential {credential} is retired for this Scope; create a new Scope after importing its key"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn prepare_locked(
+        &self,
+        inner: &mut Inner,
+        scope: &PreparedScope,
+    ) -> Result<Plan, GatewayError> {
         self.canonical(scope)?;
         let plan = self.check_scope(scope)?;
         let id = ScopeId::new(scope.scope_id.as_str())?;
@@ -272,7 +324,8 @@ impl GatewayService {
             }
         }
         self.canonical(scope)
-            .map_err(|error| self.fail_closed(error))
+            .map_err(|error| self.fail_closed(error))?;
+        Ok(plan)
     }
     /// Withdraws every fake and route after PAP has durably closed Scope admission.
     /// Keeps projection and Binding cleanup responsibility; never removes real keys.
@@ -402,7 +455,11 @@ impl GatewayService {
                     continue;
                 }
                 match scope.status {
-                    ScopeStatus::Active => self.prepare_locked(inner, scope)?,
+                    // Recovery keeps the tolerant path so one retired assignment cannot
+                    // stop the gateway for every other Scope.
+                    ScopeStatus::Active => {
+                        self.prepare_locked(inner, scope)?;
+                    }
                     ScopeStatus::Deleting => self.revoke_locked(inner, scope)?,
                 }
             }

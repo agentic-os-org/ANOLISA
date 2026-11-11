@@ -1385,6 +1385,9 @@ fn credential_administration_requires_authenticated_root_and_scope_owner_is_not_
         fn prepare(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
             Ok(())
         }
+        fn restore(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
         fn revoke(&self, _: &PreparedScope) -> Result<(), asc_pap::PapError> {
             Ok(())
         }

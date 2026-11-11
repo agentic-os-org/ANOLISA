@@ -477,10 +477,20 @@ where
         let _guard = self.scope_mutation_lock(&scope)?;
         // The first read selects a stable domain, not authority to restore Active.
         let scope = self.repository.get_scope(id)?;
+        let mut admission = None;
         if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
             self.complete_scope_deletion(&scope, true)?;
         } else if scope.uses_credentials() {
-            self.restore_active_scope(&scope)?;
+            match self.restore_active_scope(&scope) {
+                Ok(()) => {}
+                // A retired credential keeps its tombstone, but it must not strand
+                // independent file Bindings. Resume their work, then surface it.
+                Err(PapError::Conflict) => {
+                    self.recover_active_scope(&scope)?;
+                    admission = Some(PapError::Conflict);
+                }
+                Err(error) => return Err(error),
+            }
         }
         match self.repository.retry_scope(id) {
             Ok(bindings) => self.notify_all(bindings)?,
@@ -488,15 +498,36 @@ where
                 if scope.status == asc_policy_types::scope::ScopeStatus::Deleting => {}
             Err(error) => return Err(error),
         }
-        Ok(scope)
+        match admission {
+            Some(error) => Err(error),
+            None => Ok(scope),
+        }
     }
 
+    /// Re-admits an explicitly retried Scope, so credential failures must surface.
     fn restore_active_scope(&self, scope: &PreparedScope) -> Result<(), PapError> {
         if scope.uses_credentials() {
             let execution = self.execution.as_ref().ok_or(PapError::Unavailable)?;
             execution.validate(scope)?;
             execution.prepare(scope)?;
         }
+        self.start_scope_discovery(scope)
+    }
+
+    /// Resumes an existing canonical Scope during startup recovery.
+    ///
+    /// A retired credential keeps its tombstone, so restoration must not reject
+    /// the Scope: independent file Policies still need their discovery worker.
+    fn recover_active_scope(&self, scope: &PreparedScope) -> Result<(), PapError> {
+        if scope.uses_credentials() {
+            let execution = self.execution.as_ref().ok_or(PapError::Unavailable)?;
+            execution.validate(scope)?;
+            execution.restore(scope)?;
+        }
+        self.start_scope_discovery(scope)
+    }
+
+    fn start_scope_discovery(&self, scope: &PreparedScope) -> Result<(), PapError> {
         self.discovery
             .as_ref()
             .ok_or(PapError::Unavailable)?
@@ -587,7 +618,7 @@ where
                     if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
                         self.complete_scope_deletion(&scope, true)
                     } else if restore_active {
-                        self.restore_active_scope(&scope)
+                        self.recover_active_scope(&scope)
                     } else {
                         Ok(())
                     }
