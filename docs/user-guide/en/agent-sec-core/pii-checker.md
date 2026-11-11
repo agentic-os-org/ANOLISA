@@ -46,7 +46,7 @@ V2 keeps the existing top-level result fields and adds evidence metadata under `
 | `coverage.reasons` | Safe codes for truncation, invalid rules, matching limits, or scan failure |
 | `input_sha256` | SHA-256 of text received by the detector; never a claim about omitted input |
 | `scanned_input_sha256`, `scanned_bytes` | Digest and byte length of the prefix actually scanned |
-| `scanner_version` | Detection semantics version; V2 currently reports `2.1.1` |
+| `scanner_version` | Detection semantics version; V2 currently reports `2.1.2` |
 | `ruleset_id` | Identity of the scanner version and immutable built-in/custom rule configuration |
 
 `bytes_scanned` retains the V1 prefix counter and can include an incomplete UTF-8 tail excluded
@@ -84,7 +84,7 @@ transport failure while the worker still finalizes its safe scan error and relea
 ## Detection semantics version
 
 `summary.scanner_version` identifies detection behavior independently of the AgentSecCore package
-version and RPC schema. V2 reports `2.1.1` in successful and failed scan reports and audit results;
+version and RPC schema. V2 reports `2.1.2` in successful and failed scan reports and audit results;
 built-in findings use engine `regex_v2`, custom findings use `fancy_regex`. `ruleset_id` includes
 this version plus the built-in patterns and custom configuration, so rule-engine changes remain
 traceable even when the YAML bytes are unchanged. A CI commit SHA identifies the tested build;
@@ -106,6 +106,16 @@ with these intentional changes from V1:
 
 Version 2.1.1 corrects fixture-word boundaries in confidence scoring, as described under
 [Built-in detection](#built-in-detection).
+
+Version 2.1.2 recognizes supported API keys, email addresses, Chinese IDs, Alibaba Cloud
+access key IDs and `Bearer` labels directly beside Han, kana or Hangul prose. For example,
+`中文sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ中文` detects the complete key
+and leaves the surrounding Chinese text outside its span. Trailing `_`, `-` and `=` remain
+part of an API key before such prose. Other Unicode letters retain the existing continuation
+checks: the scanner does not extract `lise@company.cn` from `élise@company.cn`, and an ASCII
+period followed by another domain label, including `alice@company.cn.中国`, remains rejected.
+Generic secret-field values still support Unicode and are not trimmed at CJK characters.
+This change applies to V2; the retained Python V1 detector is unchanged.
 
 The retained V1 corpus checks unchanged behavior; separate positive, negative and resource-limit
 cases define V2 changes. These checks cover the supported formats, not a guarantee of zero errors

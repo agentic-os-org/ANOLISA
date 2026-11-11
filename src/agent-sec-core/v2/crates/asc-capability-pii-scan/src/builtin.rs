@@ -52,6 +52,54 @@ const RESERVED: &[&str] = &[
 ];
 const EMAIL_SENTENCE_DELIMITERS: &str = "\"')]}>,;:!?，。；：！？、）］｝】〕》〉」』”’";
 
+// Frozen WORD_RANGES intersected with Unicode 16 Han/Hiragana/Katakana/Hangul
+// Script_Extensions from the locked regex-syntax 0.8.11 tables. Keep other
+// Unicode letters as token continuations so international addresses are not sliced.
+const CJK_WORD_RANGES: &[(char, char)] = &[
+    ('\u{1100}', '\u{11ff}'),
+    ('\u{3005}', '\u{3007}'),
+    ('\u{3021}', '\u{3029}'),
+    ('\u{3031}', '\u{3035}'),
+    ('\u{3038}', '\u{303c}'),
+    ('\u{3041}', '\u{3096}'),
+    ('\u{309d}', '\u{309f}'),
+    ('\u{30a1}', '\u{30fa}'),
+    ('\u{30fc}', '\u{30ff}'),
+    ('\u{3131}', '\u{318e}'),
+    ('\u{3192}', '\u{3195}'),
+    ('\u{31f0}', '\u{31ff}'),
+    ('\u{3220}', '\u{3229}'),
+    ('\u{3280}', '\u{3289}'),
+    ('\u{3400}', '\u{4dbf}'),
+    ('\u{4e00}', '\u{9fff}'),
+    ('\u{a960}', '\u{a97c}'),
+    ('\u{ac00}', '\u{d7a3}'),
+    ('\u{d7b0}', '\u{d7c6}'),
+    ('\u{d7cb}', '\u{d7fb}'),
+    ('\u{f900}', '\u{fa6d}'),
+    ('\u{fa70}', '\u{fad9}'),
+    ('\u{ff66}', '\u{ffbe}'),
+    ('\u{ffc2}', '\u{ffc7}'),
+    ('\u{ffca}', '\u{ffcf}'),
+    ('\u{ffd2}', '\u{ffd7}'),
+    ('\u{ffda}', '\u{ffdc}'),
+    ('\u{16fe3}', '\u{16fe3}'),
+    ('\u{1aff0}', '\u{1aff3}'),
+    ('\u{1aff5}', '\u{1affb}'),
+    ('\u{1affd}', '\u{1affe}'),
+    ('\u{1b000}', '\u{1b122}'),
+    ('\u{1b150}', '\u{1b152}'),
+    ('\u{1b164}', '\u{1b167}'),
+    ('\u{1d360}', '\u{1d371}'),
+    ('\u{20000}', '\u{2a6df}'),
+    ('\u{2a700}', '\u{2b738}'),
+    ('\u{2b740}', '\u{2b81d}'),
+    ('\u{2b820}', '\u{2cea1}'),
+    ('\u{2ceb0}', '\u{2ebe0}'),
+    ('\u{2f800}', '\u{2fa1d}'),
+    ('\u{30000}', '\u{3134a}'),
+];
+
 pub(crate) struct BuiltinDetector {
     patterns: BTreeMap<String, Regex>,
 }
@@ -195,8 +243,8 @@ impl BuiltinDetector {
                             .into()
                     }
                     "_EMAIL_RE" => r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}".into(),
-                    // Keep candidate search linear and check the frozen Python boundaries
-                    // only where the body matches, in candidate_boundaries.
+                    // Keep candidate search linear and check detector-specific
+                    // boundaries only where the body matches.
                     "_BEARER_RE" => python_pattern(&pattern.replacen(r"(?i)\b", "(?i)", 1)),
                     "_ALIYUN_ACCESS_KEY_ID_RE" => {
                         python_pattern(pattern.trim_start_matches(r"\b").trim_end_matches(r"\b"))
@@ -470,14 +518,27 @@ fn word(c: char) -> bool {
     WORD_RANGES.get(index).is_some_and(|(start, _)| *start <= c)
 }
 
+fn cjk_word(c: char) -> bool {
+    let index = CJK_WORD_RANGES.partition_point(|(_, end)| *end < c);
+    CJK_WORD_RANGES
+        .get(index)
+        .is_some_and(|(start, _)| *start <= c)
+}
+
+fn token_word(c: char) -> bool {
+    word(c) && !cjk_word(c)
+}
+
 fn candidate_boundaries(id: &str, input: &str, matched: Match<'_>) -> bool {
     let before = || input[..matched.start()].chars().next_back();
     let after = || input[matched.end()..].chars().next();
     let decimal = |c| validators::decimal(c).is_some();
     match id {
-        "_BEARER_RE" => !before().is_some_and(word),
-        "_ALIYUN_ACCESS_KEY_ID_RE" => !before().is_some_and(word) && !after().is_some_and(word),
-        "_CN_ID_RE" => !before().is_some_and(decimal) && !after().is_some_and(word),
+        "_BEARER_RE" => !before().is_some_and(token_word),
+        "_ALIYUN_ACCESS_KEY_ID_RE" => {
+            !before().is_some_and(token_word) && !after().is_some_and(token_word)
+        }
+        "_CN_ID_RE" => !before().is_some_and(decimal) && !after().is_some_and(token_word),
         "_PHONE_CN_RE" => !before().is_some_and(decimal) && !after().is_some_and(decimal),
         _ => true,
     }
@@ -499,7 +560,7 @@ fn api_key<'a>(
         if text.input[..prefix.start()]
             .chars()
             .next_back()
-            .is_some_and(word)
+            .is_some_and(token_word)
         {
             continue;
         }
@@ -515,13 +576,14 @@ fn api_key<'a>(
                 check_deadline(deadline)?;
             }
         }
-        // V1 greedily backs up to the last Python word boundary. A trailing '-'
-        // before Chinese text is a boundary too, so trimming punctuation is wrong.
+        // CJK prose ends the complete token, including trailing '-'/'=' bytes.
+        // Other contexts retain V1's greedy rollback to a Python word boundary.
         while end >= prefix.end() {
             let before = text.input.as_bytes()[end - 1];
             let before_word = before.is_ascii_alphanumeric() || before == b'_';
-            let after_word = text.input[end..].chars().next().is_some_and(word);
-            if before_word != after_word {
+            let after = text.input[end..].chars().next();
+            let after_word = after.is_some_and(word);
+            if after.is_some_and(cjk_word) || before_word != after_word {
                 *cursor = end;
                 return Ok(Some(candidate(
                     text,
@@ -649,7 +711,7 @@ fn next_email<'a>(
         check_deadline(deadline)?;
         cursor.position = whole.start() + 1;
         let before = text.input[..whole.start()].chars().next_back();
-        if before.is_some_and(|c| word(c) || matches!(c, '.' | '+' | '-'))
+        if before.is_some_and(|c| token_word(c) || matches!(c, '.' | '+' | '-'))
             || !email_right_boundary(text.input, whole.end(), deadline)?
         {
             continue;
@@ -681,7 +743,7 @@ fn email_right_boundary(
         return Ok(true);
     };
     if after != '.' {
-        return Ok(!word(after) && after != '-');
+        return Ok(!token_word(after) && after != '-');
     }
     // A period run is punctuation only when it cannot continue the domain.
     let start = end;
@@ -806,6 +868,23 @@ fn remote_command(prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cjk_boundaries_match_frozen_word_script_extensions() {
+        let pattern = Regex::new(&format!(
+            r"[{}&&[\p{{scx:Han}}\p{{scx:Hiragana}}\p{{scx:Katakana}}\p{{scx:Hangul}}]]",
+            character_class(WORD_RANGES)
+        ))
+        .unwrap();
+        let scalars: Vec<char> = (0..=0x10_ffff).filter_map(char::from_u32).collect();
+        let input: String = scalars.iter().collect();
+        let expected: Vec<char> = pattern
+            .find_iter(&input)
+            .map(|found| found.unwrap().as_str().chars().next().unwrap())
+            .collect();
+        let actual: Vec<char> = scalars.into_iter().filter(|c| cjk_word(*c)).collect();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn frozen_python_classes_cover_every_unicode_scalar() {

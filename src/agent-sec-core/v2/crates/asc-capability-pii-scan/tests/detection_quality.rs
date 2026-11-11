@@ -266,6 +266,7 @@ fn email_sentence_boundaries_preserve_spans_and_punctuation() {
         ".\u{1c}",
         ",",
         "。",
+        "中",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -312,8 +313,7 @@ fn email_sentence_boundaries_preserve_spans_and_punctuation() {
 fn email_sentence_rejects_domain_continuations_without_hiding_later_email() {
     let scanner = PiiScanner::new().unwrap();
     let mut suffixes: Vec<String> = [
-        ".123", ".c", ".-bad", "._bad", "..evil", ".cn-", "中", "_", "-", ".中", ".🙂", "...123",
-        ".../",
+        ".123", ".c", ".-bad", "._bad", "..evil", ".cn-", "_", "-", ".中", ".🙂", "...123", ".../",
     ]
     .into_iter()
     .map(str::to_owned)

@@ -19,7 +19,7 @@ fn frozen_v1_builtin_responses_match() {
         let result = scanner
             .scan(case["text"].as_str().unwrap(), &options)
             .unwrap();
-        assert_eq!(result.summary.scanner_version, "2.1.1");
+        assert_eq!(result.summary.scanner_version, "2.1.2");
         assert!(
             result
                 .findings
@@ -60,11 +60,78 @@ fn frozen_v1_builtin_responses_match() {
                 expected["findings"][index]["confidence"] = serde_json::json!(new);
             }
         }
+        upgrade_cjk_expectation(case["text"].as_str().unwrap(), &mut expected);
         // Engine provenance is intentionally versioned; all remaining fields match.
         for finding in expected["findings"].as_array_mut().unwrap() {
             finding["metadata"]["engine"] = serde_json::json!("regex_v2");
         }
         assert_eq!(actual, expected, "v1 fixture {index}: {:?}", case["text"]);
+    }
+}
+
+// Keep the six superseded V1 observations in their original corpus. Only these
+// named CJK boundary cases change; every other report field is still compared.
+fn upgrade_cjk_expectation(text: &str, expected: &mut Value) {
+    if matches!(
+        text,
+        "alice@company.cn中 bob@securecorp.cn." | "中alice@company.cn" | "alice@company.cn中"
+    ) {
+        let existing = usize::from(text.ends_with(" bob@securecorp.cn."));
+        assert_eq!(expected["summary"]["total"], existing);
+        assert_eq!(expected["findings"].as_array().unwrap().len(), existing);
+        let start = usize::from(text.starts_with('中'));
+        expected["findings"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "type":"email", "category":"personal_data", "severity":"warn", "confidence":0.82,
+                "evidence_redacted":"a***@company.cn", "span":{"start":start,"end":start+16},
+                "metadata":{"validator":"email_syntax","detector":"regex","engine":"regex_v1"},
+                "raw_evidence":"alice@company.cn"
+            }),
+        );
+        expected["verdict"] = serde_json::json!("warn");
+        expected["summary"]["total"] = serde_json::json!(existing + 1);
+        expected["summary"]["by_type"] = serde_json::json!({"email":existing+1});
+        expected["summary"]["by_category"] = serde_json::json!({"personal_data":existing+1});
+        expected["summary"]["by_severity"] = serde_json::json!({"warn":existing+1});
+        if let Some(redacted) = expected.get_mut("redacted_text") {
+            *redacted = serde_json::json!(
+                redacted
+                    .as_str()
+                    .unwrap()
+                    .replace("alice@company.cn", "a***@company.cn")
+            );
+        }
+    } else if matches!(
+        text,
+        "sk-AAAAAAAAAAAAAAAAAAAA中"
+            | "中sk-AAAAAAAAAAAAAAAAAAAA"
+            | "sk-AAAAAAAAAAAAAAAAAAAA-BBBB中"
+    ) {
+        let extended = text.contains("-BBBB");
+        assert_eq!(expected["summary"]["total"], usize::from(extended));
+        if extended {
+            assert_eq!(
+                expected["findings"][0]["raw_evidence"],
+                "sk-AAAAAAAAAAAAAAAAAAAA-"
+            );
+        } else {
+            assert_eq!(expected["findings"], serde_json::json!([]));
+        }
+        let value = text.trim_matches('中');
+        let start = usize::from(text.starts_with('中'));
+        expected["findings"] = serde_json::json!([{
+            "type":"api_key", "category":"credential", "severity":"deny", "confidence":0.86,
+            "evidence_redacted":if extended {"sk-A...[REDACTED]...BBBB"} else {"sk-A...[REDACTED]...AAAA"},
+            "span":{"start":start,"end":start+value.len()},
+            "metadata":{"pattern":"token_prefix","detector":"regex","engine":"regex_v1"},
+            "raw_evidence":value
+        }]);
+        expected["verdict"] = serde_json::json!("deny");
+        expected["summary"]["total"] = serde_json::json!(1);
+        expected["summary"]["by_type"] = serde_json::json!({"api_key":1});
+        expected["summary"]["by_category"] = serde_json::json!({"credential":1});
+        expected["summary"]["by_severity"] = serde_json::json!({"deny":1});
     }
 }
 
@@ -161,7 +228,7 @@ fn long_invalid_email_domains_do_not_hide_later_addresses() {
 }
 
 #[test]
-fn candidate_search_preserves_python_boundaries_and_redacted_spans() {
+fn candidate_search_preserves_versioned_boundaries_and_redacted_spans() {
     let scanner = PiiScanner::new().unwrap();
     let padding = "x".repeat(8192);
     let token = "İabcdefghijklmno";
@@ -176,7 +243,13 @@ fn candidate_search_preserves_python_boundaries_and_redacted_spans() {
             "",
             Some("İabc...[REDACTED]...lmno"),
         ),
-        ("bearer_token", "中Bearer ", token, "", None),
+        (
+            "bearer_token",
+            "中Bearer ",
+            token,
+            "",
+            Some("İabc...[REDACTED]...lmno"),
+        ),
         (
             "aliyun_access_key_id",
             "\u{11f02}",
@@ -185,7 +258,13 @@ fn candidate_search_preserves_python_boundaries_and_redacted_spans() {
             Some("LTAI...[REDACTED]...ijkl"),
         ),
         ("aliyun_access_key_id", "_", key, "", None),
-        ("aliyun_access_key_id", "", key, "中", None),
+        (
+            "aliyun_access_key_id",
+            "",
+            key,
+            "中",
+            Some("LTAI...[REDACTED]...ijkl"),
+        ),
         ("cn_id", "中", id, "!", Some("１１０***********００２Ｘ")),
         ("cn_id", "９", id, "", None),
         ("cn_id", "", id, "_", None),
@@ -253,9 +332,9 @@ fn mixed_unicode_positions_and_overlapping_credentials_are_redacted() {
 
 #[test]
 fn scanner_version_reflects_detection_semantics() {
-    // Whole-word fixture markers change scoring; version both the report and
+    // CJK token boundaries change findings and spans; version the report and
     // ruleset digest while retaining the previously added token prefixes.
-    assert_eq!(SCANNER_VERSION, "2.1.1");
+    assert_eq!(SCANNER_VERSION, "2.1.2");
     let report = PiiScanner::new()
         .unwrap()
         .scan(
@@ -263,7 +342,7 @@ fn scanner_version_reflects_detection_semantics() {
             &PiiScanOptions::default(),
         )
         .unwrap();
-    assert_eq!(report.summary.scanner_version, "2.1.1");
+    assert_eq!(report.summary.scanner_version, "2.1.2");
     assert!(report.findings.iter().any(|f| f.pii_type == "api_key"));
 }
 

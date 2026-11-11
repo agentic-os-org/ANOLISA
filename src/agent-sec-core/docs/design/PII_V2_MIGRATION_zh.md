@@ -56,7 +56,7 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 内置 word 和 decimal 字符表固定为 Python 3.11 / Unicode 14；全量 Unicode scalar
 分类检查和大小写匹配用例保护 V1 的字符边界语义。
 
-检测语义版本为 `summary.scanner_version=2.1.1`，纳入 `ruleset_id`，并在成功/失败扫描及
+检测语义版本为 `summary.scanner_version=2.1.2`，纳入 `ruleset_id`，并在成功/失败扫描及
 审计结果中记录。内置 engine 为 `regex_v2`，自定义 engine 为 `fancy_regex`。该版本独立于包版本。
 2.0.0 修复空 claims JWT 漏报，保留大整数/深层 JSON 的非递归结构检查；身份证日期和校验位
 统一转换数字并支持全角 X；银行卡排除全零占位符。234 个 V1 用例继续验证不变行为，
@@ -74,6 +74,15 @@ JWT 扩展与反例。差分只排除耗时、V2 新增元数据及明确升级�
 子串标记、正向上下文归一化、评分权重、过滤阈值及邮箱/私钥例外不变。
 `tests/compatibility.rs` 显式分类 `sk-test987…` 和 `LTAI5tQnKxExampleToken12` 上下文的
 置信度差异，不改写冻结的 V1 语料，也不忽略其他预期字段。
+
+2.1.2 将 CJK 正文视作 API key、邮箱、中国身份证号、阿里云 AccessKey ID 和 Bearer 标签的边界。
+`CJK_WORD_RANGES` 是冻结 Python word 表与锁定 regex-syntax 0.8.11 的 Unicode 16
+Han/Hiragana/Katakana/Hangul Script_Extensions 表的交集。通用字段、上下文评分、自定义规则
+及其他 Unicode 连续词规则保持不变。API key 在 CJK 前保留全部合法尾部字节；邮箱的
+句点与域名延续检查不变。`tests/compatibility.rs` 显式升级六个具名 V1 观察，包括此前在内部
+连字符处截断的 API key span，同时保留原始 `v1.json` 及来源信息。
+`tests/cjk_boundaries.rs` 定义 span、脱敏和反例；既有 CLI/daemon 测试覆盖 text、stdin、
+文件输入及脱敏审计。Python V1 继续作为未修改的历史 oracle，此变更仅适用于 Rust V2 scanner。
 
 V1 顶层字段仍为 `ok`、`verdict`、`summary`、`findings`、`elapsed_ms` 和可选
 `redacted_text`。`summary` 将执行状态与覆盖状态分开：
@@ -169,7 +178,7 @@ opaque 兼容 trace 标签，并为遥测提供白名单 Agent product。PII Han
 | 身份 | UID/GID/PID 来自 UDS peer；trace 和 `agent_name` 不授予权限 |
 | Trace | CLI 顶层 `--trace-context`；V1 别名、去空白和 256 字符限制；复用公共 Context/顶层 carrier，opaque 标签不是 OTel ID |
 | 规则 | 从 V1 用户级、下次扫描加载，显式迁移为中央配置、启动加载 |
-| 检测版本 | `scanner_version=2.1.1`；内置质量改进与原生自定义方言有独立用例 |
+| 检测版本 | `scanner_version=2.1.2`；内置质量改进与原生自定义方言有独立用例 |
 | 正则 | 原生 fancy-regex；实际无效语法、YAML 别名/多文档拒绝，以及执行预算/引擎限制 |
 | Runtime | 检测器、client、daemon 均为 Rust；保留 V1 作为独立回滚及 oracle |
 
