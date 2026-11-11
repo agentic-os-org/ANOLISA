@@ -119,6 +119,12 @@ command; aliases with a writable ancestor are rejected because that ancestor cou
 retarget the link after installation. Uninstallable overlapping aliases are also
 rejected by the backend. Explicit Cedar paths to files with multiple hardlinks are
 rejected before compaction, since canonicalization cannot identify their other names.
+Whole-subtree exclusions retain explicit deny rules even outside allowed roots;
+the PDP preserves these request exclusions and the PEP rejects decisions that
+discard them. The backend therefore still rejects hardlinked files inside excluded
+directories before execution. A complement such as "everything except `/work`"
+continues to use default deny outside its grants, without a root deny that would
+also block `/work`.
 The initial executable and working directory must match
 the captured paths, and captured identities are checked again before execution.
 

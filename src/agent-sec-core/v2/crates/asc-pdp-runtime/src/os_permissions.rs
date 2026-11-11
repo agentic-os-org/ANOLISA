@@ -153,6 +153,13 @@ impl PdpRuntime {
                 }
             }
         }
+        // Even outside readable roots, explicit exclusions carry the backend's
+        // hardlink validation and must survive permission compaction.
+        for rule in &input.requested_permissions.filesystem.rules {
+            if rule.effect == RuleEffect::Deny && !effective.filesystem.rules.contains(rule) {
+                effective.filesystem.rules.push(rule.clone());
+            }
+        }
         // The backend also mounts these pinned objects at their canonical launch paths.
         for required in [&input.launch.resolved_program, &input.launch.cwd] {
             if !rules_allow(&effective, required, FileRight::Read) {

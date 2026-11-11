@@ -702,3 +702,128 @@ when {{ resource.path == {} }};"#,
         FileRight::Read
     ));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn directory_exclusions_survive_pdp_compaction_and_check_hardlinked_descendants() {
+    use asc_pep_runtime::{PepRuntime, SandboxBackend, prepare_launch};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let private = dir.path().join("private");
+    let cwd = dir.path().join("cwd");
+    for path in [&work, &private, &cwd] {
+        std::fs::create_dir(path).unwrap();
+    }
+    std::fs::write(private.join("key"), "secret").unwrap();
+    let helper = dir.path().join("helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\necho '{\"strict_filesystem\":true,\"noexec\":true,\"network_off\":true}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tree = |path: &std::path::Path| {
+        format!(
+            "(resource.path == {} || resource.path like {})",
+            json!(path),
+            json!(format!("{}/*", path.display()))
+        )
+    };
+    let principal = AgentPrincipal {
+        agent_id: "hardlink-test".into(),
+        agent_type: "cosh".into(),
+    };
+    let launch = prepare_launch("/usr/bin/true", vec![], &cwd, BTreeMap::new()).unwrap();
+    let mut runtime = PepRuntime::new(SandboxBackend::new(helper));
+    let client = Client::new("permit(principal, action, resource);".into());
+    for (action, right) in [
+        ("file.read", FileRight::Read),
+        ("file.write", FileRight::Write),
+    ] {
+        for exclusion in [
+            format!("resource.path == {}", json!(private)),
+            format!(
+                "resource.path like {}",
+                json!(format!("{}/*", private.display()))
+            ),
+            tree(&private),
+        ] {
+            let source = format!(
+                r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ {} || {} || {} }};
+permit(principal, action == SecCore::Action::"file.write", resource) when {{ {} }};
+forbid(principal, action == SecCore::Action::"{action}", resource) when {{ {} }};"#,
+                tree(std::path::Path::new("/usr")),
+                tree(&cwd),
+                tree(&work),
+                tree(&work),
+                exclusion
+            );
+            let envelope = json!({"language":"cedar", "content":{
+                "schema":{"schemaId":"seccore.system","revision":1}, "text":source
+            }});
+            for text in [source.clone(), envelope.to_string()] {
+                let input = PermissionInput::parse(&text).unwrap();
+                std::fs::hard_link(private.join("key"), work.join("key")).unwrap();
+                let bound = input.prepare(&launch).unwrap();
+                let error = linux_sandbox::runtime::check_mount_plan(&bound).expect_err(&source);
+                assert!(error.to_string().contains("hardlink"), "{error}");
+                let (prepared, decision) = runtime
+                    .authorize(&principal, launch.clone(), &input, &client)
+                    .unwrap();
+                let json =
+                    PermissionInput::parse(&serde_json::to_string(&bound.permissions).unwrap())
+                        .unwrap();
+                let (json_prepared, json_decision) = runtime
+                    .authorize(&principal, launch.clone(), &json, &client)
+                    .unwrap();
+                assert_eq!(
+                    prepared.request.requested_permissions,
+                    json_prepared.request.requested_permissions
+                );
+                assert_eq!(
+                    decision.effective_permissions,
+                    json_decision.effective_permissions
+                );
+                for permissions in [
+                    &prepared.request.requested_permissions,
+                    decision.effective_permissions.as_ref().unwrap(),
+                ] {
+                    assert!(
+                        permissions
+                            .filesystem
+                            .rules
+                            .iter()
+                            .any(|rule| rule.effect == RuleEffect::Deny
+                                && rule.path == private.to_str().unwrap()
+                                && rule.rights.contains(&right))
+                    );
+                }
+                let error = runtime.prepare_execution(&prepared, &decision).unwrap_err();
+                assert!(error.to_string().contains("hardlink"), "{error}");
+                std::fs::remove_file(work.join("key")).unwrap();
+                runtime.prepare_execution(&prepared, &decision).unwrap();
+                // A later hardlink must still be caught at execution preparation.
+                std::fs::hard_link(private.join("key"), work.join("key")).unwrap();
+                let error = runtime.prepare_execution(&prepared, &decision).unwrap_err();
+                assert!(error.to_string().contains("hardlink"), "{error}");
+                let mut dropped = decision.clone();
+                dropped
+                    .effective_permissions
+                    .as_mut()
+                    .unwrap()
+                    .filesystem
+                    .rules
+                    .retain(|rule| rule.effect != RuleEffect::Deny);
+                let error = runtime.prepare_execution(&prepared, &dropped).unwrap_err();
+                assert!(
+                    error.to_string().contains("removed requested exclusion"),
+                    "{error}"
+                );
+                std::fs::remove_file(work.join("key")).unwrap();
+            }
+        }
+    }
+}
