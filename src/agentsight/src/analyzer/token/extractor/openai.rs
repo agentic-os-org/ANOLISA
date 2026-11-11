@@ -166,6 +166,28 @@ pub fn extract_response_content(
                         }
                     }
                 }
+
+                // The pre-`tool_calls` function-calling protocol carries the
+                // single call in `message.function_call` (whole body) or
+                // `delta.function_call` (streamed fragments). The live parser
+                // and genai builder read it; without this arm the fallback
+                // counted such a call as zero output tokens.
+                if let Some(call) = msg.get("function_call").filter(|c| c.is_object()) {
+                    let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let arguments = call.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                    // A streamed call names the tool once and then sends bare
+                    // argument fragments; joining must not insert `: ` before
+                    // a fragment that has no name.
+                    let fragment = if name.is_empty() {
+                        arguments.to_string()
+                    } else {
+                        format!("{name}: {arguments}")
+                    };
+                    if !fragment.is_empty() {
+                        tool_calls.push(fragment);
+                        has_data = true;
+                    }
+                }
             } else if let Some(text) = choice.get("text").and_then(|t| t.as_str()) {
                 // Legacy `/v1/completions` answers put the generated text
                 // directly on the choice, without a `message` or `delta`
@@ -820,6 +842,10 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
     // applies inside one chunk; without it a stream described its call once per
     // chunk and the counters read the repeated arguments as separate calls.
     let mut native: BTreeMap<u64, String> = BTreeMap::new();
+    // The pre-`tool_calls` function-calling protocol names one call per
+    // choice. It has no array index, so it gets its own map keyed by choice
+    // rather than a reserved slot that a wire index could collide with.
+    let mut legacy: BTreeMap<u64, (String, String)> = BTreeMap::new();
     for chunk in chunks {
         responses.observe(chunk);
         if let Some(choices) = chunk.get("choices").and_then(Value::as_array) {
@@ -897,6 +923,20 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
                         }
                     }
                 }
+                // The legacy function-calling protocol streams the one call
+                // as `function_call` name/argument fragments; a whole message
+                // carries it complete. Both readers missed the spelling.
+                if let Some(call) = message.get("function_call").filter(|c| c.is_object()) {
+                    let name = call.get("name").and_then(Value::as_str).unwrap_or("");
+                    let arguments = call.get("arguments").and_then(Value::as_str).unwrap_or("");
+                    let entry = legacy.entry(choice_index).or_default();
+                    if snapshot.is_some() {
+                        *entry = (name.to_owned(), arguments.to_owned());
+                    } else {
+                        entry.0.push_str(name);
+                        entry.1.push_str(arguments);
+                    }
+                }
             }
             continue;
         }
@@ -944,6 +984,12 @@ pub(crate) fn merge_response_tool_calls(chunks: &[Value]) -> Vec<String> {
         )
         .chain(compatible)
         .chain(native.into_values().filter(|call| !call.is_empty()))
+        .chain(
+            legacy
+                .into_values()
+                .filter(|(name, arguments)| !name.is_empty() || !arguments.is_empty())
+                .map(|(name, arguments)| format!("{name}: {arguments}")),
+        )
         .collect()
 }
 
@@ -1829,6 +1875,58 @@ mod tests {
         // exact string they expect.
         let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
         assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// The pre-`tool_calls` function-calling protocol streams the single call
+    /// as `choices[].delta.function_call` fragments (and carries it as
+    /// `message.function_call` in a whole body). The live message parser and
+    /// genai builder read that spelling, but both token readers only scanned
+    /// `tool_calls`/`tool_use`, so a legacy call counted zero output tokens.
+    #[test]
+    fn test_legacy_function_call_fragments_are_counted() {
+        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+            })
+        };
+        let chunks = [
+            chunk(
+                serde_json::json!({"function_call": {"name": "get_weather", "arguments": ""}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function_call": {"arguments": "{\"city\":"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function_call": {"arguments": "\"Beijing\"}"}}),
+                Some("function_call"),
+            ),
+        ];
+
+        let (_, _, fragments) = merge_response_output_text(&chunks);
+        assert_eq!(fragments.concat(), "get_weather: {\"city\":\"Beijing\"}");
+        assert_eq!(
+            merge_response_tool_calls(&chunks),
+            vec!["get_weather: {\"city\":\"Beijing\"}".to_string()]
+        );
+
+        let whole = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "function_call": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+                },
+                "finish_reason": "function_call"
+            }]
+        });
+        assert_eq!(
+            merge_response_tool_calls(std::slice::from_ref(&whole)),
+            vec!["get_weather: {\"city\":\"Beijing\"}".to_string()]
+        );
+        let (_, _, fragments) = merge_response_output_text(&[whole]);
+        assert_eq!(fragments.concat(), "get_weather: {\"city\":\"Beijing\"}");
     }
 
     /// A custom (freeform) tool call is announced and streamed exactly like a
