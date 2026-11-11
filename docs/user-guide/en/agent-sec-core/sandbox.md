@@ -77,8 +77,22 @@ Read-only does not mean non-executable. noexec prevents direct execution through
 the named mount; it does not prevent an allowed interpreter reading a script,
 execution through another allowed alias, or execution of a copy elsewhere.
 Filesystem deny paths must be canonical. The backend rejects symlink deny paths,
-overlapping explicitly mounted aliases and hardlinked files in denied ranges.
+overlapping explicitly mounted aliases and hardlinked files in explicitly denied ranges.
 noexec paths must also be canonical. Host file permissions still apply.
+
+Write grants restrict paths, not every name of the same file. A pre-existing
+hardlink in a writable directory can still modify a file outside the write grants.
+The backend leaves writable paths unscanned to preserve startup availability.
+When `/` is not writable and the plan has writable paths, each actual strict helper
+launch writes one warning to stderr and continues. This boundary notice also
+appears when no hardlinks exist; it is not a detection result or a guarantee that
+outside file contents are protected. Plan prechecks do not repeat the warning;
+read-only plans and plans granting write on `/` do not emit it.
+
+Use independent file copies when content isolation is required. Shared host trees
+remain mutable by other host processes; the warning does not prevent concurrent
+hardlink creation or directory-entry replacement. Explicit deny checks above
+remain enforced and can still reject execution.
 
 ## Execution behavior
 
