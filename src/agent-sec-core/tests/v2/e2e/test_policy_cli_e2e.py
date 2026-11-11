@@ -44,7 +44,14 @@ def test_policy_assignment_snapshot_and_cleanup(daemon, tmp_path):
     )
     template_v2 = _write_template(tmp_path, "policy-v2.json", ["/srv/data"])
     policy = daemon.request(
-        "policy", "create", "--name", "protect-important-files", "--file", template_v1
+        "policy",
+        "create",
+        "--name",
+        "protect-important-files",
+        "--language",
+        "json",
+        "--file",
+        template_v1,
     )
     policy_id = policy["policyId"]
     assert policy["revision"] == 1
@@ -69,6 +76,8 @@ def test_policy_assignment_snapshot_and_cleanup(daemon, tmp_path):
         policy_id,
         "--name",
         "protect-v2",
+        "--language",
+        "json",
         "--file",
         template_v2,
     )
@@ -114,3 +123,92 @@ def test_policy_assignment_snapshot_and_cleanup(daemon, tmp_path):
         ("binding", "delete"),
     ):
         assert daemon.cli(resource, operation).returncode == 2
+
+
+def test_raw_cedar_files_round_trip_through_the_daemon(cli, daemon, tmp_path):
+    # `policy default` output is the canonical raw Cedar file a user edits and imports.
+    exported = cli("policy", "default")
+    assert exported.returncode == 0, exported.stderr
+    baseline = tmp_path / "baseline.cedar"
+    baseline.write_text(exported.stdout)
+    schema = {"schemaId": "seccore.system", "revision": 1}
+    policy = daemon.request(
+        "policy", "create", "--name", "baseline", "--file", str(baseline)
+    )
+    assert policy["template"] == {
+        "language": "cedar",
+        "content": {"schema": schema, "text": exported.stdout},
+    }
+
+    protect = tmp_path / "protect.cedar"
+    protect.write_text(
+        'forbid(principal, action == SecCore::Action::"file.write", resource)\n'
+        'when { context.input.operation == SecCore::WriteOperation::"delete"\n'
+        '  && resource.path == "/workspace/important" };\n'
+    )
+    updated = daemon.request(
+        "policy",
+        "update",
+        "--policy-id",
+        policy["policyId"],
+        "--name",
+        "protect",
+        "--language",
+        "cedar",
+        "--schema-id",
+        "seccore.system",
+        "--schema-revision",
+        "1",
+        "--file",
+        str(protect),
+    )
+    assert updated["revision"] == 2
+    assert updated["template"]["content"] == {
+        "schema": schema,
+        "text": protect.read_text(),
+    }
+
+    envelope = tmp_path / "protect.json"
+    envelope.write_text(json.dumps(updated["template"]))
+    assert (
+        daemon.request(
+            "policy",
+            "update",
+            "--policy-id",
+            policy["policyId"],
+            "--name",
+            "protect",
+            "--language",
+            "json",
+            "--file",
+            str(envelope),
+        )
+        == updated
+    )
+
+    native = _write_template(tmp_path, "native.json", ["/workspace/important"])
+    for source in (native, str(envelope)):
+        for operation in ("create", "update"):
+            args = ["policy", operation, "--name", "legacy", "--file", source]
+            if operation == "update":
+                args.extend(["--policy-id", policy["policyId"]])
+            rejected = daemon.cli(*args)
+            assert rejected.returncode == 1, rejected.stderr
+            assert rejected.stdout == ""
+            assert json.loads(rejected.stderr)["error"]["code"] == "invalid_argument"
+            assert daemon.request("policy", "list")["items"] == [updated]
+
+    # An unknown revision is rejected by the daemon, never resolved to another one.
+    unknown = daemon.cli(
+        "policy",
+        "create",
+        "--name",
+        "future",
+        "--schema-revision",
+        "99",
+        "--file",
+        str(protect),
+    )
+    assert unknown.returncode == 1
+    assert json.loads(unknown.stderr)["error"]["code"] == "invalid_argument"
+    assert daemon.request("policy", "list")["items"] == [updated]

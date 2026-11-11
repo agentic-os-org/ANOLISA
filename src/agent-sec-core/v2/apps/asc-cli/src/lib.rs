@@ -370,6 +370,12 @@ pub enum InputError {
     /// Bound input before parsing or constructing a request.
     #[error("Policy template exceeds the 4194304-byte input limit")]
     TooLarge,
+    /// Cedar text is passed through verbatim and never lossily repaired.
+    #[error("Cedar Policy source must be valid UTF-8")]
+    PolicyUtf8,
+    /// A JSON source names its own schema, so the flags would be silently ignored.
+    #[error("--schema-id and --schema-revision require --language cedar")]
+    SchemaWithJson,
     /// Invalid authoring JSON or request serialization.
     #[error("invalid Policy request input: {0}")]
     Json(#[from] serde_json::Error),
@@ -414,6 +420,8 @@ impl InputError {
             | Self::AnalyzeInput { .. }
             | Self::Read(_)
             | Self::TooLarge
+            | Self::PolicyUtf8
+            | Self::SchemaWithJson
             | Self::Json(_)
             | Self::LocalCommand
             | Self::PromptScanBatch

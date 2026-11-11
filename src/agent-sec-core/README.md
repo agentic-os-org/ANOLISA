@@ -100,8 +100,9 @@ Conflicting or bypassed existing databases
 refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
 [Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
 PolicyTemplates are reusable policies with general rules; the PEP Translator
-supports native JSON file-deletion block rules. Policy create/update also accepts Cedar
-source envelopes with an exact schema reference. Cedar admission and source persistence are
+supports native JSON file-deletion block rules. Policy create/update reads raw Cedar files by
+default and saves them with an exact schema reference; `--language json` keeps native JSON
+templates and Cedar source envelopes. Cedar admission and source persistence are
 available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed.
 Non-credential native JSON requests and saved snapshots retain their format; the approved
 Secret Gateway transition below is incompatible. Scopes save immutable Policy snapshots and

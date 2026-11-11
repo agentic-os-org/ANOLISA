@@ -159,8 +159,8 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 展示请求准备、执行或 ask 前的策略警告及回执。公开执行命令仍为 `sandbox run`；
 授权接入通过库调用和 daemon RPC 完成，再使用同一本地执行后端。
 
-通过现有 `policy create/update` 命令管理 Cedar 策略，策略文件使用
-[Policy 指南](policy-cli.md)中的源码封装。更新成功后，下一次授权请求使用新版本。
+通过现有 `policy create/update` 命令管理 Cedar 策略，策略文件为 Cedar 原文，见
+[Policy 指南](policy-cli.md#cedar-policy-源码)。更新成功后，下一次授权请求使用新版本。
 
 通过 `agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`
 启用授权。此 root 配置只选择 PAP 策略 ID 和运行参数，不保存 Cedar 策略正文，也不接受策略快照文件：

@@ -110,6 +110,8 @@ def test_shared_sqlite_write_lock_retains_both_results_and_recovers_without_http
             "create",
             "--name",
             "blocked",
+            "--language",
+            "json",
             "--file",
             str(recovery.directory / "policy.json"),
         )

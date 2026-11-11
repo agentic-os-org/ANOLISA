@@ -137,7 +137,14 @@ def test_discovered_binding_delivers_saved_revision_and_cleans_up(
     template_file = tmp_path / "template.json"
     template_file.write_text(json.dumps(template))
     original = daemon.request(
-        "policy", "create", "--name", "delivery-v1", "--file", str(template_file)
+        "policy",
+        "create",
+        "--name",
+        "delivery-v1",
+        "--language",
+        "json",
+        "--file",
+        str(template_file),
     )
     policy_id = original["policyId"]
     assert original == {
@@ -185,6 +192,8 @@ def test_discovered_binding_delivers_saved_revision_and_cleans_up(
         policy_id,
         "--name",
         "delivery-v2",
+        "--language",
+        "json",
         "--file",
         str(template_file),
     )
@@ -290,7 +299,14 @@ def test_unsupported_rule_is_saved_but_prevents_partial_http_delivery(
     template_file = tmp_path / "review-policy.json"
     template_file.write_text(json.dumps(template))
     policy = daemon.request(
-        "policy", "create", "--name", "review-required", "--file", str(template_file)
+        "policy",
+        "create",
+        "--name",
+        "review-required",
+        "--language",
+        "json",
+        "--file",
+        str(template_file),
     )
     assert policy["template"] == template
     process = subprocess.Popen(["/bin/sleep", "60"])

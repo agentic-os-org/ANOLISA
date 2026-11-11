@@ -622,6 +622,8 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None):
                 "create",
                 "--name",
                 "asc-gateway-e2e",
+                "--language",
+                "json",
                 "--file",
                 str(template),
             )

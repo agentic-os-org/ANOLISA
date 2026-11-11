@@ -87,7 +87,8 @@ daemon 自己拥有的叶目录权限会先修复为 `0700`。
 两处都有数据库，或选址会绕过已有数据库时拒绝启动；显式 `AGENT_SEC_DATA_DIR` 仍为固定路径。
 详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
 PolicyTemplate 是包含通用规则的可复用策略；PEP Translator 对原生 JSON 支持文件删除 block 规则。
-现有 Policy create/update 命令也接受携带精确 schema 引用的 Cedar 源码封装，完成准入校验和源码保存；
+Policy create/update 命令缺省直接读取 Cedar 原文，并携带精确 schema 引用完成准入校验和源码保存；
+`--language json` 保留原生 JSON 模板和 Cedar 源码封装；
 Cedar `forbid` 删除/普通写入限制已接入翻译与部署。非凭据原生 JSON 请求及保存快照保持
 原有格式；下述已批准的 Secret Gateway 修订不兼容旧格式。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。

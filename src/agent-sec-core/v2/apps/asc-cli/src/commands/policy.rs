@@ -1,4 +1,4 @@
-//! Authored Policy commands and bounded template-file decoding.
+//! Authored Policy commands and bounded source-file decoding.
 
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -11,7 +11,8 @@ use asc_daemon_protocol::method::{
 use asc_daemon_protocol::{CreatePolicyParams, DaemonRequest, RevisionParams, UpdatePolicyParams};
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::authoring::{PolicySource, source_serde};
-use clap::{Args, Subcommand};
+use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
+use clap::{Args, Subcommand, ValueEnum};
 
 use super::common::{Page, encode, resource_id, revision};
 use crate::InputError;
@@ -40,9 +41,18 @@ pub(crate) enum PolicyCommand {
 #[derive(Debug, Args)]
 /// Format selector for the embedded restrictive baseline.
 pub struct DefaultPolicy {
-    /// Print the raw Cedar text instead of the Policy template envelope.
+    /// Print the JSON source envelope instead of the raw Cedar text.
     #[arg(long)]
-    cedar: bool,
+    json: bool,
+}
+
+/// How `policy create/update --file` content is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SourceLanguage {
+    /// Raw Cedar text; the schema reference comes from `--schema-*`.
+    Cedar,
+    /// JSON native template or `{"language": ..., "content": ...}` source envelope.
+    Json,
 }
 
 #[derive(Debug, Args)]
@@ -50,9 +60,18 @@ pub(crate) struct PolicyInput {
     /// Complete Policy name.
     #[arg(long)]
     name: String,
-    /// JSON native template or Cedar source envelope, resolved in the CLI's working directory.
+    /// Policy source file, resolved in the CLI's working directory.
     #[arg(long)]
     file: PathBuf,
+    /// Source format of `--file`.
+    #[arg(long, value_enum, default_value_t = SourceLanguage::Cedar)]
+    language: SourceLanguage,
+    /// Cedar schema identity [default: the embedded system schema].
+    #[arg(long, value_parser = resource_id)]
+    schema_id: Option<ResourceId>,
+    /// Cedar schema revision [default: the embedded schema's revision].
+    #[arg(long, value_parser = revision)]
+    schema_revision: Option<Revision>,
 }
 
 #[derive(Debug, Args)]
@@ -66,15 +85,15 @@ pub(crate) struct PolicyRevision {
 impl DefaultPolicy {
     /// Renders the baseline that `policy create --file` accepts.
     ///
-    /// The envelope names the embedded schema revision, so an exported file is
-    /// already bound to the schema this binary validates against. Cedar text is
-    /// what a human reviews; the envelope is what the create path decodes.
+    /// Raw Cedar text imports with the default `--language cedar`; the JSON
+    /// envelope pins the embedded schema revision inside the file and imports
+    /// with `--language json`.
     ///
     /// # Errors
     /// Returns the write failure of `out`.
     pub fn render(&self, out: &mut impl io::Write) -> io::Result<()> {
         let source = asc_policy_cedar::default_policy::default_policy_source();
-        if self.cedar {
+        if !self.json {
             return writeln!(out, "{}", source.text);
         }
         let template = PolicySource::Cedar(source);
@@ -122,6 +141,12 @@ impl PolicyCommand {
 
 impl PolicyInput {
     fn template(&self) -> Result<PolicySource, InputError> {
+        // A JSON source carries its own schema; a flag that would be ignored is an error.
+        if self.language == SourceLanguage::Json
+            && (self.schema_id.is_some() || self.schema_revision.is_some())
+        {
+            return Err(InputError::SchemaWithJson);
+        }
         let mut bytes = Vec::new();
         File::open(&self.file)?
             .take(4 * 1024 * 1024 + 1)
@@ -129,9 +154,24 @@ impl PolicyInput {
         if bytes.len() > asc_daemon_client::MAX_FRAME_BYTES {
             return Err(InputError::TooLarge);
         }
-        // Decode the typed template before conversion to Value, so duplicate
-        // fields cannot be silently collapsed by an untyped JSON map.
-        Ok(source_serde::from_slice(&bytes)?)
+        match self.language {
+            // Decode the typed template before conversion to Value, so duplicate
+            // fields cannot be silently collapsed by an untyped JSON map.
+            SourceLanguage::Json => Ok(source_serde::from_slice(&bytes)?),
+            SourceLanguage::Cedar => {
+                let text = String::from_utf8(bytes).map_err(|_| InputError::PolicyUtf8)?;
+                // The resolved reference is stored with the Policy, so a later
+                // binary with a newer default cannot reinterpret this source.
+                let embedded = asc_policy_cedar::schema::embedded_reference();
+                Ok(PolicySource::Cedar(CedarPolicySource {
+                    schema: CedarSchemaReference {
+                        schema_id: self.schema_id.clone().unwrap_or(embedded.schema_id),
+                        revision: self.schema_revision.unwrap_or(embedded.revision),
+                    },
+                    text,
+                }))
+            }
+        }
     }
 }
 
@@ -150,15 +190,100 @@ mod tests {
         assert!(cli.socket().is_none());
         assert!(matches!(cli.plan(), crate::Plan::PolicyDefault(_)));
         assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+    }
 
+    /// Renders `policy default` with `extra` flags into memory.
+    fn rendered_default(extra: &[&str]) -> Vec<u8> {
+        let mut argv = vec!["agent-sec-cli", "policy", "default"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::parse_from(argv).expect("argv parses");
         let crate::Plan::PolicyDefault(command) = cli.plan() else {
-            unreachable!("the plan was just checked");
+            panic!("argv did not resolve to `policy default`");
         };
-        let mut envelope = Vec::new();
-        command.render(&mut envelope).expect("renders to memory");
-        let decoded = asc_policy_types::authoring::source_serde::from_slice(&envelope)
-            .expect("the printed envelope decodes");
-        assert!(matches!(decoded, PolicySource::Cedar(_)));
+        let mut out = Vec::new();
+        command.render(&mut out).expect("renders to memory");
+        out
+    }
+
+    /// Builds the request of `policy create --file <path>` plus `extra` flags.
+    fn create_request(path: &std::path::Path, extra: &[&str]) -> Result<DaemonRequest, InputError> {
+        let mut argv = vec![
+            "agent-sec-cli",
+            "--socket=/run/asc.sock",
+            "policy",
+            "create",
+            "--name=p",
+            "--file",
+            path.to_str().expect("temp paths are UTF-8"),
+        ];
+        argv.extend_from_slice(extra);
+        Cli::parse_from(argv).expect("argv parses").request()
+    }
+
+    #[test]
+    fn exported_default_policy_round_trips_in_both_languages() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let source = asc_policy_cedar::default_policy::default_policy_source();
+        // Raw Cedar is imported verbatim, including the newline `writeln!` appends.
+        let mut cedar = source.clone();
+        cedar.text.push('\n');
+        for (extra, language, expected) in [
+            (&[][..], "cedar", PolicySource::Cedar(cedar)),
+            (&["--json"][..], "json", PolicySource::Cedar(source)),
+        ] {
+            let path = directory.path().join(format!("default.{language}"));
+            std::fs::write(&path, rendered_default(extra)).expect("writes export");
+            let request = create_request(&path, &["--language", language]).expect("imports");
+            assert_eq!(
+                request.params["template"],
+                serde_json::to_value(expected).expect("source serializes"),
+                "--language {language}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_cedar_is_the_default_language_and_schema_flags_override_the_reference() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("policy.cedar");
+        let text = "forbid(principal, action, resource);\n";
+        std::fs::write(&path, text).expect("writes policy");
+
+        let request = create_request(&path, &[]).expect("imports with defaults");
+        assert_eq!(
+            request.params["template"],
+            serde_json::json!({"language": "cedar", "content": {
+                "schema": {"schemaId": "seccore.system", "revision": 1},
+                "text": text,
+            }})
+        );
+
+        let request = create_request(
+            &path,
+            &["--schema-id", "other.schema", "--schema-revision", "7"],
+        )
+        .expect("schema flags are forwarded and validated by the daemon");
+        assert_eq!(
+            request.params["template"]["content"]["schema"],
+            serde_json::json!({"schemaId": "other.schema", "revision": 7})
+        );
+    }
+
+    #[test]
+    fn cedar_rejects_non_utf8_and_json_rejects_schema_flags() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("policy.cedar");
+        std::fs::write(&path, b"forbid(principal, action, resource);\xff").expect("writes policy");
+        assert!(matches!(
+            create_request(&path, &[]),
+            Err(InputError::PolicyUtf8)
+        ));
+        for flag in ["--schema-id=seccore.system", "--schema-revision=1"] {
+            assert!(matches!(
+                create_request(&path, &["--language=json", flag]),
+                Err(InputError::SchemaWithJson)
+            ));
+        }
     }
 
     /// Returns the template path `argv` parsed into, or panics if it did not

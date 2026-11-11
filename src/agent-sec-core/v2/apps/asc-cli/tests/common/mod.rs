@@ -71,7 +71,12 @@ pub fn args_for(request: &Value, directory: &Path, socket: &Path) -> Vec<OsStrin
             "template" => {
                 let path = directory.join("template with spaces.json");
                 std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
-                args.extend([OsString::from("--file"), path.into_os_string()]);
+                args.extend([
+                    OsString::from("--language"),
+                    "json".into(),
+                    "--file".into(),
+                    path.into_os_string(),
+                ]);
             }
             "policyTemplates" => {
                 assert_eq!(value.as_array().unwrap().len(), 1);

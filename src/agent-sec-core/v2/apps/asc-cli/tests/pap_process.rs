@@ -125,6 +125,8 @@ async fn scope_cli_creates_discovery_jobs_and_rejects_nonadministrators() {
                 "create".into(),
                 "--name".into(),
                 "scope-policy".into(),
+                "--language".into(),
+                "json".into(),
                 "--file".into(),
                 file.into_os_string(),
             ];

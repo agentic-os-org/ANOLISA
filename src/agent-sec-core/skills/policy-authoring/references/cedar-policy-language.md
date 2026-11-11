@@ -103,8 +103,10 @@ resource.path == "/a\\b"    // 反斜杠
 
 ## 下游提交格式（仅供参考）
 
-本 Skill 只交付 Cedar 源码，不负责包装或提交。下游提交时将源码放入 JSON 策略模板的
-`content.text`，声明语言与固定 schema 引用，不直接提交裸 `.cedar` 文件。例如：
+本 Skill 只交付 Cedar 源码，不负责提交。下游可直接把源码保存为 UTF-8 的 `.cedar` 文件，
+用 `agent-sec-cli policy create --name <名称> --file <文件>.cedar` 导入；schema 引用缺省为
+`seccore.system` revision 1，也可用 `--schema-id`、`--schema-revision` 显式指定。只有使用
+`--language json` 或直接调用 RPC 时，才需要把源码放入 JSON 封装的 `content.text`，例如：
 
 ```json
 {
@@ -118,5 +120,5 @@ resource.path == "/a\\b"    // 反斜杠
 
 区分三个阶段：
 1. Cedar 源码：实际解析语法、检查支持的写法与字段类型才算源码校验；离线自检不算。
-2. 策略模板：JSON 包装与源码校验通过后可保存，不表示已经批准、绑定或下发。
+2. 策略模板：源码校验通过后可保存，不表示已经批准、绑定或下发。
 3. 执行目标：是否支持 Cedar 执行须另行确认，模板保存成功不代表策略已经生效或实际拦截。
