@@ -51,6 +51,14 @@ identity without an extra Status exchange. Construction performs no I/O;
 every operation still checks the Unix peer, protocol, generation, configuration
 and deadline. A stale binding fails without rediscovery or automatic retry.
 
+The shared JavaScript and Python Scope transports acknowledge the installed
+native routes, enable invocations and obtain the watch revision through one
+`aw scope --action activate` child. The service operations retain their order
+and share the CLI's five-second deadline. The native owner checks its seams
+before and after activation and closes the child scope on failure, including
+a lost response after acknowledgement. The individual scope actions remain
+available to existing callers.
+
 | `operation.method` | Input beyond the envelope | Result |
 | --- | --- | --- |
 | `status` | None | PID, resource counts, audit health and unverified adoption status |

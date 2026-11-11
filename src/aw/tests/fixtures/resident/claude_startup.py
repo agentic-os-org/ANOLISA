@@ -243,7 +243,7 @@ async def acknowledge_cancel(root: Path, config: dict[str, Any]) -> None:
     ) -> tuple[int, bytes]:
         nonlocal acknowledged
         response = await original(configuration, action, value, *args, **kwargs)
-        if action == "acknowledge":
+        if action == "activate":
             acknowledged = True
             cancellation.cancel()
             await anyio.sleep(0)
@@ -264,7 +264,7 @@ async def acknowledge_expired(root: Path, config: dict[str, Any]) -> None:
     async def command(
         configuration: dict[str, Any], action: str, value: Any, *args: Any, **kwargs: Any
     ) -> tuple[int, bytes]:
-        if action == "acknowledge":
+        if action == "activate":
             # Let actual service maintenance reclaim the unacknowledged handle.
             deadline = time.monotonic() + 7
             while True:

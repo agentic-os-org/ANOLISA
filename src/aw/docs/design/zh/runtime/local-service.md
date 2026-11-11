@@ -44,6 +44,11 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 每次操作仍校验 Unix peer、协议、generation、配置和期限。绑定失效时直接失败，
 不会重新发现或自动重试。
 
+公共 JavaScript 和 Python Scope 通过一次 `aw scope --action activate` 子进程调用，
+完成原生路由安装确认、启用调用和取得监视版本。服务操作保持原有顺序，共享 CLI
+的五秒期限。原生 owner 在激活前后检查接点，失败时关闭子 Scope，确认后响应丢失
+也沿用此清理流程。既有独立 Scope 操作继续保留。
+
 | `operation.method` | 信封以外的输入 | 结果 |
 | --- | --- | --- |
 | `status` | 无 | PID、资源数量、审计健康状态及尚未验证的采用状态 |

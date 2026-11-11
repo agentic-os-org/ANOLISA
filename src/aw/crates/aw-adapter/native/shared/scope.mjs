@@ -103,13 +103,12 @@ export class Scope {
   async acknowledge() {
     this.check();
     try {
-      const reply = await this.command("acknowledge", this.handle, 6000);
+      const reply = await this.command("activate", this.handle, 6000);
       if (reply.code !== 0) throw new Error("AW task handoff acknowledgement failed");
       this.check();
-      const enabled = await this.command("enable", this.handle, 6000);
-      if (enabled.code !== 0) throw new Error("AW invocation protocol admission failed");
-      this.invocationLimit = JSON.parse(enabled.stdout).invocations_per_binding;
-      await this.watch();
+      const activation = JSON.parse(reply.stdout);
+      this.invocationLimit = activation.invocations.invocations_per_binding;
+      await this.watch(activation.watch);
     } catch (error) {
       await this.close();
       throw error;
@@ -122,11 +121,8 @@ export class Scope {
     this.onFailure?.(error);
   }
 
-  async watch() {
+  async watch(watch) {
     this.check();
-    const reply = await this.command("watch", this.handle, 6000);
-    if (reply.code !== 0) throw new Error("AW scope watch admission failed");
-    const watch = JSON.parse(reply.stdout);
     if (typeof watch.policy_revision !== "string" || !/^[a-f0-9]{64}$/.test(watch.policy_revision) ||
         watch.interval_ms !== 2000)
       throw new Error("AW scope watch response is invalid");

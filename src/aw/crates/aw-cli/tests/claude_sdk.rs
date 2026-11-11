@@ -293,7 +293,7 @@ fn shared_python_scope_monitors_failure_and_joins_concurrent_cleanup() {
     let output = fixture.run(command);
     let report = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && report.contains("Ran 5 tests"),
+        output.status.success() && report.contains("Ran 6 tests"),
         "{report}"
     );
 }

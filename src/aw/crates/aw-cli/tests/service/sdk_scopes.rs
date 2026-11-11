@@ -208,6 +208,44 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
         let (service, parent, binding) = host(&fixture, adapter);
         let task = fixture.0.join("task");
         fs::create_dir(&task).unwrap();
+        let opened = cli(
+            &binding,
+            adapter,
+            "open",
+            &json!({"pid":std::process::id(), "cwd":task, "environment":{}}),
+            false,
+        );
+        assert!(opened.status.success());
+        let activation_scope: Value = serde_json::from_slice(&opened.stdout).unwrap();
+        let mut forwarded = activation_scope.clone();
+        forwarded["pid"] = json!(std::process::id() + 1);
+        assert!(!cli(&binding, adapter, "activate", &forwarded, false)
+            .status
+            .success());
+        let activated = cli(&binding, adapter, "activate", &activation_scope, false);
+        assert!(
+            activated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&activated.stderr)
+        );
+        let activation: Value = serde_json::from_slice(&activated.stdout).unwrap();
+        assert!(
+            activation["invocations"]["invocations_per_binding"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(activation["watch"]["interval_ms"], 2000);
+        assert_eq!(
+            activation["watch"]["policy_revision"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert!(cli(&binding, adapter, "close", &activation_scope, false)
+            .status
+            .success());
         for (scenario, after) in [
             ("allow", false),
             ("block", false),
@@ -350,6 +388,9 @@ fn expired_sdk_handoff_can_close_without_reviving_callbacks() {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(!cli(&binding, adapter, "acknowledge", &scope, false)
+            .status
+            .success());
+        assert!(!cli(&binding, adapter, "activate", &scope, false)
             .status
             .success());
         for _ in 0..2 {

@@ -30,6 +30,20 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+test("failed activation closes its handle without retrying admission", async () => {
+  for (const failure of ["transport", "watch"]) {
+    const scope = create(), calls = [];
+    scope.command = async action => {
+      calls.push(action);
+      return { code: action === "activate" && failure === "transport" ? 1 : 0,
+        stdout: JSON.stringify({ invocations: { invocations_per_binding: 4 }, watch: {} }) };
+    };
+    await assert.rejects(scope.acknowledge());
+    assert(scope.closed);
+    assert.deepEqual(calls, ["activate", "close"]);
+  }
+});
+
 test("retirement transport failure latches even outside prompt cleanup", async () => {
   const scope = create();
   scope.invocations.set("call", 1);
@@ -129,13 +143,10 @@ test("idle bridge probe reports failure and stops its timer", { timeout: 2000 },
   let installed = true, reports = 0;
   scope.probe = () => { if (!installed) throw new Error("removed native seam"); };
   scope.command = async (action, value) => {
-    if (action === "watch") return { code: 0, stdout: JSON.stringify({
-      policy_revision: "b".repeat(64), interval_ms: 2000,
-    }) };
     if (action === "check") { reports++; reported.resolve(value); return { code: 1 }; }
     return { code: 0 };
   };
-  await scope.watch();
+  await scope.watch({ policy_revision: "b".repeat(64), interval_ms: 2000 });
   installed = false;
   t.mock.timers.tick(2000);
   const report = await reported.promise;
