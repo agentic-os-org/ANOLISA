@@ -77,8 +77,9 @@ that parser for `command_output` searches and routes them, like the native `Grep
 `SearchResultsCompressor`. Its unified entry recognizes numbered path matches and path lists;
 format recognition and savings checks stay inside the compressor. Disabled search compression
 or no candidate returns the original, including with `force_json`, without trying another domain.
-Qoder's native Bash adapter sends only `stdout` to Core, even when it is short or empty or
-`stderr` is larger, and preserves every other field when rewrapping the result.
+Qoder's native Bash adapter replaces only a string `stdout`, even when it is short or empty or
+`stderr` is larger. A missing or non-string `stdout` disables replacement; error diagnostics
+can still inspect `stderr`. Rewrapping preserves every other field.
 
 This protection covers the complete output of any compound command containing a recognized
 search. For example, `grep -q needle Cargo.toml && cargo build` also keeps its build log

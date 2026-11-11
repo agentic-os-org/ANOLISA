@@ -65,6 +65,31 @@ class HookParity(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(json.loads(proc.stdout), {})
 
+    def test_qoder_non_string_stdout_preserves_shell_envelope(self):
+        long_stderr = json.dumps(
+            [{"id": i, "message": "build warning"} for i in range(60)], indent=4
+        )
+        metadata = [{"id": i, "value": "structured information"} for i in range(300)]
+        for stdout in (
+            {}, {"stdout": None}, {"stdout": {"nested": "value"}},
+            {"stdout": ["value"]}, {"stdout": 0},
+        ):
+            for stderr in ("warning", long_stderr):
+                with self.subTest(stdout=stdout, stderr_length=len(stderr)):
+                    payload = {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "ls"},
+                        "tool_response": {
+                            **stdout, "stderr": stderr, "exit_code": 0, "metadata": metadata,
+                        },
+                    }
+                    proc = corpus.run_hook(
+                        corpus.RESPONSE_HOOK, json.dumps(payload),
+                        corpus.RESPONSE_AGENTS["qoder-cli"],
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(json.loads(proc.stdout), {})
+
     def test_domain_compressors_receive_native_shell_content(self) -> None:
         cases = {
             "toon": json.dumps({"items": [{"id": i, "name": "repeated record"} for i in range(60)]}, indent=4),

@@ -90,7 +90,9 @@ skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
 
 Native shell envelopes expose their dominant `stdout` or `stderr` text from 200 characters
 onward, so short logs reach the same domain compressors as plain text. Qoder's native Bash
-always selects `stdout`, including short or empty values. Other fields stay unchanged.
+selects only string `stdout`, including short or empty values. If `stdout` is missing or is
+not a string, the original result is not replaced. `stderr` and other fields stay unchanged;
+error diagnostics can still inspect `stderr`.
 Qoder's native Bash stdout, Claude Code, and QwenWork keep object replacements. Cosh-NG unwraps
 shell JSON carried in `llmContent` and serializes the updated envelope into its required string
 replacement; OpenCode keeps its string output contract.
