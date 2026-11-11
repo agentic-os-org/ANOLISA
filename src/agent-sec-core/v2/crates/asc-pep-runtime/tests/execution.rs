@@ -1,14 +1,14 @@
 //! Direct execution checks; real isolation is covered by the Linux helper suite.
 #![cfg(target_os = "linux")]
 
-use asc_pep_runtime::{SandboxBackend, prepare_launch, prepare_path_facts};
+use asc_pep_runtime::{LinuxSandboxBackend, prepare_launch, prepare_path_facts};
 use asc_sandbox_types::{ExecutionSpec, LaunchSpec, OsPermissionSet};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 
 fn fixture() -> (
     tempfile::TempDir,
-    SandboxBackend,
+    LinuxSandboxBackend,
     LaunchSpec,
     OsPermissionSet,
 ) {
@@ -31,7 +31,12 @@ printf '%s\n' '{"stage":"installed"}' '{"stage":"started"}' '{"stage":"exited","
         "network": {"mode": "off"}
     }))
     .unwrap();
-    (directory, SandboxBackend::new(helper), launch, permissions)
+    (
+        directory,
+        LinuxSandboxBackend::new(helper),
+        launch,
+        permissions,
+    )
 }
 
 #[test]
@@ -82,7 +87,7 @@ fn sandbox_preserves_default_host_signals() {
         let (directory, backend, launch, permissions) = fixture();
         let missing = std::env::var_os("ASC_PEP_TEST_MISSING_HELPER").is_some();
         let backend = if missing {
-            SandboxBackend::new(directory.path().join("missing"))
+            LinuxSandboxBackend::new(directory.path().join("missing"))
         } else {
             backend
         };

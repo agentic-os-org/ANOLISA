@@ -68,7 +68,7 @@ impl SandboxCommand {
             &std::env::current_dir()?,
             target_environment()?,
         )?;
-        let result = asc_pep_runtime::SandboxBackend::installed()?
+        let result = asc_pep_runtime::LinuxSandboxBackend::installed()?
             .execute_with_provider(launch, &permissions)?;
         exit_status(result)
     }
