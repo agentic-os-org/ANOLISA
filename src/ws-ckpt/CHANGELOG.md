@@ -2,6 +2,23 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.7.1
+
+### Changed
+- Documentation: Documented that switching `btrfs-base.btrfs_mount` back to a previous root does not recover pruned snapshot records; subvolumes still on that root are re-adopted as pinned recovered orphans to review with `list --orphans` and delete explicitly (#9856, #9784)
+- Documentation: Updated the RPM packaging guide for split-package ownership and `/usr/bin` executables, distinguishing RPM installation from the default `/usr/local/bin` source-install layout (#9863)
+
+### Fixed
+- Fixed OpenClaw cron snapshots to use the installed `ws-ckpt` executable discovered from the plugin's PATH, including RPM's `/usr/bin/ws-ckpt`, instead of hardcoded `/usr/local/bin/ws-ckpt`; launcher symlinks remain stable across upgrades (#9892)
+- Fixed Hermes plugin initialization with non-mapping `plugins.ws-ckpt` sections; invalid sections now fall back to defaults and environment overrides (#9770)
+- Scoped Hermes rollback auto-checkpoint suppression to the originating session; hosts without session identity no longer arm suppression (#9860)
+- Rejected blank or null Hermes rollback `preview` values and non-boolean OpenClaw `preview` values before executing rollback (#9796)
+- Rejected fractional, boolean and string rollback depths in both plugins; positive integer-valued JSON numbers remain accepted (#9792)
+- Removed Hermes `tests/` and `.coverage` from `make install` and `make install-plugins` outputs (#9838)
+- Fixed overlapping writers being reported as quiet when one file closes; required a fresh 200 ms quiet interval after observed activity or watcher re-arming (#9756)
+- Rejected quiet-window observations affected by recursive watcher registration instead of treating delayed file events as silence (#8494)
+- Preserved Hermes checkpoint message truncation markers within the existing 80-character limit (#9595)
+
 ## 0.7.0
 
 ### Added

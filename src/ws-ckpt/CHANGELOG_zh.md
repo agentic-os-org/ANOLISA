@@ -2,6 +2,25 @@
 
 [English](CHANGELOG.md)
 
+## 0.7.1
+
+### Changed
+
+- 文档：补充说明将 `btrfs-base.btrfs_mount` 切回原根不会恢复已清除的快照记录；原根上仍存在的子卷会以 pinned 的 recovered orphan 身份重新纳入，需用 `list --orphans` 查看并显式删除 (#9856, #9784)
+- 文档：更新 RPM 打包指南，说明拆包后的文件归属和 `/usr/bin` 可执行文件路径，并区分 RPM 安装与默认使用 `/usr/local/bin` 的源码安装布局 (#9863)
+
+### Fixed
+
+- 修复 OpenClaw cron 定时快照硬编码 `/usr/local/bin/ws-ckpt` 导致 RPM 安装后执行失败的问题；从插件 PATH 查找实际安装的 `ws-ckpt`（包括 RPM 的 `/usr/bin/ws-ckpt`），并保留跨版本升级稳定的 launcher 符号链接路径 (#9892)
+- 修复非映射 `plugins.ws-ckpt` 段导致 Hermes 插件初始化失败的问题；无效段现在回退到默认配置和环境变量覆盖 (#9770)
+- Hermes 回滚后的自动快照抑制限定到执行回滚的会话；宿主不提供会话身份时不再登记抑制状态 (#9860)
+- 执行回滚前拒绝 Hermes 的空白或 null `preview` 值，以及 OpenClaw 的非布尔 `preview` 值 (#9796)
+- 两个插件均拒绝带小数部分、布尔或字符串类型的回滚深度；仍接受值为正整数的 JSON 数字 (#9792)
+- `make install` 和 `make install-plugins` 不再将 Hermes 的 `tests/` 和 `.coverage` 安装到运行时目录 (#9838)
+- 修复多个写入者重叠时，一个文件关闭便误报静默的问题；观察到活动或重新启用监听后，需重新满足 200 ms 静默间隔 (#9756)
+- 拒绝受到递归监听注册影响的静默窗口，避免将延迟送达的文件事件误判为无活动 (#8494)
+- Hermes 快照消息在原有 80 字符限制内保留截断标记 (#9595)
+
 ## 0.7.0
 
 ### Added
@@ -37,7 +56,7 @@
 
 ## [0.6.1] - 未发布
 
-### 变更
+### Changed
 
 - 可通过独立 RPM 安装运行时、宿主集成与 Skill。
 - Skill 和宿主插件迁至 ANOLISA 的共享资源目录。
