@@ -1,6 +1,6 @@
-import { mkdirSync, rmdirSync } from "fs";
+import { accessSync, constants, mkdirSync, rmdirSync, statSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { delimiter, isAbsolute, join } from "path";
 import { runCrontab } from "./commands.js";
 
 const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
@@ -12,16 +12,35 @@ export function validateCronExpr(expr: string): boolean {
 }
 
 // Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
-const MARKER_RE_QUOTED = /ws-ckpt\s+checkpoint\s+.*-w\s+'([^']+)'/;
-const MARKER_RE_UNQUOTED = /ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)/;
+const MARKER_RE_QUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+'([^']+)'/;
+const MARKER_RE_UNQUOTED = /ws-ckpt['"]?\s+checkpoint\s+.*-w\s+(\S+)/;
 
 function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
-function buildCronLine(workspace: string, schedule: string): string {
+function resolveCronBinary(): string | null {
+  // Mirror execFile's Unix PATH search so cron's restricted PATH cannot change the target.
+  for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
+    const absoluteDirectory = isAbsolute(directory)
+      ? directory
+      : `${process.cwd()}${directory ? `/${directory}` : ""}`;
+    const binary = `${absoluteDirectory}/ws-ckpt`;
+    try {
+      accessSync(binary, constants.X_OK);
+      if (!statSync(binary).isFile()) continue;
+    } catch {
+      continue;
+    }
+    // Keep the launcher path to avoid pinning an old release; reject cron-special characters.
+    return /[\n\r%]/.test(binary) ? null : binary;
+  }
+  return null;
+}
+
+function buildCronLine(workspace: string, schedule: string, binary: string): string {
   return (
-    `${schedule} /usr/local/bin/ws-ckpt checkpoint -w ${shellQuote(workspace)}` +
+    `${schedule} ${shellQuote(binary)} checkpoint -w ${shellQuote(workspace)}` +
     ` -s "cron-$(date +\\%s)"` +
     ` -m "scheduled snapshot"` +
     ` --metadata '{"auto":true,"type":"cron"}'` +
@@ -143,11 +162,13 @@ export class CrontabManager {
       if (LINE_BREAK_RE.test(workspace) || schedules.some((s) => LINE_BREAK_RE.test(s))) {
         return false;
       }
+      const binary = schedules.length > 0 ? resolveCronBinary() : "";
+      if (binary === null) return false;
       const lines = await readCrontab();
       if (lines === null) return false;
       const kept = lines.filter((l) => !matchesWorkspace(l, workspace));
       for (const s of schedules) {
-        kept.push(buildCronLine(workspace, s));
+        kept.push(buildCronLine(workspace, s, binary));
       }
       return writeCrontab(kept);
     });
