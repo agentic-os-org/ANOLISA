@@ -22,6 +22,20 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         scope.handle = {}
         return scope
 
+    async def test_failed_activation_closes_without_retrying_admission(self):
+        for failure in ("transport", "watch"):
+            scope, calls = self.scope(), []
+            async def command(config, action, value, timeout):
+                calls.append(action)
+                code = int(action == "activate" and failure == "transport")
+                return code, json.dumps({"invocations": {"invocations_per_binding": 4},
+                                         "watch": {}}).encode()
+            with patch.object(aw_scope, "command", command):
+                with self.assertRaises(RuntimeError):
+                    await scope.acknowledge()
+            self.assertTrue(scope.closed)
+            self.assertEqual(calls, ["activate", "close"])
+
     async def test_transport_failure_latches_but_cleanup_and_siblings_remain_usable(self):
         scope, other = self.scope(), self.scope()
         scope.policy_revision = "a" * 64
@@ -53,8 +67,6 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("seam removed")
         scope.probe = probe
         async def command(config, action, value, timeout):
-            if action == "watch":
-                return 0, json.dumps({"policy_revision": "b" * 64, "interval_ms": 2000}).encode()
             if action == "check":
                 report.set_result(value)
                 return 1, b'{}'
@@ -64,7 +76,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(delay, 2)
             await real_sleep(0)
         with patch.object(aw_scope, "command", command), patch.object(aw_scope.asyncio, "sleep", tick):
-            await scope.watch()
+            await scope.watch({"policy_revision": "b" * 64, "interval_ms": 2000})
             installed = False
             value = await asyncio.wait_for(report, 1)
             self.assertFalse(value["valid"])

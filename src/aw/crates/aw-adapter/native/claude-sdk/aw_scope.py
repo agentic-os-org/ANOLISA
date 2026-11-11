@@ -220,15 +220,13 @@ class Scope:
         """Enable callbacks only after the native owner has installed its routes."""
         self.check()
         try:
-            code, _ = await command(self.config, "acknowledge", self.handle, 6)
+            code, output = await command(self.config, "activate", self.handle, 6)
             if code:
                 raise RuntimeError("AW task handoff acknowledgement failed")
             self.check()
-            code, output = await command(self.config, "enable", self.handle, 6)
-            if code:
-                raise RuntimeError("AW invocation protocol admission failed")
-            self.invocation_limit = json.loads(output)["invocations_per_binding"]
-            await self.watch()
+            activation = json.loads(output)
+            self.invocation_limit = activation["invocations"]["invocations_per_binding"]
+            await self.watch(activation["watch"])
         except BaseException:
             # ACK may already have committed; release despite request cancellation.
             with anyio.CancelScope(shield=True):
@@ -242,13 +240,9 @@ class Scope:
             if self.on_failure is not None:
                 self.on_failure(error)
 
-    async def watch(self) -> None:
+    async def watch(self, watch: dict[str, Any]) -> None:
         """Monitor the existing task identity while idle as well as at dispatch."""
         self.check()
-        code, output = await command(self.config, "watch", self.handle, 6)
-        if code:
-            raise RuntimeError("AW scope watch admission failed")
-        watch = json.loads(output)
         if (not isinstance(watch, dict) or not isinstance(watch.get("policy_revision"), str)
                 or re.fullmatch(r"[a-f0-9]{64}", watch["policy_revision"]) is None
                 or watch.get("interval_ms") != 2000):

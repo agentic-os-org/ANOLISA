@@ -175,8 +175,10 @@ test("shared Scope preserves explicit reservation until confirmed child cleanup"
   const calls = [];
   scope.command = async action => {
     calls.push(action);
-    return { code: 0, stdout: JSON.stringify(action === "enable" ? { invocations_per_binding: 4 } :
-      action === "watch" ? { policy_revision: "a".repeat(64), interval_ms: 2000 } : {}) };
+    return { code: 0, stdout: JSON.stringify(action === "activate" ? {
+      invocations: { invocations_per_binding: 4 },
+      watch: { policy_revision: "a".repeat(64), interval_ms: 2000 },
+    } : {}) };
   };
   await scope.reserve();
   await scope.open(process.cwd(), {}, { deferAcknowledgement: true });
@@ -186,6 +188,6 @@ test("shared Scope preserves explicit reservation until confirmed child cleanup"
   await scope.acknowledge();
   await scope.close();
   await scope.release();
-  assert.deepEqual(calls, ["reserve", "open", "policy", "acknowledge", "enable", "watch", "close", "release"]);
+  assert.deepEqual(calls, ["reserve", "open", "policy", "activate", "close", "release"]);
   assert.equal(scope.reservation, null);
 });
