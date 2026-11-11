@@ -529,3 +529,25 @@ test("Hook cancellation during validity check suppresses callback and response",
   assert.equal(f.transport.responses.has("validity-hook"), false);
   assert.equal(f.resident.query.pendingInboundRequests.has("validity-hook"), false);
 });
+
+test("checked policy rewrite reaches the SDK parser and the correlated completion", { timeout: 5000 }, async t => {
+  const routes = ["tool.before", "tool.after"].map(event => ({ event, step: event,
+    on_error: "block", budget_ms: 1000, replace_result: false }));
+  let after;
+  const f = await fixture(t, undefined, {}, routes);
+  f.scope.invoke = async (hook, payload) => {
+    if (hook.event === "tool.after") { after = payload.tool_input; return { code: 0, stdout: Buffer.from('{}') }; }
+    return { code: 0, stdout: Buffer.from(JSON.stringify({ hookSpecificOutput: {
+      hookEventName: "PreToolUse", updatedInput: { ...payload.tool_input, command: "checked" },
+    } })) };
+  };
+  const original = { command: "original", timeout: 7 };
+  f.model("rewrite", original);
+  f.hook("rewrite", "pre-rewrite", "PreToolUse", original, { group: 1 });
+  const response = (await f.response("pre-rewrite")).response;
+  assert.deepEqual(response.hookSpecificOutput.updatedInput, { command: "checked", timeout: 7 });
+  assert.equal(response.hookSpecificOutput.permissionDecision, undefined);
+  f.hook("rewrite", "post-rewrite", "PostToolUse", response.hookSpecificOutput.updatedInput, { group: 1 });
+  assert.deepEqual((await f.response("post-rewrite")).response, {});
+  assert.deepEqual(after, { command: "checked", timeout: 7 });
+});

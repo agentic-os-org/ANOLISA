@@ -3,6 +3,7 @@
 from argparse import Namespace
 from collections import Counter
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 import json
 import math
 import os
@@ -140,10 +141,16 @@ def main() -> None:
 
     def directives(*values: Any, **options: Any) -> plugins._PreToolCallDirective:
         with guarded_hooks():
-            details = original_directives(*values, **options)
-            # Native callbacks inspect the original arguments; their rewrites are
-            # merged only afterward. Reject rewrites rather than execute unchecked input.
-            if before and details.modified_args is not None:
+            cell = {}
+            token = session.rewritten_input.set(cell)
+            try:
+                details = original_directives(*values, **options)
+                checked = cell.get("input")
+            finally:
+                session.rewritten_input.reset(token)
+            # Only an AW response checked by every before policy may change input.
+            if (before and details.modified_args is not None and
+                    (checked is None or json.dumps(details.modified_args, sort_keys=True) != checked)):
                 return plugins._PreToolCallDirective(
                     action="block", message=details.message if details.action == "block" else
                     rewrite_error,
@@ -279,6 +286,7 @@ def main() -> None:
     # Hermes reloads both plugin modules and dotenv during chat. Keep the binding
     # in this launcher's namespace, outside native plugin teardown and environment.
     session = ModuleType("_aw_hermes_session")
+    session.rewritten_input = ContextVar("aw_hermes_rewritten_input", default=None)
     session.launch_path = launch_path
     session.skills = skills
     sys.modules[session.__name__] = session

@@ -6,7 +6,7 @@
 
 可选的 Tokenless Provider 将已完成工具的模型可见文本替换为 Tokenless 按配置的可逆性
 策略选中的压缩结果。AW 检查替换边界，不独立证明语义无损。
-Qoder、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK 原生 Bash 共用一份 Provider 配置，支持 PreTool 重试建议
+Qoder CLI/SDK、OpenClaw、QwenPaw、Hermes、Pi、AgentScope SDK 2.0.6 及 Claude SDK 原生 Bash 共用 Provider 接口，支持 PreTool 命令优化
 与 PostTool 压缩。Schema 压缩和授权恢复仍是独立能力。
 
 ## 安装与启用
@@ -50,13 +50,25 @@ AW Journal 保存元数据，Tokenless 可独立保存完整压缩文本。录�
 
 ## PreTool 与权限行为
 
-生成模板和共用示例包含 `tool.before` → `pre_tool`，设置为 `effects: [block]` 和
-`on_error: report`。受支持的 Shell 工具为 `Bash`、`exec`、`terminal`、`shell`、
-`run_shell_command` 和 `execute_shell_command`（不区分大小写），且要求非空字符串
-`command`。其他输入不调用 CLI，直接保持中立。
-由 Tokenless 判断是否建议 RTK 命令；AW 阻断本次调用并向模型展示完整的重试参数，
-不静默改写输入，不批准或执行命令。新调用必须重新经过 sec-core 与原生权限检查。
-即使 PreTool 中立，扫描拒绝或失败仍然生效；外部 Hook 调度保持既有行为。
+源码模板与共享示例中的 Qoder 路由通过 `tool.before` → `pre_tool` 配置
+`effects: [replace_input]`、`on_error: block`，需要包含输入替换能力的构建。
+已发布的 AW 0.1.0 使用 `effects: [block]` 的重试模式。支持的 Shell 工具为
+`Bash`、`exec`、`terminal`、`shell`、`run_shell_command`、`execute_shell_command`
+（不区分大小写），且要求非空字符串 `command`。其他输入保持中立，不调用 CLI。
+
+输入替换复用 Tokenless Protocol v2 的 `replace_arguments`。AW 保留原调用身份，
+让后续 before 步骤检查候选参数，全部检查通过后，由最后一个回调交付改写。
+改写步骤必须排在首个适用的 before 位置，只声明 `[replace_input]`；所有 before
+步骤使用 `on_error: block`，sec-core 扫描放在改写之后。Qoder CLI/SDK、Claude SDK、
+QwenPaw、Hermes、Pi 和 AgentScope 在同次调用中采用已检查参数，继续经过原生权限检查。
+改写不授予批准权限，保留 command 以外的参数。
+
+OpenClaw 2026.9.6 可能保留先前插件审批时冻结的参数，忽略后续已检查的替换。
+适配器因此拒绝 `replace_input`。Qoder/OpenClaw 共用配置时，`tokenless.json` 和
+`sec-core-tokenless.json` 为 OpenClaw 选择单独的阻断后重试步骤；组合模板先扫描原命令。
+仅使用 OpenClaw 的模板在双目标配置中对两者都使用阻断后重试。
+
+既有 `[block]` 配置继续返回重试建议，沿用所配失败动作；需要显式修改配置才能采用输入替换。
 
 Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装（由绝对路径的 `tokenless`
 执行其 `rtk` 子命令），并将
@@ -64,10 +76,22 @@ Tokenless 接入层从实际执行参数中识别独立的归属 RTK 包装（�
 带引号或转义的参数字面量，以及符号链接状态目录，均保留该归属。支持的执行前缀为
 字面环境变量赋值、`env NAME=value ...`、不带选项的 `sudo`、`noglob`、`command`、
 `exec`，以及 `shadowenv exec --`；这些形式可以组合。其他包装形式（包括额外选项）、
-裸 RTK 命令、外部归属或复合 Shell 命令不推断 RTK 归属。CLI 故障、非法响应或超时
-按 `on_error: report` 报告，不会关闭 sec-core 的 `on_error: block`，也不
-授予原生批准。仅需 PostTool 时，只删除 before 中的 `rewrite-command` 步骤，保留
-共用 Provider 和 after 链。
+裸 RTK 命令、外部归属或复合 Shell 命令不推断 RTK 归属。输入替换模式下，CLI 故障、非法响应或超时阻断待执行调用；
+旧重试模式沿用所配失败动作。保留 Tokenless PostTool、关闭其 PreTool 时，从模板
+JSON 的 `events.tool.before.steps` 或生成的 AW 配置的
+`spec.events.tool.before.steps` 删除以下步骤：
+
+| 模板 | 删除的步骤 ID |
+| --- | --- |
+| `tokenless.json` | `rewrite-command`、`retry-command-openclaw` |
+| `tokenless-openclaw.json` | `rewrite-command` |
+| `sec-core-tokenless.json` | `rewrite-command`、`retry-command-openclaw` |
+| `sec-core-tokenless-openclaw.json` | `rewrite-command` |
+
+两个组合模板须保留启用且必需的 `tool.before` 事件及其中的 `scan-code` 步骤，
+并保持 `on_error: block`。仅在 Tokenless 单独模板的步骤列表清空后删除整个
+`tool.before` 事件。所有模板均保留 Tokenless Provider 和 `tool.after` 中的
+`compress-result`；组合模板还保留 `observe-completion`。
 
 当前恢复能力为 `none`。恢复入口、Stash、恢复作用域及恢复输出旁路由 Tokenless
 接入层负责；启用 PreTool 不会自动获得这些能力或 Schema 压缩。已识别的原始 pnpm 输出

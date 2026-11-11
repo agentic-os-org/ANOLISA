@@ -51,8 +51,13 @@ The version command must report `rtk 0.49.0`. Template variables are
 `PROVIDERS_DIR` and `TOKENLESS_CLI`.
 For native or Makefile installations, use the actual Provider root for `PROVIDERS_DIR`. For security too, install and start
 [sec-core](security.md) and select `sec-core-tokenless.json`, adding
-`SEC_CORE_CLI` and `SOCKET` from that backend. OpenClaw uses its
-[Agent arguments](configuration.md#openclaw); other runtimes use the
+`SEC_CORE_CLI` and `SOCKET` from that backend. For OpenClaw alone, choose
+`tokenless-openclaw.json` or `sec-core-tokenless-openclaw.json` and use its
+[Agent arguments](configuration.md#openclaw); these templates retain block-and-retry
+because an earlier approval plugin can freeze the original parameters. For a
+shared Qoder/OpenClaw configuration, `tokenless.json` selects same-call rewrite
+for Qoder and block-and-retry for OpenClaw. With security, use
+`sec-core-tokenless.json` to scan both Shell tools. Other runtimes use the
 [integration reference](../../../developer-guide/en/aw/providers/tokenless.md).
 
 Providers already installed by RPM or another owner may instead be configured
@@ -60,7 +65,8 @@ through absolute `transport.argv` in YAML.
 
 ## Runtime behavior
 
-- Before execution, AW may block the original call with a command retry suggestion. The Agent's new call passes through safety and native permission checks again.
+- With input replacement enabled, Tokenless rewrites supported commands within the same tool call. Later safety checks inspect the candidate before native permission checks and execution.
+- Released AW 0.1.0 uses retry suggestions. Input replacement requires a newer source build, `[replace_input]` on the first before step, and `on_error: block` on every before step; see the [integration reference](../../../developer-guide/en/aw/providers/tokenless.md#pretool-and-permission-behavior).
 - After execution, supported successful text results can be compressed. Failed results, images and unsupported content stay unchanged.
 - Compression errors, timeouts or no savings preserve the original result. Compression cannot override a safety denial.
 

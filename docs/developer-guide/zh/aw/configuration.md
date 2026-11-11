@@ -127,15 +127,16 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 交回 Adapter，不声明结构化 AW 效果。CLI 方言的非零退出仍是原生结果；Pi 将
 非零/信号退出和非法原生指令视为 callback 故障，与超时、输出超限一样按 `on_error`
 处理。为一个框架编写的原生命令不会自动跨框架适配。当前 Qoder
-回调要求 AW 步骤之间输入一致，顺序重写链与审批流程不在已接受的原生组合范围内。
+原生 AW 注册回调保留原始字节。获准的结构化输入替换会更新 Host 交给后续策略和原生步骤的视图；
+任意原生命令改写及审批流程沿用既有约束。
 输入变化会被拒绝，并按受影响步骤的 `on_error` 处理。
 
 对于 Claude SDK `PreToolUse`，原生命令 exit-0 的
 `hookSpecificOutput.permissionDecision: deny` 与 exit 2 使用同一 veto 路径，
 包括可选原因和提前事件关闭。这不开放原生批准或输入改写。
 
-当前运行时准入工具前 `observe`/`block`、工具后 `observe` 或唯一且最后的结构化
-`replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
+当前运行时准入提交前观察/阻断、工具前 `observe`/`block`/`replace_input`、工具后 `observe` 或唯一且最后的结构化
+`replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结构化输入或结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
 Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 工厂均有启动 Adapter；
 已验证基线、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
@@ -171,8 +172,10 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 允许 `observe`/`block`，不修改参数。它不是第二个原生 Hook，也不保证排在全部
 第三方 Hook 之后。检查后参数再次改变时，实际执行边界必须重新检查。
 
-Schema 词汇允许 `tool.before` 声明 `observe`、`block`、`replace_input`；`tool.after` 允许
-`observe`、`replace_result`；其余事件的 Schema 仅接受观察效果。运行时只准入已实现的两个工具事件，拒绝 `replace_input`。`ask` 保留在 before 步骤中，
+运行时准入支持 `input.submit` 的观察/阻断、`tool.before` 的观察/阻断/输入替换，
+以及 `tool.after` 的观察/结果替换。`replace_input` 步骤必须排在首个适用的 before 位置，
+只声明该效果，且整个 before 链使用 `on_error: block`。后续检查接收候选输入，
+最后一个成功回调交付改写，原生授权继续生效。`ask` 保留在 before 步骤中，
 启用步骤请求它时拒绝配置。显式关闭的 before 步骤可以保留 `ask` 供后续编辑，
 不因此获得审批能力。宿主原生审批不受影响。
 
@@ -206,7 +209,7 @@ OpenClaw after 将 `bash`、`apply-patch`、`cron` 分别规范化为 `exec`、`
 和 `validate_config`。
 
 跳过或中立结果不授予权限。原生拒绝和待确认的权限请求保持优先，
-不受支持的参数改写仍被拒绝。Tokenless PreTool 建议须由新调用重新经过选中的
+不受支持的参数改写仍被拒绝。旧 `[block]` 模式的 Tokenless PreTool 建议须由新调用重新经过选中的
 安全步骤和原生权限检查。PostTool 替换仍仅作用于末尾获准的文本槽，
 保留原生 envelope 与失败状态。
 

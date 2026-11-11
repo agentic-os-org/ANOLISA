@@ -51,7 +51,7 @@ def provider(argv, config):
 
 
 results = []
-for case in ["json-selected-output", "rtk-retry-rescanned-denied", "rtk-retry-allowed-post-neutral"]:
+for case in ["json-selected-output", "rtk-retry-rescanned-denied", "rtk-retry-allowed-post-neutral", "rtk-same-call-allow", "rtk-same-call-deny", "rtk-same-call-native-deny"]:
     state = Path(tempfile.mkdtemp(prefix="t", dir=root))
     assert len(os.fsencode(state / "state/aw.sock")) < 108, "Choose a shorter --root"
     scanner = state / "scanner"
@@ -94,7 +94,11 @@ raise SystemExit(result.returncode)
                 {"id": "record", "provider": "record", "effects": ["observe"], "on_error": "report"},
                 {"id": "compress", "provider": "tokenless", "operation": "post_tool", "effects": ["replace_result"], "on_error": "report"}]},
         }}}
-    if case != "json-selected-output":
+    same_call = case.startswith("rtk-same-call-")
+    if same_call:
+        document["spec"]["events"]["tool.before"]["steps"].insert(0,
+            {"id":"rewrite", "provider":"tokenless", "operation":"pre_tool", "effects":["replace_input"], "on_error":"block"})
+    elif case != "json-selected-output":
         document["spec"]["events"]["tool.before"]["steps"].append(
             {"id": "rewrite", "provider": "tokenless", "operation": "pre_tool", "effects": ["block"], "on_error": "report"})
     config = state / "aw.json"
@@ -106,7 +110,9 @@ raise SystemExit(result.returncode)
         env.update(PI_PRETTY_JSON="1", PI_COMMAND="printf fixture")
     else:
         env.update(PI_TOOL_NAME="bash", PI_COMMAND="git status", PI_TOKENLESS_RETRY="1")
-        if case == "rtk-retry-rescanned-denied":
+        if same_call: env.pop("PI_TOKENLESS_RETRY", None)
+        if case == "rtk-same-call-native-deny": env["PI_NATIVE_REWRITE_DENY"] = "1"
+        if case in {"rtk-retry-rescanned-denied", "rtk-same-call-deny"}:
             env["PI_SCAN_RETRY_DENY"] = "1"
         else:
             env["PI_PRETTY_JSON"] = "1"
@@ -132,6 +138,20 @@ raise SystemExit(result.returncode)
             assert result["modelToolResults"][-1]["content"][0]["text"] == output
             assert tool_results[0]["details"] == {"native": True, "id": "call-0"}
             assert tool_results[0]["usage"]["totalTokens"] == 0
+        elif same_call:
+            assert len(tool_results) == 1, (case, result)
+            scanned = [json.loads(line) for line in (state / "scanned.jsonl").read_text().splitlines()]
+            assert len(scanned) == 1 and "TOKENLESS_AGENT_ID=pi" in scanned[0], scanned
+            denied = case != "rtk-same-call-allow"
+            assert bool(result["sideEffects"]) != denied, (case, result, err)
+            assert tool_results[0]["isError"] == denied, (case, result, err)
+            if not denied:
+                assert result["executedCommands"] == scanned
+                assert result["beforeCalls"] == result["afterCalls"] == 1
+                wires = [json.loads(line) for line in (state / "tokenless-wire.jsonl").read_text().splitlines()]
+                selected = [wire for wire in wires if wire["request"]["operation"] == "post_tool"]
+                assert len(selected) == 1
+                assert selected[0]["request"]["input"]["output_optimization"] == "rtk"
         else:
             assert len(tool_results) == 2
             assert tool_results[0]["isError"] is True

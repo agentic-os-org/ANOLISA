@@ -60,7 +60,7 @@ def main() -> None:
                 os.kill(os.getpid(), signal.SIGTERM)
             print("true")
             return
-    if mode == "bash-pretool-deny" and "TOKENLESS_AGENT_ID=" in event["tool"]["input"].get(
+    if mode in {"bash-pretool-deny", "bash-same-call-deny"} and "TOKENLESS_AGENT_ID=" in event["tool"]["input"].get(
         "command", ""
     ):
         print("true")

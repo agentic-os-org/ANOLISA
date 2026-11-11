@@ -36,6 +36,19 @@ class MiddlewareTests(unittest.IsolatedAsyncioTestCase):
             state=SimpleNamespace(session_id="native-session"),
         )
 
+    async def test_checked_input_reaches_native_tool_without_a_retry(self):
+        seen = []
+        class Probe(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload):
+                return 0, b'{"aw_updated_input":{"command":"checked","timeout":7}}', b""
+        async def tool(tool_call):
+            seen.append(json.loads(tool_call.input))
+            yield ToolResponse(content=[TextBlock(text="done")])
+        middleware = Probe({}, hook("tool.before", "last"))
+        output = [item async for item in Agent._acting(self.agent([middleware], tool), ToolCallBlock(id="call", name="bash", input='{"command":"original","timeout":7}'))]
+        self.assertEqual(seen, [{"command":"checked","timeout":7}])
+        self.assertEqual(len(output), 1)
+
     async def test_replacement_reaches_native_acting_result_and_preserves_metadata(self):
         original = ToolResponse(content=[TextBlock(text="original")], metadata={"kept": True})
         class Probe(MODULE.AwToolMiddleware):

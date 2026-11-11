@@ -275,7 +275,7 @@ fn owner_death_before_dispatch(during_audit: bool) {
         let rejected = thread::scope(|threads| {
             let worker = threads.spawn(|| {
                 runtime.event_loop(
-                    (&key, instance),
+                    (&key, instance, &json!({"name":"tool.after"})),
                     &event,
                     (&cancelled, &context, None),
                     receiver,

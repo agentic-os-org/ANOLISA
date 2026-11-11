@@ -16,6 +16,13 @@
 | 检查工具命令 | `--template "$AW_TEMPLATE_DIR/sec-core.json"` | [安全检查](security.md) |
 | 同时启用两者 | `--template "$AW_TEMPLATE_DIR/sec-core-tokenless.json"` | [Tokenless](tokenless.md)和[安全检查](security.md) |
 
+仅使用 OpenClaw 时，选择 `tokenless-openclaw.json` 或
+`sec-core-tokenless-openclaw.json`。同一配置同时包含 Qoder 和 OpenClaw 时，
+`tokenless.json` 让 Qoder 在同次调用中改写命令，让 OpenClaw 使用阻断后重试建议。
+需要安全检查时选择 `sec-core-tokenless.json`，扫描两者的 Shell 工具。
+`sec-core-tokenless-openclaw.json` 也扫描两者，
+并对两个 Agent 都使用阻断后重试建议。
+
 生成 Provider 配置时，`--prefix` 使用其实际安装前缀。按上述指南中的
 `--template-var` 参数提供后端路径、socket 和 RTK 校验和；`PROVIDERS_DIR` 选择
 实际安装的 Provider 程序，与 AW CLI 前缀独立。`--provider` 仅接受 `none` 或

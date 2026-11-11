@@ -358,6 +358,37 @@ class GuardTests(NativeFixture):
                     )
                 self.assertFalse((Path.cwd() / "rewritten.txt").exists())
 
+    def test_checked_aw_rewrite_passes_the_native_directive_guard(self) -> None:
+        from hermes_cli import main as native, plugins
+        from hermes_logging import _reset_queued_handlers
+        self.addCleanup(_reset_queued_handlers)
+        self.addCleanup(setattr, sys, "argv", sys.argv[:])
+        plugin_path = self.home / "plugins/aw-native-hooks"
+        shutil.copytree(self.plugin_path, plugin_path)
+        (self.home / "config.yaml").write_text("plugins: {enabled: [aw-native-hooks]}\n")
+        bundled = self.root / "bundled"
+        bundled.mkdir()
+        os.environ["HERMES_BUNDLED_PLUGINS"] = str(bundled)
+        self.launch([("tool.before", "checked-modify")])
+        manager = self.manager()
+        self.addCleanup(manager.unload)
+        spec = importlib.util.spec_from_file_location("aw_checked_input_guard", self.plugin_path / "launch.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        reached = []
+        def dispatch() -> None:
+            native._prepare_agent_startup(SimpleNamespace())
+            original = {"command":"printf original", "timeout":7}
+            message, changed = plugins._dispatch_pre_tool_call_hooks("terminal", original, session_id="session", tool_call_id="call")
+            self.assertIsNone(message)
+            self.assertEqual(changed, {"command":"printf checked", "timeout":7})
+            self.assertEqual(original["command"], "printf original")
+            reached.append(changed)
+        sys.argv = [str(self.plugin_path / "launch.py"), "hermes", "chat", "--cli"]
+        with patch.object(native, "main", dispatch), patch.object(native, "_prepare_agent_startup", lambda args: manager.discover_and_load()), patch("hermes_cli.plugins.discover_plugins", lambda: None), patch("hermes_cli.plugins.get_plugin_manager", return_value=manager):
+            guard.main()
+        self.assertEqual(len(reached), 1)
+
     def test_execution_middleware_cannot_rewrite_nested_code_calls(self) -> None:
         from hermes_cli import main as native, middleware, plugins
         from hermes_logging import _reset_queued_handlers

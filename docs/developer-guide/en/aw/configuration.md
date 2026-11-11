@@ -152,8 +152,10 @@ structured AW effects. Nonzero exits remain native results for CLI dialects; Pi 
 exits and invalid native directives as callback failures under `on_error`, alongside
 deadline or output-limit errors. A native command
 written for one framework is not automatically portable. Current Qoder callback
-input must remain identical across AW steps; sequential rewrite chains and
-approval flows are outside the accepted native combinations. Changed input is
+callback bytes remain the original across the native AW registrations. An admitted
+structured input replacement updates the Host view used by later policy/native
+steps; arbitrary native command rewrites and approval flows retain their existing
+restrictions. Changed input is
 rejected and handled through the affected step's `on_error`.
 
 For Claude SDK `PreToolUse`, a native command's exit-0
@@ -161,9 +163,10 @@ For Claude SDK `PreToolUse`, a native command's exit-0
 including its optional reason and early-event closure. This does not enable
 native approvals or input rewrites.
 
-Runtime currently admits `tool.before` with `observe`/`block` and `tool.after`
+Runtime currently admits `input.submit` observation/blocking, `tool.before` with
+`observe`/`block`/`replace_input`, and `tool.after`
 with `observe` or a single final structured `replace_result`, plus native steps
-at these points. Boolean/native steps cannot request result replacement. Qoder CLI maps them to
+at these points. Boolean/native steps cannot request structured input or result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, guards and stronger execution guarantees
 are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope factories have launch Adapters;
@@ -204,8 +207,12 @@ parameters. It is not a second native Hook or a promise to run after every
 third-party Hook. Parameter changes after the check require another check at
 the actual enforcement boundary.
 
-The schema vocabulary permits `tool.before` to declare `observe`, `block`, `replace_input`. `tool.after` permits
-`observe`, `replace_result`. Other events accept observation effects in the schema. Runtime admission supports only the two implemented tool events and rejects `replace_input`.
+Runtime admission supports `input.submit` observation/blocking, `tool.before`
+observation/blocking/input replacement, and `tool.after` observation/result replacement.
+A `replace_input` step must be the first applicable before step, declare only
+that effect, and use fail-closed (`on_error: block`) actions throughout the before
+chain. Later checks receive the candidate input; only the final successful
+callback publishes it. Native authorization remains independent.
 `ask` is reserved for before steps; an active step requesting it is rejected.
 An explicitly disabled before step can retain `ask` for future editing, without
 acquiring approval capability. Native host approval is unaffected.

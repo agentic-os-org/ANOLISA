@@ -522,7 +522,10 @@ export class Resident {
             if (event !== "PreToolUse") {
               return await postTools(this, this.identities.payload(entry, input), context.signal);
             }
-            return await callback(this.identities.payload(entry, input), entry.id, context);
+            const result = await callback(this.identities.payload(entry, input), entry.id, context);
+            const updated = result?.hookSpecificOutput?.updatedInput;
+            if (updated !== undefined) entry.input = structuredClone(updated);
+            return result;
           }));
         }
       }

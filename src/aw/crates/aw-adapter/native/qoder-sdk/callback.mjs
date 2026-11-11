@@ -81,6 +81,12 @@ export async function invoke(config, hook, payload, signal) {
   }
   if (code !== 0) throw new Error(`callback_exit_${code}`);
   const value = stdout.length ? JSON.parse(stdout.toString("utf8")) : {};
+  if (hook.event === "tool.before" && payload.hook_event_name === "PreToolUse" &&
+      value && Object.keys(value).length === 1 &&
+      Object.keys(value.hookSpecificOutput ?? {}).length === 2 &&
+      value.hookSpecificOutput.hookEventName === "PreToolUse" &&
+      value.hookSpecificOutput.updatedInput && typeof value.hookSpecificOutput.updatedInput === "object" &&
+      !Array.isArray(value.hookSpecificOutput.updatedInput)) return value;
   if (hook.event === "tool.after" && hook.replace_result &&
       payload.hook_event_name === "PostToolUse" && value &&
       Object.keys(value).length === 1 && Object.keys(value.hookSpecificOutput ?? {}).length === 2 &&

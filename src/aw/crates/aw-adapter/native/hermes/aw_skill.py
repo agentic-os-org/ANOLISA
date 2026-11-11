@@ -163,7 +163,7 @@ def install():
     return restore
 
 
-def dynamic_callback(spec):
+def dynamic_callback(spec, record_input=None):
     """Consume policy-derived source admission without exporting it to native hooks."""
     from agent.shell_hooks import _evaluate_result, _serialize_payload, _spawn
 
@@ -179,6 +179,8 @@ def dynamic_callback(spec):
                 raise ValueError("invalid Skill admission")
         except (ValueError, KeyError, TypeError):
             return {"action": "block", "message": "AW Skill admission is unavailable"}, None
+        if record_input is not None:
+            record_input(response, native)
         return native, mode
 
     checked = callback(invoke, {"dynamic": True, "on_error": "block"})

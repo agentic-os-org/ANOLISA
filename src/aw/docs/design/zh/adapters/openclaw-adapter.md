@@ -49,6 +49,10 @@ OpenClaw 向每个 before 回调提供原始参数的副本。已有插件返回
 合并，不会作为新事件快照逐步传给后续 AW 步骤。AW 保留这一原生行为，不声称检查
 已经覆盖所有插件最后修改的参数。
 
+先前的 `requireApproval` 结果可能冻结参数并丢弃 AW 后续的替换。因此当前版本的
+before 效果只准入 `observe` 和 `block`；Tokenless PreTool 使用阻断并建议重试。
+PostTool 结果替换仍可使用。
+
 回调携带原始 `{hook, event, context}` JSON。结构化 Provider 收到归一化事件及原生
 载荷。`sessionId`、`runId` 和 `toolCallId` 为必需字段。AW 使用 run 与 tool-call 标识
 生成稳定调用标识，同一事件的多个回调共享一个 daemon 期限，后续 run 也不会误用

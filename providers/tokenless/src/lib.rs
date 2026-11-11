@@ -33,7 +33,7 @@ struct Compression {
 /// The Host must bound this process's entire lifetime, including blocking stdio.
 /// Only a projected text slot can be replaced; recovery is explicitly unavailable.
 /// State is kept in `data_dir`, separate from the immutable installation.
-/// PreTool rewrites come from the RTK linked into `cli`; suggested retries run
+/// PreTool rewrites come from the RTK linked into `cli`; rewritten commands run
 /// that CLI by absolute path, so no RTK is discovered from `PATH` or `HOME`.
 ///
 /// # Errors
@@ -85,7 +85,7 @@ fn dispatch(
     let value = request.as_value();
     if value["method"] == "describe" {
         return Ok(
-            json!({"operations":[{"name":"post_tool","events":["tool.after"],"effects":["replace_result"]},{"name":"pre_tool","events":["tool.before"],"effects":["block"]}]}),
+            json!({"operations":[{"name":"post_tool","events":["tool.after"],"effects":["replace_result"]},{"name":"pre_tool","events":["tool.before"],"effects":["block","replace_input"]}]}),
         );
     }
     let config: Config =
@@ -100,11 +100,17 @@ fn dispatch(
     if !before && !(value["operation"] == "post_tool" && value["event"]["name"] == "tool.after") {
         return Err("unsupported_operation_event");
     }
-    if !value["allowed_effects"].as_array().is_some_and(|effects| {
-        effects
-            .iter()
-            .any(|effect| effect == if before { "block" } else { "replace_result" })
-    }) {
+    let rewrite = before
+        && value["allowed_effects"]
+            .as_array()
+            .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_input"));
+    if !rewrite
+        && !value["allowed_effects"].as_array().is_some_and(|effects| {
+            effects
+                .iter()
+                .any(|effect| effect == if before { "block" } else { "replace_result" })
+        })
+    {
         return Err("replacement_not_admitted");
     }
     let neutral = json!({"input_digest":value["input_digest"],"effects":[]});
@@ -131,7 +137,7 @@ fn dispatch(
         operation["command"] = command.clone();
     }
     if before {
-        operation = json!({"tool_name":event["tool"]["name"],"arguments":event["tool"]["input"],"command_field":"command","capabilities":{"replace_arguments":false,"block_and_suggest":true}});
+        operation = json!({"tool_name":event["tool"]["name"],"arguments":event["tool"]["input"],"command_field":"command","capabilities":{"replace_arguments":rewrite,"block_and_suggest":!rewrite}});
     }
     let operation_name = if before { "pre_tool" } else { "post_tool" };
     let input = serde_json::to_vec(&json!({"protocol_version":2,"operation":operation_name,"attribution":attribution,"input":operation})).map_err(|_| "invalid_compression_input")?;

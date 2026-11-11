@@ -226,6 +226,23 @@ class SkillTests(NativeFixture):
                 return captured, reply
             return captured, json.loads(self.native.skill_view(**arguments))
 
+    def test_dynamic_callback_retains_checked_input_attestation(self):
+        from contextvars import ContextVar
+        from types import SimpleNamespace
+        from agent.shell_hooks import ShellHookSpec
+        cell = {}
+        session = SimpleNamespace(rewritten_input=ContextVar("test_checked", default=cell))
+        spec = ShellHookSpec(event="pre_tool_call", command="fixture", timeout=3, fail_closed=True)
+        revised = {"command":"printf checked", "timeout":7}
+        response = {"returncode":0, "stdout":json.dumps({"action":"modify", "args":revised,
+            "aw_checked_input":True, "aw_skill_check":None}), "stderr":"", "timed_out":False,
+            "error":None, "elapsed_seconds":0}
+        with patch("agent.shell_hooks._spawn", return_value=response):
+            reply = self.skills.dynamic_callback(spec, lambda r, n: self.plugin._record_input(r, n, session))(
+                tool_name="terminal", args={"command":"original", "timeout":7})
+        self.assertEqual(reply["args"], revised)
+        self.assertEqual(json.loads(cell["input"]), revised)
+
     def test_dynamic_skill_policy_can_enable_then_remove_source_pinning(self):
         path = self.source("local")
         rows, reply = self.dynamic_execute("local", "block")

@@ -1203,6 +1203,10 @@
     "service-expired-handoff": {
       "target": "aw-service/lib/aw_service",
       "test": "runtime::expired::tests::queued_requests_survive_expiry_retirement"
+    },
+    "input-rewrite": {
+      "target": "aw-cli/test/pretool",
+      "test": "input_rewrite::same_call_rewrite_is_checked_before_native_adoption_for_supported_adapters"
     }
   },
   "agents": {
@@ -1214,6 +1218,9 @@
           ],
           "block": [
             "security-retry"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1255,10 +1262,12 @@
       "security": [
         "security-retry",
         "scope-native-skips",
-        "coverage-native-identity"
+        "coverage-native-identity",
+        "input-rewrite"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "input-rewrite"
       ]
     },
     "claude-sdk": {
@@ -1271,6 +1280,9 @@
           "block": [
             "security-retry",
             "claude-managed-mcp-ownership"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1337,12 +1349,14 @@
         "security-retry",
         "scope-native-skips",
         "coverage-native-identity",
-        "claude-submission"
+        "claude-submission",
+        "input-rewrite"
       ],
       "tokenless": [
         "final-replacement",
         "claude-managed-mcp",
-        "scope-sdk-result"
+        "scope-sdk-result",
+        "input-rewrite"
       ]
     },
     "hermes": {
@@ -1353,6 +1367,9 @@
           ],
           "block": [
             "security-retry"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1394,10 +1411,12 @@
         "coverage-native-identity",
         "hermes-native-veto",
         "hermes-native-input-success",
-        "hermes-native-skill-policy"
+        "hermes-native-skill-policy",
+        "input-rewrite"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "input-rewrite"
       ]
     },
     "openclaw": {
@@ -1459,6 +1478,9 @@
           "block": [
             "security-retry",
             "scope-pi-order"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1528,11 +1550,13 @@
         "pi-submission",
         "pi-submission-projection",
         "pi-strict-fault",
-        "pi-strict-version"
+        "pi-strict-version",
+        "input-rewrite"
       ],
       "tokenless": [
         "final-replacement",
-        "scope-pi-result"
+        "scope-pi-result",
+        "input-rewrite"
       ]
     },
     "qoder": {
@@ -1543,6 +1567,9 @@
           ],
           "block": [
             "security-retry"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1603,10 +1630,12 @@
       "security": [
         "security-retry",
         "scope-native-skips",
-        "coverage-native-identity"
+        "coverage-native-identity",
+        "input-rewrite"
       ],
       "tokenless": [
-        "final-replacement"
+        "final-replacement",
+        "input-rewrite"
       ]
     },
     "qwenpaw": {
@@ -1617,6 +1646,9 @@
           ],
           "block": [
             "security-retry"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1722,12 +1754,14 @@
         "prompt-failure",
         "pii-policy",
         "pii-completeness",
-        "pii-residual"
+        "pii-residual",
+        "input-rewrite"
       ],
       "tokenless": [
         "final-replacement",
         "scope-sdk-result",
-        "qwenpaw-resident-denial"
+        "qwenpaw-resident-denial",
+        "input-rewrite"
       ]
     },
     "qoder-sdk": {
@@ -1740,6 +1774,9 @@
           "block": [
             "security-retry",
             "scope-qoder-sdk-order"
+          ],
+          "replace_input": [
+            "input-rewrite"
           ]
         },
         "tool.after": {
@@ -1816,11 +1853,13 @@
         "pii-policy",
         "pii-completeness",
         "pii-residual",
-        "qoder-sdk-skill-resolution"
+        "qoder-sdk-skill-resolution",
+        "input-rewrite"
       ],
       "tokenless": [
         "security-retry",
-        "final-replacement"
+        "final-replacement",
+        "input-rewrite"
       ]
     }
   },

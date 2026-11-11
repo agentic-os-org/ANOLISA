@@ -225,6 +225,9 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 1048576
+              },
+              "input": {
+                "type": "object"
               }
             },
             "allOf": [
@@ -255,6 +258,27 @@
                         "text"
                       ]
                     }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "replace_input"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "input"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "input"
+                    ]
                   }
                 }
               }

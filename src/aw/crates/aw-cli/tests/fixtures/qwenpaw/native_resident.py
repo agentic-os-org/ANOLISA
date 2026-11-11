@@ -4,6 +4,31 @@ from native_resident_support import *
 
 
 class NativeResidentTests(NativeFixture):
+    async def test_checked_input_reaches_native_coordinator_and_completion(self):
+        executed, permissions, after = [], [], []
+        async def tool(tool_call):
+            executed.append(json.loads(tool_call.input))
+            yield response()
+        coordinator = ToolCoordinator()
+        async def native_before(arguments, context):
+            permissions.append(arguments)
+        coordinator.hooks.register("tool", before=native_before)
+        hooks = [{"event":event, "step":event, "on_error":"block", "budget_ms":5000}
+                 for event in ["tool.before", "tool.after"]]
+        mw, agent, _ = self.setup_agent(tool, hooks=hooks, coordinator=coordinator)
+        async def invoke(hook, payload):
+            if hook["event"] == "tool.before":
+                return 0, b'{"aw_updated_input":{"value":2}}'
+            after.append(json.loads(payload["tool_call"]["input"]))
+            return 0, b""
+        mw.scope.invoke = invoke
+        output = await self.request(mw, agent, [self.call()])
+        self.assertEqual(executed, [{"value":2}])
+        self.assertEqual(len(permissions), 1)
+        self.assertEqual(after, [{"value":2}])
+        self.assertEqual(len(output), 1)
+        self.assertTrue(mw.scope.closed)
+
     async def test_native_finalizer_precedes_delivery_and_scope_release(self):
         order = []
         async def tool(tool_call):

@@ -82,6 +82,8 @@ class Handler(BaseHTTPRequestHandler):
                     else "printf %s " + shlex.quote(ORIGINAL) + "; touch effect"
                 )
             }
+        if MODE.startswith("bash-same-call"):
+            tool_input = {"command":"git status"}
         if PRETOOL:
             done = inference > 2
             tool_input = {"command": "git status"}

@@ -181,6 +181,8 @@ export async function createSession({ sdk, sessionManager }) {
   const original = result.session.agent.beforeToolCall;
   result.session.agent.beforeToolCall = async (context, signal) => {
     beforeCalls++;
+    if (process.env.PI_NATIVE_REWRITE_DENY === "1" && context.args.command?.includes("TOKENLESS_AGENT_ID="))
+      return { block: true, reason: "native candidate denied" };
     const value = await original(context, signal);
     if (process.env.PI_MUTATE === "1") context.args.deny = true;
     return value;

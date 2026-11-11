@@ -91,9 +91,11 @@ def register(ctx: Any) -> None:
             event=EVENTS[event], command=command, timeout=timeout,
             fail_closed=action == "block",
         )
-        callback = _make_callback(spec)
+        callback = _input_callback(spec, session) if event == "tool.before" else _make_callback(spec)
         if getattr(session, "skills", None) is not None and event == "tool.before":
-            callback = (session.skills.dynamic_callback(spec) if launch.get("reloadable")
+            callback = (session.skills.dynamic_callback(
+                spec, lambda response, result: _record_input(response, result, session)
+            ) if launch.get("reloadable")
                         else session.skills.callback(callback, hook))
         callbacks.append((EVENTS[event], callback))
 
@@ -113,6 +115,25 @@ def register(ctx: Any) -> None:
             # Native rediscovery replaces callbacks but retains this session's receipt.
             if _read_private_json(launch["ready_path"]) != receipt:
                 raise ValueError("AW Hermes readiness receipt belongs to another registration") from None
+
+
+def _input_callback(spec: Any, session: Any) -> Any:
+    def callback(**kwargs: Any) -> Any:
+        from agent.shell_hooks import _evaluate_result, _serialize_payload, _spawn
+        response = _spawn(spec, _serialize_payload(spec.event, kwargs))
+        result = _evaluate_result(spec, response)
+        _record_input(response, result, session)
+        return result
+    return callback
+
+
+def _record_input(response: Any, result: Any, session: Any) -> None:
+    if isinstance(result, dict) and result.get("action") == "modify":
+        raw = json.loads(response["stdout"])
+        if response["returncode"] == 0 and raw.get("aw_checked_input") is True:
+            cell = session.rewritten_input.get()
+            if cell is not None:
+                cell["input"] = json.dumps(result["args"], sort_keys=True)
 
 
 def _replacement_callback(launch: dict[str, Any], hook: dict[str, Any]) -> Any:

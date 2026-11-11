@@ -132,6 +132,23 @@ pub fn response(
     native: &Value,
     diagnostics: &mut dyn std::io::Write,
 ) -> Result<HookOutput> {
+    if let Some(input) = output.get("input_replacement").cloned() {
+        let mut output = output;
+        output
+            .as_object_mut()
+            .ok_or("invalid step response")?
+            .remove("input_replacement");
+        let response = response(
+            adapter,
+            event,
+            on_error,
+            output,
+            adapter_id,
+            native,
+            diagnostics,
+        )?;
+        return crate::input::reply(adapter_id, event, response, input);
+    }
     if !(matches!(on_error, "report" | "block")
         || (event == "tool.after" && on_error == "withhold_result"))
     {
@@ -205,6 +222,13 @@ pub fn response(
             (None, Some(signal @ 1..=64)) => Exit::Signal(signal as i32),
             _ => return Err("invalid native exit status".into()),
         };
+        if event == "tool.before"
+            && serde_json::from_slice::<Value>(&stdout).is_ok_and(|value| {
+                value.get("aw_checked_input").is_some() || value.get("aw_updated_input").is_some()
+            })
+        {
+            return Err("native callback cannot attest checked input".into());
+        }
         let sdk_before = matches!(adapter_id, "claude-sdk" | "qoder-sdk") && event == "tool.before";
         // Validate before success so fail-closed vetoes use the existing event closure.
         if sdk_before {

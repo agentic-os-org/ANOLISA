@@ -276,3 +276,28 @@ test("non-strict callbacks cannot consume an audited withholding marker", async 
   await f.agent.beforeToolCall(f.context);
   assert.strictEqual(await f.agent.afterToolCall(f.context), f.original);
 });
+
+test("checked input reaches the native permission callback once and retains completion identity", async t => {
+  const directory = mkdtempSync(join(output, "input-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const helper = join(directory, "callback");
+  writeFileSync(helper, `#!/usr/bin/env node
+let input='';for await(const chunk of process.stdin)input+=chunk;
+const p=JSON.parse(input);
+console.log(JSON.stringify(p.event==='tool.before'?{aw_updated_input:{...p.tool_call.input,command:'checked'}}:{}));
+`, { mode: 0o700 });
+  const received = [];
+  const agent = {
+    beforeToolCall: async context => { received.push(structuredClone(context.args)); },
+    afterToolCall: async () => {}, subscribe: () => () => {},
+  };
+  const bridge = installSessionBridge({ agent, sessionManager: { getSessionId: () => 'session' } }, null, {
+    executable: helper, binding: 'unused', ready_path: 'unused', ready_token: 'fixture',
+    hooks: [{ event: 'tool.before', step: 'rewrite', on_error: 'block', budget_ms: 1000, replace_input: true }],
+  });
+  t.after(() => bridge.dispose());
+  const context = { toolCall: { id: 'call', name: 'bash' }, args: { command: 'original', timeout: 7 } };
+  assert.equal(await agent.beforeToolCall(context), undefined);
+  assert.deepEqual(context.args, { command: 'checked', timeout: 7 });
+  assert.deepEqual(received, [{ command: 'checked', timeout: 7 }]);
+});

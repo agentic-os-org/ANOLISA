@@ -24,12 +24,13 @@ mode = {mode:?}
 if mode == 'failed': sys.exit(1)
 if mode == 'slow': time.sleep(2)
 if r['operation'] == 'pre_tool':
-    assert r['input']['capabilities'] == {{'replace_arguments': False, 'block_and_suggest': True}}
+    replace = r['input']['capabilities']['replace_arguments']
+    assert r['input']['capabilities'] == {{'replace_arguments': replace, 'block_and_suggest': not replace}}
     args = r['input']['arguments'].copy()
     args['command'] = ('env TOKENLESS_AGENT_ID=' + r['attribution']['agent_id']
         + ' TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=blocked-call TOKENLESS_DATA_DIR='
         + os.environ['TOKENLESS_DATA_DIR'] + ' ' + __file__ + ' rtk git status')
-    action, optimization = 'block_and_suggest', 'rtk'
+    action, optimization = ('replace_arguments' if replace else 'block_and_suggest'), 'rtk'
     if mode == 'direct': action = 'replace_arguments'
     if mode == 'other_field': args['cwd'] = '/changed'
     if mode == 'empty': args['command'] = ''
@@ -446,5 +447,33 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
         assert!(state.join("rtk-outcomes.db").is_file());
         assert!(!state.join("stats.db").exists());
         assert!(!state.join("stash.db").exists());
+    }
+}
+
+#[test]
+fn admitted_input_replacement_reuses_cli_rewrite_and_preserves_other_arguments() {
+    for adapter in [
+        "qoder",
+        "qoder-sdk",
+        "claude-sdk",
+        "openclaw",
+        "hermes",
+        "pi",
+        "agentscope",
+        "qwenpaw",
+    ] {
+        let f = Fixture::new("suggest");
+        let mut before = f.request(adapter);
+        before["allowed_effects"] = json!(["replace_input"]);
+        let reply = f.run(before.clone());
+        assert_eq!(
+            reply["effects"][0]["type"], "replace_input",
+            "{adapter}: {reply}"
+        );
+        assert_eq!(reply["effects"][0]["input"]["cwd"], "/original");
+        assert!(reply["effects"][0].get("text").is_none());
+        let rewritten = reply["effects"][0]["input"].clone();
+        before["event"]["tool"]["input"] = rewritten;
+        assert_eq!(f.run(before)["effects"], json!([]));
     }
 }

@@ -138,10 +138,10 @@ Provider 的精确私有配置一致。成功返回已检查的步骤；不返�
 | 请求 | 准入结果 |
 | --- | --- |
 | `input.submit`：`observe`、`block` | Provider 与 Adapter 均支持时通过；拒绝工具选择器和原始 native-hook 步骤 |
-| `tool.before`：`observe`、`block` | 所选操作和 Adapter 均支持全部请求效果时通过 |
+| `tool.before`：`observe`、`block`、`replace_input` | 所选操作和 Adapter 均支持全部请求效果时通过 |
 | `tool.after`：`observe` | 双方均支持时通过 |
 | `tool.after`：`replace_result` | 单个结构化步骤与可信文本替换能力 |
-| `ask`、输入替换、执行后阻断 | 拒绝 |
+| `ask`、执行后阻断 | 拒绝 |
 | 启用提交和两个工具事件以外的事件 | 拒绝，`required: false` 也不例外 |
 | `security.violation` 等 guard | 拒绝，本模型尚未实现最后一道检查的顺序保证 |
 | 事件与步骤的 `match.tools` | 接受；Host 仅调用同时匹配两层选择器的工具 |
@@ -218,7 +218,7 @@ Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须�
 
 ### Tokenless 组合
 
-PreTool 通过 `block` 返回完整重试建议，新调用重新经过安全与原生权限检查；PostTool 只替换获准文本槽。
+PreTool 可返回单个 `replace_input` 效果，以对象 `input` 提供候选参数并保留全部原参数键。该步骤须位于首个适用 before 位置，只声明该效果，所有 before 步骤使用 `on_error: block`。后续检查接收候选参数，最后一个成功回调沿用原身份和预算交付改写，保留原生授权。旧 `block` 重试建议继续受支持；PostTool 只替换获准文本槽。 SDK 托管 MCP handler 的输入替换在候选检查前拒绝；未改写的 MCP 调用及 PostTool 沿用既有路径。
 RTK 归属、结果分类和遥测设置见[Tokenless 参考](tokenless.md)。
 当前接入的恢复能力为 `none`，Schema/BeforeModel 与 Retrieve 接点尚未开放。
 Core 计划 API 的独立合同见[Core 执行](../../../../../src/aw/docs/design/zh/core-execution.md)。

@@ -232,6 +232,10 @@ pub(crate) fn routes(
         }
         for step in &selected {
             let mut hook = json!({"event":event,"step":step.step_id,"on_error":step.on_error,"budget_ms":budget});
+            if matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input"))
+            {
+                hook["replace_input"] = json!(true);
+            }
             if event == "input.submit"
                 && matches!(&step.execution, aw_core::admission::StepExecution::Provider { operation, .. } if operation == "check_skill")
             {

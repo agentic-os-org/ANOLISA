@@ -8,7 +8,7 @@ see the [user guide](../../../../user-guide/en/aw/tokenless.md).
 The optional Tokenless Provider replaces a completed tool's model-visible text
 with compression selected under Tokenless's configured reversibility policy. AW
 checks replacement bounds; it does not independently prove semantic losslessness.
-Qoder, OpenClaw, QwenPaw, Hermes, Pi, AgentScope SDK 2.0.6 and Claude SDK native Bash share one Provider configuration for PreTool retry suggestions and PostTool
+Qoder CLI/SDK, OpenClaw, QwenPaw, Hermes, Pi, AgentScope SDK 2.0.6 and Claude SDK native Bash use the same Provider protocol for PreTool command optimization and PostTool
 compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
@@ -62,15 +62,31 @@ AW Journal stores metadata; Tokenless can independently retain complete compress
 
 ## PreTool and permission behavior
 
-The generated template and shared example include `tool.before` → `pre_tool` with
-`effects: [block]` and `on_error: report`. Supported shell tools are `Bash`, `exec`,
-`terminal`, `shell`, `run_shell_command` and `execute_shell_command` (case insensitive),
-with a nonempty string `command`. Other inputs pass through without calling the CLI.
-Tokenless chooses whether to suggest an RTK command. AW blocks the original attempt
-and shows the full retry arguments to the model; it never silently modifies input
-or approves/executes a command. A new call must pass sec-core and native permission
-checks again. A scanner denial/failure remains authoritative even when PreTool is
-neutral. Existing external Hook scheduling is unchanged.
+The Qoder route in the source templates and shared example uses `tool.before` → `pre_tool` with
+`effects: [replace_input]` and `on_error: block`. This requires a build with input
+replacement support; released AW 0.1.0 supports the legacy `effects: [block]`
+retry mode. Supported shell tools are `Bash`, `exec`, `terminal`, `shell`,
+`run_shell_command` and `execute_shell_command` (case insensitive), with a
+nonempty string `command`. Other inputs pass through without calling the CLI.
+
+Input replacement uses Tokenless Protocol v2 `replace_arguments`. AW retains the
+call identity, asks every subsequent before step to check the candidate, and
+returns revised arguments only after the last check succeeds. Configure the
+rewrite as the first applicable before step, with `[replace_input]` as its only
+effect, and use `on_error: block` on every before step. Put sec-core scans after
+the rewrite. Qoder CLI/SDK, Claude SDK, QwenPaw, Hermes, Pi and AgentScope adopt
+checked arguments in the same invocation. Native permission checks still apply;
+the rewrite grants no approval. Non-command arguments remain unchanged.
+
+OpenClaw 2026.9.6 can retain arguments from an earlier plugin approval and
+ignore a later checked replacement. Its Adapter therefore rejects
+`replace_input`. In a shared Qoder/OpenClaw configuration, `tokenless.json` and
+`sec-core-tokenless.json` select a separate block-and-retry step for OpenClaw;
+the combined template scans the original command first. The OpenClaw-only
+templates retain block-and-retry for both targets when used together.
+
+Existing `[block]` configurations retain their retry suggestion behavior and
+`on_error` policy. They do not acquire input replacement automatically.
 
 The Tokenless integration recognizes a standalone attributed RTK wrapper in executed
 arguments, in which an absolute `tokenless` executable runs its `rtk` subcommand,
@@ -80,10 +96,23 @@ state directories preserve this ownership. Supported execution prefixes are lite
 environment assignments, `env NAME=value ...`, bare `sudo`, `noglob`, `command`,
 `exec`, and `shadowenv exec --`; these forms may be combined. Other wrapper forms
 (including extra flags), bare RTK commands, foreign attribution and compound shell
-commands are not inferred as RTK-owned. CLI errors, invalid responses or timeouts
-are reported under `on_error: report`; they do not disable
-sec-core's `on_error: block` or grant native approval. To keep PostTool alone, remove
-only the `rewrite-command` before step and retain the shared Provider and after chain.
+commands are not inferred as RTK-owned. Input-replacement errors, invalid responses and timeouts block the pending call.
+Legacy retry mode retains its configured failure action. To use Tokenless PostTool
+without its PreTool, remove these steps from `events.tool.before.steps` in the
+template JSON, or `spec.events.tool.before.steps` in the generated AW configuration:
+
+| Template | Remove step IDs |
+| --- | --- |
+| `tokenless.json` | `rewrite-command`, `retry-command-openclaw` |
+| `tokenless-openclaw.json` | `rewrite-command` |
+| `sec-core-tokenless.json` | `rewrite-command`, `retry-command-openclaw` |
+| `sec-core-tokenless-openclaw.json` | `rewrite-command` |
+
+For either combined template, keep `tool.before` enabled and required with its
+`scan-code` step and `on_error: block`. Remove the now-empty `tool.before` event
+only from the Tokenless-only templates. Retain the Tokenless Provider and
+`tool.after`'s `compress-result` step in all templates; combined templates also
+retain `observe-completion`.
 
 Recovery remains `none` in this delivery. Recovery entry points, Stash, retrieval
 scope and retrieval-output bypass belong to the Tokenless integration layer; enabling
