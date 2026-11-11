@@ -263,7 +263,11 @@ write_config() {
   # has nothing to preserve.
   if ! command_exists python3; then
     if [[ -f "$settings_file" ]]; then
-      warn "python3 not found — leaving $settings_file untouched."
+      # Both refusals below leave the requested configuration unwritten, so
+      # they raise CONFIG_WRITE_FAILED instead of returning quietly: the caller
+      # reads the exit code, and a file left untouched is not "configured".
+      CONFIG_WRITE_FAILED=true
+      err "python3 not found — leaving $settings_file untouched."
       warn "Install python3, or merge the four env keys by hand, then re-run --config."
       return 0
     fi
@@ -271,7 +275,8 @@ write_config() {
     # A control character has no hand-written JSON escape here, and writing a
     # document Claude Code rejects is the defect this script exists to fix.
     if [[ "$api_key" == *[[:cntrl:]]* ]]; then
-      warn "CLAUDE_API_KEY contains control characters — leaving $settings_file untouched."
+      CONFIG_WRITE_FAILED=true
+      err "CLAUDE_API_KEY contains control characters — leaving $settings_file untouched."
       warn "Install python3, or set the key by hand, then re-run --config."
       return 0
     fi

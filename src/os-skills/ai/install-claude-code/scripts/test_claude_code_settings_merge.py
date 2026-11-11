@@ -203,7 +203,12 @@ class SettingsMergeTests(unittest.TestCase):
         self.write_settings(json.dumps(EXISTING_SETTINGS))
         result = self.run_installer("sk-nopy", search_path=self.without_python3())
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # The file is untouched, which is right, but the requested
+        # configuration was not written: `--config` was asked for and nothing
+        # was configured, so the run must not report success.
+        self.assertNotEqual(result.returncode, 0,
+                            "the caller only sees the exit code, so an unwritten config must fail it")
+        self.assertNotIn("Done! Run 'claude'", result.stdout)
         self.assertEqual(self.read_settings(), EXISTING_SETTINGS,
                          "without a JSON parser the four keys cannot be merged, so the file stays")
         self.assertIn("python3 not found", self.output_of(result))
@@ -212,6 +217,8 @@ class SettingsMergeTests(unittest.TestCase):
     def test_without_python3_a_fresh_install_still_escapes_the_key(self):
         result = self.run_installer(WEIRD_KEY, search_path=self.without_python3())
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Done! Run 'claude'", result.stdout,
+                      "a write that did happen must still report success")
         # The fallback has no JSON library, so it escapes by hand and the value
         # must still parse back to exactly what the operator typed.
         self.assert_dashscope_env(self.read_settings(), WEIRD_KEY)
@@ -221,7 +228,9 @@ class SettingsMergeTests(unittest.TestCase):
         # character would still produce a document Claude Code refuses to load,
         # so the fallback must refuse rather than write one.
         result = self.run_installer("sk-bad\tkey", search_path=self.without_python3())
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0,
+                            "a refusal to write is not a configured install")
+        self.assertNotIn("Done! Run 'claude'", result.stdout)
         self.assertFalse(self.settings.exists(),
                          "a key that cannot be escaped must not be written")
         self.assertIn("control characters", self.output_of(result))
