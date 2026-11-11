@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { runCausalAttribution } from '../utils/apiClient';
+import { useNavigate } from 'react-router-dom';
+import { ApiRequestError, runCausalAttribution } from '../utils/apiClient';
 import { truncateText } from '../utils/text';
 import type {
   CausalAttrib,
@@ -86,6 +87,10 @@ function appendHistory(
   writeHistory(sessionId, roundIndex, idKind, next);
   return next;
 }
+
+type CausalError =
+  | { kind: 'llmNotConfigured' }
+  | { kind: 'failed'; details: string };
 
 interface CausalAttributionPanelProps {
   sessionId: string;
@@ -488,9 +493,10 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   idKind,
   onScrollToStep,
 }) => {
+  const navigate = useNavigate();
   const [complaint, setComplaint] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CausalError | null>(null);
   const [caseData, setCaseData] = useState<CausalCase | null>(null);
   const [cached, setCached] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -596,7 +602,18 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       setHistory(next);
     } catch (e) {
       if (requestVersion.current === version) {
-        setError(e instanceof Error ? e.message : '归因失败');
+        if (
+          e instanceof ApiRequestError &&
+          e.status === 400 &&
+          e.body?.error === 'llm_not_configured'
+        ) {
+          setError({ kind: 'llmNotConfigured' });
+        } else {
+          setError({
+            kind: 'failed',
+            details: e instanceof Error ? e.message : '归因失败',
+          });
+        }
       }
     } finally {
       window.clearInterval(timer);
@@ -713,8 +730,38 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
               已缓存 · 秒出
             </span>
           )}
-          {error && <span className="text-sm text-red-600">{error}</span>}
         </div>
+
+        {error?.kind === 'llmNotConfigured' && (
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+          >
+            <p>当前未配置 LLM，无法发起因果归因。请先前往「优化设置」填写 API Key 与模型后再试。</p>
+            <button
+              type="button"
+              onClick={() => navigate('/settings')}
+              className="mt-2 font-medium underline hover:text-amber-900"
+            >
+              前往优化设置
+            </button>
+          </div>
+        )}
+
+        {error?.kind === 'failed' && (
+          <div
+            role="alert"
+            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+          >
+            <p>归因失败，请稍后重试。</p>
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-red-600">查看详情</summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-red-600">
+                {error.details}
+              </pre>
+            </details>
+          </div>
+        )}
 
         {loading && (
           <div className="pt-3 space-y-2">
