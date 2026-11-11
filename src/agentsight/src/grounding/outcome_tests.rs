@@ -343,6 +343,8 @@ fn a_quoted_separator_is_not_a_command_chain() {
         "test -f '/tmp/a;b'",
         r#"pgrep -f "agent&&worker""#,
         "test -f /missing <&0",
+        // An escaped separator outside quotes is data too.
+        r"pgrep -f agent\;worker",
     ] {
         let v = classify(&bash_call(command), "(exit code 1)");
         assert_eq!(
@@ -368,6 +370,24 @@ fn a_chain_after_a_quoted_separator_is_still_a_chain() {
         v.status,
         CallStatus::OkProbe,
         "a real chain must not be read as a probe ({})",
+        v.matched_rule
+    );
+}
+
+#[test]
+fn an_escaped_quote_does_not_hide_a_chain() {
+    // An over-escaped command carries literal `\"` pairs. Reading the first
+    // one as an opening quote and the backslash before the second as an
+    // in-quote escape left the quote open and swallowed the real `|| mkdir`,
+    // so a failed chain was graded as a probe.
+    let v = classify(
+        &bash_call(r#"test -d \"$d\" || mkdir -p \"$d\""#),
+        "(exit code 1)",
+    );
+    assert_ne!(
+        v.status,
+        CallStatus::OkProbe,
+        "an escaped pair must not hide the chain ({})",
         v.matched_rule
     );
 }
