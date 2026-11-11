@@ -1,15 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "child_process";
+import { resolve } from "path";
 
 vi.mock("fs", () => ({
   mkdirSync: vi.fn(),
   rmdirSync: vi.fn(),
+  accessSync: vi.fn(),
+  statSync: vi.fn(),
+  constants: { X_OK: 1 },
 }));
 
 vi.mock("../commands.js", () => ({
   runCrontab: vi.fn(),
 }));
 
-import { mkdirSync, rmdirSync } from "fs";
+import { accessSync, statSync, mkdirSync, rmdirSync } from "fs";
 import { runCrontab } from "../commands.js";
 import {
   validateCronExpr,
@@ -19,10 +24,19 @@ import {
 
 const mockRunCrontab = runCrontab as ReturnType<typeof vi.fn>;
 const mockMkdirSync = mkdirSync as ReturnType<typeof vi.fn>;
+const mockAccessSync = vi.mocked(accessSync);
+const mockStatSync = vi.mocked(statSync);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv("PATH", "/usr/bin:/bin");
   mockMkdirSync.mockImplementation(() => undefined);
+  mockAccessSync.mockImplementation(() => undefined);
+  mockStatSync.mockReturnValue({ isFile: () => true } as ReturnType<typeof statSync>);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe("validateCronExpr", () => {
@@ -144,6 +158,100 @@ describe("CrontabManager.sync", () => {
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
 
     expect(await CrontabManager.sync("/ws", ["0 * * * *"])).toBe(true);
+  });
+});
+
+describe("cron executable discovery", () => {
+  beforeEach(() => {
+    mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+  });
+
+  it.each(["/usr/bin", "/usr/local/bin", "/opt/anolisa/bin"])(
+    "records the executable from %s rather than a fixed install prefix",
+    async (directory) => {
+      vi.stubEnv("PATH", `/missing:${directory}`);
+      mockAccessSync.mockImplementation((path) => {
+        if (path === "/missing/ws-ckpt") throw new Error("not found");
+      });
+      expect(await CrontabManager.sync("/ws", ["0 * * * *"])).toBe(true);
+      expect(mockRunCrontab.mock.calls[1][1].input).toContain(
+        `0 * * * * '${directory}/ws-ckpt' checkpoint`,
+      );
+      expect(mockAccessSync).toHaveBeenCalledWith(`${directory}/ws-ckpt`, 1);
+    },
+  );
+
+  it("fails without touching the crontab when no executable is available", async () => {
+    mockAccessSync.mockImplementation(() => { throw new Error("not found"); });
+    expect(await CrontabManager.syncWithRetry("/ws", ["0 * * * *"])).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+    expect(mockRmdirSync).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["/opt/bad\npath", "/opt/bad\rpath", "/opt/100%"])(
+    "rejects cron-unsafe executable path %j before reading or writing",
+    async (directory) => {
+      vi.stubEnv("PATH", directory);
+      expect(await CrontabManager.sync("/ws", ["0 * * * *"])).toBe(false);
+      expect(mockRunCrontab).not.toHaveBeenCalled();
+    },
+  );
+
+  it("removes schedules without requiring the CLI to remain installed", async () => {
+    mockAccessSync.mockImplementation(() => { throw new Error("uninstalled"); });
+    mockRunCrontab.mockResolvedValueOnce({
+      exitCode: 0, stdout: "0 * * * * '/usr/bin/ws-ckpt' checkpoint -w '/ws'\n# keep\n", stderr: "",
+    });
+    expect(await CrontabManager.remove("/ws")).toBe(true);
+    expect(mockAccessSync).not.toHaveBeenCalled();
+    expect(mockRunCrontab.mock.calls[1][1].input).toBe("# keep\n");
+  });
+
+  it("replaces legacy entries and remains idempotent after quoting the binary", async () => {
+    let installed = "0 * * * * /usr/local/bin/ws-ckpt checkpoint -w '/ws'\n" +
+      "5 * * * * ws-ckpt checkpoint -w /other\n# keep\n";
+    mockRunCrontab.mockImplementation(async (_args, opts) => {
+      if (opts?.input !== undefined) installed = opts.input;
+      return { exitCode: 0, stdout: installed, stderr: "" };
+    });
+    expect(await CrontabManager.sync("/ws", ["0 * * * *"])).toBe(true);
+    const first = installed;
+    expect(first).not.toContain("/usr/local/bin/ws-ckpt");
+    expect(first).toContain("5 * * * * ws-ckpt checkpoint -w /other\n# keep\n");
+    expect(await CrontabManager.sync("/ws", ["0 * * * *"])).toBe(true);
+    expect(installed).toBe(first);
+    expect(await CrontabManager.listInstalled("/ws")).toEqual(["0 * * * *"]);
+  });
+
+  it("executes a discovered launcher with a restricted cron PATH and literal shell characters", async () => {
+    const fs = await vi.importActual<typeof import("fs")>("fs");
+    const directory = fs.mkdtempSync(resolve("node_modules", "cron-launcher-"));
+    const bindir = `${directory}/owner's bin;$literal`;
+    const launcher = `${bindir}/ws-ckpt`;
+    const target = `${directory}/release-cli`;
+    const workspace = "/workspace with spaces";
+    try {
+      fs.mkdirSync(bindir);
+      fs.writeFileSync(target, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", { mode: 0o755 });
+      fs.symlinkSync(target, launcher);
+      vi.stubEnv("PATH", bindir);
+      mockAccessSync.mockImplementation(fs.accessSync);
+      mockStatSync.mockImplementation(fs.statSync);
+      expect(await CrontabManager.sync(workspace, ["0 * * * *"])).toBe(true);
+      const line: string = mockRunCrontab.mock.calls[1][1].input.trim();
+      expect(line).not.toContain(target);
+      const command = line.replace(/^\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+/, "")
+        .replace(/ >\/dev\/null 2>&1$/, "").replace(/\\%/g, "%");
+      const output = execFileSync("/bin/sh", ["-c", command], {
+        encoding: "utf-8", env: { PATH: "/usr/bin:/bin" },
+      });
+      expect(output.split("\n")).toEqual([
+        "checkpoint", "-w", workspace, "-s", expect.stringMatching(/^cron-\d+$/),
+        "-m", "scheduled snapshot", "--metadata", '{"auto":true,"type":"cron"}', "",
+      ]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
