@@ -72,10 +72,7 @@ pub(super) fn invoke_bound(binding: HookBinding, bytes: Vec<u8>) -> Result<Exit>
     } else {
         return Err("unsupported lifecycle adapter".into());
     };
-    let client = Client::connect(&binding.socket, deadline)?;
-    if client.identity() != &binding.binding.identity {
-        return Err("stale lifecycle binding".into());
-    }
+    let client = Client::from_identity(&binding.socket, binding.binding.identity.clone());
     if matches!(phase, LifecyclePhase::Ready) {
         super::native::ready(&binding, &client, pid, deadline)?;
     }
