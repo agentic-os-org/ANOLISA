@@ -1,0 +1,200 @@
+version: 1
+suite: trial-access-i18n
+defaults:
+  execution: ci
+  adapter: cosh-core
+  shell: bash
+  shell_mode: isolated
+  approval_mode: auto
+  analysis_mode: smart
+  render: terminal
+  real_provider: false
+  terminal_cols: 100
+  terminal_rows: 42
+  timeout_ms: 180000
+cases:
+  - id: TRIAL-I18N-EN-CANCEL
+    title: English cancellation retains the question without disabling automatic access
+    tags: [shell, trial, i18n, issue-9841, simulated-cloud]
+    command:
+      - bash
+      - -lc
+      - exec env COSH_E2E_ISOLATED_CONTAINER=1 python3 /work/repo/src/cosh-ng/e2e/fixtures/trial_access.py --profile "$CARGO_TARGET_DIR/debug" --language en-US
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 15000
+      - type: line
+        text: "?? 请解释当前目录"
+      - type: wait_for
+        text: "Waiting for activation"
+        timeout_ms: 15000
+      - id: waiting-card
+        type: wait_quiet
+        quiet_ms: 200
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_for
+        text: "Cancelled. Your question is retained"
+        timeout_ms: 15000
+      - id: cancelled-notice
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: bytes
+        hex: "15"
+      - type: line
+        text: "exit"
+    expect:
+      status: 0
+      contains:
+        - "Cancelled. Your question is retained"
+        - "preferences=unchanged"
+      not_contains:
+        - "disabled for this session"
+        - "Traceback"
+    evidence:
+      points:
+        - id: waiting-card
+          trigger_event: waiting-card
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: cancelled-notice
+          trigger_event: cancelled-notice
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: TRIAL-I18N-EN-SESSION
+    title: English session suppression is confirmed and the next question uses localized setup guidance
+    tags: [shell, trial, i18n, issue-9841, simulated-cloud]
+    command:
+      - bash
+      - -lc
+      - exec env COSH_E2E_ISOLATED_CONTAINER=1 python3 /work/repo/src/cosh-ng/e2e/fixtures/trial_access.py --profile "$CARGO_TARGET_DIR/debug" --language en-US
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 15000
+      - type: line
+        text: "?? 请解释当前目录"
+      - type: wait_for
+        text: "Waiting for activation"
+        timeout_ms: 15000
+      - type: bytes
+        text: n
+      - type: wait_for
+        text: "Disable for this session"
+        timeout_ms: 15000
+      - type: key
+        name: enter
+      - type: wait_for
+        text: "Your question is retained"
+        timeout_ms: 15000
+      - id: session-notice
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: bytes
+        hex: "15"
+      - type: line
+        text: 'cp "$TRIAL_FIXTURE_ROOT/requests" "$TRIAL_FIXTURE_ROOT/before"'
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: line
+        text: "?? 请再次解释当前目录"
+      - id: next-question-error
+        type: wait_quiet
+        quiet_ms: 1000
+        timeout_ms: 15000
+      - type: bytes
+        hex: "15"
+      - type: line
+        text: 'read -r before < "$TRIAL_FIXTURE_ROOT/before"; read -r after < "$TRIAL_FIXTURE_ROOT/requests"; [ "$before" = "$after" ] && printf "%s%s\n" TRIAL_POLLING_ STOPPED; exit'
+    expect:
+      status: 0
+      contains:
+        - "Automatic access is disabled for this session."
+        - "No model configured. Use /auth to configure a model."
+        - "TRIAL_POLLING_STOPPED"
+        - "preferences=unchanged"
+      not_contains:
+        - "Cancelled. Your question is retained"
+        - "Traceback"
+    evidence:
+      points:
+        - id: session-notice
+          trigger_event: session-notice
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: next-question-error
+          trigger_event: next-question-error
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: TRIAL-I18N-ZH-SESSION
+    title: Chinese session suppression and subsequent model setup errors stay in Chinese
+    tags: [shell, trial, i18n, issue-9841, simulated-cloud]
+    command:
+      - bash
+      - -lc
+      - exec env COSH_E2E_ISOLATED_CONTAINER=1 python3 /work/repo/src/cosh-ng/e2e/fixtures/trial_access.py --profile "$CARGO_TARGET_DIR/debug" --language zh-CN
+    input:
+      - type: wait_for
+        text: "cosh-osc$"
+        timeout_ms: 15000
+      - type: line
+        text: "?? 请解释当前目录"
+      - type: wait_for
+        text: "等待开通"
+        timeout_ms: 15000
+      - type: bytes
+        text: n
+      - type: wait_for
+        text: "本次会话不再提示"
+        timeout_ms: 15000
+      - type: key
+        name: enter
+      - type: wait_for
+        text: "✓ 本次会话不再提示免配置接入。"
+        timeout_ms: 15000
+      - id: session-notice
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: bytes
+        hex: "15"
+      - type: line
+        text: 'cp "$TRIAL_FIXTURE_ROOT/requests" "$TRIAL_FIXTURE_ROOT/before"'
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: line
+        text: "?? 请再次解释当前目录"
+      - id: next-question-error
+        type: wait_quiet
+        quiet_ms: 1000
+        timeout_ms: 15000
+      - type: bytes
+        hex: "15"
+      - type: line
+        text: 'read -r before < "$TRIAL_FIXTURE_ROOT/before"; read -r after < "$TRIAL_FIXTURE_ROOT/requests"; [ "$before" = "$after" ] && printf "%s%s\n" TRIAL_POLLING_ STOPPED; exit'
+    expect:
+      status: 0
+      contains:
+        - "✓ 本次会话不再提示免配置接入。"
+        - "尚未配置模型，可用 /auth 配置。"
+        - "TRIAL_POLLING_STOPPED"
+        - "preferences=unchanged"
+      not_contains:
+        - "no model configured; use /auth"
+        - "Traceback"
+    evidence:
+      points:
+        - id: session-notice
+          trigger_event: session-notice
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: next-question-error
+          trigger_event: next-question-error
+          layout_sensitive: true
+          required_types: [screenshot]
