@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.2.1
+
+**Breaking Changes**
+
+- Moved the maintained source-build entrypoint onto the unified stack build: the
+  default build now prepares and stages all maintained backends, AW and its providers,
+  and the script requires Bash 4.4 or newer. Legacy `/etc` service units that shadow the
+  new prefix layout must be migrated with the administrator-reviewed steps in the
+  sec-core guide. (#9657)
+
+**Cedar Policy Engine**
+
+- Accepted raw Cedar and Cedar source envelopes as permission input for sandbox
+  launches and PDP requests, binding file boundaries before policy canonicalization and
+  rejecting writable-ancestor and hardlinked file aliases. (#9794)
+- Deployed supported `file.read` forbids as exact-file read denial through the existing
+  Scope and Binding path, rejecting unsupported backends before old targets are removed. (#9895)
+
+**Sandbox Authorization**
+
+- Warned on stderr when a restricted sandbox starts with a read-only root and writable
+  mounts, making the accepted hardlink boundary visible without rejecting legitimate
+  workspaces. (#9868)
+
+**Credential Protection**
+
+- Rejected Scopes that reference globally retired credentials instead of admitting them
+  as `ACTIVE`, while startup recovery restores mixed Scopes tolerantly. (#9793)
+- Added `--cmdline-arg` process matching for Scopes, so script Agents such as
+  npm-installed CLIs can be selected without capturing every interpreter process of the
+  owner UID. (#9894)
+- Isolated gateway Binding faults so a forking or exiting descendant no longer stops the
+  proxy, nftables routing and runtime for every Scope; the failed Binding retries on its
+  own. (#9896)
+
+**Scanner & Policy Engine**
+
+- Detected structured PII tokens directly adjacent to Chinese, Japanese and Korean text
+  and advanced the Rust scanner semantics version to 2.1.2. (#9867)
+- Rejected blank `agent-sec-cli scan-prompt --text` input with a usage error and exit
+  code 1 instead of reporting success with no verdict. (#9786)
+
+**Build & Packaging**
+
+- Made the `agent-sec-core` RPM `Recommends` the `agent-sec-plugins` and
+  `agent-sec-skills` subpackages at the exact version, so default installs bring the
+  adapter resources and weak-dependency-disabled installs keep the previous behavior. (#9766)
+
+**Testing & CI**
+
+- Stabilized the SQLite policy repository lock tests by probing SHM locks out of process
+  and moving the crash scenario into its own test binary. (#9635)
+- Accepted `ESRCH` in the Linux gateway cleanup test helper. (#9883)
+- Joined the retention task before asserting its periodic completion log. (#9900)
+- Checked real descriptor and memory access denial in the helper isolation test, with a
+  non-root pass followed by a root Strict-profile pass. (#9903)
+
 ## 1.2.0
 
 **Breaking Changes**
