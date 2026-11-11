@@ -149,6 +149,131 @@ fn extract_text(resp: &Value) -> String {
 }
 
 #[tokio::test]
+async fn import_overwrite_replaces_markdown_file_ancestors_with_directories() {
+    let source = tempfile::tempdir().unwrap();
+    let (mut source_child, mut source_reader, mut source_stdin) =
+        spawn_with_dir(source.path()).await;
+    handshake(&mut source_reader, &mut source_stdin).await;
+    let source_root = source.path().join("user-tester");
+    for path in ["notes/old.md/new.md", "tasks/old.md/deep/new.md"] {
+        let file = source_root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "NEW\n").unwrap();
+    }
+    let exported = call_tool(
+        &mut source_reader,
+        &mut source_stdin,
+        2,
+        "mem_export",
+        json!({}),
+    )
+    .await;
+    source_child.kill().await.unwrap();
+    source_child.wait().await.unwrap();
+    assert_ne!(exported["result"]["isError"], true, "{exported}");
+
+    let target = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(target.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let root = target.path().join("user-tester");
+    for path in ["notes/old.md", "tasks/old.md", "notes/keep.md"] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "ORIGINAL\n").unwrap();
+    }
+    let preview = call_tool(
+        &mut reader,
+        &mut stdin,
+        2,
+        "mem_import",
+        json!({
+            "json_data": extract_text(&exported), "strategy": "overwrite", "dry_run": true
+        }),
+    )
+    .await;
+    let old_after_preview = std::fs::read(root.join("notes/old.md"));
+    let imported = call_tool(
+        &mut reader,
+        &mut stdin,
+        3,
+        "mem_import",
+        json!({"json_data": extract_text(&exported), "strategy": "overwrite"}),
+    )
+    .await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+
+    assert!(extract_text(&preview).contains("0 errors"), "{preview}");
+    assert_eq!(old_after_preview.unwrap(), b"ORIGINAL\n");
+    let text = extract_text(&imported);
+    assert!(text.contains("3 imported"), "{imported}");
+    assert!(text.contains("0 errors"), "{imported}");
+    assert!(text.contains("Backup:"), "{imported}");
+    for path in ["notes/old.md/new.md", "tasks/old.md/deep/new.md"] {
+        assert_eq!(std::fs::read(root.join(path)).unwrap(), b"NEW\n");
+    }
+    assert!(!root.join("notes/keep.md").exists());
+}
+
+#[tokio::test]
+async fn import_overwrite_preserves_old_memories_on_invalid_tasks_and_backup_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let root = tmp.path().join("user-tester");
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::write(root.join("notes/keep.md"), "ORIGINAL\n").unwrap();
+    let mut archive = json!({
+        "version": "1.0", "format": "anolisa-memory-archive",
+        "exported_at": "2026-11-11T00:00:00Z", "agent_id": "tester", "user_id": "tester",
+        "total_memories": 2,
+        "memories": [{"path": "notes/legal.md", "frontmatter": {}, "content": "NEW\n"}],
+        "tasks": [{"path": "../escape.md", "frontmatter": {}, "content": "invalid"}],
+        "stats": {"by_category": {}, "by_source": {}, "total_bytes": 0}
+    });
+    let mixed = call_tool(
+        &mut reader,
+        &mut stdin,
+        2,
+        "mem_import",
+        json!({"json_data": archive.to_string(), "strategy": "overwrite"}),
+    )
+    .await;
+    let original_after_mixed = std::fs::read(root.join("notes/keep.md"));
+    let legal_after_mixed = std::fs::read(root.join("notes/legal.md"));
+
+    archive["tasks"] = json!([]);
+    archive["total_memories"] = json!(1);
+    std::fs::write(root.join("notes/invalid-utf8.md"), b"\xff").unwrap();
+    let failed_backup = call_tool(
+        &mut reader,
+        &mut stdin,
+        3,
+        "mem_import",
+        json!({"json_data": archive.to_string(), "strategy": "overwrite"}),
+    )
+    .await;
+    child.kill().await.unwrap();
+
+    let text = extract_text(&mixed);
+    assert!(text.contains("1 imported"), "{text}");
+    assert!(text.contains("1 errors"), "{text}");
+    assert!(text.contains("../escape.md"), "{text}");
+    assert_eq!(original_after_mixed.unwrap(), b"ORIGINAL\n");
+    assert_eq!(legal_after_mixed.unwrap(), b"NEW\n");
+    assert_eq!(failed_backup["result"]["isError"], true, "{failed_backup}");
+    assert!(extract_text(&failed_backup).contains("backup"));
+    assert_eq!(
+        std::fs::read(root.join("notes/keep.md")).unwrap(),
+        b"ORIGINAL\n"
+    );
+    assert_eq!(
+        std::fs::read(root.join("notes/invalid-utf8.md")).unwrap(),
+        b"\xff"
+    );
+}
+
+#[tokio::test]
 async fn lists_ten_tier_a_tools() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;

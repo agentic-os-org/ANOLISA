@@ -7,6 +7,7 @@
 use agent_memory::config::AppConfig;
 use agent_memory::service::MemoryService;
 use agent_memory::tools::memory_import::{ImportStrategy, memory_import};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use tempfile::tempdir;
 
 fn setup() -> (tempfile::TempDir, MemoryService) {
@@ -184,4 +185,192 @@ fn import_accepts_real_export_round_trip() {
         out.contains("0 errors"),
         "real archive must import without errors: {out}"
     );
+}
+
+#[test]
+fn overwrite_preserves_memories_for_unsafe_memory_and_task_paths() {
+    for path in [
+        "/tmp/import-outside.md",
+        "../escape.md",
+        ".anolisa/inject.md",
+        ".git/config.md",
+    ] {
+        for bucket in ["memories", "tasks"] {
+            for mixed in [false, true] {
+                let (_tmp, svc) = setup();
+                svc.write("notes/keep.md", "ORIGINAL\n", false).unwrap();
+                let mut json: serde_json::Value = serde_json::from_str(&archive("")).unwrap();
+                json[bucket] = serde_json::json!([
+                    {"path": path, "frontmatter": {}, "content": "invalid"}
+                ]);
+                if mixed {
+                    json["memories"].as_array_mut().unwrap().insert(
+                        0,
+                        serde_json::json!({
+                            "path": "notes/legal.md", "frontmatter": {}, "content": "NEW\n"
+                        }),
+                    );
+                }
+                let out = memory_import(&svc, &json.to_string(), ImportStrategy::Overwrite, false)
+                    .unwrap();
+                assert!(out.contains("1 errors"), "{path}, {bucket}: {out}");
+                assert_eq!(
+                    std::fs::read(svc.mount.root.join("notes/keep.md")).unwrap(),
+                    b"ORIGINAL\n",
+                    "{path}, {bucket}, mixed={mixed}"
+                );
+                assert!(!out.contains("Backup:"), "no destructive wipe: {out}");
+                if mixed {
+                    assert!(out.contains("1 imported"), "{out}");
+                    assert_eq!(
+                        std::fs::read(svc.mount.root.join("notes/legal.md")).unwrap(),
+                        b"NEW\n"
+                    );
+                } else {
+                    assert!(out.contains("0 imported"), "{out}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn overwrite_preserves_memories_when_an_entry_traverses_a_symlink() {
+    let (_tmp, svc) = setup();
+    let outside = tempdir().unwrap();
+    svc.write("notes/keep.md", "ORIGINAL\n", false).unwrap();
+    symlink(outside.path(), svc.mount.root.join("link")).unwrap();
+    // A missing immediate parent still has an existing symlink ancestor.
+    let json = archive(&entry("link/new/escape.md"));
+    let out = memory_import(&svc, &json, ImportStrategy::Overwrite, false).unwrap();
+    assert!(out.contains("1 errors"), "{out}");
+    assert_eq!(
+        std::fs::read(svc.mount.root.join("notes/keep.md")).unwrap(),
+        b"ORIGINAL\n"
+    );
+    assert!(!outside.path().join("new").exists());
+}
+
+#[test]
+fn overwrite_stops_when_backup_export_fails() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/keep.md", "ORIGINAL\n", false).unwrap();
+    let unreadable = svc.mount.root.join("notes/invalid-utf8.md");
+    std::fs::write(&unreadable, b"\xff\xfe").unwrap();
+    let error = memory_import(
+        &svc,
+        &archive(&entry("notes/new.md")),
+        ImportStrategy::Overwrite,
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("backup"), "{error}");
+    assert!(error.to_string().contains("invalid-utf8.md"), "{error}");
+    assert_eq!(std::fs::read(unreadable).unwrap(), b"\xff\xfe");
+    assert_eq!(
+        std::fs::read(svc.mount.root.join("notes/keep.md")).unwrap(),
+        b"ORIGINAL\n"
+    );
+    assert!(!svc.mount.root.join("notes/new.md").exists());
+}
+
+#[test]
+fn overwrite_stops_when_backup_cannot_be_persisted() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/keep.md", "ORIGINAL\n", false).unwrap();
+    // A regular file at the metadata path fails regardless of the test UID.
+    let metadata = svc.mount.root.join("saved-metadata");
+    std::fs::rename(&svc.mount.meta_dir, &metadata).unwrap();
+    std::fs::write(&svc.mount.meta_dir, "not a directory").unwrap();
+    let error = memory_import(
+        &svc,
+        &archive(&entry("notes/new.md")),
+        ImportStrategy::Overwrite,
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("backup"), "{error}");
+    assert_eq!(
+        std::fs::read(svc.mount.root.join("notes/keep.md")).unwrap(),
+        b"ORIGINAL\n"
+    );
+    assert!(!svc.mount.root.join("notes/new.md").exists());
+}
+
+#[test]
+fn overwrite_preserves_file_ancestors_excluded_from_the_wipe() {
+    for ancestor in ["notes/data.txt", ".github/old.md"] {
+        let (_tmp, svc) = setup();
+        svc.write("notes/keep.md", "ORIGINAL\n", false).unwrap();
+        svc.write(ancestor, "DATA\n", false).unwrap();
+        let json = archive(&entry(&format!("{ancestor}/new.md")));
+        for dry_run in [true, false] {
+            let out = memory_import(&svc, &json, ImportStrategy::Overwrite, dry_run).unwrap();
+            assert!(out.contains("1 errors"), "{out}");
+            assert!(!out.contains("Backup:"), "{out}");
+            assert_eq!(
+                std::fs::read(svc.mount.root.join(ancestor)).unwrap(),
+                b"DATA\n"
+            );
+            assert_eq!(
+                std::fs::read(svc.mount.root.join("notes/keep.md")).unwrap(),
+                b"ORIGINAL\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_overwrite_does_not_treat_file_ancestors_as_cleared() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/old.md", "ORIGINAL\n", false).unwrap();
+    let json = archive(&format!(
+        "{},{}",
+        entry("notes/old.md/new.md"),
+        entry("../escape.md")
+    ));
+    for dry_run in [true, false] {
+        let out = memory_import(&svc, &json, ImportStrategy::Overwrite, dry_run).unwrap();
+        assert!(out.contains("2 errors"), "{out}");
+        assert!(out.contains("0 imported"), "{out}");
+        assert!(!out.contains("Backup:"), "{out}");
+        assert_eq!(
+            std::fs::read(svc.mount.root.join("notes/old.md")).unwrap(),
+            b"ORIGINAL\n"
+        );
+    }
+}
+
+#[test]
+fn overwrite_persists_a_private_recoverable_backup() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/keep.md", "ORIGINAL\n", false).unwrap();
+    let json = archive(&entry("notes/new.md"));
+    let preview = memory_import(&svc, &json, ImportStrategy::Overwrite, true).unwrap();
+    assert!(!preview.contains("Backup:"), "{preview}");
+    let out = memory_import(&svc, &json, ImportStrategy::Overwrite, false).unwrap();
+    assert!(out.contains("1 imported"), "{out}");
+    assert!(out.contains("0 errors"), "{out}");
+    assert!(!svc.mount.root.join("notes/keep.md").exists());
+    let backup = std::path::Path::new(out.split_once("\nBackup: ").unwrap().1);
+    assert_eq!(backup.parent().unwrap(), svc.mount.meta_dir);
+    assert_eq!(
+        std::fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let saved = std::fs::read_to_string(backup).unwrap();
+    let (_recovery_tmp, recovery) = setup();
+    let restored = memory_import(&recovery, &saved, ImportStrategy::SkipExisting, false).unwrap();
+    assert!(restored.contains("0 errors"), "{restored}");
+    assert_eq!(
+        std::fs::read(recovery.mount.root.join("notes/keep.md")).unwrap(),
+        b"ORIGINAL\n"
+    );
+    assert!(!recovery.mount.root.join("notes/new.md").exists());
+    let second = memory_import(&svc, &json, ImportStrategy::Overwrite, false).unwrap();
+    assert_ne!(
+        second.split_once("\nBackup: ").unwrap().1,
+        backup.to_str().unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), saved);
 }

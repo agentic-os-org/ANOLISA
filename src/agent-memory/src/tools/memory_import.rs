@@ -2,8 +2,9 @@
 //! memory store. Supports merge/overwrite/skip-existing strategies.
 
 use std::collections::HashMap;
-use std::os::fd::AsFd;
-use std::path::Path;
+use std::io::Write;
+use std::os::fd::{AsFd, AsRawFd};
+use std::path::{Path, PathBuf};
 
 use crate::audit::AuditEntry;
 use crate::error::{MemoryError, Result};
@@ -169,7 +170,7 @@ pub fn memory_import(
 
     // Pre-pass (own throwaway seen-set): the destructive overwrite wipe may
     // only run for a fully well-formed archive — one whose every entry
-    // passes the path-shape and duplicate checks. A malformed archive
+    // passes the creation-path and duplicate checks. A malformed archive
     // (even partly) skips the wipe; per-entry reporting below still
     // applies, so valid entries import and invalid ones are listed.
     let archive_is_malformed = {
@@ -178,7 +179,15 @@ pub fn memory_import(
             .memories
             .iter()
             .chain(archive.tasks.iter())
-            .any(|mem| check_and_record_entry_path(mem, &mut prepass_seen).is_err())
+            .any(|mem| {
+                check_and_record_entry_path(
+                    svc,
+                    mem,
+                    &mut prepass_seen,
+                    strategy == ImportStrategy::Overwrite,
+                )
+                .is_err()
+            })
     };
     if archive_is_malformed {
         tracing::warn!(
@@ -187,26 +196,44 @@ pub fn memory_import(
         );
     }
 
-    // Handle overwrite strategy: export backup, then remove all existing .md files
-    if strategy == ImportStrategy::Overwrite && !dry_run && !archive_is_malformed {
-        // Best-effort backup: export current state before destructive overwrite.
-        match crate::tools::memory_export::memory_export(
-            svc,
-            &crate::tools::memory_export::ExportFilter::default(),
-        ) {
-            Ok(backup) => {
-                tracing::info!(
-                    "overwrite backup: {} bytes of current memories saved",
-                    backup.len()
-                );
-            }
-            Err(e) => {
-                tracing::warn!("overwrite backup failed: {e}; proceeding without backup");
-            }
-        }
+    let clear_planned = strategy == ImportStrategy::Overwrite && !archive_is_malformed;
+    let backup_path = if clear_planned && !dry_run {
+        let path = (|| -> Result<PathBuf> {
+            let backup = crate::tools::memory_export::memory_export(
+                svc,
+                &crate::tools::memory_export::ExportFilter::default(),
+            )?;
+            let metadata = crate::safe_fs::open_in_root(
+                svc.mount.root_fd.as_fd(),
+                Path::new(svc.mount.meta_dir_name()),
+                nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY,
+                nix::sys::stat::Mode::empty(),
+            )?;
+            // Anchor backup creation to the checked directory, as for atomic writes.
+            let anchored = Path::new("/proc/self/fd").join(metadata.as_raw_fd().to_string());
+            let name = format!("import-backup-{}.json", ulid::Ulid::new());
+            let mut file = tempfile::Builder::new()
+                .prefix(".import-backup-")
+                .tempfile_in(&anchored)?;
+            file.write_all(backup.as_bytes())?;
+            file.as_file().sync_all()?;
+            file.persist_noclobber(anchored.join(&name))
+                .map_err(|e| e.error)?;
+            metadata.sync_all()?;
+            Ok(svc.mount.meta_dir.join(name))
+        })()
+        .map_err(|e| {
+            MemoryError::Other(format!(
+                "overwrite backup failed; existing memories were not cleared: {e}"
+            ))
+        })?;
+        tracing::info!("overwrite backup saved to {}", path.display());
         let removed = remove_all_memories(svc)?;
         tracing::info!("overwrite strategy: removed {removed} existing memories");
-    }
+        Some(path)
+    } else {
+        None
+    };
 
     // One shared seen-set for memories and tasks: both write into the same
     // mount namespace, so a task and a memory with the same path collide on
@@ -215,7 +242,7 @@ pub fn memory_import(
 
     // Import memories
     for mem in &archive.memories {
-        match import_single(svc, mem, strategy, dry_run, &mut seen_paths) {
+        match import_single(svc, mem, strategy, dry_run, clear_planned, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
@@ -234,7 +261,7 @@ pub fn memory_import(
 
     // Import tasks
     for task in &archive.tasks {
-        match import_single(svc, task, strategy, dry_run, &mut seen_paths) {
+        match import_single(svc, task, strategy, dry_run, clear_planned, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
@@ -252,13 +279,16 @@ pub fn memory_import(
     }
 
     let prefix = if dry_run { "[DRY RUN] " } else { "" };
-    let summary = format!(
+    let mut summary = format!(
         "{prefix}import complete: {} imported, {} overwritten, {} skipped, {} errors",
         report.imported,
         report.overwritten,
         report.skipped,
         report.errors.len()
     );
+    if let Some(path) = backup_path {
+        summary.push_str(&format!("\nBackup: {}", path.display()));
+    }
 
     if !report.errors.is_empty() {
         tracing::warn!("import errors: {:?}", report.errors);
@@ -293,7 +323,7 @@ enum ImportAction {
     Skipped,
 }
 
-/// Validate one archive entry before it is written.
+/// Validate and resolve one archive entry before the wipe or a write.
 ///
 /// The AMA format only ever contains markdown memory paths: `mem_export`
 /// filters its walk to `.md` files and `ExportedMemory::path` is documented
@@ -303,9 +333,11 @@ enum ImportAction {
 /// files (the append-only fact log, the generated index) with reconstructed
 /// markdown.
 fn check_and_record_entry_path(
+    svc: &MemoryService,
     mem: &ExportedMemory,
     seen: &mut std::collections::HashSet<String>,
-) -> Result<String> {
+    clearing: bool,
+) -> Result<PathBuf> {
     if mem.path.is_empty() {
         return Err(MemoryError::InvalidArgument(
             "archive entry has an empty path".into(),
@@ -333,7 +365,28 @@ fn check_and_record_entry_path(
             mem.path
         )));
     }
-    Ok(normalized)
+    // Use the same safety checks before the destructive wipe and each write.
+    let target = crate::ns::paths::resolve_for_create(&svc.mount, &normalized)?;
+    let mut probe = PathBuf::new();
+    for component in Path::new(&normalized).components() {
+        probe.push(component);
+        match crate::safe_fs::metadata(svc.mount.root_fd.as_fd(), &probe) {
+            Ok(metadata) => {
+                // A regular Markdown ancestor will become available as a directory
+                // after the wipe. Match its .git* exclusion, including .github.
+                if clearing
+                    && metadata.is_file()
+                    && probe.extension().and_then(|e| e.to_str()) == Some("md")
+                    && !normalized.starts_with(".git")
+                {
+                    break;
+                }
+            }
+            Err(MemoryError::NotFound(_)) => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(target)
 }
 
 fn import_single(
@@ -341,14 +394,10 @@ fn import_single(
     mem: &ExportedMemory,
     strategy: ImportStrategy,
     dry_run: bool,
+    clear_planned: bool,
     seen: &mut std::collections::HashSet<String>,
 ) -> Result<ImportAction> {
-    let path = check_and_record_entry_path(mem, seen)?;
-
-    // Security: use ns::paths::resolve_for_create to prevent path traversal
-    // and enforce reserved-segment checks (.anolisa, .git*, etc.) — on the
-    // normalized path, so trailing-slash spellings resolve to the file.
-    let target_path = crate::ns::paths::resolve_for_create(&svc.mount, &path)?;
+    let target_path = check_and_record_entry_path(svc, mem, seen, dry_run && clear_planned)?;
 
     let exists = target_path.exists();
 
