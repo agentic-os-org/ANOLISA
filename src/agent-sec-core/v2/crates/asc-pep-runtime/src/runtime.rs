@@ -515,6 +515,26 @@ fn verify_ceiling(
             ));
         }
     }
+    for denied in requested
+        .filesystem
+        .rules
+        .iter()
+        .filter(|rule| rule.effect == RuleEffect::Deny)
+    {
+        // Logical default-deny equivalence does not preserve hardlink checks.
+        if !denied.rights.iter().all(|right| {
+            effective.filesystem.rules.iter().any(|rule| {
+                rule.effect == RuleEffect::Deny
+                    && rule.path == denied.path
+                    && (rule.rights.contains(right) || rule.rights.contains(&FileRight::Read))
+            })
+        }) {
+            return Err(PepError::Authorization(format!(
+                "effective permissions removed requested exclusion at {}",
+                denied.path
+            )));
+        }
+    }
     let kinds: BTreeMap<_, _> = facts
         .iter()
         .map(|fact| (fact.canonical_path.as_str(), fact.is_directory))
