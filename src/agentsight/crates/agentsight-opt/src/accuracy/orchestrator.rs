@@ -198,9 +198,18 @@ fn recovered_later(
     calls: &[crate::types::ToolCallRecord],
     errored: &crate::types::ToolCallRecord,
 ) -> bool {
+    // `cmd` is a ~50-character display preview. Two Bash commands that share
+    // that prefix are not the same command, and Bash records no separate
+    // target, so recovery must compare complete execution evidence when the
+    // record carries it. Legacy records without it keep the preview fallback.
+    let errored_command = errored.execution_command();
     calls.iter().any(|c| {
+        let same_command = match (c.execution_command(), &errored_command) {
+            (Some(candidate), Some(errored)) => candidate == *errored,
+            _ => c.cmd == errored.cmd,
+        };
         c.name == errored.name
-            && c.cmd == errored.cmd
+            && same_command
             && c.target == errored.target
             && c.start > errored.start
             && !c.err
@@ -324,6 +333,27 @@ mod tests {
             make_call("Bash", "git clone url1", 20.0, false), // same cmd → recovered
         ];
         assert!(recovered_later(&calls2, &calls2[0]));
+    }
+
+    /// `cmd` is a ~50-character preview; Bash has no separate `target`, so
+    /// two different long commands sharing that prefix used to count as
+    /// "recovered" and flipped a real failure to `internal-lead`.
+    #[test]
+    fn recovered_matches_the_full_command_not_the_truncated_preview() {
+        let preview = r#"{"command":"cargo test --workspace --all-features …"#;
+        let mut failed = make_call("Bash", preview, 10.0, true);
+        failed.command = Some("cargo test --workspace --all-features --test alpha".to_string());
+        let mut different = make_call("Bash", preview, 20.0, false);
+        different.command = Some("cargo test --workspace --all-features --test beta".to_string());
+
+        assert!(
+            !recovered_later(&[failed.clone(), different.clone()], &failed),
+            "a different command sharing the preview must not count as recovery"
+        );
+
+        let mut same = different;
+        same.command = failed.command.clone();
+        assert!(recovered_later(&[failed.clone(), same], &failed));
     }
 
     fn recorded_file_issue(first_target: &str, second_target: &str) -> AccIssue {
