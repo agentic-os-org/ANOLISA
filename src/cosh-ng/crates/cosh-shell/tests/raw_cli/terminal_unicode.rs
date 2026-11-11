@@ -1,5 +1,3 @@
-#![cfg(target_os = "linux")]
-
 use super::support::terminal_screen::TerminalSession;
 
 const COLS: u16 = 24;
