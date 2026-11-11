@@ -95,8 +95,19 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    #[cfg(test)]
     pub(crate) fn new(
         bytes: Vec<u8>,
+        directory: &Path,
+        stopped: Arc<AtomicBool>,
+    ) -> Result<Arc<Self>> {
+        let configuration = aw_config::Validator::new()?.parse(&bytes)?;
+        Self::from_configuration(bytes, &configuration, directory, stopped)
+    }
+
+    pub(crate) fn from_configuration(
+        bytes: Vec<u8>,
+        configuration: &aw_config::Configuration,
         directory: &Path,
         stopped: Arc<AtomicBool>,
     ) -> Result<Arc<Self>> {
@@ -108,8 +119,8 @@ impl Runtime {
             AdmissionError::Configuration(error) => error.into(),
             AdmissionError::Rejected(_) => rejected("binding_preflight"),
         })?;
-        let contexts = evidence::Contexts::new(&bytes)?;
-        let limits = limits::Limits::parse(&bytes)?;
+        let contexts = evidence::Contexts::new(configuration)?;
+        let limits = limits::Limits::from_configuration(configuration)?;
         Ok(Arc::new(Self {
             contexts,
             limits,

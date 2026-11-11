@@ -63,6 +63,20 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 字面量版本，避免为版本探测加载 QwenPaw App 配置。自定义入口和动态版本继续使用
 原生 `--version`，共用五秒预算。App 启动、原生 Hook 安装与就绪检查继续使用原命令。
 
+## 分开统计 HTTP 启动与首个受保护操作
+
+分别统计启动到 HTTP、HTTP 到 Agent 就绪，以及首个 Hook 的延迟。HTTP 监听可以早于
+Agent 和插件启动完成，监听可用本身不代表已经能够处理受保护请求。
+
+部署使用 [sec-core 首用等待](../providers/sec-core.md#重叠后端与-agent-启动)时，
+外部 supervisor 可以解除 App 启动对后端健康的前置依赖。CPU 受限的容器可在 HTTP
+可用后启动扫描预热，减少与 App 前期导入争抢 CPU，也可在首用时初始化能力。
+只预热活动策略引用的能力。HTTP 启动由此独立于后端就绪；必需 Hook 安装、策略准入
+和实际检查仍在受保护模型请求或工具操作前完成。按该里程碑启动后端或预热由 supervisor
+负责，`aw run` 不调度或管理这些外部进程。
+如果 App 初始化本身会触发受保护操作，应独立启动后端，避免该操作等待后端、后端又
+等待 HTTP 的循环依赖。此时只后置主动扫描预热，首次实际检查仍初始化所需能力。
+
 ## 保留原生 App 启动命令
 
 已在独立 Python 环境中初始化 QwenPaw 时，可以一次安装 AW 启动模块，然后重启 App。

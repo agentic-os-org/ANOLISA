@@ -153,7 +153,7 @@ impl Observation {
             match projected {
                 Ok(value) => {
                     aw_contracts::evidence::validate_context(
-                        &runtime.contexts.registry,
+                        runtime.contexts.registry,
                         &value,
                         &seed.subject,
                         seed.candidate["digest"]

@@ -67,8 +67,9 @@ impl Server {
             }
         }
         let endpoint = Endpoint::bind(state_dir)?;
-        let runtime = Runtime::new(
+        let runtime = Runtime::from_configuration(
             bytes,
+            &configuration,
             &state_dir.join("journal"),
             Arc::new(AtomicBool::new(false)),
         )?;

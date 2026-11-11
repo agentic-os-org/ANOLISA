@@ -396,6 +396,12 @@ supplied runtime directory must already be private and owned by the current user
 The path uses a shortened revision to fit a Unix socket; reuse still verifies
 the entire configuration revision.
 
+The service validates its startup document once and passes that immutable
+configuration to resource-limit and evidence-source initialization. Evidence
+validation and public audit projection share the same process-wide compiled
+contract registry. New bindings and policy updates retain their own document
+validation and Provider admission; no readiness or policy result is cached.
+
 Startup holds a private per-state lock and writes an immutable configuration
 snapshot. A new service runs in a separate session with null stdin/stdout and a
 private stderr log. Existing services are reused only after identity and audit

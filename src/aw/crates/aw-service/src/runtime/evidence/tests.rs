@@ -6,10 +6,17 @@ use std::collections::BTreeMap;
 
 #[test]
 fn delayed_query_cannot_reclaim_a_released_instance_session() {
-    let mut contexts = Contexts::new(include_bytes!(
-        "../../../../aw-config/examples/aw.minimal.yaml"
-    ))
-    .unwrap();
+    let configuration = aw_config::Validator::new()
+        .unwrap()
+        .parse(include_bytes!(
+            "../../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap();
+    let mut contexts = Contexts::new(&configuration).unwrap();
+    assert!(std::ptr::eq(
+        contexts.registry,
+        crate::public_projection::registry().unwrap()
+    ));
     contexts.sources.insert(
         "qoder".into(),
         Settings {

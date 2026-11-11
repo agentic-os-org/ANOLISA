@@ -35,8 +35,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
-        let config = aw_config::Validator::new()?.parse(bytes)?;
+    pub(super) fn from_configuration(config: &aw_config::Configuration) -> Result<Self> {
         let mut value = config.as_value()["spec"]["daemon"]["limits"].clone();
         if value.is_null() {
             return Ok(Self::default());
@@ -129,7 +128,11 @@ mod tests {
                 "bindings":number, "events":number, "calls":number,
                 "connections":number, "invocations_per_binding":number
             });
-            let limits = Limits::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+            let config = aw_config::Validator::new()
+                .unwrap()
+                .parse(&serde_json::to_vec(&document).unwrap())
+                .unwrap();
+            let limits = Limits::from_configuration(&config).unwrap();
             assert_eq!(limits.bindings, number as usize);
             assert_eq!(limits.events, number as usize);
             assert_eq!(limits.calls, number as usize);
