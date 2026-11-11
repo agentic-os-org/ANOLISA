@@ -173,3 +173,17 @@ class TestStreamPaths:
     def test_stream_names_reject_path_traversal(self) -> None:
         with pytest.raises(ValueError):
             get_stream_log_path("../observability")
+
+    @pytest.mark.parametrize(
+        "name",
+        ["observability\n", "observability\r\n", "\nobservability", "obs\nervability"],
+    )
+    def test_stream_names_reject_newlines(self, name: str) -> None:
+        with pytest.raises(ValueError):
+            get_stream_log_path(name)
+        with pytest.raises(ValueError):
+            get_stream_db_path(name)
+        with pytest.raises(ValueError):
+            get_log_path(name)
+        with pytest.raises(ValueError):
+            get_db_path(name)

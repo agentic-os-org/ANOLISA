@@ -8,7 +8,7 @@ from pathlib import Path
 PRIMARY_LOG_PATH = "/var/log/agent-sec/security-events.jsonl"
 FALLBACK_LOG_PATH = str(Path.home() / ".agent-sec-core" / "security-events.jsonl")
 DEFAULT_SECURITY_STREAM = "security-events"
-_STREAM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_STREAM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 def _safe_tmp_dir() -> Path:
@@ -78,7 +78,8 @@ def get_data_dir() -> Path:
 
 def _validate_stream_name(stream: str) -> str:
     """Validate a logical local-event stream name."""
-    if not _STREAM_NAME_RE.match(stream):
+    # fullmatch: "$" with .match() also accepts a trailing "\n".
+    if not _STREAM_NAME_RE.fullmatch(stream):
         raise ValueError(f"Invalid stream name: {stream!r}")
     return stream
 
