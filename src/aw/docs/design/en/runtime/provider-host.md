@@ -48,6 +48,9 @@ Preparation separates pure Core admission from Provider process discovery:
 Standalone callers can also call
 `Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`,
 which delegates to the same four steps.
+`Protocol::new` shares the compiled immutable bundled schemas within a process.
+Each Host retains its own policy, Provider discovery evidence, package leases
+and execution context; every request and reply is validated and correlated.
 `bytes` is the complete configuration document; its exact bytes determine the
 SHA-256 revision retained in every call. `target` selects a configured Agent.
 The caller supplies `AdapterCapabilities` for the actual version and entrypoint;

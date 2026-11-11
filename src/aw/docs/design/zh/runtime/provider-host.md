@@ -42,6 +42,8 @@ Core 的最终执行约束。
 独立调用方也可直接调用
 `Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`，内部
 委托上述四个步骤。
+`Protocol::new` 在进程内共享已编译的不可变内置 schema。各 Host 独立保留策略、
+Provider 发现证据、安装文件锁和执行上下文；每次请求与响应仍分别校验并核对关联。
 `bytes` 是完整配置文档；每次调用保留的 SHA-256 修订摘要由这些原始字节确定。
 `target` 选择配置中的 Agent。调用方提供实际版本及入口对应的
 `AdapterCapabilities`，Provider 声明不能提供或扩展这份可信证据。
