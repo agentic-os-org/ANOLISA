@@ -19,6 +19,12 @@ Agent, Skill, session, `active_model`, and output-language preferences, but
 `agent.approval_mode`, `agent.allowed_tools`, and project audit settings are
 ignored. `cosh-shell` reads the user file, not the system or project file.
 
+ECS automatic access (`aliyun` with `auth_source = "ecs_identity"`) always uses
+the fixed model `auto`. Neither `active_model` nor provider `model` settings can
+change it, and project models are never saved by selecting this access method.
+Use `/auth` to configure another provider when you want to choose a model;
+automatic ECS access does not require `/auth` first.
+
 ## Minimal user configuration
 
 ```toml

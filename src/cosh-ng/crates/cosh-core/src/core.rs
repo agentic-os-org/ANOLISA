@@ -124,10 +124,6 @@ impl CoshCore {
         self.session_resumed = resumed;
     }
 
-    pub(crate) fn is_session_resumed(&self) -> bool {
-        self.session_resumed
-    }
-
     pub(crate) fn use_one_shot_approval_timeout(&mut self) {
         self.approval_response_timeout_default =
             Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_ONE_SHOT_DEFAULT_SECS);

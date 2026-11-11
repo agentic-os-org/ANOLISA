@@ -2,25 +2,26 @@ use super::*;
 use crate::auth::trial_policy::{self, ProviderIntent, TrialDecision};
 use crate::config::ProviderConfig;
 
-use trial_policy::DEFAULT_MODEL;
-
-fn is_identity(provider: &ProviderConfig) -> bool {
-    provider.provider_type.as_deref() == Some("aliyun")
-        && provider.auth_source.as_deref() == Some("ecs_identity")
-}
+use trial_policy::MODEL;
 
 fn saved_provider(config: &CoreConfig) -> Option<&str> {
     config
         .ai
         .active_provider
         .as_deref()
-        .filter(|name| config.ai.providers.get(*name).is_some_and(is_identity))
+        .filter(|name| {
+            config
+                .ai
+                .providers
+                .get(*name)
+                .is_some_and(ProviderConfig::is_ecs_identity)
+        })
         .or_else(|| {
             config
                 .ai
                 .providers
                 .iter()
-                .filter_map(|(name, provider)| is_identity(provider).then_some(name.as_str()))
+                .filter_map(|(name, provider)| provider.is_ecs_identity().then_some(name.as_str()))
                 .min()
         })
 }
@@ -50,15 +51,7 @@ pub(super) fn state(config: &CoreConfig, available: bool, auto_use: bool) -> Val
         && trial_policy::decide(config, &ProviderIntent::from_env(), true, true, auto_use)
             == TrialDecision::EcsIdentity;
     let provider_id = saved_provider(config);
-    let model = if active {
-        trial_policy::model(config)
-    } else {
-        provider_id
-            .and_then(|id| config.ai.providers.get(id))
-            .and_then(|provider| provider.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.into())
-    };
-    serde_json::json!({"available":available,"active":active,"model":model,"provider_id":provider_id})
+    serde_json::json!({"available":available,"active":active,"model":MODEL,"provider_id":provider_id})
 }
 
 async fn save_preference(value: bool) -> Result<(), String> {
@@ -94,11 +87,7 @@ pub(super) async fn activate(
             Err(_) => return error(request_id, "trial_preferences_worker"),
         };
     let mut candidate = config.clone();
-    let current_model = (selected
-        .is_none_or(|id| config.ai.active_provider.as_deref() == Some(id))
-        && trial_policy::decide(config, &ProviderIntent::from_env(), true, true, true)
-            == TrialDecision::EcsIdentity)
-        .then(|| trial_policy::model(config));
+    let model = MODEL.to_string();
     let provider_id = selected
         .or_else(|| saved_provider(config))
         .map(str::to_string)
@@ -115,11 +104,7 @@ pub(super) async fn activate(
         let provider = ProviderConfig {
             provider_type: Some("aliyun".into()),
             auth_source: Some("ecs_identity".into()),
-            model: Some(
-                current_model
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_MODEL.into()),
-            ),
+            model: Some(model.clone()),
             ..Default::default()
         };
         candidate
@@ -131,15 +116,11 @@ pub(super) async fn activate(
             .providers
             .insert(provider_id.clone(), provider);
     }
-    let model = current_model
-        .or_else(|| candidate.ai.providers[&provider_id].model.clone())
-        .unwrap_or_else(|| DEFAULT_MODEL.into());
     if let Some(provider) = candidate.user_ai.providers.get_mut(&provider_id) {
         provider.model = Some(model.clone());
-        candidate
-            .ai
-            .providers
-            .insert(provider_id.clone(), provider.clone());
+    }
+    if let Some(provider) = candidate.ai.providers.get_mut(&provider_id) {
+        provider.model = Some(model.clone());
     }
     candidate.ai.active_provider = Some(provider_id.clone());
     candidate.user_ai.active_provider = Some(provider_id.clone());
