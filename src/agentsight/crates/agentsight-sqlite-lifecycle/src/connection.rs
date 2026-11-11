@@ -36,6 +36,22 @@ impl Default for ConnectionOptions {
     }
 }
 
+/// Backoff for the one-time journal-mode conversion.
+///
+/// SQLite rejects `PRAGMA journal_mode=WAL` with `SQLITE_BUSY` while another
+/// connection holds the schema lock, and the busy timeout does not cover this
+/// schema-level operation. Retrying past a short-lived writer keeps a
+/// concurrent trace/serve startup from losing its store.
+const WAL_CONVERSION_BACKOFF: [Duration; 7] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(320),
+    Duration::from_millis(640),
+];
+
 /// Opens a SQLite database with explicit lifecycle behavior.
 ///
 /// # Errors
@@ -74,7 +90,14 @@ pub fn open_connection(
 
     connection.busy_timeout(options.busy_timeout)?;
     if options.enable_wal && options.mode != ConnectionMode::ReadOnlyExisting {
-        connection.execute_batch("PRAGMA journal_mode=WAL;")?;
+        retry_with_backoff(
+            || {
+                connection
+                    .execute_batch("PRAGMA journal_mode=WAL;")
+                    .map_err(LifecycleError::from)
+            },
+            &WAL_CONVERSION_BACKOFF,
+        )?;
     }
 
     Ok(connection)
@@ -255,6 +278,46 @@ mod tests {
 
         drop(connection);
         fs::remove_file(path).unwrap();
+    }
+
+    /// Converting a fresh database to WAL takes a schema-level write lock. A
+    /// second process opening the same database at that moment used to lose
+    /// the store with SQLITE_BUSY even though the holder released it shortly
+    /// after; the open must retry transient lock contention.
+    #[test]
+    fn wal_conversion_retries_while_another_connection_holds_a_write_lock() {
+        let path = test_path("wal-retry");
+        let options = |enable_wal| ConnectionOptions {
+            enable_wal,
+            busy_timeout: Duration::from_millis(20),
+            ..ConnectionOptions::default()
+        };
+        let setup = open_connection(&path, options(false)).unwrap();
+        setup
+            .execute_batch("CREATE TABLE records (value INTEGER); INSERT INTO records VALUES (1);")
+            .unwrap();
+        drop(setup);
+
+        let holder = open_connection(&path, options(false)).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            holder.execute_batch("COMMIT;").unwrap();
+        });
+
+        let result = open_connection(&path, options(true));
+        release.join().unwrap();
+
+        let connection = result.expect("a transient writer must not fail the open");
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+
+        drop(connection);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]
