@@ -167,7 +167,11 @@ def test_cosh_sandbox_view_matches_hook_switch(monkeypatch, raw, expected):
         assert helper.all_shell_enabled() == expected
     assert record.env[name]["effective"] == expected
     assert record.env[name]["default"] is False
-    assert set(record.env) == {name}
+    assert set(record.env) == {
+        name,
+        "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE",
+        "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS",
+    }
     assert record.mode == (
         "blocked" if expected == "invalid" else "all-shell" if expected else "dangerous"
     )
@@ -175,6 +179,20 @@ def test_cosh_sandbox_view_matches_hook_switch(monkeypatch, raw, expected):
     assert [
         item.agent for item in query_capabilities(capability="sandbox", env={})
     ] == ["cosh"]
+
+
+@pytest.mark.parametrize("source", [None, "command", " COMMAND ", ""])
+def test_cosh_command_permission_inputs_keep_literal_values(source: str | None) -> None:
+    name = "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE"
+    preset = "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS"
+    env = {preset: "/Run time/Runtime.Cedar"}
+    if source is not None:
+        env[name] = source
+    record = _single_record("cosh", "sandbox", env)
+    assert record.env[name]["effective"] == ("fixed" if source is None else source)
+    assert record.env[name]["default"] == "fixed"
+    assert record.env[preset]["effective"] == env[preset]
+    assert record.env[preset]["default"] == ""
 
 
 @pytest.mark.parametrize(

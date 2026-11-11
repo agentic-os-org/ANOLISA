@@ -41,6 +41,8 @@ def setup(monkeypatch):
     monkeypatch.setitem(sys.modules, "sandbox_paths", paths)
     monkeypatch.setenv("COSH_HOOK_EMPTY_OUTPUT_POLICY", "block")
     monkeypatch.delenv(bridge.ALL_SHELL_ENV, raising=False)
+    monkeypatch.delenv(bridge.SOURCE_ENV, raising=False)
+    monkeypatch.delenv(bridge.RUNTIME_ENV, raising=False)
     monkeypatch.delenv("AGENT_SEC_DAEMON_SOCKET", raising=False)
     monkeypatch.setattr(bridge.shutil, "which", lambda _: "/usr/bin/agent-sec-cli")
 
@@ -146,6 +148,8 @@ def test_authorization_preserves_native_decision_without_executing(
         "prepare",
         "--permissions",
         paths.DEFAULT_PERMISSIONS_TEMPLATE,
+        "--timeout-ms",
+        "5000",
     ]
     assert json.loads(calls[0][1]["input"])["tool_input"]["command"] == "rm -rf cache"
     assert len(calls) == 1
@@ -194,6 +198,8 @@ def test_post_tool_receipt_does_not_run_target(monkeypatch):
             "hook",
             "finish",
             "id-1",
+            "--timeout-ms",
+            "8000",
         ]
     ]
     assert bridge.finish_authorized({"tool_input": {"command": "echo ordinary"}}) == {}
@@ -513,7 +519,10 @@ def test_removed_permission_variable_cannot_override_template(monkeypatch):
         or SimpleNamespace(returncode=1, stdout="", stderr="missing template"),
     )
     result = bridge.prepare_authorized({}, "sudo python3 skill.py")
-    assert calls[0][-1] == paths.DEFAULT_PERMISSIONS_TEMPLATE
+    assert (
+        calls[0][calls[0].index("--permissions") + 1]
+        == paths.DEFAULT_PERMISSIONS_TEMPLATE
+    )
     assert result["decision"] == "block"
 
 

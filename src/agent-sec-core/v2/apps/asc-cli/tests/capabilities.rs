@@ -86,7 +86,7 @@ fn sandbox_view_is_cosh_only_and_rejects_ambiguous_switches() {
         let record = &payload[0];
         assert_eq!(record["agent"], "cosh");
         assert_eq!(record["mode"], mode);
-        assert_eq!(record["env"].as_object().unwrap().len(), 1);
+        assert_eq!(record["env"].as_object().unwrap().len(), 3);
         assert_eq!(
             record["env"]["AGENT_SEC_COSH_SANDBOX_ALL_SHELL"]["effective"],
             effective
@@ -95,6 +95,28 @@ fn sandbox_view_is_cosh_only_and_rejects_ambiguous_switches() {
             record["env"]["AGENT_SEC_COSH_SANDBOX_ALL_SHELL"]["default"],
             false
         );
+    }
+}
+
+#[test]
+fn command_permission_inputs_keep_literal_values() {
+    let source = "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE";
+    let preset = "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS";
+    for raw in [None, Some("command"), Some(" COMMAND "), Some("")] {
+        let mut env = environment(&[(preset, "/Run time/Runtime.Cedar")]);
+        if let Some(value) = raw {
+            env.insert(source.into(), value.into());
+        }
+        let records = query(&env, Some("cosh"), Some("sandbox")).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&records).unwrap()).unwrap();
+        assert_eq!(value[0]["env"][source]["effective"], raw.unwrap_or("fixed"));
+        assert_eq!(value[0]["env"][source]["default"], "fixed");
+        assert_eq!(
+            value[0]["env"][preset]["effective"],
+            "/Run time/Runtime.Cedar"
+        );
+        assert_eq!(value[0]["env"][preset]["default"], "");
     }
 }
 

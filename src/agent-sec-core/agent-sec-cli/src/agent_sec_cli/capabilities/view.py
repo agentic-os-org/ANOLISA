@@ -362,7 +362,13 @@ AGENT_SPECS: dict[str, dict[str, CapabilitySpec]] = {
 }
 AGENT_SPECS["cosh"]["sandbox"] = CapabilitySpec(
     ("PreToolUse:run_shell_command|shell", "PostToolUse:run_shell_command|shell"),
-    (EnvSpec("AGENT_SEC_COSH_SANDBOX_ALL_SHELL", False, bool_style="fail_closed"),),
+    (
+        EnvSpec("AGENT_SEC_COSH_SANDBOX_ALL_SHELL", False, bool_style="fail_closed"),
+        EnvSpec(
+            "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE", "fixed", value_kind="literal"
+        ),
+        EnvSpec("AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS", "", value_kind="literal"),
+    ),
     "dangerous",
 )
 AGENT_SPECS["cosh"]["skill-ledger"] = CapabilitySpec(
@@ -602,6 +608,8 @@ def _resolve_env(
             engine_default, known = _engine_l2_backends()
             default = engine_default or spec.default
             effective = _resolve_identifier(spec, raw, default, known, diagnostics)
+        elif spec.value_kind == "literal":
+            effective = raw if raw is not None else spec.default
         elif raw is None:
             effective = spec.default
         else:

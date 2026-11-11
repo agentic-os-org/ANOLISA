@@ -1,0 +1,2929 @@
+{
+  "format_version": "asc.cosh.command_permissions.acceptance.v2",
+  "date": "2026-11-13",
+  "environment": "ECS-alinux-test-agentOS; isolated mount/PID namespace; synthetic data only",
+  "source": {
+    "base": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+    "integration_commit_for_matching_runtime": "704ba746cb26a670e0f1256c158b2ee557c4fecf",
+    "build_input": "Frozen working tree over base, including uncommitted integration; not base alone. Packaging fixture and harness were transferred afterward; neither changes runtime binary bytes.",
+    "runtime_source_tree_sha256": "fea04a21a64830b5df513dcba9c9bcb7943e832dfa6fb260badc01428970cff3",
+    "runtime_archive_sha256": "628b51d8b9959dc0f36bf83a68cf4b3a6a18eaef215b214fe5b6527a6aec08fb",
+    "clean_host_archive_sha256": "f9fcd3729344f08874cbf1a9d10196d0e5bc51d347fc8fc54bc1d5a09b1a3367",
+    "changed_files_sha256": {
+      "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/capabilities/view.py": "c7b247aed84943c0dcffaabc39afdb5f0510573c1f95d7dbef07a2076c9958c7",
+      "src/agent-sec-core/cosh-extension/hooks/sandbox_authorization.py": "5722a18dc81ae83329c7e66e484a7564454f7604d052745a92d6c137d2965e1c",
+      "src/agent-sec-core/tests/e2e/cli/test_capabilities_e2e.py": "6ce50fecbb09e7e5d6682192839950556ce70c449a62341e5f1ae8f55f8577a3",
+      "src/agent-sec-core/tests/packaging/test-package-raw.sh": "cf1b17dcec76d21485c70c8be36e70e2138f33c3a7a20c9dfa5077ee0083d9a5",
+      "src/agent-sec-core/tests/unit-test/capabilities/test_view.py": "59728098d17ce9291e4c3e1c225cc2b5a9c30187396bd4d470437ddf87249e37",
+      "src/agent-sec-core/tests/unit-test/cosh_hooks/test_sandbox_authorization.py": "1a5e07c7d272d4494533508b8ecf5708ad602419a6463a8aee406854a7a110e6",
+      "src/agent-sec-core/tests/unit-test/cosh_hooks/test_sandbox_command_permissions.py": "3299e66c7f33c0ff1469809314bb3075a49eaa987017328b99437fd471cfcc94",
+      "src/agent-sec-core/v2/apps/asc-cli/src/capabilities/manifest.rs": "272561442d19dc7799b106577c4e0bc59f129e6be63382e91262510ec6e7ab30",
+      "src/agent-sec-core/v2/apps/asc-cli/src/capabilities/resolve.rs": "3101910c1f658a0bebf69f0b13fc50f99bb48d79cfb3f96567c03e17eb7fdeda",
+      "src/agent-sec-core/v2/apps/asc-cli/src/sandbox/hook.rs": "4f9cbdb708f779fed2ca93769bb02b8d4859682aeab6fa2d281a22f78772772e",
+      "src/agent-sec-core/v2/apps/asc-cli/tests/capabilities.rs": "0a340ce21e924748f5c4392f5bf6e3c4a59b06d9e97c05a54953f28a51a6a29b",
+      "src/agent-sec-core/v2/crates/asc-pep-runtime/src/permissions.rs": "dc0b230daa533c948f8987dd8a6d5868a5f4bf48e3ab8cb087bf876a568628e0",
+      "src/agent-sec-core/v2/crates/asc-pep-runtime/tests/permission_input.rs": "7bc5c39f70ea3fffe09c2ec9e964a430fc4c99f521095043e78c28e9c8ee835d",
+      "src/agent-sec-core/tests/e2e/linux-sandbox/command_permissions_host.py": "ad2bdc4cfbd539df188f370dfd1fddc6adf4cd04b808e25390eee851eb3b721b"
+    },
+    "cargo_locks_sha256": {
+      "src/agent-sec-core/v2/Cargo.lock": "a51244ac79d3c7a119b9b6787425347e0cfc5bbe42423dc3510ddb4729bdbed8",
+      "src/cosh-ng/Cargo.lock": "161ee95aaac607d4aa071a13ef42906e0d1d30009ce1265b53cc94f459dafc87",
+      "src/agent-sec-core/linux-sandbox/Cargo.lock": "57ca8331b9f56de05683ea2d07681551f71bf7454376641e43edf5dcbdee153d"
+    },
+    "runtime_matches_final_committed_files": true,
+    "full_manifests": {
+      "host-source-identity.json": "fb36c37123cf6fbb6f698155e053fe299176faa83a3b5cb1a8b3b7524b5bc7ce",
+      "sec-core-final-identity.json": "27dc44932bd002279f141bfbed8a15c23f6111316b6946472d03afb4ceef4a61"
+    }
+  },
+  "versions": {
+    "platform": "Linux-6.6.102-6.alnx4.x86_64-x86_64-with-glibc2.38",
+    "python": "3.11.6",
+    "rustc": "1.93.0",
+    "cosh": "0.29.1",
+    "sec_core": "1.2.1",
+    "cedar_policy": "4.14.0",
+    "linux_sandbox": "0.0.0"
+  },
+  "build_profile": {
+    "cargo": "1.93.0",
+    "locked": true,
+    "offline": true,
+    "jobs": 2,
+    "debug": 0,
+    "incremental": false,
+    "strip": "symbols",
+    "helper": "static; no ELF interpreter or NEEDED entries"
+  },
+  "artifacts": [
+    {
+      "name": "cosh-core",
+      "sha256": "e3f3bc0696577ddbbccdf70a4192e480323be1a093d9f2e9153d615baedaa932",
+      "bytes": 67474584,
+      "source_head": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+      "source_basis": {
+        "commit": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+        "clean": true
+      }
+    },
+    {
+      "name": "cosh-shell",
+      "sha256": "cbe4e2c3c482e0be5cc0955d43ce2c6609aad62bfe224388d0839b98b6215214",
+      "bytes": 25378240,
+      "source_head": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+      "source_basis": {
+        "commit": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+        "clean": true
+      }
+    },
+    {
+      "name": "linux-sandbox",
+      "sha256": "2eb9f9f7191a24c6d8e2e6bcafd22977d06a2b2f4e9ae0b45aabd351a4af3489",
+      "bytes": 6106272,
+      "source_head": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+      "source_basis": {
+        "commit": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+        "clean": true
+      }
+    },
+    {
+      "name": "agent-sec-cli",
+      "sha256": "75b1a0419fe4d98a07e4c7140dc709518f3c525ec6a9eaff6ff16bce9a72ce42",
+      "bytes": 27896296,
+      "source_head": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+      "source_basis": {
+        "base": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+        "working_tree_sha256": "fea04a21a64830b5df513dcba9c9bcb7943e832dfa6fb260badc01428970cff3"
+      }
+    },
+    {
+      "name": "agent-sec-daemon",
+      "sha256": "f24523a3b14db7ed64037ae47a6e1e8556333b597a04696e2dd95b6bd85c09f3",
+      "bytes": 48363352,
+      "source_head": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+      "source_basis": {
+        "base": "c8a7af81cf87f959d5b389df9ae65e6c575e1f8b",
+        "working_tree_sha256": "fea04a21a64830b5df513dcba9c9bcb7943e832dfa6fb260badc01428970cff3"
+      }
+    }
+  ],
+  "intent_provider": {
+    "type": "dashscope",
+    "model": "qwen3.7-max",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "credentials": "existing provider read in memory; only daemon environment"
+  },
+  "host_selection": "Local deterministic fixture chooses one shell call; production intent uses existing real HTTPS provider. Autonomous model tool choice is not claimed.",
+  "policy_contract": "All eligible explicit-principal PAP sources; permits union and cross-source forbids win. No task_policy selector.",
+  "authorization_config": {
+    "environment_permissions": {
+      "version": 1,
+      "filesystem": {
+        "default": "deny",
+        "rules": [
+          {
+            "effect": "allow",
+            "path": "/",
+            "rights": [
+              "read",
+              "write"
+            ]
+          }
+        ]
+      },
+      "execution": {
+        "deny_paths": []
+      },
+      "network": {
+        "mode": "off"
+      }
+    },
+    "ttl_seconds": 120
+  },
+  "runtime_preset": "permit(principal, action == SecCore::Action::\"process.spawn\", resource) when { resource.program == \"/bin/bash\" };\npermit(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/\" || resource.path like \"/*\" };\nforbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/.git\" || resource.path like \"/run/asc-dynamic-hook-20261111-b3c6/host/work/.git/*\" };\nforbid(principal, action == SecCore::Action::\"network.use\", resource);\n",
+  "legacy_selector_rejection": {
+    "exit": 1,
+    "stderr": "{\"timestamp\":\"2026-11-13T11:35:07.141927Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"telemetry_ready\",\"elapsed_ms\":0.59715},\"target\":\"asc_observability::diagnostic\"}\n{\"timestamp\":\"2026-11-13T11:35:07.142057Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"runtime_directory\",\"elapsed_ms\":0.7302},\"target\":\"asc_observability::diagnostic\"}\n{\"timestamp\":\"2026-11-13T11:35:07.142155Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"policy_storage\",\"elapsed_ms\":0.829586},\"target\":\"asc_observability::diagnostic\"}\nPolicy database selected path=/run/asc-dynamic-hook-20261111-b3c6/host/audit/policy-state.db\n{\"timestamp\":\"2026-11-13T11:35:07.182126Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"tokio_runtime\",\"elapsed_ms\":40.789133},\"target\":\"asc_observability::diagnostic\"}\n{\"timestamp\":\"2026-11-13T11:35:07.182728Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"socket_cleanup\",\"elapsed_ms\":41.398985},\"target\":\"asc_observability::diagnostic\"}\n{\"timestamp\":\"2026-11-13T11:35:07.182817Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"signals\",\"elapsed_ms\":41.491417000000006},\"target\":\"asc_observability::diagnostic\"}\n{\"timestamp\":\"2026-11-13T11:35:07.182877Z\",\"level\":\"INFO\",\"fields\":{\"reason\":\"startup_stage\",\"stage\":\"authorization_config\",\"elapsed_ms\":41.551692},\"target\":\"asc_observability::diagnostic\"}\nasc-daemon: invalid authorization config JSON: unknown field `task_policy`, expected `environment_permissions` or `ttl_seconds` at line 25 column 15\n  caused by: unknown field `task_policy`, expected `environment_permissions` or `ttl_seconds` at line 25 column 15\n",
+    "status": "PASS"
+  },
+  "cases": [
+    {
+      "case": "allowed",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 5.97,
+      "marker": "once\n",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" };",
+          "caveats": [
+            "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself"
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          }
+        },
+        "response": {
+          "decision_id": "c015dfe3-5797-4fcc-b0be-b9ca7bc4e976",
+          "verdict": "ALLOW",
+          "reason": "the invocation and OS permissions are authorized",
+          "policy_version": "yyWR5YOL4ENZOym-eEJXuPaoBo38csJzOYegmCY_4lA",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "c015dfe3-5797-4fcc-b0be-b9ca7bc4e976"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "c015dfe3-5797-4fcc-b0be-b9ca7bc4e976"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "c015dfe3-5797-4fcc-b0be-b9ca7bc4e976"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "c015dfe3-5797-4fcc-b0be-b9ca7bc4e976",
+          "request_id": "abba2e61-3c7c-4a8f-99ce-882e811bdf6d",
+          "execution_id": "5932de0a-d054-4ee5-bac8-e65739b02eb2",
+          "approval": null,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 0,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569441,
+          "policy_version": "yyWR5YOL4ENZOym-eEJXuPaoBo38csJzOYegmCY_4lA",
+          "request_digest": "db67689cbe7b888eb0a4e5dfaec3b3950e45aedd4d81c4cf043b8adca5a633e1",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "ALLOW",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "[stderr]\nlinux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing\n"
+      ],
+      "caveats": [
+        {
+          "text": "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "attempt": "allowed-attempt-4",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "empty-candidate",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "true",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 2.607,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 3,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "true",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "",
+          "caveats": [
+            "Command 'true' is a shell builtin with no file, process, or network actions; no permissions required."
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          }
+        },
+        "response": {
+          "decision_id": "3274bd35-1d40-4cc2-9f27-e575753d0fe4",
+          "verdict": "ALLOW",
+          "reason": "the invocation and OS permissions are authorized",
+          "policy_version": "N6gML7kVnlvcuOhiJ37_u7MDvW8M7DboveBEX-PW3A8",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "3274bd35-1d40-4cc2-9f27-e575753d0fe4"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "3274bd35-1d40-4cc2-9f27-e575753d0fe4"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "3274bd35-1d40-4cc2-9f27-e575753d0fe4"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "3274bd35-1d40-4cc2-9f27-e575753d0fe4",
+          "request_id": "aa9672b7-ab08-414f-b8df-9dc7615fcf2c",
+          "execution_id": "2a87a486-a5a2-4df9-9364-bcc95d3a6eb5",
+          "approval": null,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 0,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569455,
+          "policy_version": "N6gML7kVnlvcuOhiJ37_u7MDvW8M7DboveBEX-PW3A8",
+          "request_digest": "589bd84ab9aec2e97aa595990214f693443efa6c1e6a68bb161fa83555931507",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "ALLOW",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "(exit code: 0)"
+      ],
+      "caveats": [
+        {
+          "text": "Command 'true' is a shell builtin with no file, process, or network actions; no permissions required.",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "attempt": "empty-candidate-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "fixed",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 0.971,
+      "marker": "once\n",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 5,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": null,
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+                  "rights": [
+                    "read",
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/tmp",
+                  "rights": [
+                    "read",
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/fixed-attempt-1/tmp",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "launch": {
+            "program": "/bin/bash",
+            "resolved_program": "/usr/bin/bash",
+            "args": [
+              "-c",
+              "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker"
+            ],
+            "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+          }
+        },
+        "response": {
+          "decision_id": "52682f9b-0bfe-49b7-a8fe-f81a5acc66f7",
+          "verdict": "ALLOW",
+          "reason": "the invocation and OS permissions are authorized",
+          "policy_version": "kps1BmYiHm-H4Ti13CVz0D_1VGMGVDj03k5zIeZ7ZHo",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/tmp",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/fixed-attempt-1/tmp",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "52682f9b-0bfe-49b7-a8fe-f81a5acc66f7"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "52682f9b-0bfe-49b7-a8fe-f81a5acc66f7"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "52682f9b-0bfe-49b7-a8fe-f81a5acc66f7"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "52682f9b-0bfe-49b7-a8fe-f81a5acc66f7",
+          "request_id": "43002993-d7f2-4b0e-a7b0-02f8ac73e0a0",
+          "execution_id": "0f9004e3-91d5-48c9-8109-6c808896ee4a",
+          "approval": null,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 0,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569756,
+          "policy_version": "kps1BmYiHm-H4Ti13CVz0D_1VGMGVDj03k5zIeZ7ZHo",
+          "request_digest": "e1a2586130ee862111589b198bab584733c5de183ea311e186b4a4b7d4fff8fd",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "ALLOW",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "[stderr]\nlinux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing\n"
+      ],
+      "caveats": [],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "attempt": "fixed-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "fixed",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "intent-clarification",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 0.791,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 5,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": null,
+      "authorization": null,
+      "claim_phases": [],
+      "receipts": [],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "Blocked by hook: Sandbox authorization blocked execution: command needs clarification: Specify the destination"
+      ],
+      "caveats": [],
+      "temporary_cedar_files": [],
+      "fault_injection": "intent-clarification",
+      "attempt": "intent-clarification-attempt-1",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "intent-malformed",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 0.784,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 5,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": null,
+      "authorization": null,
+      "claim_phases": [],
+      "receipts": [],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "Blocked by hook: Sandbox authorization blocked execution: invalid command intent response"
+      ],
+      "caveats": [],
+      "temporary_cedar_files": [],
+      "fault_injection": "intent-malformed",
+      "attempt": "intent-malformed-attempt-1",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "intent-timeout",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 40.819,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 5,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": null,
+      "authorization": null,
+      "claim_phases": [],
+      "receipts": [],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "Blocked by hook: Sandbox authorization blocked execution: Command '['/run/asc-dynamic-hook-20261111-b3c6/host/intent-timeout-attempt-1/bin/agent-sec-cli', '--timeout-ms', '38000', 'intent', 'propose-command', '--command', \"printf 'once\\\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker\", '--cwd', '/run/asc-dynamic-hook-20261111-b3c6/host/work', '--format', 'json']' timed out after 40 seconds"
+      ],
+      "caveats": [],
+      "temporary_cedar_files": [],
+      "fault_injection": "intent-timeout",
+      "attempt": "intent-timeout-attempt-1",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "preset-forbid",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker; printf blocked >> /run/asc-dynamic-hook-20261111-b3c6/host/work/.git/protected",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 4.667,
+      "marker": "once\n",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 3,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker; printf blocked >> /run/asc-dynamic-hook-20261111-b3c6/host/work/.git/protected",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" && context.input.operation == SecCore::WriteOperation::\"write\" };\npermit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/.git/protected\" && context.input.operation == SecCore::WriteOperation::\"write\" };",
+          "caveats": [
+            "printf is a shell builtin; no file.exec or process.spawn emitted for printf itself"
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          }
+        },
+        "response": {
+          "decision_id": "1cf29fbc-13da-4e79-8c2f-f9aa7d7deb49",
+          "verdict": "ALLOW",
+          "reason": "the invocation and OS permissions are authorized",
+          "policy_version": "N6gML7kVnlvcuOhiJ37_u7MDvW8M7DboveBEX-PW3A8",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "1cf29fbc-13da-4e79-8c2f-f9aa7d7deb49"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "1cf29fbc-13da-4e79-8c2f-f9aa7d7deb49"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "1cf29fbc-13da-4e79-8c2f-f9aa7d7deb49"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "1cf29fbc-13da-4e79-8c2f-f9aa7d7deb49",
+          "request_id": "018e5378-0858-47a1-a107-26706bff719a",
+          "execution_id": "1ce85a2f-52ac-41a7-9fd5-beef2dfcc62d",
+          "approval": null,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 1,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569452,
+          "policy_version": "N6gML7kVnlvcuOhiJ37_u7MDvW8M7DboveBEX-PW3A8",
+          "request_digest": "3124becd4d84a3ed44c93ba9b7552f293f93894ef0561827273b37dc7285e803",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "ALLOW",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "[stderr]\nlinux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing\n/bin/bash: line 1: /run/asc-dynamic-hook-20261111-b3c6/host/work/.git/protected: Read-only file system\n"
+      ],
+      "caveats": [
+        {
+          "text": "printf is a shell builtin; no file.exec or process.spawn emitted for printf itself",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "attempt": "preset-forbid-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "sudo-original",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "sudo -n /bin/bash -c 'printf '\"'\"'once\\n'\"'\"' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker'",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 4.737,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 5,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request_keys": [
+          "command",
+          "cwd",
+          "format_version"
+        ],
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "sudo -n /bin/bash -c 'printf '\"'\"'once\\n'\"'\"' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker'",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.exec\", resource is SecCore::File) when { resource.path == \"/bin/bash\" };\npermit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process) when { resource.program == \"bash\" };\npermit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" };",
+          "caveats": [
+            "sudo -n may require additional privileges or policy not represented in this schema",
+            "printf is a shell builtin executed within bash; no separate exec permission needed"
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "launch": {
+            "program": "/bin/bash",
+            "resolved_program": "/usr/bin/bash",
+            "args": [
+              "-c",
+              "sudo -n /bin/bash -c 'printf '\"'\"'once\\n'\"'\"' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker'"
+            ],
+            "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+          }
+        },
+        "response": {
+          "decision_id": "151132ff-2d53-4bb1-a762-674fc84f71e4",
+          "verdict": "ALLOW",
+          "reason": "the invocation and OS permissions are authorized",
+          "policy_version": "kps1BmYiHm-H4Ti13CVz0D_1VGMGVDj03k5zIeZ7ZHo",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "151132ff-2d53-4bb1-a762-674fc84f71e4"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "151132ff-2d53-4bb1-a762-674fc84f71e4"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "151132ff-2d53-4bb1-a762-674fc84f71e4"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "151132ff-2d53-4bb1-a762-674fc84f71e4",
+          "request_id": "e5fea100-fd21-44d7-a729-d76381e66b82",
+          "execution_id": "9f2befd6-1f41-4c48-ac71-4811ee7d13e5",
+          "approval": null,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 1,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569711,
+          "policy_version": "kps1BmYiHm-H4Ti13CVz0D_1VGMGVDj03k5zIeZ7ZHo",
+          "request_digest": "5201239ad37fd381df176946b0de1b797920998f592eff3fbf8703c550276118",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "ALLOW",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "[stderr]\nlinux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing\nsudo: PERM_SUDOERS: setresuid(-1, 1, -1): Invalid argument\nsudo: unable to open /etc/sudoers: Invalid argument\nsudo: error initializing audit plugin sudoers_audit\n"
+      ],
+      "caveats": [
+        {
+          "text": "sudo -n may require additional privileges or policy not represented in this schema",
+          "present_in_host_transcript": true
+        },
+        {
+          "text": "printf is a shell builtin executed within bash; no separate exec permission needed",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "attempt": "sudo-original-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": true,
+      "result_limit": "Original sudo text reaches intent and PDP unchanged; sandbox starts, then system sudo fails with setresuid/sudoers Invalid argument (exit1). Successful elevation is not claimed."
+    },
+    {
+      "case": "task-deny",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 6.107,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 2,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "forbid(principal is SecCore::Subject, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" && context.input.operation == SecCore::WriteOperation::\"write\" };",
+          "caveats": [
+            "printf is a shell builtin; no file.exec or process.spawn emitted for printf itself"
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          }
+        },
+        "response": {
+          "decision_id": "a655c251-bba4-4bf3-95d5-ff2d34ba7900",
+          "verdict": "MODIFY",
+          "reason": "the final command or permissions differ from the request",
+          "policy_version": "3_ozn7RpImfcggvRyyfSUXZm2F6DaOR5fpF99rHQJKc",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "a655c251-bba4-4bf3-95d5-ff2d34ba7900"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "a655c251-bba4-4bf3-95d5-ff2d34ba7900"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "a655c251-bba4-4bf3-95d5-ff2d34ba7900"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "a655c251-bba4-4bf3-95d5-ff2d34ba7900",
+          "request_id": "66dc2dbe-5738-4fa8-be7e-94185d38b848",
+          "execution_id": "9eac82ad-0477-41fc-9089-5ce4b7272aa5",
+          "approval": null,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 1,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569447,
+          "policy_version": "3_ozn7RpImfcggvRyyfSUXZm2F6DaOR5fpF99rHQJKc",
+          "request_digest": "1aae0cd997cdfed4eba7d04e2237f7445d2dfabf8297fda9236538d806cd60e4",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "MODIFY",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "[stderr]\n/bin/bash: line 1: /run/asc-dynamic-hook-20261111-b3c6/host/work/marker: Read-only file system\n"
+      ],
+      "caveats": [
+        {
+          "text": "printf is a shell builtin; no file.exec or process.spawn emitted for printf itself",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "attempt": "task-deny-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "tty-allow",
+      "status": "PASS",
+      "proof_surface": "real_tty",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": null,
+      "provider_calls": 2,
+      "duration_seconds": 6.708,
+      "marker": "once\n",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 6,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "@advice(\"{\\\"verdict\\\":\\\"escalate\\\"}\")\npermit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request_keys": [
+          "command",
+          "cwd",
+          "format_version"
+        ],
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" && context.input.operation == SecCore::WriteOperation::\"write\" };",
+          "caveats": [
+            "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself"
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "launch": {
+            "program": "/bin/bash",
+            "resolved_program": "/usr/bin/bash",
+            "args": [
+              "-c",
+              "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker"
+            ],
+            "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+          }
+        },
+        "response": {
+          "decision_id": "17959ebc-9c25-47bc-9560-de6c7d45964d",
+          "verdict": "STEP_UP",
+          "reason": "the final invocation requires explicit confirmation",
+          "policy_version": "h8_b0FAu2xlhGa4ZKHv6IL6xp_vQlc3Hslgrd7V_KlM",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "17959ebc-9c25-47bc-9560-de6c7d45964d"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "17959ebc-9c25-47bc-9560-de6c7d45964d"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "17959ebc-9c25-47bc-9560-de6c7d45964d"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "17959ebc-9c25-47bc-9560-de6c7d45964d",
+          "request_id": "7900e526-196d-4fea-880b-4e6271e10e8d",
+          "execution_id": "be2a8569-f92f-4046-99a9-ccad0c09c1a8",
+          "approval": true,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 0,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569762,
+          "policy_version": "h8_b0FAu2xlhGa4ZKHv6IL6xp_vQlc3Hslgrd7V_KlM",
+          "request_digest": "382704b5dd16521be5bd6860213372a797d76305701a98bfc139254348517b79",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "STEP_UP",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "ShellCommandCompleted evidence\ncommand: /var/tmp/asc-dynamic-hook-20261111-b3c6/artifacts/agent-sec-cli --socket /run/asc-dynamic-hook-20261111-b3c6/host/tap.sock sandbox hook execute 17959ebc-9c25-47bc-9560-de6c7d45964d\ncwd: /run/asc-dynamic-hook-20261111-b3c6/host/work\nend_cwd: /run/asc-dynamic-hook-20261111-b3c6/host/work\nstatus: completed\nexit_code: 0\nduration_ms: 1060\noutput_id: terminal-output://raw-session-160-1794569756966155440/cmd-1\nredaction_status: preview_included\nbounded_output_summary:\nlinux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing\n"
+      ],
+      "caveats": [
+        {
+          "text": "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "approval": {
+        "visible_before_execute": true,
+        "approved": true,
+        "caveats": [
+          {
+            "text": "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself",
+            "present_in_pty_transcript": true,
+            "prefix_present_in_pty_transcript": true
+          }
+        ]
+      },
+      "completion": "Native UI reached model completion; interactive shell terminated by test controller.",
+      "attempt": "tty-allow-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": true
+    },
+    {
+      "case": "tty-deny",
+      "status": "PASS",
+      "proof_surface": "real_tty",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": null,
+      "provider_calls": 2,
+      "duration_seconds": 6.853,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 6,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "@advice(\"{\\\"verdict\\\":\\\"escalate\\\"}\")\npermit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request_keys": [
+          "command",
+          "cwd",
+          "format_version"
+        ],
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/marker\" && context.input.operation == SecCore::WriteOperation::\"write\" };",
+          "caveats": [
+            "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself"
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "launch": {
+            "program": "/bin/bash",
+            "resolved_program": "/usr/bin/bash",
+            "args": [
+              "-c",
+              "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker"
+            ],
+            "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+          }
+        },
+        "response": {
+          "decision_id": "1c54e82b-264b-48b0-a2d1-c349b4ecb2cc",
+          "verdict": "STEP_UP",
+          "reason": "the final invocation requires explicit confirmation",
+          "policy_version": "h8_b0FAu2xlhGa4ZKHv6IL6xp_vQlc3Hslgrd7V_KlM",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                },
+                {
+                  "effect": "allow",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+                  "rights": [
+                    "write"
+                  ]
+                },
+                {
+                  "effect": "deny",
+                  "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/.git",
+                  "rights": [
+                    "write"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "1c54e82b-264b-48b0-a2d1-c349b4ecb2cc"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "1c54e82b-264b-48b0-a2d1-c349b4ecb2cc"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "1c54e82b-264b-48b0-a2d1-c349b4ecb2cc",
+          "request_id": "c90e6053-78df-4f50-90e4-8cb5ac8c7cda",
+          "execution_id": "18da2c6c-5c0b-4d8b-a17b-55966e439f5b",
+          "approval": null,
+          "result": {
+            "installed": false,
+            "started": false,
+            "exit_code": null,
+            "signal": null,
+            "cancel_signal": null,
+            "error": "host did not execute the authorized invocation"
+          },
+          "recorded_at": 1794569769,
+          "policy_version": "h8_b0FAu2xlhGa4ZKHv6IL6xp_vQlc3Hslgrd7V_KlM",
+          "request_digest": "639207c2250164e52dff1071f4955dfbbc30d4eb6baf3b61a4dd998b5e02b608",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "STEP_UP",
+          "warnings": [],
+          "host_finished": true
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "Tool call denied: User cancelled this operation"
+      ],
+      "caveats": [
+        {
+          "text": "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself",
+          "present_in_host_transcript": true
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "approval": {
+        "visible_before_execute": true,
+        "approved": false,
+        "caveats": [
+          {
+            "text": "printf is a shell builtin; no file.exec or process.spawn emitted for the command itself",
+            "present_in_pty_transcript": true,
+            "prefix_present_in_pty_transcript": true
+          }
+        ]
+      },
+      "completion": "Native UI reached model completion; interactive shell terminated by test controller.",
+      "attempt": "tty-deny-attempt-1",
+      "posthoc_receipt_validation": "PASS",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": true
+    },
+    {
+      "case": "unknown-script",
+      "status": "PASS_WITH_DISPLAY_LIMIT",
+      "proof_surface": "real_tty",
+      "command": "/usr/bin/python3 /run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": null,
+      "provider_calls": 2,
+      "duration_seconds": 8.515,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 4,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "@advice(\"{\\\"verdict\\\":\\\"escalate\\\"}\")\npermit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": {
+        "method": "intent.propose_command",
+        "ok": true,
+        "request": {
+          "format_version": "asc.intent.command.request.v1",
+          "command": "/usr/bin/python3 /run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py",
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work"
+        },
+        "response": {
+          "outcome": "candidate",
+          "policy": "permit(principal, action == SecCore::Action::\"file.exec\", resource is SecCore::File) when { resource.path == \"/usr/bin/python3\" };\npermit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when { resource.path == \"/run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py\" };\npermit(principal, action == SecCore::Action::\"process.spawn\", resource is SecCore::Process) when { resource.program == \"python3\" };",
+          "caveats": [
+            "Script /run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py internal behavior (file I/O, network, subprocesses) cannot be inferred from command alone."
+          ]
+        }
+      },
+      "authorization": {
+        "method": "authorization.evaluate",
+        "ok": true,
+        "request": {
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "requested_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          }
+        },
+        "response": {
+          "decision_id": "c07ed20d-44f3-49aa-8f5c-3d379dcc38f2",
+          "verdict": "STEP_UP",
+          "reason": "the final invocation requires explicit confirmation",
+          "policy_version": "XgGqzb7tZjygeCqFY-48-jqmtsHibwSZktNSIQ55YQ0",
+          "effective_permissions": {
+            "version": 1,
+            "filesystem": {
+              "default": "deny",
+              "rules": [
+                {
+                  "effect": "allow",
+                  "path": "/",
+                  "rights": [
+                    "read"
+                  ]
+                }
+              ]
+            },
+            "execution": {
+              "deny_paths": []
+            },
+            "network": {
+              "mode": "off"
+            }
+          },
+          "warnings": []
+        }
+      },
+      "claim_phases": [
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "finish_run"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "accept",
+          "decision_id": "c07ed20d-44f3-49aa-8f5c-3d379dcc38f2"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "execute",
+          "decision_id": "c07ed20d-44f3-49aa-8f5c-3d379dcc38f2"
+        },
+        {
+          "method": "authorization.claim",
+          "ok": true,
+          "phase": "abandon",
+          "decision_id": "c07ed20d-44f3-49aa-8f5c-3d379dcc38f2"
+        }
+      ],
+      "receipts": [
+        {
+          "decision_id": "c07ed20d-44f3-49aa-8f5c-3d379dcc38f2",
+          "request_id": "c8301980-e7b2-413b-a198-0caabc1384e9",
+          "execution_id": "61e04b04-ecb6-48b5-8d9d-22744448ab1f",
+          "approval": true,
+          "result": {
+            "installed": true,
+            "started": true,
+            "exit_code": 0,
+            "signal": null,
+            "cancel_signal": null,
+            "error": null
+          },
+          "recorded_at": 1794569551,
+          "policy_version": "XgGqzb7tZjygeCqFY-48-jqmtsHibwSZktNSIQ55YQ0",
+          "request_digest": "1fc7a84f94bb4d1e34cdeaed9634c69c72da09d8f62ed475b0c157dc11bd9754",
+          "principal": {
+            "agent_type": "cosh"
+          },
+          "verdict": "STEP_UP",
+          "warnings": []
+        }
+      ],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "ShellCommandCompleted evidence\ncommand: /var/tmp/asc-dynamic-hook-20261111-b3c6/artifacts/agent-sec-cli --socket /run/asc-dynamic-hook-20261111-b3c6/host/tap.sock sandbox hook execute c07ed20d-44f3-49aa-8f5c-3d379dcc38f2\ncwd: /run/asc-dynamic-hook-20261111-b3c6/host/work\nend_cwd: /run/asc-dynamic-hook-20261111-b3c6/host/work\nstatus: completed\nexit_code: 0\nduration_ms: 1086\noutput_id: terminal-output://raw-session-50-1794569544231340581/cmd-1\nredaction_status: preview_included\nbounded_output_summary:\nUNKNOWN_WRITE_DENIED\nUNKNOWN_SCRIPT_COMPLETE\n"
+      ],
+      "caveats": [
+        {
+          "text": "Script /run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py internal behavior (file I/O, network, subprocesses) cannot be inferred from command alone.",
+          "present_in_host_transcript": false
+        }
+      ],
+      "temporary_cedar_files": [],
+      "fault_injection": null,
+      "approval": {
+        "visible_before_execute": true,
+        "approved": true,
+        "caveats": [
+          {
+            "text": "Script /run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py internal behavior (file I/O, network, subprocesses) cannot be inferred from command alone.",
+            "present_in_pty_transcript": false
+          }
+        ]
+      },
+      "completion": "Native UI reached model completion; interactive shell terminated by test controller.",
+      "attempt": "unknown-script-attempt-2",
+      "posthoc_receipt_validation": "PASS",
+      "preapproval_transcript_excerpt": [
+        "Candidate caveat: Script /run/asc-dynamic-hook-20261111-b3c6/host/work/opaque.py internal behavior (file I/O, network, subprocesses) cannot be inferred"
+      ],
+      "display_limit": "Cosh native approval clips the full caveat line; the returned candidate retains its complete text.",
+      "outside_script_target_observed": "native-control",
+      "preapproval_no_execute_claim_check": "not recorded in these earlier observations; later tty rows assert this before responding",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    },
+    {
+      "case": "unsupported-host",
+      "status": "PASS",
+      "proof_surface": "structured_host",
+      "command": "printf 'once\\n' >> /run/asc-dynamic-hook-20261111-b3c6/host/work/marker",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work",
+      "host_exit": 0,
+      "provider_calls": 2,
+      "duration_seconds": 0.779,
+      "marker": "",
+      "pap_sources": {
+        "baseline": {
+          "policyId": "8a0199e8-8fd9-427e-af1b-28523a592cee",
+          "policyName": "command-test-baseline",
+          "revision": 1,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action, resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        },
+        "task": {
+          "policyId": "a88f54d2-e3a2-4d0f-9308-6ad316c927a5",
+          "policyName": "command-test-task",
+          "revision": 5,
+          "template": {
+            "language": "cedar",
+            "content": {
+              "schema": {
+                "schemaId": "seccore.system",
+                "revision": 1
+              },
+              "text": "permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource) when { principal has agent_type && principal.agent_type == \"cosh\" };"
+            }
+          }
+        }
+      },
+      "candidate": null,
+      "authorization": null,
+      "claim_phases": [],
+      "receipts": [],
+      "jsonl_sqlite_receipts_equal": true,
+      "tool_results": [
+        "Blocked by hook: Sandbox authorization blocked execution: Cosh host does not enforce nonempty hook output; upgrade Cosh NG to a matching build"
+      ],
+      "caveats": [],
+      "temporary_cedar_files": [],
+      "fault_injection": "unsupported-host",
+      "attempt": "unsupported-host-attempt-1",
+      "permission_source": "command",
+      "all_shell": "1",
+      "original_task_supplied_to_hook": false,
+      "raw_request_key_names_recorded": false
+    }
+  ],
+  "fixed_default_boundaries": {
+    "status": "PASS",
+    "case": {
+      "case": "default-boundaries",
+      "command": "python3 skill.py",
+      "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-default-boundaries",
+      "all_shell": "1",
+      "legacy_permissions_env": null,
+      "template": "/etc/agent-sec/sandbox/permissions.json.template",
+      "controls": {
+        "native_protected_write": true,
+        "native_loopback_connect": true
+      },
+      "caller_uid": 0,
+      "marker": "once\n",
+      "sudo_system_outcome": null
+    },
+    "authorization": {
+      "method": "authorization.evaluate",
+      "ok": true,
+      "request": {
+        "principal": {
+          "agent_type": "cosh"
+        },
+        "requested_permissions": {
+          "version": 1,
+          "filesystem": {
+            "default": "deny",
+            "rules": [
+              {
+                "effect": "allow",
+                "path": "/",
+                "rights": [
+                  "read"
+                ]
+              },
+              {
+                "effect": "allow",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-default-boundaries",
+                "rights": [
+                  "read",
+                  "write"
+                ]
+              },
+              {
+                "effect": "allow",
+                "path": "/tmp",
+                "rights": [
+                  "read",
+                  "write"
+                ]
+              },
+              {
+                "effect": "allow",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-tmpdir-default-boundaries",
+                "rights": [
+                  "write"
+                ]
+              },
+              {
+                "effect": "deny",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-default-boundaries/.git",
+                "rights": [
+                  "write"
+                ]
+              },
+              {
+                "effect": "deny",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-tmpdir-default-boundaries/.git",
+                "rights": [
+                  "write"
+                ]
+              }
+            ]
+          },
+          "execution": {
+            "deny_paths": []
+          },
+          "network": {
+            "mode": "off"
+          }
+        },
+        "launch": {
+          "program": "/bin/bash",
+          "resolved_program": "/usr/bin/bash",
+          "args": [
+            "-c",
+            "python3 skill.py"
+          ],
+          "cwd": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-default-boundaries"
+        }
+      },
+      "response": {
+        "decision_id": "245401b0-5864-493e-a33f-1307a6f3222e",
+        "verdict": "ALLOW",
+        "reason": "the invocation and OS permissions are authorized",
+        "policy_version": "P-N6XDPPyL8vqStATFiKTLcFU2U6d1t8zy00JQofzK0",
+        "effective_permissions": {
+          "version": 1,
+          "filesystem": {
+            "default": "deny",
+            "rules": [
+              {
+                "effect": "allow",
+                "path": "/",
+                "rights": [
+                  "read"
+                ]
+              },
+              {
+                "effect": "allow",
+                "path": "/tmp",
+                "rights": [
+                  "write"
+                ]
+              },
+              {
+                "effect": "allow",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-default-boundaries",
+                "rights": [
+                  "write"
+                ]
+              },
+              {
+                "effect": "deny",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-default-boundaries/.git",
+                "rights": [
+                  "write"
+                ]
+              },
+              {
+                "effect": "allow",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-tmpdir-default-boundaries",
+                "rights": [
+                  "write"
+                ]
+              },
+              {
+                "effect": "deny",
+                "path": "/run/asc-dynamic-hook-20261111-b3c6/host/work/all-shell-tmpdir-default-boundaries/.git",
+                "rights": [
+                  "write"
+                ]
+              }
+            ]
+          },
+          "execution": {
+            "deny_paths": []
+          },
+          "network": {
+            "mode": "off"
+          }
+        },
+        "warnings": []
+      }
+    },
+    "receipts": [
+      {
+        "decision_id": "245401b0-5864-493e-a33f-1307a6f3222e",
+        "request_id": "fe1bb351-dcf4-4141-a324-9bc1431f50f1",
+        "execution_id": "0223b13b-73e7-4788-a9d2-467dd23b0f6d",
+        "approval": null,
+        "result": {
+          "installed": true,
+          "started": true,
+          "exit_code": 0,
+          "signal": null,
+          "cancel_signal": null,
+          "error": null
+        },
+        "recorded_at": 1794569771,
+        "policy_version": "P-N6XDPPyL8vqStATFiKTLcFU2U6d1t8zy00JQofzK0",
+        "request_digest": "6aa7f1873e8b64ca699355fe6714ea9cb5d3439600f056968e28eec0edaa6d15",
+        "principal": {
+          "agent_type": "cosh"
+        },
+        "verdict": "ALLOW",
+        "warnings": []
+      }
+    ],
+    "tool_results": [
+      "PYTHON_EFFECTIVE_UID:0\nPROTECTED_WRITE_DENIED\nPYTHON_RESULT_PRESERVED\nTMP_WRITE_ALLOWED\nTMPDIR_WRITE_ALLOWED\nMETADATA_WRITE_DENIED:.git\nMETADATA_WRITE_DENIED:.git\nNETWORK_DENIED\n\n[stderr]\nlinux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing\n"
+    ],
+    "template": {
+      "format_version": "asc.sandbox.permissions-template.v1",
+      "include_tmpdir": true,
+      "read_only_subpaths": [
+        ".git"
+      ],
+      "permissions": {
+        "version": 1,
+        "filesystem": {
+          "default": "deny",
+          "rules": [
+            {
+              "effect": "allow",
+              "path": "/",
+              "rights": [
+                "read"
+              ]
+            },
+            {
+              "effect": "allow",
+              "path": "${cwd}",
+              "rights": [
+                "read",
+                "write"
+              ]
+            },
+            {
+              "effect": "allow",
+              "path": "/tmp",
+              "rights": [
+                "read",
+                "write"
+              ]
+            }
+          ]
+        },
+        "execution": {
+          "deny_paths": []
+        },
+        "network": {
+          "mode": "off"
+        }
+      }
+    }
+  },
+  "attempt_history": [
+    {
+      "attempt": "allowed-attempt-2",
+      "status": "OBSERVED",
+      "note": "Point-only directory runtime preset rejected before PDP; fixture corrected."
+    },
+    {
+      "attempt": "allowed-attempt-3",
+      "status": "OBSERVED",
+      "note": "Sandbox executed exactly once and receipt recorded, but test-driver PostToolUse incorrectly named a nonexistent sandbox-receipt.py; restored product sandbox-guard.py dispatch."
+    },
+    {
+      "attempt": "unknown-script-attempt-1",
+      "status": "PASS_WITH_DISPLAY_LIMIT",
+      "note": "Real unknown-script execution passed; native caveat line clipped. No more width/model retries."
+    }
+  ],
+  "preflight_failure": "First PAP update used obsolete id/revision fields. Rejected before any Host/model call; corrected to policyId/policyName/template.",
+  "quality_gates": [
+    {
+      "stage": "cosh-build",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "cosh-core",
+        "--bin",
+        "cosh-core",
+        "-p",
+        "cosh-shell",
+        "--bin",
+        "cosh-shell"
+      ],
+      "exit": 0,
+      "seconds": 97.54
+    },
+    {
+      "stage": "cosh-hook-test-build",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "cosh-core",
+        "--bin",
+        "cosh-core",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "exit": 0,
+      "seconds": 34.38
+    },
+    {
+      "stage": "cosh-hook-tests",
+      "command": [
+        "/run/asc-dynamic-hook-20261111-b3c6/target-host/debug/deps/cosh_core-d876bf664f39254e",
+        "hook::tests",
+        "--test-threads=1",
+        "--show-output"
+      ],
+      "exit": 0,
+      "seconds": 1.37
+    },
+    {
+      "stage": "helper-build",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "rustc",
+        "--locked",
+        "--offline",
+        "--bin",
+        "linux-sandbox",
+        "--",
+        "-L",
+        "native=/var/tmp/asc-dynamic-hook-20261111-b3c6/static-libs/usr/lib64",
+        "-C",
+        "target-feature=+crt-static"
+      ],
+      "exit": 0,
+      "seconds": 29.57
+    },
+    {
+      "stage": "sec-fmt",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 1.57
+    },
+    {
+      "stage": "sec-build",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "asc-cli",
+        "-p",
+        "asc-daemon"
+      ],
+      "exit": 0,
+      "seconds": 100.26
+    },
+    {
+      "stage": "sec-clippy",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 101,
+      "seconds": 51.25
+    },
+    {
+      "stage": "sec-fmt",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 1.52
+    },
+    {
+      "stage": "sec-build",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "asc-cli",
+        "-p",
+        "asc-daemon"
+      ],
+      "exit": 0,
+      "seconds": 3.27
+    },
+    {
+      "stage": "sec-clippy",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 18.85
+    },
+    {
+      "stage": "sec-doc",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "doc",
+        "--locked",
+        "--offline",
+        "--workspace",
+        "--no-deps"
+      ],
+      "exit": 0,
+      "seconds": 21.51
+    },
+    {
+      "stage": "sec-tests",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "asc-cli",
+        "-p",
+        "asc-pep-runtime",
+        "-p",
+        "asc-daemon-handler",
+        "-p",
+        "asc-intent",
+        "--no-fail-fast"
+      ],
+      "exit": 101,
+      "seconds": 40.67
+    },
+    {
+      "stage": "sec-key-root-home",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "asc-cli",
+        "--test",
+        "key"
+      ],
+      "exit": 0,
+      "seconds": 1.82
+    },
+    {
+      "stage": "sec-authorization-tests",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "asc-daemon",
+        "--lib",
+        "authorization::tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 36.44
+    },
+    {
+      "stage": "sec-workspace-tests",
+      "command": [
+        "/mnt/btrfs-workspace/skill-score-alinux3-20260915/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "--workspace",
+        "--no-fail-fast",
+        "--",
+        "--skip",
+        "jsonl::tests::a_rotation_that_cannot_rename_reports_and_still_appends"
+      ],
+      "exit": 101,
+      "seconds": 101.13
+    },
+    {
+      "stage": "sec-nonroot-event-log",
+      "command": [
+        "/run/asc-dynamic-hook-20261111-b3c6/target-sec/debug/deps/asc_event_log-073279548a544f81",
+        "jsonl::tests::a_rotation_that_cannot_rename_reports_and_still_appends",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit": 0,
+      "seconds": 0.01
+    }
+  ],
+  "quality_interpretation": {
+    "cosh_hooks": "73 passed under actual UID/GID65534",
+    "focused_rust": "341 passed,2 failed,2 ignored in first four-crate run; both failures are key private-path checks under a HOME owned by65534 while running root. Exact key target rerun with root-owned HOME:4 passed. No assertions changed.",
+    "daemon_authorization": "9 passed",
+    "workspace": "Exit101 during compilation: /run tmpfs No space left on device, then linker SIGBUS. Not a product-test failure and not a workspace-green result; no repeat full build.",
+    "permission_sensitive_test": "Root workspace command excluded exact chmod-sensitive jsonl test; original test independently passed UID/GID65534.",
+    "linux_python": {
+      "status": "NOT_RUN",
+      "reason": "Existing Python 3.11.6 lacks pytest/click/pydantic/tomlkit; no additional dependency installation for this bounded follow-up. Local parent suite passed357+1skip."
+    },
+    "clippy": "Initial source failed the prepare function length lint; equivalent predicate simplification was synced, then complete workspace/all-targets -D warnings passed. Final runtime bytes match the corrected build."
+  },
+  "harness": {
+    "path": "src/agent-sec-core/tests/e2e/linux-sandbox/command_permissions_host.py",
+    "executed_sha256": "ad48c3f43e385bc5c31e468b339c057d3986e425932adbb875e160ba41a879a0",
+    "final_formatted_sha256": "ad2bdc4cfbd539df188f370dfd1fddc6adf4cd04b808e25390eee851eb3b721b",
+    "difference": "Black formatting only after the last real Host execution. Earlier rows preserve their narrower field coverage; strengthened receipt checks were applied offline to saved observations."
+  },
+  "evidence_limits": [
+    "Host model fixture deterministically selects synthetic commands; real HTTPS provider generates command intent.",
+    "The explicit synthetic runtime preset reads / recursively and denies .git writes/network; it is not a default or production minimum-permission recommendation.",
+    "Dynamic mode does not inherit the installed fixed JSON template.",
+    "Long caveats are retained in intent output but native Cosh approval transcript clips the displayed line.",
+    "Workspace test compilation hit /run tmpfs storage exhaustion; no overall workspace-green claim.",
+    "Fixed-specific native TTY/sudo were not repeated; dynamic TTY/sudo and fixed template boundaries are distinct proofs.",
+    "Earlier observations did not retain raw intent key names or safe authorization launch. These are captured in sudo-original and later TTY rows; missing older fields were not reconstructed.",
+    "Unknown-script approval observations predate the explicit no-execute-claim/no-receipt preapproval assertions. Later tty-allow/tty-deny ran those assertions; unknown-script only claims the recorded UI and completed sandbox result."
+  ],
+  "cleanup": {
+    "status": "PASS",
+    "removed": [
+      "/var/tmp/asc-dynamic-hook-20261111-b3c6",
+      "/run/asc-dynamic-hook-20261111-b3c6"
+    ],
+    "owned_build_processes_alive": false,
+    "host_process_lifecycle": "All private PID-namespace controllers exited; each daemon was stopped in finally. Namespace-local PIDs were not treated as host PIDs.",
+    "shared_caches": "Read-only sources; no removal or mutation",
+    "returned_archive_sha256": "2b5c3ca05fe50e516990b29428db74214ae32097a0d8b725c3e5f40b65f4d708",
+    "artifacts_verified_before_cleanup": {
+      "agent-sec-cli": "75b1a0419fe4d98a07e4c7140dc709518f3c525ec6a9eaff6ff16bce9a72ce42",
+      "cosh-core": "e3f3bc0696577ddbbccdf70a4192e480323be1a093d9f2e9153d615baedaa932",
+      "linux-sandbox": "2eb9f9f7191a24c6d8e2e6bcafd22977d06a2b2f4e9ae0b45aabd351a4af3489",
+      "cosh-shell": "cbe4e2c3c482e0be5cc0955d43ce2c6609aad62bfe224388d0839b98b6215214",
+      "agent-sec-daemon": "f24523a3b14db7ed64037ae47a6e1e8556333b597a04696e2dd95b6bd85c09f3"
+    },
+    "before": {
+      "/": {
+        "total": 63017381888,
+        "used": 59486515200,
+        "free": 736157696
+      },
+      "/run": {
+        "total": 3239002112,
+        "used": 29499392,
+        "free": 3209502720
+      }
+    },
+    "after": {
+      "/": {
+        "total": 63017381888,
+        "used": 58432876544,
+        "free": 1789796352
+      },
+      "/run": {
+        "total": 3239002112,
+        "used": 24907776,
+        "free": 3214094336
+      }
+    },
+    "completed_unix": 1794570038.9860883
+  },
+  "durable_evidence": {
+    "id": "linux-acceptance-20261113",
+    "filtered_returned_archive_sha256": "2b5c3ca05fe50e516990b29428db74214ae32097a0d8b725c3e5f40b65f4d708",
+    "full_acceptance_sha256": "990da4b25e38392e52e3f6de864893dba711e1e274a415d40a851cfb7acf7e78",
+    "logs": {
+      "cosh-build.log": "d84c0d53351b6273edf94cbea9d751402f3545e8e19dda65e7edbc055961ea99",
+      "cosh-hook-test-build.log": "5c04350a9e04e926563b02d3db0dd06635f45715cea8f057023a85ff4f4c691d",
+      "cosh-hook-tests.log": "3898fb7b9d6a0e3377c89bcea795883f0f75287396632615d174df2626ed2a1a",
+      "helper-build.log": "33aeaf36469c48feb2f3298b7f22a80eb115ae87bf80ccf0fea3d0d45a17ee8d",
+      "sec-authorization-tests.log": "1a11ca1a9683607ad7b9a2ac6b642b5f6485682084366ed4803694680094ddb4",
+      "sec-build-before-correction.log": "bbd6274b62f3cf89a7788523cb7b7bcb030b4926e26239b4c1eb65d9373bd97b",
+      "sec-build.log": "15e2593d045e8b1c2c83900e456e152d69733469a39df64bacd5ce0a583415a4",
+      "sec-clippy-before-correction.log": "759fa7e332dba0320bb621e4298db53876ab2a200e024d7a67564283e2997e4c",
+      "sec-clippy.log": "532d774c6ffde5bdb8a9ced333d86b7e17f301ddebf9062827d474ebd23043ee",
+      "sec-doc.log": "7806355061e7508b648456df0f85bcd53cfaa8178f37a70fae4d77fbd565a104",
+      "sec-fmt-before-correction.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sec-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sec-key-root-home.log": "27413eb410f274dc3f78f39c458be5df852494b2d00a060c3eb344bbab8fa569",
+      "sec-nonroot-event-log.log": "7e94ffcba1b4f6e86647b526ecbe97f6d5e9bc2ae2297070f5126af13adc139c",
+      "sec-tests.log": "12db306231fcbe0af19747a9d46b4cb7b517e300b04213cc837135f655a9f208",
+      "sec-workspace-tests.log": "ae535d899f331832eb67f429eadfccf95b0d186fca295633ceb86842d09ddb6a"
+    }
+  },
+  "sandbox_dependency": {
+    "path": "/usr/bin/bwrap",
+    "resolved_path": "/usr/bin/bwrap",
+    "version": "bubblewrap 0.10.0",
+    "sha256": "919130eddbd30682c49fba51461ea635eb9403ed0adf86bfe8d92d839846bee1",
+    "bytes": 82400,
+    "mtime_ns": 1748720851000000000,
+    "identity_observation": "Read-only probe after run cleanup; helper resolves bwrap via tested PATH and private /usr overlay did not alter this executable."
+  }
+}

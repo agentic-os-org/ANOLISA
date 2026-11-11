@@ -248,7 +248,7 @@ cosh
 含 `sudo` 的原始命令，都进入策略授权。明确禁止命令仍可提前阻断；原生文件工具、MCP
 及其他入口不在此 Hook 的覆盖范围内。
 
-RPM 核心包自动安装 `/etc/agent-sec/sandbox/permissions.json.template`，无需权限文件环境变量
+默认 `fixed` 模式使用 RPM 核心包自动安装的 `/etc/agent-sec/sandbox/permissions.json.template`，无需权限文件环境变量
 或手工复制。源码安装遵循已有 `CONFIGDIR` 布局，并同步生成 Hook 使用的路径；标准 RPM
 安装使用上述路径。raw 遵循其管理的配置根目录，默认路径为
 `/etc/anolisa/sec-core/sandbox/permissions.json.template`，并按同一布局生成 Hook 路径。
@@ -273,7 +273,7 @@ Git 指针路径中的空白原样保留。这些默认值不能替代策略，�
 `read_only_subpaths` 列出每个可写根目录下检查的目录名称，其中 `.git` 也支持指针文件，
 缺失路径跳过。不执行 shell 表达式或任意环境变量替换。Rust prepare 每次在内存中展开并校验模板，
 再通过现有权限提供层绑定路径。配置修改影响后续请求，不改变已经接受的调用。
-本版本不调用意图识别，也不向 PAP 发布候选策略。
+固定模式不调用意图识别；两种模式均不向 PAP 发布候选策略。
 
 PDP 仍决定允许、拒绝、修改或要求原生审批，有效权限不能超过申请。批准命令不等于开放
 网络或授予宿主 root。不可用的提权能力在沙箱内失败，不剥离 `sudo`、扩大权限或无隔离重试。
@@ -298,6 +298,61 @@ PreToolUse 启动失败、崩溃、非零退出、空或无效输出、超时时
 查看继承的环境配置；模式为 `all-shell`、`dangerous` 或非法开关对应的 `blocked`。
 该视图不读取模板，也不证明 daemon 就绪、Hook 加载或宿主兼容。重启 Cosh 前将开关设为 `0` 可恢复
 原有筛选。原权限文件覆盖变量已经删除；管理员默认权限改为维护安装的模板。
+
+### 按当前命令生成权限
+
+使用支持 `intent.propose_command` 的配套 CLI/daemon，并按[策略指南](policy-cli.md)
+配置 daemon 的意图模型。启动 Cosh 前选择动态来源及明确的 Cedar 运行预设：
+
+```bash
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
+export AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command
+export AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS=/absolute/path/runtime.cedar
+cosh
+```
+
+来源仅接受 `fixed`（未设置时的默认值）和 `command`，非法值阻断授权。这些设置仅在
+全 shell 授权开启时生效，本身不会开启授权。已删除的
+`AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 在两种模式下均无效。
+
+动态模式使用明确的运行预设，**替代**安装的固定 JSON 模板，不继承模板的 cwd/tmp
+写权限或 Git 保护。所需限制须写入 Cedar 预设或适用的 PAP 策略。预设必须为原始 Cedar
+或源码信封，与候选使用相同 schema，并提供该工作负载已知的 shell/加载器/库访问及
+初始 `/bin/bash -c` 调用许可。目录授权包含后代；整个项目的授权即使在空候选时也已
+申请其内容。不要因脚本内部行为未知而补充推测的写入或网络权限。OS permission JSON
+不能作为动态运行预设，以免合并时丢失 Cedar 调用与网络限制。
+
+Hook 在 sandbox 包装之前，将包含 `sudo` 的原始命令及规范化 cwd 交给
+`intent propose-command --format json`，不传原始用户任务。上游须提前在 PAP 准备任务
+限制，并确认其实际进入上述当前请求策略集。本版本拒绝旧 `task_policy` 选择键：符合
+条件的策略会合并 permit，任务边界须使用显式 forbid 或约束所有适用的 permit；仅创建
+未进入该集合的策略不会限制执行。
+
+Hook 按 JSON 的 `outcome` 分支，不能仅凭退出码放行：
+
+- `candidate`：展示 `caveats`，将 Cedar 与运行预设合并，复用转换、初始调用校验及
+  路径绑定。任一来源的 forbid 均保留。
+- 空候选不申请业务权限，仅由明确的运行预设提供许可；PDP 仍可拒绝或收窄。
+- `needs_clarification`：说明缺失信息，并在授权前停止。
+- 接口不可用、异常响应、转换失败及超时均阻断，不回退固定权限或无隔离执行。
+  脚本内部行为未知只作为 caveat，不自动扩大权限。
+
+Hook 响应完整保留 caveats；当前 Cosh 原生审批面板可能截短较长的 caveat 行，
+本接入不保证在该面板内可以读到完整文本。
+
+候选只是申请，不写入 PAP。PDP 根据当前策略集及环境上限决定 `effective_permissions`。
+仍受上述 Cedar 映射限制约束：不存在的文件字面量会导致权限准备失败，不会隐式转为
+父目录写权限。
+
+意图生成 RPC 期限 38 秒、子进程 40 秒；生成与 prepare 共用 55 秒，外层 Hook 60 秒。
+每次授权 RPC 最多 5 秒，且不超过剩余预算扣除 1 秒预留后的三分之一。
+finish RPC 为 8 秒、子进程 10 秒、外层 Hook 15 秒。原生 ask 与目标执行沿用原生命周期。
+
+每次调用独享 mode 0600 的候选临时文件；prepare 结束、转换失败或子进程超时后均清理。
+daemon 保管已接受的调用，后续审批、执行、finish 不重读候选文件；动态模式的 finish
+无需固定模板，回执失败不重跑目标。将来源设回 `fixed`、确认安装模板有效并重启 Cosh，
+即可恢复固定授权。本功能不采集任务、不自动发布任务策略、不路由多任务，也不接入
+AgentSight/Gateway。
 
 Hook 通过私有 `sandbox hook prepare` 入口准备权限申请。ALLOW/MODIFY 替换为获准命令的执行入口；
 STEP_UP 使用 Cosh 原生 ask，warn 显示为通知。daemon 保管完整请求和决定，包装命令只携带决定 ID。

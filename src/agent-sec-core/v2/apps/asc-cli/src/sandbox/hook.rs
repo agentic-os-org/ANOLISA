@@ -1,5 +1,6 @@
 //! Cosh keeps approval and foreground execution; the daemon holds the immutable handoff.
 
+use std::ffi::OsStr;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,6 +29,9 @@ pub enum HookCommand {
         /// Installed template or prepared JSON/Cedar request, including runtime dependencies.
         #[arg(long)]
         permissions: PathBuf,
+        /// Optional Cedar runtime preset, combined before invocation and path validation.
+        #[arg(long)]
+        runtime_permissions: Option<PathBuf>,
     },
     /// Consume a handoff after Cosh has approved the rewritten command.
     Execute {
@@ -69,7 +73,10 @@ impl HookCommand {
             timeout,
         };
         match self {
-            Self::Prepare { permissions } => prepare(permissions, &client),
+            Self::Prepare {
+                permissions,
+                runtime_permissions,
+            } => prepare(permissions, runtime_permissions.as_deref(), &client),
             Self::Execute { decision_id } => {
                 let accepted = claim(&client, decision_id, ClaimPhase::Execute, None, None)?
                     .authorization
@@ -126,7 +133,11 @@ fn claim(
     }
 }
 
-fn prepare(permissions: &Path, client: &DaemonAuthorizationClient) -> Result<u8, SandboxError> {
+fn prepare(
+    permissions: &Path,
+    runtime_permissions: Option<&Path>,
+    client: &DaemonAuthorizationClient,
+) -> Result<u8, SandboxError> {
     let mut bytes = Vec::new();
     std::io::stdin()
         .take(super::MAX_PERMISSION_BYTES + 1)
@@ -152,15 +163,16 @@ fn prepare(permissions: &Path, client: &DaemonAuthorizationClient) -> Result<u8,
         &input.cwd,
         super::target_environment()?,
     )?;
-    let permissions = if permissions
-        .extension()
-        .is_some_and(|value| value == "template")
-    {
+    let is_template = permissions.extension() == Some(OsStr::new("template"));
+    let mut permissions = if is_template {
         let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
         template::read(permissions, Path::new(&launch.cwd), tmpdir)?
     } else {
         read_permissions(permissions)?
     };
+    if let Some(preset) = runtime_permissions {
+        permissions = permissions.with_runtime(read_permissions(preset)?)?;
+    }
     let mut runtime = PepRuntime::new(SandboxBackend::installed()?);
     let (request, decision) = runtime.authorize(
         &AgentPrincipal {

@@ -57,6 +57,8 @@ pub(crate) enum EnvKind {
     DataHome { default: &'static str },
     /// Cosh all-shell switch; invalid values block execution.
     AllShell,
+    /// Literal configuration retained for validation by its owning hook.
+    Literal(&'static str),
 }
 
 /// One environment variable contributing to a capability record.
@@ -248,10 +250,20 @@ const HERMES_LEDGER: &[EnvSpec] = &[
     mode("SKILL_LEDGER_MODE", "observe", HERMES_NATIVE_MODES),
 ];
 
-const COSH_SANDBOX: &[EnvSpec] = &[EnvSpec {
-    name: "AGENT_SEC_COSH_SANDBOX_ALL_SHELL",
-    kind: EnvKind::AllShell,
-}];
+const COSH_SANDBOX: &[EnvSpec] = &[
+    EnvSpec {
+        name: "AGENT_SEC_COSH_SANDBOX_ALL_SHELL",
+        kind: EnvKind::AllShell,
+    },
+    EnvSpec {
+        name: "AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE",
+        kind: EnvKind::Literal("fixed"),
+    },
+    EnvSpec {
+        name: "AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS",
+        kind: EnvKind::Literal(""),
+    },
+];
 
 /// Limits the sandbox view to its implemented Cosh integration.
 pub(crate) fn supports(agent: &str, capability: &str) -> bool {

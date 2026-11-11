@@ -19,12 +19,15 @@ Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- comm
 或 Cedar 源码；Cedar 会转换为进程树共用的粗粒度权限。`PermissionInput` 和 Cosh sandbox Hook
 使用相同输入生成每次 PDP 权限申请。权限格式、运行要求与隔离边界见
 [Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。应用可通过
-`asc-pep-runtime::PepRuntime` 接入策略授权，由 daemon `--authorization-config`
-选择 PAP 管理的 Cedar 策略。Policy 更新成功后，后续授权请求使用新版本。
+`asc-pep-runtime::PepRuntime` 接入策略授权，使用 PAP 当前符合条件的 Cedar 策略集及
+daemon `--authorization-config` 配置的运行上限。Policy 更新成功后，后续授权请求使用新版本。
 Cosh 通过 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 接入这条流程，使用原生审批界面和
 已安装的默认权限模板。所有已接入的 `shell` / `run_shell_command` 调用，包括普通
 Python 脚本和含 `sudo` 的原始命令，均经过授权。开关默认关闭；配置、权限边界和失败
 处理见 Sandbox 指南。
+设置 `AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command` 并提供明确的 Cedar
+`AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS` 预设，可按每次原始命令和 cwd 生成权限
+申请。候选不更新 PAP；澄清、生成失败和转换失败均阻断执行。
 
 ## 背景
 
@@ -119,7 +122,7 @@ CLI 与 daemon 须同步升级为 request v1/candidate v1，其它版本不兼�
 源码中的 V2 API `intent.propose_command` 面向 hook 集成，接收 `command` 和 `cwd`，
 返回 Cedar 候选或澄清原因；CLI 通过 `agent-sec-cli intent propose-command` 暴露该接口。
 两者都不更新 base policy、不映射 OS 权限，也不执行命令；
-PDP 映射与 sandbox 接入由后续工作负责。详见
+可选的 Cosh 动态 Hook 将候选与明确的运行预设合并，沿用已有 PDP/sandbox 生命周期。详见
 [单次命令 Cedar API](docs/design/DAEMON_PROTOCOL_V1_zh.md#191-target-v2已实现-单次命令-cedar-api)。
 
 `agent-sec-cli intent init` 从显式规则在本地生成经过校验的 Cedar，
