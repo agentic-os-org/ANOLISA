@@ -281,6 +281,7 @@
             "agentscope",
             "qoder",
             "openclaw",
+            "deepseek-harness",
             "hermes",
             "claude-sdk",
             "qoder-sdk"

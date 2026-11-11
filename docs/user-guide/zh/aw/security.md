@@ -119,6 +119,10 @@ git -c http.sslVerify=false --version
 
 各工具阶段明确选择 PII 的检查方。AW 接管时移除原生 PII 的 PreToolUse/PostToolUse 注册，按需保留用户提交检查。[集成参考](../../../developer-guide/zh/aw/providers/sec-core.md#工具-pii-策略)说明配置、不支持的结果结构和原生模式限制。
 
+headless DSH 的 sec-core 示例和接入步骤见
+[DSH 接入指南](../../../developer-guide/zh/aw/agents/deepseek-harness.md)。
+原始结果无法安全替换或后台失败时，严格输出检查只返回通用工具错误。
+
 ## 停止与扩展
 
 退出 Agent 后执行 `aw stop --config "$AW_HOME/security.yaml"`。

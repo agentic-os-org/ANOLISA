@@ -65,6 +65,7 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |

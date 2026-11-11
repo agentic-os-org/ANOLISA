@@ -136,7 +136,13 @@ print(json.dumps(reply))
                 // SDK chains stop at a veto; the service must close unvisited steps.
                 if matches!(
                     adapter,
-                    "qoder-sdk" | "pi" | "claude-sdk" | "agentscope" | "qwenpaw" | "openclaw"
+                    "qoder-sdk"
+                        | "pi"
+                        | "deepseek-harness"
+                        | "claude-sdk"
+                        | "agentscope"
+                        | "qwenpaw"
+                        | "openclaw"
                 ) && blocked(adapter, outputs.last().unwrap())
                 {
                     break;

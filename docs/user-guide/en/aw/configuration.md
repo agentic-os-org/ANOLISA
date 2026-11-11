@@ -98,6 +98,11 @@ plugin names and settings. QwenPaw keeps ownership of `config.json`, plugin
 configuration and dynamic MCP updates. Select covered tools explicitly; native
 permissions continue to apply to tools outside those selectors.
 
+### DeepSeek Harness
+
+Use the [headless DSH integration guide](../../../developer-guide/en/aw/agents/deepseek-harness.md)
+for the verified version, `aw run` command and sec-core tool policy.
+
 ## Custom rules and service deployment
 
 Custom rules can read tool events and return a JSON boolean; see the [Hook tutorial](../../../developer-guide/en/aw/providers/hooks.md).

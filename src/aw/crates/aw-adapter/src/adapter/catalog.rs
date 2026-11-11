@@ -61,6 +61,16 @@ pub(crate) const OPENCLAW: Profile = Profile {
     events: TOOL_EVENTS,
 };
 
+pub(crate) const DEEPSEEK: Profile = Profile {
+    name: "deepseek-harness",
+    adapter: &super::super::adapters::deepseek::DeepSeek,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
+};
+
 pub(crate) const HERMES: Profile = Profile {
     name: "hermes",
     adapter: &super::super::adapters::hermes::Hermes,
@@ -112,7 +122,7 @@ pub(crate) const AGENTSCOPE: Profile = Profile {
 };
 
 pub(crate) const PROFILES: &[Profile] = &[
-    QODER, QODER_SDK, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
+    QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
 ];
 
 #[cfg(test)]

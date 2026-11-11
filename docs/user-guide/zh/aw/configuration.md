@@ -95,6 +95,11 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
 插件名称和配置。`config.json`、插件配置及 MCP 动态更新继续由 QwenPaw 管理。
 显式选择 AW 覆盖的工具，范围外工具继续遵循原生权限。
 
+### DeepSeek Harness
+
+已验证版本、`aw run` 命令与 sec-core 工具策略见
+[headless DSH 接入指南](../../../developer-guide/zh/aw/agents/deepseek-harness.md)。
+
 ## 自定义规则与服务部署
 
 自定义规则可读取工具事件并返回 JSON 布尔值，见[Hook 教程](../../../developer-guide/zh/aw/providers/hooks.md)。

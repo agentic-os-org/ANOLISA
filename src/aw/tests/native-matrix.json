@@ -3988,6 +3988,95 @@
         }
       ],
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
+    },
+    "deepseek-harness": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_fixture": "crates/aw-cli/tests/fixtures/deepseek-harness",
+      "boundary": "Published DeepSeek Harness 0.2.1-rc.5 headless CLI, actual plugin loader and model/tool loop with real AW sec-core and Tokenless Providers/CLI. User text is scanned at agent/pre-step; prompt denial and scanner failure prevent model requests. Web, SDK and ACP startup confirm Hook readiness; their actual input/tool-call adoption remains unverified. Profile selection and version do not gate admission. Model, tool bodies, scanner and RTK execution are deterministic fixtures; no hosted model acceptance. Tool input PII blocks execution; tool output PII can be replaced for successful single-text root results. Strict output admission is rejected because tool finalizers run after the writable Hook; nested programmatic values and native value replacements retain native content. The Skill tool exposes only a name before execution, and direct /skill injection bypasses tool Hooks; resolved Skill checking is not claimed.",
+      "cases": [
+        {
+          "name": "headless",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/deepseek-harness/native.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/headless"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/headless/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "security-deny",
+                  "security-error",
+                  "native-deny",
+                  "native-bypass",
+                  "native-override",
+                  "compress",
+                  "tool-error",
+                  "parallel",
+                  "nested-deny",
+                  "retry-denied",
+                  "retry-allowed",
+                  "post-content",
+                  "post-value",
+                  "post-block",
+                  "finalizer",
+                  "cancel",
+                  "pii-clean",
+                  "pii-input-deny",
+                  "pii-output-replace",
+                  "strict-output-rejected",
+                  "submit-allow",
+                  "submit-deny",
+                  "submit-error"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "profiles",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/deepseek-harness/profiles.py",
+            "--bin",
+            "{bin}",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/profiles"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/profiles/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": ["web", "sdk", "acp"],
+                "values": {"passed": true}
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }
