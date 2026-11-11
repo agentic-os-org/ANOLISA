@@ -386,6 +386,16 @@ tree remains recoverable under `.anolisa/trash/` with its original modes;
 manual purging of read-only directories may require restoring owner write
 permission first. Restore does not automatically collect retained trash.
 
+Restores and snapshot reclamation share a per-mount lock across `serve` processes.
+If that lock is busy, restore fails before changing files with
+`another snapshot restore or reclaim is in progress`; retry after the operation
+finishes. Reclamation skips that mount-open sweep if it cannot acquire the lock.
+The lock is released when its holder exits, but `.anolisa/.restore.lock` remains:
+do not delete this file while any process is using the mount. Restart all `serve`
+processes sharing the mount after upgrading, since older versions ignore the lock.
+This coordination covers restores and reclamation; pause other file writers when
+you need the restored tree to remain unchanged.
+
 ### Sovereignty & import/export (13)
 
 | Tool | Required | Optional | Returns / notes |

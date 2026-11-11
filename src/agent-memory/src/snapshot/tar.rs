@@ -15,12 +15,14 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg, OFlag};
+use nix::sys::stat::Mode;
 use walkdir::WalkDir;
 
 use super::{SNAPSHOTS_DIR, SnapshotInfo, snapshots_dir};
@@ -29,22 +31,32 @@ use crate::ns::MountPoint;
 
 const BACKEND_TAG: &str = "tar.gz";
 
-/// Process-wide write mutex serializing concurrent `restore_tarball`
-/// invocations. Restore is destructive (renames every top-level entry,
-/// moves staging in) — without this lock, two concurrent restores would
-/// race on the rename-aside step and leave the mount in a half-swapped
-/// state. The mutex is held for the full restore so concurrent file
-/// tools see either the pre- or post-restore state, never an interleave.
-/// Reclaim's staging sweep takes the same lock (`restore_lock`) so a
-/// sweep cannot remove a staging directory a concurrent in-process
-/// restore has just created.
-static RESTORE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Accessor for reclaim's staging sweep — the only external user of the
-/// restore lock. Process-local: cross-process sweeps are still separated
-/// from restores only by the age guard.
-pub(crate) fn restore_lock() -> std::sync::MutexGuard<'static, ()> {
-    RESTORE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+/// Exclude other restores and reclaim sweeps on this mount, across processes.
+/// Returns `None` when busy. Each caller opens its own file description so
+/// threads in the same process also contend. Never unlink the lock file:
+/// replacing its inode would let callers hold different locks on one mount.
+pub(crate) fn restore_lock(mount: &MountPoint) -> Result<Option<Flock<File>>> {
+    let rel = Path::new(mount.meta_dir_name()).join(".restore.lock");
+    let file = crate::safe_fs::open_in_root(
+        mount.root_fd.as_fd(),
+        &rel,
+        OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_NONBLOCK,
+        Mode::from_bits_truncate(0o600),
+    )?;
+    if !file.metadata()?.is_file() {
+        return Err(MemoryError::InvalidArgument(format!(
+            "snapshot restore lock is not a regular file: {}",
+            mount.root.join(&rel).display()
+        )));
+    }
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(Some(lock)),
+        Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+        Err((_, error)) => Err(MemoryError::Other(format!(
+            "lock snapshot restore for {}: {error}",
+            mount.root.display()
+        ))),
+    }
 }
 
 /// Archive-intrinsic entry gate shared by `restore_tarball` and the
@@ -380,9 +392,14 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     // `remove_dir_all(&staging)` would destroy arbitrary directories.
     validate_snapshot_id(id)?;
 
-    // Serialize concurrent restores: the rename-aside step is not idempotent
-    // and two callers swapping at once would interleave rollback entries.
-    let _restore_guard = RESTORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Hold through extraction, publication, rollback and cleanup. A rejected
+    // caller must not touch another restore's staging or user-visible files.
+    let _restore_guard = restore_lock(mount)?.ok_or_else(|| {
+        MemoryError::Other(format!(
+            "another snapshot restore or reclaim is in progress for {}; retry after it finishes",
+            mount.root.display()
+        ))
+    })?;
 
     let dir = snapshots_dir(mount);
     let archive_path = dir.join(format!("{id}.tar.gz"));

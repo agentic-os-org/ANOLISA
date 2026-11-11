@@ -28,19 +28,18 @@
 //!    on success (and clears a pre-existing one at entry), so only a
 //!    hard kill (SIGKILL or power loss) mid-restore leaves one behind;
 //!    `list_tarballs` never sees it, so it is the largest
-//!    orphaned-artefact class byte-for-byte. A restore holds no
-//!    reservation on the name (a re-run recreates staging from scratch),
-//!    so past the age guard the directory can be removed wholesale —
+//!    orphaned-artefact class byte-for-byte. Under the mount's restore
+//!    lock, a staging directory past the age guard can be removed wholesale —
 //!    via `remove_restore_staging`, since a crashed extraction
 //!    reproduces archived (possibly read-only) directory modes.
 //!
 //! The sweeper is age-guarded: an artefact younger than
 //! `min_artifact_age_secs` is never touched, so an in-flight snapshot in
 //! another process (fresh `*.partial`, archive awaiting its sidecar) is
-//! always older than the guard when reclaimed. Within this process the
-//! sweep holds `restore_lock`, so it cannot race a live restore's staging
-//! directory; across processes the age guard is the only protection. The
-//! sweep runs once per mount open, not continuously.
+//! always older than the guard when reclaimed. The sweep holds the same
+//! per-mount file lock as restore, so it cannot remove a live restore's
+//! staging directory even in another process. A busy or unavailable lock
+//! skips the sweep. The sweep runs once per mount open, not continuously.
 
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -191,13 +190,27 @@ fn archive_is_valid(root: std::os::fd::BorrowedFd<'_>, archive_rel: &Path) -> bo
 /// removal failures are logged and counted, never propagated — reclaim
 /// must not turn a mount open into a hard failure.
 ///
-/// Holds `restore_lock` for the whole sweep: the staging-class removals
-/// (rule 5) must not race an in-process `restore_tarball` that is between
-/// creating its `.<id>.staging` and publishing it. The age guard remains
-/// the only cross-process protection — this lock is per-process.
+/// Holds the mount's restore lock for the whole sweep, including across
+/// processes. If the lock is busy or unavailable, leaves all artefacts alone.
 pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport {
-    let _restore_guard = super::tar::restore_lock();
     let mut report = ReclaimReport::default();
+    let _restore_guard = match super::tar::restore_lock(mount) {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            tracing::debug!(
+                "snapshot reclaim: mount {} is busy, skipping",
+                mount.root.display()
+            );
+            return report;
+        }
+        Err(error) => {
+            tracing::warn!(
+                "snapshot reclaim: cannot lock {}: {error}; skipping",
+                mount.root.display()
+            );
+            return report;
+        }
+    };
     let dir = snapshots_dir(mount);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -356,8 +369,8 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         // listing filter keeps symlinks out of `archives`, but between
         // `read_dir` and these calls the name can be swapped, and a plain
         // `File::open` on a swapped-in FIFO blocks until a writer appears
-        // — while the sweep holds `restore_lock`, hanging every restore in
-        // the process. `open_read`/`metadata` resolve through openat2 with
+        // — while the sweep holds `restore_lock`, preventing restores on
+        // this mount. `open_read`/`metadata` resolve through openat2 with
         // NO_SYMLINKS, so a swap is refused instead of followed.
         let archive_rel = match anchored(archive) {
             Some(rel) => rel,

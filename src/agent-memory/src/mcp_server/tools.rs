@@ -375,7 +375,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Restore a snapshot by id. All current files (except .anolisa/) are replaced by the archive contents. Each top-level entry is swapped via a single rename(2): a crash mid-restore leaves the prior state intact with hidden `.<id>.rollback.*` entries under .anolisa/. Concurrent reads of an individual path see either old or new content (or briefly ENOENT during that path's rename window), never a half-written file."
+        description = "Restore a snapshot by id. All current files (except .anolisa/) are replaced by the archive contents. Fails before changing files if another snapshot restore or reclaim holds this mount's lock, including in another process; retry after it finishes. Each top-level entry is swapped via a single rename(2): a crash mid-restore leaves the prior state intact with hidden `.<id>.rollback.*` entries under .anolisa/. Concurrent reads of an individual path see either old or new content (or briefly ENOENT during that path's rename window), never a half-written file."
     )]
     async fn mem_snapshot_restore(&self, #[tool(param)] id: String) -> ToolResult {
         self.svc

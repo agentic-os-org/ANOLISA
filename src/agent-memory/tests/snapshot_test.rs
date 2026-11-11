@@ -78,6 +78,48 @@ fn restore_unknown_id_returns_not_found() {
 }
 
 #[test]
+fn restore_and_reclaim_reject_non_regular_lock_paths() {
+    for kind in ["symlink", "fifo", "directory"] {
+        let (tmp, svc) = setup();
+        svc.write("doc.md", "snapshot", false).unwrap();
+        let snapshot = svc.mem_snapshot(None).unwrap();
+        svc.write("doc.md", "live", true).unwrap();
+        let lock_path = svc.mount.meta_dir.join(".restore.lock");
+        std::fs::remove_file(&lock_path).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, "untouched").unwrap();
+        match kind {
+            "symlink" => std::os::unix::fs::symlink(&outside, &lock_path).unwrap(),
+            "fifo" => nix::unistd::mkfifo(&lock_path, nix::sys::stat::Mode::S_IRWXU).unwrap(),
+            "directory" => std::fs::create_dir(&lock_path).unwrap(),
+            _ => unreachable!(),
+        }
+        let staging = svc
+            .mount
+            .meta_dir
+            .join(format!("snapshots/.{}.staging", snapshot.id));
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("active.md"), "in progress").unwrap();
+        let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+            &svc.mount,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(report.total_removed(), 0, "{kind}");
+        assert!(svc.mem_snapshot_restore(&snapshot.id).is_err(), "{kind}");
+        assert_eq!(svc.read("doc.md").unwrap(), "live", "{kind}");
+        assert!(staging.join("active.md").exists(), "{kind}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "untouched");
+        if kind == "directory" {
+            std::fs::remove_dir(&lock_path).unwrap();
+        } else {
+            std::fs::remove_file(&lock_path).unwrap();
+        }
+        svc.mem_snapshot_restore(&snapshot.id).unwrap();
+        assert_eq!(svc.read("doc.md").unwrap(), "snapshot");
+    }
+}
+
+#[test]
 fn restore_rejects_invalid_gzip_trailer_without_changing_live_files() {
     for truncate_trailer in [false, true] {
         let (_tmp, svc) = setup();
