@@ -651,7 +651,9 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
     // assignment. The CJK marks bound a value where prose puts no spaces
     // around it. `|` is sqlite3's default column separator, so
     // `1|/tmp/report.txt` is the text-column shape of the `complete|119` a
-    // count was once hidden in. `\` opens the escape that follows a value in a
+    // count was once hidden in. `;` delimits a column the same way
+    // (`.separator ';'`, `psql -F';'`) and separates commands, so it opens and
+    // closes a value. `\` opens the escape that follows a value in a
     // JSON payload serialized inside a string (`\"v1.2.3\",\n`), which the
     // decoding pass in `push_entry` leaves raw.
     let boundary = |c: char| {
@@ -669,6 +671,7 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
                     | '<'
                     | '>'
                     | '|'
+                    | ';'
                     | ':'
                     | '='
                     | '\\'
@@ -702,8 +705,9 @@ fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
                     .next_back()
                     .is_none_or(|c| boundary(c) || matches!(c, ':' | '=' | ',')));
         // A terminal period/comma is sentence decoration; the same character
-        // followed by more filename/version content is a continuation.
-        let suffix = haystack[start + needle.len()..].trim_start_matches(['.', ',', ';', '!', '?']);
+        // followed by more filename/version content is a continuation. A
+        // semicolon is a boundary in its own right, so it is not trimmed here.
+        let suffix = haystack[start + needle.len()..].trim_start_matches(['.', ',', '!', '?']);
         starts_value && suffix.chars().next().is_none_or(boundary)
     })
 }
