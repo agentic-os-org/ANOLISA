@@ -80,6 +80,12 @@ pub struct SkillFs {
     skill_layout: SkillLayout,
     /// Channel to send sync events to the background sync worker.
     sync_tx: Option<std::sync::mpsc::Sender<SyncEvent>>,
+    /// Written by the [`Filesystem::init`](fuser::Filesystem::init) callback
+    /// (the kernel's FUSE_INIT) when `Some`: this session's readiness and
+    /// mount identity, which the background mount entry waits on. `None` on
+    /// filesystems mounted through the blocking entries, which have no
+    /// waiter.
+    session_signal: Option<Arc<crate::mount::SessionSignal>>,
     /// Skill Security policy. The S1 default is
     /// [`SkillMetaProtectionPolicy`], which denies mutating operations
     /// under `.skill-meta/**`. Embedders/tests can swap it for
@@ -260,6 +266,7 @@ impl SkillFs {
             in_place,
             skill_layout: SkillLayout::Flat,
             sync_tx: Some(sync_tx),
+            session_signal: None,
             policy: Arc::new(SkillMetaProtectionPolicy),
             event_sink: Arc::new(NoopEventSink),
             active_resolver: None,
@@ -428,6 +435,30 @@ impl SkillFs {
     pub fn with_staging_matcher(mut self, matcher: Arc<StagingMatcher>) -> Self {
         self.staging_matcher = Some(matcher);
         self
+    }
+
+    /// Attach this session's signal: written once the kernel delivers
+    /// FUSE_INIT, i.e. the session is serving. The background mount entry's
+    /// wait loop polls it instead of inferring the session's identity from
+    /// mount-table presence.
+    pub(crate) fn with_session_signal(mut self, signal: Arc<crate::mount::SessionSignal>) -> Self {
+        self.session_signal = Some(signal);
+        self
+    }
+
+    /// The mount ID this session owns, read from the mount table while
+    /// FUSE_INIT is handled: the mount exists by then, so the entry at this
+    /// mountpoint is this session's. `None` where no mount table identifies
+    /// it, which leaves teardown unable to claim any mount.
+    fn session_mount_id(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::MountHandle::path_mount_id(&self.mountpoint)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     pub fn with_staging_controller(mut self, controller: Arc<InstallerStagingController>) -> Self {
@@ -753,6 +784,23 @@ impl SkillFs {
 }
 
 impl Filesystem for SkillFs {
+    /// The kernel delivers FUSE_INIT as soon as this session serves the
+    /// mountpoint — the authoritative per-session readiness signal. The
+    /// background mount entry's wait loop polls it rather than inferring
+    /// this session's identity from mount-table presence, which a stale
+    /// mount on the same mountpoint (or a session that completed before
+    /// the first probe) makes ambiguous.
+    fn init(
+        &mut self,
+        _req: &Request<'_>,
+        _config: &mut fuser::KernelConfig,
+    ) -> Result<(), std::os::raw::c_int> {
+        if let Some(signal) = &self.session_signal {
+            signal.mark_ready(self.session_mount_id());
+        }
+        Ok(())
+    }
+
     fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
         self.inodes.forget(ino, nlookup);
     }
