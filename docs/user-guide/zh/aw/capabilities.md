@@ -13,6 +13,7 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -23,10 +24,14 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
-Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点限制见各 Agent 页。
+Qoder CLI 尚未接入失败工具的 Post 回调。Codex CLI 0.163.0 支持提交与工具执行前阻断，
+其 PostToolUse 仅支持观察，见 [Codex 指南](../../../developer-guide/zh/aw/agents/codex.md)。
+其他结果类型和接点限制见各 Agent 页。
+Codex 的 `tool.before` 标为必需时，AW 拒绝其他可在检查后改写参数的原生 PreToolUse Hook；
+非必需检查仅覆盖原始输入。
 
 普通 resident Qoder SDK、QwenPaw、Claude SDK 前台/常驻工厂、Pi worker、AgentScope 工厂回复
-及 DeepSeek Harness headless 轮次在模型请求前支持 `input.submit` 观察与阻断，检查文本并关联会话和轮次。
+、DeepSeek Harness headless 轮次及本地 Codex CLI在模型请求前支持 `input.submit` 观察与阻断，检查文本并关联会话和轮次。
 Claude 支持字符串或单条异步文本消息，拒绝或取消后完成清理再复用。DeepSeek 配置该检查后拒绝含非文本
 内容的提交；Web、SDK 和 ACP 输入路径仍需原生验收。受限 reloadable 模式及未声明此能力的 Adapter
 拒绝该事件。
@@ -47,7 +52,7 @@ Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用
 | Hook | 状态 |
 | --- | --- |
 | `session.start` | 规划中 |
-| `input.submit` | 普通 resident Qoder SDK / QwenPaw 文本、Claude SDK 前台/常驻文本工厂、Pi worker 文本输入、AgentScope 工厂文本回复及 DeepSeek Harness headless 文本轮次已实现 |
+| `input.submit` | 普通 resident Qoder SDK / QwenPaw 文本、Claude SDK 前台/常驻文本工厂、Pi worker 文本输入、AgentScope 工厂文本回复、DeepSeek Harness headless 文本轮次及本地 Codex CLI已实现 |
 | `tool.before` | 已实现 |
 | `tool.after` | 已实现 |
 | `permission.request` | 规划中 |

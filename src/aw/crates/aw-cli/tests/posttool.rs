@@ -255,6 +255,9 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
     for agent in native::agents() {
         let adapter = agent.as_str();
+        if adapter == "codex" {
+            continue; // PostToolUse cannot replace the result.
+        }
         let fixture = Fixture::new();
         let mut document = fixture.document();
         document["spec"]["agents"] =

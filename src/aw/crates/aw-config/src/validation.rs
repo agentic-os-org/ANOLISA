@@ -210,6 +210,7 @@ fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Resul
                             | "claude-sdk"
                             | "qoder-sdk"
                             | "agentscope"
+                            | "codex"
                     )
                 )
                 && parts.next().is_some_and(|name| {

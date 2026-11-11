@@ -35,7 +35,7 @@ All fields below are inside `spec` unless stated otherwise.
 | `execution.guarantee` | Only `native_hook`; no OS, final or protected guarantee |
 | `execution.default_event_budget_ms` | Required positive shared event budget, not a fresh budget for each step |
 | `audit.enabled`, `audit.payload` | This revision requires `true` and `metadata_only`; the service persists execution metadata |
-| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `qoder-sdk`, `openclaw`, `hermes`, `pi`, `claude-sdk` or `agentscope`; recognition is not runtime certification |
+| `agents.<id>.adapter` | `qwenpaw`, `qoder`, `qoder-sdk`, `openclaw`, `hermes`, `pi`, `claude-sdk`, `codex` or `agentscope`; recognition is not runtime certification |
 | `agents.<id>.shutdown_grace_ms` | External-signal shutdown grace, 1..120000 ms, default 2000; see [lifecycle](deployment/lifecycle.md) |
 | `daemon.limits` | Resident service concurrency limits; see [capacity settings](deployment/lifecycle.md#concurrent-service-budgets) |
 | `agents.<id>.argv` | Nonempty executable/argument array; first element must be nonempty; no implicit shell or interpolation |
@@ -170,7 +170,7 @@ at these points. `security.violation` admits a final `observe` or `block` step
 where an Adapter provides a checked delivery boundary. Boolean/native steps cannot request structured input or result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, guards and stronger execution guarantees
-are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope factories have launch Adapters;
+are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK, Codex CLI and explicit AgentScope factories have launch Adapters;
 their verified baselines, entrypoints and
 after-event coverage are listed in the [native Agent reference](native-agents.md).
 

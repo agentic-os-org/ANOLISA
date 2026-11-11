@@ -67,6 +67,7 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -77,6 +78,10 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
+
+Codex CLI 0.163.0 uses the same `aw run` configuration for prompt, tool-input and
+pre-execution sec-core checks. Its PostToolUse Hook observes results without
+replacing them; see the [Codex guide](../../docs/developer-guide/en/aw/agents/codex.md).
 
 Pi `runWorker` factories also support literal user text checks before model dispatch; see the [Pi submission guide](../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions).
 
@@ -91,7 +96,7 @@ injection scanning with separate risk and failure policies; see
 
 ## Supported entrypoints
 
-AW currently integrates Qoder CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
+AW currently integrates Qoder CLI, Codex CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
 Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
 SDK applications explicitly use managed factories. Runtime admission checks the required
 native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)

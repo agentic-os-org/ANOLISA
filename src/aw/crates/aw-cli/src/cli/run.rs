@@ -156,6 +156,15 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         Ok(prepared) => prepared,
         Err(error) => return interrupted_error(error.into()),
     };
+    if name == "codex"
+        && native
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-hook-trust")
+    {
+        eprintln!(
+            "AW: honoring the explicitly supplied Codex hook-trust bypass for this invocation"
+        );
+    }
     if let Some(exit) = interrupted() {
         return Ok(exit);
     }
