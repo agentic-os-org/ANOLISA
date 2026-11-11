@@ -88,9 +88,7 @@ pub(crate) fn snapshot(root: u32) -> Result<Vec<ProcessIdentity>, GatewayError> 
         process.verify()?;
         let tasks_path = format!("/proc/{}/task", process.pid);
         let tasks = std::fs::read_dir(&tasks_path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound
-                && Path::new("/proc/self/stat").is_file()
-            {
+            if process_vanished(&error) {
                 GatewayError::process_exited()
             } else {
                 GatewayError::io(
@@ -211,6 +209,12 @@ fn capture(pid: u32) -> Result<ProcessIdentity, GatewayError> {
     let pin = pidfd_open(target, PidfdFlags::empty()).map_err(|error| {
         if error == rustix::io::Errno::SRCH {
             GatewayError::process_exited()
+        } else if error == rustix::io::Errno::INVAL
+            && read_identity(pid).is_err_and(|probe| probe.is_process_exited())
+        {
+            // A reaped process keeps its PID briefly without a thread-group leader, which
+            // pidfd_open reports as EINVAL; procfs confirms the exit instead of guessing.
+            GatewayError::process_exited()
         } else {
             GatewayError::unavailable(format!("cannot pin process {pid} with pidfd: {error}"))
         }
@@ -283,10 +287,7 @@ fn read_proc(path: &Path) -> Result<String, GatewayError> {
     std::fs::File::open(path)
         .and_then(|file| file.take(MAX_PROC_BYTES + 1).read_to_string(&mut text))
         .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound
-                && path.starts_with("/proc")
-                && Path::new("/proc/self/stat").is_file()
-            {
+            if path.starts_with("/proc") && process_vanished(&error) {
                 GatewayError::process_exited()
             } else {
                 GatewayError::io("cannot read process snapshot", path, &error)
@@ -296,6 +297,16 @@ fn read_proc(path: &Path) -> Result<String, GatewayError> {
         return Err(capacity());
     }
     Ok(text)
+}
+
+/// Whether a procfs access failed because the process is gone.
+///
+/// A PID directory read while its process is being reaped fails with `ESRCH` rather than
+/// `ENOENT`; both only prove exit while procfs itself is still mounted.
+pub(crate) fn process_vanished(error: &std::io::Error) -> bool {
+    (error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()))
+        && Path::new("/proc/self/stat").is_file()
 }
 
 fn capacity() -> GatewayError {

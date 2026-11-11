@@ -85,7 +85,7 @@ pub trait Host: Send + Sync {
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
             .map_err(|_| GatewayError::unavailable("cannot read host boot identity"))?;
         let namespace = std::fs::read_link(format!("/proc/{pid}/ns/pid")).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
+            if crate::processes::process_vanished(&error) {
                 GatewayError::process_exited()
             } else {
                 GatewayError::unavailable("cannot read process PID namespace")
@@ -345,9 +345,7 @@ impl Host for SystemHost {
     fn process_cgroup(&self, pid: u32) -> Result<String, GatewayError> {
         let path = PathBuf::from(format!("/proc/{pid}/cgroup"));
         let text = std::fs::read_to_string(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound
-                && std::path::Path::new("/proc/self/cgroup").is_file()
-            {
+            if crate::processes::process_vanished(&error) {
                 GatewayError::process_exited()
             } else {
                 GatewayError::io("cannot read", &path, &error)
