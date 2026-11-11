@@ -308,6 +308,59 @@ fn list_caps_entries_at_max() {
     );
 }
 
+#[test]
+fn list_warns_only_when_matching_entries_exceed_cap() {
+    for glob in [None, Some("**/*.md".to_string())] {
+        let (tmp, svc) = setup();
+        let bulk = tmp.path().join("user-tester/bulk");
+        std::fs::create_dir_all(&bulk).unwrap();
+        for i in 0..4999 {
+            std::fs::File::create(bulk.join(format!("f{i:05}.md"))).unwrap();
+        }
+        if glob.is_some() {
+            // Extra filesystem entries do not imply extra matching results.
+            std::fs::File::create(bulk.join("ignored.txt")).unwrap();
+        }
+
+        for count in 4999..=5001 {
+            if count > 4999 {
+                std::fs::File::create(bulk.join(format!("f{:05}.md", count - 1))).unwrap();
+            }
+            for recursive in [false, true] {
+                let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let sink = captured.clone();
+                let guard = tracing_subscriber::fmt()
+                    .with_writer(move || CaptureWriter(sink.clone()))
+                    .with_ansi(false)
+                    .set_default();
+                let entries = svc
+                    .list(
+                        "bulk",
+                        ListOptions {
+                            recursive,
+                            glob: glob.clone(),
+                        },
+                    )
+                    .unwrap();
+                drop(guard);
+
+                assert_eq!(entries.len(), count.min(5000));
+                assert!(entries.iter().all(|entry| entry.path.ends_with(".md")));
+                let logged =
+                    String::from_utf8(std::mem::take(&mut *captured.lock().unwrap())).unwrap();
+                assert_eq!(
+                    logged.contains("listing truncated"),
+                    count > 5000,
+                    "count={count}, recursive={recursive}, glob={glob:?}: {logged}"
+                );
+                if count > 5000 {
+                    assert!(logged.contains("under 'bulk'"), "{logged}");
+                }
+            }
+        }
+    }
+}
+
 // ---------- mem_grep ----------
 
 #[test]
