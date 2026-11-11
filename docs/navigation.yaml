@@ -144,6 +144,11 @@ website:
           en: Claude SDK
           zh: Claude SDK
         doc: developer-guide/aw/agents/claude-sdk
+      - id: codex
+        label:
+          en: Codex CLI
+          zh: Codex CLI
+        doc: developer-guide/aw/agents/codex
     - id: providers
       label:
         en: Provider Development

@@ -4669,8 +4669,69 @@
               "cases": {
                 "at": "",
                 "key": "case",
-                "names": ["web", "sdk", "acp"],
-                "values": {"passed": true}
+                "names": [
+                  "web",
+                  "sdk",
+                  "acp"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "codex": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_packages": [
+        "@openai/codex@0.163.0"
+      ],
+      "boundary": "Codex 0.163.0 native exec and UserPromptSubmit/PreToolUse/PostToolUse Hooks with local Responses fixture. Includes input and tool denial, provider failure, native denial and input rewrite, required-check rejection of peer PreToolUse Hooks, serial steps, unchanged tool results, trust refusal and cleanup. Tool output is observe-only; hosted models, TUI trust UI, sandbox enforcement and MCP are not certified.",
+      "cases": [
+        {
+          "name": "native-cli",
+          "argv": [
+            "{python}",
+            "tests/test_codex_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/.bin/codex",
+            "--output",
+            "{output}/codex"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex/result.json",
+              "cases": {
+                "at": "results",
+                "key": "case",
+                "names": [
+                  "untrusted",
+                  "disabled",
+                  "prompt-deny",
+                  "allow",
+                  "deny",
+                  "offline",
+                  "retry",
+                  "native-deny",
+                  "native-rewrite",
+                  "native-rewrite-deny",
+                  "native-rewrite-required",
+                  "after-failure",
+                  "long"
+                ],
+                "values": {
+                  "passed": true,
+                  "cleaned": true
+                }
               }
             }
           ]

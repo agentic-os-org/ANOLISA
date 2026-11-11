@@ -67,6 +67,7 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -77,6 +78,9 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI 也可通过 `input.submit` 检查原生 `UserPromptSubmit` 文本，见 [Qoder 输入检查](../../docs/developer-guide/zh/aw/agents/qoder.md#检查用户提交)。
+
+Codex CLI 0.163.0 沿用 `aw run` 配置进行提交文本、工具输入和执行前 sec-core 检查。
+PostToolUse 只能观察结果，不能替换；见 [Codex 指南](../../docs/developer-guide/zh/aw/agents/codex.md)。
 
 Pi `runWorker` 工厂支持模型派发前的字面量用户文本检查，接入方式见 [Pi 输入检查指南](../../docs/developer-guide/zh/aw/agents/pi.md#检查用户输入)。
 
@@ -90,7 +94,7 @@ sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按�
 
 ## 支持范围
 
-当前接入 Qoder CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
+当前接入 Qoder CLI、Codex CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
 Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需要显式接入受管工厂。
 运行准入检查所需原生接口，[已验证基线](../../docs/developer-guide/zh/aw/native-agents.md)记录实际测试的框架版本。
 [Qoder SDK 接入](../../docs/developer-guide/zh/aw/agents/qoder-sdk.md)还支持预热、原样 SDK/Worker 下的原生配置、Pilot runtime launcher 授权、固定摘要的 Bash 消费者及声明式角色资产。

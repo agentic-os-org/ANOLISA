@@ -6,6 +6,7 @@ mod bridge;
 pub(crate) mod connection;
 mod dispatch;
 mod hook;
+mod hook_chain;
 pub(crate) mod instance;
 mod native;
 mod native_setup;
@@ -147,6 +148,7 @@ pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
         "scope" => scope::run(args),
         "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
+        "codex-hook" => hook_chain::callback(args, "codex", "AW_CODEX_CONFIG"),
         "policy" => {
             args.check(&[], false)?;
             policy::run()?;

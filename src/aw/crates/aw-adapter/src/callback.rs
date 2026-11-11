@@ -102,13 +102,13 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
                 _ => on_error == "block",
             }
         }
-        ("qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw", Some(output)) => {
+        ("qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw" | "codex", Some(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
         (
             "pi" | "deepseek-harness" | "openclaw" | "qoder-sdk" | "claude-sdk" | "agentscope"
-            | "qwenpaw",
+            | "qwenpaw" | "codex",
             None,
         ) => on_error == "block",
         _ => false,

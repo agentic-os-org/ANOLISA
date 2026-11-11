@@ -171,7 +171,8 @@
                     "pi",
                     "claude-sdk",
                     "qoder-sdk",
-                    "agentscope"
+                    "agentscope",
+                    "codex"
                   ]
                 },
                 "binding_id": {
