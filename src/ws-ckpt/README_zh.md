@@ -186,7 +186,8 @@ ws-ckpt reload
 使用 BtrfsBase 时，可设置 `[backend.btrfs-base] btrfs_mount = "/data"`，固定到
 已挂载且可写的 btrfs 挂载点；数据位于 `/data/ws-ckpt-data`。后端设置需重启生效。
 未指定时，重启沿用持久化挂载点；该挂载不可用就报错。修改此配置会有意切换数据根，
-旧快照不再可见，启动可能清除未 pinned 的索引记录；修改前请备份状态和数据。
+旧快照不再可见，启动可能清除未 pinned 的索引记录；切回不会恢复，残留子卷会作为 pinned 的
+恢复孤儿重新出现。修改前请备份状态和数据。
 `daemon --mount-path` 仅配置 BtrfsLoop。
 详见[存储后端选择](../../docs/user-guide/zh/ws-ckpt/index.md#存储后端选择)。
 

@@ -138,7 +138,8 @@ Losing the `ws-state` volume loses the loop image and its data.
    in `state.json` and fails if it is missing, unmounted, non-btrfs or read-only,
    rather than choosing another mount. Changing the pin requires a restart and
    can make old snapshots invisible and prune unpinned index records; switching
-   back does not restore them. Back up state and data before intentional changes.
+   back does not restore them, and leftover subvolumes return as pinned orphans
+   (see `ws-ckpt list --orphans`). Back up state and data before intentional changes.
 
 8. Share `/etc/ws-ckpt` between both containers.
    `ws-ckpt config --global` writes
