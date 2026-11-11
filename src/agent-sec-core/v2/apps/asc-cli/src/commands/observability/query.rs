@@ -223,7 +223,7 @@ impl ReportCommand {
                 totals.add(&event)
             })
         })?;
-        totals.tools.sort_by(|a, b| b.1.cmp(&a.1));
+        totals.tools.sort_by_key(|tool| std::cmp::Reverse(tool.1));
         let security = session["security_by_category_result"]
             .as_object()
             .ok_or_else(invalid_response)?;
