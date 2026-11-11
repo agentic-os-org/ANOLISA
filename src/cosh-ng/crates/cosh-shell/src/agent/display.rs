@@ -1,9 +1,7 @@
 use crate::i18n::{I18n, MessageId};
 
-pub(crate) fn display_agent_error(error: &str, i18n: &I18n) -> String {
-    let code = error.strip_prefix("provider_access:").unwrap_or(error);
-    let zh = i18n.language() == crate::Language::ZhCn;
-    let trial_message = match code {
+fn trial_error_message(code: &str, zh: bool) -> Option<&'static str> {
+    match code {
         "ModelNotConfigured" => Some(if zh {
             "尚未配置模型，可用 /auth 配置。"
         } else {
@@ -50,7 +48,16 @@ pub(crate) fn display_agent_error(error: &str, i18n: &I18n) -> String {
             "Unable to read automatic access preferences. Use /auth to retry or configure a model."
         }),
         _ => None,
-    };
+    }
+}
+
+pub(crate) fn display_agent_error(error: &str, error_code: Option<&str>, i18n: &I18n) -> String {
+    let zh = i18n.language() == crate::Language::ZhCn;
+    let trial_message = error_code
+        .and_then(|code| trial_error_message(code, zh))
+        .or_else(|| {
+            trial_error_message(error.strip_prefix("provider_access:").unwrap_or(error), zh)
+        });
     if let Some(message) = trial_message {
         return message.to_string();
     }
@@ -82,15 +89,19 @@ mod tests {
     #[test]
     fn core_question_protocol_errors_do_not_expose_reason_codes() {
         let i18n = I18n::new(crate::Language::EnUs);
-        let display = display_agent_error("cosh-core-question-protocol:missing-question", &i18n);
+        let display =
+            display_agent_error("cosh-core-question-protocol:missing-question", None, &i18n);
         assert_eq!(
             display,
             "Agent question unavailable\nThe Agent returned an incomplete question. Please retry."
         );
         assert!(!display.contains("missing-question"));
 
-        let delivery =
-            display_agent_error("cosh-core-question-protocol:answer-write-failed", &i18n);
+        let delivery = display_agent_error(
+            "cosh-core-question-protocol:answer-write-failed",
+            None,
+            &i18n,
+        );
         assert!(delivery.contains("Agent answer delivery uncertain"));
         assert!(!delivery.contains("answer-write-failed"));
     }
