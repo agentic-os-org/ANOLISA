@@ -33,6 +33,11 @@ Use `SKILLS_DIR=/absolute/path` to select another collection directory;
 use the same value when uninstalling. Start a new cosh session and run
 `/skills` to check the installed collection.
 
+`INSTALL_PROFILE=user` derives its default paths from `HOME`; when `HOME` is
+unset, empty, relative or `/`, the install fails instead of writing under `/`.
+Pass `PREFIX`, `DATADIR` and `SKILLS_DIR` explicitly to install without a home
+directory.
+
 Local system copies take precedence over RPM copies in
 `/usr/share/anolisa/skills/` when their skill names match. Use one delivery
 method for the collection; when managing an older source installation,

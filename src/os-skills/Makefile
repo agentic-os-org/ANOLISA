@@ -25,6 +25,11 @@ DATADIR ?= $(PREFIX)/share
 # Standalone skills use the consumer's data root so cosh can discover them.
 SKILLS_DIR ?= $(DATADIR)/$(if $(strip $(AWPRJ)),$(AWPRJ),cosh-ng)/skills
 endif
+ifeq ($(INSTALL_PROFILE),user)
+# A user path left to its default is derived from HOME; with HOME empty it
+# resolves under /, where cosh never looks for skills.
+HOME_DEPENDENT := $(if $(filter file,$(origin PREFIX) $(origin DATADIR) $(origin SKILLS_DIR)),1)
+endif
 # The receipt records this directory, so /a and /a/ must name one collection.
 override SKILLS_DIR := $(call strip_slash,$(SKILLS_DIR))
 COMPONENT_DIR ?= $(DATADIR)/anolisa/components/os-skills
@@ -36,6 +41,13 @@ MANIFEST ?= $(COMPONENT_DIR)/install-manifest
 check-layout:
 	@case "$(INSTALL_PROFILE)" in system|user) ;; *) echo 'INSTALL_PROFILE must be system or user' >&2; exit 1 ;; esac
 	@case "$(REPLACE_UNOWNED)" in ''|0|1) ;; *) echo 'REPLACE_UNOWNED must be 1 to take over unowned directories, or 0 or unset' >&2; exit 1 ;; esac
+	@if [ -n "$(HOME_DEPENDENT)" ]; then \
+		case "$(strip $(HOME))" in \
+		/?*) ;; \
+		*) echo 'INSTALL_PROFILE=user derives paths from HOME; set an absolute HOME other than / or pass PREFIX, DATADIR and SKILLS_DIR' >&2; exit 1 ;; \
+		esac; \
+	fi
+	@if [ "$(strip $(DESTDIR))" = / ]; then echo 'DESTDIR must be a package root other than /' >&2; exit 1; fi
 	@case "$(AWPRJ)" in ''|[a-zA-Z0-9]*) ;; *) echo 'AWPRJ must start with a letter or digit' >&2; exit 1 ;; esac
 	@case "$(AWPRJ)" in *[!a-zA-Z0-9_.-]*) echo 'AWPRJ must be a single namespace segment' >&2; exit 1 ;; esac
 	@for path in "$(if $(PREFIX),$(PREFIX),/)" "$(DATADIR)" "$(SKILLS_DIR)" "$(COMPONENT_DIR)" "$(MANIFEST)" "$(if $(DESTDIR),$(DESTDIR),/)"; do \
