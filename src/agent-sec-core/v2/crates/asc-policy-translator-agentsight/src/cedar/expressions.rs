@@ -9,8 +9,10 @@ use super::{
 
 pub(super) const DELETE: u8 = 1;
 pub(super) const WRITE: u8 = 2;
-// Unconstrained operation includes create, rename and setattr as well.
-const ALL_OPERATIONS: u8 = 31;
+// Unconstrained file.write includes create, rename and setattr as well.
+pub(super) const WRITE_OPERATIONS: u8 = 31;
+pub(super) const READ: u8 = 32;
+const ALL_OPERATIONS: u8 = WRITE_OPERATIONS | READ;
 
 #[derive(Clone)]
 pub(super) struct Branch {

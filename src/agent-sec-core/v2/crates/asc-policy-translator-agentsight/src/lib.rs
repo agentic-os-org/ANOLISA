@@ -5,8 +5,8 @@
 //! inspection, or policy attachment.
 //!
 //! Native JSON uses the existing DSL subset. Cedar PST lowers to structured
-//! deletion/ordinary-write protection. Target filesystem and live capability
-//! checks belong to the Client and deployed backend.
+//! deletion/ordinary-write protection and exact-file read denial. Target filesystem
+//! and live capability checks belong to the Client and deployed backend.
 
 #![forbid(unsafe_code)]
 

@@ -8,7 +8,7 @@
 
 Cedar 准入与 PAP/RPC 源码持久化已接入；
 测试通过已有 `pst` 接口重新解析保存的源码。
-Cedar 删除/普通写保护已接入现有 PEP Adapter 的翻译与部署；sandbox 运行时授权使用 PAP 当前策略及 schema revision 1。
+Cedar 删除/普通写/精确文件禁读保护已接入现有 PEP Adapter 的翻译与部署；sandbox 运行时授权使用 PAP 当前策略及 schema revision 1。
 具体能力边界及流程见 [专属 Adapter 契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)。
 
 原有 JSON 链路与早期导入评估的核查基线：
@@ -301,7 +301,7 @@ Cedar 原生授权结果是 Allow/Deny 与诊断信息；策略部署和业务�
 | PAP 策略管理 | 保存源码及 revision，关联 Scope，保留分配和 Binding 快照 | `asc-pap`、repository 管理双前端源码；策略组合待设计 |
 | PDP 请求决策 | 加载适用策略，接收具体请求，按需组织 PIP 信息并执行授权 | 目标设计；可以与 PAP 同处 SecCore daemon，逻辑职责独立 |
 | 部署编排 | 生成或更新 Binding、选择目标，由 Reconciler 驱动安装、更新、撤销与恢复 | 现有 Scope/Binding 与 `asc-pcp`；从授权结果生成部署输入仍待接入 |
-| 后端适配 | Translator 负责目标能力检查与翻译；Deployment Client 负责后端协议和部署调用 | 原生 DSL 与 Cedar 删除/普通写结构化翻译已接入；Client 检查目标运行能力 |
+| 后端适配 | Translator 负责目标能力检查与翻译；Deployment Client 负责后端协议和部署调用 | 原生 DSL 与 Cedar 删除/普通写/精确文件禁读结构化翻译已接入；Client 检查目标运行能力 |
 | PEP 与后端 PDP | PEP 捕获请求并落实决策；部分后端还包含自己的 PDP，持续判断系统操作 | 按 Hook、sandbox、系统调用拦截等具体场景确定；不能由 schema 推断支持情况 |
 
 ![AgentSecCore 策略管理、请求决策与部署](diagrams/CEDAR_ARCHITECTURE_zh.png)
@@ -559,7 +559,7 @@ when {
 schema 插件加载器。Hook 扩展仅在测试中定义，内嵌 schema 拒绝这些动作。
 
 这是 V2 前端与策略管理契约。PAP/RPC 与源码快照已接入，测试将恢复的源码传给 `pst`；
-现有 PEP Adapter 已翻译受支持的 Cedar forbid 删除/普通写条件，Client 下发目标防护策略。
+现有 PEP Adapter 已翻译受支持的 Cedar forbid 删除/普通写/精确文件禁读条件，Client 下发目标防护策略。
 完整边界见[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)；sandbox 运行时请求使用 schema revision 1。
 校验成功只证明前端接受该策略。SDK 的深层嵌套输入栈溢出限制仍未解决，
 当前应使用管理员审阅的策略，接入不可信生成输入前需补齐防护。
@@ -660,7 +660,7 @@ Binding，必须保留其版本支持，或先完成显式迁移和目标重新�
 |---|---|---|
 | 类型与 Cedar 前端 | 源码联合类型；内置 revision 1；`validate` 返回非阻断 warnings，`pst` 校验并返回 SDK PST | schema 文件元数据及读取；保持公共子集诊断 |
 | Policy/PAP/RPC/SQLite | `template: PolicySource`；Cedar 准入和源码持久化；旧请求与三处快照兼容 | 保持版本与快照契约 |
-| 策略加载与目标翻译 | 保存的 Cedar 源码经 `pst` 加载；删除/普通写翻译和 Client 部署已接入现有 PEP Adapter | 按声明边界验证真实后端防护；逐目标扩展支持范围 |
+| 策略加载与目标翻译 | 保存的 Cedar 源码经 `pst` 加载；删除/普通写/精确文件禁读翻译和 Client 部署已接入现有 PEP Adapter | 按声明边界验证真实后端防护；逐目标扩展支持范围 |
 | Sandbox 运行时授权 | PAP 当前版本读取、OS 授权 PDP、五态、本地 PEP 审批/执行与检查写入的回执 | 按最终修订确认 Linux 和 CI 结果；保留独立的 Binding 部署语义 |
 | Agent Hook/PIP | 内置 schema 尚未支持 | 另定资源、动作、请求字段与检测契约，再发布对应 schema 版本 |
 

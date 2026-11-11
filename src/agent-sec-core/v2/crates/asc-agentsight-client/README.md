@@ -48,6 +48,9 @@ using SecCore's shared `asc-agentsight-protocol` types and sent as
 `file_protection_policy`, with `policy_dsl` omitted. The policy payload itself has
 version 1; this is independent of the version-2 deployment plan. Existing DSL
 prepared requests retain their original bytes.
+`protections.read` defaults to false and is omitted when false. Read denial
+requires `exact_file` with no exclusions; it may be combined with deletion/write
+protection on the same target.
 
 The Client supports its HTTP request/response contract explicitly. The Translator
 and Client share payload types, the version and media type from
@@ -59,11 +62,13 @@ validation against the target release.
 
 Structured preflight requires static mount topology and the protection flags
 needed by each target: `file_entry_delete_protection`,
-`directory_tree_delete_protection`, and/or `ordinary_write_protection`. Missing
+`directory_tree_delete_protection`, `ordinary_write_protection`, and/or
+`file_read_protection`. Unavailable read protection rejects with
+`AGENTSIGHT_FILE_READ_PROTECTION_UNAVAILABLE` before old-target cleanup or POST. Missing
 structured capability fields default to unavailable. Legacy DSL retains the
 `file_delete_guard` check. Neither path silently falls back to the other. See the
 [Cedar mapping contract](../../../docs/design/AGENTSIGHT_CEDAR_TRANSLATION.md)
-for supported expressions, backend limitations and both protection flows.
+for supported expressions, backend limitations and protection flows.
 
 `source.policyId` and `source.policyRevision` populate AgentSight's product-policy
 attribution fields. Deployment identity remains the UUID derived from the source

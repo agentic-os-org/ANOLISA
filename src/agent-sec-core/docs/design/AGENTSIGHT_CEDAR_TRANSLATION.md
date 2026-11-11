@@ -5,7 +5,7 @@
 This document defines the AgentSight Adapter contract, including its Translator,
 Deployment Client and backend enforcement limits.
 
-AgentSecCore translates Cedar file-deletion and ordinary-write restrictions into
+AgentSecCore translates Cedar file-deletion, ordinary-write and exact-file read restrictions into
 AgentSight's structured file-protection payload. This extends the Cedar admission
 and persistence implementation at `af1bc18a9`; native JSON policies retain their
 existing DSL path. The production daemon already registers `AgentSightTranslator`
@@ -31,6 +31,9 @@ The crate depends only on `serde`; fixed JSON fixtures check the wire contract.
 Adding a payload version requires an explicit Translator/Client change and
 compatibility validation against the target release. A structured request omits
 `policy_dsl`; legacy requests retain their existing serialization and replay bytes.
+The optional `protections.read` defaults to false and is omitted when false,
+preserving existing version-1 payloads. Read denial requires a target advertising
+`file_read_protection`; an older target is rejected before update cleanup.
 
 This target consumes **additional forbid constraints**. A matching rule blocks
 the covered operation; otherwise this policy adds no restriction. It does not
@@ -45,6 +48,7 @@ or general Cedar authorization service in this path.
 |---|---|
 | Unconstrained `principal` | Scope/Binding selects the process instance and process tree |
 | `action == SecCore::Action::"file.write"` | Accepted; `action in [...]` must be a nonempty list containing only that action |
+| `action == SecCore::Action::"file.read"` | `read: true` on exact files; `action in [...]` may contain only this action. Combine read and write restrictions in separate statements. |
 | Unconstrained resource or `resource is SecCore::File` | Accepted |
 | `context.input.operation == SecCore::WriteOperation::"delete"` | `delete: true` |
 | `context.input.operation == SecCore::WriteOperation::"write"` | `ordinary_write: true` |
@@ -84,8 +88,9 @@ removal. These limits apply after SDK parsing, not to Cedar parser complexity.
 
 ## 3. Rejections and permitted semantic lowering
 
-The following are rejected: permit; unconstrained actions; read/exec/network
-actions; unrestricted file.write; create/rename/setattr; `context.input.program`,
+The following are rejected: permit; unconstrained or mixed read/write actions;
+exec/network actions; directory-tree read denial; unrestricted file.write;
+create/rename/setattr; `context.input.program`,
 `mode`, `ownerUid`, `ownerGid`, `cwd`, `arg_count` and `args` conditions;
 resource identity/hierarchy conditions; arbitrary
 `like` patterns; unbounded complements; unsupported functions and expressions.
@@ -99,7 +104,8 @@ Only these fixed target semantics are accepted:
 |---|---|
 | delete → deletion protection | Also protects stable entries/ancestors against relevant renames, moves into unprotected ranges, replacement and exchanges. It is not an unlink-only filter or a blanket rename ban. |
 | write → ordinary-write protection | Uses Sight's structured `file_permission` / `MAY_WRITE` check. It is not complete content integrity protection; truncate and mmap modification paths are not fully covered by this check. |
-| Path ranges → filesystem targets | Sight resolves entries, directory identities and relevant aliases in the selected process's filesystem view. Exact-file protection is not protection of every hardlink to the inode. |
+| read → exact-file read denial | Protects the regular-file identity held at Apply, including aliases, existing read-only descriptors and new mappings. Existing mappings reject Apply. External replacement or secret rotation requires reapplication. |
+| Path ranges → filesystem targets | Sight resolves entries, directory identities and relevant aliases in the selected process's filesystem view. Deletion/ordinary-write path scopes do not promise protection of every hardlink to the inode. |
 | `static_at_apply` | Mount topology is resolved at apply time. Directory trees cover subsequently created files, but arbitrary later mount changes are outside the guarantee. |
 
 For classification UNKNOWN, the current backend denies deletion/related rename
@@ -115,7 +121,7 @@ its parent; never enumerate today's glob matches as a persistent rule; never
 switch to legacy DSL or audit mode after a structured deployment failure. More
 blocking is also a semantic change outside the fixed boundaries above.
 
-## 4. Deletion and write-protection flows
+## 4. File-protection flows
 
 Deletion policy:
 
@@ -160,6 +166,24 @@ The resulting target body for deletion is:
 For write-only protection the flags are false/true; for combined protection they
 are true/true. Different operation ranges remain different targets.
 
+Read-denial policy, also supplied as an executable
+[source envelope](../../v2/fixtures/adapters/agentsight/cedar-file-protection/prevent-read.json):
+
+```cedar
+forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+when { resource.path == "/workspace/secret" };
+```
+
+This produces an `exact_file` target with
+`{"delete":false,"ordinary_write":false,"read":true}`. It does not implicitly
+block writes or deletion. Separate read/write/delete statements merge their flags
+only when their target scopes are identical. Directory-tree read denial is
+rejected with `CEDAR_RULE_<index>_UNSUPPORTED_READ_TARGET`.
+The backend requires `agent-file-guard` with active BPF LSM and its read hooks.
+Keep target access and the process tree stable during Apply; concurrent Apply,
+io_uring/AIO, process-memory access and dynamic mounts are outside this guarantee.
+Already-read content cannot be revoked.
+
 The shared flow is:
 
 1. CLI/RPC submits the source envelope. PAP validates before saving a Policy
@@ -171,7 +195,7 @@ The shared flow is:
 4. Client checks boot ID, PID namespace and process start time and prepares the
    exact HTTP bytes. The existing lifecycle registers the target before mutation.
 5. Preflight checks ready/ActPlane, static topology and the required exact-file
-   deletion, directory-tree deletion and/or ordinary-write capabilities. Missing
+   deletion, directory-tree deletion, ordinary-write and/or `file_read_protection` capabilities. Missing
    flags mean unavailable and reject before old-target cleanup or POST. Identity is checked again
    before POST; only a matching enforced receipt with a domain confirms presence.
 6. Sight validates target existence/types, topology and capacity, then installs
@@ -221,8 +245,8 @@ under an explicit permit baseline, and reject unsupported or oversized input.
 Client tests check fixed version-1 JSON requests, rejection of unsupported payload
 versions and fields, exact-byte retry, capability failure before update cleanup,
 malformed artifacts and mismatched acknowledgements.
-The PCP test `cedar_delete_and_write_flow_through_pap_sqlite_reconciler_and_http`
-exercises both fixture policies through PAP, SQLite, instance admission, actual
+The PCP test `cedar_file_protections_flow_through_pap_sqlite_reconciler_and_http`
+exercises deletion, write and read fixture policies through PAP, SQLite, instance admission, actual
 Translator/Client/Ureq, HTTP receipt, Binding Ready and cleanup. Discovery and
 the remote PEP are controlled test doubles. This does not establish live kernel
 enforcement or full file integrity.

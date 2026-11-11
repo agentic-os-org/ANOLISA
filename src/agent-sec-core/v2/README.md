@@ -10,7 +10,7 @@ This workspace slice contains the dependency-light contracts, Policy
 Administration Point, first-version PAP daemon protocol, Policy-template
 validation, protocol-independent Unix-domain-socket service framework, and runnable
 foreground process bootstrap, together with a PEP Translator for native JSON
-file-deletion rules and Cedar deletion/ordinary-write restrictions, and an
+file-deletion rules and Cedar deletion/ordinary-write/exact-file read restrictions, and an
 independent Deployment Client. `asc-pcp` provides synchronous attempts and
 `asc-policy-runtime/src/reconciliation/` provides the bounded Binding queue,
 workers, retry timers and compensation scanning. The daemon stores Policy, Scope
@@ -95,12 +95,12 @@ The current crates are:
   actions can add separate typed contexts.
   PAP/RPC and SQLite retain validated source and exact schema references. Revision 1
   supports logical subjects, program calls and permit advice for sandbox authorization.
-  The AgentSight adapter translates and deploys supported deletion and write rules. See the
+  The AgentSight adapter translates and deploys supported deletion, write and exact-file read rules. See the
   [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
 - `asc-policy-translator-agentsight`: translates immutable Binding snapshots into
   target plans. Native JSON supports block + file/write + operation=delete without
   history and produces DSL; Cedar supports a bounded `forbid` subset for deletion
-  and ordinary writes and produces structured file-protection JSON. Unsupported
+  and ordinary writes plus exact-file read denial, producing structured file-protection JSON. Unsupported
   rules reject the entire translation. Backend validation occurs at deployment.
 - `asc-agentsight-client`: health-gated AgentSight apply/delete transport for
   one configured endpoint, with process identity resolution and complete HTTP
@@ -312,7 +312,7 @@ source decoder reads historical native Policy, Scope and Binding snapshots.
 Native serialization and SQLite storage version 1 are retained. Saved Cedar
 source can be passed to the existing `asc-policy-cedar::pst` entrypoint to
 regenerate the official PST under its saved schema. The PEP Translator supports
-Cedar `forbid` deletion/ordinary-write restrictions; unsupported semantics reject
+Cedar `forbid` deletion/ordinary-write/exact-file read restrictions; unsupported semantics reject
 the entire translation. The Deployment Client checks capabilities and applies the plan.
 
 The current bootstrap bounds frame read, application dispatch, rejection

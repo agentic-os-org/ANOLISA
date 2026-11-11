@@ -24,7 +24,7 @@ const ACTPLANE_MAX_LOWERED_PATTERN_BYTES: usize = 63;
 const ACTPLANE_MAX_RULES: usize = 128;
 const DSL_REASON: &str = "AgentSecCore file deletion policy";
 
-/// Pure `AgentSight` Translator for native deletion and Cedar deletion/write constraints.
+/// Pure `AgentSight` Translator for native deletion and Cedar deletion/write/read constraints.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentSightTranslator;
 

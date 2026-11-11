@@ -5,14 +5,14 @@ mod paths;
 
 use asc_agentsight_protocol::{
     FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
-    FileProtectionTopologyMode, FileProtections,
+    FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
 };
 use asc_policy_types::{cedar::CedarPolicySource, target::TranslationRejection};
 use cedar_policy::pst::{
     ActionConstraint, Clause, Effect, PrincipalConstraint, ResourceConstraint,
 };
 
-use expressions::{Branch, DELETE, WRITE, and, expression};
+use expressions::{Branch, DELETE, READ, WRITE, WRITE_OPERATIONS, and, expression};
 use paths::target;
 
 pub(super) const MAX_TARGETS: usize = 64;
@@ -35,20 +35,32 @@ pub(super) fn translate(
             if body.effect != Effect::Forbid {
                 return Err("UNSUPPORTED_EFFECT");
             }
-            let is_write = |id: &cedar_policy::pst::EntityUID| {
-                id.ty.to_string() == "SecCore::Action" && id.eid == "file.write"
+            let all_actions = |name: &str| {
+                let matches = |id: &cedar_policy::pst::EntityUID| {
+                    id.ty.to_string() == "SecCore::Action" && id.eid == name
+                };
+                match &body.action {
+                    ActionConstraint::Eq(id) => matches(id),
+                    ActionConstraint::In(ids) => !ids.is_empty() && ids.iter().all(matches),
+                    ActionConstraint::Any => false,
+                }
             };
-            match &body.action {
-                ActionConstraint::Eq(id) if is_write(id) => {}
-                ActionConstraint::In(ids) if !ids.is_empty() && ids.iter().all(is_write) => {}
-                _ => return Err("UNSUPPORTED_ACTION"),
-            }
+            let operations = if all_actions("file.write") {
+                WRITE_OPERATIONS
+            } else if all_actions("file.read") {
+                READ
+            } else {
+                return Err("UNSUPPORTED_ACTION");
+            };
             match &body.resource {
                 ResourceConstraint::Any => {}
                 ResourceConstraint::Is(ty) if ty.to_string() == "SecCore::File" => {}
                 _ => return Err("UNSUPPORTED_RESOURCE_CONSTRAINT"),
             }
-            let mut branches = vec![Branch::default()];
+            let mut branches = vec![Branch {
+                operations,
+                ..Branch::default()
+            }];
             for clause in body.clauses() {
                 let (expr, negate) = match clause {
                     Clause::When(expr) => (expr, false),
@@ -57,10 +69,13 @@ pub(super) fn translate(
                 branches = and(branches, &expression(expr, negate, 0)?)?;
             }
             for branch in branches {
-                if branch.operations & !(DELETE | WRITE) != 0 {
+                if branch.operations & !(DELETE | WRITE | READ) != 0 {
                     return Err("UNSUPPORTED_OPERATION");
                 }
                 if let Some(mut item) = target(branch)? {
+                    if item.protections.read && item.kind != FileProtectionTargetKind::ExactFile {
+                        return Err("UNSUPPORTED_READ_TARGET");
+                    }
                     // Identical scopes may share operation bits. Different exclusions
                     // on the same root are rejected by Sight's structured protocol.
                     item.exclusions.sort_by(|a, b| a.path.cmp(&b.path));
@@ -90,6 +105,7 @@ fn merge(targets: &mut Vec<FileProtectionTarget>, item: FileProtectionTarget) ->
         }
         existing.protections.delete |= item.protections.delete;
         existing.protections.ordinary_write |= item.protections.ordinary_write;
+        existing.protections.read |= item.protections.read;
     } else {
         if targets.len() == MAX_TARGETS {
             return Err("TARGET_LIMIT_EXCEEDED");
@@ -103,6 +119,7 @@ fn protections(operations: u8) -> FileProtections {
     FileProtections {
         delete: operations & DELETE != 0,
         ordinary_write: operations & WRITE != 0,
+        read: operations & READ != 0,
     }
 }
 

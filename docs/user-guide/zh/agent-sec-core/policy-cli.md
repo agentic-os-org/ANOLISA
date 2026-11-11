@@ -264,8 +264,10 @@ Get/list 返回保存的原文及精确 schema 引用。语法、schema 或公�
 `invalid_argument`，不修改已保存的策略内容及 revision。未知 schema revision 直接拒绝，
 不回退到其他版本。原生模板继续使用原有形状。
 
-策略创建成功不代表目标 PEP 支持该策略。当前 PEP Translator 支持限制删除和普通写入的
-Cedar `forbid` 子集；不支持的语义使整个翻译失败。
+策略创建成功不代表目标 PEP 支持该策略。当前 PEP Translator 支持限制删除、普通写入和精确文件禁读的
+Cedar `forbid` 子集。禁读使用 `file.read` 和精确文件路径，要求 AgentSight 报告
+`file_read_protection` 能力；不支持目录树禁读。参见 [AgentSight 禁读边界](../agentsight/integrations.md#禁止读取密钥文件)。
+不支持的语义使整个翻译失败。
 Policy 更新或删除后，已有 Scope/Binding 快照仍保留原
 Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保存 AST/PST。
 旧二进制不能读取新增 Cedar 记录，需要回滚时应保留升级前的数据库备份。
