@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.5"
+  },
+  "name": "aw-deepseek-native-fixture",
+  "private": true
+}

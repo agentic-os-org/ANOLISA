@@ -164,6 +164,7 @@
                   "enum": [
                     "qoder",
                     "openclaw",
+                    "deepseek-harness",
                     "hermes",
                     "qwenpaw",
                     "pi",

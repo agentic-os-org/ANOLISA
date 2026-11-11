@@ -209,6 +209,7 @@ fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Resul
                         "pi" | "qwenpaw"
                             | "qoder"
                             | "openclaw"
+                            | "deepseek-harness"
                             | "hermes"
                             | "claude-sdk"
                             | "qoder-sdk"

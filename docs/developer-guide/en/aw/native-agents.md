@@ -17,6 +17,7 @@ After changing an application dependency, follow [native validation](validation.
 | [Qoder CLI](agents/qoder.md) | 1.1.64 | CLI |
 | [Qoder SDK](agents/qoder-sdk.md) | 1.0.56 / Worker 1.1.78 | Node.js worker |
 | [OpenClaw](agents/openclaw.md) | 2026.9.6 | Gateway |
+| [DeepSeek Harness](agents/deepseek-harness.md) | 0.2.1-rc.5 | headless CLI; profile selection is open |
 | [QwenPaw](agents/qwenpaw.md) | 2.2.2.post1 / AgentScope 2.0.10 | App/API |
 | [Hermes](agents/hermes.md) | 952c941e | chat |
 | [AgentScope SDK](agents/agentscope.md) | 2.0.6 | Python worker |

@@ -142,6 +142,10 @@ registrations when AW owns those phases; keep user-submit checks as required.
 The [integration reference](../../../developer-guide/en/aw/providers/sec-core.md#tool-pii-policy)
 explains configuration, unsupported result shapes and native mode limits.
 
+For headless DSH, use its [sec-core example and integration guide](../../../developer-guide/en/aw/agents/deepseek-harness.md).
+Its strict output path returns a generic tool error if the original result cannot be
+safely replaced or the backend fails.
+
 ## Stop and extend
 
 After exiting the Agent, run `aw stop --config "$AW_HOME/security.yaml"`.

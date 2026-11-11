@@ -49,7 +49,8 @@
     "aw-host/test/tool_matching",
     "aw-provider-sec-core/test/pii",
     "aw-provider-sec-core/test/pii_transport",
-    "aw-cli/test/native_setup"
+    "aw-cli/test/native_setup",
+    "aw-cli/test/deepseek"
   ],
   "cases": {
     "package-doctor-files": {
@@ -1207,6 +1208,14 @@
     "input-rewrite": {
       "target": "aw-cli/test/pretool",
       "test": "input_rewrite::same_call_rewrite_is_checked_before_native_adoption_for_supported_adapters"
+    },
+    "deepseek-lifecycle": {
+      "target": "aw-cli/test/deepseek",
+      "test": "profile_overlay_blocks_tools_and_releases_binding"
+    },
+    "submit-deepseek": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::deepseek::tests::submission_uses_the_shared_input_contract"
     }
   },
   "agents": {
@@ -1860,6 +1869,45 @@
         "security-retry",
         "final-replacement",
         "input-rewrite"
+      ]
+    },
+    "deepseek-harness": {
+      "events": {
+        "input.submit": {
+          "observe": [
+            "submit-deepseek"
+          ],
+          "block": [
+            "submit-deepseek"
+          ]
+        },
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "deepseek-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement",
+        "security-retry"
       ]
     }
   },
