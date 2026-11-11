@@ -8,9 +8,12 @@ and starts the local gateway service.
 """
 
 import argparse
+import contextlib
 import json
 import os
+import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -157,6 +160,44 @@ OPENAI_THINKING_FORMAT_MODELS = {
 
 DINGTALK_PLUGIN_PACKAGE = "@soimy/dingtalk"
 DINGTALK_CHANNEL_ID = "dingtalk"
+
+
+def write_json_preserving_mode(path, data):
+    """Rewrite a credential file without widening its mode or leaving a copy.
+
+    `os.replace` publishes the staging file's inode, so it publishes that
+    inode's mode too. These files hold API keys and device tokens, so the mode
+    the user chose is carried across, a file that does not exist yet starts
+    private rather than umask-default, and a staging file that never reaches
+    the rename is removed: it would otherwise keep the credentials it already
+    flushed to disk at a predictable name.
+
+    `O_CREAT` takes the final mode, so the file is never world-readable even
+    briefly while it is being written; umask can only clear bits, so the result
+    is never wider than `keep_mode`. `O_EXCL` refuses to adopt a `.tmp` another
+    run left behind, and the cleanup below only removes the file this call
+    created.
+    """
+    try:
+        keep_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        # Only a missing destination means "new"; anything else is a real
+        # error the following open() reports with its own path and reason.
+        keep_mode = 0o600
+    tmp_path = path.with_name(path.name + ".tmp")
+    created = False
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, keep_mode)
+        created = True
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp_path, path)
+    except BaseException:
+        if created:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp_path)
+        raise
 
 
 def deep_merge(base, override):
@@ -541,13 +582,11 @@ def apply_config(config, config_path, *, dry_run=False):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if config_path.exists():
         backup_path = config_path.with_name(config_path.name + ".bak")
-        backup_path.write_bytes(config_path.read_bytes())
+        # `copy2` carries the mode; `write_bytes` would drop it and leave the
+        # backup of a secret more readable than the secret it backs up.
+        shutil.copy2(config_path, backup_path)
 
-    tmp_path = config_path.with_name(config_path.name + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as fh:
-        json.dump(merged, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-    os.replace(tmp_path, config_path)
+    write_json_preserving_mode(config_path, merged)
 
     for key in config:
         print(f"  [OK] {key}")
@@ -1051,11 +1090,7 @@ def clear_read_only_operator_pairings(args):
             changed = True
 
     if changed:
-        tmp_path = path.with_name(path.name + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
-        os.replace(tmp_path, path)
+        write_json_preserving_mode(path, data)
         print(f"  cleared read-only operator pairing: {path}")
 
 
@@ -1086,7 +1121,10 @@ def clear_cached_operator_device_auth(args):
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         backup = path.with_name(path.name + ".bak")
-        backup.write_bytes(path.read_bytes())
+        # The original is unlinked below, so this backup is the only copy of
+        # the device token left; `copy2` keeps its mode, `write_bytes` would
+        # leave that only copy at umask-default.
+        shutil.copy2(path, backup)
         path.unlink()
         print(f"  cleared unreadable cached device auth: {path}")
         return
@@ -1101,11 +1139,7 @@ def clear_cached_operator_device_auth(args):
         return
 
     if changed:
-        tmp_path = path.with_name(path.name + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
-        os.replace(tmp_path, path)
+        write_json_preserving_mode(path, data)
         print(f"  cleared cached operator device auth: {path}")
 
 
