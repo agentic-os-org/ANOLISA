@@ -5,6 +5,10 @@ use super::readonly::{parse_disabled_rules, parse_runtime_spec, string_array};
 use super::{CoshConfig, HealthServiceConfig, HealthServiceExpectedState};
 use crate::types::CoshApprovalMode;
 
+#[cfg(test)]
+#[path = "parse_health_tests.rs"]
+mod health_tests;
+
 pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
     // `[logging].level` is the authoritative log-level key shared with
     // cosh-core; the legacy `[ui].log_level` fallback applies only while it
@@ -225,7 +229,7 @@ fn parse_readonly_table(
     }
 }
 
-fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
+pub(super) fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     let Some(health) = value.get("health").and_then(toml::Value::as_table) else {
         return;
     };
@@ -253,6 +257,32 @@ fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
                 .collect::<Vec<_>>();
             if !mounts.is_empty() {
                 config.health.critical_mounts = mounts;
+            }
+        }
+    }
+    if let Some(mounts) = health.get("scan_mounts") {
+        if let Ok(mounts) = string_array(mounts, "health.scan_mounts") {
+            config.health.scan_mounts = Some(
+                mounts
+                    .into_iter()
+                    .filter(|mount| !mount.trim().is_empty())
+                    .collect(),
+            );
+        }
+    }
+    if let Some(checks) = health.get("checks").and_then(toml::Value::as_table) {
+        for (id, enabled) in checks {
+            if let Some(enabled) = enabled.as_bool() {
+                config.health.checks.insert(id.clone(), enabled);
+            }
+        }
+    }
+    if let Some(policies) = health.get("policies").and_then(toml::Value::as_table) {
+        for (context, policy) in policies {
+            if let Some(disabled) = policy.get("disable") {
+                if let Ok(disabled) = string_array(disabled, "health.policies.disable") {
+                    config.health.policies.insert(context.clone(), disabled);
+                }
             }
         }
     }

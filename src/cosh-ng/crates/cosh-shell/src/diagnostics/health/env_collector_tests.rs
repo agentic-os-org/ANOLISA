@@ -7,6 +7,41 @@ use super::*;
 use crate::diagnostics::test_env::env_guard;
 
 #[test]
+fn provider_and_config_share_one_file_sample() {
+    let _guard = env_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join(".copilot-shell");
+    std::fs::create_dir(&config_dir).unwrap();
+    let path = config_dir.join("config.toml");
+    std::fs::write(&path, "[ai.providers.default]\ntype='mock'\n").unwrap();
+    let previous = std::env::var_os("HOME");
+    std::env::set_var("HOME", directory.path());
+    let mut config = CoshConfig::default();
+    config.adapter_default = "cosh-core".into();
+    let mut builder = HealthReportBuilder::for_started_at(0).with_progress(move |progress| {
+        if let super::super::model::HealthProgress::Fact { fact, .. } = progress {
+            if fact.key == "provider.credentials_present" {
+                std::fs::write(&path, "this = = invalid\n").unwrap();
+            }
+        }
+        true
+    });
+    builder.declare_check(HealthCollector::Provider, true);
+    run_env_collectors(&mut builder, &config, directory.path(), 0);
+    let report = builder.finish(1);
+    match previous {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(config_dir.join("config.toml")).unwrap(),
+        "this = = invalid\n"
+    );
+    assert!(report.facts.iter().any(|fact| fact.key == "config.parseable"
+        && fact.value == HealthFactValue::Bool(true)), "checks must describe the same sampled file");
+}
+
+#[test]
 fn classify_provider_covers_known_and_unknown_adapters() {
     assert_eq!(classify_provider("fake", false), ProviderReadiness::Ready);
     assert_eq!(
@@ -61,7 +96,7 @@ fn collectors_record_checks_without_panicking() {
     let mut builder = HealthReportBuilder::for_started_at(0);
     run_env_collectors(&mut builder, &config, Path::new("/tmp"), 0);
     let report = builder.finish(1);
-    for check in ["provider", "config", "hooks", "pty", "permissions"] {
+    for check in ["provider", "config", "hooks", "pty"] {
         assert!(
             report.checks_done.iter().any(|done| done == check),
             "missing check {check}: {report:?}"
@@ -101,7 +136,12 @@ fn config_status_flags_invalid_toml_as_unparseable() {
     assert!(!bad_status.parseable, "{bad_status:?}");
 
     let mut builder = HealthReportBuilder::for_started_at(0);
-    collect_config(&mut builder, &CoshConfig::default(), 0);
+    collect_config(
+        &mut builder,
+        &CoshConfig::default(),
+        0,
+        &EnvironmentConfigSample::read(),
+    );
     let report = builder.finish(1);
     assert!(
         report
@@ -505,5 +545,78 @@ fn restore_env(key: &str, previous: Option<std::ffi::OsString>) {
     match previous {
         Some(value) => std::env::set_var(key, value),
         None => std::env::remove_var(key),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn unsupported_permission_probe_is_a_collection_gap() {
+    let _guard = env_guard();
+    let directory = tempfile::tempdir().expect("temporary HOME");
+    let previous = std::env::var_os("HOME");
+    std::env::set_var("HOME", directory.path());
+    let mut builder = HealthReportBuilder::for_started_at(1);
+    collect_permissions(&mut builder, 0);
+    let report = builder.finish(2);
+    match previous {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+    assert!(report.unavailable.iter().any(|gap| gap.collector
+        == super::super::model::HealthCollector::Permissions
+        && gap.reason == super::super::model::HealthUnavailableReason::Unsupported));
+    assert!(!report
+        .findings
+        .iter()
+        .any(|finding| finding.id == "env-permissions"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn anonymous_permission_probe_has_no_directory_entry() {
+    use std::os::unix::fs::MetadataExt;
+    let _guard = env_guard();
+    let directories = [
+        tempfile::tempdir().expect("default filesystem directory"),
+        tempfile::tempdir_in("/dev/shm").expect("tmpfs probe directory"),
+    ];
+    for (index, directory) in directories.iter().enumerate() {
+        match open_anonymous_probe(directory.path()) {
+            Ok(file) => {
+                assert_eq!(file.metadata().expect("probe metadata").nlink(), 0);
+                assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+                drop(file);
+            }
+            Err(error) => {
+                assert_eq!(index, 0, "tmpfs must support anonymous probes: {error}");
+                assert!(matches!(
+                    error.raw_os_error(),
+                    Some(
+                        nix::libc::EOPNOTSUPP
+                            | nix::libc::EINVAL
+                            | nix::libc::ENOSYS
+                            | nix::libc::EISDIR
+                    )
+                ));
+                let previous = std::env::var_os("HOME");
+                std::env::set_var("HOME", directory.path());
+                let mut builder = HealthReportBuilder::for_started_at(1);
+                collect_permissions(&mut builder, 0);
+                let report = builder.finish(2);
+                restore_env("HOME", previous);
+                assert!(report.unavailable.iter().any(|gap| gap.collector
+                    == super::super::model::HealthCollector::Permissions
+                    && gap.reason == super::super::model::HealthUnavailableReason::Unsupported));
+                assert!(!report
+                    .facts
+                    .iter()
+                    .any(|fact| fact.key.starts_with("permissions.")));
+                assert!(!report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.id == "env-permissions"));
+            }
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }

@@ -1,10 +1,12 @@
 #[allow(dead_code, unused_imports)]
 #[path = "agent_render/mod.rs"]
 pub(crate) mod agent_render;
+pub(crate) mod guidance;
 mod question;
 #[path = "renderer.rs"]
 mod renderer;
 pub(crate) mod trial_layout;
+pub(crate) mod welcome;
 pub(crate) mod wrap;
 
 pub(crate) use agent_render::*;

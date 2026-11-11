@@ -1,6 +1,11 @@
+use crate::config::private_state;
 use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+pub(crate) mod claim;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::model::{
@@ -8,6 +13,7 @@ use super::model::{
 };
 
 const MAX_ENTRIES: usize = 128;
+const MAX_BYTES: usize = 128 * 1024;
 const RETAIN_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const WARNING_TTL_MS: u64 = 4 * 60 * 60 * 1000;
 const CRITICAL_TTL_MS: u64 = 30 * 60 * 1000;
@@ -31,28 +37,44 @@ pub(crate) enum SuppressionDecision {
 pub(crate) struct HealthSuppressionStore {
     entries: Vec<HealthSuppressionEntry>,
     session_seen: HashSet<String>,
+    unavailable: bool,
 }
 
 impl HealthSuppressionStore {
     pub(crate) fn load_default() -> Self {
         health_suppression_store_path()
             .map(|path| Self::load_from_path(&path))
-            .unwrap_or_default()
+            .unwrap_or_else(Self::unavailable)
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            unavailable: true,
+            ..Self::default()
+        }
     }
 
     pub(crate) fn load_from_path(path: &Path) -> Self {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return Self::default();
+        let content = match read_history(path) {
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => return Self::unavailable(),
+            },
+            Ok(None) => return Self::default(),
+            Err(_) => return Self::unavailable(),
         };
-        let entries = content
+        let entries: Option<Vec<_>> = content
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .filter_map(parse_entry_line)
+            .map(parse_entry_line)
             .collect();
-        Self {
-            entries,
-            session_seen: HashSet::new(),
+        match entries {
+            Some(entries) if entries.len() <= MAX_ENTRIES => Self {
+                entries,
+                ..Self::default()
+            },
+            _ => Self::unavailable(),
         }
     }
 
@@ -63,6 +85,9 @@ impl HealthSuppressionStore {
         metrics: &BTreeMap<String, f64>,
         now_ms: u64,
     ) -> SuppressionDecision {
+        if self.unavailable {
+            return SuppressionDecision::Suppress;
+        }
         let fingerprint = finding_fingerprint(finding);
         let key = session_key(host_id, &fingerprint);
         if self.session_seen.contains(&key) {
@@ -111,13 +136,22 @@ impl HealthSuppressionStore {
     }
 
     pub(crate) fn write_to_path(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                format!("create health suppression store directory failed: {err}")
-            })?;
-        }
-        std::fs::write(path, serialize_entries(&self.entries))
-            .map_err(|err| format!("write health suppression store failed: {err}"))
+        let write = || -> Result<(), private_state::Error> {
+            if self.unavailable {
+                return Err(private_state::Error::UnsafePath);
+            }
+            let parent = path.parent().ok_or(private_state::Error::UnsafePath)?;
+            private_state::ensure_directory(parent)?;
+            if let Ok(file) = open_legacy_history(path) {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            private_state::atomic_write(
+                path,
+                serialize_entries(&self.entries).as_bytes(),
+                MAX_BYTES,
+            )
+        };
+        write().map_err(|error| format!("write health suppression store failed: {error:?}"))
     }
 
     pub(crate) fn record_and_persist(
@@ -139,6 +173,42 @@ impl HealthSuppressionStore {
             let drop_count = self.entries.len() - MAX_ENTRIES;
             self.entries.drain(0..drop_count);
         }
+    }
+}
+
+fn open_legacy_history(path: &Path) -> Result<std::fs::File, private_state::Error> {
+    let parent = path.parent().ok_or(private_state::Error::UnsafePath)?;
+    private_state::validate_directory(parent)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { nix::libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o644
+    {
+        return Err(private_state::Error::UnsafePath);
+    }
+    Ok(file)
+}
+
+fn read_history(path: &Path) -> Result<Option<Vec<u8>>, private_state::Error> {
+    match private_state::read_bounded(path, MAX_BYTES) {
+        Err(private_state::Error::UnsafePath) => {
+            let file = open_legacy_history(path)?;
+            if file.metadata()?.len() > MAX_BYTES as u64 {
+                return Err(private_state::Error::TooLarge);
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_BYTES {
+                return Err(private_state::Error::TooLarge);
+            }
+            Ok(Some(bytes))
+        }
+        result => result,
     }
 }
 
@@ -276,33 +346,47 @@ fn parse_entry_line(line: &str) -> Option<HealthSuppressionEntry> {
     if !valid_field(&host_id) || !valid_field(&finding_fingerprint) {
         return None;
     }
+    let metrics = parse_metrics(parts.next().unwrap_or(""))?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some(HealthSuppressionEntry {
         host_id,
         finding_fingerprint,
         severity,
         shown_at_ms,
-        metrics: parts.next().map(parse_metrics).unwrap_or_default(),
+        metrics,
     })
 }
 
 fn serialize_metrics(metrics: &BTreeMap<String, f64>) -> String {
-    metrics
-        .iter()
-        .filter(|(key, value)| valid_field(key) && value.is_finite())
-        .map(|(key, value)| format!("{key}={value:.6}"))
-        .collect::<Vec<_>>()
-        .join(",")
+    serde_json::Value::Object(
+        metrics
+            .iter()
+            .filter(|(key, value)| valid_field(key) && value.is_finite())
+            .map(|(key, value)| (key.clone(), serde_json::Value::from(*value)))
+            .collect(),
+    )
+    .to_string()
 }
 
-fn parse_metrics(value: &str) -> BTreeMap<String, f64> {
+fn parse_metrics(value: &str) -> Option<BTreeMap<String, f64>> {
+    if value.is_empty() {
+        return Some(BTreeMap::new());
+    }
+    if value.starts_with('{') {
+        let metrics: BTreeMap<String, f64> = serde_json::from_str(value).ok()?;
+        return metrics
+            .iter()
+            .all(|(key, value)| valid_field(key) && value.is_finite())
+            .then_some(metrics);
+    }
     value
         .split(',')
-        .filter_map(|item| {
+        .map(|item| {
             let (key, value) = item.split_once('=')?;
-            if !valid_field(key) {
-                return None;
-            }
-            Some((key.to_string(), value.parse::<f64>().ok()?))
+            let value = value.parse::<f64>().ok()?;
+            (valid_field(key) && value.is_finite()).then(|| (key.to_string(), value))
         })
         .collect()
 }
@@ -324,220 +408,4 @@ fn valid_field(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::diagnostics::health::model::{HealthFindingCategory, HealthMessageId};
-
-    #[test]
-    fn suppresses_same_session_and_recent_warning() {
-        let mut store = HealthSuppressionStore::default();
-        let finding = finding("J06", HealthSeverity::Warning);
-        let metrics = metrics(&[("memory.available_ratio", 0.08)]);
-
-        assert_eq!(
-            store.should_show("host", &finding, &metrics, 1000),
-            SuppressionDecision::Show
-        );
-        store.record_shown("host", &finding, metrics.clone(), 1000);
-
-        assert_eq!(
-            store.should_show("host", &finding, &metrics, 2000),
-            SuppressionDecision::Suppress
-        );
-        let reloaded = HealthSuppressionStore {
-            entries: store.entries.clone(),
-            session_seen: HashSet::new(),
-        };
-        assert_eq!(
-            reloaded.should_show("host", &finding, &metrics, 2000),
-            SuppressionDecision::Suppress
-        );
-    }
-
-    #[test]
-    fn severity_upgrade_and_metric_worsening_bypass_ttl() {
-        let mut store = HealthSuppressionStore::default();
-        let warning = finding("J06", HealthSeverity::Warning);
-        let critical = finding("J06", HealthSeverity::Critical);
-        store.record_shown(
-            "host",
-            &warning,
-            metrics(&[
-                ("memory.available_mib", 1200.0),
-                ("memory.available_ratio", 0.12),
-                ("memory.used_ratio", 0.50),
-            ]),
-            1000,
-        );
-        let reloaded = HealthSuppressionStore {
-            entries: store.entries.clone(),
-            session_seen: HashSet::new(),
-        };
-
-        assert_eq!(
-            reloaded.should_show(
-                "host",
-                &critical,
-                &metrics(&[
-                    ("memory.available_mib", 1200.0),
-                    ("memory.available_ratio", 0.12)
-                ]),
-                2000,
-            ),
-            SuppressionDecision::Show
-        );
-        assert_eq!(
-            reloaded.should_show(
-                "host",
-                &warning,
-                &metrics(&[
-                    ("memory.available_mib", 500.0),
-                    ("memory.available_ratio", 0.12)
-                ]),
-                2000,
-            ),
-            SuppressionDecision::Show
-        );
-        assert_eq!(
-            reloaded.should_show(
-                "host",
-                &warning,
-                &metrics(&[
-                    ("memory.available_mib", 1200.0),
-                    ("memory.available_ratio", 0.22)
-                ]),
-                2000,
-            ),
-            SuppressionDecision::Suppress
-        );
-        assert_eq!(
-            reloaded.should_show(
-                "host",
-                &warning,
-                &metrics(&[
-                    ("memory.available_mib", 1200.0),
-                    ("memory.available_ratio", 0.04)
-                ]),
-                2000,
-            ),
-            SuppressionDecision::Show
-        );
-        assert_eq!(
-            reloaded.should_show(
-                "host",
-                &warning,
-                &metrics(&[
-                    ("memory.available_mib", 1200.0),
-                    ("memory.available_ratio", 0.12),
-                    ("memory.used_ratio", 0.62)
-                ]),
-                2000,
-            ),
-            SuppressionDecision::Show
-        );
-    }
-
-    #[test]
-    fn host_id_includes_machine_id_when_available() {
-        let mut report = HealthScanReport::new("health", 0);
-        report.host = Some("same-hostname".to_string());
-
-        let without_machine = host_id_for_report(&report, None);
-        let first_machine = host_id_for_report(&report, Some("machine-a"));
-        let second_machine = host_id_for_report(&report, Some("machine-b"));
-
-        assert_ne!(without_machine, first_machine);
-        assert_ne!(first_machine, second_machine);
-    }
-
-    #[test]
-    fn expired_warning_shows_again() {
-        let mut store = HealthSuppressionStore::default();
-        let finding = finding("J10", HealthSeverity::Warning);
-        let metrics = metrics(&[("filesystem.max_used_ratio", 0.90)]);
-        store.record_shown("host", &finding, metrics.clone(), 1000);
-        let reloaded = HealthSuppressionStore {
-            entries: store.entries.clone(),
-            session_seen: HashSet::new(),
-        };
-
-        assert_eq!(
-            reloaded.should_show("host", &finding, &metrics, 1000 + WARNING_TTL_MS + 1),
-            SuppressionDecision::Show
-        );
-    }
-
-    #[test]
-    fn corrupted_store_lines_are_ignored_and_write_errors_degrade() {
-        let path = temp_path("corrupted");
-        std::fs::write(&path, "bad\nmissing\tparts\n").expect("write corrupted");
-
-        let store = HealthSuppressionStore::load_from_path(&path);
-        assert!(store.entries.is_empty());
-
-        let dir_path = temp_path("dir-target");
-        std::fs::create_dir_all(&dir_path).expect("create dir");
-        let err = store
-            .write_to_path(&dir_path)
-            .expect_err("write to dir fails");
-        assert!(err.contains("write health suppression store failed"));
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir_path);
-    }
-
-    #[test]
-    fn persists_only_bounded_metadata() {
-        let path = temp_path("persist");
-        let mut store = HealthSuppressionStore::default();
-        let finding = finding("J11", HealthSeverity::Critical);
-        store
-            .record_and_persist(
-                &path,
-                "host",
-                &finding,
-                metrics(&[("kernel.oom_latest_age_seconds", 120.0)]),
-                1000,
-            )
-            .expect("persist");
-
-        let content = std::fs::read_to_string(&path).expect("read store");
-        assert!(content.contains("kernel.oom_latest_age_seconds"));
-        assert!(!content.contains("journalctl"));
-        assert!(!content.contains("/tmp/"));
-        let loaded = HealthSuppressionStore::load_from_path(&path);
-        assert_eq!(loaded.entries.len(), 1);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    fn finding(id: &str, severity: HealthSeverity) -> HealthFinding {
-        HealthFinding {
-            id: id.to_string(),
-            severity,
-            category: HealthFindingCategory::Anomaly,
-            title_id: HealthMessageId::HealthFindingMemoryAvailableLow,
-            detail_id: None,
-            detail_args: BTreeMap::new(),
-            evidence_fact_ids: Vec::new(),
-            suggested_try_ids: Vec::new(),
-        }
-    }
-
-    fn metrics(items: &[(&str, f64)]) -> BTreeMap<String, f64> {
-        items
-            .iter()
-            .map(|(key, value)| ((*key).to_string(), *value))
-            .collect()
-    }
-
-    fn temp_path(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("cosh-health-suppression-{label}-{nanos}"))
-    }
-}
+mod tests;

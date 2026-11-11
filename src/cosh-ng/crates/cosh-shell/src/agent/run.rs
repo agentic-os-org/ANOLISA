@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::agent::continuation::{
     annotate_continuation_user_approval_mode, provider_mode_for_agent_run,
 };
-use crate::agent::poll::poll_active_agent_run;
+use crate::agent::poll::poll_started_agent_run;
 use crate::agent::queue::enqueue;
 use crate::agent::skill_context::finalize_agent_request_skill_context;
 use crate::evidence::request::ParsedCoshRequest;
@@ -291,6 +291,73 @@ fn start_agent_run_with_queue_policy<W: Write>(
     selectable_after_event_index: Option<usize>,
     before_held_text: bool,
 ) -> std::io::Result<AgentStartDisposition> {
+    let disposition = accept_agent_run_with_queue_policy(
+        request,
+        origin,
+        intent,
+        class,
+        adapter,
+        state,
+        selectable_after_event_index,
+        before_held_text,
+    );
+    if disposition == AgentStartDisposition::Started {
+        poll_accepted_agent_run(state, output, adapter)?;
+    }
+    Ok(disposition)
+}
+
+pub(crate) fn accept_deferred_agent_run(
+    request: &AgentRequest,
+    state: &mut InlineState,
+) -> AgentStartDisposition {
+    enqueue(
+        state,
+        PendingAgentRequest {
+            request: request.clone(),
+            origin: AgentRunOrigin::Standard,
+            intent: AgentStartIntent::UserInitiated,
+            class: PendingRequestClass::Normal,
+            selectable_after_event_index: None,
+            before_held_text: false,
+        },
+    )
+}
+
+pub(crate) fn activate_deferred_agent_run(
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+) -> Option<AgentStartDisposition> {
+    if state.agent_run.active.is_some()
+        || state.auth.ecs_trial.is_blocking()
+        || crate::slash::session::compaction_pending_or_active(state)
+    {
+        return None;
+    }
+    let pending = state.agent_run.queued_requests.pop_front()?;
+    Some(accept_agent_run_with_queue_policy(
+        &pending.request,
+        pending.origin,
+        pending.intent,
+        pending.class,
+        adapter,
+        state,
+        pending.selectable_after_event_index,
+        pending.before_held_text,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accept_agent_run_with_queue_policy(
+    request: &AgentRequest,
+    origin: AgentRunOrigin,
+    intent: AgentStartIntent,
+    class: PendingRequestClass,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    selectable_after_event_index: Option<usize>,
+    before_held_text: bool,
+) -> AgentStartDisposition {
     // Central compaction gate. Every start path funnels through here: the
     // natural-language intercept, auto failure analysis, hook consultation,
     // evidence continuations, recovery/handoff fallbacks, question answers,
@@ -316,10 +383,10 @@ fn start_agent_run_with_queue_policy<W: Write>(
                     origin = ?origin,
                     "internal agent run suppressed: session compaction pending or active"
                 );
-                return Ok(AgentStartDisposition::SuppressedByCompaction);
+                return AgentStartDisposition::SuppressedByCompaction;
             }
             AgentStartIntent::UserInitiated => {
-                return Ok(enqueue(
+                return enqueue(
                     state,
                     PendingAgentRequest {
                         request: request.clone(),
@@ -329,13 +396,13 @@ fn start_agent_run_with_queue_policy<W: Write>(
                         selectable_after_event_index,
                         before_held_text,
                     },
-                ));
+                );
             }
         }
     }
 
     if state.agent_run.active.is_some() || state.auth.ecs_trial.is_blocking() {
-        return Ok(enqueue(
+        return enqueue(
             state,
             PendingAgentRequest {
                 request: request.clone(),
@@ -345,18 +412,12 @@ fn start_agent_run_with_queue_policy<W: Write>(
                 selectable_after_event_index,
                 before_held_text,
             },
-        ));
+        );
     }
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     let markdown_stream = renderer.stream_markdown_agent();
-    let mut status_animation = renderer.status_animation();
-    if status_animation.is_enabled() {
-        status_animation.render(output, state.i18n().t(MessageId::AgentThinking))?;
-    } else {
-        renderer.write_loading_text(output, state.i18n().t(MessageId::AgentThinking))?;
-    }
-    output.flush()?;
+    let status_animation = renderer.status_animation();
 
     let mut request = request.clone();
     state.startup_health.poll_ready();
@@ -420,8 +481,24 @@ fn start_agent_run_with_queue_policy<W: Write>(
         completed: false,
         host_completed_tool_ids: Vec::new(),
     });
-    poll_active_agent_run(state, output, adapter)?;
-    Ok(AgentStartDisposition::Started)
+    AgentStartDisposition::Started
+}
+
+pub(crate) fn poll_accepted_agent_run<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    adapter: &AdapterInstance,
+) -> std::io::Result<()> {
+    let thinking = state.i18n().t(MessageId::AgentThinking);
+    if let Some(active) = state.agent_run.active.as_mut() {
+        if active.status_animation.is_enabled() {
+            active.status_animation.render(output, thinking)?;
+        } else {
+            active.renderer.write_loading_text(output, thinking)?;
+        }
+    }
+    output.flush()?;
+    poll_started_agent_run(state, output, adapter)
 }
 
 fn attach_continuity_prompt_hint(request: &mut AgentRequest, state: &InlineState) {
@@ -556,162 +633,4 @@ pub(super) fn has_queued_run_before_held_text(state: &InlineState) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::skill_context::finalize_agent_request_skill_context;
-    use crate::diagnostics::health::{
-        HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue, HealthScanReport,
-        HealthSeverity,
-    };
-    use crate::types::STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT;
-
-    #[test]
-    fn only_insight_origins_use_strict_result_presentation() {
-        assert!(!AgentRunOrigin::Standard.is_insight_triggered());
-        assert!(AgentRunOrigin::InsightPrompt.is_insight_triggered());
-        assert!(AgentRunOrigin::AutoFailure.is_insight_triggered());
-    }
-
-    #[test]
-    fn final_insight_context_never_exceeds_provider_budget() {
-        let mut request = test_agent_request();
-        request.context_hints = vec![
-            "x".repeat(crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES),
-            "insight_evidence\ntarget_facts:\ncommand_id=cmd-1".to_string(),
-        ];
-
-        finalize_agent_request_skill_context(&mut request, None);
-        enforce_insight_context_budget(&mut request);
-
-        assert!(
-            serialized_context_hint_bytes(&request.context_hints)
-                <= crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES
-        );
-        assert_eq!(request.context_hints.len(), 1);
-        assert!(request.context_hints[0].starts_with("insight_evidence\n"));
-    }
-
-    #[test]
-    fn malformed_oversized_insight_payload_is_utf8_safely_bounded() {
-        let mut request = test_agent_request();
-        request.context_hints = vec![format!(
-            "insight_evidence\n{}",
-            "界".repeat(crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES)
-        )];
-
-        enforce_insight_context_budget(&mut request);
-
-        assert!(
-            serialized_context_hint_bytes(&request.context_hints)
-                <= crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES
-        );
-        assert!(request.context_hints[0].is_char_boundary(request.context_hints[0].len()));
-    }
-
-    #[test]
-    fn health_context_hint_is_not_attached_to_free_form_request() {
-        let report = test_health_report();
-        let mut request = test_agent_request();
-
-        finalize_agent_request_skill_context(&mut request, Some(&report));
-
-        assert!(!request
-            .context_hints
-            .iter()
-            .any(|hint| hint.starts_with("health_scan ")));
-    }
-
-    #[test]
-    fn health_context_hint_is_attached_to_startup_health_follow_up() {
-        let report = test_health_report();
-        let mut request = test_agent_request();
-        request
-            .context_hints
-            .push(STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT.to_string());
-
-        finalize_agent_request_skill_context(&mut request, Some(&report));
-
-        let hint = request
-            .context_hints
-            .iter()
-            .find(|hint| hint.starts_with("health_scan "))
-            .expect("health context hint");
-        assert!(hint.contains("scan_id=health-1"), "{hint}");
-        assert!(hint.contains("overall_severity=warning"), "{hint}");
-        assert!(hint.contains("bounded_facts_only=true"), "{hint}");
-        assert!(hint.contains("no_collector_stdout=true"), "{hint}");
-        assert!(!hint.contains("/tmp/cosh"), "{hint}");
-    }
-
-    #[test]
-    fn health_context_hint_dedupes_existing_health_hint() {
-        let report = test_health_report();
-        let mut request = test_agent_request();
-        request
-            .context_hints
-            .push(STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT.to_string());
-        request
-            .context_hints
-            .push("health_scan scan_id=existing".to_string());
-
-        finalize_agent_request_skill_context(&mut request, Some(&report));
-
-        assert_eq!(
-            request
-                .context_hints
-                .iter()
-                .filter(|hint| hint.starts_with("health_scan "))
-                .count(),
-            1
-        );
-    }
-
-    fn test_health_report() -> HealthScanReport {
-        let mut report = HealthScanReport::new("health-1", 0);
-        report.overall_severity = HealthSeverity::Warning;
-        report.facts.push(HealthFact {
-            id: "memory.available_ratio".to_string(),
-            category: HealthFactCategory::Memory,
-            key: "memory.available_ratio".to_string(),
-            value: HealthFactValue::Float(0.08),
-            unit: None,
-            source: HealthFactSource::Fixture,
-            elapsed_ms: 0,
-        });
-        report
-    }
-
-    fn test_agent_request() -> AgentRequest {
-        AgentRequest {
-            id: "agent-request-health".to_string(),
-            session_id: "session-1".to_string(),
-            command_block: CommandBlock {
-                id: "cmd-1".to_string(),
-                session_id: "session-1".to_string(),
-                command: "分析一下这台机器内存风险".to_string(),
-                origin: CommandOrigin::UserInteractive,
-                cwd: "/repo".to_string(),
-                end_cwd: "/repo".to_string(),
-                started_at_ms: 1,
-                ended_at_ms: 2,
-                duration_ms: 1,
-                exit_code: 0,
-                status: CommandStatus::Completed,
-                output: OutputRefs {
-                    terminal_output_ref: None,
-                    terminal_output_bytes: 0,
-                },
-                shell_environment_generation: None,
-                audit_identity: None,
-            },
-            context_blocks: Vec::new(),
-            context_hints: Vec::new(),
-            user_input: Some("分析一下这台机器内存风险".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::RecommendOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        }
-    }
-}
+mod tests;

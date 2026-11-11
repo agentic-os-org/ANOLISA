@@ -109,7 +109,7 @@ pub(crate) fn render_agent_cancel_actions<W: Write>(
     Ok(())
 }
 
-fn cancel_active_agent_run<W: Write>(
+pub(crate) fn cancel_active_agent_run<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {

@@ -60,10 +60,11 @@ pub fn resolve_language_setting(setting: LanguageSetting) -> Language {
 
 pub fn detect_language_from_env() -> Language {
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Ok(value) = std::env::var(key) {
-            if let Some(language) = parse_locale_language(&value) {
-                return language;
-            }
+        if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            return value
+                .to_str()
+                .and_then(parse_locale_language)
+                .unwrap_or(Language::EnUs);
         }
     }
     Language::EnUs
@@ -102,6 +103,27 @@ pub fn language_config_status() -> LanguageConfigStatus {
         source,
         config_path,
     }
+}
+
+pub(crate) fn read_guidance_language() -> std::io::Result<Language> {
+    if let Some(setting) = std::env::var("COSH_SHELL_LANG")
+        .ok()
+        .and_then(|value| parse_language_setting(&value))
+    {
+        return Ok(resolve_language_setting(setting));
+    }
+    let path = config_read_file_path()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    let content = match super::load::read_config_text(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let setting = language_setting_from_config_content(&content)
+        .as_deref()
+        .and_then(parse_language_setting)
+        .unwrap_or(LanguageSetting::Auto);
+    Ok(resolve_language_setting(setting))
 }
 
 pub(super) fn apply_language_value(config: &mut CoshConfig, value: &str) {
@@ -193,4 +215,135 @@ fn parse_locale_language(value: &str) -> Option<Language> {
         return Some(Language::EnUs);
     }
     None
+}
+
+#[cfg(test)]
+mod localization_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::fs::symlink;
+
+    struct Environment(Vec<(&'static str, Option<OsString>)>);
+    impl Environment {
+        fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = values
+                .iter()
+                .map(|(name, value)| {
+                    let old = std::env::var_os(name);
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                    (*name, old)
+                })
+                .collect();
+            Self(saved)
+        }
+    }
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn localization_first_nonempty_locale_has_priority_even_when_not_chinese_or_english() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        for (all, messages, lang, expected) in [
+            (
+                Some("C"),
+                Some("zh_CN.UTF-8"),
+                Some("zh_CN.UTF-8"),
+                Language::EnUs,
+            ),
+            (Some("POSIX"), None, Some("zh_CN.UTF-8"), Language::EnUs),
+            (Some("C.UTF-8"), None, Some("zh_CN.UTF-8"), Language::EnUs),
+            (
+                Some("ja_JP.UTF-8"),
+                None,
+                Some("zh_CN.UTF-8"),
+                Language::EnUs,
+            ),
+            (
+                Some(""),
+                Some("zh_CN.UTF-8"),
+                Some("en_US.UTF-8"),
+                Language::ZhCn,
+            ),
+            (
+                None,
+                Some("en_US.UTF-8"),
+                Some("zh_CN.UTF-8"),
+                Language::EnUs,
+            ),
+            (None, None, Some("zh_CN.UTF-8"), Language::ZhCn),
+            (None, None, None, Language::EnUs),
+        ] {
+            let _env =
+                Environment::set(&[("LC_ALL", all), ("LC_MESSAGES", messages), ("LANG", lang)]);
+            assert_eq!(
+                detect_language_from_env(),
+                expected,
+                "{all:?}/{messages:?}/{lang:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn localization_native_settings_keep_oversized_and_symlinked_config_compatible() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".copilot-shell")).unwrap();
+        let path = home.path().join(".copilot-shell/config.toml");
+        let _env = Environment::set(&[
+            ("HOME", home.path().to_str()),
+            ("COSH_SHELL_LANG", None),
+            ("LC_ALL", Some("en_US.UTF-8")),
+        ]);
+        std::fs::write(
+            &path,
+            format!("[ui]\nlanguage='zh-CN'\n#{}", "x".repeat(256 * 1024)),
+        )
+        .unwrap();
+        assert_eq!(language_config_status().effective, Language::ZhCn);
+        assert!(read_guidance_language().is_err());
+        std::fs::remove_file(&path).unwrap();
+        let target = home.path().join("target.toml");
+        std::fs::write(&target, "[ui]\nlanguage='zh-CN'\n").unwrap();
+        symlink(target, &path).unwrap();
+        assert_eq!(language_config_status().effective, Language::ZhCn);
+        assert!(read_guidance_language().is_err());
+        let _override = Environment::set(&[("COSH_SHELL_LANG", Some("zh-CN"))]);
+        assert_eq!(read_guidance_language().unwrap(), Language::ZhCn);
+    }
+    #[test]
+    fn localization_passive_reader_accepts_the_limit_and_rejects_fifo_without_a_writer() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".copilot-shell")).unwrap();
+        let path = home.path().join(".copilot-shell/config.toml");
+        let _env = Environment::set(&[
+            ("HOME", home.path().to_str()),
+            ("COSH_SHELL_LANG", None),
+            ("LC_ALL", Some("en_US.UTF-8")),
+        ]);
+        assert_eq!(read_guidance_language().unwrap(), Language::EnUs);
+        let header = "[ui]\nlanguage='zh-CN'\n#";
+        std::fs::write(
+            &path,
+            format!("{header}{}", "x".repeat(256 * 1024 - header.len())),
+        )
+        .unwrap();
+        assert_eq!(read_guidance_language().unwrap(), Language::ZhCn);
+        std::fs::remove_file(&path).unwrap();
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        assert!(read_guidance_language().is_err());
+        let _override = Environment::set(&[("COSH_SHELL_LANG", Some("en-US"))]);
+        assert_eq!(read_guidance_language().unwrap(), Language::EnUs);
+    }
 }

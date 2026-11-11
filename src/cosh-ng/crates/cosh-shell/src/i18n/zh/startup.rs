@@ -2,22 +2,17 @@ use super::MessageId;
 
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
-        MessageId::StartupTitle => "cosh-shell",
+        MessageId::StartupTitle => "Cosh AI Shell",
         MessageId::StartupAdapterLine => {
-            "后端: {adapter} · Shell: {shell} · 审批: {approval} · 分析: {analysis}"
+            "Shell: {shell} · 审批: {approval}"
         }
         MessageId::StartupCwdLine => "cwd: {cwd}",
-        MessageId::StartupCommandsLine => "/help · /mode · /hooks",
-        MessageId::StartupHooksNoneSummary => "启动 hooks: 未配置。",
-        MessageId::StartupHooksCompletedSummary => "启动 hooks: 内置只读检查已完成。",
-        MessageId::StartupHooksFindingsHeading => "启动检查结果",
+        MessageId::StartupCommandsLine => "可执行命令，也可直接提问。",
+        MessageId::StartupAiDisabledLine => "AI 已关闭，仍可执行 Shell 命令。",
+        MessageId::StartupHelpLabel => "帮助：",
+        MessageId::StartupAskOnlyLine => "仅本次 --ask 使用 AI；后续输入仍保持 AI 关闭。",
         MessageId::StartupHooksRustProjectFinding => {
             "检测到 `Cargo.toml` Rust 项目；`/skill` 可查看面向项目的 Agent 能力。"
-        }
-        MessageId::StartupHooksNoFindings => "内置只读检查未发现启动项。",
-        MessageId::StartupHooksReadOnlyNote => "`cosh-shell` 只检查了轻量启动上下文。",
-        MessageId::StartupSwitchHint => {
-            "\u{1f4a1} 运行 \"cosh-switch\" 可在 cosh-ng 与 copilot-shell 之间切换"
         }
         MessageId::StartupAuthHintLine => {
             "\u{1f4a1} ECS 上可直接提问体验 AI Shell；也可用 /auth 配置自选模型。"

@@ -29,46 +29,6 @@ pub(crate) fn apply_try_recommendations(
     apply_try_items(report, try_items);
 }
 
-pub(crate) fn preview_try_recommendations(
-    report: &mut HealthScanReport,
-    config: &HealthConfig,
-    suppression: &mut HealthSuppressionStore,
-    host_id: &str,
-    now_ms: u64,
-) {
-    let try_items = generate_try_recommendations_with_recording(
-        report,
-        config,
-        suppression,
-        host_id,
-        now_ms,
-        false,
-    );
-    apply_try_items(report, try_items);
-}
-
-pub(crate) fn record_visible_try_recommendations(
-    report: &HealthScanReport,
-    suppression: &mut HealthSuppressionStore,
-    host_id: &str,
-    now_ms: u64,
-) {
-    if report.try_items.is_empty() {
-        return;
-    }
-    let metrics = metrics_for_report(report);
-    let finding_ids = report
-        .try_items
-        .iter()
-        .map(|item| item.finding_id.as_str())
-        .collect::<HashSet<_>>();
-    for finding in &report.findings {
-        if finding_ids.contains(finding.id.as_str()) {
-            suppression.record_shown(host_id, finding, metrics.clone(), now_ms);
-        }
-    }
-}
-
 fn apply_try_items(report: &mut HealthScanReport, try_items: Vec<HealthTryItem>) {
     for finding in &mut report.findings {
         finding.suggested_try_ids = try_items
@@ -98,10 +58,43 @@ fn generate_try_recommendations_with_recording(
     now_ms: u64,
     record_selected: bool,
 ) -> Vec<HealthTryItem> {
+    let metrics = metrics_for_report(report);
+    let selected = candidates_with_filter(report, config, |finding| {
+        suppression.should_show(host_id, finding, &metrics, now_ms) != SuppressionDecision::Suppress
+    });
+    if record_selected {
+        for item in &selected {
+            if let Some(finding) = report
+                .findings
+                .iter()
+                .find(|finding| finding.id == item.finding_id)
+            {
+                suppression.record_shown(host_id, finding, metrics.clone(), now_ms);
+            }
+        }
+    }
+    selected
+}
+
+pub(crate) fn generate_try_candidates(
+    report: &HealthScanReport,
+    config: &HealthConfig,
+) -> Vec<HealthTryItem> {
+    candidates_with_filter(report, config, |_| true)
+}
+
+pub(crate) fn apply_try_candidates(report: &mut HealthScanReport, config: &HealthConfig) {
+    apply_try_items(report, generate_try_candidates(report, config));
+}
+
+fn candidates_with_filter(
+    report: &HealthScanReport,
+    config: &HealthConfig,
+    mut include: impl FnMut(&HealthFinding) -> bool,
+) -> Vec<HealthTryItem> {
     if report.findings.is_empty() || report.overall_severity == HealthSeverity::Ok {
         return Vec::new();
     }
-    let metrics = metrics_for_report(report);
     let mut candidates = Vec::new();
     let finding_ids = report
         .findings
@@ -109,9 +102,7 @@ fn generate_try_recommendations_with_recording(
         .map(|finding| finding.id.as_str())
         .collect::<HashSet<_>>();
     for finding in &report.findings {
-        if suppression.should_show(host_id, finding, &metrics, now_ms)
-            == SuppressionDecision::Suppress
-        {
+        if !include(finding) {
             continue;
         }
         candidates.extend(candidates_for_finding(
@@ -137,17 +128,6 @@ fn generate_try_recommendations_with_recording(
             .is_some_and(|finding| finding.severity == HealthSeverity::Critical);
         if !critical && !selected_categories.insert(category.to_string()) {
             continue;
-        }
-        let selected_finding = record_selected
-            .then(|| {
-                report
-                    .findings
-                    .iter()
-                    .find(|finding| finding.id == item.finding_id)
-            })
-            .flatten();
-        if let Some(finding) = selected_finding {
-            suppression.record_shown(host_id, finding, metrics.clone(), now_ms);
         }
         selected.push(item);
         if selected.len() == MAX_TRY_ITEMS {
@@ -206,13 +186,13 @@ fn candidates_for_finding(
                 + oom_freshness_weight(report),
         ));
     }
-    if matches!(finding.id.as_str(), "J09" | "J10") {
+    if matches!(finding.id.split(':').next(), Some("J09" | "J10")) {
         items.push(try_item(
             "T04",
             finding,
             HealthMessageId::HealthTryInspectDiskUsage,
             HealthMessageId::HealthTryReasonDiskHigh,
-            BTreeMap::new(),
+            finding.detail_args.clone(),
             base_score(finding) + evidence_weight(finding) + actionability_weight(),
         ));
     }
@@ -222,7 +202,7 @@ fn candidates_for_finding(
             finding,
             HealthMessageId::HealthTryInspectServiceStatus,
             HealthMessageId::HealthTryReasonServiceState,
-            BTreeMap::new(),
+            finding.detail_args.clone(),
             base_score(finding) + evidence_weight(finding) + actionability_weight(),
         ));
     }
@@ -426,345 +406,4 @@ fn string_fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::config::{HealthServiceConfig, HealthServiceExpectedState};
-    use crate::diagnostics::health::builder::HealthReportBuilder;
-    use crate::diagnostics::health::model::{
-        HealthFactCategory, HealthFactSource, HealthFindingCategory,
-    };
-    use crate::diagnostics::health::rules::apply_judgement_rules;
-
-    use super::*;
-
-    #[test]
-    fn memory_and_swap_generate_sorted_try_items() {
-        let mut report = report_with_memory_pressure();
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-        let mut suppression = HealthSuppressionStore::default();
-
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut suppression,
-            "host",
-            1,
-        );
-
-        assert_eq!(report.try_items.len(), 2);
-        assert_eq!(
-            report.try_items[0].label_id,
-            HealthMessageId::HealthTryCheckSwapPressure
-        );
-        assert_eq!(
-            report.try_items[1].label_id,
-            HealthMessageId::HealthTryAnalyzeMemoryPressure
-        );
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| !finding.suggested_try_ids.is_empty()));
-    }
-
-    #[test]
-    fn single_cpu_warning_is_suppressed_unless_verbose() {
-        let mut report = HealthReportBuilder::for_started_at(1);
-        report
-            .add_fact(
-                HealthFactCategory::Cpu,
-                "cpu.load_per_core_1m",
-                HealthFactValue::Float(2.5),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Cpu,
-                "cpu.load_per_core_5m",
-                HealthFactValue::Float(1.2),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            );
-        let mut report = report.finish(2);
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-        let mut suppression = HealthSuppressionStore::default();
-
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut suppression,
-            "host",
-            1,
-        );
-        assert!(report.try_items.is_empty());
-
-        let config = HealthConfig {
-            verbose: true,
-            ..HealthConfig::default()
-        };
-        apply_try_recommendations(
-            &mut report,
-            &config,
-            &mut HealthSuppressionStore::default(),
-            "host2",
-            1,
-        );
-        assert_eq!(
-            report.try_items[0].label_id,
-            HealthMessageId::HealthTryInspectHighLoad
-        );
-    }
-
-    #[test]
-    fn cpu_warning_with_oom_context_does_not_generate_high_load_try() {
-        let mut report = HealthReportBuilder::for_started_at(1);
-        report
-            .add_fact(
-                HealthFactCategory::Cpu,
-                "cpu.load_per_core_1m",
-                HealthFactValue::Float(3.0),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Cpu,
-                "cpu.load_per_core_5m",
-                HealthFactValue::Float(1.5),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Kernel,
-                "kernel.oom_latest_age_seconds",
-                HealthFactValue::Unsigned(900),
-                Some("seconds".to_string()),
-                HealthFactSource::Fixture,
-                0,
-            );
-        let mut report = report.finish(2);
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut HealthSuppressionStore::default(),
-            "host",
-            1,
-        );
-
-        assert!(report.findings.iter().any(|finding| finding.id == "J04"));
-        assert!(report.findings.iter().any(|finding| finding.id == "J12"));
-        assert!(
-            report
-                .try_items
-                .iter()
-                .all(|item| item.label_id != HealthMessageId::HealthTryInspectHighLoad),
-            "{:?}",
-            report.try_items
-        );
-    }
-
-    #[test]
-    fn cpu_warning_with_service_failure_generates_high_load_try() {
-        let mut report = HealthReportBuilder::for_started_at(1);
-        report
-            .add_fact(
-                HealthFactCategory::Cpu,
-                "cpu.load_per_core_1m",
-                HealthFactValue::Float(3.0),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Cpu,
-                "cpu.load_per_core_5m",
-                HealthFactValue::Float(1.5),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Service,
-                "service.cosh-failed-probe.service.status",
-                HealthFactValue::String("failed".to_string()),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            );
-        let mut report = report.finish(2);
-        let mut config = HealthConfig::default();
-        config.services.push(HealthServiceConfig {
-            name: "cosh-failed-probe.service".to_string(),
-            expected: HealthServiceExpectedState::Active,
-        });
-        apply_judgement_rules(&mut report, &config);
-
-        apply_try_recommendations(
-            &mut report,
-            &config,
-            &mut HealthSuppressionStore::default(),
-            "host",
-            1,
-        );
-
-        assert!(report.findings.iter().any(|finding| finding.id == "J04"));
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| finding.id.starts_with("J15")));
-        assert!(
-            report
-                .try_items
-                .iter()
-                .any(|item| item.label_id == HealthMessageId::HealthTryInspectHighLoad),
-            "{:?}",
-            report.try_items
-        );
-    }
-
-    #[test]
-    fn recent_oom_with_process_adds_process_specific_try() {
-        let mut builder = HealthReportBuilder::for_started_at(1);
-        add_memory_low(&mut builder);
-        builder
-            .add_fact(
-                HealthFactCategory::Kernel,
-                "kernel.oom_latest_age_seconds",
-                HealthFactValue::Unsigned(120),
-                Some("seconds".to_string()),
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Kernel,
-                "kernel.oom_killed_process",
-                HealthFactValue::String("mysql".to_string()),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            );
-        let mut report = builder.finish(2);
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut HealthSuppressionStore::default(),
-            "host",
-            1,
-        );
-
-        let process_try = report
-            .try_items
-            .iter()
-            .find(|item| item.id.starts_with("T07"))
-            .expect("process try");
-        assert_eq!(
-            process_try.label_id,
-            HealthMessageId::HealthTryInspectProcessMemory
-        );
-        assert_eq!(
-            process_try.label_args.get("process").map(String::as_str),
-            Some("mysql")
-        );
-    }
-
-    #[test]
-    fn suppression_store_hides_recent_duplicate_try() {
-        let mut report = report_with_memory_pressure();
-        apply_judgement_rules(&mut report, &HealthConfig::default());
-        let mut suppression = HealthSuppressionStore::default();
-
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut suppression,
-            "host",
-            1,
-        );
-        assert!(!report.try_items.is_empty());
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut suppression,
-            "host",
-            2,
-        );
-        assert!(report.try_items.is_empty());
-    }
-
-    #[test]
-    fn degraded_only_generates_unavailable_checks_try() {
-        let mut report = HealthScanReport::new("health-1", 1);
-        report.findings.push(HealthFinding {
-            id: "J02".to_string(),
-            severity: HealthSeverity::Degraded,
-            category: HealthFindingCategory::CollectionGap,
-            title_id: HealthMessageId::HealthFindingCoreCollectorUnavailable,
-            detail_id: None,
-            detail_args: BTreeMap::new(),
-            evidence_fact_ids: Vec::new(),
-            suggested_try_ids: Vec::new(),
-        });
-        report.recompute_overall_severity();
-
-        apply_try_recommendations(
-            &mut report,
-            &HealthConfig::default(),
-            &mut HealthSuppressionStore::default(),
-            "host",
-            1,
-        );
-
-        assert_eq!(
-            report.try_items[0].label_id,
-            HealthMessageId::HealthTryReviewUnavailableChecks
-        );
-    }
-
-    fn report_with_memory_pressure() -> HealthScanReport {
-        let mut builder = HealthReportBuilder::for_started_at(1);
-        add_memory_low(&mut builder);
-        builder
-            .add_fact(
-                HealthFactCategory::Memory,
-                "memory.swap_used_ratio",
-                HealthFactValue::Float(0.55),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Memory,
-                "memory.swap_used_mib",
-                HealthFactValue::Unsigned(2048),
-                Some("MiB".to_string()),
-                HealthFactSource::Fixture,
-                0,
-            );
-        builder.finish(2)
-    }
-
-    fn add_memory_low(builder: &mut HealthReportBuilder) {
-        builder
-            .add_fact(
-                HealthFactCategory::Memory,
-                "memory.available_mib",
-                HealthFactValue::Unsigned(700),
-                Some("MiB".to_string()),
-                HealthFactSource::Fixture,
-                0,
-            )
-            .add_fact(
-                HealthFactCategory::Memory,
-                "memory.available_ratio",
-                HealthFactValue::Float(0.08),
-                None,
-                HealthFactSource::Fixture,
-                0,
-            );
-    }
-}
+mod tests;

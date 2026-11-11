@@ -248,7 +248,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                     output.write_all(&input)?;
                 }
-                writeln!(output)?;
+                output.write_all(b"\r\n")?;
                 output.flush()?;
             }
             RawInputEvent::PromptGhostClear => {

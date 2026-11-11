@@ -1,3 +1,9 @@
+// Shared renderer tests run once in the library; private runtime helpers stay in both targets.
+#[cfg(test)]
+macro_rules! library_tests {
+    ($($item:item)*) => {};
+}
+
 mod activity;
 #[allow(dead_code, unused_imports)]
 mod adapter;
@@ -26,6 +32,7 @@ mod journal;
 mod ledger;
 #[allow(dead_code, unused_imports)]
 mod parser;
+mod process;
 mod question;
 #[allow(dead_code, unused_imports)]
 mod raw_input;
@@ -50,10 +57,9 @@ mod upgrade;
 use runtime::cli_args::configured_raw_invocation;
 use runtime::invocation::{
     classify_invocation, exec_gateway, exec_shell, gateway_plan, is_cosh_entry, Invocation,
+    TuiEntry,
 };
-use runtime::startup::{
-    passthrough_non_interactive, passthrough_raw_non_interactive, print_usage_help,
-};
+use runtime::startup::{exec_direct_command, print_usage_help};
 
 #[allow(unused_imports)]
 mod binary_compat {
@@ -82,11 +88,25 @@ mod binary_compat {
 #[allow(unused_imports)]
 pub(crate) use binary_compat::*;
 
-/// Full argv (argv[0] included) when this process was invoked through the
-/// `/usr/bin/cosh` entry; `None` for the `cosh-shell` CLI surface.
-fn cosh_entry_args() -> Option<Vec<std::ffi::OsString>> {
-    let args = std::env::args_os().collect::<Vec<_>>();
-    is_cosh_entry(args.first()?).then_some(args)
+fn run_tui(mut entry: TuiEntry) -> i32 {
+    match runtime::login::login_shell_plan(entry.login_argv0) {
+        Ok(Some(plan)) => {
+            if let Some(warning) = runtime::login::apply_login_shell_plan(&mut entry, plan) {
+                eprintln!("cosh: {warning}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("cosh: {error}");
+            return 1;
+        }
+    }
+    runtime::terminal::install_terminal_recovery();
+    let cosh_config = config::load_config();
+    runtime::logging::init_logging(&cosh_config.log_level);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
+    let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(entry, &cosh_config);
+    runtime::controller::run_raw(&adapter_name, shell_kind, launch_options)
 }
 
 fn main() {
@@ -94,46 +114,65 @@ fn main() {
         std::process::exit(status);
     }
 
-    // `/usr/bin/cosh` entry (argv[0] basename `cosh`, login `-cosh` included):
-    // the invocation-transparency contract dispatches before any runtime
-    // initialization so passthrough leaves no logs or terminal side effects.
-    if let Some(args_os) = cosh_entry_args() {
-        use std::io::IsTerminal;
-
+    let args_os = std::env::args_os().collect::<Vec<_>>();
+    let cosh_entry = is_cosh_entry(&args_os[0]);
+    if cosh_entry {
         if let Some(plan) = gateway_plan(&args_os[1..]) {
             std::process::exit(exec_gateway(plan));
         }
-        let stdin_tty = std::io::stdin().is_terminal();
-        let stdout_tty = std::io::stdout().is_terminal();
-        let stderr_tty = std::io::stderr().is_terminal();
-        match classify_invocation(
+    }
+    let subcommand = args_os.get(1).and_then(|arg| arg.to_str());
+    let legacy_command = matches!(
+        subcommand,
+        Some(
+            "--version"
+                | "--help"
+                | "diagnostics"
+                | "demo"
+                | "doctor"
+                | "host-demo"
+                | "interactive"
+                | "interactive-demo"
+                | "adapter-demo"
+        )
+    );
+    if cosh_entry || !legacy_command {
+        use std::io::IsTerminal;
+        let status = match classify_invocation(
             &args_os[0],
             &args_os[1..],
-            stdin_tty,
-            stdout_tty,
-            stderr_tty,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
         ) {
-            Invocation::ExecShell(plan) => std::process::exit(exec_shell(plan)),
-            Invocation::Tui(entry) => {
-                runtime::terminal::install_terminal_recovery();
-                let cosh_config = config::load_config();
-                runtime::logging::init_logging(&cosh_config.log_level);
-                tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
-                // The classifier only admits valid UTF-8 launch arguments;
-                // argv[0] may be arbitrary bytes, so it never reaches the
-                // TUI parser.
-                let launch_args = entry
-                    .launch_args
-                    .iter()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>();
-                let (adapter_name, shell_kind, launch_options) =
-                    configured_raw_invocation(&launch_args);
-                let status =
-                    runtime::controller::run_raw(&adapter_name, shell_kind, launch_options);
-                std::process::exit(status);
+            Invocation::ExecShell(plan) => {
+                if !cosh_entry
+                    && matches!(subcommand, Some("--" | "raw"))
+                    && plan.args.first().and_then(|arg| arg.to_str()) == Some("--")
+                {
+                    exec_direct_command(&plan.args[1..])
+                } else {
+                    exec_shell(plan)
+                }
             }
-        }
+            Invocation::Tui(entry) => run_tui(entry),
+            Invocation::Guide(args) => config::guide::run_cli(&args),
+            Invocation::Login(args) => runtime::login::run_cli(&args),
+            Invocation::ShellIntegration(operation) => {
+                runtime::shell_integration::run_cli(operation)
+            }
+            Invocation::HealthWorker => diagnostics::health::runtime::run_private_health_worker(),
+            Invocation::LoginShellPlanWorker => runtime::login::probe::run_worker(),
+            Invocation::LoginInvitationWorker => runtime::login::invitation::run_worker(),
+            Invocation::LoginEditor => runtime::login::editor::run_editor(),
+            Invocation::LoginLifecycle(args) => runtime::login::lifecycle::run_cli(&args),
+            Invocation::Health(args) => runtime::health_banner::run_cli(&args),
+            Invocation::UsageError(error) => {
+                eprintln!("cosh: {error}");
+                2
+            }
+        };
+        std::process::exit(status);
     }
 
     let args = std::env::args().collect::<Vec<_>>();
@@ -150,27 +189,6 @@ fn main() {
         std::process::exit(diagnostics::bundle::run_cli(&args[2..]));
     }
 
-    let has_subcommand = matches!(
-        args.get(1).map(String::as_str),
-        Some(
-            "demo"
-                | "doctor"
-                | "host-demo"
-                | "raw"
-                | "interactive"
-                | "interactive-demo"
-                | "adapter-demo"
-        )
-    );
-    if let Some(status) = passthrough_raw_non_interactive(&args) {
-        std::process::exit(status);
-    }
-    if !has_subcommand {
-        if let Some(status) = passthrough_non_interactive(&args) {
-            std::process::exit(status);
-        }
-    }
-
     runtime::terminal::install_terminal_recovery();
 
     // Initialize structured logging (file output to ~/.copilot-shell/logs/)
@@ -178,22 +196,10 @@ fn main() {
     runtime::logging::init_logging(&cosh_config.log_level);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
 
-    if !has_subcommand {
-        // The classifier admitted the TUI: only cosh-owned/login tokens on a
-        // terminal reach this point.
-        let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[1..]);
-        let status = runtime::controller::run_raw(&adapter_name, shell_kind, launch_options);
-        std::process::exit(status);
-    }
-
     let status = match args.get(1).map(String::as_str) {
         Some("demo") => runtime::controller::run_demo(),
         Some("doctor") => runtime::doctor::run_doctor(),
         Some("host-demo") => runtime::controller::run_host_demo(),
-        Some("raw") => {
-            let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[2..]);
-            runtime::controller::run_raw(&adapter_name, shell_kind, launch_options)
-        }
         Some("interactive") => {
             runtime::controller::run_interactive(args.get(2).map(String::as_str).unwrap_or("fake"))
         }

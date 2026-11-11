@@ -106,18 +106,18 @@ fn raw_cli_startup_banner_renders_when_enabled() {
         ],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
-    assert!(output.contains("Adapter: fake"), "{output}");
+    assert!(output.contains("Cosh AI Shell"), "{output}");
+    assert!(!output.contains("Adapter: fake"), "{output}");
     assert!(output.contains("Shell: bash"), "{output}");
-    assert!(output.contains("Approval: auto"), "{output}");
-    assert!(output.contains("Analysis: smart"), "{output}");
+    assert!(output.contains("approval: auto"), "{output}");
+    assert!(!output.contains("Analysis: smart"), "{output}");
     assert!(!output.contains("Mode: auto"), "{output}");
     assert!(output.contains("/help"), "{output}");
-    assert!(output.contains("/hooks"), "{output}");
+    assert!(!output.contains("/hooks"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(
         !output.contains("┌─┐┌─┐┌─┐┬ ┬"),
-        "logo should be removed: {output}"
+        "six-line logo should not return: {output}"
     );
     assert!(
         !output.contains("Agent actions still require approval"),
@@ -128,8 +128,8 @@ fn raw_cli_startup_banner_renders_when_enabled() {
         "no hooks line when hooks are disabled: {output}"
     );
     assert!(!output.contains("no command ran"), "{output}");
-    assert!(!output.contains("cosh-osc$ ╭ · cosh-shell"), "{output}");
-    assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
+    assert!(!output.contains("cosh-osc$ ╭ Cosh AI Shell"), "{output}");
+    assert_inline_before_followup(&output, "╭ Cosh AI Shell", "exit");
     assert!(!output.contains("Thinking..."), "{output}");
 }
 
@@ -589,7 +589,7 @@ fn raw_cli_upgrade_notice_renders_at_an_idle_prompt_without_input() {
     let mut session = spawn_with_gated_upgrade_probe();
     session.wait_screen("startup banner before upgrade probe completes", |screen| {
         let contents = screen.contents();
-        contents.contains("╭ · cosh-shell") && !contents.contains("Update available: cosh-ng")
+        contents.contains("╭ Cosh AI Shell") && !contents.contains("Update available: cosh-ng")
     });
     release_upgrade_probe(&session);
 
@@ -736,7 +736,7 @@ fn raw_cli_upgrade_notice_skips_the_zsh_session_after_typed_input() {
     }
     let mut session = spawn_with_gated_upgrade_probe_for_shell("zsh", &[]);
     session.wait_screen("startup banner before upgrade probe completes", |screen| {
-        screen.contents().contains("╭ · cosh-shell")
+        screen.contents().contains("╭ Cosh AI Shell")
     });
 
     // Wait for the echo so the leading keystrokes cannot coalesce with the
@@ -947,11 +947,11 @@ fn raw_cli_startup_banner_uses_zh_language_env() {
         ],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
-    assert!(output.contains("后端: fake"), "{output}");
+    assert!(output.contains("Cosh AI Shell"), "{output}");
+    assert!(!output.contains("后端: fake"), "{output}");
     assert!(output.contains("Shell: bash"), "{output}");
     assert!(output.contains("审批: auto"), "{output}");
-    assert!(output.contains("分析: smart"), "{output}");
+    assert!(!output.contains("分析: smart"), "{output}");
     assert!(!output.contains("模式: auto"), "{output}");
     assert!(output.contains("/help"), "{output}");
 }
@@ -969,8 +969,8 @@ fn raw_cli_startup_banner_reports_effective_modes() {
         ],
     );
 
-    assert!(output.contains("Approval: trust"), "{output}");
-    assert!(output.contains("Analysis: manual"), "{output}");
+    assert!(output.contains("approval: trust"), "{output}");
+    assert!(!output.contains("Analysis: manual"), "{output}");
 }
 
 #[test]
@@ -986,8 +986,8 @@ fn raw_cli_startup_approval_alias_and_invalid_value_fail_closed() {
             ],
         );
 
-        assert!(output.contains("Approval: recommend"), "{value}: {output}");
-        assert!(!output.contains("Approval: auto"), "{value}: {output}");
+        assert!(output.contains("approval: recommend"), "{value}: {output}");
+        assert!(!output.contains("approval: auto"), "{value}: {output}");
     }
 }
 
@@ -1003,13 +1003,19 @@ fn raw_cli_plain_startup_banner_keeps_both_modes() {
         ],
     );
 
-    assert!(output.contains("Approval: auto"), "{output}");
-    assert!(output.contains("Analysis: smart"), "{output}");
+    assert!(output.contains("approval: auto"), "{output}");
+    assert!(!output.contains("Analysis: smart"), "{output}");
+}
+
+fn private_startup_health_home(label: &str) -> std::path::PathBuf {
+    let home = temp_shell_home(label);
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    home
 }
 
 #[test]
 fn raw_cli_startup_health_fixture_renders_when_enabled() {
-    let cwd = temp_shell_home("startup-health-fixture");
+    let cwd = private_startup_health_home("startup-health-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1027,20 +1033,20 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Suggested prompts", b"exit\n")],
+        &[("Try asking:", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("warning"), "{output}");
     assert!(output.contains("Load  1m"), "{output}");
     assert!(!output.contains("Load  Load 1m"), "{output}");
-    assert!(output.contains("Mem used"), "{output}");
+    assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
     assert!(output.contains("Swap used"), "{output}");
-    assert!(output.contains("Findings"), "{output}");
-    assert!(output.contains("Suggested prompts"), "{output}");
-    assert!(output.contains("[Health]"), "{output}");
-    assert_eq!(output.matches("[Health]").count(), 3, "{output}");
+    assert!(output.contains("Needs attention"), "{output}");
+    assert!(output.contains("Try asking:"), "{output}");
+    assert!(first_health_prompt(&output).is_some(), "{output}");
+    assert_eq!(output.matches("Try asking:").count(), 1, "{output}");
     assert!(!output.contains("Next:"), "{output}");
     assert_inline_before_followup(&output, "╭─ Health check", "exit");
 }
@@ -1064,8 +1070,8 @@ fn raw_cli_startup_health_disabled_renders_no_row() {
 }
 
 #[test]
-fn raw_cli_startup_health_cards_share_configured_width() {
-    let cwd = temp_shell_home("startup-health-card-width");
+fn raw_cli_startup_health_caps_welcome_and_preserves_configured_content_width() {
+    let cwd = private_startup_health_home("startup-health-card-width");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
@@ -1089,7 +1095,7 @@ fn raw_cli_startup_health_cards_share_configured_width() {
         ],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
+    assert!(output.contains("Cosh AI Shell"), "{output}");
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("Received shell prompt request"), "{output}");
     let widths = box_line_widths(&output);
@@ -1098,14 +1104,20 @@ fn raw_cli_startup_health_cards_share_configured_width() {
         "expected startup, health and agent boxes\n{output}"
     );
     assert!(
-        widths.iter().all(|width| *width == 140),
-        "box widths should match configured width: {widths:?}\n{output}"
+        widths.contains(&80)
+            && widths.contains(&140)
+            && widths
+                .iter()
+                .copied()
+                .skip_while(|width| *width == 80)
+                .all(|width| width == 140),
+        "welcome is capped at 80; health and Agent use configured width: {widths:?}\n{output}"
     );
 }
 
 #[test]
 fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
-    let cwd = temp_shell_home("startup-health-critical-fixture");
+    let cwd = private_startup_health_home("startup-health-critical-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1123,16 +1135,16 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Suggested prompts", b"exit\n")],
+        &[("Try asking:", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("critical"), "{output}");
     assert!(output.contains("OOM"), "{output}");
-    assert!(output.contains("Suggested prompts"), "{output}");
+    assert!(output.contains("Try asking:"), "{output}");
     assert!(
-        output.contains("cause of the most recent OOM")
-            || output.contains("why the latest OOM killed"),
+        output.contains("Check recent OOM impact on java")
+            && output.contains("event timing and memory limits"),
         "{output}"
     );
     assert!(!output.contains("CONSTRAINT_"), "{output}");
@@ -1147,7 +1159,7 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
 
 #[test]
 fn raw_cli_startup_health_degraded_fixture_is_read_only() {
-    let cwd = temp_shell_home("startup-health-degraded-read-only");
+    let cwd = private_startup_health_home("startup-health-degraded-read-only");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
@@ -1173,8 +1185,8 @@ fn raw_cli_startup_health_degraded_fixture_is_read_only() {
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("degraded"), "{output}");
-    assert!(output.contains("Suggested prompts"), "{output}");
-    assert!(output.contains("[Health]"), "{output}");
+    assert!(output.contains("Try asking:"), "{output}");
+    assert!(first_health_prompt(&output).is_some(), "{output}");
     assert!(!output.contains("[Personal]"), "{output}");
     assert!(!output.contains("Tab insert"), "{output}");
     assert!(!output.contains("Enter ask"), "{output}");
@@ -1186,8 +1198,8 @@ fn raw_cli_startup_health_degraded_fixture_is_read_only() {
 }
 
 #[test]
-fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
-    let cwd = temp_shell_home("startup-health-healthy-fixture");
+fn raw_cli_startup_health_healthy_fixture_renders_resource_summary_once() {
+    let cwd = private_startup_health_home("startup-health-healthy-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
@@ -1207,21 +1219,37 @@ fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
         vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
-    assert!(output.contains("Health: ok"), "{output}");
-    // The banner path marks the report rendered, so the deferred path must
-    // not emit the row a second time.
-    assert_eq!(output.matches("Health: ok").count(), 1, "{output}");
-    assert!(output.contains("Mem used"), "{output}");
-    assert!(output.contains("Disk"), "{output}");
-    assert!(!output.contains("Health check"), "{output}");
-    assert!(!output.contains("Suggested prompts"), "{output}");
-    assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
+    let visible = compact_without_box_chars(&output);
+    assert!(visible.contains("Cosh AI Shell"), "{output}");
+    assert!(
+        visible.contains("Health check: no anomalies in checked items"),
+        "{output}"
+    );
+    // The deferred path must not render the resource summary again.
+    assert_eq!(visible.matches("Health check:").count(), 1, "{output}");
+    for resource in [
+        "1m 0.8 / 4 cores (0.2x)",
+        "Memory used 51%",
+        "15.6 GiB available / 32.0 GiB",
+        "Disk / used 42%",
+        "100.0 GiB available",
+    ] {
+        assert!(visible.contains(resource), "missing {resource}: {output}");
+    }
+    assert!(!visible.contains("Unavailable:"), "{output}");
+    assert!(!visible.contains("Needs attention"), "{output}");
+    assert!(!output.contains("Try asking:"), "{output}");
+    assert_inline_before_followup(&output, "╭ Cosh AI Shell", "exit");
+    assert_inline_before_followup(
+        &output,
+        "Health check: no anomalies in checked items",
+        "exit",
+    );
 }
 
 #[test]
 fn raw_cli_startup_health_no_color_keeps_readable_content() {
-    let cwd = temp_shell_home("startup-health-no-color");
+    let cwd = private_startup_health_home("startup-health-no-color");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1240,23 +1268,23 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Suggested prompts", b"exit\n")],
+        &[("Try asking:", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("warning"), "{output}");
     assert!(output.contains("Load  1m"), "{output}");
     assert!(!output.contains("Load  Load 1m"), "{output}");
-    assert!(output.contains("Mem used"), "{output}");
+    assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
-    assert!(output.contains("Suggested prompts"), "{output}");
-    assert!(output.contains("[Health]"), "{output}");
+    assert!(output.contains("Try asking:"), "{output}");
+    assert!(first_health_prompt(&output).is_some(), "{output}");
     assert!(!output.contains("Next:"), "{output}");
     let health_block = output
         .split("Health check")
         .nth(1)
         .unwrap_or(output.as_str())
-        .split("Suggested prompts")
+        .split("Try asking:")
         .next()
         .unwrap_or(output.as_str());
     assert!(!health_block.contains("\x1b["), "{output}");
@@ -1264,7 +1292,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
 
 #[test]
 fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
-    let cwd = temp_shell_home("startup-health-dumb");
+    let cwd = private_startup_health_home("startup-health-dumb");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1281,16 +1309,16 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
             ("TERM", "dumb"),
         ],
         &cwd,
-        &[("Mem used", b"exit\n")],
+        &[("Memory  used", b"exit\n")],
     );
 
     assert!(output.contains("Health check:"), "{output}");
     assert!(output.contains("warning"), "{output}");
     assert!(output.contains("Load  1m"), "{output}");
     assert!(!output.contains("Load  Load 1m"), "{output}");
-    assert!(output.contains("Mem used"), "{output}");
+    assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
-    assert!(!output.contains("Suggested prompts"), "{output}");
+    assert!(!output.contains("Try asking:"), "{output}");
     assert!(!output.contains("Shift+Tab cycle"), "{output}");
     assert!(!output.contains("▕"), "{output}");
     assert!(!output.contains("Next:"), "{output}");
@@ -1300,8 +1328,8 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
 }
 
 #[test]
-fn raw_cli_startup_health_suppresses_all_three_visible_try_items() {
-    let cwd = temp_shell_home("startup-health-suppressed-try");
+fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
+    let cwd = private_startup_health_home("startup-health-suppressed-try");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let env = [
@@ -1321,28 +1349,31 @@ fn raw_cli_startup_health_suppresses_all_three_visible_try_items() {
         &[],
         &env,
         &cwd,
-        &[("Suggested prompts", b"exit\n")],
+        &[("Try asking:", b"exit\n")],
     );
-    assert!(first.contains("Suggested prompts"), "{first}");
+    assert!(first.contains("Try asking:"), "{first}");
     assert!(!first.contains("Next:"), "{first}");
 
-    let second = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let second = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &env,
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Try asking:", b"exit\n")],
     );
     assert!(second.contains("Health check"), "{second}");
     assert!(second.contains("warning"), "{second}");
-    assert!(!second.contains("Suggested prompts"), "{second}");
-    assert!(first_health_prompt(&second).is_none(), "{second}");
+    assert_eq!(second.matches("Try asking:").count(), 1, "{second}");
+    let first_prompt = first_health_prompt(&first).expect("first primary health prompt");
+    let second_prompt = first_health_prompt(&second).expect("next unsuppressed health prompt");
+    assert_ne!(first_prompt, second_prompt, "{second}");
+    assert!(!second.contains(&first_prompt), "{second}");
     assert!(!second.contains("Next:"), "{second}");
 }
 
 #[test]
 fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
-    let cwd = temp_shell_home("startup-health-hidden-no-suppress");
+    let cwd = private_startup_health_home("startup-health-hidden-no-suppress");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store_str = suppression_store.to_string_lossy().into_owned();
 
@@ -1384,16 +1415,16 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Suggested prompts", b"exit\n")],
+        &[("Try asking:", b"exit\n")],
     );
 
     assert!(shown.contains("Health check"), "{shown}");
-    assert!(shown.contains("Suggested prompts"), "{shown}");
+    assert!(shown.contains("Try asking:"), "{shown}");
 }
 
 #[test]
 fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
-    let cwd = temp_shell_home("startup-health-ghost-tab");
+    let cwd = private_startup_health_home("startup-health-ghost-tab");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1414,17 +1445,14 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
         ],
         &cwd,
         &[
-            (
-                " › Analyze memory pressure and identify top consumers",
-                b"\t\n",
-            ),
+            (" › Check memory pressure, top consumers", b"\t\n"),
             ("Received shell prompt request", b"exit\n"),
         ],
     );
 
-    assert!(output.contains("Suggested prompts"), "{output}");
+    assert!(output.contains("Try asking:"), "{output}");
     assert!(
-        output.contains("Analyze memory pressure and identify top consumers"),
+        output.contains("Check memory pressure, top consumers"),
         "{output}"
     );
     let first_prompt = first_health_prompt(&output).expect("first health prompt");
@@ -1441,14 +1469,14 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
     assert!(compact.contains("scan_id=health-"), "{output}");
     assert!(compact.contains("bounded_facts_only=true"), "{output}");
     assert!(
-        !output.contains("command not found: Analyze memory pressure"),
+        !output.contains("command not found: Check current memory pressure"),
         "{output}"
     );
 }
 
 #[test]
 fn raw_cli_startup_health_prompt_ghost_tab_only_does_not_submit() {
-    let cwd = temp_shell_home("startup-health-ghost-tab-only");
+    let cwd = private_startup_health_home("startup-health-ghost-tab-only");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
@@ -1484,7 +1512,7 @@ fn raw_cli_startup_health_prompt_ghost_tab_only_does_not_submit() {
 
 #[test]
 fn raw_cli_startup_health_shift_tab_cycles_then_enter_submits_active_prompt() {
-    let cwd = temp_shell_home("startup-health-shift-tab-enter");
+    let cwd = private_startup_health_home("startup-health-shift-tab-enter");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1503,12 +1531,9 @@ fn raw_cli_startup_health_shift_tab_cycles_then_enter_submits_active_prompt() {
         ],
         &cwd,
         &[
+            (" › Check memory pressure, top consumers", b"\x1b[Z"),
             (
-                " › Analyze memory pressure and identify top consumers",
-                b"\x1b[Z",
-            ),
-            (
-                " › Check whether swap pressure is active and which processes",
+                " › Check whether swap pressure is active, available memory and related processes",
                 b"\n",
             ),
             (
@@ -1518,14 +1543,14 @@ fn raw_cli_startup_health_shift_tab_cycles_then_enter_submits_active_prompt() {
         ],
     );
 
-    assert_eq!(output.matches("[Health]").count(), 3, "{output}");
+    assert_eq!(output.matches("Try asking:").count(), 1, "{output}");
     assert!(
         output.contains("\x1b[2m › Check whether swap pressure"),
         "{output}"
     );
     assert!(
         compact_without_box_chars(&output).contains(
-            "Received shell prompt request: Check whether swap pressure is active and which processes"
+            "Received shell prompt request: Check whether swap pressure is active, available memory and related processes"
         ),
         "{output}"
     );
@@ -1545,8 +1570,14 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
             vec![("TERM", "xterm-256color"), ("NO_COLOR", "1")],
         ),
     ] {
-        let cwd = temp_shell_home(&format!("startup-health-ghost-disabled-{name}"));
-        let suppression_store = cwd.join("health-suppression");
+        let cwd = private_startup_health_home(&format!("startup-health-ghost-disabled-{name}"));
+        // Terminal capability is independent of disk sync latency within the claim deadline.
+        #[cfg(target_os = "linux")]
+        let suppression_home = tempfile::tempdir_in("/dev/shm").unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let suppression_home = tempfile::tempdir().unwrap();
+        fs::set_permissions(suppression_home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let suppression_store = suppression_home.path().join("health-suppression");
         let suppression_store = suppression_store.to_string_lossy().into_owned();
         let mut env = vec![
             ("COSH_SHELL_STARTUP_BANNER", "1"),
@@ -1559,26 +1590,26 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
             ("COSH_SHELL_ISOLATED", "0"),
         ];
         env.extend(extra_env);
-        let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
-            "fake",
-            &[],
-            &env,
-            &cwd,
-            vec![
-                (b"\t\n".to_vec(), Duration::from_millis(1400)),
-                (b"exit\n".to_vec(), Duration::from_millis(700)),
-            ],
-        );
+        let steps: &[(&str, &[u8])] = if name == "dumb" {
+            &[("Health check:", b"\t\nexit\n")]
+        } else {
+            &[
+                (" › Check memory pressure, top consumers", b"\t\n"),
+                ("Received shell prompt request:", b"exit\n"),
+            ]
+        };
+        let output =
+            run_raw_cli_with_args_env_current_dir_and_marker_input("fake", &[], &env, &cwd, steps);
 
         if name == "dumb" {
-            assert!(!output.contains("Suggested prompts"), "{name}\n{output}");
+            assert!(!output.contains("Try asking:"), "{name}\n{output}");
             assert!(first_health_prompt(&output).is_none(), "{name}\n{output}");
             assert!(
                 !output.contains("Received shell prompt request:"),
                 "{name}\n{output}"
             );
         } else {
-            assert!(output.contains("Suggested prompts"), "{name}\n{output}");
+            assert!(output.contains("Try asking:"), "{name}\n{output}");
             assert!(first_health_prompt(&output).is_some(), "{name}\n{output}");
             assert!(
                 output.contains("Received shell prompt request:"),
@@ -1590,7 +1621,7 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
 
 #[test]
 fn raw_cli_startup_health_prompt_ghost_does_not_override_manual_input() {
-    let cwd = temp_shell_home("startup-health-ghost-manual");
+    let cwd = private_startup_health_home("startup-health-ghost-manual");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
@@ -1620,18 +1651,18 @@ fn raw_cli_startup_health_prompt_ghost_does_not_override_manual_input() {
     assert!(output.contains("echo manual"), "{output}");
     assert!(output.contains("manual"), "{output}");
     assert!(
-        !output.contains("Received shell prompt request: Analyze memory pressure"),
+        !output.contains("Received shell prompt request: Check current memory pressure"),
         "{output}"
     );
     assert!(
-        !output.contains("command not found: Analyze memory pressure"),
+        !output.contains("command not found: Check current memory pressure"),
         "{output}"
     );
 }
 
 #[test]
 fn raw_cli_startup_health_context_is_not_attached_to_plain_agent_request() {
-    let cwd = temp_shell_home("startup-health-context");
+    let cwd = private_startup_health_home("startup-health-context");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
     let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
@@ -1690,7 +1721,7 @@ fn raw_cli_startup_health_live_does_not_render_on_non_linux_by_default() {
         ],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
+    assert!(output.contains("Cosh AI Shell"), "{output}");
     assert!(!output.contains("Health check"), "{output}");
     assert!(!output.contains("Health:"), "{output}");
     assert!(!output.contains("platform unsupported"), "{output}");
@@ -1710,7 +1741,7 @@ fn raw_cli_startup_health_live_does_not_block_shell_on_linux_by_default() {
         ],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
+    assert!(output.contains("Cosh AI Shell"), "{output}");
     assert!(output.contains("after-health-startup"), "{output}");
     assert!(!output.contains("platform unsupported"), "{output}");
 }
@@ -1728,20 +1759,11 @@ fn raw_cli_startup_hooks_use_zh_language_env() {
         ],
     );
 
-    assert!(
-        output.contains("启动 hooks: 内置只读检查已完成"),
-        "{output}"
-    );
-    assert!(output.contains("启动检查结果"), "{output}");
-    assert!(
-        output.contains("检测到 Cargo.toml Rust 项目")
-            || output.contains("内置只读检查未发现启动项"),
-        "{output}"
-    );
-    assert!(
-        output.contains("cosh-shell 只检查了轻量启动上下文"),
-        "{output}"
-    );
+    assert!(output.contains("检测到 Cargo.toml Rust 项目"), "{output}");
+    assert!(output.contains("/skill"), "{output}");
+    assert!(!output.contains("启动 hooks:"), "{output}");
+    assert!(!output.contains("启动检查结果"), "{output}");
+    assert!(!output.contains("只检查了轻量启动上下文"), "{output}");
     for label in [
         "Startup hooks:",
         "Startup findings",
@@ -1772,16 +1794,18 @@ fn raw_cli_startup_hooks_no_findings_use_zh_language_env() {
         vec![(b"exit\n".to_vec(), Duration::ZERO)],
     );
 
-    assert!(
-        output.contains("启动 hooks: 内置只读检查已完成"),
-        "{output}"
-    );
-    assert!(output.contains("启动检查结果"), "{output}");
-    assert!(output.contains("内置只读检查未发现启动项"), "{output}");
-    assert!(
-        !output.contains("No startup findings from built-in read-only checks"),
-        "{output}"
-    );
+    assert!(output.contains("Cosh AI Shell"), "{output}");
+    for hidden in [
+        "启动 hooks:",
+        "启动检查结果",
+        "未发现启动项",
+        "No startup findings",
+    ] {
+        assert!(
+            !output.contains(hidden),
+            "quiet startup check leaked {hidden}: {output}"
+        );
+    }
 }
 
 #[test]
@@ -1804,8 +1828,8 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
         ],
     );
 
-    assert!(output.contains("Approval: auto"), "{output}");
-    assert!(output.contains("Analysis: smart"), "{output}");
+    assert!(output.contains("approval: auto"), "{output}");
+    assert!(!output.contains("Analysis: smart"), "{output}");
     assert!(output.contains("Deferred req-1"), "{output}");
     assert!(output.contains("$ git status"), "{output}");
     assert!(!output.contains("Approval req-"), "{output}");
@@ -1867,7 +1891,7 @@ printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-d
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(output.contains("Adapter: cosh-core"), "{output}");
+    assert!(output.contains("adapter: cosh-core"), "{output}");
     assert!(
         output.contains("Cosh-core default adapter reached via implicit raw."),
         "{output}"
@@ -1897,17 +1921,14 @@ fn raw_cli_startup_hooks_render_markdown_findings_without_running_commands() {
     );
 
     assert!(
-        output.contains("Startup hooks: built-in read-only checks completed"),
+        output.contains("Rust project detected from Cargo.toml"),
         "{output}"
     );
-    assert!(output.contains("Startup findings"), "{output}");
+    assert!(output.contains("/skill"), "{output}");
+    assert!(!output.contains("Startup hooks:"), "{output}");
+    assert!(!output.contains("Startup findings"), "{output}");
     assert!(
-        output.contains("Rust project detected from Cargo.toml")
-            || output.contains("No startup findings from built-in read-only checks"),
-        "{output}"
-    );
-    assert!(
-        output.contains("cosh-shell only inspected lightweight startup context"),
+        !output.contains("only inspected lightweight startup context"),
         "{output}"
     );
     assert!(
@@ -1936,7 +1957,7 @@ fn raw_cli_startup_banner_reports_selected_zsh_shell() {
         ],
     );
 
-    assert!(output.contains("cosh-shell"), "{output}");
+    assert!(output.contains("Cosh AI Shell"), "{output}");
     assert!(output.contains("Shell: zsh"), "{output}");
     assert!(!output.contains("Shell: bash"), "{output}");
     assert!(!output.contains("zsh: command not found"), "{output}");
@@ -2040,13 +2061,14 @@ fn raw_cli_missing_shell_arg_reports_error_without_starting_bash() {
 }
 
 fn first_health_prompt(output: &str) -> Option<String> {
-    strip_ansi_escape(output)
+    let plain = strip_ansi_escape(output);
+    let mut lines = plain
         .lines()
-        .find_map(|line| {
-            let (_, prompt) = line.split_once("[Health]")?;
-            Some(prompt.trim().trim_end_matches('│').trim().to_string())
-        })
-        .filter(|prompt| !prompt.is_empty())
+        .skip_while(|line| line.trim() != "Try asking:");
+    lines.next()?;
+    lines
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
 }
 
 fn compact_without_box_chars(output: &str) -> String {
@@ -2115,4 +2137,54 @@ fn assert_raw_cli_rejects_shell_args(args: &[&str], expected: &str) {
         !stderr.contains("bash:"),
         "stdout={stdout}\nstderr={stderr}"
     );
+}
+
+#[test]
+fn raw_cli_startup_health_unusable_history_keeps_facts_without_inviting() {
+    use std::os::unix::fs::symlink;
+    for kind in ["corrupt", "fifo", "symlink", "oversized"] {
+        let home = private_startup_health_home("unusable-history");
+        let history = home.join("health-suppression");
+        match kind {
+            "corrupt" => fs::write(&history, "broken history\n").unwrap(),
+            "fifo" => {
+                nix::unistd::mkfifo(&history, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                    .unwrap()
+            }
+            "symlink" => {
+                let target = home.join("target");
+                fs::write(&target, "keep").unwrap();
+                symlink(target, &history).unwrap();
+            }
+            _ => fs::write(&history, vec![b'x'; 128 * 1024 + 1]).unwrap(),
+        }
+        let before = if kind == "fifo" {
+            None
+        } else {
+            Some(fs::read(&history).unwrap())
+        };
+        let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+            "fake",
+            &[],
+            &[
+                ("COSH_SHELL_STARTUP_BANNER", "1"),
+                ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-warning"),
+                (
+                    "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+                    history.to_str().unwrap(),
+                ),
+                ("COSH_SHELL_LANG", "en-US"),
+                ("TERM", "xterm-256color"),
+                ("COSH_SHELL_ISOLATED", "0"),
+            ],
+            &home,
+            &[("Health check", b"exit\n")],
+        );
+        assert!(output.contains("Health check"), "{kind}: {output}");
+        assert!(!output.contains("Try asking:"), "{kind}: {output}");
+        if let Some(before) = before {
+            assert_eq!(fs::read(&history).unwrap(), before);
+        }
+        fs::remove_dir_all(&home).unwrap();
+    }
 }

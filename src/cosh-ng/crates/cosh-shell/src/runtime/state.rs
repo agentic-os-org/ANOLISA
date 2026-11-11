@@ -1,12 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::activity::runtime::{RuntimeActivityRow, ToolInvocationRecord};
 use crate::agent::run::{ActiveAgentRun, AgentRunOrigin, PendingAgentRequest};
 use crate::agent::turn_extension::PendingTurnExtension;
-use crate::diagnostics::health::HealthScanReport;
 use crate::hooks::state::HookRuntimeState;
 use crate::insight::correlation::InsightCorrelationState;
 use crate::insight::model::{InsightBinding, InsightCandidate};
@@ -24,6 +22,7 @@ use crate::runtime::evidence_state::EvidenceState;
 use crate::runtime::provider_cancellation_artifacts::ProviderCancellationArtifactState;
 use crate::runtime::provider_tool_state::ProviderToolState;
 use crate::runtime::shell_handoff_state::ShellHandoffState;
+pub(crate) use crate::runtime::startup::session::{StartupAuthState, StartupHealthState};
 pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
 use crate::runtime::state_prelude::{
     first_program_token, CommandBlock, GovernedEvent, I18n, Language,
@@ -158,6 +157,7 @@ pub(crate) struct InlineState {
     /// consumed into the host_executed_shell result on delivery.
     pub(crate) input_wait_facts: HashMap<String, crate::adapter::HostExecutedInputWait>,
     pub(crate) continuity: ContinuityState,
+    pub(crate) startup_session: crate::runtime::startup::session::StartupSessionState,
     pub(crate) startup_health: StartupHealthState,
     pub(crate) startup_auth: StartupAuthState,
     pub(crate) startup_upgrade: StartupUpgradeState,
@@ -170,125 +170,6 @@ pub(crate) enum PendingInputGhostBinding {
     Health(AgentContextBinding),
     Insight(Box<InsightBinding>),
     Personal(FrozenPromptBinding),
-}
-
-#[derive(Default)]
-pub(crate) struct StartupHealthState {
-    pub(crate) pending: Option<mpsc::Receiver<Option<HealthScanReport>>>,
-    pub(crate) report: Option<HealthScanReport>,
-    pub(crate) rendered: bool,
-}
-
-impl StartupHealthState {
-    pub(crate) fn wait_ready(&mut self, timeout: Duration) {
-        if self.report.is_some() || self.rendered {
-            return;
-        }
-        let Some(receiver) = &self.pending else {
-            return;
-        };
-        match receiver.recv_timeout(timeout) {
-            Ok(report) => {
-                self.report = report;
-                self.pending = None;
-                if self.report.is_none() {
-                    self.rendered = true;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.pending = None;
-                self.rendered = true;
-            }
-        }
-    }
-
-    pub(crate) fn poll_ready(&mut self) {
-        if self.report.is_some() || self.rendered {
-            return;
-        }
-        let Some(receiver) = &self.pending else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(report) => {
-                self.report = report;
-                self.pending = None;
-                if self.report.is_none() {
-                    self.rendered = true;
-                }
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.pending = None;
-                self.rendered = true;
-            }
-        }
-    }
-}
-
-/// Background probe of the effective AI credential state, resolved via
-/// cosh-core at bootstrap so the startup banner can hint `/auth` without
-/// blocking first paint. Fail-quiet: an error, timeout, or missing probe
-/// leaves `resolved` at `None` and nothing is shown.
-///
-/// Lifecycle: the `Default` state (no probe, no verdict) is the safe
-/// state — every consumer treats it as "not unconfigured", so an
-/// `InlineState` built without bootstrap wiring can never trigger the
-/// hint. Bootstrap installs `pending` only for the CoshCore adapter
-/// with AI enabled and the banner on; a successful `/auth` credential
-/// change resets the state to `Default` so no stale verdict outlives
-/// the credentials it described.
-#[derive(Default)]
-pub(crate) struct StartupAuthState {
-    pub(crate) pending: Option<mpsc::Receiver<Option<bool>>>,
-    pub(crate) resolved: Option<bool>,
-}
-
-impl StartupAuthState {
-    pub(crate) fn wait_ready(&mut self, timeout: Duration) {
-        if self.resolved.is_some() {
-            return;
-        }
-        let Some(receiver) = &self.pending else {
-            return;
-        };
-        match receiver.recv_timeout(timeout) {
-            Ok(resolved) => {
-                self.resolved = resolved;
-                self.pending = None;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.pending = None;
-            }
-        }
-    }
-
-    pub(crate) fn poll_ready(&mut self) {
-        if self.resolved.is_some() {
-            return;
-        }
-        let Some(receiver) = &self.pending else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(resolved) => {
-                self.resolved = resolved;
-                self.pending = None;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.pending = None;
-            }
-        }
-    }
-
-    /// True only when the authority explicitly reported "no usable
-    /// credentials"; uncertainty never shows the hint.
-    pub(crate) fn ai_unconfigured(&self) -> bool {
-        self.resolved == Some(false)
-    }
 }
 
 #[derive(Default)]

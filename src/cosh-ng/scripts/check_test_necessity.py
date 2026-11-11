@@ -23,6 +23,11 @@ PROVISIONED_UID_TESTS = (
     'crates/cosh-shell/src/runtime/logging_tests.rs::foreign_uid_expired_log_preserves_content',
     'crates/cosh-shell/src/runtime/logging_tests.rs::foreign_uid_current_log_refuses_append',
 )
+SUBPROCESS_ENTRIES = (
+    'crates/cosh-shell/src/diagnostics/health/runtime/worker/tests.rs::private_worker_child',
+    'crates/cosh-shell/src/diagnostics/health/runtime/job/tests.rs::deadline_job_child',
+    'crates/cosh-shell/src/diagnostics/health/collectors/command/tests.rs::controlling_terminal_child',
+)
 FIELDS = (
     "rule",
     "pattern",
@@ -177,9 +182,17 @@ def main(argv=None) -> int:
     )
     if provisioned_count not in (0, 4):
         failures.append("provisioned foreign-UID regressions must be registered as a complete group of four")
-    if ignored_count - provisioned_count != 3 or heavy_count - provisioned_count != 3:
+    helper_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["pattern"] in SUBPROCESS_ENTRIES
+        and rule.data["disposition"] == "subprocess-entry"
+    )
+    if helper_count != len(SUBPROCESS_ENTRIES):
+        failures.append("supervised subprocess entries must match their exact registry set")
+    if ignored_count - provisioned_count - helper_count != 3 or heavy_count - provisioned_count != 3:
         failures.append(
-            f"ordinary ignored tests ({ignored_count - provisioned_count}) and explicit-heavy registry tests "
+            f"ordinary ignored tests ({ignored_count - provisioned_count - helper_count}) and explicit-heavy registry tests "
             f"({heavy_count - provisioned_count}) must both remain 3"
         )
 

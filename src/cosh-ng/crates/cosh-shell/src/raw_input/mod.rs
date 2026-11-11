@@ -21,7 +21,7 @@ pub(crate) use event_parser::redact_extension_setting_value;
 pub(crate) use generation::UserPtyInputGeneration;
 pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
-pub(crate) use prompt_epoch::PromptEpochExchange;
+pub(crate) use prompt_epoch::{PromptEpochExchange, PromptSnapshot};
 pub(crate) use pty::{
     foreground_process_group_for_fds, process_group_exists, set_pty_winsize,
     signal_foreground_process_group, signal_process_group, signal_process_group_id, write_all_pty,
@@ -198,6 +198,23 @@ pub(crate) enum RawInputEvent {
     SessionDelete(String),
     SessionClearConfirm(String),
     SessionCancel(String),
+}
+
+#[cfg(test)]
+pub(crate) fn test_write_user_bytes_to_pty(
+    master: &mut std::fs::File,
+    generation: &UserPtyInputGeneration,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let (events, _) = std::sync::mpsc::channel();
+    relay::write_user_bytes_to_pty(
+        master,
+        generation,
+        &mut generation::LineSubmitCounter::default(),
+        &events,
+        &MainPromptGate::default(),
+        bytes,
+    )
 }
 
 #[cfg(test)]

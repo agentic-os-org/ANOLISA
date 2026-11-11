@@ -11,6 +11,6 @@ pub(crate) use implementation::{
     signal_process_group_id, spawn_raw_action_relay, spawn_raw_action_relay_with_wake,
     spawn_raw_input_relay, spawn_raw_input_relay_with_wake, update_input_mode,
     update_locked_input_mode, write_all_pty, MainPromptGate, PromptDraftEditor,
-    PromptEpochExchange, PromptGhostRoute, RawInputEvent, RawInputMode, RawInputShellRoute,
-    UserPtyInputGeneration, ZshPathPromptBuffering,
+    PromptEpochExchange, PromptGhostRoute, PromptSnapshot, RawInputEvent, RawInputMode,
+    RawInputShellRoute, UserPtyInputGeneration, ZshPathPromptBuffering,
 };

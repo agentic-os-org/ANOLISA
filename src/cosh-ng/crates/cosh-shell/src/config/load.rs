@@ -1,3 +1,6 @@
+use std::fs::OpenOptions;
+use std::io::{self, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::language::apply_language_value;
@@ -27,6 +30,24 @@ pub(super) fn load_config_file_into(path: &Path, config: &mut CoshConfig) {
         parse_simple_config(&content, config);
         parse_toml_config(&content, config);
     }
+}
+
+pub(super) fn read_config_text(path: &Path) -> io::Result<String> {
+    const LIMIT: u64 = 256 * 1024;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return Err(io::Error::from_raw_os_error(nix::libc::EFBIG));
+    }
+    let mut content = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut content)?;
+    if content.len() as u64 > LIMIT {
+        return Err(io::Error::from_raw_os_error(nix::libc::EFBIG));
+    }
+    Ok(content)
 }
 
 pub(super) fn config_file_path() -> Option<PathBuf> {

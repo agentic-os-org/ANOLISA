@@ -16,10 +16,12 @@ pub(crate) mod evidence_requests;
 #[allow(clippy::field_reassign_with_default)]
 mod evidence_requests_tests;
 pub(crate) mod evidence_state;
+pub(crate) mod health_banner;
 pub(crate) mod hooks;
 pub(crate) mod insight;
 pub(crate) mod invocation;
 pub(crate) mod logging;
+pub(crate) mod login;
 pub(crate) mod mode;
 #[cfg(test)]
 mod mode_tests;
@@ -32,6 +34,7 @@ pub(crate) mod provider_tool_state;
 pub(crate) mod question_terminal;
 pub(crate) mod shell_evidence;
 pub(crate) mod shell_handoff_state;
+pub(crate) mod shell_integration;
 pub(crate) mod startup;
 pub(crate) mod state;
 mod state_prelude;

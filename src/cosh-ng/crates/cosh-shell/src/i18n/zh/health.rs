@@ -9,7 +9,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthBannerEvidenceLabel => "证据",
         MessageId::HealthBannerMoreFindingsLabel => "另有 {count} 个问题",
         MessageId::HealthBannerUnavailableLabel => "不可用",
-        MessageId::HealthBannerFindingsSection => "发现的问题",
+        MessageId::HealthBannerFindingsSection => "重点关注",
         MessageId::HealthBannerSuggestedPromptSection => "建议下一步",
         MessageId::HealthBannerSuggestedPromptIntro => "以下提示词可直接输入给 Agent：",
         MessageId::HealthSeverityOk => "正常",
@@ -25,6 +25,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthMetricCpuPerCoreUnit => "倍",
         MessageId::HealthMetricCpuUsed => "CPU 已用",
         MessageId::HealthMetricHost => "主机",
+        MessageId::HealthMetricUsed => "已用",
         MessageId::HealthMetricMemory => "内存",
         MessageId::HealthMetricMemoryAvailable => "内存可用",
         MessageId::HealthMetricMemoryUsed => "内存已用",
@@ -55,38 +56,38 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryCheckSwapPressure => "检查换页压力",
         MessageId::HealthTryCheckRecentOom => "分析最近一次 OOM 原因",
         MessageId::HealthTryInspectDiskUsage => "检查磁盘占用",
-        MessageId::HealthTryInspectServiceStatus => "检查服务状态",
+        MessageId::HealthTryInspectServiceStatus => "检查 {service} 状态",
         MessageId::HealthTryInspectHighLoad => "分析高负载",
         MessageId::HealthTryInspectProcessMemory => "检查 {process} 内存",
         MessageId::HealthTryReviewUnavailableChecks => "查看缺失检查",
         MessageId::HealthPromptAnalyzeMemoryPressure => {
-            "分析内存压力，找出可能影响当前 shell 的主要占用来源。"
+            "请核实当前内存压力、主要占用及适用的 cgroup 限制，给出处理建议。"
         }
-        MessageId::HealthPromptCheckSwapPressure => "检查是否存在换页压力，并找出主要相关进程。",
+        MessageId::HealthPromptCheckSwapPressure => "请核实是否存在换页压力，检查内存余量及相关进程。",
         MessageId::HealthPromptCheckRecentOom => {
-            "帮我分析最近一次 OOM 的原因，重点看被杀进程、cgroup 和当时内存水位。"
+            "请核对近期 OOM 的发生时间、作用域和受影响进程，再排查相关内存限制。"
         }
-        MessageId::HealthPromptInspectDiskUsage => "检查高风险挂载点占用，并给出安全清理目标。",
+        MessageId::HealthPromptInspectDiskUsage => "请核实当前磁盘占用与主要来源，给出处理建议。",
         MessageId::HealthPromptInspectServiceStatus => {
-            "检查配置服务状态，并分析最近可能的失败原因。"
+            "请先核实服务 {service} 的当前状态，再排查可能原因并给出处理建议。"
         }
-        MessageId::HealthPromptInspectHighLoad => "分析当前高负载，判断主要来自 CPU 还是 IO 压力。",
+        MessageId::HealthPromptInspectHighLoad => "请核实当前负载，区分 CPU 繁忙与 I/O 等待等可能来源。",
         MessageId::HealthPromptInspectProcessMemory => {
-            "帮我分析最近一次 OOM 为什么杀掉 {process}，重点看 cgroup 和内存上限。"
+            "请核对近期 OOM 中 {process} 的受影响情况、事件时间及相关内存限制。"
         }
         MessageId::HealthPromptReviewUnavailableChecks => {
             "说明启动健康检查为什么不可用，以及如何恢复这些检查。"
         }
         MessageId::HealthInsightMemoryAvailableLow => {
-            "可用内存偏低；命令可能变慢，新进程也可能启动失败"
+            "可用内存偏低"
         }
-        MessageId::HealthInsightDiskHigh => "最高风险挂载点磁盘水位偏高；写入或构建可能很快失败",
+        MessageId::HealthInsightDiskHigh => "挂载点磁盘使用率偏高",
         MessageId::HealthInsightRecentOom => {
-            "最近一次 OOM 已发生；应回溯被杀进程、cgroup 和当时内存水位"
+            "近期 OOM 事件"
         }
-        MessageId::HealthInsightCpuLoadHigh => "最近多个窗口负载都偏高；命令响应可能变慢",
+        MessageId::HealthInsightCpuLoadHigh => "最近多个窗口负载偏高",
         MessageId::HealthInsightSwapPressure => {
-            "Swap 使用偏高并伴随内存压力；频繁换页可能拖慢命令响应"
+            "Swap 使用偏高"
         }
         MessageId::HealthInsightServiceState => {
             "服务单元 {service} 当前 {observed}，预期 {expected}"

@@ -8,6 +8,13 @@ Assisted 模式，保留隐式自然语言路由、Skills、审批卡片和可�
 在启动时选择 Native 集成。自动化或其他 Agent 集成仍可使用结构化 JSON 和
 JSONL 接口。
 
+镜像可以保留默认 Bash 并预装 Cosh。运行 `cosh` 进入 AI Shell，或运行
+`cosh --ask '你的问题'` 携带初始问题。可选的 Bash 启动接入由镜像的系统包负责，
+仅安装 Cosh RPM 不会启用。详见
+[Bash 引导与登录 Shell 控制](../../docs/user-guide/zh/cosh-ng/shell/bash-guidance.md)。
+
+`--ask` 是本次初问的显式 AI 请求，即使 `COSH_SHELL_AI=off` 也可使用；认证和工具授权仍生效，后续输入保持原关闭状态。
+
 默认情况下，登录 shell（例如 `cosh --login`）会在 Bash 4+ 上以真实 login 身份
 启动 Bash；设 `shell.login_identity = false` 可保留旧的非 login（`--rcfile`）启动。
 有界的真实 login 身份能力探测失败、使用 Bash 3.2（如 macOS 系统 bash），或父会话导出了 POSIX

@@ -24,6 +24,15 @@ pub(crate) fn poll_active_agent_run<W: Write>(
     poll_active_agent_run_with_policy(state, output, adapter, false, true, true, false)
 }
 
+// The start caller must regain control before this owner retires or advances the queue.
+pub(crate) fn poll_started_agent_run<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    adapter: &AdapterInstance,
+) -> std::io::Result<()> {
+    poll_active_agent_run_with_policy(state, output, adapter, false, true, false, false)
+}
+
 pub(crate) fn poll_active_agent_run_deferred<W: Write>(
     state: &mut InlineState,
     output: &mut W,
@@ -159,7 +168,8 @@ fn poll_active_agent_run_with_policy<W: Write>(
                 if state.auth.ecs_trial.owns_run(&active_run.request.id) {
                     crate::auth::trial::before_terminal_output(&mut state.auth.ecs_trial, output)?;
                 }
-                should_finish = true;
+                active_run.completed = true;
+                should_finish = finish_completed;
                 break;
             }
             Err(err) => AgentEvent::AgentFailed {

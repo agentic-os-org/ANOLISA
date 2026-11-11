@@ -30,6 +30,15 @@ fn render_raw_inline_event_view<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    if inline_state.startup_session.compact && !inline_state.rendered_startup_banner {
+        if let Some(prompt) = view.prompt_snapshot() {
+            inline_state.startup_session.prompt_snapshot = Some(prompt.clone());
+        }
+    }
+    inline_state
+        .startup_session
+        .login_invitation
+        .observe_prompt(view.prompt_snapshot());
     let snapshot = ShellEventSnapshot::with_base(view.base(), view.events());
     if let Some(audit) = inline_state.audit.as_mut() {
         let batch = snapshot.batch_since(inline_state.control.event_cursor());
@@ -328,6 +337,7 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
                 &state.approvals.requests,
             ),
         })
+        .or_else(|| crate::runtime::startup::session::initial_question_capture(state))
 }
 
 pub(crate) fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool {

@@ -30,6 +30,89 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::CaptureInputRejectedBody => {
             "卡片操作处理期间键入的内容无法安全投递，请重新输入。"
         }
+        MessageId::GuideUsage => concat!(
+            "Cosh 使用指南\n",
+            "\n",
+            "进入 AI Shell\n",
+            "  cosh\n",
+            "    照常执行命令，也可直接提问。\n",
+            "  cosh --ask '你的问题'\n",
+            "    带着首问进入交互会话，之后可执行命令或继续提问。\n",
+            "\n",
+            "显示与关闭（独立开关）\n",
+            "  cosh guide off\n",
+            "    关闭 AI 使用提示，不影响手动使用 Cosh。\n",
+            "    开启：cosh guide on；查看：cosh guide status\n",
+            "  cosh health banner off\n",
+            "    关闭登录资源摘要，不影响 AI 使用提示。\n",
+            "    开启：cosh health banner on；查看：cosh health banner status\n",
+            "\n",
+            "默认登录 Shell（仅支持登录切换的系统可用）\n",
+            "  cosh login set\n",
+            "    新登录进入 Cosh；已有会话保持不变。\n",
+            "  cosh login restore\n",
+            "    恢复记录的原 Bash，下次登录生效。\n",
+            "  cosh login status\n",
+            "    查看登录 Shell。\n",
+            "  cosh login set --user alice\n",
+            "    管理其他用户（仅管理员）。\n",
+            "    restore 和 status 同样支持 --user alice。\n",
+        ),
+        MessageId::GuidePreferenceSaved => "AI 使用提示：{state}（已保存）。",
+        MessageId::GuidePreferenceDefault => "AI 使用提示：开启（默认设置）。",
+        MessageId::GuideSaved => "AI 使用提示已保存为{state}。",
+        MessageId::GuideDisabledSaved => "AI 使用提示已关闭并保存。",
+        MessageId::GuideStateOn => "开启",
+        MessageId::GuideStateOff => "关闭",
+        MessageId::GuideAvailableConditional => "自动引导仅在支持的 Shell 中显示。",
+        MessageId::GuideUnconfirmed => "当前会话的自动引导状态尚未确认。",
+        MessageId::GuideRuntimeUnconfirmed => "当前引导状态尚未确认：{error}。",
+        MessageId::GuideClosed => "当前自动引导已关闭。",
+        MessageId::GuideIndependentHint => {
+            "AI 使用提示包括首屏建议、失败求助和登录推广；仍可手动运行 cosh。关闭登录资源摘要：cosh health banner off。"
+        }
+        MessageId::GuideReadFailed => "无法读取引导设置：{error}。请检查后重试。",
+        MessageId::GuideSaveFailed => "引导设置持久保存失败：{error}。请重试原命令。",
+        MessageId::GuideRuntimeSaveFailed => {
+            "当前运行态已设为{state}，但持久保存失败：{error}。请重试原命令。"
+        }
+        MessageId::GuideRuntimePublishFailed => {
+            "运行态更新失败，持久设置未保存：{error}。请重试原命令。"
+        }
+        MessageId::GuideRuntimePublishPartial => {
+            "当前关闭标记已生效，但运行态发布失败，持久设置未保存：{error}。请重试原命令。"
+        }
+        MessageId::GuideRuntimeUnavailable => "没有已验证的本地运行目录",
+        MessageId::GuideErrorCorrupt => "已保存的状态已损坏",
+        MessageId::GuideErrorVersion => "不支持的状态版本",
+        MessageId::GuideErrorBusy => "引导状态正被其他进程使用",
+        MessageId::GuideErrorUnsafe => "状态路径的私有性或属主不符合要求",
+        MessageId::GuideErrorTooLarge => "引导状态超过大小或数量限制",
+        MessageId::GuideErrorIo => "存储读写失败（{error}）",
+        MessageId::LoginUser => "用户：",
+        MessageId::LoginCurrentShell => "当前登录 Shell：",
+        MessageId::LoginOriginalBash => "原 Bash：",
+        MessageId::LoginTransaction => "事务状态：",
+        MessageId::LoginManaged => "受管状态：",
+        MessageId::LoginNoManagedRecord => "无受管记录",
+        MessageId::LoginManagedYes => "是",
+        MessageId::LoginManagedNo => "否",
+        MessageId::LoginTransactionUnmanaged => "未受管",
+        MessageId::LoginTransactionPrepared => "已准备",
+        MessageId::LoginTransactionApplied => "已应用",
+        MessageId::LoginTransactionRestored => "已恢复",
+        MessageId::LoginTransactionConflict => "冲突",
+        MessageId::LoginNewLoginsOnly => "仅影响新登录，已有会话保持不变。",
+        MessageId::LoginChangePreview => "用户：{user}（UID {uid}）：{before} -> {after}。仅影响新登录。",
+        MessageId::LoginConfirm => "是否继续？[y/N] ",
+        MessageId::LoginShellChanged => "登录 Shell：{shell}。仅影响新登录。",
+        MessageId::LoginChangeComplete => "登录 Shell 操作已完成。仅影响新登录。",
+        MessageId::LoginAuthorizationRequired => "授权不可用或未成功，请联系管理员执行：{command}",
+        MessageId::LoginCommandFailed => "cosh login：操作未完成：{error}",
+        MessageId::LoginUsage => "用法：cosh login status|set|restore [--user USER] [--yes]",
+        MessageId::LoginIdentityMismatch => "提权账号身份与已确认的 UID 不一致。",
+        MessageId::LoginStateConflict => "账号 Shell 或登录记录存在冲突，请联系管理员核查。",
+        MessageId::LoginRecoveryMissing => "没有可信的登录恢复记录，未修改账号。",
         _ => return None,
     })
 }

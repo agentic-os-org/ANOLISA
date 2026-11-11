@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ "$#" -ne 0 ]; then
+  echo 'usage: cosh-switch' >&2
+  exit 2
+fi
+exec /usr/bin/sudo -- /usr/libexec/cosh/login-preflight swap-to-copilot

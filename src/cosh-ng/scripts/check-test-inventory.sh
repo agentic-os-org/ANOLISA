@@ -69,8 +69,18 @@ uid_ignored_count="$(
 if [[ "$uid_ignored_count" -ne 4 ]]; then
   fail "expected exactly four provisioned foreign-UID regressions, found $uid_ignored_count"
 fi
-ordinary_ignored_count=$((ignored_count - uid_ignored_count))
-echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases"
+helper_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "(same-package worker entry used by the unit launcher|isolated deadline helper subprocess|helper subprocess requiring a controlling terminal)"\]\n([ \t]*#\[[^\n]*\][^\n]*\n)?[ \t]*fn (private_worker_child|deadline_job_child|controlling_terminal_child)\(' \
+    crates/cosh-shell/src/diagnostics/health/runtime/worker/tests.rs \
+    crates/cosh-shell/src/diagnostics/health/runtime/job/tests.rs \
+    crates/cosh-shell/src/diagnostics/health/collectors/command/tests.rs |
+    awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$helper_ignored_count" -ne 3 ]]; then
+  fail "expected exactly three supervised private subprocess entries, found $helper_ignored_count"
+fi
+ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count))
+echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries"
 if [[ "$ordinary_ignored_count" -gt 3 ]]; then
   fail "ordinary ignored test inventory increased above 3 to $ordinary_ignored_count"
 fi

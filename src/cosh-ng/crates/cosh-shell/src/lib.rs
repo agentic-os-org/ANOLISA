@@ -1,3 +1,9 @@
+// Shared renderer tests run once in the library; private runtime helpers stay in both targets.
+#[cfg(test)]
+macro_rules! library_tests {
+    ($($item:item)*) => {$($item)*};
+}
+
 #[path = "adapter/public.rs"]
 pub mod adapter;
 #[path = "agent/public.rs"]
@@ -39,6 +45,8 @@ pub mod parser;
 #[cfg(test)]
 #[path = "input/path_prompt_tests.rs"]
 mod path_prompt_tests;
+#[allow(dead_code, unused_imports)]
+mod process;
 #[allow(dead_code)]
 #[path = "question/public.rs"]
 mod question;

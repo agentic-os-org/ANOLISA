@@ -47,11 +47,28 @@ impl ShellIntegration {
 pub(crate) struct ShellEventView<'a> {
     base: usize,
     events: &'a [ShellEvent],
+    prompt_snapshot: Option<&'a crate::raw_input::PromptSnapshot>,
 }
 
 impl<'a> ShellEventView<'a> {
     pub(crate) fn new(base: usize, events: &'a [ShellEvent]) -> Self {
-        Self { base, events }
+        Self {
+            base,
+            events,
+            prompt_snapshot: None,
+        }
+    }
+
+    pub(crate) fn with_prompt_snapshot(
+        mut self,
+        prompt: Option<&'a crate::raw_input::PromptSnapshot>,
+    ) -> Self {
+        self.prompt_snapshot = prompt;
+        self
+    }
+
+    pub(crate) fn prompt_snapshot(self) -> Option<&'a crate::raw_input::PromptSnapshot> {
+        self.prompt_snapshot
     }
 
     pub(crate) fn base(self) -> usize {
@@ -203,6 +220,7 @@ pub struct ShellHostConfig {
     /// the Rust intercept path. Zsh never enables this Bash-only route.
     pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
+    pub(crate) initial_output_newline: bool,
     pub raw_action_watchdog: Duration,
     /// #2161: shared input-wait episode clock. The relay's interactive
     /// sentinel marks/clears it; the runtime controller reads it to drive
@@ -244,6 +262,7 @@ impl ShellHostConfig {
             bash_login_env_posix: true,
             slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
+            initial_output_newline: false,
             raw_action_watchdog: Duration::from_secs(120),
             input_wait_status: InputWaitStatus::default(),
             hint_language: crate::config::Language::default(),

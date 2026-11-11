@@ -1,25 +1,28 @@
+mod fixtures;
+pub(super) mod job;
+mod plan;
+pub(super) mod process;
+mod protocol;
+mod scan;
+mod worker;
+use fixtures::{fixture_report, fixture_report_for_context};
+
+pub(crate) use scan::HealthScanHandle;
+pub(crate) use worker::{
+    run_private_health_worker, PRIVATE_WORKER_FLAG as PRIVATE_HEALTH_WORKER_FLAG,
+};
+
 use std::env;
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::HealthConfig;
 
 use super::builder::HealthReportBuilder;
-use super::collectors::{
-    collect_configured_services, collect_cpu, collect_disk, collect_host, collect_kernel_signals,
-    collect_memory,
-};
 use super::model::{
     HealthCollector, HealthFactCategory, HealthFactSource, HealthFactValue, HealthScanReport,
     HealthSeverity, HealthUnavailableReason,
 };
-use super::recommendation::{preview_try_recommendations, record_visible_try_recommendations};
 use super::rules::apply_judgement_rules;
-use super::suppression::{
-    current_time_ms, health_machine_id, health_suppression_store_path, host_id_for_report,
-    HealthSuppressionStore,
-};
 
 const DEFAULT_SCAN_BUDGET: Duration = Duration::from_secs(3);
 const HEALTH_SCAN_ENV: &str = "COSH_SHELL_HEALTH_SCAN";
@@ -57,8 +60,160 @@ pub(crate) fn health_scan_mode_from_env() -> HealthScanMode {
     }
 }
 
-pub(crate) fn run_health_scan(config: &HealthConfig) -> Option<HealthScanReport> {
-    run_health_scan_with_options(config, HealthScanOptions::from_env())
+pub(crate) fn start_startup_health_scan(config: HealthConfig) -> Option<HealthScanHandle> {
+    let mut options = HealthScanOptions::from_env();
+    options.total_budget = Duration::from_millis(500);
+    start_scan_with_context(&config, options, plan::ScanContext::Startup, None)
+}
+
+pub(crate) fn validate_health_check_ids(disabled: &[String]) -> Result<(), String> {
+    for id in disabled {
+        if super::plan::definition(id).is_none() {
+            return Err(format!("unknown health check: {id}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn health_check_ids() -> Vec<&'static str> {
+    super::plan::CHECKS.iter().map(|check| check.id).collect()
+}
+
+pub(crate) fn bash_budget_remaining(
+    deadline_boottime_us: u64,
+    maximum: Duration,
+) -> Option<Duration> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (deadline_boottime_us, maximum);
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut now: nix::libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut now) } < 0
+            || now.tv_nsec < 0
+            || now.tv_nsec >= 1_000_000_000
+        {
+            return None;
+        }
+        let now_us = u64::try_from(now.tv_sec)
+            .ok()?
+            .checked_mul(1_000_000)?
+            .checked_add((now.tv_nsec as u64).checked_add(999)? / 1000)?;
+        let remaining = Duration::from_micros(deadline_boottime_us.checked_sub(now_us)?);
+        (!remaining.is_zero() && remaining <= maximum).then_some(remaining)
+    }
+}
+
+pub(crate) fn start_login_health_scan_config_entry_until(
+    absolute: Instant,
+    disabled: &[String],
+) -> Result<Option<HealthScanHandle>, String> {
+    validate_health_check_ids(disabled)?;
+    let mut options = HealthScanOptions::from_env();
+    options.total_budget = absolute
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(350));
+    if options.mode == HealthScanMode::Disabled || options.total_budget.is_zero() {
+        return Ok(None);
+    }
+    let deadline = job::JobDeadline::at_instant(absolute, options.total_budget)
+        .map_err(|error| error.to_string())?;
+    if deadline.remaining().unwrap_or_default().is_zero() {
+        return Ok(None);
+    }
+    Ok(Some(HealthScanHandle::start(plan::WorkerRequest {
+        scan_id: super::builder::health_scan_id(options.started_at_ms),
+        started_at_ms: options.started_at_ms,
+        now_epoch_seconds: options.now_epoch_seconds,
+        deadline,
+        context: plan::ScanContext::LoginBanner,
+        config: HealthConfig::default(),
+        environment: None,
+        disabled: disabled.to_vec(),
+        config_source: plan::ConfigSource::LoginConfigProjection,
+        fixture_name: match options.mode {
+            HealthScanMode::Fixture(name) => Some(name),
+            _ => None,
+        },
+    })))
+}
+
+fn start_scan_with_context(
+    config: &HealthConfig,
+    options: HealthScanOptions,
+    context: plan::ScanContext,
+    environment: Option<(&crate::config::CoshConfig, &std::path::Path)>,
+) -> Option<HealthScanHandle> {
+    if (!config.enabled && context != plan::ScanContext::OnDemand)
+        || options.mode == HealthScanMode::Disabled
+    {
+        return None;
+    }
+    if let HealthScanMode::Fixture(name) = &options.mode {
+        return Some(HealthScanHandle::ready(fixture_report_for_context(
+            name,
+            config,
+            &options,
+            context,
+            &[],
+        )));
+    }
+    let deadline =
+        match job::JobDeadline::after(options.total_budget.min(worker::MAX_WORKER_BUDGET)) {
+            Ok(deadline) => deadline,
+            Err(_) => return None,
+        };
+    Some(HealthScanHandle::start(plan::WorkerRequest {
+        scan_id: super::builder::health_scan_id(options.started_at_ms),
+        started_at_ms: options.started_at_ms,
+        now_epoch_seconds: options.now_epoch_seconds,
+        deadline,
+        context,
+        config: config.clone(),
+        disabled: Vec::new(),
+        config_source: crate::diagnostics::health::runtime::plan::ConfigSource::CallerSnapshot,
+        fixture_name: None,
+        environment: environment
+            .map(|(config, cwd)| plan::EnvironmentSnapshot::capture(config, cwd)),
+    }))
+}
+
+pub(crate) fn run_supervised_doctor_report(
+    config: &crate::config::CoshConfig,
+    cwd: &std::path::Path,
+) -> HealthScanReport {
+    let started = Instant::now();
+    let mut options = HealthScanOptions::from_env();
+    let started_at_ms = options.started_at_ms;
+    if let HealthScanMode::Fixture(name) = &options.mode {
+        return fixture_report(name, &config.health, &options);
+    }
+    let mut health = config.health.clone();
+    if options.mode == HealthScanMode::Disabled {
+        health.enabled = false;
+    }
+    options.mode = HealthScanMode::Live;
+    let budget = options.total_budget;
+    if let Some(mut handle) = start_scan_with_context(
+        &health,
+        options,
+        plan::ScanContext::OnDemand,
+        Some((config, cwd)),
+    ) {
+        if let Some(report) = handle.finish_within(budget) {
+            return report;
+        }
+    }
+    let mut builder = HealthReportBuilder::for_started_at(started_at_ms);
+    builder.add_unavailable(
+        HealthCollector::Config,
+        HealthUnavailableReason::ParseError,
+        HealthSeverity::Unavailable,
+        started.elapsed().as_millis(),
+    );
+    builder.finish(started_at_ms.saturating_add(started.elapsed().as_millis()))
 }
 
 pub(crate) fn startup_health_scan_enabled_for_env(config: &HealthConfig) -> bool {
@@ -72,341 +227,14 @@ pub(crate) fn startup_health_scan_enabled_for_env(config: &HealthConfig) -> bool
     }
 }
 
-pub(crate) fn spawn_startup_health_scan(
-    config: HealthConfig,
-) -> mpsc::Receiver<Option<HealthScanReport>> {
-    let (sender, receiver) = mpsc::channel();
-    if matches!(health_scan_mode_from_env(), HealthScanMode::Fixture(_)) {
-        let report = startup_health_report(&config);
-        let _ = sender.send(report);
-        return receiver;
-    }
-    thread::spawn(move || {
-        let report = startup_health_report(&config);
-        let _ = sender.send(report);
-    });
-    receiver
-}
-
-fn startup_health_report(config: &HealthConfig) -> Option<HealthScanReport> {
-    run_health_scan(config).map(|mut report| {
-        let mut suppression = HealthSuppressionStore::load_default();
-        let machine_id = health_machine_id();
-        let host_id = host_id_for_report(&report, machine_id.as_deref());
-        preview_try_recommendations(
-            &mut report,
-            config,
-            &mut suppression,
-            &host_id,
-            current_time_ms(),
-        );
-        report
-    })
-}
-
-pub(crate) fn record_startup_health_recommendations(report: &HealthScanReport) {
-    if report.try_items.is_empty() {
-        return;
-    }
-    let mut suppression = HealthSuppressionStore::load_default();
-    let machine_id = health_machine_id();
-    let host_id = host_id_for_report(report, machine_id.as_deref());
-    record_visible_try_recommendations(report, &mut suppression, &host_id, current_time_ms());
-    if let Some(path) = health_suppression_store_path() {
-        let _ = suppression.write_to_path(&path);
-    }
-}
-
-pub(crate) fn run_health_scan_with_options(
+#[cfg(test)]
+fn run_health_scan_with_options(
     config: &HealthConfig,
     options: HealthScanOptions,
 ) -> Option<HealthScanReport> {
-    if !config.enabled || options.mode == HealthScanMode::Disabled {
-        return None;
-    }
-    let report = match &options.mode {
-        HealthScanMode::Disabled => return None,
-        HealthScanMode::Fixture(name) => fixture_report(name, config, &options),
-        HealthScanMode::Live => live_report(config, &options),
-    };
-    Some(report)
-}
-
-fn live_report(config: &HealthConfig, options: &HealthScanOptions) -> HealthScanReport {
-    let scan_started = Instant::now();
-    let mut builder = HealthReportBuilder::for_started_at(options.started_at_ms);
-    builder.set_role(config.role.clone());
-    let (sender, receiver) = mpsc::channel();
-    let deadline = Instant::now() + options.total_budget;
-
-    spawn_collector("host", sender.clone(), options.started_at_ms, collect_host);
-    let mut expected = vec![
-        ("host", HealthCollector::Host, HealthSeverity::Unavailable),
-        ("cpu", HealthCollector::Cpu, HealthSeverity::Degraded),
-        ("memory", HealthCollector::Memory, HealthSeverity::Degraded),
-        ("disk", HealthCollector::Disk, HealthSeverity::Degraded),
-        (
-            "kernel_signal",
-            HealthCollector::KernelSignal,
-            HealthSeverity::Unavailable,
-        ),
-    ];
-    spawn_collector("cpu", sender.clone(), options.started_at_ms, collect_cpu);
-    spawn_collector(
-        "memory",
-        sender.clone(),
-        options.started_at_ms,
-        collect_memory,
-    );
-
-    let disk_config = config.clone();
-    spawn_collector(
-        "disk",
-        sender.clone(),
-        options.started_at_ms,
-        move |builder| collect_disk(builder, &disk_config),
-    );
-
-    let now_epoch_seconds = options.now_epoch_seconds;
-    spawn_collector(
-        "kernel_signal",
-        sender.clone(),
-        options.started_at_ms,
-        move |builder| collect_kernel_signals(builder, now_epoch_seconds),
-    );
-
-    if !config.services.is_empty() {
-        expected.push((
-            "configured_service",
-            HealthCollector::ConfiguredService,
-            HealthSeverity::Degraded,
-        ));
-        let service_config = config.clone();
-        spawn_collector(
-            "configured_service",
-            sender.clone(),
-            options.started_at_ms,
-            move |builder| collect_configured_services(builder, &service_config),
-        );
-    }
-    drop(sender);
-
-    for _ in 0..expected.len() {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
-            Ok(report) => {
-                builder.merge_report(report);
-            }
-            Err(_) => break,
-        }
-    }
-    mark_missed_collectors_as_timeout(&mut builder, &expected, options.total_budget.as_millis());
-    let elapsed_ms = scan_started
-        .elapsed()
-        .as_millis()
-        .min(options.total_budget.as_millis());
-    let mut report = builder.finish(options.started_at_ms + elapsed_ms);
-    apply_judgement_rules(&mut report, config);
-    report
-}
-
-fn spawn_collector<F>(
-    _name: &'static str,
-    sender: mpsc::Sender<HealthScanReport>,
-    started_at_ms: u128,
-    run: F,
-) where
-    F: FnOnce(&mut HealthReportBuilder) + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut builder = HealthReportBuilder::for_started_at(started_at_ms);
-        run(&mut builder);
-        let report = builder.finish(started_at_ms);
-        let _ = sender.send(report);
-    });
-}
-
-fn mark_missed_collectors_as_timeout(
-    builder: &mut HealthReportBuilder,
-    expected: &[(&'static str, HealthCollector, HealthSeverity)],
-    elapsed_ms: u128,
-) {
-    for (check_name, collector, severity) in expected {
-        if builder_has_collector_result(builder.report(), check_name, *collector) {
-            continue;
-        }
-        builder.add_unavailable(
-            *collector,
-            HealthUnavailableReason::Timeout,
-            *severity,
-            elapsed_ms,
-        );
-    }
-}
-
-fn builder_has_collector_result(
-    report: &HealthScanReport,
-    check_name: &str,
-    collector: HealthCollector,
-) -> bool {
-    report.checks_done.iter().any(|check| check == check_name)
-        || report
-            .unavailable
-            .iter()
-            .any(|item| item.collector == collector)
-}
-
-fn fixture_report(
-    name: &str,
-    config: &HealthConfig,
-    options: &HealthScanOptions,
-) -> HealthScanReport {
-    let source = fixture_source(name).unwrap_or_else(|| fixture_source("linux-healthy").unwrap());
-    let mut builder = HealthReportBuilder::for_started_at(options.started_at_ms);
-    builder.set_role(config.role.clone());
-    load_fixture_source(source, &mut builder);
-    let mut report = builder.finish(options.started_at_ms + 1);
-    apply_judgement_rules(&mut report, config);
-    report
-}
-
-fn fixture_source(name: &str) -> Option<&'static str> {
-    match name {
-        "linux-healthy" | "healthy" => Some(include_str!("fixtures/linux-healthy.health")),
-        "linux-warning" | "warning" => Some(include_str!("fixtures/linux-warning.health")),
-        "linux-critical" | "critical" => Some(include_str!("fixtures/linux-critical.health")),
-        "linux-degraded" | "degraded" => Some(include_str!("fixtures/linux-degraded.health")),
-        "linux-partial" | "partial" => Some(include_str!("fixtures/linux-partial.health")),
-        _ => None,
-    }
-}
-
-fn load_fixture_source(source: &str, builder: &mut HealthReportBuilder) {
-    for line in source.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(host) = line.strip_prefix("host=") {
-            builder.set_host(host);
-            continue;
-        }
-        if let Some(score) = line.strip_prefix("score=") {
-            builder.set_health_score(score.parse::<u8>().ok());
-            continue;
-        }
-        if let Some(check) = line.strip_prefix("check=") {
-            builder.add_check_done(check);
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("fact ") {
-            load_fixture_fact(rest, builder);
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("unavailable ") {
-            load_fixture_unavailable(rest, builder);
-        }
-    }
-}
-
-fn load_fixture_fact(rest: &str, builder: &mut HealthReportBuilder) {
-    let mut parts = rest.split_whitespace();
-    let Some(category) = parts.next().and_then(parse_fixture_category) else {
-        return;
-    };
-    let Some(key) = parts.next() else {
-        return;
-    };
-    let Some(kind) = parts.next() else {
-        return;
-    };
-    let Some(value) = parts
-        .next()
-        .and_then(|value| parse_fixture_value(kind, value))
-    else {
-        return;
-    };
-    let unit = parts
-        .next()
-        .filter(|unit| *unit != "-")
-        .map(ToString::to_string);
-    builder.add_fact(category, key, value, unit, HealthFactSource::Fixture, 0);
-}
-
-fn load_fixture_unavailable(rest: &str, builder: &mut HealthReportBuilder) {
-    let mut parts = rest.split_whitespace();
-    let Some(collector) = parts.next().and_then(parse_fixture_collector) else {
-        return;
-    };
-    let Some(reason) = parts.next().and_then(parse_fixture_unavailable_reason) else {
-        return;
-    };
-    let Some(severity) = parts.next().and_then(HealthSeverity::parse) else {
-        return;
-    };
-    let elapsed_ms = parts
-        .next()
-        .and_then(|value| value.parse::<u128>().ok())
-        .unwrap_or_default();
-    builder.add_unavailable(collector, reason, severity, elapsed_ms);
-}
-
-fn parse_fixture_category(value: &str) -> Option<HealthFactCategory> {
-    match value {
-        "host" => Some(HealthFactCategory::Host),
-        "cpu" => Some(HealthFactCategory::Cpu),
-        "memory" => Some(HealthFactCategory::Memory),
-        "disk" => Some(HealthFactCategory::Disk),
-        "kernel" => Some(HealthFactCategory::Kernel),
-        "service" => Some(HealthFactCategory::Service),
-        "provider" => Some(HealthFactCategory::Provider),
-        "config" => Some(HealthFactCategory::Config),
-        "hooks" => Some(HealthFactCategory::Hooks),
-        "pty" => Some(HealthFactCategory::Pty),
-        "permissions" => Some(HealthFactCategory::Permissions),
-        _ => None,
-    }
-}
-
-fn parse_fixture_value(kind: &str, value: &str) -> Option<HealthFactValue> {
-    match kind {
-        "str" => Some(HealthFactValue::String(value.to_string())),
-        "i64" => value.parse::<i64>().ok().map(HealthFactValue::Integer),
-        "u64" => value.parse::<u64>().ok().map(HealthFactValue::Unsigned),
-        "f64" => value.parse::<f64>().ok().map(HealthFactValue::Float),
-        "bool" => value.parse::<bool>().ok().map(HealthFactValue::Bool),
-        _ => None,
-    }
-}
-
-fn parse_fixture_collector(value: &str) -> Option<HealthCollector> {
-    match value {
-        "host" => Some(HealthCollector::Host),
-        "cpu" => Some(HealthCollector::Cpu),
-        "memory" => Some(HealthCollector::Memory),
-        "disk" => Some(HealthCollector::Disk),
-        "kernel_signal" => Some(HealthCollector::KernelSignal),
-        "configured_service" => Some(HealthCollector::ConfiguredService),
-        "provider" => Some(HealthCollector::Provider),
-        "config" => Some(HealthCollector::Config),
-        "hooks" => Some(HealthCollector::Hooks),
-        "pty" => Some(HealthCollector::Pty),
-        "permissions" => Some(HealthCollector::Permissions),
-        _ => None,
-    }
-}
-
-fn parse_fixture_unavailable_reason(value: &str) -> Option<HealthUnavailableReason> {
-    match value {
-        "unsupported" => Some(HealthUnavailableReason::Unsupported),
-        "permission_denied" => Some(HealthUnavailableReason::PermissionDenied),
-        "command_missing" => Some(HealthUnavailableReason::CommandMissing),
-        "timeout" => Some(HealthUnavailableReason::Timeout),
-        "parse_error" => Some(HealthUnavailableReason::ParseError),
-        _ => None,
-    }
+    let budget = options.total_budget;
+    start_scan_with_context(config, options, plan::ScanContext::Resources, None)?
+        .finish_within(budget)
 }
 
 fn now_millis() -> u128 {
@@ -436,6 +264,111 @@ fn health_scan_mode_from_value(value: Option<&str>) -> HealthScanMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabling_memory_keeps_only_swap_owned_projection() {
+        let mut config = HealthConfig::default();
+        config.checks.insert("resource.memory".into(), false);
+        let report = run_health_scan_with_options(
+            &config,
+            HealthScanOptions {
+                started_at_ms: 1,
+                now_epoch_seconds: 100,
+                total_budget: Duration::from_secs(1),
+                mode: HealthScanMode::Fixture("linux-critical".into()),
+            },
+        )
+        .unwrap();
+        assert!(!report
+            .facts
+            .iter()
+            .any(|fact| fact.key == "memory.available_mib"));
+        assert!(report
+            .facts
+            .iter()
+            .any(|fact| fact.key == "memory.swap_used_ratio"));
+        assert!(!report
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.id.as_str(), "J05" | "J06")));
+        assert!(!report.checks_done.iter().any(|id| id == "memory"));
+        assert!(report.checks_done.iter().any(|id| id == "swap"));
+        for finding in &report.findings {
+            assert!(finding
+                .evidence_fact_ids
+                .iter()
+                .all(|id| report.facts.iter().any(|fact| fact.id == *id)));
+        }
+    }
+
+    #[test]
+    fn login_worker_respects_user_config_before_collecting() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join(".copilot-shell")).unwrap();
+        std::fs::write(
+            directory.path().join(".copilot-shell/config.toml"),
+            "[health]\nenabled=false\n[ui]\nlanguage='en-US'\n",
+        )
+        .unwrap();
+        let previous = std::env::var_os("HOME");
+        let previous_mode = std::env::var_os(HEALTH_SCAN_ENV);
+        std::env::set_var("HOME", directory.path());
+        std::env::set_var(HEALTH_SCAN_ENV, "1");
+        let report = HealthScanHandle::start(plan::WorkerRequest {
+            scan_id: "health-1".into(),
+            started_at_ms: 1,
+            now_epoch_seconds: 100,
+            deadline: job::JobDeadline::after(Duration::from_secs(3)).unwrap(),
+            context: plan::ScanContext::LoginBanner,
+            config: HealthConfig::default(),
+            environment: None,
+            disabled: Vec::new(),
+            config_source: plan::ConfigSource::LoginConfigProjection,
+            fixture_name: None,
+        })
+        .finish_within(Duration::from_secs(3))
+        .unwrap();
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var(HEALTH_SCAN_ENV, value),
+            None => std::env::remove_var(HEALTH_SCAN_ENV),
+        }
+        let config = report
+            .login_config
+            .as_ref()
+            .unwrap_or_else(|| panic!("actual worker config frame: {report:?}"));
+        assert!(!config.health.enabled);
+        assert_eq!(config.language, "en-US");
+        assert!(report.facts.is_empty());
+        assert!(report
+            .check_results
+            .iter()
+            .all(|check| check.status == super::super::model::HealthCheckStatus::Disabled));
+    }
+
+    #[test]
+    fn scan_finish_builds_candidates_without_entry_suppression() {
+        let report = fixture_report(
+            "linux-critical",
+            &HealthConfig::default(),
+            &HealthScanOptions {
+                started_at_ms: 1,
+                now_epoch_seconds: 100,
+                total_budget: Duration::from_millis(100),
+                mode: HealthScanMode::Fixture("linux-critical".to_string()),
+            },
+        );
+        assert!(!report.try_items.is_empty());
+        for item in &report.try_items {
+            assert!(report.findings.iter().any(|finding| {
+                finding.id == item.finding_id && finding.suggested_try_ids.contains(&item.id)
+            }));
+        }
+    }
 
     #[test]
     fn disabled_config_returns_no_report() {
@@ -536,11 +469,17 @@ mod tests {
         .expect("live report");
 
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(report.elapsed_ms <= 1, "{report:?}");
+        let observed_ms = started.elapsed().as_millis();
+        assert!(report.elapsed_ms <= observed_ms.saturating_add(1));
+        assert!(
+            observed_ms.saturating_sub(report.elapsed_ms) <= 3,
+            "elapsed was truncated: {report:?}"
+        );
     }
 
     #[test]
     fn live_scan_records_collectors_missed_by_total_budget() {
+        let started = Instant::now();
         let report = run_health_scan_with_options(
             &HealthConfig::default(),
             HealthScanOptions {
@@ -552,7 +491,9 @@ mod tests {
         )
         .expect("live report");
 
-        assert_eq!(report.elapsed_ms, 0);
+        let observed_ms = started.elapsed().as_millis();
+        assert!(report.elapsed_ms <= observed_ms.saturating_add(1));
+        assert!(observed_ms.saturating_sub(report.elapsed_ms) <= 3);
         for collector in [
             HealthCollector::Host,
             HealthCollector::Cpu,
@@ -567,5 +508,32 @@ mod tests {
                 "{collector:?}: {report:?}"
             );
         }
+    }
+
+    #[test]
+    fn supervised_doctor_receives_actual_worker_facts() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let previous = std::env::var_os(HEALTH_SCAN_ENV);
+        std::env::set_var(HEALTH_SCAN_ENV, "1");
+        let mut config = crate::config::CoshConfig::default();
+        config.adapter_default = "fake".to_string();
+        let report = run_supervised_doctor_report(&config, std::path::Path::new("/tmp"));
+        match previous {
+            Some(value) => std::env::set_var(HEALTH_SCAN_ENV, value),
+            None => std::env::remove_var(HEALTH_SCAN_ENV),
+        }
+        assert!(
+            report
+                .facts
+                .iter()
+                .any(|fact| fact.key == "provider.adapter"
+                    && fact.value == HealthFactValue::String("fake".to_string())),
+            "actual worker did not return provider facts: {report:?}"
+        );
+        assert!(report
+            .check_results
+            .iter()
+            .any(|check| check.id == "environment.provider"
+                && check.status == super::super::model::HealthCheckStatus::Ok));
     }
 }

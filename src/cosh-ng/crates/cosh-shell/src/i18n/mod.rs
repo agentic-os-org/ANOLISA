@@ -107,13 +107,13 @@ mod tests {
     }
 
     #[test]
-    fn message_id_keeps_fieldless_enum_compatibility() {
+    fn message_id_catalog_order_matches_declared_segments() {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
-        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
-        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
-        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 744);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 745);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 746);
         assert_eq!(
             MessageId::AgentQuestionUnavailableTitle as usize,
             MessageId::SlashQuotedArgumentsUnsupported as usize + 1
@@ -122,33 +122,31 @@ mod tests {
             MessageId::ApprovalTitle as usize,
             MessageId::QuestionNoPendingBody as usize + 1
         );
-        // The tool-argument status pair is a registered stable runtime
-        // interface: pin the discriminants with fixed values so a segment
-        // inserted ahead of them can never shift the tail unnoticed
-        // (new segments must append after mcp_registry_ids).
-        assert_eq!(MessageId::AgentStatusToolArguments as usize, 829);
-        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 830);
-        assert_eq!(MessageId::HelpGroupPrompt as usize, 831);
+        // Pin local catalog order after removing six unused startup keys.
+        // MessageId numbers are not persisted or sent over a protocol.
+        assert_eq!(MessageId::AgentStatusToolArguments as usize, 823);
+        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 824);
+        assert_eq!(MessageId::HelpGroupPrompt as usize, 825);
         // The #1747 trailing segment must stay appended after every earlier
         // segment so pre-existing discriminants never shift.
-        assert_eq!(MessageId::HelpSummaryMcp as usize, 834);
-        assert_eq!(MessageId::SlashMcpTitle as usize, 835);
+        assert_eq!(MessageId::HelpSummaryMcp as usize, 828);
+        assert_eq!(MessageId::SlashMcpTitle as usize, 829);
         // The #1988 segment remains pinned ahead of the appended #2029
         // turn-extension messages.
         assert_eq!(
             MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
-            836
+            830
         );
         // The #2029 turn-extension segment keeps its pinned discriminants.
-        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 837);
+        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 831);
         assert_eq!(
             MessageId::ApprovalTurnExtensionUnavailableBody as usize,
-            846
+            840
         );
         // The #1913 capture-notice segment remains pinned ahead of the
         // appended shell-recovery, auth, and hook-notification messages.
-        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
-        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
+        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 841);
+        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 842);
         assert_eq!(
             MessageId::AgentRecoveryTriggerLine as usize,
             MessageId::CaptureInputRejectedBody as usize + 1
@@ -294,7 +292,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::AuthEcsChecking as usize,
-            MessageId::ALL.len() - 21
+            MessageId::GuideUsage as usize - 21
         );
         assert_eq!(
             MessageId::AuthEcsCancelHint as usize,
@@ -310,6 +308,30 @@ mod tests {
         );
         assert_eq!(
             MessageId::SlashBugCopyLine as usize + 1,
+            MessageId::GuideUsage as usize
+        );
+        assert_eq!(
+            MessageId::GuideErrorIo as usize + 1,
+            MessageId::StartupAiDisabledLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupAiDisabledLine as usize + 1,
+            MessageId::HealthMetricUsed as usize
+        );
+        assert_eq!(
+            MessageId::HealthMetricUsed as usize + 1,
+            MessageId::StartupHelpLabel as usize
+        );
+        assert_eq!(
+            MessageId::StartupHelpLabel as usize + 1,
+            MessageId::StartupAskOnlyLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupAskOnlyLine as usize + 1,
+            MessageId::LoginUser as usize
+        );
+        assert_eq!(
+            MessageId::LoginRecoveryMissing as usize + 1,
             MessageId::ALL.len()
         );
     }
@@ -345,15 +367,17 @@ mod tests {
 
     #[test]
     fn format_replaces_known_args_and_keeps_missing_args() {
-        let i18n = I18n::new(Language::EnUs);
-        let text = i18n.format(
-            MessageId::StartupAdapterLine,
-            &[("adapter", "qwen"), ("shell", "bash"), ("approval", "auto")],
-        );
+        for language in [Language::ZhCn, Language::EnUs] {
+            let i18n = I18n::new(language);
+            let text = i18n.format(
+                MessageId::StartupAdapterLine,
+                &[("shell", "bash"), ("unused", "qwen")],
+            );
 
-        assert!(text.contains("qwen"));
-        assert!(text.contains("bash"));
-        assert!(text.contains("{analysis}"));
+            assert!(text.contains("bash"));
+            assert!(text.contains("{approval}"));
+            assert!(!text.contains("qwen"));
+        }
     }
 
     #[test]

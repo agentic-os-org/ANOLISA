@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "login_record_schema": 1,
+  "stable_entry": "/usr/bin/cosh",
+  "package": "cosh-ng",
+  "minimum_compatible_package_version": "0.27.0",
+  "replacement_preflight_protocol": 1,
+  "replacement_preflight": "/usr/libexec/cosh/login-preflight",
+  "final_uninstall_guard": true
+}

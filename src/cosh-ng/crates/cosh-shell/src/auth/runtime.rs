@@ -135,6 +135,10 @@ pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
         || state.auth.ecs_trial.preference_job.is_some()
 }
 
+pub(crate) fn has_auth_operation(state: &InlineState) -> bool {
+    has_pending_auth(state) || state.auth.ecs.is_some()
+}
+
 /// Trigger auth panel from `/auth` slash command.
 /// Now starts in ManagingProviders phase to show existing providers.
 pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
@@ -142,7 +146,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if state.auth.state.is_some() {
+    if has_auth_operation(state) {
         return Ok(());
     }
     let AdapterInstance::CoshCore(cosh_core) = adapter else {
@@ -806,7 +810,21 @@ pub(super) fn cancel_auth_panel<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if super::ecs_poll::cancel(state, output)? {
+    crate::runtime::startup::session::cancel_initial_question(state);
+    let cancel_run = state.auth.state.as_ref().is_some_and(|auth| {
+        auth.backend == AuthBackend::ActiveRun
+            && state.agent_run.active.as_ref().is_some_and(|run| {
+                run.governed_events.iter().any(|event| {
+                    matches!(
+                        &event.event,
+                        crate::runtime::prelude::AgentEvent::AuthRequired {
+                            run_id, request_id, ..
+                        } if run_id == &run.request.id && request_id == &auth.request_id
+                    )
+                })
+            })
+    });
+    if super::ecs_poll::cancel(state, output)? && !cancel_run {
         return Ok(());
     }
     clear_active_auth_panel(state, output)?;
@@ -814,6 +832,9 @@ pub(super) fn cancel_auth_panel<W: std::io::Write>(
         state.auth.completed_ids.insert(auth.id.clone());
     }
     state.auth.state = None;
+    if cancel_run {
+        return crate::runtime::cancel::cancel_active_agent_run(state, output);
+    }
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     renderer.write_notice_panel(

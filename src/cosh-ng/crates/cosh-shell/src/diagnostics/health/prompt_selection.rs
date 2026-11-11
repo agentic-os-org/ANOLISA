@@ -83,7 +83,7 @@ fn finding_display_rank(finding: &HealthFinding) -> u8 {
     }
 }
 
-fn format_health_message(
+pub(crate) fn format_health_message(
     i18n: I18n,
     id: HealthMessageId,
     args: &BTreeMap<String, String>,
@@ -91,6 +91,11 @@ fn format_health_message(
     let mut text = i18n.t(id.to_i18n()).to_string();
     for (key, value) in args {
         text = text.replace(&format!("{{{key}}}"), value);
+    }
+    if id == HealthMessageId::HealthPromptInspectDiskUsage {
+        if let Some(mount) = args.get("mount").filter(|mount| !mount.is_empty()) {
+            return format!("{mount}: {text}");
+        }
     }
     text
 }

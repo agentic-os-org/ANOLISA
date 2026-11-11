@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthSeverity {
     Ok,
     Unavailable,
@@ -42,14 +44,18 @@ impl HealthSeverity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HealthScanReport {
     pub(crate) scan_id: String,
     pub(crate) host: Option<String>,
+    pub(crate) login_config: Option<crate::config::HealthLoginConfig>,
     pub(crate) role: Option<String>,
     pub(crate) started_at_ms: u128,
     pub(crate) elapsed_ms: u128,
     pub(crate) overall_severity: HealthSeverity,
+    pub(crate) resource_severity: HealthSeverity,
+    pub(crate) check_results: Vec<HealthCheckResult>,
+    pub(crate) fact_metadata: BTreeMap<String, HealthFactMetadata>,
     pub(crate) health_score: Option<u8>,
     pub(crate) facts: Vec<HealthFact>,
     pub(crate) findings: Vec<HealthFinding>,
@@ -63,10 +69,14 @@ impl HealthScanReport {
         Self {
             scan_id: scan_id.into(),
             host: None,
+            login_config: None,
             role: None,
             started_at_ms,
             elapsed_ms: 0,
             overall_severity: HealthSeverity::Ok,
+            resource_severity: HealthSeverity::Ok,
+            check_results: Vec::new(),
+            fact_metadata: BTreeMap::new(),
             health_score: None,
             facts: Vec::new(),
             findings: Vec::new(),
@@ -76,7 +86,48 @@ impl HealthScanReport {
         }
     }
 
+    pub(crate) fn sync_check_projections(&mut self) {
+        self.checks_done = self
+            .check_results
+            .iter()
+            .filter(|check| check.status == HealthCheckStatus::Ok)
+            .map(|check| check.compatibility_id().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.unavailable = self
+            .check_results
+            .iter()
+            .flat_map(|check| check.gaps.iter().cloned())
+            .collect();
+    }
+
     pub(crate) fn recompute_overall_severity(&mut self) {
+        if !self.check_results.is_empty() {
+            self.sync_check_projections();
+        }
+        self.resource_severity = self
+            .findings
+            .iter()
+            .filter(|finding| finding.category != HealthFindingCategory::CollectionGap)
+            .filter(|finding| {
+                finding.evidence_fact_ids.iter().any(|id| {
+                    self.facts.iter().any(|fact| {
+                        fact.id == *id
+                            && matches!(
+                                fact.category,
+                                HealthFactCategory::Cpu
+                                    | HealthFactCategory::Memory
+                                    | HealthFactCategory::Disk
+                                    | HealthFactCategory::Kernel
+                                    | HealthFactCategory::Service
+                            )
+                    })
+                })
+            })
+            .map(|finding| finding.severity)
+            .max_by_key(|severity| severity.precedence())
+            .unwrap_or(HealthSeverity::Ok);
         self.overall_severity = self
             .findings
             .iter()
@@ -87,7 +138,79 @@ impl HealthScanReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum HealthCheckStatus {
+    Ok,
+    Partial,
+    Unavailable,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HealthCheckResult {
+    pub(crate) id: String,
+    pub(crate) collector: Option<HealthCollector>,
+    pub(crate) status: HealthCheckStatus,
+    pub(crate) fact_ids: Vec<String>,
+    pub(crate) gaps: Vec<UnavailableCollector>,
+    pub(crate) elapsed_ms: u128,
+}
+
+impl HealthCheckResult {
+    pub(crate) fn compatibility_id(&self) -> &str {
+        if self.id == "resource.swap" {
+            "swap"
+        } else {
+            match self.collector {
+                Some(collector) => collector.check_id(),
+                None => &self.id,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum HealthFactScope {
+    Host,
+    Environment,
+    Path(String),
+    Cgroup(String),
+    Fixture,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum HealthFactCoverage {
+    Snapshot,
+    ReadWindow {
+        since_ms: Option<u128>,
+        until_ms: Option<u128>,
+        max_records: usize,
+        complete: bool,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HealthFactMetadata {
+    pub(crate) scope: HealthFactScope,
+    pub(crate) sampled_at_ms: u128,
+    pub(crate) coverage: HealthFactCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) enum HealthProgress {
+    Host(String),
+    Fact {
+        check_id: String,
+        fact: HealthFact,
+        metadata: HealthFactMetadata,
+    },
+    Finding(HealthFinding),
+    Check(HealthCheckResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HealthFact {
     pub(crate) id: String,
     pub(crate) category: HealthFactCategory,
@@ -98,7 +221,7 @@ pub(crate) struct HealthFact {
     pub(crate) elapsed_ms: u128,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthFactCategory {
     Host,
     Cpu,
@@ -113,7 +236,7 @@ pub(crate) enum HealthFactCategory {
     Permissions,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum HealthFactValue {
     String(String),
     Integer(i64),
@@ -122,7 +245,7 @@ pub(crate) enum HealthFactValue {
     Bool(bool),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthFactSource {
     Hostname,
     OsRelease,
@@ -137,7 +260,7 @@ pub(crate) enum HealthFactSource {
     Fixture,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct HealthFinding {
     pub(crate) id: String,
     pub(crate) severity: HealthSeverity,
@@ -149,7 +272,7 @@ pub(crate) struct HealthFinding {
     pub(crate) suggested_try_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthFindingCategory {
     RootCause,
     Anomaly,
@@ -157,7 +280,7 @@ pub(crate) enum HealthFindingCategory {
     CollectionGap,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct UnavailableCollector {
     pub(crate) collector: HealthCollector,
     pub(crate) reason: HealthUnavailableReason,
@@ -165,7 +288,7 @@ pub(crate) struct UnavailableCollector {
     pub(crate) elapsed_ms: u128,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthCollector {
     Host,
     Cpu,
@@ -180,8 +303,47 @@ pub(crate) enum HealthCollector {
     Permissions,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+impl HealthCollector {
+    pub(crate) const ALL: [Self; 11] = [
+        Self::Cpu,
+        Self::Memory,
+        Self::Host,
+        Self::Disk,
+        Self::KernelSignal,
+        Self::ConfiguredService,
+        Self::Provider,
+        Self::Config,
+        Self::Hooks,
+        Self::Pty,
+        Self::Permissions,
+    ];
+    pub(crate) fn check_id(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Disk => "disk",
+            Self::KernelSignal => "kernel_signal",
+            Self::ConfiguredService => "configured_service",
+            Self::Provider => "provider",
+            Self::Config => "config",
+            Self::Hooks => "hooks",
+            Self::Pty => "pty",
+            Self::Permissions => "permissions",
+        }
+    }
+
+    pub(crate) fn from_check_id(id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|collector| collector.check_id() == id)
+            .or_else(|| super::plan::definition(id).map(|check| check.collector))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthUnavailableReason {
+    MissingContext,
     Unsupported,
     PermissionDenied,
     CommandMissing,
@@ -189,7 +351,7 @@ pub(crate) enum HealthUnavailableReason {
     ParseError,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct HealthTryItem {
     pub(crate) id: String,
     pub(crate) label_id: HealthMessageId,
@@ -204,14 +366,14 @@ pub(crate) struct HealthTryItem {
     pub(crate) finding_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthTryKind {
     AskAgent,
     DisplayCommand,
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum HealthMessageId {
     HealthBannerTitle,
     HealthBannerTryLabel,

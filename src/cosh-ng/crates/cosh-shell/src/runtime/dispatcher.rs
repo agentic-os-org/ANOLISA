@@ -90,9 +90,11 @@ impl RuntimeDispatcher {
         output: &mut W,
     ) -> std::io::Result<Vec<RuntimeAction>> {
         let batch = snapshot.batch_since(state.control.event_cursor());
+        crate::runtime::login::invitation::observe_user_activity(state, batch.events);
         render_inline_guidance_from_batch(snapshot, &batch, adapter, shell_label, state, output)?;
         crate::auth::ecs_poll::poll(adapter, state, output)?;
         crate::auth::trial::poll(adapter, state, output)?;
+        crate::runtime::login::invitation::render_at_idle(state, output)?;
         Ok(vec![RuntimeAction::AdvanceEventCursor(batch.to)])
     }
 
@@ -172,6 +174,13 @@ fn render_inline_guidance_from_batch<W: Write>(
     // "No pending question" notice for Task-owned input.
     crate::slash::render_task_form_actions(action_events, state, output, event_index_base)?;
     crate::slash::render_task_snapshot_actions(action_events, state, output, event_index_base)?;
+    crate::runtime::startup::session::handle_initial_question_actions(
+        action_events,
+        adapter,
+        state,
+        output,
+        event_index_base,
+    )?;
     let question_actions =
         QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
     RuntimeDispatcher::apply_actions(question_actions, state);
@@ -430,6 +439,9 @@ fn poll_inline_runtime_without_shell_events<W: Write>(
         return Ok(());
     }
 
+    if state.startup_session.compact {
+        crate::runtime::startup::session::render_initial_question(&[], adapter, state, output)?;
+    }
     render_startup_health_banner(state, output)?;
     if state.shell_at_prompt {
         render_pending_upgrade_notice_at_idle_prompt(state, output)?;
