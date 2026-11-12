@@ -591,7 +591,8 @@ fn provider_change_drops_stale_startup_auth_verdict() {
     let mut state = InlineState::default();
     state.personalization.foreground_model = Some("stale-model".to_string());
     state.startup_auth.resolved = Some(false);
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<Option<bool>>(1);
+    state.startup_auth.hint = crate::adapter::StartupAuthHint::Ecs;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     state.startup_auth.pending = Some(receiver);
 
     clear_observed_model_after_provider_change(&mut state);
@@ -602,6 +603,10 @@ fn provider_change_drops_stale_startup_auth_verdict() {
     assert!(state.personalization.foreground_model.is_none());
     assert!(state.startup_auth.resolved.is_none());
     assert!(state.startup_auth.pending.is_none());
+    assert_eq!(
+        state.startup_auth.hint,
+        crate::adapter::StartupAuthHint::Unknown
+    );
     assert!(!state.startup_auth.ai_unconfigured());
     drop(sender);
 }

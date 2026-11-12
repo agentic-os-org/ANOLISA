@@ -243,6 +243,7 @@ pub(super) fn clear_observed_model_after_provider_change(state: &mut InlineState
     // recommendation disclosure for the rest of the session).
     state.startup_auth.pending = None;
     state.startup_auth.resolved = None;
+    state.startup_auth.hint = Default::default();
 }
 
 fn clear_observed_model_after_provider_delete(

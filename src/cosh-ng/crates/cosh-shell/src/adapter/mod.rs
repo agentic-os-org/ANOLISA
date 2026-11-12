@@ -17,6 +17,7 @@ mod control_protocol;
 mod control_protocol_tests;
 mod cosh_core;
 mod cosh_core_auth;
+pub(crate) use cosh_core_auth::StartupAuthHint;
 mod cosh_core_process;
 mod cosh_core_registry;
 #[cfg(test)]

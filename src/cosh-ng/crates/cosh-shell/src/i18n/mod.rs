@@ -328,6 +328,14 @@ mod tests {
         );
         assert_eq!(
             MessageId::StartupAskOnlyLine as usize + 1,
+            MessageId::StartupEcsAuthHintLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupEcsAuthHintLine as usize + 1,
+            MessageId::StartupConfigureAuthHintLine as usize
+        );
+        assert_eq!(
+            MessageId::StartupConfigureAuthHintLine as usize + 1,
             MessageId::LoginUser as usize
         );
         assert_eq!(
