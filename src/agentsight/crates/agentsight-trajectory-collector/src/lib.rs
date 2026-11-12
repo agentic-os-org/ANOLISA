@@ -268,11 +268,7 @@ fn process_session(
             .and_then(|m| m.total_completion_tokens)
             .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
         start_time: trajectory.steps.iter().find_map(|s| s.timestamp.clone()),
-        end_time: trajectory
-            .steps
-            .iter()
-            .rev()
-            .find_map(|s| s.timestamp.clone()),
+        end_time: last_activity(&trajectory),
         first_user_message,
         last_user_message,
         atif_json,
@@ -285,6 +281,45 @@ fn process_session(
     };
     store.upsert_trajectory(&record)?;
     Ok(true)
+}
+
+/// Collected last activity includes valid completions attached to earlier steps.
+fn last_activity(trajectory: &agentsight_atif::AtifTrajectory) -> Option<String> {
+    let mut latest = None;
+    for step in &trajectory.steps {
+        let issued = step.timestamp.as_deref().and_then(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|time| (time, raw))
+        });
+        let completions = step.tool_calls.iter().flatten().filter_map(|call| {
+            if step.source != agentsight_atif::StepSource::Agent {
+                return None;
+            }
+            let raw = call.extra.as_ref()?.get("result_timestamp")?.as_str()?;
+            let end = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+            issued
+                .as_ref()
+                .is_none_or(|(start, _)| end >= *start)
+                .then_some((end, raw))
+        });
+        for (timestamp, raw) in issued.into_iter().chain(completions) {
+            if latest
+                .as_ref()
+                .is_none_or(|(previous, _)| timestamp > *previous)
+            {
+                latest = Some((timestamp, raw));
+            }
+        }
+    }
+    latest.map(|(_, raw)| raw.to_owned()).or_else(|| {
+        // Keep the legacy fallback for documents without any parseable time.
+        trajectory
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| step.timestamp.clone())
+    })
 }
 
 /// Sleep `interval_secs` in 1s slices; returns `false` as soon as `stop` is
