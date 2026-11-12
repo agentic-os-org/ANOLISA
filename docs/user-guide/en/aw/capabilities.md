@@ -91,7 +91,7 @@ Hermes local chat supports directory-based `skill_view` through the same
 `tool.before` check. See [Hermes Skill sources](../../../developer-guide/en/aw/agents/hermes.md#skill-trust)
 for native selection and source limits.
 
-Pi Coding Agent/Core 0.84.2 resident factories also check local `/skill:name`
+Pi Coding Agent/Core matching releases from 0.84.2 through 1.5.2 also check local `/skill:name`
 submissions through `input.submit`. The selected directory content is fixed before
 Ledger validation; prompt and PII checks inspect the final expanded text.
 See [Pi setup and limits](../../../developer-guide/en/aw/agents/pi.md#validate-skill-submissions).

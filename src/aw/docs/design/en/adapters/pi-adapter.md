@@ -8,8 +8,10 @@ The task-worker mode below retains its original one-worker lifecycle and failure
 The Pi adapter supports the public Coding Agent/Core SDKs
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core`,
 with Node.js >=22.19.0 on Linux. Its entrypoint is `sdk`: one AW-owned foreground
-worker imports an application factory. Both SDKs at 0.84.2 are the verified baseline;
-other releases must retain the Agent/AgentSession and tool lifecycle interfaces.
+worker imports an application factory. Public factory, input submission and
+strict output acceptance covered all 24 published matching SDK pairs from
+0.84.2 through 1.5.2 with the package conditions in the Pi integration guide.
+Other releases must retain the Agent/AgentSession and tool lifecycle interfaces.
 The native Pi CLI is outside this contract.
 
 ## Factory and lifecycle
@@ -91,7 +93,9 @@ errors, early abort and native before failures also skip after. Tool exceptions
 reach after with `isError:true`.
 
 The original after callback runs first. AW observes its field-by-field replacement
-using Pi's nullish merge semantics, including image normalization and `isError`.
+using Pi's nullish merge semantics, including image normalization, `isError`,
+and `structuredContent`. A content override without structured output drops
+the stale structured field; AW text replacement does the same.
 Native callback exceptions keep the SDK's error behavior; strict output uses a
 generic error message to avoid exposing unchecked callback data. AW before supports
 `observe`/`block`, including a Provider's literal retry reason. Pi adds the denied
@@ -140,7 +144,10 @@ without extending its budget. This differs from an awaited policy denial.
 
 Configure `scan_tool_output` with `on_error: withhold_result` to require inspection
 before tool data reaches the model or Agent subscribers. This route requires both
-Pi packages at 0.84.2, whose `Agent.processEvents` delivery boundary is verified.
+Pi packages at the same stable version from 0.84.2 through 1.5.2, inclusive.
+All 24 published pairs passed the focused native final-event suite for the
+`Agent.processEvents` delivery boundary. Prereleases, mixed package versions
+and later releases cannot activate strict output until separately accepted.
 AW suppresses `tool_execution_update` for the entire target whenever any strict
 after route is configured, including tools outside that route's selectors. The
 native final event contains the adopted result; AW does not replay partial chunks.
@@ -231,7 +238,7 @@ python3 crates/aw-cli/tests/fixtures/pi/submission-smoke.py \
   --output target/pi-submission
 ```
 
-This runs Pi 0.84.2, AW and the real sec-core Provider against a local HTTP model
+This runs Pi 1.3.0, AW and the real sec-core Provider against a local HTTP model
 and a controlled scanner CLI. It checks original text, risk/PII refusal and recovery,
 Provider exit/timeout/invalid output under block/report, input/context/provider-request extension rejection,
 alternate ingress, concurrent sessions/prompts, abort/dispose and empty resource

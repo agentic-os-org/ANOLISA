@@ -39,7 +39,7 @@ class ResidentContainerTests(GateFixture):
                 "suites": [{"agent": plan["agent"], "name": c["name"]} for c in plan["cases"]],
                 "runtime": {
                     "python": self.manifest["agents"]["claude-sdk"]["python"],
-                    "node": "v24.16.0", "claude_cli": "2.1.161 (Claude Code)", "pi": "0.84.2",
+                    "node": "v24.16.0", "claude_cli": "2.1.161 (Claude Code)", "pi": "1.3.0",
                     "rtk": "rtk 0.49.0",
                     "python_packages": self.manifest["agents"]["claude-sdk"]["versions"],
                 },

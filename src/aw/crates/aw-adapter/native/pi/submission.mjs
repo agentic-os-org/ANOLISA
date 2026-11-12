@@ -38,12 +38,14 @@ export function inputBoundary(session) {
     own(session.agent, key, reject);
   const nativePrompt = session.agent.prompt.bind(session.agent);
   own(session.agent, "prompt", async (messages, ...args) => {
-    // Check the final SDK projection as well as the public prompt boundary.
-    const content = messages?.[0]?.content;
+    // Pi 1.3 prepends its system message; the submitted user text must still be exact.
+    const userIndex = messages?.[0]?.role === "system" ? 1 : 0;
+    const content = messages?.[userIndex]?.content;
     if (!dispatch || dispatch.used || !Array.isArray(messages) ||
-        messages[0]?.role !== "user" || content?.length !== 1 ||
+        messages[userIndex]?.role !== "user" || content?.length !== 1 ||
         content[0]?.type !== "text" || content[0].text !== dispatch.text ||
-        messages.slice(1).some(message => message.role === "user")) reject();
+        messages.slice(userIndex + 1).some(message =>
+          message.role === "user" || message.role === "system")) reject();
     dispatch.used = true;
     dispatch.users = structuredClone(userContent([...(session.agent.state?.messages ?? []), ...messages]));
     return await nativePrompt(messages, ...args);

@@ -76,7 +76,7 @@ QwenPaw 的 `skill-objects` 另覆盖实际同名选择、来源固定与取消�
 Hermes 本地 chat 通过同一 `tool.before` 检查支持目录型 `skill_view`。
 原生选择与来源范围见 [Hermes Skill 接入](../../../developer-guide/zh/aw/agents/hermes.md#skill-信任检查)。
 
-Pi Coding Agent/Core 0.84.2 常驻工厂还可通过 `input.submit` 检查本地
+Pi Coding Agent/Core 0.84.2–1.5.2 的已发布同版配对还可通过 `input.submit` 检查本地
 `/skill:name` 输入。先固定选中目录的正文，再执行 Ledger 校验，prompt 与 PII
 检查针对最终展开文本。接线与限制见 [Pi 指南](../../../developer-guide/zh/aw/agents/pi.md#校验-skill-输入)。
 原生 `skill-objects` 与 `skill-input` 验收覆盖选中对象、来源变化、信任拒绝、取消及真实模型交付。

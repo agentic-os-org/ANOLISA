@@ -7,7 +7,8 @@ across sequential executions. Independent clients run concurrently in the same
 foreground worker. One configuration selects `aw run --config aw.yaml --agent pi`
 or `--agent claude`. SYSOM integration stays in the image, startup and common
 client/MCP factories; the application owns scheduling, credentials, HTTP/SSE,
-business tools and conversation storage. Verified baselines are Pi 0.84.2 and
+business tools and conversation storage. Verified Pi baselines are 0.84.2, 1.3.0 and 1.5.2;
+the Claude SDK baseline is
 Claude SDK 0.2.88 / bundled CLI 2.1.161; other releases use the same native
 factory, transport and lifecycle checks.
 

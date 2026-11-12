@@ -1,8 +1,8 @@
-# Pi Coding Agent/Core 0.84.2, Node.js >=22.19.0, managed runWorker factory.
+# Verified Pi Coding Agent/Core baselines: 0.84.2, 1.3.0, 1.5.2; Node.js >=22.19.0.
+# Managed runWorker factory.
 # Replace executable/socket/application paths and start sec-core separately.
-# Pi-only input Skill policy; other Adapters need a separate configuration.
-# Use distinct metadata.name values with automatic daemon paths.
-# Literal user text and local /skill:name; sign/authorize Skill directories first.
+# One Pi target: input, shell-tool and final tool-output checks.
+# Sign/authorize Skill directories before using /skill:name.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
 metadata:
@@ -34,7 +34,9 @@ spec:
         mode: block
         skill: true
         prompt: {mode: block, scan_mode: fast}
-        pii: {input_mode: block, output_mode: observe}
+        pii: {input_mode: block, output_mode: replace_result}
+        tools:
+          bash: {language: bash, input_pointer: /command}
   events:
     input.submit:
       enabled: true
@@ -55,3 +57,28 @@ spec:
           operation: scan_user_input
           effects: [observe, block]
           on_error: block
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: tool-input
+          provider: security
+          operation: scan_tool_input
+          match: {tools: ['native:pi:bash']}
+          effects: [observe, block]
+          on_error: block
+        - id: shell-code
+          provider: security
+          operation: scan_code
+          match: {tools: ['native:pi:bash']}
+          effects: [observe, block]
+          on_error: block
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: tool-output
+          provider: security
+          operation: scan_tool_output
+          effects: [observe, replace_result]
+          on_error: withhold_result

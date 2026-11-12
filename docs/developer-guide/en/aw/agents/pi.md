@@ -7,12 +7,43 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 ## Start a Pi SDK worker
 
 For a high-code Pi application, use `adapter: pi` with the public Coding Agent/Core
-SDKs and Node.js >=22.19.0. Both SDKs at 0.84.2 are the verified baseline.
-AW checks package identity, module layout and native Agent/AgentSession interfaces
-for other releases, and records the installed Coding Agent version. AW owns a foreground SDK worker and connects
-both tool Hook points. Install those SDK packages in your application using your
-normal dependency workflow, and retain your application's model/auth settings.
+SDKs and Node.js >=22.19.0. The 24 published matching pairs from 0.84.2
+through 1.5.2 passed public factory, input submission and strict output checks
+with the package conditions below. AW checks package identity, module layout
+and native Agent/AgentSession interfaces, and records the installed Coding Agent
+version. AW owns a foreground SDK worker and connects both tool Hook points.
+Install the packages in your application with a committed lockfile and retain
+your model/auth settings.
 The native Pi CLI is a separate entrypoint and is not launched by this adapter.
+
+The published 0.85.0 Coding Agent imports `@earendil-works/pi-server` without
+declaring it. Install `@earendil-works/pi-server@0.85.0` alongside the matching
+Coding Agent/Core pair. For 1.0.1–1.1.0, lock `@earendil-works/chord`,
+`pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp` and `pi-tui` to the same Pi
+release; npm's unlocked transitive resolution can load an incompatible
+`pi-codemode` and fail during SDK import. Run `npm ci` from that lockfile.
+
+For 0.85.0, install the missing package with the pair:
+
+```bash
+npm install --save-exact @earendil-works/pi-coding-agent@0.85.0 \
+  @earendil-works/pi-agent-core@0.85.0 @earendil-works/pi-server@0.85.0
+```
+
+For 1.0.1–1.1.0, select the release used by the application and lock its Pi
+package family. This example uses 1.1.0:
+
+```bash
+PI_VERSION=1.1.0
+npm install --save-exact \
+  "@earendil-works/pi-coding-agent@$PI_VERSION" \
+  "@earendil-works/pi-agent-core@$PI_VERSION" \
+  "@earendil-works/pi-ai@$PI_VERSION" \
+  "@earendil-works/pi-codemode@$PI_VERSION" \
+  "@earendil-works/pi-mcp@$PI_VERSION" \
+  "@earendil-works/pi-tui@$PI_VERSION" \
+  "@earendil-works/chord@$PI_VERSION"
+```
 
 Expose your existing public factory and foreground task in an absolute `.mjs`
 application module:
@@ -65,12 +96,16 @@ SDK acceptance. Exit Agents and stop the original service before changing policy
 retain/remove the audit state using the same local-service cleanup procedure.
 
 For strict output inspection, set the sec-core `scan_tool_output` step to
-`on_error: withhold_result`. Both Pi packages must be 0.84.2. Configuring any strict
+`on_error: withhold_result`. Both Pi packages must have the same stable version
+from 0.84.2 through 1.5.2, inclusive. Later releases require a new AW
+acceptance check before strict admission. Configuring any strict
 after route suppresses intermediate tool updates across the target; subscribers
 and the model receive only the adopted final result. AW scans a detached snapshot
 of the effective result and delivers that snapshot, including native after-callback
 overrides and metadata. Later mutations of retained result objects do not change
-the delivered result. PII risk replaces text;
+the delivered result. Native after callbacks can replace `structuredContent`;
+replacing text without a matching structured value drops the stale field.
+PII risk replaces text;
 scanner faults discard the full result and return a fixed placeholder. The same
 session can continue after a scanner fault. Targets without strict routes retain
 native streaming and report-mode Tokenless.
@@ -105,7 +140,7 @@ its prompts, tool callbacks and disposal. Updates reject an open session,
 application factory preparation or unconfirmed cleanup; close every session
 before updating. Newly created sessions adopt the new policy, including
 input and Skill checks. Strict output updates still require both Pi packages
-at 0.84.2. A preparation failure leaves dispatch disabled; release only after
+in the same supported release line. A preparation failure leaves dispatch disabled; release only after
 all sessions have closed. For an application exporting `run(session, context)`, the
 native helper creates the initial managed session and supplies `createSession`
 and `closeSession` in `context`. Close every active session before updating the
@@ -118,6 +153,11 @@ Use the [Pi submission example](../../../../../src/aw/crates/aw-service/examples
 with a resident factory exporting `runWorker`. Replace the executable and sec-core
 socket paths, retain your application's model/auth configuration, and launch with
 `aw run --config /absolute/aw.pi-submission.yaml --agent pi -- 'Your task'`.
+This single Pi configuration checks text, Skill, and PII at submission; scans
+`bash` inputs and commands before execution; and scans final tool output with
+`withhold_result` on scanner failure. Map and match additional native tools before
+relying on the example to protect them. Start sec-core separately and authorize
+the Skill directories used by the worker.
 The application exposes its existing factory plus this worker entrypoint:
 
 ```javascript
@@ -166,7 +206,7 @@ cleanup requires worker restart. A late scan reply cannot dispatch a model reque
 
 ## Validate Skill submissions
 
-Use a separate Pi configuration for `input.submit/check_skill`, such as
+Use a Pi-specific configuration for `input.submit/check_skill`, such as
 `aw.pi-submission.yaml`. The Provider declares this event as Pi-only; selecting
 Qoder SDK, QwenPaw or another Adapter from the same configuration fails admission
 before native hooks are ready, with either `on_error: block` or `report`.
@@ -182,7 +222,8 @@ Then submit `/skill:name optional arguments` through the managed `session.prompt
 A valid signed Skill reaches the model; denied trust, changed source and a failed
 required check reject the prompt before model transport.
 
-For Coding Agent 0.84.2, AW selects the first matching object from the session's
+For the verified matching Coding Agent/Core releases from 0.84.2 through 1.5.2,
+AW selects the first matching object from the session's
 actual `resourceLoader.getSkills()`, fixes its directory `SKILL.md` text, and uses
 the SDK frontmatter parser and native command format. The final expanded text,
 including arguments, passes through all input checks. Native submission receives

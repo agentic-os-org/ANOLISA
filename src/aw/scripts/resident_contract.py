@@ -85,7 +85,7 @@ def verify_shard(directory: Path, manifest: dict, expected: str, shard: str) -> 
     for name, version in manifest["agents"]["claude-sdk"]["versions"].items():
         if runtime["python_packages"].get(name) != version:
             raise ValueError(f"resident dependency version mismatch: {name}")
-    if runtime["pi"] != "0.84.2":
+    if runtime["pi"] != "1.3.0":
         raise ValueError("resident Pi version changed")
     cleanup = json.loads((directory / "container.json").read_text())
     if (

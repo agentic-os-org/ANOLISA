@@ -233,12 +233,30 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
         commands.run(["node", str(npm / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")], AW)
     if (npm / "package-lock.json").exists():
         shutil.copyfile(npm / "package-lock.json", commands.evidence / "npm-lock.json")
+    extra_npm = {}
+    for label, fixture in row.get("npm_fixtures", {}).items():
+        directory = work / f"npm_{label}"
+        directory.mkdir()
+        for name in ("package.json", "package-lock.json"):
+            shutil.copyfile(AW / fixture / name, directory / name)
+        commands.run(
+            [
+                "npm", "ci", "--prefix", str(directory),
+                "--ignore-scripts", "--no-audit", "--no-fund",
+            ],
+            AW,
+        )
+        shutil.copyfile(
+            directory / "package-lock.json", commands.evidence / f"npm-lock-{label}.json"
+        )
+        extra_npm[f"npm_{label}"] = str(directory)
     values = {
         "python": str(python),
         "source": str(source),
         "npm": str(npm),
         "aw_root": str(AW),
         "qwenpaw": str(python.parent / "qwenpaw"),
+        **extra_npm,
     }
     if "qoder_cli" in row:
         commands.run(
@@ -365,10 +383,11 @@ def main() -> None:
             redact_logs(args.output, token)
             shutil.copytree(output, args.output / "fixtures", dirs_exist_ok=True)
             # Preserve the same relative result paths for aggregation after upload.
-            for path in (work / "npm").glob("*.json"):
-                if path.name not in {"package.json", "package-lock.json"}:
-                    (args.output / "npm").mkdir(exist_ok=True)
-                    shutil.copyfile(path, args.output / "npm" / path.name)
+            for name in ("npm", *(f"npm_{label}" for label in row.get("npm_fixtures", {}))):
+                for path in (work / name).glob("*.json"):
+                    if path.name not in {"package.json", "package-lock.json"}:
+                        (args.output / name).mkdir(exist_ok=True)
+                        shutil.copyfile(path, args.output / name / path.name)
             (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"{args.agent}: {len(result['cases'])} native suites passed")
 
