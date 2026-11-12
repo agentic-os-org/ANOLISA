@@ -9,6 +9,32 @@
 
 ## [未发布]
 
+## [0.4.1] - 2026-11-12
+
+### 变更
+
+- 将组件目录更新到 Agent Memory `0.2.15`、cosh-ng `0.29.1`、OS Skills `0.7.0`、
+  agent-sec-core `1.2.1`、SkillFS `0.5.7` 和 ws-ckpt `0.7.1`。
+
+### 修复
+
+- `anolisa telemetry prepare` 现在拒绝重定位的 `--prefix` 值和
+  `--install-mode user`，dry-run 也适用，避免将 systemd 无法使用的服务报告为
+  已准备就绪。应在镜像根目录内使用 system 范围执行准备；`--prefix /` 仍可使用。
+  该命令的帮助不再展示被拒绝的选项
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951))。
+- 使用 `--json` 时，将遥测操作的警告写入 JSON 响应的 `warnings` 数组，
+  包括 `anolisa telemetry prepare --no-service` 的启动指导，以及启用或禁用时
+  的服务失败警告。原先从 stderr 读取这些警告的脚本需改为读取 JSON 数组；
+  面向用户的文本输出保持不变
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951))。
+- 为生成的遥测 systemd 单元中的可执行文件路径添加引号并转义，确保包含空格、
+  引号、反斜杠或百分号的路径能启动正确的程序。非 UTF-8 路径现在会被拒绝，
+  不再写入无法使用的单元。已有单元不会自动重写：镜像准备时需重新运行
+  `anolisa telemetry prepare`，需要采集的宿主则重新运行
+  `anolisa telemetry enable`
+  ([#9952](https://github.com/agentic-os-org/ANOLISA/pull/9952))。
+
 ## [0.4.0] - 2026-11-08
 
 ### 新增

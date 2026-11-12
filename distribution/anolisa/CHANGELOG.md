@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-12
+
+### Changed
+
+- Update the component catalog to Agent Memory `0.2.15`, cosh-ng `0.29.1`,
+  OS Skills `0.7.0`, agent-sec-core `1.2.1`, SkillFS `0.5.7`, and ws-ckpt `0.7.1`.
+
+### Fixed
+
+- Reject relocated `--prefix` values and `--install-mode user` for
+  `anolisa telemetry prepare`, including dry runs, instead of reporting a
+  prepared service that systemd cannot use. Run preparation inside the image
+  root with system scope; `--prefix /` remains accepted. The command's help no
+  longer advertises the rejected options
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951)).
+- Include telemetry action warnings in the JSON envelope's `warnings` array
+  when using `--json`, including boot guidance from
+  `anolisa telemetry prepare --no-service` and service failures from enable
+  or disable. Scripts that read these warnings from stderr must instead read
+  the JSON array; human-readable output is unchanged
+  ([#9951](https://github.com/agentic-os-org/ANOLISA/pull/9951)).
+- Quote and escape executable paths in generated telemetry systemd units so
+  paths containing spaces, quotes, backslashes, or percent signs reach the
+  correct binary. Reject non-UTF-8 executable paths instead of writing an
+  unusable unit. Existing units are not rewritten automatically: rerun
+  `anolisa telemetry prepare` during image preparation or
+  `anolisa telemetry enable` on hosts where collection is intended
+  ([#9952](https://github.com/agentic-os-org/ANOLISA/pull/9952)).
+
 ## [0.4.0] - 2026-11-08
 
 ### Added
