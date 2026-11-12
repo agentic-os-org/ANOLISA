@@ -35,7 +35,7 @@ impl PinnedMounts {
             .create_args
             .iter()
             .enumerate()
-            .filter_map(|(index, arg)| (arg == "--volume").then_some(index + 1))
+            .filter_map(|(index, arg)| (arg == "--mount").then_some(index + 1))
             .collect();
         for (index, mount) in plan.mounts.iter_mut().enumerate() {
             let source = open_source(Path::new(&mount.source))?;
@@ -94,8 +94,7 @@ impl PinnedMounts {
             let position = *positions
                 .get(index)
                 .ok_or_else(|| DockerError::Protocol("missing bind argument".into()))?;
-            let suffix = if mount.read_only { ":ro" } else { "" };
-            plan.create_args[position] = format!("{}:{}{suffix}", mount.source, mount.destination);
+            plan.create_args[position] = mount.argument();
         }
         Ok(pinned)
     }
