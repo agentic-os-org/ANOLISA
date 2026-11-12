@@ -275,6 +275,12 @@ const EPERM: i32 = 1;
 /// I/O failure: labelling it `failed` hid it from the blocked filter and from the
 /// blocked totals. Any other errno stays `failed`, because those operations were
 /// not denied by policy.
+///
+/// This rests on a producer invariant: the enforcement backend reports `EPERM` on
+/// a [`FileAction`](agentsight_enforcement_protocol::FileAction) only for an
+/// operation its own policy denied, never for an ambient filesystem permission
+/// check. A future producer that surfaces ordinary `EPERM` failures must not reuse
+/// this errno, or unrelated I/O denials would be counted as policy enforcement.
 pub fn event_result(event: &SecurityEvent) -> &'static str {
     match &event.kind {
         SecurityEventKind::FileAction(action) => {

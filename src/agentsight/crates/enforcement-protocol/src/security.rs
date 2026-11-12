@@ -198,6 +198,11 @@ pub struct FileAction {
     /// Whether the kernel operation completed successfully.
     pub succeeded: bool,
     /// Observed errno when the operation failed.
+    ///
+    /// `EPERM` is reserved for an operation the reporting policy itself denied:
+    /// the audit result label reads it as a policy block, so surfacing an ambient
+    /// filesystem permission failure under this errno would be counted as
+    /// enforcement. Other failures keep their own errno.
     pub errno: Option<i32>,
     /// Backend rule identifier when available.
     pub rule_id: Option<String>,
