@@ -3,13 +3,11 @@
 //! Translates an [`asc_sandbox_types::ExecutionSpec`] into one container whose
 //! placement expresses exactly the requested restrictions: a read-only pinned
 //! image rootfs, explicit read-only/read-write bind mounts for allow rules,
-//! the granted network mode (`none` when off, `host` when full), dropped
-//! capabilities and `no-new-privileges`. Host networking additionally installs
-//! a seccomp profile denying `AF_UNIX`, matching the linux backend, because
-//! the shared host netns exposes abstract Unix endpoints. Anything the
-//! container model cannot express exactly (deny rules inside allowed
-//! subtrees, mount-level noexec) is rejected as
-//! [`asc_pep_runtime::PepError::Unsupported`]; nothing is approximated.
+//! network off maps to `none`, full to `host`, with capabilities dropped and
+//! `no-new-privileges` enabled. Both modes block external Unix sockets, retaining
+//! only local stream/seqpacket socket pairs and native `x86_64`/aarch64 ABIs.
+//! Restrictions that cannot be expressed exactly (deny subtrees, mount-level
+//! noexec) return [`asc_pep_runtime::PepError::Unsupported`], never an approximation.
 //!
 //! Contract boundaries:
 //! - The operator-pinned image rootfs is the trusted base world; default-deny

@@ -152,6 +152,20 @@ CLI 返回目标退出码；收到信号退出报告时，返回 `128 + signal`�
 bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的安装子进程；这一清理竞态仍是已知限制。
 实现与验证边界见[执行设计](../../../../src/agent-sec-core/docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)。
 
+## Docker 后端（源码 Preview）
+
+可选的 `sandbox run --backend docker --image <pinned-image>` 模式要求 Docker Engine；
+默认 Linux 后端和上述前置条件不变。镜像提供可信基础文件系统，仅挂载明确获准的宿主
+文件或目录；工作目录必须被授权覆盖。deny、noexec 和运行时保留路径会被拒绝，不做近似映射。
+Docker 仅接受 OS permission JSON；Cedar 原文和 Cedar source envelope 必须使用 Linux 后端，
+在调用 Docker 前即被拒绝。
+
+Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
+网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair
+和兼容 ABI 被阻断。Docker seccomp 仅支持原生 x86_64 和 aarch64。拒绝 socket、设备、FIFO
+作为 bind 根，以及 `/run`、`/var/run`、`/var/lib/docker` 目标。只读挂载不等于获准调用 socket
+API。这些限制不消除现有共享文件和硬链接边界。Cosh 授权 Hook 不选择 Docker 模式。
+
 ## 接入策略授权
 
 需要授权的应用通过 `asc-pep-runtime::PepRuntime` 和 `DaemonAuthorizationClient` 接入，

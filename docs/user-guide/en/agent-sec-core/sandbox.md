@@ -202,6 +202,25 @@ that has not started the target; this cleanup race remains a known limitation.
 See the [execution design](../../../../src/agent-sec-core/docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)
 for implementation and validation boundaries.
 
+## Docker backend (source Preview)
+
+The opt-in `sandbox run --backend docker --image <pinned-image>` mode requires
+Docker Engine; the default Linux backend and its requirements above are unchanged.
+The image supplies the trusted base filesystem. Only explicitly allowed host
+files/directories are bind-mounted; the working directory must be covered.
+Deny rules, noexec and runtime-owned paths are rejected rather than approximated.
+Docker accepts OS permission JSON only; raw Cedar and Cedar source envelopes
+require the Linux backend and are rejected before invoking Docker.
+
+Both Docker network modes block external Unix sockets, including pathname
+sockets inside an allowed directory and abstract sockets in the host network
+namespace. Local stream/seqpacket socket pairs remain available; datagram pairs
+and compatibility ABIs are blocked. The Docker seccomp profile supports native
+x86_64 and aarch64 only. Socket/device/FIFO bind roots and `/run`, `/var/run`,
+`/var/lib/docker` targets are rejected. Read-only mounts are not socket API
+permissions. These restrictions do not remove the existing shared-file/hardlink
+boundary. The Docker mode is not selected by the Cosh authorization hook.
+
 ## Use policy authorization
 
 Applications that need authorization use `asc-pep-runtime::PepRuntime` with
