@@ -165,6 +165,14 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+// Mirrors the shared helper's contract: the evidence link may only name a case
+// belonging to a visible (agent-filtered) violation row. The real derivation is
+// covered against the compiled module in apiClient-regression.
+const firstCorrelatedCaseIdStub = (violations, agentIdFilter) => (
+  (agentIdFilter ? violations.filter((v) => v.agent_id === agentIdFilter) : violations)
+    .find((v) => v.case_id)?.case_id
+);
+
 // RichText only sanitizes its text for display, and the sanitizer has its own
 // suite; here it yields the text so the page tree keeps the same content.
 const richTextStub = { RichText: ({ children }) => children };
@@ -1585,6 +1593,7 @@ function auditPageHarness() {
     '../components/Pagination': loadPageModule('src/components/Pagination.tsx', {}, driver),
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => (request && request.policy_mode) || 'audit',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../utils/ruleReason': { translateRuleReason: (summary) => summary },
     '../utils/apiClient': {
@@ -2167,6 +2176,7 @@ test('system audit: a case filter change re-queries the list from the first page
     '../components/Pagination': loadPageModule('src/components/Pagination.tsx', {}, driver),
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => (request && request.policy_mode) || 'audit',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../utils/ruleReason': { translateRuleReason: (summary) => summary },
     '../utils/apiClient': {

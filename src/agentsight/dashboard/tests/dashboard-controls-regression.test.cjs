@@ -129,6 +129,14 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+// Mirrors the shared helper's contract: the evidence link may only name a case
+// belonging to a visible (agent-filtered) violation row. The real derivation is
+// covered against the compiled module in apiClient-regression.
+const firstCorrelatedCaseIdStub = (violations, agentIdFilter) => (
+  (agentIdFilter ? violations.filter((v) => v.agent_id === agentIdFilter) : violations)
+    .find((v) => v.case_id)?.case_id
+);
+
 for (const [label, model, tools, idle, expected] of [
   ['half-second model', 0.5, 0, 0, [['model', 0.5]]],
   ['one-second model', 1, 0, 0, [['model', 1]]],
@@ -318,6 +326,7 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
     // carry no bindings, so the stored-mode fallback is enough.
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => request.policy_mode ?? 'observe',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../components/Pagination': componentStub('Pagination'),
   };
@@ -424,7 +433,10 @@ test('read-denial template is capability-gated and submits a file read binding',
         createFileReadBinding: async (request) => requests.push(request),
         createCredentialBinding: async () => assert.fail('read denial must not apply a credential policy'),
       },
-      '../utils/enforcementMode': { effectiveBindingMode: () => 'enforce' },
+      '../utils/enforcementMode': {
+        effectiveBindingMode: () => 'enforce',
+        firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
+      },
       '../components/Pagination': componentStub('Pagination'),
     }, driver).RiskEnforcementPage;
     let rendered = driver.render(page);
@@ -467,6 +479,7 @@ async function renderRiskEnforcementCapabilities(capabilities) {
     },
     '../utils/enforcementMode': {
       effectiveBindingMode: (request) => request.policy_mode ?? 'observe',
+      firstCorrelatedCaseId: firstCorrelatedCaseIdStub,
     },
     '../components/Pagination': componentStub('Pagination'),
   }, driver);

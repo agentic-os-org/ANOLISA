@@ -33,3 +33,29 @@ export function legacyBindingMode(policyDsl: string): EnforcementPolicyMode {
 export function effectiveBindingMode(request: BindingModeSource): EnforcementPolicyMode {
   return request.policy_mode ?? legacyBindingMode(request.policy_dsl);
 }
+
+/** The fields of a violation this module needs to locate audit evidence. */
+export interface ViolationCaseSource {
+  agent_id: string;
+  case_id?: string | null;
+}
+
+/**
+ * First correlated case among the violations an agent filter leaves visible.
+ *
+ * The evidence link may only point at a case the operator can actually see:
+ * deriving it from the unfiltered list hands over another agent's evidence, and
+ * keeps the link rendered while the filtered agent has no case at all. Filtering
+ * lives here so a caller cannot pair a filtered table with an unfiltered link.
+ * Returns `undefined` when nothing is correlated, which is the signal to hide
+ * the link rather than offer an empty System Audit.
+ */
+export function firstCorrelatedCaseId(
+  violations: readonly ViolationCaseSource[],
+  agentIdFilter?: string | null,
+): string | undefined {
+  const visible = agentIdFilter
+    ? violations.filter((violation) => violation.agent_id === agentIdFilter)
+    : violations;
+  return visible.find((violation) => violation.case_id)?.case_id ?? undefined;
+}
