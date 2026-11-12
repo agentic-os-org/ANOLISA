@@ -88,8 +88,14 @@ def probe():
                         h["eventName"] == "preToolUse" and h.get("command") != expected.get("tool.before")
                         for h in rows[0]["hooks"]
                     )
+                    other_post_tool_hooks = sum(
+                        h["eventName"] == "postToolUse" and h.get("command") != expected.get("tool.after")
+                        for h in rows[0]["hooks"]
+                    )
                     return {"hooks": hooks, "errors": bool(errors),
                             "other_pre_tool_hooks": other_pre_tool_hooks,
+                            "other_post_tool_hooks": other_post_tool_hooks,
+                            "code_mode": features.get("code_mode", False),
                             "enabled": features.get("hooks", features.get("codex_hooks", True))}
         raise TimeoutError("Codex inventory deadline exceeded")
     finally:

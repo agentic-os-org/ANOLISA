@@ -53,7 +53,13 @@ pub(super) fn invoke(
             .as_str()
             .ok_or("unsupported_pii_result")?;
         let mut residual = event["tool"]["result"].clone();
-        if clear_slot(&mut residual, slot) != 1 {
+        let cleared = if !residual.is_string() && residual.to_string().as_str() == slot {
+            residual = Value::Null;
+            1
+        } else {
+            clear_slot(&mut residual, slot)
+        };
+        if cleared != 1 {
             return Err("unsupported_pii_result");
         }
         // Scan the retained envelope too: a credential in stderr, another block

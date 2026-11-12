@@ -48,7 +48,7 @@ def run(argv, cwd, environment, evidence, expected=0, timeout=40):
 
 
 def document(aw, codex, state, mode, evidence):
-    return {"apiVersion": "aw/v1alpha1", "kind": "AWConfiguration", "metadata": {"name": "codex-native"},
+    policy = {"apiVersion": "aw/v1alpha1", "kind": "AWConfiguration", "metadata": {"name": "codex-native"},
         "spec": {"daemon": {"startup": "on_demand", "endpoint": "auto", "state_dir": str(state)},
             "execution": {"guarantee": "native_hook", "default_event_budget_ms": 5000},
             "audit": {"enabled": True, "payload": "metadata_only"},
@@ -66,6 +66,10 @@ def document(aw, codex, state, mode, evidence):
                     {"id": "retry", "provider": "policy", "operation": "retry", "effects": ["observe", "block"], "on_error": "report"}]},
                 "tool.after": {"enabled": True, "steps": [
                     {"id": "record", "provider": "policy", "operation": "record", "effects": ["observe"], "on_error": "report"}]}}}}
+    if mode.startswith("replace"):
+        policy["spec"]["events"]["tool.after"]["steps"][0]["effects"] = ["observe", "replace_result"]
+        policy["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = "withhold_result"
+    return policy
 
 
 def case(args, mode):
@@ -82,11 +86,21 @@ def case(args, mode):
             "deadline_seconds": 40, "stop": "owned server.shutdown/server_close in finally"}))
         environment = {"PATH": os.environ["PATH"], "HOME": str(root), "CODEX_HOME": str(home),
                        "NO_PROXY": "127.0.0.1,localhost", "TERM": "dumb"}
-        native = ('model="gpt-5.4"\nmodel_provider="fixture"\nmodel_reasoning_effort="low"\n'
+        model_name = "gpt-6-astra" if mode == "replace-apply" else "gpt-5.4"
+        native = (f'model="{model_name}"\nmodel_provider="fixture"\nmodel_reasoning_effort="low"\n'
                   'approval_policy="never"\nsandbox_mode="danger-full-access"\n'
                   '[model_providers.fixture]\nname="fixture"\nwire_api="responses"\n'
                   f'base_url="http://127.0.0.1:{port}/v1"\nrequires_openai_auth=false\nsupports_websockets=false\n'
-                  '[features]\ncode_mode=false\n')
+                  f'[features]\ncode_mode={str(mode == "replace-code-mode").lower()}\n')
+        if mode in ("replace-mcp", "replace-mcp-large", "replace-media"):
+            mcp_args = [str(Path(__file__).with_name("codex_mcp.py"))]
+            if mode == "replace-media":
+                mcp_args.append("media")
+            if mode == "replace-mcp-large":
+                mcp_args.append("large")
+            native += ('[mcp_servers.fixture]\n'
+                       f'command={json.dumps(sys.executable)}\n'
+                       f'args={json.dumps(mcp_args)}\n')
         if mode == "disabled":
             native += 'hooks=false\n'
         (home / "config.toml").write_text(native)
@@ -120,23 +134,32 @@ def case(args, mode):
                     {"type": "command", "command": f"{sys.executable} {rewrite}", "timeout": 3}]})
                 hooks.write_text(json.dumps(value))
                 installed = hooks.read_bytes()
+            if mode == "replace-peer":
+                value = json.loads(installed)
+                value["hooks"]["PostToolUse"].append({"matcher": ".*", "hooks": [
+                    {"type": "command", "command": "printf '{}'", "timeout": 3}]})
+                hooks.write_text(json.dumps(value))
+                installed = hooks.read_bytes()
             # This explicit native switch is restricted to our disposable, vetted fixture.
             if mode not in ("untrusted", "disabled"):
                 base.append("--dangerously-bypass-hook-trust")
             output = run(base + ["--", "Run the fixture tool exactly once."], workspace, environment, evidence,
-                         expected=1 if mode in ("untrusted", "disabled", "native-rewrite-required") else 0)
+                         expected=1 if mode in ("untrusted", "disabled", "native-rewrite-required",
+                                                "replace-peer", "replace-code-mode") else 0)
             assert hooks.read_bytes() == installed
             assert (home / "config.toml").read_text() == native
             assert not (workspace / "AW_MUST_NOT_EXIST").exists()
-            if mode in ("untrusted", "disabled", "native-rewrite-required"):
+            if mode in ("untrusted", "disabled", "native-rewrite-required", "replace-peer", "replace-code-mode"):
                 assert not model.requests
                 assert not state.exists()
                 if mode == "untrusted":
                     assert "trust" in output
                 elif mode == "disabled":
                     assert "disabled" in output
-                else:
+                elif mode == "native-rewrite-required":
                     assert "cannot share PreToolUse" in output
+                else:
+                    assert "result replacement requires" in output, output
             else:
                 if mode in ("prompt-deny", "offline"):
                     assert not model.requests
@@ -149,6 +172,46 @@ def case(args, mode):
                 if mode in ("allow", "after-failure"):
                     assert "AW_NATIVE_OUTPUT" in outputs and "AW_NATIVE_ERROR" in outputs, outputs
                     assert "Process exited with code 7" in outputs, outputs
+                    assert len(after) == 1
+                if mode in ("replace", "replace-apply", "replace-mcp", "replace-long"):
+                    assert model.outputs[-1:] == ["AW_REDACTED_RESULT"], model.outputs
+                    sent = [item["output"] for request in model.requests[1:]
+                            for item in request["input"] if item.get("type") in ("function_call_output", "custom_tool_call_output")]
+                    assert sent[-len(model.outputs):] == model.outputs, sent
+                    if mode in ("replace", "replace-apply", "replace-mcp"):
+                        assert sent == ["AW_REDACTED_RESULT"], sent
+                    if mode == "replace-long":
+                        assert "AW_LONG_DONE" not in json.dumps(sent), sent
+                    assert len(after) == 1
+                if mode == "replace-apply":
+                    assert (workspace / "AW_PATCHED").read_text() == "created\n"
+                if mode == "replace-mcp":
+                    assert after[0]["event"]["tool"]["name"] == "mcp__fixture__echo"
+                    assert "AW_MCP_ORIGINAL" not in json.dumps(model.requests)
+                if mode == "replace-mcp-large":
+                    assert model.outputs == ["AW result withheld"], model.outputs
+                    assert "AW_MCP_ORIGINAL" not in json.dumps(model.requests)
+                    assert not after, after
+                if mode == "replace-media":
+                    assert model.outputs == ["AW result withheld"], model.outputs
+                    assert after[0]["event"]["tool"].get("result_projection") is None
+                if mode == "replace-long":
+                    assert model.calls >= 2
+                if mode == "replace-parallel":
+                    delivered = {item["call_id"]: item["output"] for request in model.requests[1:]
+                                 for item in request["input"]
+                                 if item.get("type") == "function_call_output"}
+                    assert delivered == {"call_1": "AW_REDACTED_1", "call_2": "AW_REDACTED_2"}, delivered
+                    assert "AW_SECRET_A" not in json.dumps(delivered)
+                    assert "AW_SECRET_B" not in json.dumps(delivered)
+                    originals = {event["event"]["tool"]["call_id"]: event["event"]["tool"]["result_projection"]["text"]
+                                 for event in after}
+                    assert "AW_SECRET_A" in originals["call_1"] and "AW_SECRET_B" in originals["call_2"]
+                    assert len(after) == 2
+                if mode == "replace-failure":
+                    assert model.outputs == ["AW result withheld"], model.outputs
+                    assert [item["output"] for request in model.requests[1:]
+                            for item in request["input"] if item.get("type") == "function_call_output"] == model.outputs
                     assert len(after) == 1
                 if mode == "long":
                     assert "AW_LONG_DONE" in outputs, outputs
@@ -198,7 +261,7 @@ def main():
     version = subprocess.check_output([args.codex, "--version"], text=True, timeout=5).strip()
     assert version == "codex-cli 0.163.0", version
     results = []
-    for mode in ("untrusted", "disabled", "prompt-deny", "allow", "deny", "offline", "retry", "native-deny", "native-rewrite", "native-rewrite-deny", "native-rewrite-required", "after-failure", "long"):
+    for mode in ("untrusted", "disabled", "prompt-deny", "allow", "deny", "offline", "retry", "native-deny", "native-rewrite", "native-rewrite-deny", "native-rewrite-required", "after-failure", "long", "replace", "replace-failure", "replace-peer", "replace-code-mode", "replace-apply", "replace-mcp", "replace-mcp-large", "replace-media", "replace-long", "replace-parallel"):
         results.append(case(args, mode))
         print(f"Codex native {mode}: passed", flush=True)
     (args.output / "result.json").write_text(json.dumps({"version": version, "results": results}, indent=2))

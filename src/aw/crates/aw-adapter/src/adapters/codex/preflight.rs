@@ -61,6 +61,7 @@ pub(super) fn hooks(
     events: &[&str],
     bypass: bool,
     require_final_input: bool,
+    replacement: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
     if events.is_empty() {
@@ -100,6 +101,14 @@ pub(super) fn hooks(
     }
     if require_final_input && result["other_pre_tool_hooks"].as_u64() != Some(0) {
         return Err("required Codex tool.before cannot share PreToolUse with native Hooks that may rewrite checked input".into());
+    }
+    if replacement
+        && (result["code_mode"] != false || result["other_post_tool_hooks"].as_u64() != Some(0))
+    {
+        return Err(
+            "Codex result replacement requires code mode disabled and no other PostToolUse Hooks"
+                .into(),
+        );
     }
     for event in events {
         let matches = result["hooks"][*event]

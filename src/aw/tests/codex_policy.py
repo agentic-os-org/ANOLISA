@@ -12,14 +12,14 @@ if request["method"] == "describe":
         {"name": "scan_prompt", "events": ["input.submit"], "effects": ["observe", "block"]},
         {"name": "scan", "events": ["tool.before"], "effects": ["observe", "block"]},
         {"name": "retry", "events": ["tool.before"], "effects": ["observe", "block"]},
-        {"name": "record", "events": ["tool.after"], "effects": ["observe"]},
+        {"name": "record", "events": ["tool.after"], "effects": ["observe", "replace_result"]},
     ]
 elif request["method"] == "invoke":
     with Path(path).open("a") as stream:
         stream.write(json.dumps(request) + "\n")
     op = request["operation"]
     command = request["event"]["tool"]["input"].get("command", "") if op != "scan_prompt" else ""
-    if mode == "offline" or (mode == "after-failure" and op == "record"):
+    if mode == "offline" or (mode in ("after-failure", "replace-failure") and op == "record"):
         sys.exit(1)
     reply["input_digest"] = request["input_digest"]
     reply["effects"] = [{"type": "observe", "reason_code": "observed"}]
@@ -30,4 +30,11 @@ elif request["method"] == "invoke":
     if op == "retry" and mode == "retry" and "ORIGINAL" in command:
         reply["effects"] = [{"type": "block", "reason_code": "tokenless_retry",
                              "text": "Retry with printf CANDIDATE > AW_MUST_NOT_EXIST"}]
+    if op == "record" and (mode in ("replace", "replace-apply", "replace-mcp", "replace-parallel")
+                           or (mode == "replace-long" and "AW_LONG_DONE" in
+                               request["event"]["tool"].get("result_projection", {}).get("text", ""))):
+        text = "AW_REDACTED_RESULT"
+        if mode == "replace-parallel":
+            text = "AW_REDACTED_" + request["event"]["tool"]["call_id"][-1].upper()
+        reply["effects"] = [{"type": "replace_result", "text": text}]
 print(json.dumps(reply))

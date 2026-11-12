@@ -37,9 +37,29 @@ AW 在同一 Codex home 内串行安装。更新已有 Hook 文件时，将被�
 `tool.before` 标为必需时，AW 在启动前拒绝其他原生 PreToolUse Hook。
 Codex 可能在 AW 检查原始输入后执行其他 Hook 改写的参数。若未标为必需，
 已有 PreToolUse Hook 可改写实际执行参数；AW 的检查仅对应原始输入。
-PostToolUse 记录完成事件；Codex 0.163.0 没有受支持的结果替换入口，AW 因此拒绝
-`replace_result`，无法在 Codex 消费工具结果前对其脱敏。需要输出 PII 控制时，
-应在原生工具或其他可强制执行的边界实现。
+PostToolUse 记录完成事件。Codex 0.163.0 可让最后一个 Provider 步骤返回
+`replace_result`，替换普通模型请求中的文本。该步骤需配置 `on_error: withhold_result`；
+Provider 失败或 Hook 结果缺少受支持的文本投影时，AW 返回固定 withheld 文本。已绑定的
+PostToolUse Hook 在回调准备失败时也会交付 withheld；超过 1 MiB 的 Hook 输入会在进入
+Provider 扫描前触发这一处理。
+启用替换时，启动准入拒绝 Code Mode 和其他 PostToolUse Hook。sec-core 示例仍为观察模式；
+可选的输出 PII 步骤使用 `scan_tool_output`、`effects: [observe, replace_result]` 和
+`pii.output_mode: replace_result`。
+
+复制示例配置，将 `spec.providers.security.config.pii.output_mode` 设为
+`replace_result`，并在 `spec.events.tool.after.steps` 末尾追加：
+
+```yaml
+- id: output-pii
+  provider: security
+  operation: scan_tool_output
+  effects: [observe, replace_result]
+  on_error: withhold_result
+```
+
+这一版本专属行为会把原生 Hook 标记为 stopped。Code Mode、未触发 PostToolUse 的工具失败、
+策略前结果捕获、遥测、终端流式输出和原生 Hook 命令失败仍不受保护。MCP 结构化结果在普通
+模型请求中转成替换文本。需要完整的输出交付保护时，应在原生工具或其他可强制执行的边界实现。
 
 准入入口为新建本地 TUI 和 `codex exec`。AW 拒绝恢复、分叉、远程模式、工作目录、
 配置覆盖和未知参数，因为这些操作可能改变已检查的 Hook 清单或会话边界。

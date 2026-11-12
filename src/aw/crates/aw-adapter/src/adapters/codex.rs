@@ -55,11 +55,25 @@ impl Adapter for Codex {
                             .is_some_and(|steps| !steps.is_empty()))
             })
             .collect();
+        let replacement = input.document["spec"]["events"]["tool.after"]["enabled"] == true
+            && input.document["spec"]["events"]["tool.after"]["steps"]
+                .as_array()
+                .is_some_and(|steps| {
+                    steps.iter().any(|step| {
+                        step["effects"].as_array().is_some_and(|effects| {
+                            effects.iter().any(|effect| effect == "replace_result")
+                        })
+                    })
+                });
+        if replacement && version != "0.163.0" {
+            return Err("Codex native result replacement is verified only on 0.163.0".into());
+        }
         preflight::hooks(
             &input.command,
             &events,
             invocation.bypass_hook_trust,
             input.document["spec"]["events"]["tool.before"]["required"] == true,
+            replacement,
             cancelled,
         )?;
         Ok(Box::new(Prepared {
@@ -129,10 +143,14 @@ impl Adapter for Codex {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        adapter::catalog::CODEX.capabilities(
+        let mut capabilities = adapter::catalog::CODEX.capabilities(
             &self.version,
             if self.invocation.exec { "exec" } else { "tui" },
-        )
+        );
+        capabilities
+            .failure_actions
+            .insert("tool.after".into(), vec!["withhold_result".into()]);
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -141,6 +159,12 @@ impl PreparedLaunch for Prepared {
             .any(|step| matches!(step.execution, StepExecution::Native))
         {
             return Err("Codex AW chains accept boolean Hooks or Providers; keep native Hooks in Codex configuration".into());
+        }
+        if steps
+            .iter()
+            .any(|step| step.execution.replaces_result() && step.on_error != "withhold_result")
+        {
+            return Err("Codex result replacement requires on_error: withhold_result".into());
         }
         routes(&self.input, steps)?;
         Ok(())
@@ -220,7 +244,10 @@ fn routes(
             event.into(),
             HookEvent {
                 budget_ms: budget,
-                replacement_step: None,
+                replacement_step: selected
+                    .iter()
+                    .find(|step| step.replaces_result)
+                    .map(|step| step.step_id.clone()),
                 steps: selected
                     .into_iter()
                     .map(|s| (s.step_id, s.on_error))

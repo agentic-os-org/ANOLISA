@@ -128,7 +128,7 @@ pub(crate) const CODEX: Profile = Profile {
     events: &[
         ("input.submit", &["observe", "block"]),
         ("tool.before", &["observe", "block"]),
-        ("tool.after", &["observe"]),
+        ("tool.after", &["observe", "replace_result"]),
     ],
 };
 

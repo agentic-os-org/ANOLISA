@@ -12,7 +12,7 @@ if request["method"] == "describe":
         {"name": "scan_prompt", "events": ["input.submit"], "effects": ["observe", "block"]},
         {"name": "scan", "events": ["tool.before"], "effects": ["observe", "block"]},
         {"name": "retry", "events": ["tool.before"], "effects": ["observe", "block"]},
-        {"name": "record", "events": ["tool.after"], "effects": ["observe"]},
+        {"name": "record", "events": ["tool.after"], "effects": ["observe", "replace_result"]},
     ]
 elif request["method"] == "invoke":
     op = request["operation"]
@@ -33,4 +33,6 @@ elif request["method"] == "invoke":
         reply["effects"] = [{"type": "block", "reason_code": "security_denied"}]
     elif op == "retry" and mode == "retry":
         reply["effects"] = [{"type": "block", "reason_code": "tokenless_retry", "text": "Retry with rtk candidate"}]
+    elif op == "record" and mode == "replace":
+        reply["effects"] = [{"type": "replace_result", "text": "AW_REDACTED_RESULT"}]
 print(json.dumps(reply))

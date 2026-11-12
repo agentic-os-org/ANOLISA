@@ -6,14 +6,14 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 
 ## Hook support matrix
 
-✓ Declared with contract coverage; × unsupported. Result replacement is limited to authorized text slots and preserves native envelopes and failure status.
+✓ Declared with contract coverage; × unsupported. Most Adapters replace authorized text slots while preserving native envelopes and failure status. Codex has a narrower model-text contract described below.
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `codex` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -24,9 +24,10 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
-Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 supports
-submission and pre-tool denial, while its PostToolUse Hook is observe-only; see
-the [Codex guide](../../../developer-guide/en/aw/agents/codex.md). See each Agent
+Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 can
+replace ordinary model-visible text through PostToolUse with Code Mode disabled
+and no peer PostToolUse Hooks; this does not protect prior capture, telemetry or
+Hook failures. See the [Codex guide](../../../developer-guide/en/aw/agents/codex.md). See each Agent
 page for result types and callback limits.
 Required Codex `tool.before` rejects other native PreToolUse Hooks because they
 can rewrite arguments after AW checks them. Optional checks cover original input.
