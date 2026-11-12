@@ -191,7 +191,17 @@ pub fn extract_usage_object(
                 .or_else(|| usage.get("thoughts_token_count"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            (input, output.saturating_add(thoughts))
+            // Tool execution prompts are a separate input counter, unlike
+            // cachedContentTokenCount, which is a subset of promptTokenCount.
+            let tool_prompt = usage
+                .get("toolUsePromptTokenCount")
+                .or_else(|| usage.get("tool_use_prompt_token_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            (
+                input.saturating_add(tool_prompt),
+                output.saturating_add(thoughts),
+            )
         }
         LLMProvider::DashScope => {
             // Native protocol reuses Anthropic's field names.
