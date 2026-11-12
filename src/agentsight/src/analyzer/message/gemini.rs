@@ -302,7 +302,8 @@ pub struct GeminiUsageMetadata {
 /// empty-response behaviour instead of being recorded as a success.
 fn safety_prompt_block_reason(body: &serde_json::Value) -> Option<&str> {
     /// Gemini's `BlockReason` values that name a safety policy.
-    const SAFETY_BLOCK_REASONS: &[&str] = &["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"];
+    const SAFETY_BLOCK_REASONS: &[&str] =
+        &["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "IMAGE_SAFETY"];
     body.pointer("/promptFeedback/blockReason")
         .and_then(serde_json::Value::as_str)
         .filter(|reason| {
@@ -696,6 +697,11 @@ mod tests {
         let bare = serde_json::json!({"promptFeedback": {"blockReason": "BLOCKLIST"}});
         let response = GeminiParser::parse_response(&bare).expect("a bare prompt block must parse");
         assert_eq!(response.finish_reason(), Some("BLOCKLIST"));
+
+        let image = serde_json::json!({"promptFeedback": {"blockReason": "IMAGE_SAFETY"}});
+        let response =
+            GeminiParser::parse_response(&image).expect("an image safety block must parse");
+        assert_eq!(response.finish_reason(), Some("IMAGE_SAFETY"));
 
         let chunks = serde_json::json!([
             {"promptFeedback": {"blockReason": "SAFETY"}},
