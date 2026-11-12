@@ -60,6 +60,10 @@ pub struct SubagentTrajectoryRef {
 /// merely mentions "error".
 pub const EXTRA_IS_ERROR: &str = "is_error";
 
+/// Marks a system step as the complete prompt for the next request, replacing
+/// prior system instructions. Unmarked system steps remain additive messages.
+pub const EXTRA_SYSTEM_PROMPT_SNAPSHOT: &str = "system_prompt_snapshot";
+
 /// The outcome a tool-result envelope declares, when it declares one.
 ///
 /// Providers disagree about how to spell the out-of-band failure flag: Anthropic

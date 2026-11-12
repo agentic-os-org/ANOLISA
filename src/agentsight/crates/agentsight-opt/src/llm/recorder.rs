@@ -342,7 +342,10 @@ impl TrajectoryRecorder {
                 tool_calls: None,
                 observation: None,
                 metrics: None,
-                extra: None,
+                extra: Some(HashMap::from([(
+                    agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT.to_string(),
+                    serde_json::Value::Bool(true),
+                )])),
                 llm_call_count: None,
                 is_copied_context: None,
             });

@@ -22,6 +22,13 @@ use crate::storage::sqlite::genai::TraceEventDetail;
 
 /// Build a plain text step (system prompt or user query) with no agent payload.
 fn text_step(step_id: usize, source: StepSource, timestamp_ns: i64, message: String) -> Step {
+    // Native export concatenates the request's full system instructions.
+    let extra = matches!(source, StepSource::System).then(|| {
+        HashMap::from([(
+            agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT.to_string(),
+            serde_json::Value::Bool(true),
+        )])
+    });
     Step {
         step_id,
         source,
@@ -33,7 +40,7 @@ fn text_step(step_id: usize, source: StepSource, timestamp_ns: i64, message: Str
         tool_calls: None,
         observation: None,
         metrics: None,
-        extra: None,
+        extra,
         llm_call_count: None,
         is_copied_context: None,
     }
