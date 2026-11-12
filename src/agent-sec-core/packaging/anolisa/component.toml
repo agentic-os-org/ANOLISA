@@ -75,6 +75,12 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
+source = "bin/asc-sandbox-docker-guard"
+target = "{bindir}/asc-sandbox-docker-guard"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
 source = "bin/agent-sec-python"
 target = "{bindir}/agent-sec-python"
 mode = "0755"
