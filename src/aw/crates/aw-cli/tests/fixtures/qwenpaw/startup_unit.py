@@ -447,23 +447,35 @@ def install_guard(*, build=None):
             config = root / "config.json"
             config.write_text("{}")
             config.chmod(0o600)
-            arguments = ["launch.py", "/venv/bin/qwenpaw", "/owned", "app", "--port", "8096"]
+            program = root / "venv with spaces/bin/qwenpaw"
+            program.parent.mkdir(parents=True)
+            output = root / "context.json"
+            program.write_text(
+                "import json, sys\nfrom pathlib import Path\n"
+                f"Path({str(output)!r}).write_text(json.dumps([sys.argv, sys.path[0]]))\n"
+            )
+            link = root / "linked-console"
+            link.symlink_to(program)
             old_path = sys.path.copy()
+            expected_path = old_path[0] if sys.flags.safe_path else str(program.parent)
             try:
-                with patch.dict(os.environ, AW_NATIVE_CONFIG=str(config)), patch.object(
-                    sys, "argv", arguments
-                ), patch.object(LAUNCH, "install") as install, patch.object(
-                    LAUNCH.runpy, "run_path"
-                ) as run:
-                    def check_native_context(*_):
-                        self.assertEqual(sys.argv, ["/venv/bin/qwenpaw", "app", "--port", "8096"])
-                        self.assertEqual(sys.path[0], "/venv/bin")
-                    install.side_effect = check_native_context
-                    LAUNCH.main()
-                    install.assert_called_once_with(Path("/owned"), {})
-                    run.assert_called_once_with("/venv/bin/qwenpaw", run_name="__main__")
-                    self.assertEqual(sys.argv, ["/venv/bin/qwenpaw", "app", "--port", "8096"])
-                    self.assertEqual(sys.path[0], "/venv/bin")
+                for console in (program, link):
+                    arguments = ["launch.py", str(console), "/owned", "app", "--port", "8096"]
+                    with patch.dict(os.environ, AW_NATIVE_CONFIG=str(config)), patch.object(
+                        sys, "argv", arguments
+                    ), patch.object(LAUNCH, "install") as install, patch.object(
+                        LAUNCH.runpy, "run_path", wraps=LAUNCH.runpy.run_path
+                    ) as run:
+                        def check_native_context(*_):
+                            self.assertEqual(sys.argv, [str(console), "app", "--port", "8096"])
+                            self.assertEqual(sys.path[0], expected_path)
+                        install.side_effect = check_native_context
+                        LAUNCH.main()
+                        install.assert_called_once_with(Path("/owned"), {})
+                        run.assert_called_once_with(str(console), run_name="__main__")
+                        self.assertEqual(json.loads(output.read_text()), [
+                            [str(console), "app", "--port", "8096"], expected_path,
+                        ])
             finally:
                 sys.path[:] = old_path
 

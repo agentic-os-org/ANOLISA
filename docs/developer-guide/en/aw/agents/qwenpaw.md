@@ -11,7 +11,8 @@ with its compatible dependencies and initialize its model configuration through
 QwenPaw. AW records the installed version and checks the plugin, middleware and
 native task lifecycle interfaces for other releases. The example uses `argv: [qwenpaw, app]`. Set
 `QWENPAW_WORKING_DIR` to the existing initialized absolute directory. Ordinary
-launches through a recognized absolute Python console script register AW through
+launches through recognized absolute pip/uv console scripts, including uv relocatable
+entrypoints, register AW through
 the native Registry from a private temporary package. This avoids the filesystem
 plugin loader's module sweep and leaves the workspace plugin directory untouched.
 AW owns this integration and its cleanup; it does not appear in QwenPaw's
@@ -79,9 +80,11 @@ An ordinary configuration with no Providers or event steps still installs
 resident admission and cleanup middleware.
 The shared sec-core Provider also supports [Skill validation before loading](../providers/sec-core.md#validate-skills-before-loading). Configure `check_skill` on `tool.before` for the native `Skill` tool and authorize its canonical source directories in the daemon.
 
-Recognized absolute Python console scripts read the installed literal version
-with their own interpreter and import path, without importing QwenPaw's App
-configuration. Custom entrypoints and nonliteral versions retain the native
+AW recognizes standard CLI entrypoints by Python syntax, allowing installer comments,
+quote styles and formatting. UV relocatable entrypoints use the interpreter beside
+the resolved console script. Probing and managed startup share this recognition
+result. Literal installed versions use the same interpreter and import path without
+importing App configuration. Custom entrypoints and nonliteral versions retain the native
 `--version` probe within the same five-second budget. Native Hook installation
 and readiness checks retain the native interfaces. Managed console
 launches execute the original script in the same interpreter and process, with

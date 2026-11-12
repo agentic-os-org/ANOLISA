@@ -174,14 +174,13 @@ impl Adapter for QwenPaw {
                 );
             }
         }
-        let output = probe::version(&input.command, cancelled)?;
+        let (output, interpreter) = probe::inspect(&input.command, cancelled)?;
         let version = crate::version::reported(
             output
                 .strip_prefix("QwenPaw, version ")
                 .ok_or("QwenPaw --version must identify QwenPaw and its version")?,
             "QwenPaw",
         )?;
-        let interpreter = probe::interpreter(&input.command.program);
         Ok(Box::new(Prepared {
             input,
             version,
