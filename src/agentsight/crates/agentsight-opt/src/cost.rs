@@ -246,8 +246,7 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
     let mut findings = Vec::new();
 
     // Per-step replay model: the token flame chart data.
-    let system_tokens = estimate_tokens_from_chars(system_chars);
-    let mut calls = compute_llm_calls(trajectory, system_tokens);
+    let mut calls = compute_llm_calls(trajectory);
     let model = trajectory.model_name();
 
     // Degraded capture: the replay model is built from user/system bytes only,
@@ -522,13 +521,29 @@ impl CallBuilder {
 /// Walk ATIF steps and compute the replay breakdown. Each agent step is one
 /// LLM call; its observation (tool results) becomes replayed tool history for
 /// the following steps.
-fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall> {
+fn compute_llm_calls(traj: &AtifTrajectory) -> Vec<LlmCall> {
     let origin = traj.origin_ts().unwrap_or_default();
-    let mut b = CallBuilder::new(origin, static_region);
+    let mut b = CallBuilder::new(origin, 0);
     let mut user_turn = 0usize;
+    let mut system_chars = 0usize;
 
     for step in &traj.steps {
         match step.source.as_str() {
+            "system" => {
+                // Only producer-declared snapshots replace earlier messages.
+                // Plain ATIF system messages can add instructions mid-session.
+                if step
+                    .extra
+                    .as_ref()
+                    .and_then(|extra| extra.get(agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    system_chars = 0;
+                }
+                system_chars += step.message.as_deref().unwrap_or("").chars().count();
+                b.static_region = estimate_tokens_from_chars(system_chars);
+            }
             "agent" => {
                 let mut turn_output = 0usize;
                 if let Some(r) = step.reasoning_content.as_deref() {
@@ -584,7 +599,7 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                 user_turn += 1;
                 b.hist_user += estimate_tokens(step.message.as_deref().unwrap_or(""));
             }
-            _ => {} // system steps feed the static region, already injected
+            _ => {}
         }
         // Replayed context can carry observations on a user step when the
         // issuing call predates the captured conversation.
