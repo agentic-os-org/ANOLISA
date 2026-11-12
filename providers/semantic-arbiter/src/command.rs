@@ -43,6 +43,16 @@ enum Token {
     Op(&'static str),
 }
 
+/// How a simple command shifts the base directory for later relative paths.
+enum DirChange {
+    /// Leaves the base unchanged.
+    None,
+    /// Returns to the verified workspace root, so the base stays known.
+    Root,
+    /// Moves somewhere the lexer cannot verify; later relative paths are unknown.
+    Unknown,
+}
+
 const SEPARATORS: &[&str] = &[";", "&", "&&", "||", "|", "|&"];
 const OPERATORS: &[&str] = &[
     "<<<", "<<-", "&>>", ";;", "&&", "||", "|&", ">>", ">|", "<<", "<>", ">&", "<&", "&>", ";",
@@ -123,8 +133,9 @@ const FIND_ACTIONS: &[&str] = &[
     "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls",
 ];
 
-/// Analyzes one command line; malformed quoting marks the whole line unresolved.
-pub(crate) fn analyze(command: &str) -> Analysis {
+/// Analyzes one command line against the workspace root; malformed quoting
+/// marks the whole line unresolved.
+pub(crate) fn analyze(command: &str, workspace: &str) -> Analysis {
     let Some((tokens, substitution)) = lex(command) else {
         return Analysis {
             targets: vec![],
@@ -141,7 +152,11 @@ pub(crate) fn analyze(command: &str) -> Analysis {
         match token {
             Token::Op(op) if SEPARATORS.contains(&op) => {
                 let words = redirections(std::mem::take(&mut segment), base_unknown, &mut analysis);
-                base_unknown |= simple(&words, base_unknown, &mut analysis);
+                match simple(&words, base_unknown, workspace, &mut analysis) {
+                    DirChange::None => {}
+                    DirChange::Root => base_unknown = false,
+                    DirChange::Unknown => base_unknown = true,
+                }
             }
             other => segment.push(other),
         }
@@ -183,8 +198,13 @@ fn redirections(tokens: Vec<Token>, base_unknown: bool, analysis: &mut Analysis)
     words
 }
 
-/// Analyzes one simple command; returns whether it changes the working directory.
-fn simple(words: &[Word], base_unknown: bool, analysis: &mut Analysis) -> bool {
+/// Analyzes one simple command; reports how it shifts the base directory.
+fn simple(
+    words: &[Word],
+    base_unknown: bool,
+    workspace: &str,
+    analysis: &mut Analysis,
+) -> DirChange {
     let mut args = words;
     loop {
         while args.first().is_some_and(assignment) {
@@ -194,7 +214,7 @@ fn simple(words: &[Word], base_unknown: bool, analysis: &mut Analysis) -> bool {
             Some(word) if !word.dynamic && WRAPPERS.contains(&word.text.as_str()) => {
                 if args.get(1).is_some_and(|next| next.text.starts_with('-')) {
                     analysis.unresolved = true;
-                    return false;
+                    return DirChange::None;
                 }
                 args = &args[1..];
             }
@@ -202,17 +222,25 @@ fn simple(words: &[Word], base_unknown: bool, analysis: &mut Analysis) -> bool {
         }
     }
     let Some((program, rest)) = args.split_first() else {
-        return false;
+        return DirChange::None;
     };
     if program.dynamic {
         analysis.unresolved = true;
-        return false;
+        return DirChange::None;
     }
     let name = program.text.rsplit('/').next().unwrap_or_default();
     let mut add =
         |operation, word: &Word, tree| push(analysis, operation, word, tree, base_unknown);
     match name {
-        "cd" | "pushd" | "popd" => return true,
+        // Only a return to the verified root keeps the base known; an absolute
+        // cd there succeeds from any cwd, so it also recovers after a prior cd.
+        "cd" => {
+            return match rest {
+                [word] if !word.dynamic && is_root(&word.text, workspace) => DirChange::Root,
+                _ => DirChange::Unknown,
+            };
+        }
+        "pushd" | "popd" => return DirChange::Unknown,
         "rm" | "unlink" | "rmdir" => {
             let tree = name == "rm" && flagged(rest, &["-r", "-R", "--recursive"], "rR");
             operands(rest, &[]).for_each(|word| add(Operation::Delete, word, tree));
@@ -228,7 +256,9 @@ fn simple(words: &[Word], base_unknown: bool, analysis: &mut Analysis) -> bool {
             operands(rest, &["-s", "-r", "--size", "--reference"])
                 .for_each(|word| add(Operation::Replace, word, false));
         }
-        "cp" | "mv" | "ln" => return transfer(name == "mv", rest, base_unknown, analysis),
+        "cp" | "mv" | "ln" => {
+            transfer(name == "mv", rest, base_unknown, analysis);
+        }
         "sed" => sed(rest, base_unknown, analysis),
         "sort" => sort(rest, base_unknown, analysis),
         "find" => {
@@ -241,9 +271,10 @@ fn simple(words: &[Word], base_unknown: bool, analysis: &mut Analysis) -> bool {
         }
         "git" => git(rest, base_unknown, analysis),
         _ if READ_ONLY.contains(&name) => {}
+        _ if is_version_query(rest) => {}
         _ => analysis.unresolved = true,
     }
-    false
+    DirChange::None
 }
 
 fn transfer(moves: bool, rest: &[Word], base_unknown: bool, analysis: &mut Analysis) -> bool {
@@ -365,12 +396,21 @@ fn sort(rest: &[Word], base_unknown: bool, analysis: &mut Analysis) {
 
 fn git(rest: &[Word], base_unknown: bool, analysis: &mut Analysis) {
     let mut index = 0;
+    let mut tree_relocated = false;
     while let Some(word) = rest.get(index) {
         match word.text.as_str() {
             "-c" => index += 2,
             "--no-pager" | "--no-optional-locks" | "-P" => index += 1,
+            "-C" | "--git-dir" | "--work-tree" => {
+                tree_relocated = true;
+                index += 2;
+            }
+            "--version" | "--help" => return,
+            text if text.starts_with("--git-dir=") || text.starts_with("--work-tree=") => {
+                tree_relocated = true;
+                index += 1;
+            }
             _ if word.text.starts_with('-') => {
-                // `-C`, `--git-dir` and `--work-tree` move the effective tree.
                 analysis.unresolved = true;
                 return;
             }
@@ -384,10 +424,18 @@ fn git(rest: &[Word], base_unknown: bool, analysis: &mut Analysis) {
         analysis.unresolved = true;
         return;
     }
+    // Read-only subcommands name no write target, so a relocated tree cannot
+    // misattribute anything; a mutating one cannot be attributed once the tree moves.
+    if GIT_READ_ONLY.contains(&command.text.as_str()) {
+        return;
+    }
+    if tree_relocated {
+        analysis.unresolved = true;
+        return;
+    }
     let mut add =
         |operation, word: &Word, tree| push(analysis, operation, word, tree, base_unknown);
     match command.text.as_str() {
-        name if GIT_READ_ONLY.contains(&name) => {}
         "rm" => {
             if !flagged(rest, &["--cached"], "") {
                 let tree = flagged(rest, &["-r"], "r");
@@ -455,6 +503,36 @@ fn assignment(word: &Word) -> bool {
             && !name.starts_with(|c: char| c.is_ascii_digit())
             && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     })
+}
+
+/// A lone version/help query prints and exits; no operand can name a write target.
+fn is_version_query(rest: &[Word]) -> bool {
+    match rest {
+        [word] => {
+            !word.dynamic && matches!(word.text.as_str(), "--version" | "--help" | "-V" | "-h")
+        }
+        _ => false,
+    }
+}
+
+/// Whether a cd destination is lexically the workspace root itself.
+///
+/// `..` and relative forms stay unknown: their landing depends on filesystem
+/// state the lexer never reads, so only an absolute path equal to the verified
+/// root can keep the base known.
+fn is_root(text: &str, workspace: &str) -> bool {
+    if !text.starts_with('/') {
+        return false;
+    }
+    let mut parts = vec![];
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return false,
+            other => parts.push(other),
+        }
+    }
+    format!("/{}", parts.join("/")) == workspace
 }
 
 /// Whether any option is present as a long form or inside a short cluster.

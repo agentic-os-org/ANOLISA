@@ -201,9 +201,10 @@ fn file_change(
 /// A recursive target also changes each preserved resource below it, so the
 /// gate blocks it without the model. A target the lexer cannot attribute
 /// (scripts, interpreters, unlisted programs, substitutions, variables, the
-/// workspace itself, or a relative path after `cd` or under another
-/// `dir_path`) becomes `command:unresolved`, which the model judges from the
-/// full call; under a declared allowance it is outside scope unless listed.
+/// workspace itself, or a relative path after a `cd` to anywhere but the
+/// workspace root or under another `dir_path`) becomes `command:unresolved`,
+/// which the model judges from the full call; under a declared allowance it is
+/// outside scope unless listed.
 fn command_changes(
     input: &Value,
     mapping: &CommandMapping,
@@ -228,7 +229,7 @@ fn command_changes(
         Some(Value::String(dir)) => dir.trim_end_matches('/') != workspace,
         Some(_) => return Err("unsupported_input"),
     };
-    let analysis = command::analyze(text);
+    let analysis = command::analyze(text, workspace);
     let mut changes = vec![];
     for target in analysis.targets {
         let operation = target.operation;
