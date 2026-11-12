@@ -206,7 +206,16 @@ fn run_fixture(case: &str, interactive: bool) -> String {
             .env("COSH_PROMPT_MODE", parts[2]);
         let failure = "; __round=1; false";
         let setup = "builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" setup";
-        let mut lines = if parts[0] == "registered" {
+        let mut lines = if parts[1] == "retreat" {
+            vec![
+                format!("{setup}\n"),
+                "builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" retreat\n"
+                    .to_string(),
+                "false\n".to_string(),
+                "builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" check\n"
+                    .to_string(),
+            ]
+        } else if parts[0] == "registered" {
             vec![format!("{setup}{failure}\n")]
         } else {
             vec![format!("{setup}\n"), format!("builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash\" configure{failure}\n")]
@@ -853,4 +862,25 @@ fn chld_trap_changes_retire_the_observer_after_the_first_detection_window() {
         assert_eq!(observation(&candidate), observation(&baseline), "{phase}");
         assert_eq!(observation(&candidate), "OBS_CARGO:101:101", "{phase}");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lost_prompt_slot_overwrite_stops_recording() {
+    let output = run_fixture("hook_prompt_active_retreat_overwrite", true);
+    assert!(output.contains("HOOK_RETREAT_OK"), "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lost_prompt_slot_delete_stops_recording() {
+    let output = run_fixture("hook_prompt_active_retreat_delete", true);
+    assert!(output.contains("HOOK_RETREAT_OK"), "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lost_prompt_slot_readonly_stops_recording() {
+    let output = run_fixture("hook_prompt_active_retreat_readonly", true);
+    assert!(output.contains("HOOK_RETREAT_OK"), "{output}");
 }

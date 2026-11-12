@@ -232,7 +232,12 @@ if [[ $__cosh_hook_trusted == 1 ]]; then __cosh_hook_status "$__cosh_hook_saved"
 else ( if [[ :$SHELLOPTS: == *:posix:* ]] || { POSIXLY_CORRECT=1 && [[ :$SHELLOPTS: == *:posix:* ]]; }; then \exit "$__cosh_hook_saved"; else ((__cosh_hook_saved == 0)); fi ) 2>/dev/null; fi && [[ 1 ]]'
 __cosh_hook_boot_entry=$__cosh_hook_entry
 __cosh_hook_prompt_entry=$__cosh_hook_entry
-__cosh_hook_err_action='__cosh_hook_event_status=$? __cosh_hook_event_command=${BASH_COMMAND:0:1025} __cosh_hook_event_pipe_count=${#PIPESTATUS[@]} __cosh_hook_event_subshell=$BASH_SUBSHELL __cosh_hook_event_functions=${#FUNCNAME[@]} __cosh_hook_event_sources=${#BASH_SOURCE[@]} __cosh_hook_event_flags=$- __cosh_hook_event_time=$EPOCHREALTIME __cosh_hook_event_cwd=${PWD:0:4097} 2>/dev/null'
+__cosh_hook_err_action='__cosh_hook_err_status=$? __cosh_hook_err_pipe_count=${#PIPESTATUS[@]} 2>/dev/null
+case ${__cosh_hook_slot-} in [0-7])
+if [[ ${__cosh_hook_active-} == 1 && -n ${__cosh_hook_entry-} && ${PROMPT_COMMAND[$__cosh_hook_slot]-} == "$__cosh_hook_entry" ]]; then
+    __cosh_hook_event_status=$__cosh_hook_err_status __cosh_hook_event_command=${BASH_COMMAND:0:1025} __cosh_hook_event_pipe_count=$__cosh_hook_err_pipe_count __cosh_hook_event_subshell=$BASH_SUBSHELL __cosh_hook_event_functions=${#FUNCNAME[@]} __cosh_hook_event_sources=${#BASH_SOURCE[@]} __cosh_hook_event_flags=$- __cosh_hook_event_time=$EPOCHREALTIME __cosh_hook_event_cwd=${PWD:0:4097} 2>/dev/null
+fi
+;; esac'
 __cosh_hook_definitions=$("${__cosh_hook_ops[@]}" declare -f __cosh_hook_clock __cosh_hook_call __cosh_hook_guard __cosh_hook_retreat __cosh_hook_boot __cosh_hook_prompt __cosh_hook_status)
 __cosh_hook_options=$("${__cosh_hook_ops[@]}" set +o; "${__cosh_hook_ops[@]}" shopt -p)
 if __cosh_hook_call compat registration 2>/dev/null && [[ ${__cosh_hook_response[1]} == SHOW &&
