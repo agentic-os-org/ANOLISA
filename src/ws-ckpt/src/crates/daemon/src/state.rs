@@ -1155,8 +1155,9 @@ impl DaemonState {
     pub fn rearm_watcher(&self, ws_id: &str, registration_path: &Path) -> bool {
         match WorkspaceWatcher::start(registration_path) {
             Ok(watcher) => {
+                let covered = !watcher.is_degraded();
                 self.register_watcher(ws_id.to_string(), watcher);
-                true
+                covered
             }
             Err(e) => {
                 warn!(
@@ -1166,6 +1167,31 @@ impl DaemonState {
                 false
             }
         }
+    }
+
+    /// Swap the live tree with its old descriptors released. The pause
+    /// restores coverage on both success and failure, before callers handle
+    /// the backend result or update the index.
+    pub(crate) async fn rollback_with_watcher(
+        &self,
+        ws_id: &str,
+        registration_path: &Path,
+        snapshot_id: &str,
+        pause: crate::fs_watcher::RollbackWatchPause,
+    ) -> anyhow::Result<PathBuf> {
+        let result = self.backend.rollback(ws_id, snapshot_id).await;
+        drop(pause);
+        // Preserve the existing opportunity to install a watcher for a
+        // workspace whose initial registration failed.
+        if result.is_ok()
+            && self
+                .watchers
+                .lock()
+                .is_ok_and(|watchers| !watchers.contains_key(ws_id))
+        {
+            self.rearm_watcher(ws_id, registration_path);
+        }
+        result
     }
 
     /// True when the stored watch targets the inode currently behind the
@@ -1223,6 +1249,13 @@ impl DaemonState {
         ws_id: &str,
         registration_path: Option<&Path>,
     ) -> Quiescence {
+        if self.watchers.lock().is_ok_and(|watchers| {
+            watchers
+                .get(ws_id)
+                .is_some_and(WorkspaceWatcher::rollback_paused)
+        }) {
+            return Quiescence::MonitoringUnavailable;
+        }
         // Defense in depth: rollback re-arms the watch proactively, but any
         // other path that replaced the live subvolume (or a failed re-arm)
         // would leave the watch on a dead inode — indistinguishable from a
@@ -1290,7 +1323,7 @@ impl DaemonState {
             };
             // Monitoring is unavailable: quiescence cannot be established.
             if degraded {
-                return Quiescence::Writing;
+                return Quiescence::MonitoringUnavailable;
             }
             // A walk pauses delivery for the shared instance, so the
             // watermark may stay stale only because its events are still
@@ -2872,6 +2905,168 @@ mod tests {
         std::fs::create_dir(&live).unwrap();
         std::fs::write(live.join("canary"), "new subvolume").unwrap();
         std::fs::remove_dir_all(&aside).unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlapping_rollback_pauses_restore_coverage_after_the_last_swap() {
+        let (_root, state, parent) = watcher_fixture();
+        let child = parent.join("child");
+        std::fs::create_dir(&child).unwrap();
+        for (id, path) in [("ws", &parent), ("child", &child)] {
+            state.register_watcher(id.to_string(), WorkspaceWatcher::start(path).unwrap());
+        }
+
+        let parent_pause = WorkspaceWatcher::pause_for_rollback(&parent).unwrap();
+        let child_pause = WorkspaceWatcher::pause_for_rollback(&child).unwrap();
+        drop(parent_pause);
+        for (id, path) in [("ws", &parent), ("child", &child)] {
+            assert!(!state.has_watcher(id));
+            assert_eq!(
+                state.check_workspace_quiescent(id, Some(path)).await,
+                Quiescence::MonitoringUnavailable
+            );
+        }
+
+        drop(child_pause);
+        assert!(state.has_watcher("ws"));
+        assert!(state.has_watcher("child"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inotify_watch_count() -> usize {
+        std::fs::read_dir("/proc/self/fdinfo")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
+            .map(|info| {
+                info.lines()
+                    .filter(|line| line.starts_with("inotify wd:"))
+                    .count()
+            })
+            .sum()
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_repeated_swaps_release_watches(test_name: &str, pause_before_swap: bool) {
+        use std::fs;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        // Other unit tests watch directories concurrently. Run just this
+        // case in a fresh process so its fdinfo counts have an exact baseline.
+        const ISOLATED_TEST: &str = "WS_CKPT_WATCH_COUNT_TEST";
+        if std::env::var(ISOLATED_TEST).as_deref() != Ok(test_name) {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(ISOLATED_TEST, test_name)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{test_name}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("live");
+        let child = live.join("child");
+        let file = child.join("sub/data");
+        let workspaces = [("ws", &live), ("child", &child)];
+        let create_tree = || {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "original").unwrap();
+        };
+        create_tree();
+        let baseline = inotify_watch_count();
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        for (id, path) in workspaces {
+            state
+                .register_workspace(id.into(), path.clone(), SnapshotIndex::new(path.clone()))
+                .unwrap();
+            state.register_watcher(id.into(), WorkspaceWatcher::start(path).unwrap());
+        }
+        // The two registrations share the three directories' descriptors.
+        assert_eq!(inotify_watch_count(), baseline + 3);
+
+        for round in 0..4 {
+            let pause =
+                pause_before_swap.then(|| WorkspaceWatcher::pause_for_rollback(&live).unwrap());
+            if pause.is_some() {
+                assert_eq!(inotify_watch_count(), baseline, "paused round {round}");
+            }
+            // Keep the old trees alive so the kernel cannot free their watches
+            // for us when they are deleted.
+            fs::rename(&live, root.path().join(format!("retired-{round}"))).unwrap();
+            create_tree();
+            drop(pause);
+            if !pause_before_swap {
+                // A child can be the first workspace to notice the parent swap.
+                assert_ne!(
+                    state.check_workspace_quiescent("child", Some(&child)).await,
+                    Quiescence::MonitoringUnavailable,
+                    "self-heal failed in round {round}"
+                );
+            }
+            assert_eq!(inotify_watch_count(), baseline + 3, "round {round}");
+
+            let watermarks = workspaces.map(|(id, path)| {
+                assert!(state.has_watcher(id), "{id} is uncovered in round {round}");
+                assert!(state.watcher_target_is_current(id, path));
+                let activity = state
+                    .watchers
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .unwrap()
+                    .last_activity();
+                let before = activity.load(Ordering::Acquire);
+                (activity, before)
+            });
+            while watermarks
+                .iter()
+                .any(|(_, before)| crate::fs_watcher::activity_now_ms() <= *before)
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            fs::write(&file, "changed").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while watermarks
+                    .iter()
+                    .any(|(activity, before)| activity.load(Ordering::Acquire) <= *before)
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("parent or child missed the write in round {round}"));
+        }
+
+        state.unregister_workspace("child").await;
+        state.unregister_workspace("ws").await;
+        assert_eq!(inotify_watch_count(), baseline);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn repeated_rollback_swaps_release_watches() {
+        assert_repeated_swaps_release_watches(
+            "state::tests::repeated_rollback_swaps_release_watches",
+            true,
+        )
+        .await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn repeated_self_heal_swaps_release_watches() {
+        assert_repeated_swaps_release_watches(
+            "state::tests::repeated_self_heal_swaps_release_watches",
+            false,
+        )
+        .await;
     }
 
     #[tokio::test]

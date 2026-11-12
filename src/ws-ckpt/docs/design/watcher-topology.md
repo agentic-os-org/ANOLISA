@@ -80,7 +80,7 @@ of this PR's head (`39db95fa7`) against #7669 (`771b2977e`) posted in the
 The shared-queue overflow is an inherent property of the topology and is
 treated as a first-class failure mode, not logged-and-forgotten:
 
-- **Fail-closed containment.** notify 6.1.1 surfaces `IN_Q_OVERFLOW` as
+- **Fail-closed containment.** notify 8.2.2 surfaces `IN_Q_OVERFLOW` as
   `Ok(EventKind::Other)` carrying the rescan flag — it never reaches the
   `Err` arm. `forward_event` detects it, increments the cumulative overflow
   counter, logs an ERROR, and stamps **every** route's last-activity
@@ -116,7 +116,7 @@ treated as a first-class failure mode, not logged-and-forgotten:
 ### The walk-pause cost (fail closed around it; #8448)
 
 The overflow above is one half of the shared-queue cost. The other half has
-no counter: notify 6.1.1 runs `watch()` (a `WalkDir` over the whole tree) and
+no counter: notify 8.2.2 runs `watch()` (a recursive `WalkDir`) and
 the auto-add of created or moved-in directories on its single event-loop
 thread, and it does not read the inotify fd while a walk is in progress.
 With one shared instance that thread serves the whole daemon, so events from
@@ -215,6 +215,10 @@ only check that an event reaches the watermark.
   on (resolved through the registration symlink before arming — inotify
   watches inodes, so a rollback that swaps the live subvolume behind the path
   is detectable), and a monotonic `watch_seq` for observing re-arms.
+- **Symlink coverage.** The watcher resolves a symlink used as the workspace
+  registration root and routes events under the registered path. Recursive
+  watching skips directory symlinks inside that root. A separately registered
+  workspace on the target directory has its own route and coverage.
 - **Route table.** `routes: RwLock<HashMap<PathBuf, Vec<Arc<AtomicU64>>>>` —
   a path maps to the watermarks of the live handles on it (normally one; a re-arm
   briefly keeps two, which is why the value is a `Vec`). Events are dispatched
@@ -227,22 +231,35 @@ only check that an event reaches the watermark.
   inside delivery — holding the write side across the call would deadlock the
   loop against ourselves). The coverage map is a leaf lock. The event path
   itself takes no lock beyond the route read.
-- **Publication order.** `add_route` publishes the route *before* arming the
-  kernel watch: descriptors covering the path do not exist before `watch()`,
-  so every event that can possibly be delivered already finds its route. A
-  failed registration rolls the publication back and releases the partial
-  descriptors the recursive walk installed (notify 6.1.1 does not roll back on
-  its own).
-- **Overlap-preserving release.** notify 6.1.1 keys one descriptor per path
-  and a recursive `unwatch(root)` removes *every* descriptor whose path starts
-  with `root` — including descriptors overlapping survivors rely on. Before
-  the first descriptor goes away, `unwatch_preserving_overlaps` stamps every
+- **Publication order.** `add_route` publishes the route before arming the
+  kernel watch so events from newly installed descriptors can find it. A
+  failed registration removes the new handle from the route. If it was the
+  last handle, ws-ckpt also releases any partial descriptors left by the
+  notify 8.2.2 walk.
+- **Overlap-preserving release.** notify 8.2.2 indexes descriptors by path.
+  A successful recursive `unwatch(root)` removes the descriptors mapped to
+  `root` and its descendants, including those overlapping survivors rely on.
+  Before the first descriptor goes away, `unwatch_preserving_overlaps` stamps every
   overlapping survivor as just active and marks its route uncovered; then
   unwatches; then re-arms each survivor. A successful re-arm stamps the
   survivor again before clearing the mark — like `start`, its quiet window
   begins only once the recursive walk is done. A failed re-arm keeps the
   degraded mark (fail closed) and releases its own partial registration with
   a bounded failure cascade.
+- **Rollback pause and recovery.** Ordinary and guarded rollback detach
+  the old tree's watches before the backend swaps directories. Affected
+  routes stay published and are marked uncovered during the pause. New
+  routes that overlap the pause are published with kernel watches deferred.
+  If detaching fails, rollback stops before the swap and attempts to restore
+  coverage. The backend's return, including an error, triggers re-arming
+  on the current tree once no pending rollback overlaps the route. A
+  failed re-arm leaves the route uncovered.
+- **Re-arming after an external replacement.** The quiescence check compares
+  the recorded directory identity with the current `(dev, ino)`. If the
+  identity changed, re-arming releases the old descriptors through notify's
+  stored path mappings before watching the replacement. It marks affected
+  routes uncovered during the change and re-arms overlapping routes.
+  Failed recovery reports `MonitoringUnavailable`.
 - **Quiescence.** `check_quiescent` fails closed while the route is degraded,
   and snapshots both the per-route coverage epoch and the instance-wide
   registration/auto-add generations before its quiet period: an interruption

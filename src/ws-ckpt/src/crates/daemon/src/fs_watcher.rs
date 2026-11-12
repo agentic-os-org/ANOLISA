@@ -53,7 +53,7 @@ pub(crate) fn quiescent_after(last_activity_ms: u64, now_ms: u64) -> bool {
 
 /// Instance-wide registration activity for the shared watcher.
 ///
-/// notify 6.1.1 runs every recursive `watch()` walk and every auto-add of a
+/// notify runs every recursive `watch()` walk and every auto-add of a
 /// newly created or moved-in directory on its single event-loop thread, and
 /// does not read the inotify descriptor while walking. With one shared
 /// instance that thread serves every workspace, so a walk pauses event
@@ -304,6 +304,8 @@ pub(crate) struct SharedWatcher {
     /// silence proves nothing about the writes that happened while no
     /// descriptor covered them (#7592 review).
     coverage: RwLock<HashMap<PathBuf, RouteCoverage>>,
+    /// Live roots being replaced. Mutated under the watcher mutex.
+    rollback_roots: Mutex<Vec<PathBuf>>,
 }
 
 /// Per-route kernel-coverage state: whether coverage is currently known
@@ -318,6 +320,30 @@ struct RouteCoverage {
     /// observation and must void a `Safe` decision when it moved, even
     /// if coverage was restored in between.
     interruptions: u64,
+    /// Identity from the most recent successful arm of this route.
+    target: Option<(u64, u64)>,
+}
+
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+fn watch_registration(watcher: &mut RecommendedWatcher, root: &Path) -> notify::Result<()> {
+    // Resolve the registration symlink as a directory so the recursive walk
+    // arms the root itself. The trailing dot preserves the registered path
+    // for routing and unwatch, and nested symlinks are still not followed.
+    watcher.watch(&root.join("."), RecursiveMode::Recursive)
+}
+
+pub(crate) struct RollbackWatchPause {
+    shared: Arc<SharedWatcher>,
+    root: PathBuf,
+}
+
+impl Drop for RollbackWatchPause {
+    fn drop(&mut self) {
+        self.shared.resume_after_rollback(&self.root);
+    }
 }
 
 /// Lock discipline inside [`SharedWatcher`], all locks private to this
@@ -348,16 +374,21 @@ impl SharedWatcher {
         let callback_overflows = Arc::clone(&queue_overflows);
         let callback_registration = Arc::clone(&registration);
         let callback_control = Arc::clone(&control);
-        let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            forward_event(
-                &callback_routes,
-                &callback_overflows,
-                &callback_registration,
-                &callback_control,
-                activity_now_ms(),
-                res,
-            )
-        })
+        // A registered symlink root is still watched. Do not follow links
+        // inside it: an alias to another workspace can steal its event path.
+        let watcher = RecommendedWatcher::new(
+            move |res: notify::Result<Event>| {
+                forward_event(
+                    &callback_routes,
+                    &callback_overflows,
+                    &callback_registration,
+                    &callback_control,
+                    activity_now_ms(),
+                    res,
+                )
+            },
+            notify::Config::default().with_follow_symlinks(false),
+        )
         .map_err(|e| anyhow::anyhow!("Failed to init notify watcher: {}", e))?;
         let watcher = Arc::new(Mutex::new(watcher));
         let _ = control.set(Arc::downgrade(&watcher));
@@ -367,6 +398,7 @@ impl SharedWatcher {
             queue_overflows,
             registration,
             coverage: RwLock::new(HashMap::new()),
+            rollback_roots: Mutex::new(Vec::new()),
         })
     }
 
@@ -413,9 +445,121 @@ impl SharedWatcher {
 
     /// Clear the degraded mark: a successful (re)registration restored
     /// the kernel coverage for `root`.
-    fn clear_degraded(&self, root: &Path) {
+    fn record_coverage(&self, root: &Path, target: (u64, u64)) {
         let mut coverage = self.coverage.write().unwrap_or_else(|err| err.into_inner());
-        coverage.entry(root.to_path_buf()).or_default().uncovered = false;
+        let entry = coverage.entry(root.to_path_buf()).or_default();
+        entry.target = Some(target);
+        entry.uncovered = false;
+    }
+
+    fn covered_target(&self, root: &Path) -> Option<(u64, u64)> {
+        self.coverage
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(root)
+            .and_then(|coverage| coverage.target)
+    }
+
+    fn rollback_paused(&self, path: &Path) -> bool {
+        self.rollback_roots
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .any(|root| overlaps(root, path))
+    }
+
+    fn pause_for_rollback(self: &Arc<Self>, root: &Path) -> anyhow::Result<RollbackWatchPause> {
+        let _registration = self.begin_registration();
+        let mut watcher = self.watcher.lock().unwrap_or_else(|err| err.into_inner());
+        let previously_paused = {
+            let mut roots = self
+                .rollback_roots
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let previously_paused = roots.clone();
+            roots.push(root.to_path_buf());
+            previously_paused
+        };
+        // Keep the routes published but uncovered, and unwatch while notify
+        // still maps these paths to the old inode descriptors.
+        let affected = self.mark_overlapping_uncovered(root, &[]);
+        if let Err(error) =
+            Self::detach_rollback_tree(&mut watcher, root, &affected, &previously_paused)
+        {
+            // A concurrent rollback must not see a failed pause as detached.
+            self.resume_rollback_routes(&mut watcher, root);
+            return Err(anyhow::anyhow!(
+                "cannot detach write watches for {root:?}: {error}"
+            ));
+        }
+        Ok(RollbackWatchPause {
+            shared: Arc::clone(self),
+            root: root.to_path_buf(),
+        })
+    }
+
+    fn detach_rollback_tree(
+        watcher: &mut RecommendedWatcher,
+        root: &Path,
+        affected: &[PathBuf],
+        previously_paused: &[PathBuf],
+    ) -> notify::Result<()> {
+        if previously_paused.iter().any(|path| root.starts_with(path)) {
+            // A pending ancestor swap already detached this subtree.
+            return Ok(());
+        }
+        if affected.iter().any(|path| path == root)
+            || (!root.is_symlink() && affected.iter().any(|path| root.starts_with(path)))
+        {
+            return watcher.unwatch(root);
+        }
+        // With no watch on the root, detach the outermost registered children
+        // individually. An ancestor walk never enters an unregistered link.
+        let descendants: Vec<_> = affected
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .filter(|path| {
+                !previously_paused
+                    .iter()
+                    .any(|paused| path.starts_with(paused))
+            })
+            .collect();
+        for path in &descendants {
+            if !descendants
+                .iter()
+                .any(|parent| parent != path && path.starts_with(parent))
+            {
+                watcher.unwatch(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn resume_after_rollback(&self, root: &Path) {
+        let _registration = self.begin_registration();
+        let mut watcher = self.watcher.lock().unwrap_or_else(|err| err.into_inner());
+        self.resume_rollback_routes(&mut watcher, root);
+    }
+
+    fn resume_rollback_routes(&self, watcher: &mut RecommendedWatcher, root: &Path) {
+        {
+            let mut roots = self
+                .rollback_roots
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if let Some(index) = roots.iter().position(|path| path == root) {
+                roots.swap_remove(index);
+            }
+        }
+        let affected = self
+            .routes
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .keys()
+            .filter(|path| overlaps(path, root))
+            .cloned()
+            .collect();
+        self.restore_routes(watcher, root, affected, &mut Vec::new());
     }
 
     /// Stamp every live handle on `root` as active now. Takes `routes`
@@ -464,7 +608,7 @@ impl SharedWatcher {
     /// Release the kernel watch on `root` without silencing other
     /// registered roots that overlap it.
     ///
-    /// notify 6.1.1 keys one descriptor per path, and a recursive
+    /// notify indexes descriptors by path, and a recursive
     /// `unwatch(root)` removes EVERY descriptor whose path starts with
     /// `root` — including descriptors other registered roots rely on: a
     /// workspace nested inside this one, or an ancestor whose recursive
@@ -488,7 +632,7 @@ impl SharedWatcher {
     /// published route overlapping it, unwatch, then re-arm each of them.
     ///
     /// A failed re-arm keeps the route's degraded mark and releases the
-    /// partial descriptors its walk installed: notify 6.1.1's recursive
+    /// partial descriptors its walk installed: notify's recursive
     /// `watch()` adds one descriptor per directory and bails out at the
     /// first failure without rolling back, and a leaked partial set pins
     /// the per-user watch budget (`max_user_watches`) for later re-arms
@@ -507,42 +651,56 @@ impl SharedWatcher {
         failed: &mut Vec<PathBuf>,
     ) {
         let _registration = self.begin_registration();
-        let survivors: Vec<PathBuf> = {
-            let routes = self.routes.write().unwrap_or_else(|err| err.into_inner());
-            let survivors: Vec<PathBuf> = routes
-                .keys()
-                .filter(|registered| registered.starts_with(root) || root.starts_with(*registered))
-                .filter(|registered| !failed.contains(*registered))
-                .cloned()
-                .collect();
-            let now = activity_now_ms();
-            for survivor in &survivors {
-                if let Some(activities) = routes.get(survivor) {
-                    for activity in activities {
-                        activity.fetch_max(now, Ordering::AcqRel);
-                    }
-                }
-                self.mark_degraded(survivor);
-            }
-            survivors
-        };
+        let survivors = self.mark_overlapping_uncovered(root, failed);
         let _ = watcher.unwatch(root);
+        self.restore_routes(watcher, root, survivors, failed);
+    }
+
+    fn mark_overlapping_uncovered(&self, root: &Path, failed: &[PathBuf]) -> Vec<PathBuf> {
+        let routes = self.routes.read().unwrap_or_else(|err| err.into_inner());
+        let now = activity_now_ms();
+        let mut affected = Vec::new();
+        for (path, activities) in routes.iter() {
+            if overlaps(path, root) && !failed.contains(path) {
+                for activity in activities {
+                    activity.fetch_max(now, Ordering::AcqRel);
+                }
+                self.mark_degraded(path);
+                affected.push(path.clone());
+            }
+        }
+        affected
+    }
+
+    fn restore_routes(
+        &self,
+        watcher: &mut RecommendedWatcher,
+        root: &Path,
+        survivors: Vec<PathBuf>,
+        failed: &mut Vec<PathBuf>,
+    ) {
         // Restore the kernel descriptors the prefix removal took away.
         // notify re-adds the root first, then walks the tree, so the
         // interruption window is bounded by one registration round-trip.
         for survivor in survivors {
             // A nested release below may already have failed this root.
-            if failed.contains(&survivor) {
+            if failed.contains(&survivor) || self.rollback_paused(&survivor) {
                 continue;
             }
-            match watcher.watch(&survivor, RecursiveMode::Recursive) {
+            let armed = std::fs::metadata(&survivor)
+                .map_err(notify::Error::io)
+                .and_then(|meta| {
+                    watch_registration(watcher, &survivor)?;
+                    Ok((meta.dev(), meta.ino()))
+                });
+            match armed {
                 // Coverage is whole again; the interruption is over. As in
                 // `WorkspaceWatcher::start`, writes into directories the
                 // walk had not reached yet left no event, so the survivor's
                 // quiet window starts once it is fully re-armed.
-                Ok(()) => {
+                Ok(target) => {
                     self.stamp_active(&survivor);
-                    self.clear_degraded(&survivor);
+                    self.record_coverage(&survivor, target);
                 }
                 Err(e) => {
                     // The pre-unwatch mark stays: coverage remains
@@ -560,9 +718,54 @@ impl SharedWatcher {
         }
     }
 
-    fn add_route(&self, workspace_path: &Path, activity: Arc<AtomicU64>) -> anyhow::Result<()> {
+    fn add_route(
+        &self,
+        workspace_path: &Path,
+        activity: Arc<AtomicU64>,
+    ) -> anyhow::Result<(u64, u64)> {
         let _registration = self.begin_registration();
         let mut watcher = self.watcher.lock().unwrap_or_else(|err| err.into_inner());
+        let meta = std::fs::metadata(workspace_path).map_err(|error| {
+            anyhow::anyhow!("cannot resolve watch target for {workspace_path:?}: {error}")
+        })?;
+        let target = (meta.dev(), meta.ino());
+        let paused = self.rollback_paused(workspace_path);
+        let mut rearmed = None;
+        if !paused
+            && self
+                .covered_target(workspace_path)
+                .is_some_and(|old| old != target)
+        {
+            // A child can notice an external swap of its whole parent tree
+            // first. Release from the outermost stale registered ancestor
+            // before a recursive walk can overwrite any old path mappings.
+            let root = workspace_path
+                .ancestors()
+                .skip(1)
+                .filter(|path| {
+                    self.covered_target(path).is_some_and(|old| {
+                        std::fs::metadata(path).is_ok_and(|m| old != (m.dev(), m.ino()))
+                    })
+                })
+                .last()
+                .unwrap_or(workspace_path);
+            let affected = self.mark_overlapping_uncovered(root, &[]);
+            match watcher.unwatch(root) {
+                Ok(()) => (),
+                Err(error) if matches!(error.kind, notify::ErrorKind::WatchNotFound) => (),
+                Err(error) => {
+                    anyhow::bail!("cannot detach stale write watches for {root:?}: {error}");
+                }
+            }
+            // The existing routes already receive events during this walk.
+            self.restore_routes(&mut watcher, root, affected, &mut Vec::new());
+            if self.route_degraded(workspace_path) {
+                anyhow::bail!(
+                    "cannot restore write watches for {workspace_path:?} after target change"
+                );
+            }
+            rearmed = self.covered_target(workspace_path);
+        }
         // Publish the route BEFORE arming the kernel watch. notify installs
         // kernel descriptors synchronously inside `watch()`, so an event
         // delivered right after the kernel add but before the route landed
@@ -579,7 +782,14 @@ impl SharedWatcher {
                 .or_default()
                 .push(Arc::clone(&activity));
         }
-        if let Err(e) = watcher.watch(workspace_path, RecursiveMode::Recursive) {
+        if paused {
+            self.mark_degraded(workspace_path);
+            return Ok(target);
+        }
+        if let Some(target) = rearmed {
+            return Ok(target);
+        }
+        if let Err(e) = watch_registration(&mut watcher, workspace_path) {
             // Roll the publication back.
             let last_handle = {
                 let mut routes = self.routes.write().unwrap_or_else(|err| err.into_inner());
@@ -597,7 +807,7 @@ impl SharedWatcher {
             };
             if last_handle {
                 self.retire_coverage(workspace_path);
-                // notify 6.1.1 does not roll back a partially installed
+                // notify does not roll back a partially installed
                 // recursive registration: its walk adds one descriptor per
                 // directory and bails out on the first failure (an
                 // `ENOSPC`/MaxFilesWatch under `max_user_watches`
@@ -631,8 +841,8 @@ impl SharedWatcher {
         // A successful (re)registration restores this root's kernel
         // coverage, so any degraded mark from an earlier failed re-arm is
         // obsolete.
-        self.clear_degraded(workspace_path);
-        Ok(())
+        self.record_coverage(workspace_path, target);
+        Ok(target)
     }
 
     fn remove_route(&self, workspace_path: &Path, activity: &Arc<AtomicU64>) {
@@ -683,7 +893,7 @@ fn forward_event(
         }
     };
     if event.need_rescan() {
-        // notify 6.1.1 surfaces inotify IN_Q_OVERFLOW as
+        // notify surfaces inotify IN_Q_OVERFLOW as
         // Ok(EventKind::Other) carrying Flag::Rescan — it never reaches the
         // Err arm, and without this check the wildcard match below would
         // silently discard it. The kernel dropped events: every activity
@@ -741,7 +951,7 @@ fn forward_event(
 }
 
 /// Whether notify may follow this event with an internal recursive auto-add
-/// walk. notify 6.1.1 calls `add_watch_by_event` only from its CREATE and
+/// walk. notify calls `add_watch_by_event` only from its CREATE and
 /// MOVED_TO branches, and only when the event carries `ISDIR`; a file create
 /// or rename cannot start a walk.
 fn is_dir_registration_event(event: &Event) -> bool {
@@ -937,6 +1147,10 @@ impl WatcherCache {
 }
 
 impl WorkspaceWatcher {
+    pub(crate) fn pause_for_rollback(path: &Path) -> anyhow::Result<RollbackWatchPause> {
+        shared_watcher()?.pause_for_rollback(path)
+    }
+
     /// Start watching a workspace directory (recursively) for write activity.
     /// Called after workspace init or during rebuild_from_disk.
     ///
@@ -960,10 +1174,7 @@ impl WorkspaceWatcher {
         // inode inotify actually observes — the identity to compare against
         // after the backend swaps the live subvolume behind the path.
         // Resolve it before arming the watch so a failure leaves no route.
-        let meta = std::fs::metadata(&path)
-            .map_err(|e| anyhow::anyhow!("cannot resolve watch target for {:?}: {}", path, e))?;
-
-        shared.add_route(&path, Arc::clone(&last_activity_ms))?;
+        let target = shared.add_route(&path, Arc::clone(&last_activity_ms))?;
         // The recursive walk can take a while on a large tree, and writes
         // into directories it had not reached yet left no event: the quiet
         // window starts once the watch is fully armed.
@@ -973,14 +1184,20 @@ impl WorkspaceWatcher {
             last_activity_ms,
             workspace_path: path,
             shared,
-            target: (meta.dev(), meta.ino()),
+            target,
             watch_seq: WATCH_SEQ.fetch_add(1, Ordering::Relaxed),
         })
     }
 
     /// The (dev, ino) this watch is armed on.
     pub fn target_identity(&self) -> (u64, u64) {
-        self.target
+        self.shared
+            .covered_target(&self.workspace_path)
+            .unwrap_or(self.target)
+    }
+
+    pub(crate) fn rollback_paused(&self) -> bool {
+        self.shared.rollback_paused(&self.workspace_path)
     }
 
     /// Monotonic generation of this watcher (for observing re-arms).

@@ -393,12 +393,10 @@ pub async fn rollback(
     }
 
     // 5. Rollback via backend (includes warmup, snapshot, cleanup)
-    state.backend.rollback(&ws.ws_id, &resolved_id).await?;
-
-    // 5a. The backend swapped the live subvolume (rename aside + snapshot
-    // recreate + delete). The inotify watch still names the retired inode,
-    // so re-arm it or every later checkpoint's quiescence check is a no-op.
-    state.rearm_watcher(&ws.ws_id, &ws.path);
+    let pause = crate::fs_watcher::WorkspaceWatcher::pause_for_rollback(&ws.path)?;
+    state
+        .rollback_with_watcher(&ws.ws_id, &ws.path, &resolved_id, pause)
+        .await?;
 
     // 6. Update head + migrate LIVE_CHILD
     if let Some(old_head) = ws.index.head.clone() {
