@@ -1,5 +1,6 @@
 """SQLAlchemy SQLite storage primitives for security event indexes."""
 
+import os
 import re
 import sqlite3
 import sys
@@ -7,6 +8,7 @@ import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_from_bytes
 
 from agent_sec_cli.security_events.orm_base import Base
 from agent_sec_cli.security_events.schema_version import (
@@ -49,9 +51,10 @@ def normalize_sqlite_path(path: str | Path) -> Path:
 def create_sqlite_engine(path: Path, *, read_only: bool = False) -> Engine:
     """Create a pooled SQLAlchemy engine for a SQLite DB."""
     if read_only:
+        # Use filesystem bytes so surrogate-escaped POSIX names still round-trip.
         url = URL.create(
             "sqlite+pysqlite",
-            database=f"file:{path.as_posix()}",
+            database=f"file:{quote_from_bytes(os.fsencode(path.as_posix()))}",
             query={"mode": "ro", "uri": "true"},
         )
     else:
