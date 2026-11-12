@@ -201,6 +201,21 @@ $(post_script)}" >/dev/null 2>"$TMP/post.warn"
         echo "ERROR: fail-open %post did not emit an observable warning" >&2
         exit 1
     fi
+    for fault in write close; do
+        rpm --eval "%{lua:
+local fault = '$fault'
+io.open = function() return {
+  seek = function() return 0 end,
+  read = function() return '' end,
+  write = function() if fault == 'write' then return nil, 'injected write failure' end return true end,
+  close = function() if fault == 'close' then return nil, 'injected close failure' end return true end
+} end
+$(post_script)}" >/dev/null 2>"$TMP/post-$fault.warn"
+        if ! grep -Fq 'could not register' "$TMP/post-$fault.warn"; then
+            echo "ERROR: %post $fault failure did not emit a warning" >&2
+            exit 1
+        fi
+    done
 else
     echo "SKIP: rpm lua interpreter unavailable; %post matrix not exercised" >&2
 fi

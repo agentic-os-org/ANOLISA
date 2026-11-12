@@ -115,8 +115,10 @@ Changes affect new logins; existing sessions continue. Without `--user`,
 `--yes` skips the interactive confirmation, not authorization or safety checks.
 Changing another account requires an explicit name.
 
-Login changes require a qualified system package with the lifecycle capability.
-An unqualified build refuses `set` without changing the account. Conflicting
+Standard RPM builds include the login-management capability by default; installing
+the package leaves existing login shells unchanged. `set` supports qualified
+ALinux4 system installations. Unsupported environments and packages built with
+`--without login_lifecycle` refuse `set` without changing the account. Conflicting
 external shell changes, untrusted records, and unavailable authorization do not
 trigger a forced overwrite. Restoring an unmanaged account does not invent an
 original Shell.

@@ -1,6 +1,6 @@
 %define anolis_release 1
 %global debug_package %{nil}
-%bcond_with login_lifecycle
+%bcond_without login_lifecycle
 %if ! 0%{?_libexecdir_cosh:1}
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
 %endif
@@ -160,9 +160,15 @@ if f then
   if shells ~= '' and shells:sub(-1) ~= nl then normalized = normalized..nl end
   if not normalized:find(nl..cosh..nl, 1, true) then
     local separator = (shells ~= '' and shells:sub(-1) ~= nl) and nl or ''
-    f:write(separator, cosh, nl)
+    local written, write_err = f:write(separator, cosh, nl)
+    if not written then
+      io.stderr:write('warning: cosh-ng: could not register '..cosh..' in /etc/shells: '..tostring(write_err)..nl)
+    end
   end
-  f:close()
+  local closed, close_err = f:close()
+  if not closed then
+    io.stderr:write('warning: cosh-ng: could not register '..cosh..' in /etc/shells: '..tostring(close_err)..nl)
+  end
 else
   io.stderr:write('warning: cosh-ng: could not register '..cosh..' in /etc/shells: '..tostring(err)..nl)
 end

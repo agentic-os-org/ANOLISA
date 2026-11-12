@@ -263,7 +263,7 @@ fn rpm_assets_gate_capability_and_route_lifecycle_through_one_backend() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../packaging/rpm/cosh-ng.spec.in"
     ));
-    assert!(spec.contains("%bcond_with login_lifecycle"));
+    assert!(spec.contains("%bcond_without login_lifecycle"));
     assert!(!spec.contains("/profile.d/"));
     assert!(!spec.contains("packaging/bash/cosh-profile.sh"));
     assert!(!spec.contains("packaging/system-integration"));
