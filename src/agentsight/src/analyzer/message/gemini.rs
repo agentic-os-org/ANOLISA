@@ -132,6 +132,10 @@ pub struct GeminiPart {
 /// A Gemini tool call: the tool name plus its argument object
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeminiFunctionCall {
+    /// Optional provider call ID, shared by a call and its response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Tool name
     #[serde(default)]
     pub name: String,
@@ -147,6 +151,10 @@ pub struct GeminiFunctionCall {
 /// raw because the response is caller-defined.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeminiFunctionResponse {
+    /// Optional provider call ID, shared by a call and its response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// Tool name this result belongs to
     #[serde(default)]
     pub name: String,

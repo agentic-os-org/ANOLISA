@@ -1219,7 +1219,7 @@ impl GenAIBuilder {
                     if let Some(call) = part.get("functionCall") {
                         saw_gemini = true;
                         tool_calls.push(MessagePart::ToolCall {
-                            id: None,
+                            id: call.get("id").and_then(|v| v.as_str()).map(str::to_owned),
                             name: call
                                 .get("name")
                                 .and_then(|v| v.as_str())

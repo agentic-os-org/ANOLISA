@@ -885,16 +885,14 @@ impl GenAIBuilder {
                 .filter(|call| !call.name.is_empty())
             {
                 converted.push(MessagePart::ToolCall {
-                    // Gemini identifies a call by name; the provider does not
-                    // assign an id on the wire.
-                    id: None,
+                    id: call.id.clone(),
                     name: call.name.clone(),
                     arguments: call.args.clone(),
                 });
             }
             if let Some(result) = part.function_response.as_ref() {
                 converted.push(MessagePart::ToolCallResponse {
-                    id: None,
+                    id: result.id.clone(),
                     response: result.response.clone().unwrap_or(serde_json::Value::Null),
                 });
             }
@@ -1932,6 +1930,7 @@ mod tests {
                             },
                             GeminiPart {
                                 function_call: Some(GeminiFunctionCall {
+                                    id: None,
                                     name: "lookup".to_string(),
                                     args: Some(serde_json::json!({"value": 4})),
                                 }),
@@ -2064,6 +2063,7 @@ mod tests {
                     parts: vec![
                         GeminiPart {
                             function_call: Some(GeminiFunctionCall {
+                                id: None,
                                 name: "lookup".to_string(),
                                 args: Some(serde_json::json!({"q": "x"})),
                             }),
@@ -2071,6 +2071,7 @@ mod tests {
                         },
                         GeminiPart {
                             function_call: Some(GeminiFunctionCall {
+                                id: None,
                                 name: "read".to_string(),
                                 args: Some(serde_json::json!({"path": "/tmp/a"})),
                             }),
@@ -2083,6 +2084,7 @@ mod tests {
                     parts: vec![
                         GeminiPart {
                             function_response: Some(GeminiFunctionResponse {
+                                id: None,
                                 name: "lookup".to_string(),
                                 response: Some(serde_json::json!({"ok": true})),
                             }),
@@ -2090,6 +2092,7 @@ mod tests {
                         },
                         GeminiPart {
                             function_response: Some(GeminiFunctionResponse {
+                                id: None,
                                 name: "read".to_string(),
                                 response: Some(serde_json::json!({"content": "a body"})),
                             }),
@@ -2097,6 +2100,7 @@ mod tests {
                         },
                         GeminiPart {
                             function_call: Some(GeminiFunctionCall {
+                                id: None,
                                 name: String::new(),
                                 args: None,
                             }),
