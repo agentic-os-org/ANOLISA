@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -38,6 +39,15 @@ class RawPackagingTests(unittest.TestCase):
 
     def test_real_payload_and_reproducibility(self):
         version = tomllib.loads((ROOT / "component.toml").read_text())["component"]["version"]
+        tracked = subprocess.check_output(["git", "ls-files", "-z", "--", "."], cwd=ROOT)
+        tracked_paths = [Path(name) for name in os.fsdecode(tracked).split("\0") if name]
+        skill_dirs = {path.parent for path in tracked_paths if path.name == "SKILL.md"}
+        expected = {
+            f"share/anolisa/skills/{skill.name}/{path.relative_to(skill)}"
+            for skill in skill_dirs
+            for path in tracked_paths
+            if path.is_relative_to(skill)
+        }
         with tempfile.TemporaryDirectory() as temporary:
             out = Path(temporary)
             for arch in ("x86_64", "aarch64"):
@@ -58,12 +68,6 @@ class RawPackagingTests(unittest.TestCase):
                         contract["component"]["platform"]["arch"], ["x86_64", "aarch64"]
                     )
                     self.assertEqual(contract["install"]["modes"], ["user", "system"])
-                    expected = {
-                        f"share/anolisa/skills/{skill.parent.name}/{file.relative_to(skill.parent)}"
-                        for skill in ROOT.rglob("SKILL.md")
-                        for file in skill.parent.rglob("*")
-                        if file.is_file()
-                    }
                     self.assertEqual(set(files), expected | {".anolisa/component.toml"})
                     self.assertTrue(
                         all(m.uid == m.gid == 0 and m.mtime == 1234567890 for m in members.values())
