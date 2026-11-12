@@ -117,6 +117,17 @@ fi
 %{_datadir}/agentsight/adapters/dsh/
 
 %changelog
+* Thu Nov 12 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.16.1-1
+- Require a trusted origin before bypassing dashboard authentication on loopback
+- Resolve init-namespace identity for containerized targets
+- Capture Claude Code builds with the 2026 Bun BoringSSL layout
+- Reattach SSL probes for new PIDs and retry late SSL library discovery
+- Raise memlock before loading probes on 5.10 vendor kernels
+- Persist file-delete audit evidence and reject blocks without an active BPF LSM
+- Discover Cline sessions and Qoder CLI launched with a Node V8 flag
+- Recommend the matching agentsight-plugins from the compatibility package
+- See CHANGELOG.md for the remaining fixes
+
 * Fri Nov 06 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.16.0-1
 - Add secret-file read protection for selected agent process trees
 - Observe Qoder CLI gateway calls; configuration schema 6 adds Qoder defaults
