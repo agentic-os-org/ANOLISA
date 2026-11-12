@@ -9,6 +9,29 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.5] - 2026-11-12
+
+### 新增
+
+- JSON 工具结果可以将受支持的 HTML 字符串值渲染为紧凑的 Markdown 视图，同时保留周围的字段、类型、数字及记录顺序。每次替换都要求视图能够节省 Token 且原文成功写入 Stash，恢复提示可取回完全一致的原始字符串。不受支持或可能隐藏内容的值保持原样；文件读取输出不参与此转换。沿用现有的 `TOKENLESS_HTML_EXTRACTION_ENABLED` 开关控制（[#9757](https://github.com/agentic-os-org/ANOLISA/pull/9757)）。
+- PostTool 可以在无需恢复能力时压缩可识别的原始 `pnpm install` 输出中的更新通知、依赖列表和装饰线，保留其中的事实但不保留原始排版。有恢复能力时还可缩减较长的进度序列；遇到未知输出则保留剩余日志。PreTool 命令改写保持不变（[#9791](https://github.com/agentic-os-org/ANOLISA/pull/9791)）。
+- OpenClaw 注册会话范围内的原文恢复能力，并在上下文压缩后撤销旧的恢复授权。DeepSeek Harness 可以请求经过审计的 RTK 重试，无需修改宿主已批准的工具参数；实际可用性仍取决于宿主的输出替换及恢复能力（[#9633](https://github.com/agentic-os-org/ANOLISA/pull/9633)）。
+
+### 变更
+
+- 默认启用可恢复的 Git diff 压缩；设置 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 可禁用。Python SDK 的默认配置现在遵循全局压缩、搜索路径共享、HTML 提取和 diff 压缩环境开关；显式配置值优先（[#9633](https://github.com/agentic-os-org/ANOLISA/pull/9633)）。
+- POSIX Python PreTool Hook 每次改写少启动一个 Tokenless 进程，同时保留超时、响应校验及失败时的透传行为。适配器与 Core 仍须版本匹配；Windows 沿用原有的进程管理方式（[#9789](https://github.com/agentic-os-org/ANOLISA/pull/9789)）。
+
+### 修复
+
+- 较短的 Shell 日志现在可以进入对应领域的压缩器，Cosh-NG 获得符合其宿主协议的字符串替换。缺失适配器和不受支持的 Schema Hook 直接透传，不借用其他宿主的协议（[#9633](https://github.com/agentic-os-org/ANOLISA/pull/9633)）。
+- Qoder Bash 结果缺少 `stdout` 或其值不是字符串时保持原样，不再暴露会丢失 `stderr` 或元数据的替换结果；有效字符串替换继续保留结果封装（[#9893](https://github.com/agentic-os-org/ANOLISA/pull/9893)）。
+- HTML 页面渲染保留浏览器可见的代码换行、链接边缘空格和表头表尾位置。有序列表遵循 `start`、列表项 `value`、空项及 `reversed`；列表项之间的内容不占用编号，`center` 独立成块。字母和罗马数字标记仍以数字显示；JSON 内 HTML 继续采用更严格的校验，无法准确表达的列表保持原样（[#9757](https://github.com/agentic-os-org/ANOLISA/pull/9757)、[#9799](https://github.com/agentic-os-org/ANOLISA/pull/9799)）。
+- 多个会话并发首次打开 Stash 数据库时，会在忙等待超时内等待并重试 WAL 初始化，不再因数据库锁错误立即失去可恢复压缩能力（[#9757](https://github.com/agentic-os-org/ANOLISA/pull/9757)）。
+- `tokenless rtk -- <command>`（包括 `-- --version` 和 `-- --help`）会消费命令前的选项结束标记，不再尝试执行 `--`。单独的 `tokenless rtk --` 返回缺少命令的用法错误；命令名之后的分隔符保留原有含义（[#9866](https://github.com/agentic-os-org/ANOLISA/pull/9866)）。
+- 可选的 Selective-Claw 插件在 SQLite 仍可回滚时，回滚失败的启动及历史协调消息导入批次，避免已导入的部分前缀使重试跳过剩余历史。已有的不完整历史不会被修复；清理失败会与原始错误一起报告（[#9835](https://github.com/agentic-os-org/ANOLISA/pull/9835)）。
+- Codex 适配器安装在未设置 `HOME` 时，不再因未绑定变量中止或误用根目录下的 marketplace 路径。二进制安装要求显式前缀或有效主目录；没有可用根路径时会报告跳过 marketplace 注册，dry-run 预览仍不写入文件（[#8795](https://github.com/agentic-os-org/ANOLISA/pull/8795)）。
+
 ## [0.9.4] - 2026-11-06
 
 ### 变更

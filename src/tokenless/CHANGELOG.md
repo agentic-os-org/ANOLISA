@@ -9,6 +9,29 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-12
+
+### Added
+
+- JSON tool results can render supported HTML string values as compact Markdown views while preserving the surrounding fields, types, numbers, and record order. Each replacement requires a profitable view and successful Stash storage, and its recovery instruction retrieves the exact original string. Unsupported or potentially hidden content stays unchanged; file-read output is excluded. The existing `TOKENLESS_HTML_EXTRACTION_ENABLED` switch controls this behavior ([#9757](https://github.com/agentic-os-org/ANOLISA/pull/9757)).
+- Recognized raw `pnpm install` output can compact update notices, dependency lists, and decorative bars in PostTool without recovery, retaining their facts but not their original layout. Long progress sequences can additionally be reduced when recovery is available; unknown output protects the remaining log. PreTool command rewriting is unchanged ([#9791](https://github.com/agentic-os-org/ANOLISA/pull/9791)).
+- OpenClaw registers conversation-scoped recovery for compressed originals and revokes old recovery grants after compaction. DeepSeek Harness can request audited RTK retries without changing the tool arguments already approved by its host; availability still depends on the host's output-replacement and recovery capabilities ([#9633](https://github.com/agentic-os-org/ANOLISA/pull/9633)).
+
+### Changed
+
+- Recoverable Git diff compression is enabled by default; set `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` to disable it. Python SDK defaults now honor the global compression, search path sharing, HTML extraction, and diff compression environment switches; explicit configuration values take precedence ([#9633](https://github.com/agentic-os-org/ANOLISA/pull/9633)).
+- POSIX Python PreTool Hooks start one fewer Tokenless process per rewrite while retaining deadlines, response validation, and passthrough on failure. Matching adapter and Core versions remain required; Windows keeps its existing process ownership ([#9789](https://github.com/agentic-os-org/ANOLISA/pull/9789)).
+
+### Fixed
+
+- Short shell logs now reach their domain compressors, and Cosh-NG receives the string replacement its host protocol expects. Missing adapters and unsupported schema hooks pass through without using another host's protocol ([#9633](https://github.com/agentic-os-org/ANOLISA/pull/9633)).
+- Qoder Bash results with missing or non-string `stdout` remain unchanged instead of exposing a replacement that loses `stderr` or metadata; valid string replacements continue to preserve the result envelope ([#9893](https://github.com/agentic-os-org/ANOLISA/pull/9893)).
+- HTML page rendering preserves browser-visible line breaks in code, spaces at link edges, and table header/footer placement. Ordered lists honor `start`, item `value`, empty items, and `reversed`; content between items does not consume a number, and `center` starts a block. Lettered and Roman list markers still render as numbers, while HTML inside JSON keeps stricter checks and leaves unrepresentable lists unchanged ([#9757](https://github.com/agentic-os-org/ANOLISA/pull/9757), [#9799](https://github.com/agentic-os-org/ANOLISA/pull/9799)).
+- Concurrent sessions opening a new Stash database wait and retry its WAL initialization within the busy timeout instead of immediately losing recoverable compression on a database-lock error ([#9757](https://github.com/agentic-os-org/ANOLISA/pull/9757)).
+- `tokenless rtk -- <command>`, including `-- --version` and `-- --help`, consumes the leading end-of-options delimiter instead of attempting to execute `--`. A bare `tokenless rtk --` reports the missing-command usage error; delimiters after the command name retain their meaning ([#9866](https://github.com/agentic-os-org/ANOLISA/pull/9866)).
+- The optional Selective-Claw plugin rolls back failed bootstrap and reconciliation message-import batches when SQLite rollback remains available, so a partially imported prefix does not cause retries to skip the remaining history. Existing partial histories are not repaired, and cleanup failures are reported alongside the original error ([#9835](https://github.com/agentic-os-org/ANOLISA/pull/9835)).
+- Codex adapter installation handles an unset `HOME` without an unbound-variable abort or an unintended root-level marketplace path. It requires an explicit binary prefix or usable home and reports skipped marketplace registration when no usable root exists; dry-run previews retain their no-write behavior ([#8795](https://github.com/agentic-os-org/ANOLISA/pull/8795)).
+
 ## [0.9.4] - 2026-11-06
 
 ### Changed
