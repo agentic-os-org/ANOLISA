@@ -2312,6 +2312,27 @@ fn raw_cli_health_banner_early_dispatch_is_quiet_and_management_is_independent()
 }
 
 #[test]
+fn review_regression_health_banner_chinese_usage_and_preference_error() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(home.path().join(".copilot-shell"), "blocked").unwrap();
+    for (action, code, expected) in [("invalid", 2, "用法"), ("status", 1, "无法读取或保存")]
+    {
+        let error_path = home.path().join(format!("{action}.stderr"));
+        let error_file = fs::File::create(&error_path).unwrap();
+        let output = raw_cli_command(env!("CARGO_BIN_EXE_cosh-shell"))
+            .args(["health", "banner", action])
+            .env("HOME", home.path())
+            .env("COSH_SHELL_LANG", "zh-CN")
+            .stderr(Stdio::from(error_file))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn raw_cli_login_invitation_worker_is_private_early_and_rejects_extra_arguments() {
     for argv0 in ["cosh", "cosh-shell"] {
         let home = tempfile::tempdir().unwrap();

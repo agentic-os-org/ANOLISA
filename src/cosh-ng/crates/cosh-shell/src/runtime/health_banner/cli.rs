@@ -34,11 +34,7 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
             render(options, deadline)
         }
         action => {
-            let language = std::env::var("COSH_SHELL_LANG")
-                .ok()
-                .and_then(|value| parse_language_setting(&value))
-                .map(resolve_language_setting)
-                .unwrap_or_else(detect_language_from_env);
+            let language = cli_language();
             let result = crate::config::guide::open_user_store()
                 .map_err(|_| ())
                 .and_then(|store| manage(action, &store, language));
@@ -50,7 +46,13 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
                 Err(()) => {
                     let _ = write_frame(
                         nix::libc::STDERR_FILENO,
-                        b"Unable to read or save the login resource summary preference.\n",
+                        match language {
+                            crate::Language::EnUs => {
+                                "Unable to read or save the login resource summary preference.\n"
+                            }
+                            crate::Language::ZhCn => "无法读取或保存登录资源摘要偏好设置。\n",
+                        }
+                        .as_bytes(),
                         default_deadline,
                     );
                     1
@@ -63,10 +65,21 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
 fn usage(deadline: Instant) -> i32 {
     let _ = write_frame(
         nix::libc::STDERR_FILENO,
-        b"Usage: cosh health banner [on|off|status] | [--disable CHECK_ID] [--budget-ms 1..500]\n",
+        match cli_language() {
+            crate::Language::EnUs => "Usage: cosh health banner [on|off|status] | [--disable CHECK_ID] [--budget-ms 1..500]\n",
+            crate::Language::ZhCn => "用法: cosh health banner [on|off|status] | [--disable CHECK_ID] [--budget-ms 1..500]\n",
+        }.as_bytes(),
         deadline,
     );
     2
+}
+
+fn cli_language() -> crate::Language {
+    std::env::var("COSH_SHELL_LANG")
+        .ok()
+        .and_then(|value| parse_language_setting(&value))
+        .map(resolve_language_setting)
+        .unwrap_or_else(detect_language_from_env)
 }
 
 pub(super) fn render(mut options: Options, deadline: Instant) -> i32 {
