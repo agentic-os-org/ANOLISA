@@ -1,10 +1,7 @@
 //! Seccomp placement for host-network containers.
 //!
-//! With `network=host` the workload shares the host network namespace, where
-//! abstract Unix endpoints are reachable. The linux backend closes that path
-//! by allowing only INET/INET6 sockets; this module mirrors the restriction
-//! on top of the daemon's default profile so the remaining syscall hardening
-//! is preserved.
+//! Both network modes block external Unix sockets, retaining local stream/seqpacket IPC.
+//! The vendored Moby baseline permits only native ABIs to prevent indirect socketcall bypasses.
 
 /// Default moby seccomp profile, vendored from the moby/profiles repository
 /// (seccomp/default.json); kept pristine so daemon hardening is not weakened.
@@ -1262,40 +1259,64 @@ const DEFAULT_PROFILE: &str = r#"
 }
 "#;
 
-/// Default profile narrowed to deny `AF_UNIX` sockets, matching the linux
-/// backend's full-network seccomp filter.
-///
-/// # Panics
-/// Only if the vendored profile constant is corrupted; unit tests pin its
-/// shape, so this is unreachable in a built crate.
-pub(crate) fn full_network_profile() -> String {
-    let mut profile: serde_json::Value =
-        serde_json::from_str(DEFAULT_PROFILE).expect("vendored seccomp profile is valid JSON");
-    let syscalls = profile["syscalls"]
-        .as_array_mut()
-        .expect("vendored profile lists syscalls");
-    // The stock profile allows every socket domain below 3, which includes
-    // AF_UNIX; replace that rule with explicit AF_UNSPEC/AF_INET allows so
-    // AF_UNIX falls through to the default errno action.
-    let position = syscalls
-        .iter()
-        .position(|entry| {
-            entry["names"]
-                .as_array()
-                .is_some_and(|names| names.iter().any(|name| name.as_str() == Some("socket")))
-                && entry["args"][0]["value"] == 3
-                && entry["args"][0]["op"] == "SCMP_CMP_LT"
-        })
-        .expect("vendored profile keeps the permissive socket rule");
-    let narrow = |domain: u64| {
-        serde_json::json!({
-            "names": ["socket"],
-            "action": "SCMP_ACT_ALLOW",
-            "args": [{"index": 0, "value": domain, "op": "SCMP_CMP_EQ"}]
-        })
+pub(crate) fn network_profile() -> Result<serde_json::Value, crate::DockerError> {
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => "SCMP_ARCH_X86_64",
+        "aarch64" => "SCMP_ARCH_AARCH64",
+        other => {
+            return Err(crate::DockerError::Unsupported(format!(
+                "docker seccomp requires native x86_64 or aarch64, not {other}"
+            )));
+        }
     };
-    syscalls.splice(position..=position, [narrow(0), narrow(2)]);
-    serde_json::to_string(&profile).expect("seccomp profile serializes")
+    let mut profile: serde_json::Value = serde_json::from_str(DEFAULT_PROFILE)?;
+    profile
+        .as_object_mut()
+        .ok_or_else(|| crate::DockerError::Protocol("invalid embedded seccomp profile".into()))?
+        .remove("archMap");
+    profile["architectures"] = serde_json::json!([architecture]);
+    let syscalls = profile["syscalls"].as_array_mut().ok_or_else(|| {
+        crate::DockerError::Protocol("embedded seccomp profile lacks syscalls".into())
+    })?;
+    for entry in syscalls.iter_mut() {
+        if let Some(names) = entry["names"].as_array_mut() {
+            names.retain(|name| {
+                !matches!(
+                    name.as_str(),
+                    Some(
+                        "socket"
+                            | "socketpair"
+                            | "socketcall"
+                            | "io_uring_setup"
+                            | "io_uring_enter"
+                            | "io_uring_register"
+                    )
+                )
+            });
+        }
+    }
+    syscalls.retain(|entry| {
+        entry["names"]
+            .as_array()
+            .is_some_and(|names| !names.is_empty())
+    });
+    for domain in [2, 10] {
+        syscalls.push(serde_json::json!({
+            "names": ["socket"], "action": "SCMP_ACT_ALLOW",
+            "args": [{"index": 0, "value": domain, "op": "SCMP_CMP_EQ"}]
+        }));
+    }
+    // SOCK_NONBLOCK/CLOEXEC preserve the socket type; datagrams can target external peers.
+    for kind in [1, 5] {
+        syscalls.push(serde_json::json!({
+            "names": ["socketpair"], "action": "SCMP_ACT_ALLOW",
+            "args": [
+                {"index": 0, "value": 1, "op": "SCMP_CMP_EQ"},
+                {"index": 1, "value": 15, "valueTwo": kind, "op": "SCMP_CMP_MASKED_EQ"}
+            ]
+        }));
+    }
+    Ok(profile)
 }
 
 #[cfg(test)]
@@ -1303,8 +1324,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn full_network_profile_denies_af_unix_and_keeps_inet() {
-        let profile: serde_json::Value = serde_json::from_str(&full_network_profile()).unwrap();
+    fn network_profile_blocks_external_unix_and_compat() {
+        let profile = network_profile().unwrap();
+        assert!(profile.get("archMap").is_none());
+        assert_eq!(profile["architectures"].as_array().unwrap().len(), 1);
+        let entries = profile["syscalls"].as_array().unwrap();
+        assert!(!entries.iter().any(|entry| {
+            entry["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == "socketcall" || name == "io_uring_setup")
+        }));
+        let pairs: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry["names"] == serde_json::json!(["socketpair"]))
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        for (rule, kind) in pairs.iter().zip([1, 5]) {
+            assert_eq!(
+                rule["args"],
+                serde_json::json!([
+                    {"index": 0, "value": 1, "op": "SCMP_CMP_EQ"},
+                    {"index": 1, "value": 15, "valueTwo": kind, "op": "SCMP_CMP_MASKED_EQ"}
+                ])
+            );
+        }
         assert_eq!(profile["defaultAction"], "SCMP_ACT_ERRNO");
         let socket_rules: Vec<_> = profile["syscalls"]
             .as_array()
