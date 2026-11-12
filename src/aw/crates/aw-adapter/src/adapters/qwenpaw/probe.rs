@@ -37,7 +37,7 @@ pub(super) fn version(command: &CommandSpec, cancelled: &AtomicBool) -> Result<S
     )
 }
 
-fn interpreter(program: &Path) -> Option<String> {
+pub(super) fn interpreter(program: &Path) -> Option<String> {
     if !program.is_absolute() {
         return None;
     }

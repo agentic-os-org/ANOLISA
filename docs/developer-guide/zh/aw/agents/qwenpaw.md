@@ -10,7 +10,10 @@
 通过 QwenPaw 初始化模型配置。其他版本沿用插件、middleware 与原生任务生命周期接口检查，
 AW 记录已安装版本。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
-AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
+普通启动识别出绝对路径 Python 标准启动脚本后，从私有临时包通过原生 Registry 注册 AW，
+减少文件系统插件加载后的全局模块扫描，并保持工作区插件目录原样。AW 负责该集成及其
+退出清理，QwenPaw 的文件系统插件列表不展示该集成。自定义入口、`--reloadable` 和外部
+启动集成继续使用原生插件加载器。
 
 普通启动会检查每个已构造 Agent 实际安装的 resident middleware，并创建已确认的
 任务作用域。Before 正序执行、After 逆序展开，原生工具并发由宿主决定。Offload 工具
@@ -61,7 +64,12 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 
 识别出的绝对路径 Python 标准启动脚本，使用同一解释器与导入路径读取实际安装包的
 字面量版本，避免为版本探测加载 QwenPaw App 配置。自定义入口和动态版本继续使用
-原生 `--version`，共用五秒预算。App 启动、原生 Hook 安装与就绪检查继续使用原命令。
+原生 `--version`，共用五秒预算。原生 Hook 安装与就绪检查沿用原生接口。受管启动在同一
+解释器、同一进程内执行原启动脚本，保留原参数和导入优先级；用户插件沿用原生加载与
+隔离机制。Startup 回执确认前到达的请求最多等待 30 秒，再开始构造 Agent。等待边界在
+原启动脚本执行前安装，覆盖首次插件加载前 Hub 初始化期间到达的请求；Agent 构造还须
+通过 resident middleware 实际安装检查。AW 模块在原生插件初始化阶段、
+Agent 加载前导入。初始化失败会停止 App，回执缺失或不匹配时阻止 Agent 构造。
 
 ## 分开统计 HTTP 启动与首个受保护操作
 
