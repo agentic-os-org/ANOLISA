@@ -139,9 +139,28 @@ pub enum ManagementCommands {
 /// a new variant to [`ComponentCommands`] or [`ManagementCommands`]
 /// automatically updates `--help` without maintaining a separate const.
 pub fn build_cli() -> clap::Command {
-    let cmd = Cli::command();
+    let cmd = hide_options_telemetry_prepare_rejects(Cli::command());
     let help_text = generate_grouped_help();
     cmd.help_template(HELP_TEMPLATE).after_help(help_text)
+}
+
+/// Hides the global options `telemetry prepare` refuses from its own help.
+///
+/// clap has no per-command `hide` for `global` options, and editing a subtree
+/// after `build()` corrupts that subtree's help rendering. Instead the two
+/// definitions are cloned onto the subcommand before the tree is built: global
+/// propagation then skips their ids, so `prepare` renders its own hidden copies
+/// while parsing stays identical to every other subcommand.
+fn hide_options_telemetry_prepare_rejects(cmd: clap::Command) -> clap::Command {
+    let hidden: Vec<clap::Arg> = cmd
+        .get_arguments()
+        .filter(|arg| matches!(arg.get_id().as_str(), "install_mode" | "prefix"))
+        .cloned()
+        .map(|arg| arg.hide(true))
+        .collect();
+    cmd.mut_subcommand("telemetry", |telemetry| {
+        telemetry.mut_subcommand("prepare", |prepare| prepare.args(hidden))
+    })
 }
 
 fn generate_grouped_help() -> String {
@@ -1284,6 +1303,46 @@ mod tests {
             help.contains("ls"),
             "visible alias `ls` should appear in help output"
         );
+    }
+
+    #[test]
+    fn prepare_help_hides_options_the_command_rejects() {
+        let mut cmd = build_cli();
+        // Global options reach subcommands while building, which is also when the
+        // parse reaches for help, so render the propagated tree rather than the raw one.
+        cmd.build();
+        let help = cmd
+            .find_subcommand_mut("telemetry")
+            .and_then(|telemetry| telemetry.find_subcommand_mut("prepare"))
+            .expect("telemetry prepare must exist")
+            .render_help()
+            .to_string();
+        assert!(help.contains("--no-service"), "help: {help}");
+        assert!(!help.contains("--prefix"), "help: {help}");
+        assert!(!help.contains("--install-mode"), "help: {help}");
+    }
+
+    #[test]
+    fn global_options_stay_visible_on_commands_that_honor_them() {
+        let mut cmd = build_cli();
+        cmd.build();
+        let help = cmd
+            .find_subcommand_mut("install")
+            .expect("install must exist")
+            .render_help()
+            .to_string();
+        assert!(help.contains("--prefix"), "help: {help}");
+        assert!(help.contains("--install-mode"), "help: {help}");
+    }
+
+    #[test]
+    fn hidden_prepare_options_still_parse_so_the_command_can_reject_them() {
+        let cmd = build_cli();
+        let matches = cmd
+            .try_get_matches_from(["anolisa", "--prefix", "/opt/image", "telemetry", "prepare"])
+            .expect("hiding the help entry must not remove the option");
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        assert_eq!(cli.prefix, Some(PathBuf::from("/opt/image")));
     }
 
     #[test]
