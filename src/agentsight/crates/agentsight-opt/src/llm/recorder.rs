@@ -6,7 +6,9 @@
 //! in ATIF format for debugging, auditing, and replay.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use agentsight_atif::{
@@ -377,7 +379,8 @@ impl TrajectoryRecorder {
 
     /// Export and save the ATIF trajectory to a directory.
     ///
-    /// File name: `{session_label}_{timestamp}.atif.json`
+    /// File name: `{session_label}_{timestamp}_{process}_{sequence}.atif.json`.
+    /// Existing files are never replaced, including concurrent saves.
     /// Returns the path of the saved file.
     pub fn save_to_dir(&self, dir: &Path) -> std::io::Result<std::path::PathBuf> {
         std::fs::create_dir_all(dir)?;
@@ -395,11 +398,31 @@ impl TrajectoryRecorder {
                 }
             })
             .collect();
-        let file_name = format!("{safe_label}_{ts}.atif.json");
-        let path = dir.join(file_name);
-
         let json = self.to_atif_json()?;
-        std::fs::write(&path, json)?;
+        static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+        let (path, mut file) = loop {
+            let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+            let file_name = format!(
+                "{safe_label}_{ts}_{}_{sequence}.atif.json",
+                std::process::id()
+            );
+            let path = dir.join(file_name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => break (path, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        if let Err(error) = file.write_all(json.as_bytes()) {
+            // Remove only the artifact allocated by this save, never an older run.
+            drop((file, std::fs::remove_file(&path)));
+            return Err(error);
+        }
+        drop(file);
 
         tracing::info!(
             "Saved opt LLM trajectory ({} calls) to {}",
