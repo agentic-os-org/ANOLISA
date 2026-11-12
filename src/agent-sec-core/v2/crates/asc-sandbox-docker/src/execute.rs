@@ -59,6 +59,25 @@ impl DockerBackend {
     }
 
     fn run(&self, spec: &ExecutionSpec) -> Result<ExecutionResult, DockerError> {
+        #[cfg(target_os = "linux")]
+        {
+            self.run_with_stager(spec, crate::mounts::PinnedMounts::prepare)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = spec;
+            Err(DockerError::Unsupported(
+                "Docker sandbox requires Linux".into(),
+            ))
+        }
+    }
+
+    // Tests replace only mount syscalls; the full Docker lifecycle and fence checks still run.
+    pub(crate) fn run_with_stager<T>(
+        &self,
+        spec: &ExecutionSpec,
+        prepare_mounts: impl FnOnce(&ExecutionSpec, &mut crate::ContainerPlan) -> Result<T, DockerError>,
+    ) -> Result<ExecutionResult, DockerError> {
         spec.validate()?;
         for fact in &spec.path_facts {
             if path_fact(Path::new(&fact.path))? != *fact {
@@ -91,7 +110,8 @@ impl DockerBackend {
             )));
         }
         let name = format!("asc-sandbox-{}", uuid::Uuid::new_v4());
-        let plan = translate::translate(spec, &self.config, &name)?;
+        let mut plan = translate::translate(spec, &self.config, &name)?;
+        let _staging = prepare_mounts(spec, &mut plan)?;
         let mut create_args = plan.create_args.clone();
         // network=none does not isolate pathname sockets, so both modes need this filter.
         let profile = crate::seccomp::network_profile()?;
