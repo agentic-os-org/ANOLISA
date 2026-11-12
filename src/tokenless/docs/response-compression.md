@@ -148,6 +148,15 @@ Stash 写入与可恢复性按各区域结果合并，取最弱可恢复性。
 `protect_search_output` 为真的请求（Grep 工具输出与已识别的 Shell `grep`/`rg` 命令输出）
 不进入该路由，关闭搜索路径共享也不例外；`replace_with_text` 为假的请求同样不进入。
 
+**搜索守卫的复合命令输出**：当 Shell 命令的段中含有搜索、且每条搜索段都要求行号
+（`-n`/`--line-number`，含合并短旗标与 `nice -n 5` 等透明包装）并另有真正产出的段时，
+混合路由改走搜索守卫路径：检测窗口内每条符合带行号 `path:line:text` 命中语法的行
+（与 Search Results 领域的 `line_is_search_hit` 判定完全一致，单一事实来源）作为搜索
+字节逐字节保留；命中行之间的极大 run 整体交给 Build Log 压缩器，不在 200 行扫描边界
+处切开。每个 run 的可恢复性（进度削减生效即 `Retrievable`）按 `weakest` 合并后上送，
+不再一律声称 `Lossless`；检测窗口之外的内容原样追加。不带行号的搜索段令整个输出回到
+#9370 的整段输出保护。
+
 ## 四、集成路径
 
 ### 路径 1：OpenClaw 插件（实时工具结果 middleware）

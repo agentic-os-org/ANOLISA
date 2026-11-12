@@ -462,6 +462,20 @@ pub(crate) fn is_search_command(command: &str) -> bool {
     command_has_segment(command, native_output::is_search)
 }
 
+/// Whether every shell segment that searches asks for numbered hits
+/// (`-n` / `--line-number`). The search-guarded mixed route preserves
+/// `path:line:`-prefixed lines byte-for-byte, which only bounds the output
+/// of a numbered search; an unnumbered search's hits have no such prefix,
+/// so a compound command with any unnumbered search segment keeps #9370's
+/// whole-output protection instead.
+pub(crate) fn every_search_is_numbered(command: &str) -> bool {
+    command_has_segment(command, |words| {
+        native_output::is_search(words) && !native_output::search_is_numbered(words)
+    })
+    .then_some(())
+    .is_none()
+}
+
 /// Whether some shell segment of the command produces output that is not the
 /// search's own bytes: a genuine producer (`cargo build`, `xargs cat`), not a
 /// presentation filter (`sort`, `head`, `wc`) and not a no-op (`cd`). A pure

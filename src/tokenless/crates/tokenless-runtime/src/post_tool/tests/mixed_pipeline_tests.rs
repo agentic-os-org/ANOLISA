@@ -311,15 +311,16 @@ fn compound_search_output_compresses_only_its_log_runs() {
 
 #[test]
 fn compound_search_output_with_no_compressible_run_passes_through() {
-    // A quiet search followed by a log the compressor cannot shrink: no
-    // run offers a benefit, so the whole output passes through untouched.
+    // A numbered quiet search followed by a log the compressor cannot
+    // shrink: no run offers a benefit, so the whole output passes through
+    // untouched.
     let rows = (0..40)
         .map(|i| format!("{i},v{i}"))
         .collect::<Vec<_>>()
         .join("\n");
     let input = format!("src/lib.rs:3:match\n{rows}\n");
     let mut req = request(&input);
-    req.command = Some("grep -q needle Cargo.toml && cargo build 2>&1".into());
+    req.command = Some("grep -qn needle Cargo.toml && cargo build 2>&1".into());
     let concrete = Arc::new(CountingStore::default());
     let store: Arc<dyn StashStore> = concrete.clone();
     let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
@@ -333,12 +334,14 @@ fn compound_search_output_keeps_match_shaped_log_lines() {
     // A log line shaped exactly like a search hit (`path:line:text`) is a
     // claimable search byte: it is excluded from the run and preserved,
     // even though the log segment produced it. The remaining routine run
-    // still compresses.
+    // still compresses. The grep carries -n: its numbered hits are what the
+    // guarded grammar can claim, and its unnumbered siblings would keep the
+    // whole-output protection instead.
     let log = build_log();
     let hit_shaped = "warning from build.rs:41:see the log\n";
     let input = format!("{log}{hit_shaped}");
     let mut req = request(&input);
-    req.command = Some("cargo build 2>&1 | grep -E 'error|warning'".into());
+    req.command = Some("cargo build 2>&1 | grep -nE 'error|warning'".into());
     let concrete = Arc::new(CountingStore::default());
     let store: Arc<dyn StashStore> = concrete.clone();
     let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
@@ -346,6 +349,90 @@ fn compound_search_output_keeps_match_shaped_log_lines() {
     let output = &run.response.output;
     assert!(output.contains(hit_shaped), "{output}");
     assert!(output.contains("lines omitted."));
+}
+
+#[test]
+fn an_unnumbered_search_keeps_the_whole_output_protection() {
+    // The guarded route preserves `path:line:`-prefixed lines, which bounds
+    // a numbered search's hits — but an unnumbered search's hits carry no
+    // such prefix, so its compound command keeps #9370's whole-output
+    // protection: the search route's do-not-touch verdict fires, not the
+    // mixed route, and nothing reaches Stash.
+    let log = build_log();
+    let hits = "src/main.rs:12:fn entry() {\nsrc/main.rs:40:let done = false;\n";
+    let input = format!("{hits}{log}");
+    let mut req = request(&input);
+    req.command = Some("grep entry src/main.rs && cargo build".into());
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert_eq!(run.response.output, input);
+    assert_eq!(concrete.len(), 0);
+    // `--line-number` counts just like `-n` (and a wrapper's own `-n` does
+    // not): this numbered form takes the guarded route again.
+    let mut req = request(&input);
+    req.command = Some("nice -n 5 grep --line-number entry src/main.rs && cargo build".into());
+    let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert!(run.response.output.contains("lines omitted."));
+}
+
+#[test]
+fn compound_search_output_survives_beyond_the_scan_window() {
+    // >64 KiB of input: the guarded split scans only the leading window,
+    // and everything past it is appended verbatim — the candidate may not
+    // silently shrink what it never claimed, and the tail must survive
+    // byte-for-byte even when the compressed head wins.
+    let log = build_log();
+    let tail_marker = "tail-after-the-scan-window\n";
+    let filler = format!("{log}{}", "x".repeat(80 * 1024));
+    let input = format!(
+        "src/main.rs:12:fn entry() {{\n{filler}{log}{tail_marker}"
+    );
+    let mut req = request(&input);
+    req.command = Some("grep -n entry src/main.rs && cargo build".into());
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    let output = &run.response.output;
+    assert!(
+        output.ends_with(tail_marker),
+        "tail was dropped past the scan window: {}",
+        &output[output.len().saturating_sub(200)..]
+    );
+    // The untouched tail is byte-identical, not merely present.
+    let tail_len = tail_marker.len() + log.len();
+    assert_eq!(&output[output.len() - tail_len..], &input[input.len() - tail_len..]);
+    assert!(output.len() < input.len());
+}
+
+#[test]
+fn one_contiguous_log_over_200_lines_is_a_single_run() {
+    // MAX_SCAN_LINES is a scan bound, not a run boundary: splitting one
+    // contiguous 600-line log at an arbitrary 200-line offset would
+    // fragment it into per-chunk edge lines and recovery markers. The
+    // guarded split keeps it one run, and its compression matches the
+    // standalone build-log route on the same bytes.
+    let log = (0..600)
+        .map(|index| {
+            format!("Compiling package-{index:03} v0.1.{} with extended progress output\n", index % 10)
+        })
+        .collect::<String>();
+    let input = format!("$ cargo build\n{log}Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+    let mut req = request(&input);
+    req.command = Some("grep -n entry src/main.rs && cargo build".into());
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let guarded = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(guarded.response.disposition, Disposition::Applied);
+    let output = &guarded.response.output;
+    // One run, one marker: no per-chunk fragmentation.
+    assert_eq!(output.matches("lines omitted.").count(), 1, "{output}");
+    assert!(output.contains("$ cargo build\n"));
+    assert!(output.contains("Finished `dev` profile [unoptimized] target(s) in 1.2s\n"));
+    assert!(output.len() < input.len());
 }
 
 #[test]

@@ -244,7 +244,7 @@ pub(crate) fn compress_regions(
     })
 }
 
-fn weakest(left: Recoverability, right: Recoverability) -> Recoverability {
+pub(crate) fn weakest(left: Recoverability, right: Recoverability) -> Recoverability {
     use Recoverability::{Lossless, Retrievable, Unrecoverable};
     match (left, right) {
         (Unrecoverable, _) | (_, Unrecoverable) => Unrecoverable,
@@ -315,19 +315,9 @@ pub(crate) fn has_recognizable_regions(content: &str) -> bool {
 /// timestamp like `12:30:00`, a bare `build.log:41` count, prose with a
 /// colon) is not a search byte here.
 fn is_search_hit_line(line: &str) -> bool {
-    // Mirrors `search_results::line_is_search_hit`: a path-like prefix
-    // (`/` or `.` present, so `12:30:00` timestamps do not match), then a
-    // line number, then a second colon.
-    let Some(colon) = line.find(':') else {
-        return false;
-    };
-    let path = &line[..colon];
-    if path.is_empty() || !(path.contains('/') || path.contains('.')) {
-        return false;
-    }
-    let rest = &line[colon + 1..];
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    digits >= 1 && rest.as_bytes().get(digits) == Some(&b':')
+    // The search-results grammar itself, not a copy: a byte claimed as a
+    // search hit is a byte the lossless search path would have recognized.
+    super::content::line_is_search_hit(line)
 }
 
 /// One piece of a search-guarded compound output, in source order: either a
@@ -343,7 +333,6 @@ pub(crate) enum GuardedSegment<'a> {
 /// Splits a search-guarded compound output into ordered segments: every
 /// recognized search-hit line becomes its own [`GuardedSegment::SearchHit`]
 /// and the remaining lines group into maximal [`GuardedSegment::Run`]s.
-/// Bounded by the shared scan window.
 ///
 /// The split is conservative in both directions:
 ///
@@ -353,7 +342,20 @@ pub(crate) enum GuardedSegment<'a> {
 /// - Everything else joins the current run, including blank lines and
 ///   prose: the run's own compressor decides whether the run compresses,
 ///   and a rejected run survives byte-for-byte.
-pub(crate) fn search_guarded_runs(content: &str) -> Vec<GuardedSegment<'_>> {
+///
+/// A run is bounded only by the recognized search-hit lines and the shared
+/// scan window — never by [`MAX_SCAN_LINES`], which is a scan bound
+/// elsewhere in this crate. Splitting one contiguous log at an arbitrary
+/// 200-line offset would fragment it into per-chunk edge lines, recovery
+/// markers and Stash rows, diverging from the standalone route's output.
+///
+/// Returns the segments plus the byte length actually scanned (the bounded
+/// scan window): the caller must append `&content[scanned..]` after
+/// splicing the segments back, or everything past the window would be
+/// silently dropped — a truncated candidate is *smaller*, so the arbiter
+/// would accept it as a win.
+pub(crate) fn search_guarded_runs(content: &str) -> (Vec<GuardedSegment<'_>>, usize) {
+    let scanned_bytes = scan_prefix(content).len();
     let mut segments = Vec::new();
     let mut current: Vec<&str> = Vec::new();
     for line in scan_prefix(content).split_inclusive('\n') {
@@ -367,16 +369,11 @@ pub(crate) fn search_guarded_runs(content: &str) -> Vec<GuardedSegment<'_>> {
             continue;
         }
         current.push(line);
-        if current.len() >= MAX_SCAN_LINES {
-            segments.push(GuardedSegment::Run(SearchGuardedRun {
-                lines: std::mem::take(&mut current),
-            }));
-        }
     }
     if !current.is_empty() {
         segments.push(GuardedSegment::Run(SearchGuardedRun { lines: current }));
     }
-    segments
+    (segments, scanned_bytes)
 }
 
 /// Whether a search-guarded run offers the log domain anything: the run's
@@ -412,6 +409,7 @@ pub(crate) fn compress_search_guarded_run(
         return Some(SearchGuardedRunOutcome {
             output: None,
             operations: Vec::new(),
+            recoverability: outcome.recoverability,
             stash_writes: outcome.stash_writes,
             stash_errors: outcome.metrics.stash_errors,
         });
@@ -425,11 +423,12 @@ pub(crate) fn compress_search_guarded_run(
                 tokenless_compressors::BuildLogOperation::TerminalCleanup => {
                     AppliedOperation::TerminalCleanup
                 }
-                tokenless_compressors::BuildLogOperation::ProgressReduction => {
+                tokenless_compressors::BuildLogOperation::Reduction => {
                     AppliedOperation::BuildLogReduction
                 }
             })
             .collect(),
+        recoverability: outcome.recoverability,
         stash_writes: outcome.stash_writes,
         stash_errors: outcome.metrics.stash_errors,
     })
@@ -441,6 +440,11 @@ pub(crate) struct SearchGuardedRunOutcome {
     pub(crate) output: Option<String>,
     /// Wire operations when the run compressed.
     pub(crate) operations: Vec<AppliedOperation>,
+    /// The run's weakest recovery guarantee. `BuildLogCompressor` reports
+    /// `Retrievable` whenever progress reduction applies, exactly when a run
+    /// changes, so this must flow to the wire rather than be asserted
+    /// `Lossless` — hosts gate safety decisions on that value.
+    pub(crate) recoverability: Recoverability,
     /// Tentative Stash writes performed while producing candidates.
     pub(crate) stash_writes: Vec<tokenless_ccr::StashWrite>,
     /// Failed Stash writes.

@@ -20,6 +20,8 @@ mod source_code;
 mod stack_trace;
 mod tabular;
 
+pub(crate) use search_results::line_is_search_hit;
+
 use tokenless_compressors::SearchResultsCompressor;
 use tokenless_protocol::ContentType;
 
