@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct DockerConfig {
     /// Trusted docker CLI, invoked by absolute path with a cleared environment.
     pub cli: PathBuf,
+    /// Fixed local Unix endpoint; personal Docker contexts are never read.
+    pub host: String,
     /// Operator-pinned image; a digest reference is strongly recommended.
     pub image: String,
     /// Optional memory limit in docker syntax, such as `512m`.
@@ -27,6 +29,15 @@ impl DockerConfig {
         if !self.cli.is_absolute() {
             return Err(DockerError::Unsupported(
                 "docker CLI must be an explicit absolute path".into(),
+            ));
+        }
+        let endpoint = self.host.strip_prefix("unix://").unwrap_or_default();
+        if !std::path::Path::new(endpoint).is_absolute()
+            || endpoint.contains(['\0', '\n', '\r'])
+            || endpoint.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(DockerError::Unsupported(
+                "docker host must be unix:///absolute/path without traversal".into(),
             ));
         }
         if self.image.is_empty()
@@ -79,6 +90,7 @@ mod tests {
     fn config() -> DockerConfig {
         DockerConfig {
             cli: PathBuf::from("/usr/bin/docker"),
+            host: "unix:///var/run/docker.sock".into(),
             image: "registry.example.com/team/agent@sha256:abc123".into(),
             memory: None,
             cpus: None,
