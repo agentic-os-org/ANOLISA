@@ -116,7 +116,6 @@ run_raw_packaging() {
     packaging/payload.sh \
     packaging/raw/package.sh \
     packaging/raw/assets/bin/cosh \
-    packaging/raw/assets/bin/cosh-switch \
     scripts/managed-task-dev.sh \
     tests/test-managed-task-dev.sh \
     tests/test-package-raw.sh

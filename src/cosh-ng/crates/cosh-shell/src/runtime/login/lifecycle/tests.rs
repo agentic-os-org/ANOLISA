@@ -178,10 +178,6 @@ fn lifecycle_arguments_are_exact_and_owned_once() {
         parse(&args(&["downgrade", "/root/old.rpm"])).unwrap(),
         Action::Downgrade("/root/old.rpm".into())
     );
-    assert_eq!(
-        parse(&args(&["swap-to-copilot"])).unwrap(),
-        Action::SwapToCopilot
-    );
     for invalid in [
         vec![],
         vec!["check-erase", "extra"],
@@ -190,6 +186,7 @@ fn lifecycle_arguments_are_exact_and_owned_once() {
         vec!["replace", "/root/../target.rpm"],
         vec!["replace", "/root/a.rpm", "--yes"],
         vec!["status"],
+        vec!["swap-to-copilot"],
     ] {
         assert!(parse(&args(&invalid)).is_err());
     }
@@ -216,7 +213,6 @@ fn only_installed_capability_audit_is_available_before_sudo() {
         Action::CheckTarget("/root/no-access.rpm".into()),
         Action::Replace("/root/no-access.rpm".into()),
         Action::Downgrade("/root/no-access.rpm".into()),
-        Action::SwapToCopilot,
     ] {
         assert!(admit(&action, 1001).is_err());
         assert!(admit(&action, 0).is_ok());

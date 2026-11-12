@@ -42,12 +42,6 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "bin/cosh-switch"
-target = "{bindir}/cosh-switch"
-mode = "0755"
-type = "executable"
-
-[[component.layout.files]]
 source = "libexec/anolisa/cosh-ng/cosh-core"
 target = "{libexecdir}/cosh-ng/cosh-core"
 mode = "0755"

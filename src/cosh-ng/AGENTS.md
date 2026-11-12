@@ -89,7 +89,7 @@ for physical RPM products, dependencies, file ownership and scriptlets.
 
 | Package | Responsibility |
 |---------|----------------|
-| `cosh-ng` | Public CLI, shell launcher and switch command; private Core, Gateway and shell binaries; Gateway service unit, license, runtime documentation and the `manage-task-checkpoints` workflow skill. Retains `Provides: anolisa-component(cosh-ng)`. |
+| `cosh-ng` | Public CLI, shell launcher; private Core, Gateway and shell binaries; Gateway service unit, license, runtime documentation and the `manage-task-checkpoints` workflow skill. Retains `Provides: anolisa-component(cosh-ng)`. |
 
 The single `cosh-ng` RPM owns all runtime files and the bundled skill. Keep the
 service and login-shell scriptlets with this package and preserve the

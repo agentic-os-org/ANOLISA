@@ -17,7 +17,6 @@ SEMVER = re.compile(
 REQUIRED_SOURCES = {
     "bin/cosh-cli",
     "bin/cosh",
-    "bin/cosh-switch",
     "libexec/anolisa/cosh-ng/cosh-core",
     "libexec/anolisa/cosh-ng/cosh-shell",
     "libexec/anolisa/cosh-ng/resources.conf",
