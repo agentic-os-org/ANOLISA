@@ -777,8 +777,6 @@ fn is_closing_response_event(chunk: &Value) -> bool {
     )
 }
 
-/// A choice that carries `message` instead of `delta` speaks in cumulative
-/// snapshots: each frame repeats the answer so far rather than an increment.
 /// Returns the message or delta object of a choice, treating an explicit
 /// `"message": null` as absent.
 ///
@@ -793,6 +791,8 @@ fn message_or_delta(choice: &Value) -> Option<&Value> {
         .or_else(|| choice.get("delta").filter(|value| !value.is_null()))
 }
 
+/// A choice that carries `message` instead of `delta` speaks in cumulative
+/// snapshots: each frame repeats the answer so far rather than an increment.
 fn carries_message_snapshot(chunk: &Value) -> bool {
     // The DashScope/Bailian native envelope is a snapshot too, and the most
     // literal one: it has no `choices[].delta` at all, and by default every
@@ -813,7 +813,7 @@ fn carries_message_snapshot(chunk: &Value) -> bool {
                 choice
                     .get("message")
                     .is_some_and(|message| !message.is_null())
-                    && choice.get("delta").is_none()
+                    && choice.get("delta").is_none_or(Value::is_null)
             })
         })
 }
@@ -1534,6 +1534,26 @@ mod tests {
             merge_response_output_text(&[chunk]).0,
             "hello there",
             "a null message must not turn a delta chunk into a snapshot"
+        );
+    }
+
+    /// The mirror case: a gateway repeats a whole `message` frame beside
+    /// `"delta": null`. A present-but-null delta must count as absent, or the
+    /// cumulative snapshots are appended as increments and the answer is
+    /// counted twice.
+    #[test]
+    fn test_null_delta_does_not_hide_message_snapshot() {
+        let first = serde_json::json!({
+            "choices": [{"index": 0, "message": {"content": "hello"}, "delta": null}]
+        });
+        let second = serde_json::json!({
+            "choices": [{"index": 0, "message": {"content": "hello world"}, "delta": null}]
+        });
+        assert!(carries_message_snapshot(&first));
+        assert_eq!(
+            merge_response_output_text(&[first, second]).0,
+            "hello world",
+            "a cumulative snapshot repeated beside a null delta must not be appended"
         );
     }
 
