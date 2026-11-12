@@ -129,7 +129,13 @@ esac
 impl Fixture {
     fn write_inspect(&self, network: &str) {
         let inspect = serde_json::json!([{
+            "Path": "/usr/bin/python3", "Args": ["-c", "print(1)"],
+            "Config": {
+                "Entrypoint": ["/usr/bin/python3"], "Cmd": ["-c", "print(1)"],
+                "WorkingDir": self.work
+            },
             "HostConfig": {
+                "Privileged": false, "CapAdd": null,
                 "NetworkMode": network,
                 "ReadonlyRootfs": true,
                 "CapDrop": ["ALL"],
@@ -139,8 +145,10 @@ impl Fixture {
                     }}]
             },
             "Mounts": [
-                {"Source": self.work, "Destination": self.work, "RW": false},
-                {"Source": self.data, "Destination": self.data, "RW": true}
+                {"Type": "bind", "Source": self.work, "Destination": self.work,
+                    "RW": false, "Propagation": "rprivate"},
+                {"Type": "bind", "Source": self.data, "Destination": self.data,
+                    "RW": true, "Propagation": "rprivate"}
             ],
             "State": {
                 "Running": false,
@@ -204,7 +212,41 @@ fn successful_run_maps_the_container_lifecycle() {
         assert!(create.iter().any(|arg| arg == expected), "{expected}");
     }
     assert!(create.iter().any(|arg| arg == "agent@sha256:abc123"));
-    assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+    assert_eq!(fixture.read_calls("rm.calls").len(), 3);
+}
+
+#[test]
+fn created_invocation_must_match_request() {
+    for pointer in [
+        "/Path",
+        "/Args",
+        "/Config/Entrypoint",
+        "/Config/Cmd",
+        "/Config/WorkingDir",
+    ] {
+        let fixture = fixture();
+        fixture.write_inspect("none");
+        let path = fixture.state.join("inspect.json");
+        let mut inspected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        *inspected[0].pointer_mut(pointer).unwrap() = serde_json::json!("wrong-image-default");
+        std::fs::write(path, serde_json::to_vec(&inspected).unwrap()).unwrap();
+        let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
+        assert!(
+            error.to_string().contains("invocation"),
+            "{pointer}: {error}"
+        );
+        assert!(!fixture.state.join("start.args").exists());
+        assert_eq!(fixture.read_calls("rm.calls").len(), 3);
+        let create = fixture.read_calls("create.args");
+        let entry = create.iter().position(|arg| arg == "--entrypoint").unwrap();
+        assert_eq!(create[entry + 1], "/usr/bin/python3");
+        let image = create
+            .iter()
+            .position(|arg| arg == "agent@sha256:abc123")
+            .unwrap();
+        assert_eq!(&create[image + 1..], ["-c", "print(1)"]);
+    }
 }
 
 #[test]
@@ -261,7 +303,7 @@ fn host_network_without_seccomp_fence_aborts_and_cleans_up() {
     let error = fixture.backend.execute_bound(&spec).unwrap_err();
     assert!(error.to_string().contains("AF_UNIX"), "{error}");
     assert!(!fixture.state.join("start.args").exists());
-    assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+    assert_eq!(fixture.read_calls("rm.calls").len(), 3);
 }
 
 #[test]
@@ -271,7 +313,7 @@ fn fence_mismatch_aborts_before_start_and_cleans_up() {
     let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
     assert!(error.to_string().contains("fence"), "{error}");
     assert!(!fixture.state.join("start.args").exists());
-    assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+    assert_eq!(fixture.read_calls("rm.calls").len(), 3);
 }
 
 #[test]
@@ -292,7 +334,7 @@ fn recursive_readonly_downgrade_aborts_before_start() {
             .any(|arg| arg.ends_with(",readonly,bind-recursive=readonly"))
     );
     assert!(!args.iter().any(|arg| arg == "--volume"));
-    assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+    assert_eq!(fixture.read_calls("rm.calls").len(), 3);
 }
 
 #[test]
@@ -323,7 +365,7 @@ fn start_status_must_agree_with_inspected_exit_code() {
     std::fs::write(fixture.state.join("start.code"), "9").unwrap();
     let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
     assert!(error.to_string().contains("disagrees"), "{error}");
-    assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+    assert_eq!(fixture.read_calls("rm.calls").len(), 3);
 }
 
 #[test]
