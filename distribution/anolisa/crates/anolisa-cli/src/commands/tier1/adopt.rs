@@ -1141,6 +1141,7 @@ mod tests {
     fn owned_binding() -> ProviderBinding {
         ProviderBinding::Owned {
             artifact: anolisa_core::domain::OwnedArtifact {
+                repository: None,
                 version: "1.0.0".to_string(),
                 distribution_source: None,
                 raw_package: None,

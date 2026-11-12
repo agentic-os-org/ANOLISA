@@ -452,13 +452,14 @@ jobs:
         shell: bash
         run: |
           cd src/agent-sec-core
+          # Read all grep output in these summaries. An early pipe close fails large reports under pipefail.
           if [ -f coverage.xml ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' coverage.xml | head -1)
-            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' coverage.xml | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' coverage.xml | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' coverage.xml | head -1)
-            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' coverage.xml | head -1)
-            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' coverage.xml | head -1)
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' coverage.xml | sed -n '1p')
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' coverage.xml | sed -n '1p')
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' coverage.xml | sed -n '1p')
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' coverage.xml | sed -n '1p')
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' coverage.xml | sed -n '1p')
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' coverage.xml | sed -n '1p')
             LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
             BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
             {
@@ -578,12 +579,12 @@ jobs:
         run: |
           COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
           if [ -f "$COV_FILE" ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | sed -n '1p')
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | sed -n '1p')
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | sed -n '1p')
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | sed -n '1p')
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | sed -n '1p')
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | sed -n '1p')
             LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
             BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
             {

@@ -1,6 +1,6 @@
 [package]
 name = "asc-cli"
-description = "AgentSecCore daemon client and direct sandbox execution CLI"
+description = "AgentSecCore CLI for daemon capabilities, sandbox execution and local Skill assessment"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -27,6 +27,8 @@ asc-action-types = { workspace = true }
 asc-capability-prompt-scan = { workspace = true }
 asc-model-client = { workspace = true }
 asc-intent = { workspace = true }
+asc-skill-score = { workspace = true }
+tempfile = { workspace = true }
 dirs = { workspace = true }
 rustix = { workspace = true }
 asc-observability = { workspace = true, features = ["runtime"] }

@@ -123,6 +123,7 @@ fn plant_restartable(prefix: &std::path::Path) -> FsLayout {
         scope: InstallationScope::System,
         binding: ProviderBinding::Owned {
             artifact: OwnedArtifact {
+                repository: None,
                 version: "1.0.0".to_string(),
                 distribution_source: None,
                 raw_package: None,

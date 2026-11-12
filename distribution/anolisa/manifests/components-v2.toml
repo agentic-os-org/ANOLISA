@@ -192,3 +192,13 @@ kind = "rpm"
 package = "ktuner"
 provides = "anolisa-component(ktuner)"
 legacy_adopt = true
+
+[[components]]
+name = "sec-core-skill-score"
+display_name = "Agent Security Core optional Skill Score runtime"
+summary = "Explicitly installed isolated worker dependencies and locked execution images"
+targets = [{ os = "linux", arch = "x86_64" }]
+
+[[components.backends]]
+kind = "raw"
+package = "sec-core-skill-score"

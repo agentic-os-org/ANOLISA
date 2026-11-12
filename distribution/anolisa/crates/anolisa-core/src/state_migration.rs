@@ -346,6 +346,7 @@ pub fn owned_installation(legacy: &InstalledObject, scope: InstallationScope) ->
         scope,
         binding: ProviderBinding::Owned {
             artifact: OwnedArtifact {
+                repository: None,
                 version: legacy.version.clone(),
                 distribution_source: legacy.distribution_source.clone(),
                 raw_package: legacy.raw_package.clone(),

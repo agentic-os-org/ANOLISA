@@ -67,7 +67,7 @@ rust-lint: ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
 test-python: ## Run Python unit and integration tests
 	@echo "🧪 Running Python tests..."
 	cd agent-sec-cli && uv sync
-	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ --ignore=tests/v2 -v
+	uv run --project agent-sec-cli pytest -o "pythonpath=$(CURDIR)/skill-score-runtime/src" tests/ --ignore=tests/e2e/ --ignore=tests/v2 -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
 	uv run --project agent-sec-cli pytest tests/e2e/daemon -v
 	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner -v
@@ -155,7 +155,7 @@ test-e2e-source-build: test-e2e-source-build-v2 ## Run V2 E2E tests against sour
 test-python-coverage: ## Run Python tests with coverage report
 	@echo "🧪 Running Python tests with coverage..."
 	cd agent-sec-cli && uv sync
-	uv run --project agent-sec-cli pytest tests/ \
+	uv run --project agent-sec-cli pytest -o "pythonpath=$(CURDIR)/skill-score-runtime/src" tests/ \
 		--ignore=tests/e2e/linux-sandbox \
 		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/skill-signing \

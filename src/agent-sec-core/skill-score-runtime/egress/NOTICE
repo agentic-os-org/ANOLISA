@@ -1,0 +1,8 @@
+ASC Skill Score egress sidecar
+
+The network rule order and transparent proxy policy derive from Harbor 0.22.0
+(https://github.com/harbor-framework/harbor), Apache License 2.0.
+ASC owns this entrypoint, readiness contract, policy generation and image.
+The installed Harbor package is used through its public Compose interface.
+
+GOST is a separately licensed dependency pinned by the Dockerfile digest.

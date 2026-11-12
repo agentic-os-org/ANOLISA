@@ -109,6 +109,20 @@ pub struct ComponentManifest {
     /// synthesized `binary_version` over the first executable layout file —
     /// see [`ComponentManifest::health_spec`].
     pub health_check: Option<CheckSpec>,
+    /// Optional verified candidate preparation, before replacing installed files.
+    pub prepare: Option<PrepareSpec>,
+}
+
+/// A component-owned dependency preparation program from the verified raw payload.
+///
+/// The relative script path is resolved beneath a private candidate prefix, never
+/// against the old installation. The installer passes final prefix and cache paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareSpec {
+    /// Prefix-relative executable path included in the component's file mappings.
+    pub script: String,
+    /// Hard deadline for the program and its process group, in seconds.
+    pub timeout_secs: u32,
 }
 
 /// Structured distribution selector, surfaced for downstream consumers
@@ -1077,6 +1091,8 @@ struct ComponentMetaRaw {
     // directly into the internally-tagged `CheckSpec` (`type = "..."`).
     #[serde(default)]
     health_check: Option<CheckSpec>,
+    #[serde(default)]
+    prepare: Option<PrepareSpec>,
     // `[[component.dependencies]]` — structured runtime dependency entries, a
     // sibling of `[component.layout]`. Nested under `[component]`, so it never
     // collides with the top-level `[dependencies]` parsed into
@@ -1339,6 +1355,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             capabilities: component_capabilities,
             hooks: component_hooks,
             health_check,
+            prepare,
             dependencies: component_runtime_deps,
         } = raw.component;
 
@@ -1541,6 +1558,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             features,
             adapters,
             health_check,
+            prepare,
         }
     }
 }

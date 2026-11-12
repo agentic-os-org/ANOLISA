@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/protectskills/MaliciousAgentSkillsBench",
+  "commit": "f7d28b1a9de4eb33d552529cf79d1065d765f6c3",
+  "path": "code/scanner/skill-security-scan",
+  "license": "MIT",
+  "changes": "Scanner and rules subset only; imports relocated to the private package namespace and module scope, unused imports removed, formatting normalized. Upstream rule semantics and comments retained."
+}

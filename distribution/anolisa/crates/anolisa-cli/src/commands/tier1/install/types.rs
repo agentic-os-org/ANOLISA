@@ -16,11 +16,22 @@ pub(crate) struct RawResolution {
     pub(crate) package: String,
     pub(crate) entry: DistributionEntry,
     pub(crate) artifact_url: String,
+    pub(super) recorded_repository: bool,
     /// Repository base URL the index was fetched from, kept so a
     /// version-pinned install can attribute the resolved candidate to its
     /// source repository in the result envelope.
     pub(crate) base_url: String,
     pub(crate) warnings: Vec<String>,
+}
+
+impl RawResolution {
+    pub(super) fn public_url_label(&self, url: &str) -> String {
+        if self.recorded_repository {
+            format!("sha256:{}", super::raw::repository_fingerprint(url))
+        } else {
+            crate::commands::common::repository_url_label(url)
+        }
+    }
 }
 
 /// Execution input after the artifact has been verified and its install
@@ -57,6 +68,8 @@ pub(crate) enum InstallContractSource {
 /// Source that selected the raw repository URL for this resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawRepositoryOrigin {
+    /// URL recovered from the installed component’s owner-only repository record.
+    Installed,
     /// URL loaded from the active repository configuration file.
     Config(PathBuf),
     /// URL supplied by the invocation's one-off `--repo` option.

@@ -30,6 +30,7 @@ members = [
     "crates/asc-foundation-types",
     "crates/asc-intent",
     "crates/asc-model-client",
+    "crates/asc-skill-score",
     "crates/asc-agentsight-client",
     "crates/asc-agentsight-protocol",
     "crates/asc-policy-translator-agentsight",
@@ -87,6 +88,13 @@ asc-event-sink = { path = "crates/asc-event-sink" }
 asc-foundation-types = { path = "crates/asc-foundation-types" }
 asc-intent = { path = "crates/asc-intent" }
 asc-model-client = { path = "crates/asc-model-client" }
+asc-skill-score = { path = "crates/asc-skill-score" }
+rust_decimal = "1"
+unicode-casefold = "0.2"
+flate2 = "1"
+bzip2 = "0.6"
+liblzma = { version = "0.4", default-features = false, features = ["static"] }
+tar = "0.4"
 asc-observability = { path = "crates/asc-observability" }
 asc-pap = { path = "crates/asc-pap" }
 asc-pcp = { path = "crates/asc-pcp" }

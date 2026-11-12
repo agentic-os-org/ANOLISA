@@ -135,6 +135,15 @@ stage_payload() {
     normalize_modes "$stage"
     python3 "$ROOT/packaging/raw/verify_release.py" \
         "$ROOT" "$CONTRACT" --payload-root "$stage" > /dev/null
+    if [ -n "${RAW_PREVIEW_VERSION:-}" ]; then
+        python3 - "$stage/.anolisa/component.toml" "$VERSION" <<'PYVERSION'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text, count = re.subn(r'(?m)^version = "[^"]+"$', 'version = "' + sys.argv[2] + '"', path.read_text(), count=1)
+assert count == 1
+path.write_text(text)
+PYVERSION
+    fi
 }
 
 resolve_epoch() {
@@ -176,6 +185,11 @@ TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 [ -x "$BUILD_DIR/linux-sandbox" ] || die "missing build output $BUILD_DIR/linux-sandbox"
 
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" "$ROOT" "$CONTRACT")"
+[ -z "${RAW_SKILL_SCORE_PAYLOAD:-}" ] || die "install sec-core-skill-score separately; base packages cannot embed assessment payloads"
+if [ -n "${RAW_PREVIEW_VERSION:-}" ]; then
+    [[ "$RAW_PREVIEW_VERSION" =~ ^${VERSION//./\.}-skillscore\.[a-f0-9]{12}(\.base\.[a-f0-9]{12})?$ ]] || die "invalid preview version"
+    VERSION="$RAW_PREVIEW_VERSION"
+fi
 
 if [ "$COMMAND" = "stage" ]; then
     [ -n "${DESTDIR:-}" ] || die "DESTDIR is required by stage-raw"

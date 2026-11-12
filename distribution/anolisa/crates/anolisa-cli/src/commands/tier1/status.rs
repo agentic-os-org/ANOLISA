@@ -111,6 +111,9 @@ pub(crate) struct AdapterSummaryRecord {
 /// `not_installed` records stay compact.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComponentRecord {
+    /// Compare companion package origins without exposing repository credentials or private paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) raw_repository_sha256: Option<String>,
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) scope: String,
@@ -754,6 +757,7 @@ fn adapter_observation_from_scan(entry: &ScanEntry) -> AdapterObservation {
 
 fn not_installed_record(name: &str) -> ComponentRecord {
     ComponentRecord {
+        raw_repository_sha256: None,
         name: name.to_string(),
         status: "not_installed".to_string(),
         scope: "none".to_string(),
@@ -845,6 +849,7 @@ fn observed_record(
         let evr = info.version.to_string();
         let source_repo = query.installed_origin(&target.package).ok().flatten();
         return Some(ComponentRecord {
+            raw_repository_sha256: None,
             name: target.component,
             status: "observed".to_string(),
             scope: "system".to_string(),
@@ -959,6 +964,10 @@ fn record_from_snapshot(
 
     let visibility = snapshot.state_visibility();
     let mut record = ComponentRecord {
+        raw_repository_sha256: match &installation.binding {
+            ProviderBinding::Owned { artifact } => artifact.repository_sha256(),
+            ProviderBinding::Delegated { .. } => None,
+        },
         name: installation.name.clone(),
         status,
         scope: visibility.map_or_else(
@@ -2954,6 +2963,7 @@ name = "copilot-shell"
     #[test]
     fn adapter_summary_skips_empty_adapters_in_json() {
         let record = ComponentRecord {
+            raw_repository_sha256: None,
             name: "agentsight".to_string(),
             status: "installed".to_string(),
             scope: "system".to_string(),
@@ -2986,6 +2996,7 @@ name = "copilot-shell"
     #[test]
     fn scope_metadata_pairs_expose_mutability_and_state_path() {
         let record = ComponentRecord {
+            raw_repository_sha256: None,
             name: "agentsight".to_string(),
             status: "installed".to_string(),
             scope: "system".to_string(),
