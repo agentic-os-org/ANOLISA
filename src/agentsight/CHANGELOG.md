@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.16.1
+
+### Security
+- Stop trusting every loopback request: the dashboard skips authentication only for same-origin requests to a loopback host, and both `serve` and the macOS local viewer restrict CORS to their own origin, so a visited web page can no longer read sessions, trajectories or security events through `127.0.0.1`.
+
+### Features
+- Resolve the init-namespace identity of targets inside PID namespaces: enforcer map operations, tracepoint holders and events use kernel PIDs, and inode-only paths resolve through the target root.
+- Discover Cline sessions in the trajectory collector, pair Cline usage with its response, and refresh usage that Cline saves after a task finishes.
+
+### Changed
+- The `agentsight` compatibility RPM recommends the matching `agentsight-plugins`, so a default `dnf install agentsight` also delivers the DSH plugin resources.
+- ActPlane refuses to apply policies outside the init PID namespace with a dedicated RPC error, and rejects block policies when the BPF LSM is not active, before mutating BPF state.
+
+### Fixes
+- Capture Claude Code builds again after Bun's 2026 BoringSSL rebuild reordered the SSL functions; reattach SSL probes on each new PID and retry SSL libraries that load late.
+- Raise the memlock limit before loading probes, so 5.10 vendor kernels no longer fail every probe with `EPERM` in containers.
+- Persist file-delete audit evidence, label denied file operations as blocked, scope the evidence link to the filtered agent, and warn on exec patterns that can never match.
+- Discover Qoder CLI launched through Node with one V8 flag, decode overlay mount paths, read non-UTF-8 process names, and probe the IPv6 loopback for health ports.
+- Read streamed Anthropic tool results; preserve Gemini text parts and project metadata, canonicalize and normalize Gemini request contents, and fold Gemini thinking tokens into partial usage.
+- Match Codex command outcomes, scope reasoning replay suppression, count tools in raw fallback token estimates, discount prompt edits for cache hits, and bound decoded HPACK block bytes.
+- Keep collected results without an owner, collected and local completion times, local tool outcomes and shell output, recorded dispatch timing, and complete command evidence for accuracy checks.
+- Show and analyze replayed user observations, strip injected tags in local sessions, keep useful single-step sessions, isolate optimization session roots, and report local label-store errors.
+- Order and distinguish repeated preference turns, fold evaluator outcome variants, validate citations against the prompt, reject stale model judgements, and accept semantic ranking envelopes.
+- Harden claim extraction for embedded JSON, bracketed lists, paths, URLs, Markdown references and semicolon-delimited values; skip verified rows in the triage window.
+- Stop the causal probe from loading whole response bodies into memory, sanitize causal attribution errors, keep concurrent analysis artifacts, order the savings strategy breakdown, and reject negative batch limits.
+- Clear stale interruptions on completion, exclude tool work from user idle time, and deduplicate crash backups by conversation.
+- Retry a busy WAL conversion, prune legacy evaluation tables, preserve config symlinks and modes, replace optimize configs atomically, read BOM-marked optimize configs, keep a rejected config from applying, and degrade `serve` instead of aborting on malformed JSON.
+- Guard dashboard settings saves until the configuration loads, validate trajectory labels before querying the store, and build Linux-only targets only on Linux.
+
+### Performance
+- Run static SSL signature scans on one paced background worker instead of the capture event consumer.
+- Cache, index and borrow claim extraction fast paths.
+
+### Docs
+- Document container target identity, the EPERM denial invariant, and the Chinese build-all note.
+
+### Upgrade notes
+- The default configuration adds a `QoderCLI` rule `["*node*", "*", "*qodercli*"]` for Node launches with one V8 flag. Existing `cmdline` sections are kept as they are on upgrade; add the rule manually to discover such launches.
+- With weak dependencies enabled (the dnf default), upgrading or installing `agentsight` also pulls `agentsight-plugins`, which requires `nodejs >= 22`; exclude it with `--setopt=install_weak_deps=False` when the DSH integration is not wanted.
+
 ## 0.16.0
 
 ### Breaking changes
