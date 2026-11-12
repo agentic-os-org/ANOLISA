@@ -351,6 +351,13 @@ fn run_with_effects(
     ctx: &CliContext,
     effects: &dyn TelemetryEffects,
 ) -> Result<TelemetryApplicationOutcome, CliError> {
+    // Rejected before the plan branch so a preview cannot advertise an option the
+    // apply path refuses. The ordering is only guaranteed inside the handler: the
+    // CLI policy check in `commands::dispatch` runs first and may report a
+    // permission error to an unprivileged caller before this line is reached.
+    if matches!(&request, TelemetryRequest::Prepare { .. }) {
+        reject_unsupported_prepare_options(ctx)?;
+    }
     if matches!(request.intent(), ExecutionIntent::Plan) {
         if ctx.install_mode != InstallMode::System {
             let command = request.command();
@@ -598,6 +605,44 @@ fn execute_prepare(
         changes: vec![TelemetryChange::ImagePrepared { service_enabled }],
         warnings,
     })
+}
+
+/// Rejects options `telemetry prepare` cannot honor.
+///
+/// The command writes the resident unit into the fixed system unit tree and
+/// enables it through the host manager. A relocated `--prefix` would drop the
+/// unit where systemd never looks, and `--install-mode user` would still write
+/// system paths, so both would report success over an image that stays
+/// disabled. Images are prepared from inside their own root instead.
+///
+/// Checked at the [`run_with_effects`] entry, before the plan branch and before
+/// [`TelemetryEffects::require_root`], so a `--dry-run` preview cannot advertise
+/// options the apply path refuses. The check still sits behind the CLI policy
+/// check in `commands::dispatch`, which answers a permission error first for an
+/// unprivileged caller in system mode. `prepare` is an image-build command, so
+/// that ordering is accepted instead of being pushed into the argument parser.
+fn reject_unsupported_prepare_options(ctx: &CliContext) -> Result<(), CliError> {
+    const COMMAND: &str = "telemetry prepare";
+    if let Some(prefix) = ctx.prefix.as_deref()
+        && prefix != Path::new("/")
+    {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "`--prefix {}` is not supported: the resident unit must live in the system unit tree systemd reads, so it would be written but never enabled; run this command inside the image root instead",
+                prefix.display()
+            ),
+        });
+    }
+    if ctx.install_mode != InstallMode::System {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason:
+                "`telemetry prepare` always writes the system unit tree; drop `--install-mode user`"
+                    .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn runtime(command: &str, error: impl std::fmt::Display) -> CliError {
@@ -1475,6 +1520,141 @@ mod tests {
             rendered
                 .contains(r#"ExecStart="/tmp/a b/c\"d\\e%%f$g/anolisa" telemetry upload --loop"#),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_a_relocated_prefix() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let ctx = context_for_root(
+            Path::new("/tmp/anolisa-telemetry-application"),
+            InstallMode::System,
+            Some(PathBuf::from("/tmp/anolisa-telemetry-application/prefix")),
+            TestContextOptions::default(),
+        );
+        let error = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &effects,
+        )
+        .expect_err("a relocated prefix must fail instead of enabling the host unit");
+        assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert!(error.reason().contains("--prefix"));
+        // The rejection precedes the root check, every write and every systemctl call.
+        assert!(effects.calls().is_empty(), "calls: {:?}", effects.calls());
+    }
+
+    #[test]
+    fn prepare_dry_run_rejects_a_relocated_prefix() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let ctx = context_for_root(
+            Path::new("/tmp/anolisa-telemetry-application"),
+            InstallMode::System,
+            Some(PathBuf::from("/tmp/anolisa-telemetry-application/prefix")),
+            TestContextOptions::default(),
+        );
+        let error = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Plan,
+            },
+            &ctx,
+            &effects,
+        )
+        .expect_err("a preview must not accept an option the apply path refuses");
+        assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert!(error.reason().contains("--prefix"));
+        // Rejected before the plan branch: no preview was produced.
+        assert!(effects.calls().is_empty(), "calls: {:?}", effects.calls());
+    }
+
+    #[test]
+    fn prepare_reports_unsupported_options_before_the_root_error() {
+        // Handler-level check: `commands::dispatch` validates the CLI policy first,
+        // so this test does not exercise the unprivileged CLI entry point.
+        let effects = FakeEffects {
+            root_error: Some("requires root"),
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let ctx = context_for_root(
+            Path::new("/tmp/anolisa-telemetry-application"),
+            InstallMode::System,
+            Some(PathBuf::from("/tmp/anolisa-telemetry-application/prefix")),
+            TestContextOptions::default(),
+        );
+        let error = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &effects,
+        )
+        .expect_err("an unsupported option must be reported without asking for root");
+        assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert!(error.reason().contains("--prefix"));
+        assert!(effects.calls().is_empty(), "calls: {:?}", effects.calls());
+    }
+
+    #[test]
+    fn prepare_rejects_user_scope_before_the_root_check() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let error = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx(InstallMode::User),
+            &effects,
+        )
+        .expect_err("user scope cannot write the system unit tree");
+        assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert!(error.reason().contains("--install-mode user"));
+        assert!(effects.calls().is_empty(), "calls: {:?}", effects.calls());
+    }
+
+    #[test]
+    fn prepare_accepts_the_root_prefix() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let ctx = context_for_root(
+            Path::new("/tmp/anolisa-telemetry-application"),
+            InstallMode::System,
+            Some(PathBuf::from("/")),
+            TestContextOptions::default(),
+        );
+        let outcome = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: true,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &effects,
+        )
+        .expect("`--prefix /` names the default tree and must stay accepted");
+        let TelemetryApplicationOutcome::Applied { result, .. } = outcome else {
+            panic!("expected applied outcome");
+        };
+        assert_eq!(
+            result,
+            TelemetryApplied::Prepared {
+                service_enabled: false
+            }
         );
     }
 
