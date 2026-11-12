@@ -226,6 +226,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Nov 12 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.15-1
+- Validate overwrite imports and persist private backups before clearing memories
+- Coordinate snapshot restores and reclamation across processes
+- Reclaim invalid snapshot pairs while retaining unreadable backups
+- Retry failed index writes and report incomplete search indexes
+- Continue grep after invalid UTF-8 and warn only on actual list truncation
+
 * Sun Nov 08 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.14-1
 - Default source installation to the ANOLISA namespace and preserve shared files
 - Reclaim abandoned snapshots and clean up failed snapshot creation

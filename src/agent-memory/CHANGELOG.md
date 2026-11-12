@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.15] - 2026-11-12
+
+### Fixed
+
+- `mem_import` validates memory and task paths before an overwrite clears existing Markdown files, and saves a private, synced AMA backup whose path is returned as `Backup:`. Unsafe paths skip the whole-store clear, while valid entries still import and may replace matching paths; backup failures stop the operation before clearing. Dry runs validate without writing or creating backups. Pause other writers during overwrite and retain space for backups, which require manual removal; later write failures can still leave a partial import (#9929).
+- `mem_snapshot_restore` and mount-open snapshot reclamation now share a per-mount lock across processes, preventing competing restores or cleanup from changing an active restore's staging files. A busy lock makes restore fail with a retryable error and makes reclamation skip that sweep. Restart all `serve` processes sharing a mount after upgrading; do not delete `.anolisa/.restore.lock` while any process uses the mount. Other file writers are not coordinated by this lock (#9898).
+- Snapshot reclamation validates aged archives even when their sidecars parse, discards invalid archives, and retains backups with opening or filesystem read errors for a later retry. Valid metadata and archive-named directories remain intact; `mem_snapshot_list` hides missing or non-regular archives without scanning their contents. Mount opening now reads every eligible paired archive in full, increasing startup I/O. Disable `[memory.snapshot_reclaim].enabled` to stop future cleanup; rollback cannot recover already discarded archives (#9911).
+- Failed startup and incremental index writes now retry automatically with delays increasing from 1 to 64 seconds, without another file change or a server restart. While recovery is pending, `memory_search` reports an incomplete index instead of successful empty or partial results; file tools, including `mem_grep`, remain available (#9928).
+- `mem_grep` continues searching after invalid UTF-8 lines and preserves the original line numbers of later matches, instead of silently dropping the remainder of the file (#9904).
+- `mem_list` warns only when an additional matching entry is omitted, so a complete listing of exactly 5000 entries no longer reports truncation; the 5000-entry cap remains (#9905).
+
 ## [0.2.14] - 2026-11-08
 
 ### Changed
