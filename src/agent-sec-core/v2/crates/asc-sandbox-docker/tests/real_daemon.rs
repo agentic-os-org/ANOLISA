@@ -20,6 +20,7 @@ impl Drop for Mounted {
 fn backend() -> DockerBackend {
     DockerBackend::new(DockerConfig {
         cli: "/usr/bin/docker".into(),
+        host: "unix:///var/run/docker.sock".into(),
         image: std::env::var("ASC_DOCKER_TEST_IMAGE")
             .expect("set ASC_DOCKER_TEST_IMAGE to a locally available pinned Python image"),
         memory: None,
@@ -62,6 +63,7 @@ fn source_replacement_at_start_keeps_authorized_inode() {
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
         let backend = DockerBackend::new(DockerConfig {
             cli,
+            host: "unix:///var/run/docker.sock".into(),
             image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
             memory: None,
             cpus: None,
@@ -93,6 +95,42 @@ fn source_replacement_at_start_keeps_authorized_inode() {
             "secret"
         );
     }
+}
+
+#[test]
+#[ignore = "requires host mount privileges, local Docker and pinned Python image"]
+fn personal_context_and_proxy_config_are_isolated() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join(".docker");
+    std::fs::create_dir(&config).unwrap();
+    let contents = br#"{"currentContext":"missing-remote-context","proxies":{"default":{"httpProxy":"http://test.invalid:1"}}}"#;
+    std::fs::write(config.join("config.json"), contents).unwrap();
+    let cli = directory.path().join("docker");
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/bin/sh\nexport HOME='{}' DOCKER_CONFIG='{}'\nexec /usr/bin/docker \"$@\"\n",
+            directory.path().display(),
+            config.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backend = DockerBackend::new(DockerConfig {
+        cli,
+        host: "unix:///var/run/docker.sock".into(),
+        image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
+        memory: None,
+        cpus: None,
+        pids_limit: Some(64),
+    })
+    .unwrap();
+    let request = spec(
+        directory.path(),
+        "import os; assert not any(k.lower().endswith('_proxy') for k in os.environ)",
+    );
+    assert_eq!(backend.execute_bound(&request).unwrap().exit_code, Some(0));
+    assert_eq!(std::fs::read(config.join("config.json")).unwrap(), contents);
 }
 
 #[test]

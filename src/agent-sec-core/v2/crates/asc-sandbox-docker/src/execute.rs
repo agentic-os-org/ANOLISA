@@ -1,6 +1,6 @@
 //! Container lifecycle over the trusted docker CLI, fail closed at every step.
 
-use crate::{DockerConfig, DockerError, translate};
+use crate::{DockerConfig, DockerError, client::Client, translate};
 use asc_pep_runtime::{PepError, SandboxBackend};
 use asc_sandbox_types::{
     BackendCapabilities, ExecutionResult, ExecutionSpec, LaunchSpec, OsPermissionSet, PathFact,
@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Diagnostics carried into errors are bounded independently of CLI output.
 const MAX_DIAGNOSTIC_CHARS: usize = 4096;
@@ -18,7 +18,7 @@ const MAX_DIAGNOSTIC_CHARS: usize = 4096;
 /// Docker enforcement backend pinned to one operator-owned configuration.
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
-    config: DockerConfig,
+    pub(crate) config: DockerConfig,
 }
 
 impl DockerBackend {
@@ -61,7 +61,8 @@ impl DockerBackend {
     fn run(&self, spec: &ExecutionSpec) -> Result<ExecutionResult, DockerError> {
         #[cfg(target_os = "linux")]
         {
-            self.run_with_stager(spec, crate::mounts::PinnedMounts::prepare)
+            let client = Client::new(&self.config)?;
+            self.run_with_stager(spec, &client, crate::mounts::PinnedMounts::prepare)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -76,6 +77,7 @@ impl DockerBackend {
     pub(crate) fn run_with_stager<T>(
         &self,
         spec: &ExecutionSpec,
+        client: &Client,
         prepare_mounts: impl FnOnce(&ExecutionSpec, &mut crate::ContainerPlan) -> Result<T, DockerError>,
     ) -> Result<ExecutionResult, DockerError> {
         spec.validate()?;
@@ -112,10 +114,11 @@ impl DockerBackend {
         let name = format!("asc-sandbox-{}", uuid::Uuid::new_v4());
         let mut plan = translate::translate(spec, &self.config, &name)?;
         let _staging = prepare_mounts(spec, &mut plan)?;
+        client.verify_mounts(&plan)?;
         let mut create_args = plan.create_args.clone();
         // network=none does not isolate pathname sockets, so both modes need this filter.
         let profile = crate::seccomp::network_profile()?;
-        let mut seccomp = tempfile::NamedTempFile::new()?;
+        let mut seccomp = tempfile::NamedTempFile::new_in(client.directory.path())?;
         seccomp.write_all(&serde_json::to_vec(&profile)?)?;
         create_args.extend([
             "--security-opt".into(),
@@ -124,8 +127,8 @@ impl DockerBackend {
         create_args.push(self.config.image.clone());
         create_args.push(spec.launch.program.clone());
         create_args.extend(spec.launch.args.iter().cloned());
-        let created = self
-            .cli(&["create"])
+        let created = client
+            .command(&["create", "--pull", "never"])
             .args(&create_args)
             .output()
             .map_err(DockerError::Io)?;
@@ -136,23 +139,23 @@ impl DockerBackend {
             )));
         }
         let mut cleanup = Cleanup {
-            cli: &self.config.cli,
+            client,
             name: name.clone(),
             armed: true,
         };
         let mut result = ExecutionResult::default();
-        self.verify_fence(&name, &plan, &profile)?;
+        Self::verify_fence(client, &name, &plan, &profile)?;
         result.installed = true;
         // Attach keeps the target's stdio interactive; the CLI exit status is
         // cross-checked against the inspected state below.
-        let started = self
-            .cli(&["start", "--attach", "--interactive", &name])
+        let started = client
+            .command(&["start", "--attach", "--interactive", &name])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
             .map_err(DockerError::Io)?;
-        let inspected = self.inspect(&name)?;
+        let inspected = Self::inspect(client, &name)?;
         let state = &inspected["State"];
         result.started = state["StartedAt"]
             .as_str()
@@ -179,18 +182,18 @@ impl DockerBackend {
             )));
         }
         cleanup.disarm();
-        self.remove(&name)?;
+        Self::remove(client, &name)?;
         Ok(result)
     }
 
     /// Confirms the created container installs exactly the planned fence.
     fn verify_fence(
-        &self,
+        client: &Client,
         name: &str,
         plan: &crate::ContainerPlan,
         profile: &serde_json::Value,
     ) -> Result<(), DockerError> {
-        let inspected = self.inspect(name)?;
+        let inspected = Self::inspect(client, name)?;
         let host = &inspected["HostConfig"];
         if host["NetworkMode"].as_str() != Some(plan.network_mode.as_str())
             || host["ReadonlyRootfs"].as_bool() != Some(true)
@@ -233,8 +236,8 @@ impl DockerBackend {
         Ok(())
     }
 
-    fn inspect(&self, name: &str) -> Result<serde_json::Value, DockerError> {
-        let output = self.cli(&["inspect", name]).output()?;
+    fn inspect(client: &Client, name: &str) -> Result<serde_json::Value, DockerError> {
+        let output = client.command(&["inspect", name]).output()?;
         if !output.status.success() {
             return Err(DockerError::Protocol(format!(
                 "docker inspect failed: {}",
@@ -250,8 +253,8 @@ impl DockerBackend {
         Ok(list.remove(0))
     }
 
-    fn remove(&self, name: &str) -> Result<(), DockerError> {
-        let output = self.cli(&["rm", "-f", name]).output()?;
+    fn remove(client: &Client, name: &str) -> Result<(), DockerError> {
+        let output = client.command(&["rm", "-f", name]).output()?;
         if !output.status.success() {
             return Err(DockerError::Protocol(format!(
                 "docker cleanup failed: {}",
@@ -261,17 +264,22 @@ impl DockerBackend {
         Ok(())
     }
 
-    /// Every CLI call runs without ambient environment or credentials.
-    fn cli(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.config.cli);
-        command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        command
+    pub(crate) fn capabilities_with_client(
+        client: &Client,
+    ) -> Result<BackendCapabilities, PepError> {
+        let output = client
+            .command(&["version", "--format", "{{.Server.Version}}"])
+            .output()?;
+        if !output.status.success() {
+            return Err(PepError::Unsupported(
+                "docker daemon capability probe failed".into(),
+            ));
+        }
+        Ok(BackendCapabilities {
+            strict_filesystem: true,
+            noexec: false,
+            network_off: true,
+        })
     }
 }
 
@@ -293,21 +301,8 @@ fn recursive_readonly_matches(host: &serde_json::Value, mount: &crate::MountPlan
 
 impl SandboxBackend for DockerBackend {
     fn capabilities(&self) -> Result<BackendCapabilities, PepError> {
-        // strict_filesystem refers to host-path isolation: only authorized
-        // bind mounts expose host data; the pinned image is the base world.
-        let output = self
-            .cli(&["version", "--format", "{{.Server.Version}}"])
-            .output()?;
-        if !output.status.success() {
-            return Err(PepError::Unsupported(
-                "docker daemon capability probe failed".into(),
-            ));
-        }
-        Ok(BackendCapabilities {
-            strict_filesystem: true,
-            noexec: false,
-            network_off: true,
-        })
+        let client = Client::new(&self.config).map_err(PepError::from)?;
+        Self::capabilities_with_client(&client)
     }
 
     fn execute_bound(&self, spec: &ExecutionSpec) -> Result<ExecutionResult, PepError> {
@@ -317,7 +312,7 @@ impl SandboxBackend for DockerBackend {
 
 /// Best-effort container removal when a run aborts before explicit cleanup.
 struct Cleanup<'a> {
-    cli: &'a Path,
+    client: &'a Client,
     name: String,
     armed: bool,
 }
@@ -331,14 +326,7 @@ impl Cleanup<'_> {
 impl Drop for Cleanup<'_> {
     fn drop(&mut self) {
         if self.armed {
-            let _ = Command::new(self.cli)
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .args(["rm", "-f", &self.name])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .output();
+            let _ = self.client.command(&["rm", "-f", &self.name]).output();
         }
     }
 }
@@ -393,6 +381,7 @@ mod tests {
         let cli = tempfile::NamedTempFile::new().unwrap();
         let config = DockerConfig {
             cli: cli.path().to_owned(),
+            host: "unix:///var/run/docker.sock".into(),
             image: "agent:1.0".into(),
             memory: None,
             cpus: None,
@@ -407,6 +396,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let error = DockerBackend::new(DockerConfig {
             cli: directory.path().join("absent-docker"),
+            host: "unix:///var/run/docker.sock".into(),
             image: "agent:1.0".into(),
             memory: None,
             cpus: None,
