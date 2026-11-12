@@ -55,6 +55,75 @@ fn init_generates_cedar_locally_without_a_daemon() {
     assert!(text.contains("SecCore::Network::\"all\""));
 }
 
+fn assert_direction_control_rejected(output: &Output, control: char) {
+    assert_eq!(output.status.code(), Some(1), "control {control:?}");
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!error.contains(control));
+    assert!(error.contains(&control.escape_unicode().to_string()));
+}
+
+#[test]
+fn init_rejects_direction_controls_before_cedar_or_json_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let spec_path = directory.path().join("spec.json");
+    for control in [
+        '\u{202e}', '\u{2066}', '\u{061c}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}',
+        '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ] {
+        for (flag, field, suffix) in [
+            ("--allow-read", "allow_read", ""),
+            ("--allow-write", "allow_write", "/*"),
+            ("--allow-exec", "allow_exec", "/**"),
+            ("--deny-read", "deny_read", "/*"),
+            ("--deny-write", "deny_write", "/**"),
+            ("--deny-exec", "deny_exec", ""),
+            ("--program", "programs", ""),
+        ] {
+            let path = format!("/data/{control}report.txt{suffix}");
+            let mut spec = serde_json::json!({"allow_read":["/safe"]});
+            spec[field] = serde_json::json!([path]);
+            // Escaped JSON must be rejected after decoding, not only as literal bytes.
+            let encoded = spec
+                .to_string()
+                .replace(control, &format!("\\u{:04x}", u32::from(control)));
+            std::fs::write(&spec_path, encoded).unwrap();
+            for format in ["cedar", "json"] {
+                let flags = cli(directory.path())
+                    .args(["--allow-read", "/safe", flag, &path, "--format", format])
+                    .output()
+                    .unwrap();
+                assert_direction_control_rejected(&flags, control);
+                let file = cli(directory.path())
+                    .arg("--spec-file")
+                    .arg(&spec_path)
+                    .args(["--format", format])
+                    .output()
+                    .unwrap();
+                assert_direction_control_rejected(&file, control);
+            }
+        }
+    }
+    // Ordinary Unicode paths still work and keep the template line breaks readable.
+    let path = "/data/报告-مرحبا.txt";
+    let text = stdout(
+        &cli(directory.path())
+            .args(["--allow-read", path])
+            .output()
+            .unwrap(),
+    );
+    assert!(text.contains(path));
+    assert!(text.contains("permit (\n"));
+    assert!(!text.contains("\\u{a}"));
+    let output = cli(directory.path())
+        .args(["--allow-read", path, "--format", "json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["spec"]["allow_read"][0], path);
+    assert!(value["policy"].as_str().unwrap().contains(path));
+}
+
 #[test]
 fn init_spec_file_json_conflicts_and_invalid_paths() {
     let directory = tempfile::tempdir().unwrap();

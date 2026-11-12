@@ -73,7 +73,7 @@ pub enum SpecError {
     InvalidVersion,
     /// A path is relative, aliased, oversized or carries characters the template cannot express.
     #[error(
-        "path must be a canonical absolute path without '*', backslashes or control characters: {0}"
+        "path must be a canonical absolute path without '*', backslashes, control characters or bidi controls: {0}"
     )]
     InvalidPath(String),
     /// A program constraint is not an exact canonical absolute path.
@@ -192,6 +192,13 @@ enum PathPattern {
 }
 
 fn parse_path(raw: &str) -> Result<PathPattern, SpecError> {
+    // `char::is_control` misses bidi controls, and line or paragraph separators would reflow the
+    // verbatim preview a reviewer reads.
+    if raw.chars().any(|ch| {
+        matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }) {
+        return Err(SpecError::InvalidPath(raw.to_owned()));
+    }
     // Cedar `like` treats every '*' as a wildcard; refusing the character keeps the rendered
     // pattern exactly as broad as the caller asked, with no escaping subtleties.
     if raw.contains('*') && !raw.ends_with("/*") && !raw.ends_with("/**") {
@@ -233,7 +240,11 @@ fn push_file_rule(
             } else {
                 format!("{prefix}/*")
             };
-            format!("resource.path like {}", cedar_string(&glob))
+            format!(
+                "(resource.path == {} || resource.path like {})",
+                cedar_string(prefix),
+                cedar_string(&glob)
+            )
         }
     };
     let condition = if programs.is_empty() {

@@ -2,9 +2,9 @@
 //! file, program or network operation.
 
 use asc_intent::{
-    CANDIDATE_VERSION, CEDAR_SCHEMA, CandidatePolicy, DRAFT_VERSION, INTENT_BUDGET,
+    CANDIDATE_VERSION, CEDAR_SCHEMA, CandidatePolicy, DRAFT_VERSION, INTENT_BUDGET, IntentSpec,
     MAX_POLICY_BYTES, PROMPT_VERSION, PolicyError, ProposalContext, ProposalError, ProposalOutcome,
-    TaskInput, prepare_policy, propose_task, validate_policy_response,
+    TaskInput, compile_spec, prepare_policy, propose_task, validate_policy_response,
 };
 use asc_model_client::provider::{FakeProvider, ModelProvider, ProviderError};
 use cedar_policy::{
@@ -123,6 +123,76 @@ impl Judge {
         self.check("file.write", path, write_context(op), expected);
     }
 }
+#[test]
+fn init_subtrees_include_roots_and_preserve_boundaries() {
+    for suffix in ["*", "**"] {
+        let allow = vec![format!("/data/{suffix}")];
+        let deny = vec![format!("/data/secrets/{suffix}")];
+        let spec = IntentSpec {
+            allow_read: allow.clone(),
+            allow_write: allow.clone(),
+            allow_exec: allow,
+            deny_read: deny.clone(),
+            deny_write: deny.clone(),
+            deny_exec: deny,
+            programs: vec!["/bin/test".into()],
+            ..IntentSpec::default()
+        };
+        let judge = Judge::new(&compile_spec(&spec).unwrap().text);
+        for (path, expected) in [
+            ("/data/secrets", Decision::Deny),
+            ("/data/secrets/token", Decision::Deny),
+            ("/data/secrets/nested/token", Decision::Deny),
+            ("/data", Decision::Allow),
+            ("/data/public", Decision::Allow),
+            ("/data/secrets-backup", Decision::Allow),
+            ("/data/secrets-backup/token", Decision::Allow),
+            ("/data/secrets2/token", Decision::Allow),
+            ("/database", Decision::Deny),
+            ("/database/token", Decision::Deny),
+        ] {
+            judge.read(path, expected);
+            for operation in ["write", "create", "delete", "rename", "setattr"] {
+                judge.write(path, operation, expected);
+            }
+            judge.check("file.exec", path, exec_context("/", &[]), expected);
+        }
+        // The root and descendant alternatives must both stay program-scoped: the joining `||`
+        // must not lift a path match out of the `&&`.
+        for path in ["/data", "/data/public"] {
+            judge.check(
+                "file.read",
+                path,
+                json!({"input":{"program":"/bin/other"}}),
+                Decision::Deny,
+            );
+            let mut context = write_context("rename");
+            context["input"]["program"] = json!("/bin/other");
+            judge.check("file.write", path, context, Decision::Deny);
+        }
+
+        let mut root = IntentSpec {
+            allow_write: vec![format!("/{suffix}")],
+            ..IntentSpec::default()
+        };
+        let allowed = Judge::new(&compile_spec(&root).unwrap().text);
+        root.deny_write = root.allow_write.clone();
+        let denied = Judge::new(&compile_spec(&root).unwrap().text);
+        for path in ["/", "/data", "/data/nested/token"] {
+            allowed.write(path, "rename", Decision::Allow);
+            denied.write(path, "rename", Decision::Deny);
+        }
+    }
+    // A root path without a subtree suffix still matches only itself.
+    let exact = IntentSpec {
+        allow_write: vec!["/".into()],
+        ..IntentSpec::default()
+    };
+    let judge = Judge::new(&compile_spec(&exact).unwrap().text);
+    judge.write("/", "rename", Decision::Allow);
+    judge.write("/data", "rename", Decision::Deny);
+}
+
 fn json_hash(value: &Value) -> String {
     fn sort(value: &mut Value) {
         match value {
