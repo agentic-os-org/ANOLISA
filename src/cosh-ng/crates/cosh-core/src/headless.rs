@@ -817,6 +817,8 @@ where
                     }
                     let message = if preference_error {
                         "automatic access preferences are unavailable; automatic model access is disabled; use /auth"
+                    } else if code == "EcsTrialDisabled" {
+                        "automatic model access is disabled; use /auth to enable automatic access or configure a model"
                     } else {
                         "no model configured; use /auth to configure or re-enable a model"
                     };
