@@ -544,9 +544,9 @@ fn build_agent_step(
         }
     }
 
-    // Observation: correlate tool_calls with responses from next event
+    // Provider results may be inline; client results arrive in the next request.
     let observation = if !tool_calls.is_empty() {
-        build_observation(&tool_calls, next)
+        build_observation(&tool_calls, event, parsed, next)
     } else {
         None
     };
@@ -653,13 +653,13 @@ fn messages_after_the_last_tool_call(messages: &[InputMessage]) -> &[InputMessag
     }
 }
 
-/// Build observation by looking for ToolCallResponse in the next event's input.
+/// Match inline provider results, then client results in the next request.
 fn build_observation(
     tool_calls: &[ToolCall],
+    event: &TraceEventDetail,
+    parsed: Option<&LLMCall>,
     next: Option<(&TraceEventDetail, Option<&LLMCall>)>,
 ) -> Option<Observation> {
-    let (next_event, next_parsed) = next?;
-
     let tc_ids: HashMap<&str, usize> = tool_calls
         .iter()
         .enumerate()
@@ -669,32 +669,53 @@ fn build_observation(
     let mut results: Vec<ObservationResult> = Vec::new();
     let mut matched_by_id = vec![false; tool_calls.len()];
 
-    // Strategy 1: from parsed LLMCall's full request messages (latest round only)
-    if let Some(call) = next_parsed {
-        let latest = latest_round_messages(&call.request.messages);
-        collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
-    } else {
-        // Strategy 2: from event_json parsed as LLMCall (latest round only)
-        if let Some(call) = parse_event_json(next_event) {
+    // Results in the response are authoritative; a replay must not replace
+    // them or consume an unmatched client call.
+    if let Some(call) = parsed {
+        collect_tool_response_parts(
+            call.response
+                .messages
+                .iter()
+                .map(|message| message.parts.as_slice()),
+            &tc_ids,
+            &mut results,
+            &mut matched_by_id,
+        );
+    } else if let Some(messages) = event
+        .output_messages
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<OutputMessage>>(json).ok())
+    {
+        collect_tool_response_parts(
+            messages.iter().map(|message| message.parts.as_slice()),
+            &tc_ids,
+            &mut results,
+            &mut matched_by_id,
+        );
+    }
+
+    if let Some((next_event, next_parsed)) = next {
+        let inline_count = results.len();
+        // Strategy 1: from parsed LLMCall's full request messages (latest round only)
+        if let Some(call) = next_parsed {
             let latest = latest_round_messages(&call.request.messages);
             collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
         }
-    }
 
-    // Strategy 3: from input_messages column. Narrowed to the round it
-    // carries: a completed row keeps only the current round there, but a row
-    // that never completed keeps the whole replayed history, and a multi-round
-    // turn keeps every round of the turn — an earlier round's id-less response
-    // would otherwise take this step's call through the positional fallback.
-    if results.is_empty() {
-        if let Some(ref json) = next_event.input_messages {
-            if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
-                let latest = messages_after_the_last_tool_call(&msgs);
-                collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
+        // Fall back to the input_messages column, narrowed to the round it
+        // carries: a completed row keeps only the current round there, but a row
+        // that never completed keeps the whole replayed history, and a multi-round
+        // turn keeps every round of the turn — an earlier round's id-less response
+        // would otherwise take this step's call through the positional fallback.
+        if results.len() == inline_count {
+            if let Some(ref json) = next_event.input_messages {
+                if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
+                    let latest = messages_after_the_last_tool_call(&msgs);
+                    collect_tool_responses(latest, &tc_ids, &mut results, &mut matched_by_id);
+                }
             }
         }
     }
-
     if results.is_empty() {
         None
     } else {
@@ -777,7 +798,7 @@ const ERROR_ENVELOPE_KEYS: &[&str] = &[
 /// `tool_call_response` sat on a `user` message and none on a `tool` message, so
 /// gating on role dropped all of them and left every observation empty. The part
 /// type is the reliable discriminator — `ToolCallResponse` is the only variant
-/// carrying a result, and assistant turns only ever carry `ToolCall`.
+/// carrying a result; provider-side results can also appear on assistant turns.
 ///
 /// Matching runs in two passes: every response that names a call through its id
 /// claims that call first, and only the responses the ids could not place are
@@ -791,6 +812,20 @@ fn collect_tool_responses(
     results: &mut Vec<ObservationResult>,
     matched: &mut [bool],
 ) {
+    collect_tool_response_parts(
+        messages.iter().map(|message| message.parts.as_slice()),
+        tc_ids,
+        results,
+        matched,
+    );
+}
+
+fn collect_tool_response_parts<'a>(
+    messages: impl IntoIterator<Item = &'a [MessagePart]>,
+    tc_ids: &HashMap<&str, usize>,
+    results: &mut Vec<ObservationResult>,
+    matched: &mut [bool],
+) {
     // Flatten the responses in message order once; both passes work over the
     // same list.
     let mut pending: Vec<(
@@ -798,8 +833,8 @@ fn collect_tool_responses(
         String,
         Option<HashMap<String, serde_json::Value>>,
     )> = Vec::new();
-    for msg in messages {
-        for part in &msg.parts {
+    for parts in messages {
+        for part in parts {
             if let MessagePart::ToolCallResponse { id, response } = part {
                 // Providers report tool failure out of band: Anthropic wraps a
                 // failed result as `{"content": …, "is_error": true}`, real
