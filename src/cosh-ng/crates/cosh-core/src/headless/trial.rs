@@ -41,7 +41,7 @@ pub(super) async fn prepare(
         preference.unwrap_or(false),
     );
     result.map_err(|code| {
-        if code == "ModelNotConfigured" {
+        if matches!(code, "ModelNotConfigured" | "EcsTrialDisabled") {
             preference.err().map(|error| error.code()).unwrap_or(code)
         } else {
             code
@@ -89,8 +89,16 @@ fn apply_policy(
             Ok(Prepared::Existing)
         }
         TrialDecision::Disabled => {
-            engine.provider = super::auth::unconfigured_provider();
-            Err("ModelNotConfigured")
+            let code = if context.as_ref().is_some_and(|context| {
+                context.intent == TrialIntent::UserInitiated
+                    && (!context.auto_use_allowed || !persistent_auto_use)
+            }) {
+                "EcsTrialDisabled"
+            } else {
+                "ModelNotConfigured"
+            };
+            engine.provider = super::auth::unconfigured_provider_for(code);
+            Err(code)
         }
         TrialDecision::EcsIdentity => {
             let selected_name = engine.config.ai.active_provider.as_deref().or_else(|| {
@@ -198,6 +206,101 @@ mod tests {
             "intent":"user_initiated","auto_use_allowed":allowed
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn review_regression_disabled_auto_access_is_not_missing_model_configuration() {
+        for identity_configured in [false, true] {
+            for (allowed, persistent) in [(false, true), (true, false)] {
+                let mut config = CoreConfig::default();
+                if identity_configured {
+                    config.ai.providers.insert(
+                        "console".into(),
+                        crate::config::ProviderConfig {
+                            provider_type: Some("aliyun".into()),
+                            auth_source: Some("ecs_identity".into()),
+                            ..Default::default()
+                        },
+                    );
+                }
+                let mut core = CoshCore::new_legacy(
+                    config,
+                    Box::new(MockProvider::history_echo()),
+                    ToolRegistry::new(),
+                );
+                assert_eq!(
+                    super::apply_policy(
+                        &mut core,
+                        true,
+                        Some(context(allowed)),
+                        &ProviderIntent::default(),
+                        persistent,
+                    ),
+                    Err("EcsTrialDisabled"),
+                    "identity_configured={identity_configured}, allowed={allowed}, persistent={persistent}"
+                );
+                assert!(core.trial_access.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn review_regression_missing_trial_context_still_reports_missing_configuration() {
+        let mut core = CoshCore::new_legacy(
+            CoreConfig::default(),
+            Box::new(MockProvider::history_echo()),
+            ToolRegistry::new(),
+        );
+        assert_eq!(
+            super::apply_policy(&mut core, true, None, &ProviderIntent::default(), true),
+            Err("ModelNotConfigured")
+        );
+    }
+
+    #[test]
+    fn review_regression_non_user_context_does_not_report_automatic_access_disabled() {
+        for persistent in [false, true] {
+            let mut core = CoshCore::new_legacy(
+                CoreConfig::default(),
+                Box::new(MockProvider::history_echo()),
+                ToolRegistry::new(),
+            );
+            let mut request = context(false);
+            request.intent = crate::protocol::ecs_trial::TrialIntent::InternalBestEffort;
+            assert_eq!(
+                super::apply_policy(
+                    &mut core,
+                    true,
+                    Some(request),
+                    &ProviderIntent::default(),
+                    persistent
+                ),
+                Err("ModelNotConfigured")
+            );
+        }
+    }
+
+    #[test]
+    fn review_regression_preference_read_error_remains_specific() {
+        let _lock = crate::sls::tests::ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::sls::tests::EnvVarGuard::set("HOME", home.path().to_str().unwrap());
+        let directory = home.path().join(".copilot-shell/cosh");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("preferences.toml"), "invalid = [").unwrap();
+        let mut core = CoshCore::new_legacy(
+            CoreConfig::default(),
+            Box::new(MockProvider::history_echo()),
+            ToolRegistry::new(),
+        );
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(super::prepare(&mut core, true, Some(context(true))));
+        assert_eq!(result, Err("trial_preferences_invalid"));
     }
 
     #[test]
@@ -337,7 +440,7 @@ mod tests {
                 true
             )
             .unwrap_err(),
-            "ModelNotConfigured"
+            "EcsTrialDisabled"
         );
         assert!(core.trial_access.is_none());
     }
@@ -360,7 +463,7 @@ mod tests {
                 false
             )
             .unwrap_err(),
-            "ModelNotConfigured"
+            "EcsTrialDisabled"
         );
         assert!(core.trial_access.is_none());
     }

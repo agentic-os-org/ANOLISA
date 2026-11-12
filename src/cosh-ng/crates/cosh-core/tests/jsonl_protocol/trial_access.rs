@@ -67,12 +67,9 @@ fn user(allowed: bool) -> Value {
             "intent":"user_initiated","auto_use_allowed":allowed}})
 }
 
-fn assert_disabled(messages: &[Value], results: usize) {
+fn assert_disabled(messages: &[Value], results: usize, code: &str) {
     assert_eq!(
-        messages
-            .iter()
-            .filter(|m| m["error_code"] == "ModelNotConfigured")
-            .count(),
+        messages.iter().filter(|m| m["error_code"] == code).count(),
         results,
         "{messages:?}"
     );
@@ -91,6 +88,7 @@ fn session_suppression_stops_default_access_without_auth_or_mock() {
     assert_disabled(
         &exchange(true, &[initialize(true), user(false), shutdown()]),
         1,
+        "EcsTrialDisabled",
     );
 }
 
@@ -174,7 +172,7 @@ fn review5_configure_after_suppression_serves_the_next_question_without_restart(
     );
     let results: Vec<_> = messages.iter().filter(|m| m["type"] == "result").collect();
     assert_eq!(results.len(), 2, "{messages:?}");
-    assert_eq!(results[0]["error_code"], "ModelNotConfigured");
+    assert_eq!(results[0]["error_code"], "EcsTrialDisabled");
     assert_eq!(results[1]["is_error"], false, "{messages:?}");
     assert!(
         messages.iter().any(|m| m["type"] == "assistant"),
@@ -200,7 +198,11 @@ fn invalid_trial_context_does_not_authorize_default_access() {
     ] {
         let mut request = user(true);
         request["ecs_trial_context"][field] = value;
-        assert_disabled(&exchange(true, &[initialize(true), request, shutdown()]), 1);
+        assert_disabled(
+            &exchange(true, &[initialize(true), request, shutdown()]),
+            1,
+            "ModelNotConfigured",
+        );
     }
 }
 
@@ -208,7 +210,11 @@ fn invalid_trial_context_does_not_authorize_default_access() {
 fn capable_client_without_trial_context_does_not_open_auth() {
     let mut request = user(true);
     request.as_object_mut().unwrap().remove("ecs_trial_context");
-    assert_disabled(&exchange(true, &[initialize(true), request, shutdown()]), 1);
+    assert_disabled(
+        &exchange(true, &[initialize(true), request, shutdown()]),
+        1,
+        "ModelNotConfigured",
+    );
 }
 
 #[test]
@@ -219,6 +225,7 @@ fn subsequent_user_rechecks_suppression_in_the_same_core() {
             &[initialize(true), user(false), user(false), shutdown()],
         ),
         2,
+        "EcsTrialDisabled",
     );
 }
 
@@ -235,6 +242,7 @@ fn persistent_suppression_overrides_saved_identity_provider() {
             home.path(),
         ),
         1,
+        "EcsTrialDisabled",
     );
 }
 

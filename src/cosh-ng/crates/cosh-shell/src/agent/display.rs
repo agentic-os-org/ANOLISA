@@ -28,9 +28,14 @@ fn trial_error_message(code: &str, zh: bool) -> Option<&'static str> {
             "Unable to access the ECS identity. Your question is retained; use /auth to configure a model."
         }),
         "EcsTrialDisabled" => Some(if zh {
-            "自动接入已关闭。问题已保留，可用 /auth 配置模型或重新启用。"
+            "自动接入已关闭，可用 /auth 重新启用免配置接入或配置模型。"
         } else {
-            "Automatic OS Console access is disabled. Your question is retained; use /auth to configure a model or enable automatic access."
+            "Automatic model access is disabled. Use /auth to enable automatic access or configure a model."
+        }),
+        "Sysom.Identity.PermissionDenied" | "Forbidden" | "AccessDenied" => Some(if zh {
+            "当前账号或实例无权访问模型服务，请联系管理员检查权限，或用 /auth 切换模型服务。"
+        } else {
+            "This account or instance cannot access the model service. Ask an administrator to check permissions, or use /auth to switch model services."
         }),
         "trial_wait_timeout" => Some(if zh {
             "等待开通已超时。问题已保留，可用 /auth 配置模型。"

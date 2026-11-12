@@ -2,6 +2,56 @@ use super::display::display_agent_error;
 use crate::i18n::I18n;
 
 #[test]
+fn review_regression_permissions_explain_access_without_activation_or_retention_claims() {
+    for (language, expected) in [
+        (
+            crate::Language::ZhCn,
+            "当前账号或实例无权访问模型服务，请联系管理员检查权限，或用 /auth 切换模型服务。",
+        ),
+        (
+            crate::Language::EnUs,
+            "This account or instance cannot access the model service. Ask an administrator to check permissions, or use /auth to switch model services.",
+        ),
+    ] {
+        let i18n = I18n::new(language);
+        for code in ["Sysom.Identity.PermissionDenied", "Forbidden", "AccessDenied"] {
+            assert_eq!(
+                display_agent_error("upstream wording", Some(code), &i18n),
+                expected
+            );
+            assert_eq!(
+                display_agent_error(&format!("provider_access:{code}"), None, &i18n),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn review_regression_disabled_auto_access_offers_reenable_without_retention_claim() {
+    for (language, expected) in [
+        (
+            crate::Language::ZhCn,
+            "自动接入已关闭，可用 /auth 重新启用免配置接入或配置模型。",
+        ),
+        (
+            crate::Language::EnUs,
+            "Automatic model access is disabled. Use /auth to enable automatic access or configure a model.",
+        ),
+    ] {
+        let i18n = I18n::new(language);
+        assert_eq!(
+            display_agent_error("upstream wording", Some("EcsTrialDisabled"), &i18n),
+            expected
+        );
+        assert_eq!(
+            display_agent_error("provider_access:EcsTrialDisabled", None, &i18n),
+            expected
+        );
+    }
+}
+
+#[test]
 fn trial_failures_show_model_setup_and_credit_guidance() {
     let zh = I18n::new(crate::Language::ZhCn);
     assert_eq!(
