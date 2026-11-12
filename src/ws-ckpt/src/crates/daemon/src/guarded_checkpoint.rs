@@ -548,6 +548,18 @@ pub(crate) async fn rollback(
     // Only guarded_rollbacks changed; snapshot membership and ordering are unchanged.
     workspace.index = started_index;
 
+    let path = Path::new(registered_path);
+    let pause = match crate::fs_watcher::WorkspaceWatcher::pause_for_rollback(path) {
+        Ok(pause) => pause,
+        Err(error) => {
+            let response = rollback_rejected(
+                GuardedRollbackRejectionCodeV2::WriteLockConflict,
+                format!("failed to detach the old write watcher: {error:#}"),
+            );
+            return abort_reserved_rollback(state, &mut workspace, operation_id, response).await;
+        }
+    };
+
     // Revalidate all mutable provider state after the durable intent write. The
     // digest comparison is the final completed await before backend rollback,
     // keeping preview validation and the destructive call in one write lock.
@@ -596,7 +608,10 @@ pub(crate) async fn rollback(
         return abort_reserved_rollback(state, &mut workspace, operation_id, response).await;
     }
 
-    if let Err(error) = state.backend.rollback(ws_id, target_snapshot_id).await {
+    if let Err(error) = state
+        .rollback_with_watcher(ws_id, path, target_snapshot_id, pause)
+        .await
+    {
         // Admission refuses before the workspace is moved: release the
         // reservation so the operation stays retryable (#7234).
         if error.downcast_ref::<CreateAdmissionRefused>().is_some() {
@@ -628,11 +643,6 @@ pub(crate) async fn rollback(
     };
 
     update_live_head(&mut workspace.index, target_snapshot_id);
-    // The backend swapped the live subvolume (rename aside + snapshot
-    // recreate + delete); the inotify watch still names the retired inode,
-    // so re-arm it or every later guarded checkpoint's quiescence check —
-    // including this operation's own pre-flight on a retry — is a no-op.
-    state.rearm_watcher(ws_id, std::path::Path::new(registered_path));
     let succeeded = GuardedRollbackOutcomeV2::Succeeded {
         resulting_generation,
     };

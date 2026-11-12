@@ -44,7 +44,7 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 
 共享队列溢出是拓扑的固有属性,按一等公民的失败模式处理,而不是记日志了事:
 
-- **fail-closed 封闭。** notify 6.1.1 把 `IN_Q_OVERFLOW` 表现为携带 rescan 标志的
+- **fail-closed 封闭。** notify 8.2.2 把 `IN_Q_OVERFLOW` 表现为携带 rescan 标志的
   `Ok(EventKind::Other)`——永远不会进 `Err` 分支。`forward_event` 检测到它后递增累计溢出计数、记 ERROR,并把**所有** route 的最近活动水位推进到当前时间。因此每个被 watch 的 workspace 在溢出后都被视为正在写入,直到在一个新的静默期里重新观察到安静:一个吵闹的 workspace 不能在内核丢事件的窗口里把其他 workspace 变成"看起来静默"。
 - **可观测面(已实现):**
   - `Request::WatcherHealth` 回复 `WatcherHealthOk { workspaces_without_watcher, watcher_queue_overflows }`;字段是 wire-frozen 的(bincode 按位置编码)。
@@ -56,7 +56,7 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 
 ### walk 暂停代价(以 fail-closed 封闭;#8448)
 
-上面的溢出是共享队列代价的一半;另一半没有计数器:notify 6.1.1 在其唯一的事件循环线程上执行 `watch()`(对整棵树的 `WalkDir`)以及对新建/移入目录的 auto-add,且 walk 进行期间不读 inotify fd。共享单实例下该线程服务整个 daemon,因此*所有* workspace 的事件都要在内核队列里等到 walk 结束。
+上面的溢出是共享队列代价的一半;另一半没有计数器:notify 8.2.2 在其唯一的事件循环线程上执行 `watch()`(递归 `WalkDir`)以及对新建/移入目录的 auto-add,且 walk 进行期间不读 inotify fd。共享单实例下该线程服务整个 daemon,因此*所有* workspace 的事件都要在内核队列里等到 walk 结束。
 
 真正的风险不是暂停本身,而是错误的 `Safe`。`check_workspace_quiescent` 依据静默窗口结束前送达的事件做决策;当该窗口落进一次 walk 时,水位保持陈旧,决策在 workspace 仍在被写入时返回 `Safe`。per-route coverage epoch 检测不到它:被检查 route 的 epoch、degraded 标记与 watcher 身份都没有变化,因为 walk 属于另一个 workspace。
 
@@ -87,10 +87,22 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 ## 共享架构设计
 
 - **句柄。** `WorkspaceWatcher` 只持有 route 身份、最近活动水位、watch 挂载目录的 `(dev, ino)`(挂载前经注册符号链接解析——inotify 观察的是 inode,回滚把 live subvolume 换到路径后面时可据此发现 watch 失效)、以及用于观察 re-arm 的单调 `watch_seq`。
+- **符号链接覆盖范围。** watcher 会解析作为 workspace 注册根的符号链接，并按注册路径分发事件。
+  递归监听会跳过根目录内部的目录符号链接。单独将目标目录注册为 workspace 后，由其自己的 route
+  负责监听。
 - **路由表。** `routes: RwLock<HashMap<PathBuf, Vec<Arc<AtomicU64>>>>`——一个路径映射到其上存活句柄的水位(通常一个;re-arm 期间短暂两个,这就是值为 `Vec` 的原因)。事件按路径祖先链分发,重叠根内的写入会推进每个包含它的 workspace,与每 workspace 实例的观察一致。
 - **锁纪律。** `watcher` 互斥锁串行化注册类变更,且总在 `routes` 之前获取;`routes` 的写锁绝不跨 `watch()`/`unwatch()` 调用持有(notify 事件循环在分发回调里取 `routes.read()`——跨调用持写锁会让自己死锁事件循环)。coverage 表是叶子锁。事件路径除 route 读锁外不取任何锁。
-- **发布顺序。** `add_route` 先发布 route 再挂内核 watch:覆盖该路径的描述符在 `watch()` 之前不存在,因此每个可能送达的事件都已能找到 route。注册失败会回滚发布,并释放递归 walk 已装入的部分描述符(notify 6.1.1 自身不回滚)。
-- **保重叠的释放。** notify 6.1.1 每路径一个描述符,且递归 `unwatch(root)` 会移除路径以 `root` 为前缀的*所有*描述符——包括重叠幸存者赖以工作的描述符。`unwatch_preserving_overlaps` 在第一个描述符消失前把每个重叠幸存者的水位推进到当前时间并标记 uncovered;然后 unwatch;再逐个 re-arm 幸存者。re-arm 成功后先再次推进幸存者的水位、再清除标记——与 `start` 一样,其静默窗口从递归 walk 完成后才开始计算。re-arm 失败保留 degraded 标记(fail closed),并以有界级联释放自身的部分注册。
+- **发布顺序。** `add_route` 先发布 route 再挂内核 watch，让新描述符发来的事件能找到 route。
+  注册失败会移除新句柄。如果它是最后一个句柄，ws-ckpt 还会释放 notify 8.2.2 递归扫描留下的部分描述符。
+- **保重叠的释放。** notify 8.2.2 按路径索引描述符。递归 `unwatch(root)` 成功时会移除映射到 `root` 及其子路径的描述符，包括重叠 workspace 依赖的描述符。`unwatch_preserving_overlaps` 在第一个描述符消失前把每个重叠幸存者的水位推进到当前时间并标记 uncovered;然后 unwatch;再逐个 re-arm 幸存者。re-arm 成功后先再次推进幸存者的水位、再清除标记——与 `start` 一样,其静默窗口从递归 walk 完成后才开始计算。re-arm 失败保留 degraded 标记(fail closed),并以有界级联释放自身的部分注册。
+- **回滚暂停与恢复。** 普通回滚和 guarded rollback 都在后端换根前解绑旧目录树的监听。暂停期间，
+  受影响的 route 保留在路由表中并标记为无监听覆盖。与暂停范围重叠的新 route 也会发布，内核监听
+  则延后挂载。如果解绑失败，回滚在换根前停止并尝试恢复监听。无论后端成功还是报错，返回后都会
+  尝试在当前目录树恢复监听。若某条 route 仍有重叠回滚未结束，则等全部结束后才恢复。重挂失败时
+  保留无覆盖标记。
+- **外部换根后的重挂。** 静默检查会比较记录的目录身份与当前的 `(dev, ino)`。身份变化时，重挂通过
+  notify 保存的路径映射先释放旧描述符，再监听新目录。更换期间将受影响的 route 标记为无监听覆盖，
+  随后为重叠的 route 恢复监听。恢复失败时报告 `MonitoringUnavailable`。
 - **静默期。** `check_quiescent` 在 route degraded 时 fail closed,并在静默期前同时快照 per-route coverage epoch 与实例级注册/auto-add 代际:一个在观察窗口内开始又结束的中断会让 route 恢复健康、留下一个证明不了任何事的陈旧水位,因此任意代际变化即推翻 `Safe` 决策。注册或 auto-add walk 在途时检查拒绝开始;idle 快捷路径也会等到排队事件排空后才恢复。
 - **初始化缓存。** `WatcherCache` 只缓存成功的初始化;瞬态 `inotify_init` 失败(`EMFILE`/`ENFILE`/`ENOMEM`)由下一次注册重试,而不是让 watcher 死到 daemon 重启。
 
