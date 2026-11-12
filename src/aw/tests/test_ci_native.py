@@ -26,6 +26,28 @@ class NativeTests(GateFixture):
         super().setUp()
         self.manifest = load(AW)
 
+    def test_hermes_source_install_copies_under_hardlink_environment(self) -> None:
+        row = self.manifest["agents"]["hermes-0.23.1"]
+        evidence = self.root / "evidence"
+        work = self.root / "work"
+        evidence.mkdir()
+        work.mkdir()
+        commands = Commands(evidence, {})
+        observed = []
+
+        def command(argv, _cwd, timeout=600, **_kwargs):
+            observed.append(argv)
+            return row["source"]["revision"] if argv[:3] == ["git", "rev-parse", "HEAD"] else "{}"
+
+        with patch.dict(os.environ, {"UV_LINK_MODE": "hardlink"}), patch.object(
+            commands, "run", side_effect=command
+        ):
+            native_acceptance.setup(row, work, commands)
+        installs = [argv for argv in observed if argv[:2] == ["uv", "pip"]]
+        self.assertEqual(len(installs), 2)
+        for argv in installs:
+            self.assertEqual(argv[argv.index("--link-mode") + 1], "copy")
+
     def test_setup_reports_survive_relative_and_absolute_output_paths(self) -> None:
         run = Commands.run
         row = self.manifest["agents"]["qoder"]

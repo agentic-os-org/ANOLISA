@@ -51,6 +51,9 @@ def register(ctx: Any) -> None:
     """An installed plugin is inert unless this process was launched by AW."""
     session = sys.modules.get("_aw_hermes_session")
     if session is None:
+        if hasattr(ctx, "register_rpc"):
+            from . import aw_gateway
+            aw_gateway.register(ctx, _read_launch)
         return
 
     from agent.shell_hooks import ShellHookSpec, _make_callback
