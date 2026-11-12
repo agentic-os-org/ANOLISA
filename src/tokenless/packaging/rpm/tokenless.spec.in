@@ -400,7 +400,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Fri Nov 06 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Nov 12 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Render recoverable HTML inside JSON values and compact recognized pnpm output
+- Enable recoverable diff compression by default and extend host recovery support
+- Reduce POSIX rewrite process overhead and preserve Qoder result envelopes
+- Correct HTML list rendering, RTK delimiters and concurrent Stash initialization
+- Roll back failed Selective-Claw imports and handle Codex installs without HOME
+
+* Fri Nov 06 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.4-1
 - Preserve scalar JSON types beyond the depth limit without stashing them
 - Preserve native grep/rg matches and Qoder Bash result metadata
 - Restore QwenWork private-runtime retrieval and retain AgentScope results on errors

@@ -1981,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "blake3",
  "libc",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-cli"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "chrono",
  "clap",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "csv",
  "html5ever",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-python"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "pyo3",
  "serde",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-runtime"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "libc",
  "regex",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "libc",
  "regex",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-stats"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "actix-web",
  "blake3",
