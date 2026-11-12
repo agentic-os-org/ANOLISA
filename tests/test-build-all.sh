@@ -498,7 +498,7 @@ scope = runpy.run_path(str(source / "src/agent-sec-core/tests/v2/packaging/test_
 fixture = scope["DeliveryTests"]()
 try:
     fixture.setUp()
-    binaries = ("v2/bin/agent-sec-cli", "v2/bin/agent-sec-daemon", "v2/bin/agent-sec-daemon-health", "linux-sandbox")
+    binaries = ("v2/bin/agent-sec-cli", "v2/bin/agent-sec-daemon", "v2/bin/agent-sec-daemon-health", "v2/bin/asc-sandbox-docker-guard", "linux-sandbox")
     for name in binaries:
         fixture.artifact(name, f"#!/bin/sh\n# stale {Path(name).name}\nexit 0\n", executable=True)
     shutil.copytree(fixture.source, destination, dirs_exist_ok=True)
@@ -519,7 +519,7 @@ MAKE
 
 assert_native_sec_core_installation() {
     local prefix="$1" binary
-    for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health linux-sandbox; do
+    for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health asc-sandbox-docker-guard linux-sandbox; do
         grep -Fxq "# fresh $binary" "$prefix/bin/$binary" || fail "sec-core installed a stale $binary"
     done
 }

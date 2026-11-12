@@ -139,6 +139,7 @@ fn docker_execute(
     let backend = DockerBackend::new(DockerConfig {
         cli: options.docker_cli.clone(),
         host: options.docker_host.clone(),
+        guard: None,
         image: options.image.clone().unwrap_or_default(),
         memory: options.memory.clone(),
         cpus: options.cpus.clone(),
