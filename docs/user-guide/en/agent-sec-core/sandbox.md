@@ -212,6 +212,15 @@ Deny rules, noexec and runtime-owned paths are rejected rather than approximated
 Docker accepts OS permission JSON only; raw Cedar and Cedar source envelopes
 require the Linux backend and are rejected before invoking Docker.
 
+Docker mounts require host root, `CAP_SYS_ADMIN`, and kernel support for
+`open_tree`/`move_mount`. Missing capabilities are rejected without automatic
+privilege elevation, including typical rootless deployments. Source paths must
+not contain symlinks. The backend opens each component and checks authorization
+identity on the held FD, then publishes the pinned object under root-owned private
+`/run/asc-sandbox-docker` staging. Reads and writes remain live even if the original
+path is replaced before start. Staging is not exposed to workloads and subsequent
+mount propagation is isolated.
+
 Both Docker network modes block external Unix sockets, including pathname
 sockets inside an allowed directory and abstract sockets in the host network
 namespace. Local stream/seqpacket socket pairs remain available; datagram pairs

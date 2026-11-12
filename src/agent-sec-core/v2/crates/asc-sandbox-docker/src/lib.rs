@@ -13,6 +13,9 @@
 //! - The operator-pinned image rootfs is the trusted base world; default-deny
 //!   applies to host filesystem access, which is visible only through the
 //!   authorized bind mounts.
+//! - Linux mounts require host root, `CAP_SYS_ADMIN` and `open_tree`/`move_mount`.
+//!   Reject symlinks at every level and verify FD identities before private root-owned staging.
+//!   Workspaces remain live; replacing a source path cannot change a pinned object. Fail closed.
 //! - The target program must be an absolute path inside the image; the working
 //!   directory must be covered by an allow rule so it exists in the container.
 //! - The trusted docker CLI is invoked by absolute path with a cleared
@@ -24,12 +27,18 @@
 
 mod config;
 mod execute;
+#[cfg(target_os = "linux")]
+mod mounts;
 mod seccomp;
 mod translate;
 
 pub use config::DockerConfig;
 pub use execute::DockerBackend;
 pub use translate::{ContainerPlan, MountPlan};
+
+#[cfg(test)]
+#[path = "../tests/docker_backend.rs"]
+mod backend_tests;
 
 /// Failures of the docker backend before or during container placement.
 #[derive(Debug, thiserror::Error)]

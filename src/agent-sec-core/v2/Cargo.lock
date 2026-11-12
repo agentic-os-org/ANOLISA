@@ -739,6 +739,7 @@ version = "1.2.1"
 dependencies = [
  "asc-pep-runtime",
  "asc-sandbox-types",
+ "rustix",
  "serde_json",
  "tempfile",
  "thiserror",

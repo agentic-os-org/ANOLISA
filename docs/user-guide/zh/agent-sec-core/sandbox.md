@@ -160,6 +160,12 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 Docker 仅接受 OS permission JSON；Cedar 原文和 Cedar source envelope 必须使用 Linux 后端，
 在调用 Docker 前即被拒绝。
 
+Docker 挂载要求宿主 root、`CAP_SYS_ADMIN` 和内核 `open_tree`/`move_mount` 支持；
+不自动提权，缺少能力即拒绝（包括通常的 rootless 部署）。源路径不能含符号链接。
+后端逐级打开源对象，在持有的 FD 上核验授权身份，再挂载到 root 管理的
+`/run/asc-sandbox-docker` 私有 staging，保留实时读写；即使启动前原路径被替换，
+仍使用原来获准的对象。staging 禁止向工作负载暴露，且隔离后续挂载传播。
+
 Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
 网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair
 和兼容 ABI 被阻断。Docker seccomp 仅支持原生 x86_64 和 aarch64。拒绝 socket、设备、FIFO

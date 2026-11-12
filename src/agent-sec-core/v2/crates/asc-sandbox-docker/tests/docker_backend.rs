@@ -1,17 +1,51 @@
 //! Lifecycle checks against a scripted docker CLI; no daemon is required.
 #![cfg(target_os = "linux")]
 
+use crate::{DockerBackend, DockerConfig};
 use asc_pep_runtime::SandboxBackend;
-use asc_sandbox_docker::{DockerBackend, DockerConfig};
 use asc_sandbox_types::{ExecutionSpec, LaunchSpec, NetworkMode, OsPermissionSet};
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
+// Crate unit tests replace privileged staging without exporting an API that bypasses mount pinning.
+struct ScriptedBackend(DockerBackend);
+
+impl ScriptedBackend {
+    fn execute_bound(
+        &self,
+        spec: &ExecutionSpec,
+    ) -> Result<asc_sandbox_types::ExecutionResult, asc_pep_runtime::PepError> {
+        self.0
+            .run_with_stager(spec, |_, _| Ok(()))
+            .map_err(Into::into)
+    }
+
+    fn execute(
+        &self,
+        launch: LaunchSpec,
+        permissions: OsPermissionSet,
+    ) -> Result<asc_sandbox_types::ExecutionResult, asc_pep_runtime::PepError> {
+        self.execute_bound(&ExecutionSpec {
+            version: 1,
+            launch,
+            permissions,
+            path_facts: vec![],
+            mount_aliases: vec![],
+        })
+    }
+
+    fn capabilities(
+        &self,
+    ) -> Result<asc_sandbox_types::BackendCapabilities, asc_pep_runtime::PepError> {
+        self.0.capabilities()
+    }
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
     state: PathBuf,
-    backend: DockerBackend,
+    backend: ScriptedBackend,
     work: PathBuf,
     data: PathBuf,
 }
@@ -72,7 +106,7 @@ esac
     Fixture {
         directory,
         state,
-        backend,
+        backend: ScriptedBackend(backend),
         work,
         data,
     }
