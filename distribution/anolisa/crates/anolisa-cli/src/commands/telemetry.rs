@@ -992,14 +992,13 @@ mod tests {
     }
 
     #[test]
-    fn test_unit_template_renders_exec_and_wantedby() {
+    fn test_unit_template_declares_exec_lines_and_install_target() {
         const UNIT_TEMPLATE: &str =
             include_str!("../../../../systemd/anolisa-telemetry.service.in");
-        let rendered = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", "/usr/bin/anolisa");
-        assert!(rendered.contains("ExecStartPre=/usr/bin/anolisa telemetry init"));
-        assert!(rendered.contains("ExecStart=/usr/bin/anolisa telemetry upload --loop"));
-        assert!(rendered.contains("WantedBy=multi-user.target"));
-        // Placeholder must be fully substituted.
-        assert!(!rendered.contains("@@ANOLISA_BIN@@"));
+        // The template keeps the bare placeholder; quoting belongs to the
+        // renderer (`systemd_exec_path`), so this only checks the lines exist.
+        assert!(UNIT_TEMPLATE.contains("ExecStartPre=@@ANOLISA_BIN@@ telemetry init"));
+        assert!(UNIT_TEMPLATE.contains("ExecStart=@@ANOLISA_BIN@@ telemetry upload --loop"));
+        assert!(UNIT_TEMPLATE.contains("WantedBy=multi-user.target"));
     }
 }
