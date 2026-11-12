@@ -1697,6 +1697,65 @@
         }
       ]
     },
+    "hermes-0.23.1": {
+      "owner": "@kongche-jbw",
+      "python": "3.14.0",
+      "mode": "automated",
+      "versions": {},
+      "source_install": "frozen-no-build-isolation",
+      "source": {
+        "url": "https://github.com/NousResearch/hermes-agent.git",
+        "revision": "3b421578588243f920886e6fe79a6faa87ea026e"
+      },
+      "boundary": "Official Hermes v0.23.1 CLI/Gateway hooks on a pinned source checkout. Native contract covers server-owned admission binding, drained session retirement, adopted queued turns, compaction lineage, registered-session reload rejection, JSON argument freezing, deferred Tool Search dispatch, denial, and model-bound text replacement. The older in-process baseline runs in the separate hermes job.",
+      "cases": [
+        {
+          "name": "gateway-contract",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/native_contract.py",
+            "--source",
+            "{source}",
+            "--plugin",
+            "{aw_root}/crates/aw-adapter/native/hermes"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 70
+        },
+        {
+          "name": "gateway-live",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/gateway_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--output",
+            "{output}/gateway-live"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/gateway-live/result.json",
+              "values": {
+                "status": "passed",
+                "model_saw_replacement": true,
+                "model_saw_original": false,
+                "pre_events": 1,
+                "after_events": 1,
+                "instance_released": true,
+                "gateway_stopped": true
+              }
+            }
+          ]
+        }
+      ]
+    },
     "openclaw": {
       "owner": "@kongche-jbw",
       "python": "3.12.3",

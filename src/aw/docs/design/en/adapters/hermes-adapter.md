@@ -7,7 +7,8 @@ Hermes' native plugin and shell Hook APIs through the Python `chat` entrypoint o
 Linux. The verified baseline is official `NousResearch/hermes-agent` revision
 `952c941e741e922a9be8fc403c8944c6e96318bb`; other revisions must retain the profile,
 plugin and shell Hook interfaces.
-Gateway, ACP, Desktop and the separate TUI entrypoint remain unsupported.
+Hermes `0.23.1` CLI chat uses an internal Gateway with a session-bound AW plugin.
+Standalone Gateway clients, ACP, Desktop and the separate TUI entrypoint remain unsupported.
 AW inserts native `--cli` so ambient TUI preferences cannot change that entrypoint.
 Only complete supported chat options are accepted; profile changes, worktree and
 resume switches, plugin-disabling flags and native option abbreviations are rejected.
@@ -284,15 +285,24 @@ required.
 Launch requires the matching installed plugin to be enabled. It keeps the
 selected `HERMES_HOME`, pins the equivalent native `--profile` selector so a
 sticky `active_profile` cannot redirect the process, and retains the launch
-working directory. The installed plugin is inert during ordinary Hermes launches
-without the AW launcher's process-local session binding.
+working directory. The installed plugin has no AW effect during ordinary Hermes
+launches without the AW launcher's session binding.
 
 ## Hook semantics
 
-Each admitted AW step becomes a separate native shell Hook callback registered
-with `PluginContext.register_hook`. Hermes serializes callbacks in registration
-order and retains control over parallel or sequential tool batches. Existing
+The in-process path registers each admitted AW step as a native callback. In
+`0.23.1`, the CLI registers its Gateway session through the plugin RPC before
+native conversation handling. The Gateway binds every admitted turn at its
+execution claim using the actual submission identity, including queued prompts
+and background notifications. Pre-admission failures create no turn lease. Hermes retains
+control over tool batch scheduling. Existing
 configured Hooks still run; AW does not import or reorder their configuration.
+The Gateway refuses plugin unload while an AW session remains registered, so
+queued admissions cannot lose their callbacks between turns.
+After the CLI closes a session, it waits for that session's queued and active
+admissions to settle before retiring the registration. AW keeps the launch
+files and service instance until the Gateway acknowledges retirement. A later
+AW launch can then register the same session, and plugin unload is allowed.
 Native Hook configuration has no per-Hook environment object in the verified
 baseline.
 
@@ -303,8 +313,9 @@ environment contents into normalized events or audit records.
 
 | Native event | AW event | Available behavior |
 | --- | --- | --- |
-| `pre_tool_call` | `tool.before` | Structured observe/block; native commands retain native stdout and exit semantics |
+| `pre_tool_call` | `tool.before` | Observe, block and checked input replacement; native commands retain stdout and exit semantics |
 | `post_tool_call` | `tool.after` | Observation, including blocked, failed, cancelled and timed-out tool outcomes |
+| `transform_tool_result` | `tool.after` | Replace the model-bound result after post callbacks |
 
 The native payload supplies `session_id`, `extra.api_request_id` and
 `extra.tool_call_id`. The normalized call ID hashes the request and tool-call ID
@@ -317,27 +328,16 @@ Hermes parses a native `action: block` response or exit code 2 as a veto. A veto
 does not prevent later registered before callbacks from running. Native
 `action: approve` requests human approval; it never means automatic allow.
 Structured AW `ask` remains unsupported. When AW before callbacks are configured,
-the launcher delegates to the native directive reducer, then blocks any effective
-argument rewrite and discards its modified arguments. Native callbacks inspect
-the original arguments and merge rewrites afterward; executing a rewrite would
-bypass the AW check. All callbacks still run, and existing native veto reasons
-are retained. This guard survives plugin rediscovery and is restored on native
-main exit. The same launch scope wraps native tool-execution middleware: freeze
-the JSON arguments before the middleware chain and return a native tool error
-instead of dispatching changed arguments. This includes `execute_code`'s nested
-`CellAuthority`/RPC calls, where pre-tool checks precede execution middleware.
-Replacing a dictionary with identical JSON values remains supported; nested
-in-place and value-type changes are refused. Only native JSON value types and
-string dictionary keys can reach dispatch with AW before callbacks; tuples and
-integer keys cannot collide with the inspected JSON. Integers must fit i64/u64,
-floats must be finite, and string values/keys must contain Unicode scalar values;
-unsupported inputs are rejected, not converted. Execution rewrites are unsupported
-for both top-level and nested calls when AW before callbacks are active, using
-one shared native middleware boundary without replaying policy callbacks.
-Native after callbacks observe the resulting tool error. Both guards survive
-plugin reload and are restored on main exit. Empty and after-only AW routes
+the launcher accepts an input replacement only when AW marks the modified
+arguments as checked. The in-process path checks the native reducer's effective
+arguments; the `0.23.1` Gateway path records the checked arguments for each
+session, request and tool call. Both paths compare arguments again at tool
+execution, returning a tool error if a later native Hook or middleware changes
+them. The Gateway also checks schema coercion at registry and inline dispatch.
+Existing native vetoes remain effective. Empty and after-only AW routes
 retain native rewrite behavior.
-Post callbacks cannot undo the tool or replace its result.
+Post callbacks cannot undo the tool. A `transform_tool_result` callback can
+replace the model-bound result; Hermes retains the original on callback failure.
 
 Both the AW event deadline and Hermes' callback timeout apply. Launch refuses
 event budgets whose native command timeout and cleanup allowance exceed

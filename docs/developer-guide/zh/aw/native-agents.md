@@ -17,7 +17,7 @@
 | [OpenClaw](agents/openclaw.md) | 2026.9.6 | Gateway |
 | [DeepSeek Harness](agents/deepseek-harness.md) | 0.2.1-rc.5 | headless CLI；可选择其他 profile |
 | [QwenPaw](agents/qwenpaw.md) | 2.2.2.post1 / AgentScope 2.0.10 | App/API |
-| [Hermes](agents/hermes.md) | 952c941e | chat |
+| [Hermes](agents/hermes.md) | 952c941e；0.23.1（`3b421578588243f920886e6fe79a6faa87ea026e`） | chat；0.23.1 的 AW 启动 CLI 与内部 Gateway |
 | [AgentScope SDK](agents/agentscope.md) | 2.0.6 | Python worker |
 | [Pi SDK](agents/pi.md) | 0.84.2–1.5.2（24 个已发布配对） | Node.js worker |
 | [Claude SDK](agents/claude-sdk.md) | 0.2.88 / CLI 2.1.161 | Python worker |

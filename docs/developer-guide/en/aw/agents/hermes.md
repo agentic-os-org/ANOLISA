@@ -4,10 +4,14 @@
 
 ## Prepare
 
-The verified baseline is commit `952c941e741e922a9be8fc403c8944c6e96318bb`. AW records
-the actual checkout revision and accepts other revisions with the native profile,
-plugin and shell-hook interfaces. Keep tracked files clean and retain the checked
-installation and loader environment. Install the Python console script with an absolute Python shebang; the entrypoint is local `chat`.
+The in-process baseline is commit `952c941e741e922a9be8fc403c8944c6e96318bb`.
+Hermes `0.23.1` is pinned at commit `3b421578588243f920886e6fe79a6faa87ea026e`
+in the native acceptance matrix. Its CLI chat turns run in the internal Gateway; AW binds that
+Gateway's plugin to the launched session before submitting each turn. Both use
+the same AW configuration. AW records the actual checkout revision and accepts
+other revisions with the required native interfaces. Keep tracked files clean and
+retain the checked installation and loader environment. Install the Python console
+script with an absolute Python shebang; the entrypoint is local `chat`.
 Build AW with the [tutorial](../integration.md), copy the [Hermes configuration](../../../../../src/aw/crates/aw-service/examples/aw.hermes.yaml), and set argv to the installation's absolute path.
 Initialize the profile and model credentials with Hermes first.
 
@@ -28,15 +32,21 @@ Use the same profile for launch. Wait for Hook readiness, then [validate native 
 
 | Item | Requirement |
 | --- | --- |
-| Entrypoint | Python console script with local chat; no shell wrapper, `python -m`, TUI, Gateway, ACP or session/profile/worktree switching |
+| Entrypoint | Python console script with local `chat --cli`, including the internal Gateway in `0.23.1`; standalone Gateway clients, TUI, ACP and session/profile/worktree switching remain outside this entrypoint |
 | Paths | Working directory, profile, venv, checkout and AW paths must be UTF-8; profile and `.env` must be current-user-owned and protected from other writers |
 | Git environment | Unset `GIT_DIR`, `GIT_COMMON_DIR`; use absolute HOME/XDG and Git configuration paths; filter and fsmonitor helpers are rejected |
 | Native options | Safe mode and chat help flags are rejected before integration; use `hermes chat --help` directly |
-| Tool arguments | AW before routes reject Hook/middleware input rewriting, including calls inside `execute_code` |
+| Tool arguments | An AW checked `replace_input` result is accepted; later native Hook or middleware changes are denied before dispatch, including calls inside `execute_code` |
 | Budget | At most 55000 ms per event, within the native callback deadline |
 
 Other native callbacks may still run after before denial; after can observe failed or blocked attempts.
-Forced plugin reload during tool execution is rejected with AW callbacks configured. Empty policy still requires plugin installation and registers zero tool callbacks.
+Forced plugin reload during an AW-bound Gateway turn or in-process tool execution is rejected. A committed context compaction keeps the same AW binding for later tools in that turn. Empty policy still requires plugin installation and registers zero tool callbacks.
+The Gateway releases an admitted turn's binding after its server-side execution ends. If the CLI loses its connection or stops waiting, the binding stays active while execution is unresolved. On CLI exit, AW waits for queued and active turns to settle and for the session to close before releasing its launch files and service instance. An unresolved execution keeps that wait active; resolve it in Hermes before ending the AW run.
+For `0.23.1`, restart an already running Gateway after connecting or upgrading the plugin.
+The CLI refuses to submit a turn if its Gateway cannot confirm the AW session binding.
+`transform_tool_result` replaces a tool result before the model receives it. Hermes
+retains the original result if that callback fails or times out; policies that must
+withhold content should deny the tool in `tool.before`.
 
 ## Upgrade and cleanup
 

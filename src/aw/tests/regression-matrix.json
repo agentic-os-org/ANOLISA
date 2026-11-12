@@ -115,7 +115,7 @@
     },
     "hermes-lifecycle": {
       "target": "aw-cli/test/launcher",
-      "test": "hermes_probes_and_install_writers_cancel_and_reap_on_signals"
+      "test": "hermes_trust::signals::hermes_probes_and_install_writers_cancel_and_reap_on_signals"
     },
     "qwenpaw-lifecycle": {
       "target": "aw-cli/test/qwenpaw",

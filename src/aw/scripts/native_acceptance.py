@@ -154,19 +154,20 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
         commands.run(["git", "checkout", "--detach", "FETCH_HEAD"], source)
         if commands.run(["git", "rev-parse", "HEAD"], source).strip() != row["source"]["revision"]:
             raise ValueError("native source checkout does not match its pin")
-        commands.run(
-            [
-                "uv",
-                "sync",
-                "--locked",
-                "--no-dev",
-                "--link-mode",
-                "copy",
-                "--python",
-                sys.executable,
-            ],
-            source,
-        )
+        sync = ["uv", "sync", "--locked", "--no-dev", "--link-mode", "copy",
+                "--python", sys.executable]
+        if row.get("source_install") == "frozen-no-build-isolation":
+            # Hermes 0.23.1's relative exclude-newer filters its own build
+            # requirement on public mirrors. The committed lock still owns runtime deps.
+            commands.run([*sync[:2], "--frozen", *sync[3:], "--no-install-project"], source)
+            commands.run(["uv", "pip", "install", "--no-config", "--link-mode", "copy", "--python",
+                          str(source / ".venv/bin/python"), "setuptools==84.2.1",
+                          "wheel==0.48.0"], source)
+            commands.run(["uv", "pip", "install", "--no-config", "--link-mode", "copy", "--python",
+                          str(source / ".venv/bin/python"), "--no-deps",
+                          "--no-build-isolation", "-e", "."], source)
+        else:
+            commands.run(sync, source)
         # Own the copies before tightening permissions; never chmod shared cache hardlinks.
         for directory, _children, files in os.walk(source / ".venv"):
             path = Path(directory)
@@ -352,7 +353,7 @@ def main() -> None:
             if args.agent in {"qoder", "qoder-sdk"}:
                 environment["QODER_PERSONAL_ACCESS_TOKEN"] = token
             values.update(bin=str(args.bin), output=str(output))
-            if args.agent == "hermes":
+            if args.agent in {"hermes", "hermes-0.23.1"}:
                 # Hosted runners configure Git LFS filters globally; the fixture needs none.
                 environment.update(
                     PATH=hermes_path(work, values["python"], args.bin, environment),

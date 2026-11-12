@@ -25,4 +25,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     NativeFixture.plugin_path = args.plugin
     sys.path.insert(0, str(args.source))
+    try:
+        from hermes_cli.gateway_agent import GatewayAgent  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        from native_gateway import GatewayTests  # noqa: F401
+        __all__.append("GatewayTests")
     unittest.main(argv=[sys.argv[0]])

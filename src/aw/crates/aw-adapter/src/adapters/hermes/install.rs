@@ -18,6 +18,9 @@ use std::{
 pub(super) const PLUGIN: &str = "aw-native-hooks";
 const MANIFEST: &[u8] = include_bytes!("../../../native/hermes/plugin.yaml");
 const CODE: &[u8] = include_bytes!("../../../native/hermes/__init__.py");
+const GATEWAY: &[u8] = include_bytes!("../../../native/hermes/aw_gateway.py");
+const GATEWAY_LIFECYCLE: &[u8] = include_bytes!("../../../native/hermes/aw_gateway_lifecycle.py");
+const SKILL: &[u8] = include_bytes!("../../../native/hermes/aw_skill.py");
 const MARKER: &[u8] = b"aw-hermes-plugin/v1alpha1\n";
 
 pub(super) fn profile(path: &str) -> Result<PathBuf> {
@@ -179,10 +182,13 @@ pub(super) fn installed(profile: &Path) -> Result<Value> {
     Ok(config)
 }
 
-fn files() -> [(&'static str, &'static [u8]); 3] {
+fn files() -> [(&'static str, &'static [u8]); 6] {
     [
         ("plugin.yaml", MANIFEST),
         ("__init__.py", CODE),
+        ("aw_gateway.py", GATEWAY),
+        ("aw_gateway_lifecycle.py", GATEWAY_LIFECYCLE),
+        ("aw_skill.py", SKILL),
         (".aw-owned", MARKER),
     ]
 }

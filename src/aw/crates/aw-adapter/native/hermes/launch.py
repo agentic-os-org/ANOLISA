@@ -10,6 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 import sys
+import time
 from types import ModuleType
 from typing import Any, Callable
 from uuid import uuid4
@@ -113,6 +114,8 @@ def main() -> None:
     executing = 0
     reload_restore = None
     reload_runtime = None
+    gateway_restore = None
+    primed_sessions: set[str] = set()
 
     def discovery(force: bool = False) -> None:
         if not force:
@@ -178,7 +181,7 @@ def main() -> None:
             return original_execution(tool_name, arguments, dispatch, **context)
 
     def prepare(args: Namespace) -> None:
-        nonlocal post_restore, skill_restore, dispatch_restore, input_restore, reload_restore, reload_runtime
+        nonlocal post_restore, skill_restore, dispatch_restore, input_restore, reload_restore, reload_runtime, gateway_restore
         admit_reload = None
         if env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("HERMES_SAFE_MODE disables the AW native plugin")
@@ -197,6 +200,29 @@ def main() -> None:
         if receipt != expected or env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("Hermes AW registration does not match this launch")
         require_hooks()
+        if launch["hooks"] and gateway_restore is None:
+            try:
+                from hermes_cli.gateway_agent import GatewayAgent
+            except ImportError:
+                pass  # Older in-process Hermes releases have no GatewayAgent.
+            else:
+                original_run = GatewayAgent.run_conversation
+
+                def bound_run(agent: Any, *args: Any, **kwargs: Any) -> Any:
+                    require_hooks()
+                    receipt = agent.connection.call(
+                        "plugin.aw-native-hooks.prime", session_id=agent.session_id,
+                        launch_path=launch_path, token=launch["token"])
+                    if (not isinstance(receipt, dict) or receipt.get("adapter") != "hermes"
+                            or receipt.get("token") != launch["token"]
+                            or receipt.get("hooks") != len(launch["hooks"])
+                            or not isinstance(receipt.get("gateway_pid"), int)):
+                        raise RuntimeError("Hermes Gateway did not register the AW callbacks")
+                    primed_sessions.add(agent.session_id)
+                    return original_run(agent, *args, **kwargs)
+
+                gateway_restore = (GatewayAgent, original_run)
+                GatewayAgent.run_conversation = bound_run
         if launch.get("reloadable") and reload_restore is None:
             import cli
             from aw_reload import Runtime
@@ -295,9 +321,45 @@ def main() -> None:
         plugins._get_pre_tool_call_directive_details = directives
         middleware.run_tool_execution_middleware = execution
         manager.discover_and_load = discovery
+    def retire_gateway_sessions() -> None:
+        if not primed_sessions:
+            return
+        from hermes_cli.gateway_connection import GatewayConnection
+
+        for session_id in sorted(primed_sessions):
+            reported_at = 0.0
+            while True:
+                connection = GatewayConnection()
+                try:
+                    receipt = connection.call(
+                        "plugin.aw-native-hooks.retire", timeout=10,
+                        target_session_id=session_id, launch_path=launch_path,
+                        token=launch["token"])
+                    if receipt == {"retired": True}:
+                        try:
+                            connection.call(
+                                "plugin.aw-native-hooks.acknowledge_retire", timeout=5,
+                                target_session_id=session_id, launch_path=launch_path,
+                                token=launch["token"])
+                        except Exception as error:
+                            print(f"AW Hermes Gateway retirement acknowledgement failed: {error}",
+                                  file=sys.stderr)
+                        break
+                    if receipt != {"retired": False}:
+                        raise RuntimeError("invalid AW Hermes Gateway retirement receipt")
+                except (Exception, SystemExit) as error:
+                    if time.monotonic() - reported_at >= 30:
+                        print(f"AW Hermes Gateway session retirement pending: {error}",
+                              file=sys.stderr)
+                        reported_at = time.monotonic()
+                finally:
+                    connection.close()
+                time.sleep(0.2)
+
     try:
         native.main()
     finally:
+        retire_gateway_sessions()
         plugins._get_pre_tool_call_directive_details = original_directives
         middleware.run_tool_execution_middleware = original_execution
         if post_restore is not None:
@@ -310,6 +372,8 @@ def main() -> None:
         manager.discover_and_load = original_discovery
         if reload_restore is not None:
             reload_restore[0].chat = reload_restore[1]
+        if gateway_restore is not None:
+            gateway_restore[0].run_conversation = gateway_restore[1]
         if input_restore is not None:
             cli, original_main, original_images = input_restore
             cli.main = original_main
