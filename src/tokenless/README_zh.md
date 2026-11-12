@@ -12,6 +12,9 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 
 当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
+进入 PostTool 的 Maven 输出可在保留全部记录的同时共享重复字面量模板及下载 URL 前缀，
+无需 Stash。识别范围、输出还原方法与验证限制参见 [Maven 构建输出](../../docs/user-guide/zh/tokenless/index.md#maven-构建输出)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |

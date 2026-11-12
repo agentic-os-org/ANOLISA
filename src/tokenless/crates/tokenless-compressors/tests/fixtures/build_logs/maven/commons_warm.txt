@@ -1,0 +1,228 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ----------------------< commons-cli:commons-cli >-----------------------
+[INFO] Building Apache Commons CLI 1.9.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.4.0:clean (default-clean) @ commons-cli ---
+[INFO] Deleting /work/source/target
+[INFO] 
+[INFO] --- enforcer:3.5.0:enforce (enforce-maven-version) @ commons-cli ---
+[INFO] Rule 0: org.apache.maven.enforcer.rules.version.RequireMavenVersion passed
+[INFO] 
+[INFO] --- enforcer:3.5.0:enforce (enforce-java-version) @ commons-cli ---
+[INFO] Rule 0: org.apache.maven.enforcer.rules.version.RequireJavaVersion passed
+[INFO] 
+[INFO] --- apache-rat:0.16.1:check (rat-check) @ commons-cli ---
+[INFO] Rat check: Summary over all files. Unapproved: 0, unknown: 0, generated: 0, approved: 105 licenses.
+[INFO] 
+[INFO] --- artifact:3.5.1:check-buildplan (check-buildplan) @ commons-cli ---
+[INFO] no known issue with org.apache.maven.plugins:maven-enforcer-plugin:3.5.0
+[INFO] no known issue with org.apache.rat:apache-rat-plugin:0.16.1
+[INFO] no known issue with org.apache.maven.plugins:maven-artifact-plugin:3.5.1
+[INFO] no known issue with org.codehaus.mojo:build-helper-maven-plugin:3.6.0
+[INFO] no known issue with org.apache.maven.plugins:maven-antrun-plugin:3.1.0
+[INFO] no known issue with org.apache.maven.plugins:maven-remote-resources-plugin:3.2.0 (>= 1.7.0)
+[INFO] no known issue with org.codehaus.mojo:buildnumber-maven-plugin:3.2.0
+[INFO] no known issue with org.apache.maven.plugins:maven-resources-plugin:3.3.1
+[INFO] no known issue with org.apache.maven.plugins:maven-compiler-plugin:3.13.0
+[INFO] no known issue with org.apache.felix:maven-bundle-plugin:5.1.9 (>= 5.1.9)
+[INFO] no known issue with org.jacoco:jacoco-maven-plugin:0.8.12
+[INFO] no known issue with org.apache.maven.plugins:maven-surefire-plugin:3.3.1
+[INFO] no known issue with org.apache.maven.plugins:maven-jar-plugin:3.4.2 (>= 3.2.0)
+[INFO] no known issue with org.apache.maven.plugins:maven-source-plugin:3.2.1 (>= 3.2.1)
+[INFO] no known issue with org.cyclonedx:cyclonedx-maven-plugin:2.8.0 (>= 2.7.9)
+[INFO] no known issue with org.spdx:spdx-maven-plugin:0.7.3
+[INFO] no known issue with org.moditect:moditect-maven-plugin:1.2.2.Final (>= 1.2.0.Final)
+[INFO] no known issue with org.apache.maven.plugins:maven-site-plugin:3.12.1
+[INFO] no known issue with org.apache.maven.plugins:maven-install-plugin:3.1.2
+[INFO] no known issue with org.apache.maven.plugins:maven-deploy-plugin:3.1.2
+[INFO] 
+[INFO] --- build-helper:3.6.0:parse-version (parse-version) @ commons-cli ---
+[INFO] 
+[INFO] --- antrun:3.1.0:run (javadoc.resources) @ commons-cli ---
+[INFO] Executing tasks
+[INFO]      [copy] Copying 2 files to /work/source/target/apidocs/META-INF
+[INFO] Executed tasks
+[INFO] 
+[INFO] --- remote-resources:3.2.0:process (process-resource-bundles) @ commons-cli ---
+[INFO] Skipping remote resources execution.
+[INFO] 
+[INFO] --- buildnumber:3.2.0:create (default) @ commons-cli ---
+[INFO] Executing: /bin/sh -c cd '/work/source' && 'git' 'rev-parse' '--verify' 'HEAD'
+[INFO] Working directory: /work/source
+[INFO] Storing buildNumber: null at timestamp: 1794474659318
+[INFO] Executing: /bin/sh -c cd '/work/source' && 'git' 'symbolic-ref' 'HEAD'
+[INFO] Working directory: /work/source
+[WARNING] Cannot get the branch information from the git repository: 
+Detecting the current branch failed: fatal: ref HEAD is not a symbolic ref
+
+[INFO] Executing: /bin/sh -c cd '/work/source' && 'git' 'rev-parse' '--verify' 'HEAD'
+[INFO] Working directory: /work/source
+[INFO] Storing scmBranch: UNKNOWN
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ commons-cli ---
+[INFO] skip non existing resourceDirectory /work/source/src/main/resources
+[INFO] Copying 2 resources from  to target/classes/META-INF
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ commons-cli ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 26 source files with javac [debug release 8] to target/classes
+[WARNING] source value 8 is obsolete and will be removed in a future release
+[WARNING] target value 8 is obsolete and will be removed in a future release
+[WARNING] To suppress warnings about obsolete options, use -Xlint:-options.
+[INFO] 
+[INFO] --- bundle:5.1.9:manifest (bundle-manifest) @ commons-cli ---
+[INFO] No MANIFEST.MF file found, generating manifest.
+[INFO] Writing manifest: /work/source/target/osgi/MANIFEST.MF
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ commons-cli ---
+[INFO] Copying 1 resource from src/test/resources to target/test-classes
+[INFO] Copying 2 resources from  to target/test-classes/META-INF
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ commons-cli ---
+[INFO] Recompiling the module because of changed dependency.
+[INFO] Compiling 39 source files with javac [debug release 8] to target/test-classes
+[WARNING] source value 8 is obsolete and will be removed in a future release
+[WARNING] target value 8 is obsolete and will be removed in a future release
+[WARNING] To suppress warnings about obsolete options, use -Xlint:-options.
+[INFO] /work/source/src/test/java/org/apache/commons/cli/bug/BugCLI133Test.java: Some input files use or override a deprecated API.
+[INFO] /work/source/src/test/java/org/apache/commons/cli/bug/BugCLI133Test.java: Recompile with -Xlint:deprecation for details.
+[INFO] 
+[INFO] --- jacoco:0.8.12:prepare-agent (prepare-agent) @ commons-cli ---
+[INFO] argLine set to -javaagent:/work/cache/org/jacoco/org.jacoco.agent/0.8.12/org.jacoco.agent-0.8.12-runtime.jar=destfile=/work/source/target/jacoco.exec
+[INFO] 
+[INFO] --- surefire:3.3.1:test (default-test) @ commons-cli ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running org.apache.commons.cli.bug.BugsTest
+[INFO] Tests run: 13, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.035 s -- in org.apache.commons.cli.bug.BugsTest
+[INFO] Running org.apache.commons.cli.bug.BugCLI71Test
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.003 s -- in org.apache.commons.cli.bug.BugCLI71Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI325Test
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.bug.BugCLI325Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI312Test
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.003 s -- in org.apache.commons.cli.bug.BugCLI312Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI266Test
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.bug.BugCLI266Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI265Test
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.002 s -- in org.apache.commons.cli.bug.BugCLI265Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI252Test
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.bug.BugCLI252Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI18Test
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.bug.BugCLI18Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI162Test
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.004 s -- in org.apache.commons.cli.bug.BugCLI162Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI148Test
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.bug.BugCLI148Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI13Test
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0 s -- in org.apache.commons.cli.bug.BugCLI13Test
+[INFO] Running org.apache.commons.cli.bug.BugCLI133Test
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.bug.BugCLI133Test
+[INFO] Running org.apache.commons.cli.ValuesTest
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.004 s -- in org.apache.commons.cli.ValuesTest
+[INFO] Running org.apache.commons.cli.ValueTest
+[INFO] Tests run: 40, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.044 s -- in org.apache.commons.cli.ValueTest
+[INFO] Running org.apache.commons.cli.UtilTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.UtilTest
+[INFO] Running org.apache.commons.cli.UnrecognizedOptionExceptionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0 s -- in org.apache.commons.cli.UnrecognizedOptionExceptionTest
+[INFO] Running org.apache.commons.cli.TypeHandlerTest
+[INFO] Tests run: 63, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.082 s -- in org.apache.commons.cli.TypeHandlerTest
+[INFO] Running org.apache.commons.cli.SolrCreateToolTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.002 s -- in org.apache.commons.cli.SolrCreateToolTest
+[INFO] Running org.apache.commons.cli.SolrCliTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.SolrCliTest
+[INFO] Running org.apache.commons.cli.PosixParserTest
+[WARNING] Tests run: 66, Failures: 0, Errors: 0, Skipped: 10, Time elapsed: 0.019 s -- in org.apache.commons.cli.PosixParserTest
+[INFO] Running org.apache.commons.cli.PatternOptionBuilderTest
+Exception found converting v to desired type: java.net.MalformedURLException: unknown protocol: foo
+Exception found converting d to desired type: java.lang.ClassNotFoundException: System.DateTime
+Exception found converting f to desired type: java.io.FileNotFoundException: non-existing.file (No such file or directory)
+Exception found converting x to desired type: java.lang.NumberFormatException: For input string: "3,5"
+Exception found converting i to desired type: java.lang.NoSuchMethodException: java.util.Calendar.<init>()
+Exception found converting n to desired type: java.lang.ClassNotFoundException: System.DateTime
+[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.006 s -- in org.apache.commons.cli.PatternOptionBuilderTest
+[INFO] Running org.apache.commons.cli.ParseExceptionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.ParseExceptionTest
+[INFO] Running org.apache.commons.cli.OptionsTest
+[INFO] Tests run: 15, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.005 s -- in org.apache.commons.cli.OptionsTest
+[INFO] Running org.apache.commons.cli.OptionValidatorTest
+[INFO] Tests run: 115, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.038 s -- in org.apache.commons.cli.OptionValidatorTest
+[INFO] Running org.apache.commons.cli.OptionTest
+[INFO] Tests run: 21, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.009 s -- in org.apache.commons.cli.OptionTest
+[INFO] Running org.apache.commons.cli.OptionGroupTest
+[INFO] Tests run: 13, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.004 s -- in org.apache.commons.cli.OptionGroupTest
+[INFO] Running org.apache.commons.cli.OptionBuilderTest
+[INFO] Tests run: 9, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.002 s -- in org.apache.commons.cli.OptionBuilderTest
+[INFO] Running org.apache.commons.cli.HelpFormatterTest
+[INFO] Tests run: 38, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.313 s -- in org.apache.commons.cli.HelpFormatterTest
+[INFO] Running org.apache.commons.cli.GnuParserTest
+[WARNING] Tests run: 66, Failures: 0, Errors: 0, Skipped: 22, Time elapsed: 0.009 s -- in org.apache.commons.cli.GnuParserTest
+[INFO] Running org.apache.commons.cli.DisablePartialMatchingTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0 s -- in org.apache.commons.cli.DisablePartialMatchingTest
+[INFO] Running org.apache.commons.cli.DeprecatedAttributesTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.DeprecatedAttributesTest
+[INFO] Running org.apache.commons.cli.DefaultParserTest
+[INFO] Tests run: 74, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.012 s -- in org.apache.commons.cli.DefaultParserTest
+[INFO] Running org.apache.commons.cli.ConverterTests
+[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.005 s -- in org.apache.commons.cli.ConverterTests
+[INFO] Running org.apache.commons.cli.CommandLineTest
+[INFO] Tests run: 121, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.039 s -- in org.apache.commons.cli.CommandLineTest
+[INFO] Running org.apache.commons.cli.BasicParserTest
+[WARNING] Tests run: 66, Failures: 0, Errors: 0, Skipped: 27, Time elapsed: 0.007 s -- in org.apache.commons.cli.BasicParserTest
+[INFO] Running org.apache.commons.cli.ArgumentIsOptionTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.ArgumentIsOptionTest
+[INFO] Running org.apache.commons.cli.ApplicationTest
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.ApplicationTest
+[INFO] Running org.apache.commons.cli.AlreadySelectedExceptionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.001 s -- in org.apache.commons.cli.AlreadySelectedExceptionTest
+[INFO] 
+[INFO] Results:
+[INFO] 
+[WARNING] Tests run: 797, Failures: 0, Errors: 0, Skipped: 59
+[INFO] 
+[INFO] 
+[INFO] --- jar:3.4.2:jar (default-jar) @ commons-cli ---
+[INFO] Building jar: /work/source/target/commons-cli-1.9.0.jar
+[INFO] 
+[INFO] --- jar:3.4.2:test-jar (default) @ commons-cli ---
+[INFO] Building jar: /work/source/target/commons-cli-1.9.0-tests.jar
+[INFO] 
+[INFO] --- source:3.2.1:jar-no-fork (create-source-jar) @ commons-cli ---
+[INFO] Building jar: /work/source/target/commons-cli-1.9.0-sources.jar
+[INFO] 
+[INFO] --- source:3.2.1:test-jar-no-fork (create-source-jar) @ commons-cli ---
+[INFO] Building jar: /work/source/target/commons-cli-1.9.0-test-sources.jar
+[INFO] 
+[INFO] --- cyclonedx:2.8.0:makeAggregateBom (build-sbom-cyclonedx) @ commons-cli ---
+[INFO] CycloneDX: Resolving Dependencies
+[INFO] CycloneDX: Creating BOM version 1.5 with 0 component(s)
+[INFO] CycloneDX: Writing and validating BOM (XML): /work/source/target/commons-cli-1.9.0-bom.xml
+[INFO]            attaching as commons-cli-1.9.0-cyclonedx.xml
+[INFO] CycloneDX: Writing and validating BOM (JSON): /work/source/target/commons-cli-1.9.0-bom.json
+[INFO]            attaching as commons-cli-1.9.0-cyclonedx.json
+[INFO] 
+[INFO] --- spdx:0.7.3:createSPDX (build-sbom-spdx) @ commons-cli ---
+[INFO] spdx file type = .json
+[INFO] Creating SPDX File /work/source/target/site/commons-cli_commons-cli-1.9.0.spdx.json
+[WARNING] The following errors were found in the SPDX file:
+ License list version does not match the pattern M.N
+[INFO] 
+[INFO] --- moditect:1.2.2.Final:add-module-info (add-module-infos) @ commons-cli ---
+[INFO] Running jdeps --generate-module-info /work/source/target/moditect --multi-release=9 /work/source/target/commons-cli-1.9.0.jar
+writing to /work/source/target/moditect/commons.cli/versions/9/module-info.java
+[INFO] Created module descriptor at /work/source/target/moditect/generated-sources/org.apache.commons.cli/module-info.java
+[INFO] 
+[INFO] --- site:3.12.1:attach-descriptor (attach-descriptor) @ commons-cli ---
+[INFO] Skipping because packaging 'jar' is not pom.
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  10.240 s
+[INFO] Finished at: 2026-11-12T09:11:08Z
+[INFO] ------------------------------------------------------------------------

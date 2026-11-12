@@ -19,6 +19,12 @@ pub(crate) fn mask(line: &str) -> String {
 
 pub(crate) fn generic_progress_template(line: &str) -> Option<String> {
     let trimmed = line.trim();
+    if trimmed.contains('\r')
+        || trimmed.starts_with("Progress (")
+        || super::maven::is_download_line(trimmed)
+    {
+        return None;
+    }
     if !trimmed.bytes().any(|byte| byte.is_ascii_digit()) {
         return None;
     }

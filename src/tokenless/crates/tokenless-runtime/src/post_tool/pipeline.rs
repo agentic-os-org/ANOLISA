@@ -1257,6 +1257,72 @@ mod tests {
         assert_eq!(run.stash_writes, Some(0));
     }
 
+    const MAVEN_LOG: &str = include_str!(
+        "../../../tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt"
+    );
+
+    #[test]
+    fn maven_layout_routes_without_recovery_and_never_writes_stash() {
+        for mode in 0..4 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(MAVEN_LOG);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            }
+            if mode == 1 {
+                config.stash_enabled = false;
+            }
+            if mode == 3 {
+                req.content_origin = ContentOrigin::FileRead;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert!(run.response.after_tokens < run.response.before_tokens);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn maven_obeys_existing_source_status_replacement_and_acceptance_guards() {
+        for mode in 0..8 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(MAVEN_LOG);
+            let mut config = build_log_config();
+            match mode {
+                0 => req.status = ToolResultStatus::Error,
+                1 => req.capabilities.replace_output = false,
+                2 => req.content_origin = ContentOrigin::FileContent,
+                3 => req.content_origin = ContentOrigin::ApiResponse,
+                4 => config.min_input_chars = usize::MAX,
+                5 => config.compression_enabled = false,
+                6 => config.timeout = Duration::ZERO,
+                _ => req.command = Some("rg needle build.log".into()),
+            }
+            let run = PostToolPipeline::run(&req, &config, Some(&store));
+            assert_eq!(run.response.output, MAVEN_LOG, "mode {mode}");
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+            if mode == 5 {
+                assert_eq!(run.response.disposition, Disposition::DryRun);
+            }
+            if mode == 6 {
+                assert_eq!(run.response.disposition, Disposition::Timeout);
+            }
+        }
+    }
+
     const PNPM_INSTALL: &str = include_str!(
         "../../../tokenless-compressors/tests/fixtures/build_logs/pnpm_install_live.txt"
     );

@@ -384,7 +384,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm 和 Maven 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
@@ -523,6 +523,52 @@ Retrieve 恢复省略的 SGR 清理后记录。恢复为 `none` 时（包括 Ope
 `pnpm install` 没有新增 PreTool RTK 改写豁免；既有归属、状态、来源和 Adapter 大小门槛仍生效。
 这不是覆盖所有 pnpm 版本或脚本输出的承诺，也不证明整任务账单节省。
 既有 Protocol v2 [CLI 契约](cli-reference.md#compress) 保持不变。
+
+### Maven 构建输出
+
+包含 Maven BuildLog 支持的源码构建通过现有 PostTool 内容路由压缩已识别的原生
+Maven 输出。默认模式和 `--batch-mode` 日志独立识别，不依赖命令字符串或依赖缓存状态。
+结构压缩沿用 `build_log_reduction` 操作，报告 `lossless`，无需恢复能力且不写入 Stash。
+
+识别要求有界样本中存在相互关联的 Maven 记录：插件阶段后接已识别记录、完整模块／测试标题，
+或附带耗时与结束时间的构建结果。头部采样预算内的可见开头必须符合日志形态，可先有 `$ `
+命令提示、调用 `mvn`／`mvnw`／`mvnDebug`／`mvnd` 的 `set -x` 轨迹、JVM 选项或已知
+HotSpot／访问告警、`mvn --show-version` 版本头或 `[mvnd] ` 启动行；不剥离行级时间戳。
+Markdown 代码围栏内的行不提供 Maven 证据，证据窗口不得跨越围栏或采样缺口；跨缺口仅靠
+尾部提供证据时，若头部存在未闭合围栏或尾部出现围栏也不判定为 Maven；头部已具备围栏外
+强证据后，构建输出后续出现的围栏不再否决整份日志。开头超出采样预算时，也不判定为
+Maven。仅有下载记录，或孤立的扫描／结果标记，都不足以确定 Maven 上下文。Maven 风格的
+传输记录与 CR 重绘也不计入 Cargo 或独立 Generic 进度证据。纯下载片段保持原样；在已确认
+的 Maven 输出中，它们仍可按下文方式压缩。含 CR 的证据不参与结构识别，因此全部采用
+CRLF 换行的输出使用其他内容检测器；Maven 结构压缩目前仅支持 LF 记录。内容启发式无法
+判断与原生日志完全相同的文本实际由哪个进程产生；此规则有意放弃先前将 Maven 纯下载片段
+当作 Cargo 或 Generic 进度所获得的缩减。
+
+如果无法规划 Maven 编辑，带命令／退出状态锚点的日志仍可在 Stash 和 Shell/Tool 恢复可用时
+使用原有 Generic 进度缩减，其中包括仍处于有效 Maven 识别范围内（未被诊断、畸形记录或
+未知文本关闭）且通过严格语法验证的 Maven 传输及 CR 重绘记录；畸形 CR 重绘不会被当作
+Generic 进度。该回退报告 `retrievable` 并保留恢复指令；没有恢复能力时，保留 SGR 清理
+后的原文。选中的 Maven 布局保持无损，不与 Generic 省略混合使用。
+
+压缩块以 `Maven templates` 和包含字面量、行数的 JSON 头部开始。后续每行包含从零开始的
+模板编号及 TAB 分隔字段。将字段与相应模板的字面量交错拼接，再追加 LF，即可还原原始行。
+所有行保留原有顺序和重复项，模块及插件格式、INFO 前缀、测试类与方法、计数、跳过信息、
+耗时和 Reactor 结果均保留。连续完整的下载记录还可共享仓库及普通 HTTP(S) URL 的目录前缀；
+每次动作、URL 和完成回执仍然存在，包括 batch 模式的 `[INFO] ` 前缀。不会推断下载配对、
+排序或去重。既有 SGR 清理之后可逐字节还原，装饰性填充也保留在表示中。
+
+仅完整且已识别的记录可以压缩。每块上限为 256 条记录、64 KiB，超限块整体保留。
+每个结果最多应用 256 次编辑；达到上限后保留已完成的编辑，其余后缀保持原样。
+结果中任何单条记录超过 64 KiB 时，禁用该结果的 Maven 编辑。含 CR 的记录在 SGR 清理后
+逐字节保留，压缩块不得跨越它们。严格验证的传输重绘只维持当前识别范围，不进行压缩。
+警告、异常、畸形记录及未知文本关闭该范围；仅完整插件阶段、模块标题或三行测试标题能
+重新开启。下载样式文本或空行不能重新开启未知范围。带凭据、查询参数、片段或百分号转义的
+URL 不在初版下载语法内，保持原样。已经压缩的结果不会再次处理。
+
+每块及完整候选都必须同时减少字符数和估算 token 数。Runtime 和适配层现有的大小、状态、
+来源及替换保护继续生效，Tool Error 保持原始输出。Maven 命令保留当前 PreTool RTK 行为；
+本功能不新增命令改写豁免，也不从 PostTool 调用 RTK。本地语料与适配层回放结果不能证明
+真实 Agent、完整任务或账单收益。
 
 ### CSV/TSV 压紧保留完整表格
 
