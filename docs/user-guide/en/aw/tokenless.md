@@ -17,7 +17,7 @@ Prepare the AW CLI, `AW_HOME` and `AW_QODER` using [installation](installation.m
 then install the bridge into its own extension prefix:
 
 ```bash
-export AW_VERSION=0.1.0
+export AW_VERSION=0.1.1
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
@@ -66,7 +66,9 @@ through absolute `transport.argv` in YAML.
 ## Runtime behavior
 
 - With input replacement enabled, Tokenless rewrites supported commands within the same tool call. Later safety checks inspect the candidate before native permission checks and execution.
-- Released AW 0.1.0 uses retry suggestions. Input replacement requires a newer source build, `[replace_input]` on the first before step, and `on_error: block` on every before step; see the [integration reference](../../../developer-guide/en/aw/providers/tokenless.md#pretool-and-permission-behavior).
+- Released AW 0.1.0 uses retry suggestions. AW 0.1.1 supports input replacement
+  with `[replace_input]` on the first before step and `on_error: block` on every
+  before step; see the [integration reference](../../../developer-guide/en/aw/providers/tokenless.md#pretool-and-permission-behavior).
 - After execution, supported successful text results can be compressed. Failed results, images and unsupported content stay unchanged.
 - Compression errors, timeouts or no savings preserve the original result. Compression cannot override a safety denial.
 

@@ -1,5 +1,5 @@
 name: aw-native-hooks
-version: 0.1.0
+version: 0.1.1
 description: Connect an AW launch to Hermes native tool hooks
 provides_hooks:
   - pre_tool_call

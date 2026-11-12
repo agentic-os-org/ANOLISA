@@ -48,7 +48,7 @@ on `aw-service`; tests in `aw-provider` also depend on `aw-config`; CLI integrat
 depend on `aw-cli`. The `aw` frontend calls AW configuration and local-extension APIs in-process.
 The standalone `aw-package` executable has been removed; its crate remains.
 AW CLI builds use `make -C src/aw build`; archive assembly uses
-`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` and ordinary scripts under
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` and ordinary scripts under
 `distribution/packaging/aw/`. Extension records, file verification and durable
 transactions live in the private `aw-package::store` module. Runtime file leases
 live in `aw-exec`, independently of package database access.

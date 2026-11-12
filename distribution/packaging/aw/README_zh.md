@@ -9,7 +9,7 @@
 输出目录必须为绝对路径且为空：
 
 ```bash
-make -C distribution aw-packages VERSION=0.1.0 \
+make -C distribution aw-packages VERSION=0.1.1 \
   COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"
 cd target/aw-packages
 sha256sum -c SHA256SUMS

@@ -10,7 +10,7 @@ Use a clean Linux checkout, Rust 1.97.1 and Python 3.9 or newer. Select the
 artifacts explicitly and use an absolute, empty output directory:
 
 ```bash
-make -C distribution aw-packages VERSION=0.1.0 \
+make -C distribution aw-packages VERSION=0.1.1 \
   COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"
 cd target/aw-packages
 sha256sum -c SHA256SUMS

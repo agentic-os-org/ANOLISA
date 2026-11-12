@@ -44,7 +44,7 @@ AW workspace 的普通依赖和测试依赖均不引用它们。
 `aw-cli` 提供统一 `aw` 命令；独立 `aw-package` 可执行文件已删除，Rust crate 保留。
 CLI 通过 `aw-package` 完成本地 Provider 管理与离线编辑；文件校验与事务保留在其
 私有 `store` 模块，运行时读锁归 `aw-exec`。产品安装仍归发行方或原生管理器负责。`make -C src/aw build` 构建 AW CLI，
-`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
 中的普通构建/打包脚本；具体后端打包和配置默认值由 distribution 管理。
 `aw-service` 以库形式提供客户端与服务；底层库不依赖 `aw-cli`。
 启动器和服务共同使用 `aw-adapter`；Adapter 不依赖 service、Host 或 CLI 内部类型。

@@ -95,7 +95,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aw-adapter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-config",
  "aw-contracts",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "aw-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-adapter",
  "aw-config",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "aw-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jsonschema",
  "serde",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "aw-contracts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jsonschema",
  "serde",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "aw-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-config",
  "aw-contracts",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "aw-exec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "aw-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-config",
  "aw-core",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "aw-package"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-config",
  "aw-exec",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "aw-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-config",
  "jsonschema",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "aw-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-adapter",
  "aw-config",

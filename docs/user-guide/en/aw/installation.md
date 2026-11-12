@@ -33,7 +33,7 @@ sec-core CLI/daemon from their backend owner's release or native core package.
 From the downloaded artifact directory, install the prebuilt AW CLI as your user:
 
 ```bash
-export AW_VERSION=0.1.0
+export AW_VERSION=0.1.1
 export AW_BUNDLE_KIND=aw-core
 export AW_BUNDLE="$AW_BUNDLE_KIND-$AW_VERSION-linux-$(uname -m)"
 sha256sum -c SHA256SUMS

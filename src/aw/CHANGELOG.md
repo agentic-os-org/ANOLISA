@@ -2,6 +2,52 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## [0.1.1] - 2026-11-12
+
+### Added
+
+- **AW**: Updated to v0.1.1, manage prepared native instances across eight
+  Adapters and apply policy updates after their work drains.
+- **AW**: Updated to v0.1.1, export bounded public audit and runtime facts so
+  applications can inspect instance state and completed work.
+- **AW**: Updated to v0.1.1, let supported before-tool Providers replace checked
+  tool input before native authorization and execution.
+- **AW**: Updated to v0.1.1, let the sec-core Provider wait for its backend
+  socket within the check budget during parallel startup
+  ([#9881](https://github.com/agentic-os-org/ANOLISA/pull/9881)).
+
+### Changed
+
+- **AW**: Updated to v0.1.1, shorten ordinary QwenPaw startup with private
+  Registry registration and recognize generated pip/uv console scripts
+  ([#9959](https://github.com/agentic-os-org/ANOLISA/pull/9959)).
+- **AW**: Updated to v0.1.1, prepare native startup and idle policy updates for
+  Qoder CLI, OpenClaw, Hermes, Pi, Claude SDK and AgentScope integrations.
+- **AW**: Updated to v0.1.1, wake shared Service connections when readable to
+  reduce control-call latency across Adapters
+  ([#9837](https://github.com/agentic-os-org/ANOLISA/pull/9837)).
+
+### Fixed
+
+- **AW**: Updated to v0.1.1, preserve native veto and expired-event failure
+  actions, keeping denied or timed-out work from continuing unchecked.
+- **AW**: Updated to v0.1.1, allow new-prefix Provider installs alongside
+  retained 0.1.0 records in the shared database, preserving the rollback copy
+  ([#9763](https://github.com/agentic-os-org/ANOLISA/pull/9763)).
+
+### Support and deployment
+
+Linux supports the eight Adapters in the [Hook matrix](../../docs/user-guide/en/aw/capabilities.md#hook-support-matrix).
+Seven support checked `tool.before` input replacement; OpenClaw does not.
+`tool.after` replacement remains limited to authorized text slots, and native
+permission checks retain precedence. Managed MCP and idle policy update boundaries
+vary by Adapter and launch mode; see the [support table](../../docs/user-guide/en/aw/capabilities.md#mcp-and-policy-updates).
+Local Skill checks use the supported sec-core Provider paths described in the
+[Skill reference](../../docs/user-guide/en/aw/capabilities.md#skill-checks).
+Deploy the selected Provider and backend separately, prepare the native startup
+route, and enable policies in AW configuration. Preserve the previous 0.1.0
+packages and configuration for rollback.
+
 ## [0.1.0] - 2026-11-07
 
 ### Added

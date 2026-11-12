@@ -50,7 +50,7 @@ It directly calls `aw-package` for local Provider management and offline
 editing. File verification and transactions stay in its private `store` module;
 runtime leases belong to `aw-exec`. Product installation remains the distributor
 or native manager responsibility. `make -C src/aw build` builds the AW CLI, while
-`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes ordinary build/package scripts in
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes ordinary build/package scripts in
 `distribution/packaging/aw/`. Independent backend delivery and configuration
 defaults belong to distribution. `aw-service` provides
 the client and service as a library. Libraries do not depend on `aw-cli`.

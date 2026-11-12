@@ -24,7 +24,7 @@ backend. Root daemons must run from root-controlled backend installations.
 After [installing the AW CLI](installation.md), add the Provider bridge:
 
 ```bash
-export AW_VERSION=0.1.0
+export AW_VERSION=0.1.1
 export AW_SEC_BUNDLE="aw-provider-sec-core-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_SEC_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"

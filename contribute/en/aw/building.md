@@ -61,7 +61,7 @@ executable explicitly; installation paths are not discovered automatically.
 Use a clean source checkout and an empty absolute output directory:
 
 ```bash
-make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' \
+make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' \
   OUTPUT="$PWD/target/aw-packages"
 cd target/aw-packages
 sha256sum -c SHA256SUMS
@@ -71,9 +71,9 @@ The explicit `COMPONENTS` list selects independent archives:
 
 | Entry | Archive | Contents |
 | --- | --- | --- |
-| `core` | `aw-core-0.1.0-linux-<arch>.tar.gz` | `bin/aw`, ordinary installation Makefile and source/license documents |
-| `sec-core` | `aw-provider-sec-core-0.1.0-linux-<arch>.tar.gz` | Provider `package.json`, bridge payload, schema, examples and configuration templates |
-| `tokenless` | `aw-provider-tokenless-0.1.0-linux-<arch>.tar.gz` | Provider `package.json`, bridge payload, examples and configuration templates |
+| `core` | `aw-core-0.1.1-linux-<arch>.tar.gz` | `bin/aw`, ordinary installation Makefile and source/license documents |
+| `sec-core` | `aw-provider-sec-core-0.1.1-linux-<arch>.tar.gz` | Provider `package.json`, bridge payload, schema, examples and configuration templates |
+| `tokenless` | `aw-provider-tokenless-0.1.1-linux-<arch>.tar.gz` | Provider `package.json`, bridge payload, examples and configuration templates |
 
 Select one or more entries without `all` or a combined archive. `VERSION` labels
 artifacts; it does not select a source tag. `distribution/packaging/aw/` owns

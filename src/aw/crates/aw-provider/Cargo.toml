@@ -1,6 +1,6 @@
 [package]
 name = "aw-provider"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Offline AW provider protocol and view contracts"
