@@ -49,13 +49,7 @@ impl OptLlmConfig {
         }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(path, json)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
+        crate::config::atomic_write::write_private_config_atomically(path, &json)
     }
 
     fn effective_base_url(&self) -> String {
@@ -1441,3 +1435,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "../../config/optimization_save_tests.rs"]
+mod atomic_save_tests;
