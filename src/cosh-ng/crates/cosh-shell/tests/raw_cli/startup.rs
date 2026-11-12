@@ -1070,7 +1070,7 @@ fn raw_cli_startup_health_disabled_renders_no_row() {
 }
 
 #[test]
-fn raw_cli_startup_health_caps_welcome_and_preserves_configured_content_width() {
+fn raw_cli_startup_health_matches_welcome_and_configured_content_width() {
     let cwd = private_startup_health_home("startup-health-card-width");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
@@ -1104,15 +1104,38 @@ fn raw_cli_startup_health_caps_welcome_and_preserves_configured_content_width() 
         "expected startup, health and agent boxes\n{output}"
     );
     assert!(
-        widths.contains(&80)
-            && widths.contains(&140)
-            && widths
-                .iter()
-                .copied()
-                .skip_while(|width| *width == 80)
-                .all(|width| width == 140),
-        "welcome is capped at 80; health and Agent use configured width: {widths:?}\n{output}"
+        widths.iter().all(|width| *width == 140),
+        "welcome, health and Agent use configured width: {widths:?}\n{output}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn review_regression_startup_fits_actual_narrow_pty_with_or_without_width_override() {
+    for width in [None, Some("140")] {
+        let mut environment = vec![
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_LANG", "en-US"),
+        ];
+        if let Some(width) = width {
+            environment.push(("COSH_SHELL_WIDTH", width));
+        }
+        let session =
+            TerminalSession::spawn_for_shell_with_env("bash", "enhanced", 32, &environment);
+        let plain = strip_ansi_escape(&session.raw_output());
+        assert!(plain.contains("Cosh AI Shell"), "{plain}");
+        assert!(plain.contains("/help"), "{plain}");
+        assert!(!plain.contains('╭'), "{plain}");
+        let welcome = plain.split("Cosh AI Shell").nth(1).unwrap();
+        let welcome = welcome.split("Help: /help").next().unwrap();
+        for line in welcome.lines() {
+            assert!(
+                terminal_display_width(line.trim_end_matches('\r')) <= 32,
+                "{line:?}"
+            );
+        }
+        session.finish();
+    }
 }
 
 #[test]

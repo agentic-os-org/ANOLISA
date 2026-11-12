@@ -49,7 +49,7 @@ fn welcome_keeps_long_information_and_help_inside_actual_columns() {
         assert!(
             lines
                 .iter()
-                .all(|line| display_width(line) <= usize::from(width.min(80))),
+                .all(|line| display_width(line) <= usize::from(width)),
             "{width}: {lines:?}"
         );
         let flat = lines.join("").replace(['│', ' '], "");
@@ -68,6 +68,55 @@ fn welcome_keeps_long_information_and_help_inside_actual_columns() {
             "{lines:?}"
         );
         assert!(lines.last().unwrap().contains("/help"));
+    }
+}
+
+#[test]
+fn welcome_matches_standard_panel_width() {
+    for width in [40, 80, 110, 160] {
+        let renderer = RatatuiInlineRenderer::with_width(width).within_columns(width);
+        for compact in [false, true] {
+            let lines = renderer.welcome_lines(model(compact));
+            let border = lines.iter().find(|line| line.contains('╭')).unwrap();
+            assert_eq!(
+                display_width(border),
+                usize::from(renderer.panel_standard_width())
+            );
+            assert_eq!(display_width(lines.last().unwrap()), display_width(border));
+        }
+    }
+}
+
+#[test]
+fn review_regression_terminal_entry_respects_narrow_columns() {
+    let _env = crate::diagnostics::test_env::env_guard();
+    let saved = std::env::var_os("COSH_SHELL_WIDTH");
+    for columns in [20, 32, 39, 40, 80, 200] {
+        std::env::set_var("COSH_SHELL_WIDTH", columns.to_string());
+        let renderer = RatatuiInlineRenderer::for_terminal();
+        match &saved {
+            Some(value) => std::env::set_var("COSH_SHELL_WIDTH", value),
+            None => std::env::remove_var("COSH_SHELL_WIDTH"),
+        }
+        assert!(renderer.panel_standard_width() <= columns);
+        let lines = renderer.welcome_lines(model(false));
+        assert!(lines
+            .iter()
+            .all(|line| display_width(line) <= usize::from(columns)));
+        let mut output = Vec::new();
+        renderer
+            .write_agent_response(
+                &mut output,
+                "A longer response must fit inside the actual terminal columns.",
+                None,
+            )
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.lines()
+                .all(|line| display_width(line) <= usize::from(columns)),
+            "{columns}: {text}"
+        );
     }
 }
 

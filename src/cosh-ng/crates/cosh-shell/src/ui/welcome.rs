@@ -45,7 +45,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn welcome_lines(&self, model: WelcomeModel) -> Vec<String> {
-        let width = self.panel_standard_width().min(80);
+        let width = self.panel_standard_width();
         let i18n = self.i18n();
         let help = format!("{} /help", i18n.t(MessageId::StartupHelpLabel));
         let mut body = Vec::new();

@@ -85,20 +85,22 @@ pub struct RatatuiInlineRenderer {
 impl RatatuiInlineRenderer {
     pub fn for_terminal() -> Self {
         let stdout_is_tty = std::io::stdout().is_terminal() && !running_under_cargo_test();
-        let width = if let Some(width) = configured_terminal_width() {
-            width
-        } else if stdout_is_tty {
+        let terminal_columns = if stdout_is_tty {
             ratatui::crossterm::terminal::size()
+                .ok()
                 .map(|(cols, _)| cols)
-                .unwrap_or(DEFAULT_WIDTH)
-                .clamp(MIN_WIDTH, 200)
+                .filter(|cols| *cols > 0)
         } else {
-            DEFAULT_WIDTH
+            None
+        };
+        let columns = match (configured_terminal_width(), terminal_columns) {
+            (Some(configured), Some(actual)) => Some(configured.min(actual)),
+            (configured, actual) => configured.or(actual),
         };
         Self {
-            width,
-            column_limit: None,
-            plain: plain_output_requested(),
+            width: columns.unwrap_or(DEFAULT_WIDTH).clamp(MIN_WIDTH, 200),
+            column_limit: columns,
+            plain: plain_output_requested() || columns.is_some_and(|columns| columns < MIN_WIDTH),
             styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
             language: crate::Language::EnUs,
         }
@@ -461,10 +463,7 @@ impl RatatuiInlineRenderer {
 
     fn content_width(&self) -> usize {
         let margin = if self.plain { 2 } else { 4 };
-        self.width
-            .clamp(MIN_WIDTH, MAX_WIDTH)
-            .saturating_sub(margin)
-            .max(20) as usize
+        self.panel_standard_width().saturating_sub(margin).max(1) as usize
     }
 
     fn supports_status_animation(&self) -> bool {
@@ -689,7 +688,8 @@ fn configured_terminal_width() -> Option<u16> {
     std::env::var("COSH_SHELL_WIDTH")
         .ok()
         .and_then(|width| width.parse::<u16>().ok())
-        .map(|width| width.clamp(MIN_WIDTH, 200))
+        .filter(|width| *width > 0)
+        .map(|width| width.min(200))
 }
 
 #[cfg(test)]
