@@ -1518,7 +1518,7 @@ fn file_deletion_events(
         active,
         raw.pid,
         Some(raw.ppid),
-        process_start_time(active, raw.pid),
+        process_start_time(active, raw.pid, raw.process_start_boottime),
     );
     Some(SecurityEvent::file_operation_decision(
         identity,
@@ -2351,38 +2351,61 @@ mod tests {
 
     #[test]
     fn a_file_deletion_violation_publishes_its_decision_under_one_identity() {
-        let now = monotonic_now_ns().expect("monotonic clock should be readable");
-        let mut raw = raw_violation(now);
-        // 5, 6 and 7 are the delete operations the file-deletion policy reports.
-        raw.op = 5;
-        raw.target = "/root/.ssh/id_rsa".into();
-        raw.blocked = true;
-        let mut active = active_binding();
-        active.binding.request.policy_revision = "3".into();
-        let state = RuntimeState::new();
-        let violations = state
-            .events
-            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
-        let evidence = state.security_events.subscribe();
+        // Every operation the file-deletion policy reports must reach the audit
+        // stream, not just unlink: a rename or rmdir denial is the same product
+        // promise and used to stop at the violation hub.
+        for (op, operation) in [(5u32, "unlink"), (6, "rename"), (7, "rmdir")] {
+            let now = monotonic_now_ns().expect("monotonic clock should be readable");
+            let mut raw = raw_violation(now);
+            raw.op = op;
+            raw.target = "/root/.ssh/id_rsa".into();
+            raw.blocked = true;
+            let mut active = active_binding();
+            active.binding.request.policy_revision = "3".into();
+            let state = RuntimeState::new();
+            let violations = state
+                .events
+                .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+            let evidence = state.security_events.subscribe();
 
-        publish_raw_violation(raw, &active, &state);
+            publish_raw_violation(raw, &active, &state);
 
-        let violation = violations
-            .try_recv()
-            .expect("the raw violation must be published");
-        let pair: Vec<_> = evidence.try_iter().collect();
-        assert_eq!(
-            pair.len(),
-            2,
-            "a file-deletion match publishes the file event and its decision"
-        );
-        assert!(matches!(pair[0].kind, SecurityEventKind::FileAction(_)));
-        assert!(matches!(pair[1].kind, SecurityEventKind::PolicyDecision(_)));
-        for event in &pair {
+            let violation = violations
+                .try_recv()
+                .expect("the raw violation must be published");
+            let pair: Vec<_> = evidence.try_iter().collect();
             assert_eq!(
-                event.event_id, violation.event_id,
-                "the violation row resolves its case through the evidence id, so a \
-                 separate id here leaves the UI with nothing to link to"
+                pair.len(),
+                2,
+                "{operation}: a file-deletion match publishes the file event and its decision"
+            );
+            // Correlation fails closed while referenced evidence is missing, so
+            // the file event has to precede the decision that names it.
+            let SecurityEventKind::FileAction(action) = &pair[0].kind else {
+                panic!("{operation}: the first published event must be the file action");
+            };
+            assert_eq!(action.operation, operation);
+            assert!(
+                !action.succeeded,
+                "{operation}: the denial must be recorded"
+            );
+            let SecurityEventKind::PolicyDecision(decision) = &pair[1].kind else {
+                panic!("{operation}: the second published event must be the decision");
+            };
+            assert_eq!(
+                pair[0].event_id, violation.event_id,
+                "{operation}: the violation row resolves its case through the file \
+                 evidence id, so a separate id here leaves the UI with nothing to link to"
+            );
+            // A denied file operation has no separate taint origin, so the
+            // decision names that one file event as both source and sink.
+            assert_eq!(
+                decision.source_event_id, pair[0].event_id,
+                "{operation}: the decision must reference the file event as its source"
+            );
+            assert_eq!(
+                decision.sink_event_id, pair[0].event_id,
+                "{operation}: the decision must reference the file event as its sink"
             );
         }
     }

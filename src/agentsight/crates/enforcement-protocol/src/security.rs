@@ -364,9 +364,13 @@ pub struct PolicyDecision {
     pub policy_id: String,
     /// Immutable numeric policy revision.
     pub policy_revision: u64,
-    /// File event that introduced the sensitive label.
+    /// Evidence event that introduced the evaluated subject: the file event
+    /// carrying the sensitive label for credential exfiltration, or the denied
+    /// file operation itself for a file-deletion decision.
     pub source_event_id: Uuid,
-    /// Network event that triggered evaluation.
+    /// Evidence event that triggered evaluation: the network sink for credential
+    /// exfiltration, or the same denied file operation for a file-deletion
+    /// decision, which has no separate origin and destination.
     pub sink_event_id: Uuid,
     /// Progressive rollout mode used for the decision.
     pub mode: PolicyMode,

@@ -337,6 +337,7 @@ name = "agentsight-enforcer"
 version = "0.1.0"
 dependencies = [
  "actplane-ifc-compiler",
+ "agentsight-audit",
  "agentsight-enforcement-protocol",
  "anyhow",
  "ctrlc",
