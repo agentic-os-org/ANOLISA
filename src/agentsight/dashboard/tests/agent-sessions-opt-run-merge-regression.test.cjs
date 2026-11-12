@@ -62,6 +62,39 @@ const logged = (id, extra = {}) => ({
 
 const UUID = '00000000-0000-0000-0000-000000000123';
 
+test('nested optimization runs count only their own direct dimensions', () => {
+  const outer = `opt:${UUID}`;
+  const nested = `${outer}:subagent:explore`;
+  const rows = merge([], [
+    logged(outer), logged(`${outer}:subagent:accuracy`, { is_subagent: true }),
+    logged(nested), logged(`${nested}:subagent:cost-waste`, { is_subagent: true }),
+    logged(`${nested}:subagent:summary`, { is_subagent: true }),
+  ]);
+  const byId = new Map(rows.map((row) => [row.session_id, row]));
+  assert.equal(rows.length, 2);
+  assert.equal(byId.get(outer).subagent_count, 1);
+  assert.equal(byId.get(nested).subagent_count, 2);
+});
+
+test('an absent immediate parent leaves its dimension visible beside an outer run', () => {
+  const outer = `opt:${UUID}`;
+  const dimension = `${outer}:subagent:explore:subagent:summary`;
+  const rows = merge([], [logged(outer), logged(dimension, { is_subagent: true })]);
+  assert.equal(rows.length, 2, 'the outer run cannot expose another run\'s dimension');
+  assert.ok(rows.some((row) => row.session_id === dimension));
+  assert.equal(rows.find((row) => row.session_id === outer).subagent_count, 0);
+});
+
+test('a nested run outside its outer run window still folds its own dimensions', () => {
+  const nested = `opt:${UUID}:subagent:explore`;
+  const rows = merge([], [
+    logged(`${nested}:subagent:accuracy`, { is_subagent: true }), logged(nested),
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].session_id, nested);
+  assert.equal(rows[0].subagent_count, 1);
+});
+
 test('an opt run over a UUID target stays its own row and keeps the target intact', () => {
   const result = merge([captured(UUID)], [logged(`opt:${UUID}`, { project: UUID })]);
   assert.equal(result.length, 2, JSON.stringify(result));
