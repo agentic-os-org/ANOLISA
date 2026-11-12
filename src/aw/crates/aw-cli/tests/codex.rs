@@ -170,6 +170,7 @@ fn native_replacement_returns_feedback_to_codex() {
     let service = Service::start(&f, &doc);
     install(&f);
     let mut launch = command(&f, "run");
+    launch.env("FAKE_CODEX_VERSION", "0.166.0");
     launch.args(["--", "--", "replace"]);
     let output = f.run(launch);
     assert!(

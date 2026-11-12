@@ -20,17 +20,17 @@ describes that manual acknowledgement. Cancellation, failed publication and
 repeated installation are tested as consecutive state transitions.
 
 Preflight records the reported CLI version and checks the public Hook inventory,
-enabled state, trust and exact AW definitions. Version 0.163.0 is the native
-acceptance baseline, not a runtime allowlist. A required `tool.before` also
-rejects other PreToolUse Hooks: Codex runs matching Hooks concurrently and may
+enabled state, trust and exact AW definitions. Versions 0.163.0 and 0.166.0
+have native acceptance evidence; reported versions are not a runtime allowlist.
+A required `tool.before` also rejects other PreToolUse Hooks: Codex runs matching Hooks concurrently and may
 execute another Hook's `updatedInput` after AW checked the original input.
 Optional checks retain this native composition and attest only to original input.
 
 The Adapter normalizes each native event with session and tool-call identity.
 One AW command invokes its admitted steps in order through Service, Host and
 Provider. A before block exits with Codex's native denial status; an allow leaves
-native approval intact. Codex 0.163.0 can turn a PostToolUse `continue:false`
-reason into ordinary model-visible text. AW admits this version-specific path
+native approval intact. Codex 0.163.0 and 0.166.0 can turn a PostToolUse `continue:false`
+reason into ordinary model-visible text. AW admits this Hook behavior
 only with Code Mode disabled and no peer PostToolUse Hooks. The final replacement
 step uses `withhold_result` on Provider failure or unsupported projection.
 Codex still captures and logs some original results before the Hook, and native
