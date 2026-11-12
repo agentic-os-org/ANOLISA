@@ -225,7 +225,7 @@ python3.11 -m venv .venv
 ```
 
 The OS Skills suite covers skill scripts and installation/package layout.
-Its PDF regression uses the pinned PyMuPDF dependency. The SkillFS command
+It uses only the Python standard library. The SkillFS command
 above only checks the Python log-usage scripts; it does not replace the Linux
 Rust or FUSE checks. Both suites run in their component's prebuilt CI workflow.
 
