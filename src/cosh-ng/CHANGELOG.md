@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-11-12
+
+### Changed
+
+- **BREAKING**: `cosh-cli checkpoint create` no longer accepts `--pin`. The flag used to pin the snapshot, and pinned snapshots are kept by the daemon's automatic count and age cleanup; every snapshot created now is unpinned, so that cleanup can remove it. A script that passes `--pin` must stop doing so, and now fails argument parsing (#9897)
+
+### Fixed
+
+- Automatic ECS model access always requests the `auto` model instead of the model resolved from project, user, environment, CLI, or restored-session settings, refuses a non-`auto` runtime model switch while access is active, and no longer keeps a project's model selection in the saved user configuration after that project is left (#9885)
+- A turn that ends without assistant text now shows completion only instead of replaying a literal `completed` as a fake answer, in both one-shot and interactive headless output (#9118)
+- Suppressing automatic access for the session and cancelling it now have distinct confirmations in English, and model setup errors follow the selected shell language instead of always appearing in English (#9871)
+
 ## [0.29.0] - 2026-11-08
 
 ### Added
