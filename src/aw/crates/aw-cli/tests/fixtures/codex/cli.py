@@ -14,7 +14,9 @@ if sys.argv[1:] == ["--version"]:
     print("codex-cli " + os.environ.get("FAKE_CODEX_VERSION", "0.163.0"))
     sys.exit(0)
 hooks = json.loads((home / "hooks.json").read_text())["hooks"]
-if sys.argv[1:] == ["app-server"]:
+if sys.argv[1:] == ["app-server"] and "AW_CODEX_CONFIG" not in os.environ:
+    (root / "codex-probe-remote-control").write_text(
+        os.environ.get("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED", ""))
     if os.environ.get("FAKE_CODEX_PROBE_HOLD") == "1":
         (root / "codex-probe.pid").write_text(str(os.getpid()))
         time.sleep(30)
@@ -57,7 +59,18 @@ if sys.argv[1:] == ["app-server"]:
     sys.exit(0)
 
 (root / "codex-started").write_text(json.dumps(sys.argv[1:]))
-mode = sys.argv[-1]
+if sys.argv[1] == "app-server":
+    (root / "codex-started-remote-control").write_text(
+        os.environ.get("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED", ""))
+mode = os.environ.get("FAKE_CODEX_APP_MODE", "allow") if sys.argv[1] == "app-server" else sys.argv[-1]
+if mode == "capacity":
+    (root / "codex-chain").write_text(os.environ["AW_CODEX_CONFIG"])
+    deadline = time.monotonic() + 10
+    while not (root / "capacity-ready").exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("capacity test did not release Codex")
+        time.sleep(0.01)
+    mode = "allow"
 if mode == "hold":
     (root / "codex.pid").write_text(str(os.getpid()))
     time.sleep(30)

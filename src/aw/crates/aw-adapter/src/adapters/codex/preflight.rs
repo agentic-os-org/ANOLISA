@@ -11,8 +11,25 @@ use std::{
 };
 
 pub(super) struct Invocation {
-    pub exec: bool,
+    pub entrypoint: Entrypoint,
     pub bypass_hook_trust: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Entrypoint {
+    Tui,
+    Exec,
+    AppServer,
+}
+
+impl Entrypoint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tui => "tui",
+            Self::Exec => "exec",
+            Self::AppServer => "app-server",
+        }
+    }
 }
 
 pub(super) fn arguments(args: &[OsString]) -> Result<Invocation> {
@@ -20,6 +37,19 @@ pub(super) fn arguments(args: &[OsString]) -> Result<Invocation> {
         .iter()
         .map(|arg| arg.to_str().ok_or("non-UTF-8 Codex argument"))
         .collect::<std::result::Result<_, _>>()?;
+    // shortcut: stdio assumes fixed-config RPCs; filter requests for untrusted clients.
+    if args.first() == Some(&"app-server") {
+        if !matches!(
+            &args[1..],
+            [] | ["--listen", "stdio://"] | ["--listen=stdio://"]
+        ) {
+            return Err("Codex app-server requires local stdio and no startup overrides".into());
+        }
+        return Ok(Invocation {
+            entrypoint: Entrypoint::AppServer,
+            bypass_hook_trust: false,
+        });
+    }
     let exec = args.first() == Some(&"exec");
     let mut index = usize::from(exec);
     let mut bypass_hook_trust = false;
@@ -51,7 +81,11 @@ pub(super) fn arguments(args: &[OsString]) -> Result<Invocation> {
         index += 1;
     }
     Ok(Invocation {
-        exec,
+        entrypoint: if exec {
+            Entrypoint::Exec
+        } else {
+            Entrypoint::Tui
+        },
         bypass_hook_trust,
     })
 }

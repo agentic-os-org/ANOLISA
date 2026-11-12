@@ -81,6 +81,8 @@ Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`;
 
 Codex CLI 0.163.0 and 0.166.0 have been verified with one `aw run` configuration
 for sec-core checks and ordinary model-visible PostToolUse text replacement.
+Local app-server stdio also passes when its trusted client keeps the launch
+directory and Codex configuration for every new thread and turn.
 Code Mode, prior capture and telemetry, and Hook transport failures remain
 outside that protection; see the
 [Codex guide](../../docs/developer-guide/en/aw/agents/codex.md).

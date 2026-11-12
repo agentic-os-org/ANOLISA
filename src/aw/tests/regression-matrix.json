@@ -1242,6 +1242,10 @@
       "target": "aw-cli/test/codex",
       "test": "report_cannot_override_a_large_native_denial"
     },
+    "codex-capacity": {
+      "target": "aw-cli/test/codex",
+      "test": "app_server_legacy_capacity_blocks_and_recovers_on_relaunch"
+    },
     "codex-replacement": {
       "target": "aw-cli/test/codex",
       "test": "native_replacement_returns_feedback_to_codex"
@@ -1981,6 +1985,7 @@
         "codex-launch",
         "codex-admission",
         "codex-interruption",
+        "codex-capacity",
         "codex-submission"
       ],
       "security": [

@@ -135,6 +135,79 @@ fn native_launch_preserves_config_serializes_steps_and_cleans_instances() {
 }
 
 #[test]
+fn app_server_uses_local_stdio_and_the_same_hook_chain() {
+    for args in [
+        vec![],
+        vec!["--listen", "stdio://"],
+        vec!["--listen=stdio://"],
+    ] {
+        let f = Fixture::new();
+        let mut doc = setup(&f);
+        let cli = doc["spec"]["agents"]["codex"]["argv"][0].clone();
+        doc["spec"]["agents"]["codex"]["argv"] = json!([cli, "app-server"]);
+        f.save(&doc);
+        let service = Service::start(&f, &doc);
+        install(&f);
+        let mut launch = command(&f, "run");
+        launch.env("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED", "0");
+        launch.arg("--").args(&args);
+        let output = f.run(launch);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("policy-calls")).unwrap(),
+            "scan_prompt\nscan\nretry\nrecord\n"
+        );
+        let mut expected = vec!["app-server"];
+        expected.extend(args);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(f.root.join("codex-started")).unwrap())
+                .unwrap(),
+            json!(expected)
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("codex-probe-remote-control")).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("codex-started-remote-control")).unwrap(),
+            "1"
+        );
+        service.released(&f);
+    }
+}
+
+#[test]
+fn app_server_rejects_remote_and_mutating_startup_options() {
+    for args in [
+        vec!["--stdio"],
+        vec!["--listen", "ws://127.0.0.1:9000"],
+        vec!["--listen", "unix:///tmp/codex.sock"],
+        vec!["daemon", "start"],
+        vec!["--config", "features.hooks=false"],
+        vec!["--print-startup-config"],
+    ] {
+        let f = Fixture::new();
+        let mut doc = setup(&f);
+        let cli = doc["spec"]["agents"]["codex"]["argv"][0].clone();
+        doc["spec"]["agents"]["codex"]["argv"] = json!([cli, "app-server"]);
+        f.save(&doc);
+        let service = Service::start(&f, &doc);
+        install(&f);
+        let mut launch = command(&f, "run");
+        launch.arg("--").args(args);
+        let output = f.run(launch);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("local stdio"));
+        assert!(!f.root.join("codex-started").exists());
+        assert_eq!(service.status()["bindings"], 0);
+    }
+}
+
+#[test]
 fn submission_denial_prevents_tool_execution_and_releases_event() {
     let f = Fixture::new();
     let doc = setup(&f);
@@ -480,4 +553,73 @@ fn install_requires_reconciliation_before_noop_or_changed_retry() {
         fs::rename(backup, f.root.join("reviewed-hooks.json")).unwrap();
         install(&f);
     }
+}
+
+#[test]
+fn app_server_legacy_capacity_blocks_and_recovers_on_relaunch() {
+    use aw_service::{Client, Operation};
+    let f = Fixture::new();
+    let mut doc = setup(&f);
+    let cli = doc["spec"]["agents"]["codex"]["argv"][0].clone();
+    doc["spec"]["agents"]["codex"]["argv"] = json!([cli, "app-server"]);
+    f.save(&doc);
+    let service = Service::start(&f, &doc);
+    install(&f);
+    let mut launch = command(&f, "run");
+    launch.env("FAKE_CODEX_APP_MODE", "capacity");
+    let process = Process::spawn(&f, launch);
+    let marker = f.root.join("codex-chain");
+    let deadline = Instant::now() + TIMEOUT;
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "Codex did not publish its binding"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let chain: Value =
+        serde_json::from_slice(&fs::read(fs::read_to_string(marker).unwrap()).unwrap()).unwrap();
+    let binding: Value =
+        serde_json::from_slice(&fs::read(chain["binding"].as_str().unwrap()).unwrap()).unwrap();
+    let client = Client::connect(Path::new(binding["socket"].as_str().unwrap()), deadline).unwrap();
+    let close = |index| Operation::CloseHookEvent {
+        instance_id: binding["binding"]["instance_id"].as_str().unwrap().into(),
+        event: if index % 2 == 0 {
+            "tool.before"
+        } else {
+            "tool.after"
+        }
+        .into(),
+        session_id: "capacity".into(),
+        call_id: format!("call-{}", index / 2),
+    };
+    for index in 0..1024 {
+        assert_eq!(
+            client.call(close(index), Instant::now() + TIMEOUT).unwrap()["closed"],
+            true
+        );
+    }
+    let error = client
+        .call(close(1024), Instant::now() + TIMEOUT)
+        .unwrap_err();
+    assert!(error.to_string().contains("native_event_limit"), "{error}");
+    fs::write(f.root.join("capacity-ready"), b"ready").unwrap();
+    let output = process.finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["results"][0]["code"], 2);
+    assert!(!f.root.join("codex-tool-executed").exists());
+    service.released(&f);
+    let output = f.run(command(&f, "run"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(f.root.join("codex-tool-executed").exists());
+    service.released(&f);
 }

@@ -10,6 +10,7 @@ spec:
   agents:
     codex:
       adapter: codex
+      # For a trusted app-server stdio client, append app-server to argv.
       argv: [/absolute/path/to/codex]
   providers:
     security:
