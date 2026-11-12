@@ -56,6 +56,7 @@ cp "$ROOT/qoder-plugin/.qoder-plugin/plugin.json" "$BUILD/qoder-plugin/.qoder-pl
 cp "$ROOT/qoder-plugin/hooks/hooks.json" "$BUILD/qoder-plugin/hooks/"
 cp "$ROOT/qwen-code-extension/qwen-extension.json" "$BUILD/qwen-code-extension/"
 cp "$ROOT/cosh-extension/cosh-extension.json" "$BUILD/cosh-extension/"
+cp "$ROOT/cosh-extension/hooks/"*.py "$BUILD/cosh-extension/hooks/"
 make -C "$ROOT" stage-skills stage-gateway BUILD_DIR="$BUILD"
 
 run_package() {
@@ -98,6 +99,7 @@ for expected in \
     "./bin/agent-sec-daemon" \
     "./bin/agent-sec-daemon-health" \
     "./bin/agent-sec-python" \
+    "./share/anolisa/sec-core/sandbox/permissions.json.template" \
     "./lib/anolisa/sec-core/python3.11/runtime/bin/python3.11"; do
     grep -Fxq "$expected" "$TMP/tar-list.txt"
 done
@@ -110,12 +112,79 @@ fi
 python3 - "$ROOT" "$STAGE" "$TMP" <<'PY'
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 root, stage, temporary = map(Path, sys.argv[1:])
+template = stage / "share/anolisa/sec-core/sandbox/permissions.json.template"
+assert template.read_bytes() == (root / "packaging/sandbox/permissions.json.template").read_bytes()
+contract = tomllib.loads((stage / ".anolisa/component.toml").read_text())
+assert any(entry.get("target") == "{etcdir}/sec-core/sandbox/permissions.json.template"
+           and entry.get("type") == "config" for entry in contract["component"]["layout"]["files"])
+paths_source = stage / "share/anolisa/sec-core/sandbox_paths.py.in"
+assert not (stage / "adapters/sec-core/cosh/hooks/sandbox_paths.py").exists()
+assert '{etcdir}/sec-core/sandbox/permissions.json.template' in paths_source.read_text()
+assert any(entry.get("source") == "share/anolisa/sec-core/sandbox_paths.py.in"
+           and entry.get("render") == "anolisa-paths-v1" for entry in contract["component"]["layout"]["files"])
+
+# Materialize the declared destinations, then start the installed guard in both modes.
+layout = {"datadir": str(temporary / "installed/share/anolisa"),
+          "etcdir": str(temporary / "installed/etc/anolisa")}
+adapter = next(item for item in contract["adapters"] if item["framework"] == "cosh")
+installed = Path(adapter["dest"].format_map(layout))
+shutil.copytree(stage / adapter["source"], installed)
+for entry in contract["component"]["layout"]["files"]:
+    if entry["source"] not in ("share/anolisa/sec-core/sandbox_paths.py.in",
+                               "share/anolisa/sec-core/sandbox/permissions.json.template"):
+        continue
+    destination = Path(entry["target"].format_map(layout))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    content = (stage / entry["source"]).read_text()
+    if entry.get("render") == "anolisa-paths-v1":
+        for key, value in layout.items():
+            content = content.replace("{" + key + "}", value)
+    destination.write_text(content)
+cli_bin = temporary / "sandbox-cli"
+cli_bin.mkdir()
+cli = cli_bin / "agent-sec-cli"
+calls = temporary / "sandbox-calls.json"
+cli.write_text(
+    f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
+    f"Path({str(calls)!r}).write_text(json.dumps([sys.argv[1:], json.load(sys.stdin)]))\n"
+    "print(json.dumps({'decision': 'block', 'reason': 'fixture policy denied', "
+    "'systemMessage': 'fixture policy denied'}))\n"
+)
+cli.chmod(0o755)
+environment = os.environ | {"PATH": str(cli_bin) + os.pathsep + os.environ["PATH"],
+                            "PYTHONDONTWRITEBYTECODE": "1"}
+environment.pop("PYTHONPATH", None)
+payload = {"hook_event_name": "PreToolUse", "tool_name": "shell",
+           "tool_input": {"command": "python3 skill.py"}, "cwd": str(temporary),
+           "session_id": "raw-install-fixture"}
+for enabled, decision in (("0", "allow"), ("1", "block")):
+    # Direct protocol fixture: simulate Cosh's per-invocation output policy.
+    output_policy = "block" if enabled == "1" else "allow"
+    result = subprocess.run(
+        [sys.executable, "-B", str(installed / "hooks/sandbox-guard.py")],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+        timeout=10, cwd=temporary,
+        env=environment | {"AGENT_SEC_COSH_SANDBOX_ALL_SHELL": enabled,
+                           "COSH_HOOK_EMPTY_OUTPUT_POLICY": output_policy},
+    )
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["decision"] == decision, output
+    if enabled == "0":
+        assert not calls.exists()
+    else:
+        arguments, request = json.loads(calls.read_text())
+        assert arguments == ["sandbox", "hook", "prepare", "--permissions",
+                             layout["etcdir"] + "/sec-core/sandbox/permissions.json.template"]
+        assert request["tool_input"] == payload["tool_input"]
+        assert output["reason"] == "fixture policy denied"
 gateway = stage / "share/anolisa/sec-core/gateway"
 for name, source in {
     "asc_gateway_addon.py": "v2/gateway/addon/asc_gateway_addon.py",

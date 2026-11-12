@@ -15,6 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from all_shell_host import run_all_shell_host
 from cosh_host import run_host
 
 
@@ -144,6 +145,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
             "rules": [
                 {"effect": "allow", "path": "/", "rights": ["read"]},
                 {"effect": "allow", "path": str(work), "rights": ["read", "write"]},
+                {"effect": "allow", "path": "/tmp", "rights": ["read", "write"]},
             ],
         },
         "execution": {"deny_paths": []},
@@ -531,10 +533,16 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 Path(__file__).resolve().parents[3]
                 / "cosh-extension/hooks/sandbox-guard.py"
             )
+            # Legacy sandbox re-entry must not traverse a runner-owned private home
+            # after root loses host DAC capabilities in the user namespace.
+            legacy_bin = root / "legacy-bin"
+            legacy_bin.mkdir(mode=0o700)
+            shutil.copy2(helper, legacy_bin / "linux-sandbox")
             hook_env = environment | {
-                "PATH": f"{cli.parent}:/usr/bin:/bin",
-                "AGENT_SEC_COSH_SANDBOX_PERMISSIONS": str(permission_file),
+                "PATH": f"{legacy_bin}:{cli.parent}:/usr/bin:/bin",
+                "AGENT_SEC_COSH_SANDBOX_ALL_SHELL": "1",
             }
+            hook_env.pop("AGENT_SEC_COSH_SANDBOX_PERMISSIONS", None)
 
             def fire_hook(
                 event: str, tool_command: str, env: dict | None = None
@@ -550,7 +558,8 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                             "tool_input": {"command": tool_command},
                         }
                     ),
-                    env=env or hook_env,
+                    # Direct protocol only; real Cosh cases supply their own signal.
+                    env=(env or hook_env) | {"COSH_HOOK_EMPTY_OUTPUT_POLICY": "block"},
                     cwd=work,
                     capture_output=True,
                     text=True,
@@ -702,6 +711,53 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                     cli,
                 )
 
+            for case in (
+                "disabled",
+                "disabled-dangerous",
+                "disabled-blocked",
+                "enabled-blocked",
+                "allowed",
+                "legacy-env-ignored",
+                "default-boundaries",
+                "git-worktree",
+                "symlink-git",
+                "denied",
+                "denied-write",
+                "approved",
+                "declined",
+                "sudo-preserved",
+                "sudo-system",
+                "invalid-flag",
+                "missing-template",
+                "invalid-template",
+                "writable-template",
+                "writable-template-parent",
+                "symlink-template",
+                "missing-cli",
+                "missing-daemon",
+                "invalid-response",
+                "authorization-timeout",
+                "hook-timeout",
+                "hook-crash",
+                "hook-empty",
+                "hook-empty-disabled",
+                "hook-invalid-output",
+                "finish-failure",
+            ):
+                publish(
+                    "ask"
+                    if case in {"approved", "declined", "sudo-preserved"}
+                    else "deny" if case == "denied" else "allow"
+                )
+                run_all_shell_host(
+                    case,
+                    root,
+                    work,
+                    hook,
+                    hook_env,
+                    data / "security-events.jsonl",
+                )
+
             publish("allow")
             deleted = rpc(
                 endpoint,
@@ -743,6 +799,7 @@ def main() -> None:
     parser.add_argument("daemon", type=Path)
     parser.add_argument("example", type=Path)
     parser.add_argument("helper", type=Path)
+    parser.add_argument("--isolation-root", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     assert (
         os.geteuid() == 0
@@ -750,8 +807,77 @@ def main() -> None:
     binaries = [
         path.resolve(strict=True) for path in (args.daemon, args.example, args.helper)
     ]
+    if args.isolation_root is not None:
+        prepare_private_template(args.isolation_root)
+        run = args.isolation_root / "run"
+        run.mkdir(mode=0o700)
+        exercise(*binaries, run)
+        return
     with tempfile.TemporaryDirectory(prefix="asc-authorized-", dir="/run") as directory:
-        exercise(*binaries, Path(directory))
+        root = Path(directory)
+        (root / "parent-mountns").write_text(os.readlink("/proc/self/ns/mnt"))
+        completed = subprocess.run(
+            [
+                "unshare",
+                "--mount",
+                "--fork",
+                sys.executable,
+                str(Path(__file__).resolve()),
+                *(str(path) for path in binaries),
+                "--isolation-root",
+                str(root),
+            ],
+            check=False,
+        )
+        raise SystemExit(completed.returncode)
+
+
+def prepare_private_template(root: Path) -> None:
+    """Install test defaults and a private passwd home without changing host /etc."""
+    assert os.readlink("/proc/self/ns/mnt") != (root / "parent-mountns").read_text()
+    subprocess.run(["mount", "--make-rprivate", "/"], check=True)
+    upper, work = root / "etc-upper", root / "etc-work"
+    upper.mkdir(mode=0o700)
+    work.mkdir(mode=0o700)
+    subprocess.run(
+        [
+            "mount",
+            "-t",
+            "overlay",
+            "overlay",
+            "-o",
+            f"lowerdir=/etc,upperdir={upper},workdir={work}",
+            "/etc",
+        ],
+        check=True,
+    )
+    template = Path("/etc/agent-sec/sandbox/permissions.json.template")
+    for path in (template.parent.parent, template.parent):
+        assert not path.is_symlink(), path
+        path.mkdir(mode=0o755, exist_ok=True)
+        path.chmod(0o755)
+        os.chown(path, 0, 0)
+    template.unlink(missing_ok=True)
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "packaging/sandbox/permissions.json.template"
+    )
+    template.write_bytes(source.read_bytes())
+    template.chmod(0o644)
+    os.chown(template, 0, 0)
+    # The HOME rejection case must not use the real account's home as a workspace.
+    home = root / "passwd-home"
+    home.mkdir(mode=0o700)
+    passwd = Path("/etc/passwd")
+    assert not passwd.is_symlink(), passwd
+    rows = []
+    for row in passwd.read_text().splitlines():
+        fields = row.split(":")
+        if len(fields) == 7 and fields[2] == str(os.geteuid()):
+            fields[5] = str(home)
+        rows.append(":".join(fields))
+    passwd.write_text("\n".join(rows) + "\n")
+    os.environ["ASC_SANDBOX_TEST_PRIVATE_ETC"] = "1"
 
 
 if __name__ == "__main__":

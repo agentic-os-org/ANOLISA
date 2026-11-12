@@ -29,6 +29,7 @@ asc-model-client = { workspace = true }
 asc-intent = { workspace = true }
 dirs = { workspace = true }
 rustix = { workspace = true }
+nix = { workspace = true }
 asc-observability = { workspace = true, features = ["runtime"] }
 tracing.workspace = true
 asc-daemon-client = { workspace = true }

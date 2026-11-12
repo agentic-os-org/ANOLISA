@@ -258,6 +258,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "nix",
  "rustix",
  "serde",
  "serde_json",

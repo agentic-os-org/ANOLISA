@@ -18,13 +18,14 @@ use serde::Deserialize;
 use super::{SandboxError, exit_status, read_permissions};
 
 mod message;
+mod template;
 
 /// Private entry points called by the packaged Cosh hook and its rewritten command.
 #[derive(Debug, Subcommand)]
 pub enum HookCommand {
     /// Authorize the Hook JSON from stdin without executing the target.
     Prepare {
-        /// OS permission JSON or Cedar request source, including runtime dependencies.
+        /// Installed template or prepared JSON/Cedar request, including runtime dependencies.
         #[arg(long)]
         permissions: PathBuf,
     },
@@ -151,13 +152,22 @@ fn prepare(permissions: &Path, client: &DaemonAuthorizationClient) -> Result<u8,
         &input.cwd,
         super::target_environment()?,
     )?;
+    let permissions = if permissions
+        .extension()
+        .is_some_and(|value| value == "template")
+    {
+        let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
+        template::read(permissions, Path::new(&launch.cwd), tmpdir)?
+    } else {
+        read_permissions(permissions)?
+    };
     let mut runtime = PepRuntime::new(SandboxBackend::installed()?);
     let (request, decision) = runtime.authorize(
         &AgentPrincipal {
             agent_type: Some("cosh".into()),
         },
         launch,
-        &read_permissions(permissions)?,
+        &permissions,
         client,
     )?;
     let output = if matches!(

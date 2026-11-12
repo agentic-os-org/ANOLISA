@@ -422,6 +422,26 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
 SkillSec 持久化与激活恢复见第 11 节。
 
+**DPROC-V2-SANDBOX-TEMPLATE-1**：基于 ANOLISA
+`8b1c1c0bd040711f22ca86fbe8673d2af77aa1a1` 的全 shell 授权改动，由核心包交付
+`/etc/agent-sec/sandbox/permissions.json.template`（root:root 0644，目录 0755）。
+源码安装遵循 `CONFIGDIR` 并同步渲染 Hook 读取路径；RPM 标记 `%config(noreplace)`，
+源码重复安装保留管理员配置。raw 使用 `{etcdir}/sec-core/sandbox/permissions.json.template`
+（默认 `/etc/anolisa/sec-core/sandbox/permissions.json.template`），遵循安装器既有路径所有权，
+同步渲染独立的 `sandbox_paths.py`；不扩大 ANOLISA 可写目录范围。配置属于 CLI prepare 的权限来源，不成为 daemon 新参数、
+RPC 或 PAP 发布入口。仅 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1/true` 选择默认模板；
+删除旧权限文件环境覆盖，关闭模式继续原有路径。原始命令（含 sudo）交给 PDP，模板错误
+或依赖失败阻断；finish 不依赖模板或开关状态且不重跑命令。配置修改影响后续 prepare，
+不改变已接受的决定。模板和父目录的信任校验、实际安装及升级保留分别由
+`asc-cli/src/sandbox/hook/template/tests.rs`、`tests/v2/packaging/test_delivery.py`、
+`tests/packaging/test-skillsec-install.sh` 和 Linux Host 集成测试验证；构建通过不代表
+真实 Cosh 验收通过。回退时恢复先前组件并关闭开关，保留管理员模板，不迁移 daemon 状态。
+
+配套 Cosh NG 支持 Hook 元数据 `require_output_when_env`，将 sandbox-guard 的空输出
+检查绑定全 shell 开关。开启或非法值时空输出进入现有失败阻断流程；关闭时及未声明该
+字段的其他 extension 保持兼容。仅配置 `fail_open=false` 的旧 Cosh NG 仍将成功退出的
+extension 空输出视为透传，不能作为本功能的宿主验收版本。
+
 **DPROC-V2-SOURCE-BUILD-1（2026-09-29）**：仓库级
 `./scripts/build-all.sh --component sec-core` 源码安装改为 V2 交付。它构建 Rust
 `agent-sec-cli`、`agent-sec-daemon` 和 `linux-sandbox`，以 root 安装到

@@ -17,6 +17,7 @@ CANONICAL_CAPABILITIES = (
     "pii-check",
     "skill-ledger",
     "observability",
+    "sandbox",
 )
 
 AGENTS = ("qoder", "qwen", "codex", "cosh", "openclaw", "hermes")
@@ -359,6 +360,11 @@ AGENT_SPECS: dict[str, dict[str, CapabilitySpec]] = {
         include_prompt_mode=False,
     ),
 }
+AGENT_SPECS["cosh"]["sandbox"] = CapabilitySpec(
+    ("PreToolUse:run_shell_command|shell", "PostToolUse:run_shell_command|shell"),
+    (EnvSpec("AGENT_SEC_COSH_SANDBOX_ALL_SHELL", False, bool_style="fail_closed"),),
+    "dangerous",
+)
 AGENT_SPECS["cosh"]["skill-ledger"] = CapabilitySpec(
     _COSH_HOOKS["skill-ledger"],
     (
@@ -436,6 +442,7 @@ AGENT_SPECS["cosh"]["prompt-scan"] = CapabilitySpec(
 )
 
 STATIC_DEFAULT_TIMEOUTS = {
+    ("cosh", "sandbox"): "55",
     ("qwen", "skill-ledger"): "5",
     ("cosh", "code-scan"): "10",
     ("cosh", "prompt-scan"): "10",
@@ -556,8 +563,7 @@ def _safe_cli_value(value: str, limit: int = 80) -> str:
 
 def _agent_records(agent: str, env: Mapping[str, str]) -> list[CapabilityRecord]:
     records: list[CapabilityRecord] = []
-    for capability in CANONICAL_CAPABILITIES:
-        spec = AGENT_SPECS[agent][capability]
+    for capability, spec in AGENT_SPECS[agent].items():
         env_values, diagnostics, enabled = _resolve_env(spec.env, env)
         records.append(
             CapabilityRecord(
@@ -612,10 +618,17 @@ def _resolve_env(
     return values, diagnostics, _enabled_from_values(values)
 
 
-def _resolve_bool(spec: EnvSpec, raw: str | None, diagnostics: list[str]) -> bool:
+def _resolve_bool(spec: EnvSpec, raw: str | None, diagnostics: list[str]) -> bool | str:
     if raw is None:
         return bool(spec.default)
     normalized = raw.strip().lower()
+    if spec.bool_style == "fail_closed":
+        if normalized in ("1", "true"):
+            return True
+        if normalized in ("0", "false"):
+            return False
+        diagnostics.append(f"{spec.name} is invalid; shell execution is blocked")
+        return "invalid"
     if spec.bool_style == "strict":
         if normalized in _STRICT_TRUE_FALSE:
             return _STRICT_TRUE_FALSE[normalized]
@@ -713,6 +726,11 @@ def _enabled_from_values(env_values: dict[str, Any]) -> bool:
 
 
 def _mode_from_env(env_values: dict[str, Any], default: str = "observe") -> str:
+    all_shell = env_values.get("AGENT_SEC_COSH_SANDBOX_ALL_SHELL", {}).get("effective")
+    if all_shell == "invalid":
+        return "blocked"
+    if all_shell is True:
+        return "all-shell"
     for name in (
         "CODE_SCANNER_MODE",
         "PROMPT_SCANNER_MODE",

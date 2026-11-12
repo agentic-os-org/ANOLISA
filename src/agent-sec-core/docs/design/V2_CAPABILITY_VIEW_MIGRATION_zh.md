@@ -34,8 +34,22 @@
 - 只读 CLI 进程继承到的环境变量；
 - 不读取 Agent 配置文件、Agent home 目录、任何磁盘状态（`XDG_DATA_HOME` 仅做**语法**校验，不访问文件系统）；
 - `enabled` 表示「环境变量允许该 Hook 运行」，**不证明** Hook 已在目标 Agent 进程中加载；
-- 输出永不回显原始环境变量值：非法值一律折叠为「有效值 + 诊断」，唯一接近原样上报的
-  `PROMPT_SCANNER_L2_MODEL` 也要经过转义与 80 字符截断。
+- 非法布尔或枚举值折叠为「有效值 + 诊断」；接近原样展示的 `PROMPT_SCANNER_L2_MODEL`
+  经过转义与 80 字符截断。
+
+### 1.2 Cosh sandbox 环境配置
+
+基于 ANOLISA `8b1c1c0bd040711f22ca86fbe8673d2af77aa1a1` 的全 shell 授权改动，
+V1/V2 视图同步新增仅 Cosh 提供的 `sandbox` 条目。原 6×5 组合保持不变，默认共 31 条；
+`--capability sandbox` 仅返回 Cosh，与其他 Agent 同时筛选时返回空集。
+
+`AGENT_SEC_COSH_SANDBOX_ALL_SHELL` 默认 false，接受 `1/true`、`0/false`，忽略大小写
+和前后空白；非法值展示 `effective="invalid"`、`mode="blocked"` 和阻断诊断，不能
+回退到关闭。有效配置对应 `all-shell` 或 `dangerous`；`enabled` 仍描述 guard，
+不等同于全 shell 开关。删除权限文件变量，默认模板不由只读能力视图读取或验证。
+timeout 展示 prepare 子进程的 55 秒；finish 子进程为 10 秒，外层分别为 60 / 15 秒。
+这一增量由 Python Hook/视图单测、Rust 视图测试和共享 CLI E2E 用例覆盖；下节历史
+迁移通过记录不包含新增 sandbox 条目，新增用例须按本次变更的实际验证结果验收。
 
 ## 2. 等价性证据
 
@@ -93,7 +107,7 @@ G1 与 G4 已在对应 V2 能力迁入后收敛，不再是后续工作包的输
 | ID | 内容 | 为什么不是缺口 | 维护约定 |
 |---|---|---|---|
 | **G2** | agent/capability/env manifest 在 V1 Python 与 V2 Rust 各存一份 | V2 采用 contract-first 重写，Rust 侧 fork 一份 manifest 是迁移方式的既定形态；两代并存期结束（V1 下线、`view.py` 删除）后自然只剩一份 | 并存期间任何 manifest 改动（新增 agent、新增变量、改默认值/allowlist/timeout 上限）需双改；V1/V2 共用的 capability E2E 覆盖两代共同语义。 |
-| **G3** | capability view 报告所有五个 capability 的环境配置 | 视图是静态环境变量投影；能力的执行路径可独立迁移，但变更环境变量语义时必须同步更新 manifest。 | 若某次迁移**破了「语义与 V1 一致」这个前提**（改变量名、改默认值、改 allowlist），那是该次迁移自带的契约变更，需在其 PR 里同步 manifest。 |
+| **G3** | capability view 报告原五个 capability，以及仅 Cosh 的 sandbox 环境配置 | 视图是静态环境变量投影；能力的执行路径可独立迁移，但变更环境变量语义时必须同步更新 manifest。 | 若某次迁移**破了「语义与 V1 一致」这个前提**（改变量名、改默认值、改 allowlist），那是该次迁移自带的契约变更，需在其 PR 里同步 manifest。 |
 | **G5** | `enabled` 只反映环境变量意图，不代表 Hook 已在 Agent 进程加载 | V1 的 `capabilities` 从设计上就是 environment-only 视图，从不探测目标 Agent 进程；V2 照搬。若将来确实需要「已加载」证明，那是一个新增的运行期探测能力，不是改本视图语义 | 命令 `--help` 长文本已声明该边界 |
 | **G6** | 非打印字符判定按 Unicode general category 复刻 Python `str.isprintable()`（拒绝 `Other` = `Cc`/`Cf`/`Cs`/`Co`/`Cn` 与 `Separator` = `Zs`/`Zl`/`Zp`，ASCII 空格除外），残余差异仅来自两侧 Unicode 数据版本不同 | 判定规则与 V1 一致，且复用 V1 prompt-scanner 已在用的 `unicode-properties`（同组件不引入第二个类别表实现）。该库 0.1.4 用 Unicode 17.0 数据，Python 3.11.6 的 `unicodedata` 是 14.0.0，因此「14.0 未分配、后续版本已分配」的码位上 V1 按 `Cn` 转义而 V2 按其真实类别放行（实测如 U+1E030、U+11F00）。这批码位是新分配的字母与符号，不含双向控制符或零宽字符，不构成视觉欺骗面 | 无。规则本身已收敛，版本偏移随两侧升级自然缩小；不要为此再手写码位表 |
 | **G7** | V1 `CapabilityRecord` 的 `hooks`/`source`/`config`/`config_path` 字段未实现 | 这些字段在 V1 的 `to_dict()` 里本就不进入 JSON，也不进入表格，属于内部中间态；V2 不实现即为等价 | 无 |

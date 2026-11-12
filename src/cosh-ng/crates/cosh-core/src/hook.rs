@@ -266,6 +266,32 @@ struct RegisteredHook {
     accepts_empty_output: bool,
 }
 
+impl RegisteredHook {
+    fn empty_output_allowed(&self) -> bool {
+        if !self.accepts_empty_output {
+            return false;
+        }
+        let Some(name) = &self.require_output_when_env else {
+            return true;
+        };
+        if !crate::config::is_valid_env_name(name) {
+            return false;
+        }
+        let value = self
+            .env
+            .get(name)
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os(name));
+        match value {
+            None => true,
+            Some(value) => value.to_str().is_some_and(|value| {
+                let value = value.trim();
+                value == "0" || value.eq_ignore_ascii_case("false")
+            }),
+        }
+    }
+}
+
 impl std::ops::Deref for RegisteredHook {
     type Target = HookDefinition;
 
@@ -972,7 +998,7 @@ impl HookSystem {
                     let cmd = def.command.clone();
                     let env = def.env.clone();
                     let timeout = Self::timeout_for(def);
-                    let accepts_empty_output = def.accepts_empty_output;
+                    let accepts_empty_output = def.empty_output_allowed();
                     async move {
                         let output =
                             Self::run_hook_cmd(&cmd, &env, &json, timeout, accepts_empty_output)
@@ -991,7 +1017,7 @@ impl HookSystem {
             &def.env,
             input_json,
             Self::timeout_for(def),
-            def.accepts_empty_output,
+            def.empty_output_allowed(),
         )
         .await
     }
@@ -1035,6 +1061,17 @@ impl HookSystem {
         // asked for. Nothing security-relevant may depend on them.
         cmd.env("COSH_RUNTIME", "cosh-ng");
         cmd.env("COSH_NG_VERSION", env!("CARGO_PKG_VERSION"));
+
+        // Report this invocation's enforced policy so security hooks can reject
+        // older hosts that silently ignore require_output_when_env.
+        cmd.env(
+            "COSH_HOOK_EMPTY_OUTPUT_POLICY",
+            if accepts_empty_output {
+                "allow"
+            } else {
+                "block"
+            },
+        );
 
         // The deadline covers the stdin write as well: a hook that never
         // reads stdin must not stall the session, and on timeout the whole
@@ -1720,6 +1757,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_can_require_output_without_changing_disabled_mode() {
+        for sequential in [false, true] {
+            for (value, required) in [
+                (None, false),
+                (Some("0"), false),
+                (Some(" FALSE "), false),
+                (Some("1"), true),
+                (Some(" TrUe "), true),
+                (Some(""), true),
+                (Some("invalid"), true),
+            ] {
+                let mut hooks = extension_pre_tool_hook("true");
+                let group = &mut hooks.pre_tool_use[0];
+                group.sequential = Some(sequential);
+                let hook = &mut group.hooks[0];
+                let name = format!("COSH_TEST_REQUIRE_OUTPUT_{}", std::process::id());
+                hook.require_output_when_env = Some(name.clone());
+                if let Some(value) = value {
+                    hook.env.insert(name, value.to_owned());
+                }
+                let mut system = HookSystem::from_config(&HooksConfig::default());
+                system.register_extension_hooks(&hooks);
+                let result = system
+                    .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+                    .await;
+                if required {
+                    assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+                    assert_eq!(result.hook_failures[0].kind, HookFailureKind::EmptyOutput);
+                    assert!(result.notifications[0].message.contains("empty output"));
+                } else {
+                    assert_eq!(result.decision, HookDecision::Passthrough);
+                    assert!(result.hook_failures.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_requirement_uses_child_environment_and_rejects_invalid_names() {
+        let mut hook = RegisteredHook {
+            definition: HookDefinition {
+                require_output_when_env: Some("PATH".into()),
+                ..Default::default()
+            },
+            accepts_empty_output: true,
+        };
+        assert!(std::env::var_os("PATH").is_some());
+        assert!(!hook.empty_output_allowed());
+        hook.definition.env.insert("PATH".into(), "0".into());
+        assert!(hook.empty_output_allowed());
+        hook.definition.require_output_when_env = Some("INVALID=NAME".into());
+        assert!(!hook.empty_output_allowed());
+    }
+
+    #[tokio::test]
     async fn extension_errors_remain_fail_closed() {
         for (command, expected) in [
             ("printf 'not-json'", HookFailureKind::InvalidJson),
@@ -1831,6 +1923,7 @@ mod tests {
             timeout: None,
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
@@ -1846,6 +1939,7 @@ mod tests {
             timeout: None,
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
@@ -1864,6 +1958,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use: vec![],
@@ -1905,6 +2000,7 @@ mod tests {
                 timeout: None,
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use: vec![],
@@ -1947,6 +2043,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             session_start: vec![],
@@ -1980,6 +2077,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use: vec![],
@@ -2017,6 +2115,7 @@ mod tests {
                 timeout,
                 sequential: None,
                 fail_open,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             ..Default::default()
@@ -2097,6 +2196,7 @@ mod tests {
                 timeout: None,
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             },
             accepts_empty_output: false,
@@ -2143,6 +2243,7 @@ mod tests {
             timeout: None,
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }
     }
@@ -2339,6 +2440,7 @@ mod tests {
                 timeout: Some(10_000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             ..Default::default()
@@ -2368,6 +2470,7 @@ mod tests {
                     timeout: Some(10_000),
                     sequential: None,
                     fail_open: false,
+                    require_output_when_env: None,
                     env: Default::default(),
                 },
                 HookDefinition {
@@ -2377,6 +2480,7 @@ mod tests {
                     timeout: Some(10_000),
                     sequential: None,
                     fail_open: false,
+                    require_output_when_env: None,
                     env: Default::default(),
                 },
             ],
@@ -2512,6 +2616,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],
@@ -2556,6 +2661,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],
@@ -2716,6 +2822,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_reports_enforced_empty_output_policy() {
+        for accepts_empty_output in [false, true] {
+            let output = HookSystem::run_hook_cmd(
+                r#"python3 -c 'import json,os; print(json.dumps({"systemMessage": os.environ["COSH_HOOK_EMPTY_OUTPUT_POLICY"]}))'"#,
+                &BTreeMap::from([("COSH_HOOK_EMPTY_OUTPUT_POLICY".into(), "forged".into())]),
+                "{}",
+                Duration::from_secs(10),
+                accepts_empty_output,
+            )
+            .await;
+            assert!(output.failure.is_none());
+            assert_eq!(
+                output.output.system_message.as_deref(),
+                Some(if accepts_empty_output {
+                    "allow"
+                } else {
+                    "block"
+                }),
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn hook_env_with_invalid_name_is_dropped_and_hook_still_runs() {
         let fields = probe_env(
             "HOME",
@@ -2814,6 +2943,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],
@@ -2862,6 +2992,7 @@ mod tests {
                     timeout: Some(5000),
                     sequential: None,
                     fail_open: false,
+                    require_output_when_env: None,
                     env: Default::default(),
                 },
                 HookDefinition {
@@ -2871,6 +3002,7 @@ mod tests {
                     timeout: Some(5000),
                     sequential: None,
                     fail_open: false,
+                    require_output_when_env: None,
                     env: Default::default(),
                 },
             ],
@@ -2913,6 +3045,7 @@ mod tests {
                 timeout: Some(5000),
                 sequential: None,
                 fail_open: false,
+                require_output_when_env: None,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],

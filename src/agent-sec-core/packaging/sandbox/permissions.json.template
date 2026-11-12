@@ -1,0 +1,42 @@
+{
+  "format_version": "asc.sandbox.permissions-template.v1",
+  "include_tmpdir": true,
+  "read_only_subpaths": [".git"],
+  "permissions": {
+    "version": 1,
+    "filesystem": {
+      "default": "deny",
+      "rules": [
+        {
+          "effect": "allow",
+          "path": "/",
+          "rights": [
+            "read"
+          ]
+        },
+        {
+          "effect": "allow",
+          "path": "${cwd}",
+          "rights": [
+            "read",
+            "write"
+          ]
+        },
+        {
+          "effect": "allow",
+          "path": "/tmp",
+          "rights": [
+            "read",
+            "write"
+          ]
+        }
+      ]
+    },
+    "execution": {
+      "deny_paths": []
+    },
+    "network": {
+      "mode": "off"
+    }
+  }
+}

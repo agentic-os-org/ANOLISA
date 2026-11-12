@@ -10,12 +10,13 @@
 pub(crate) const AGENTS: [&str; 6] = ["qoder", "qwen", "codex", "cosh", "openclaw", "hermes"];
 
 /// Canonical capability names; hook-level aliases such as `scan-code` are rejected.
-pub(crate) const CANONICAL_CAPABILITIES: [&str; 5] = [
+pub(crate) const CANONICAL_CAPABILITIES: [&str; 6] = [
     "code-scan",
     "prompt-scan",
     "pii-check",
     "skill-ledger",
     "observability",
+    "sandbox",
 ];
 
 const HOOK_POLICIES: &[&str] = &["observe", "warn", "ask", "block"];
@@ -26,7 +27,7 @@ const PROMPT_MODES: &[&str] = &["observe", "deny"];
 const SCAN_MODES: &[&str] = &["fast", "standard", "strict"];
 const ASK_ONLY: &[&str] = &["ask"];
 
-/// How one environment variable is parsed and which value it falls back to.
+/// How one environment variable is parsed and invalid values are reported.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum EnvKind {
     /// Accepts `true`/`false` only, matching the hook enable switches.
@@ -54,6 +55,8 @@ pub(crate) enum EnvKind {
     Identifier,
     /// ANOLISA data root, validated syntactically without touching the filesystem.
     DataHome { default: &'static str },
+    /// Cosh all-shell switch; invalid values block execution.
+    AllShell,
 }
 
 /// One environment variable contributing to a capability record.
@@ -245,11 +248,21 @@ const HERMES_LEDGER: &[EnvSpec] = &[
     mode("SKILL_LEDGER_MODE", "observe", HERMES_NATIVE_MODES),
 ];
 
-/// Returns the environment contract of one agent/capability pair.
+const COSH_SANDBOX: &[EnvSpec] = &[EnvSpec {
+    name: "AGENT_SEC_COSH_SANDBOX_ALL_SHELL",
+    kind: EnvKind::AllShell,
+}];
+
+/// Limits the sandbox view to its implemented Cosh integration.
+pub(crate) fn supports(agent: &str, capability: &str) -> bool {
+    capability != "sandbox" || agent == "cosh"
+}
+
+/// Returns the environment contract of one supported agent/capability pair.
 ///
 /// # Panics
-/// Panics when either name is not in `AGENTS` / `CANONICAL_CAPABILITIES`;
-/// callers normalize both through the filter parser first.
+/// Panics for an unknown or unsupported pair; callers normalize both names
+/// through the filter parser and check [`supports`] first.
 pub(crate) fn spec(agent: &str, capability: &str) -> CapabilitySpec {
     let (env, default_mode) = match (agent, capability) {
         ("qoder" | "qwen", "code-scan") => (QODER_CODE, "observe"),
@@ -267,6 +280,7 @@ pub(crate) fn spec(agent: &str, capability: &str) -> CapabilitySpec {
         ("cosh", "prompt-scan") => (COSH_PROMPT, "ask"),
         ("cosh" | "openclaw", "pii-check") => (COSH_PII, "observe"),
         ("cosh", "skill-ledger") => (COSH_LEDGER, "ask"),
+        ("cosh", "sandbox") => (COSH_SANDBOX, "dangerous"),
         ("openclaw", "code-scan") => (OPENCLAW_CODE, "observe"),
         ("openclaw" | "hermes", "prompt-scan") => (COSH_PROMPT, "observe"),
         ("hermes", "code-scan") => (HERMES_CODE, "observe"),
@@ -287,6 +301,7 @@ pub(crate) fn spec(agent: &str, capability: &str) -> CapabilitySpec {
 /// out.
 pub(crate) fn static_default_timeout(agent: &str, capability: &str) -> Option<&'static str> {
     let timeout = match (agent, capability) {
+        ("cosh", "sandbox") => "55",
         ("qwen" | "cosh" | "openclaw" | "hermes", "skill-ledger") => "5",
         ("cosh" | "openclaw", "code-scan" | "pii-check" | "prompt-scan")
         | ("hermes", "code-scan" | "pii-check") => "10",
@@ -304,6 +319,9 @@ pub(crate) fn env_names() -> Vec<&'static str> {
     let mut names = Vec::new();
     for agent in AGENTS {
         for capability in CANONICAL_CAPABILITIES {
+            if !supports(agent, capability) {
+                continue;
+            }
             for entry in spec(agent, capability).env {
                 if !names.contains(&entry.name) {
                     names.push(entry.name);
@@ -322,12 +340,17 @@ mod tests {
     fn every_agent_capability_pair_has_a_spec() {
         for agent in AGENTS {
             for capability in CANONICAL_CAPABILITIES {
+                if !supports(agent, capability) {
+                    continue;
+                }
                 let spec = spec(agent, capability);
                 assert!(!spec.env.is_empty(), "{agent}/{capability} has no env");
                 assert!(
-                    spec.env
-                        .iter()
-                        .any(|entry| entry.name.ends_with("_HOOK_ENABLED")),
+                    capability == "sandbox"
+                        || spec
+                            .env
+                            .iter()
+                            .any(|entry| entry.name.ends_with("_HOOK_ENABLED")),
                     "{agent}/{capability} has no enable switch"
                 );
             }
@@ -338,6 +361,9 @@ mod tests {
     fn static_defaults_cover_every_pair_without_a_timeout_variable() {
         for agent in AGENTS {
             for capability in CANONICAL_CAPABILITIES {
+                if !supports(agent, capability) {
+                    continue;
+                }
                 let has_variable = spec(agent, capability)
                     .env
                     .iter()
@@ -355,6 +381,9 @@ mod tests {
     fn prompt_scan_is_the_only_capability_carrying_the_l2_backend() {
         for agent in AGENTS {
             for capability in CANONICAL_CAPABILITIES {
+                if !supports(agent, capability) {
+                    continue;
+                }
                 let carries = spec(agent, capability)
                     .env
                     .iter()

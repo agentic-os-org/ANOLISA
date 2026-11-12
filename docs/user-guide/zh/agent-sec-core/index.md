@@ -521,9 +521,11 @@ agent-sec-cli capabilities --agent hermes --capability code-scan
 agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 ```
 
-支持的 capability 名称只能是 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，仅包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
+支持的 capability 名称为 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger`、`observability` 和 `sandbox`（仅 Cosh）；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，仅包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
 
-当前配置的 L2 后端是唯一有意保留的例外：模型名只有原样展示才有意义，因此 `PROMPT_SCANNER_L2_MODEL` 会作为 `prompt-scan` 的 `env` 条目原样上报（保留大小写，并做转义与长度封顶）。它的 `default`（以及变量未设置时的 `effective`）取自 native 扫描引擎上报的默认后端；若取值不属于引擎支持的后端，则原样上报并附一条 diagnostic——因为引擎会在构造期直接报错，扫描会失败而不是回退到默认后端。而宿主 hook 对失败的扫描一律 fail-open，因此这条 diagnostic 往往是该配置错误在 prompt 开始无防护流转前唯一的可见之处。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
+当前配置的 L2 后端是一项有意保留的例外：模型名只有原样展示才有意义，因此 `PROMPT_SCANNER_L2_MODEL` 会作为 `prompt-scan` 的 `env` 条目原样上报（保留大小写，并做转义与长度封顶）。它的 `default`（以及变量未设置时的 `effective`）取自 native 扫描引擎上报的默认后端；若取值不属于引擎支持的后端，则原样上报并附一条 diagnostic——因为引擎会在构造期直接报错，扫描会失败而不是回退到默认后端。而宿主 hook 对失败的扫描一律 fail-open，因此这条 diagnostic 往往是该配置错误在 prompt 开始无防护流转前唯一的可见之处。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
+
+`sandbox` 在 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 或 `true` 时显示 `MODE=all-shell`，未设置或 `0`/`false` 时为 `dangerous`，非法值为 `blocked`；忽略大小写和前后空白。`ENABLED` 描述 guard，而非此开关。JSON 仅展示开关，不读取安装的默认模板或检查授权是否就绪。`TIMEOUT(s)=55` 为 prepare 期限，finish 为 10 秒。安装和失败行为见 [Cosh sandbox 授权](sandbox.md#在-cosh-ng-中启用授权)。
 
 视图来源和限制：
 
@@ -534,7 +536,7 @@ agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 
 ## Agent Hook 环境变量
 
-每个宿主都会读取 `<CAPABILITY>_HOOK_ENABLED`（`true` / `false`，忽略大小写和首尾
+scanner、ledger 和 observability Hook 读取 `<CAPABILITY>_HOOK_ENABLED`（`true` / `false`，忽略大小写和首尾
 空白）。未设置或值无效时保持 hook 开启。对于使用 shared hook policy parser 的
 capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `observe`
 的别名，`deny` 是 `block` 的别名。Prompt Scanner 更窄：`PROMPT_SCANNER_MODE`
@@ -563,6 +565,7 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `AGENT_SEC_COSH_SANDBOX_ALL_SHELL` | `false` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 `PROMPT_SCANNER_L2_MODEL` 标记为 `✓*`，因为没有任何 adapter 直接读取它：每个宿主都
 是调用 `agent-sec-cli scan-prompt` 子进程，由该命令解析 L2 后端，所以六家都会继承

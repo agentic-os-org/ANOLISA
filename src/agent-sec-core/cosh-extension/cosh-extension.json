@@ -33,6 +33,8 @@
             "type": "command",
             "command": "python3 ${extensionPath}/hooks/sandbox-guard.py",
             "name": "sandbox-guard",
+            "fail_open": false,
+            "require_output_when_env": "AGENT_SEC_COSH_SANDBOX_ALL_SHELL",
             "timeout": 60000
           }
         ]

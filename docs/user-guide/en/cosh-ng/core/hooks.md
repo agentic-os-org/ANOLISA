@@ -71,6 +71,17 @@ confirmation. Exit code `2` also blocks. In `cosh-core`, config `PreToolUse`
 Hooks fail closed on empty output, invalid JSON, timeout, or unexpected non-zero
 exit unless that Hook explicitly sets `fail_open = true`. Extension Hooks may
 return empty output on success; their execution errors still fail closed.
+An Extension Hook may set `require_output_when_env` to an environment variable
+name. Empty output then fails when that child variable is set to anything except
+`0` or `false` (case and surrounding whitespace are ignored). Unset preserves
+the existing behavior; empty or invalid values require output. The Hook's `env`
+map overrides the inherited value. This lets an opt-in security mode require a
+response while preserving the extension's default mode.
+Cosh sets `COSH_HOOK_EMPTY_OUTPUT_POLICY` to `block` or `allow` for the policy
+enforced on that invocation, overriding inherited and declared values. A Hook can
+use this internal compatibility signal to reject a host that lacks the required
+behavior. It is not an authentication mechanism or a user configuration option;
+keep `fail_open = false` when an output failure must stop execution.
 Return `{}` for an explicit passthrough from a config Hook.
 The default timeout is 60 seconds; set a
 shorter `timeout` when a check must be quick. Use `sequential = true` when

@@ -102,8 +102,8 @@ Cedar 文件读写条件中的路径字面量必须已经存在。准备时保�
 准备 PDP 请求的应用可用 `asc_pep_runtime::PermissionInput::parse(text)` 解析当次输入，
 作为现有 `PermissionProvider` 传给 `PepRuntime::authorize` 或 `run`。JSON 与 Cedar 均
 生成 `requested_permissions`；daemon 策略仍决定最终 `effective_permissions`。输入不会
-作为授权策略上传到 PAP。`AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接受相同格式，每次 Hook
-准备请求时重新读取文件。输入变化影响下一次请求，不改变已准备的决定或运行中的沙箱。
+作为授权策略上传到 PAP。Cosh 使用下文的系统默认模板；内部准备入口仍支持当次 JSON/Cedar
+权限输入，供权限提供层接入。输入变化影响下一次请求，不改变已准备的决定或运行中的沙箱。
 两个运行入口均通过 `PermissionProvider::prepare` 先绑定路径，再执行或请求授权。
 `PermissionInput::resolve` 仅用于词法预览，不生成绑定对象的执行计划。
 
@@ -228,18 +228,76 @@ schema、组件分工和验证范围见[实现设计](../../../../src/agent-sec-
 
 ## 在 Cosh NG 中启用授权
 
-先启用上述 daemon 授权配置，并确认 ASC 扩展已在 Cosh 中启用。为目标工作目录准备
-完整的 `OsPermissionSet` 文件，然后在启动 Cosh 的环境中设置：
+安装配套的 Rust V2 运行时与 Cosh extension，启用上述 daemon 授权配置，并在 Cosh NG
+中启用扩展。本源码修订新增全 shell 授权；正式发布前须使用包含本次改动的构建。
+**不要同时开启 Cosh 的 sandbox 与 tokenless 能力**。若 tokenless 已启用，
+先用 `/extensions disable tokenless` 禁用该扩展，再使用 sandbox 授权。tokenless 会改写
+部分 shell 命令，Cosh 当前的 Hook 合并方式可能让该改写覆盖 sandbox 的执行交接。
+本版本不自动检测或强制执行这一互斥要求。
+
+启用全 shell 授权：
 
 ```bash
-export AGENT_SEC_COSH_SANDBOX_PERMISSIONS=/absolute/path/permissions.json
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
 cosh
 ```
 
-这会把现有 guard 命中的 shell 命令切换到 PDP 授权；不扩大命令匹配范围，也不接管原生文件工具。
-未设置该变量时保留原行为。设置后，权限文件无效、daemon 不可用或授权失败均阻断，不回退旧沙箱或无隔离执行。
-请求直接提供 `principal.agent_type: "cosh"`，Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
-会话 ID 不建立授权身份。
+开关默认关闭，接受 `1` / `true` 和 `0` / `false`，忽略大小写与前后空白。
+非法值报告配置错误并阻断 shell 执行。关闭时保留原有危险命令筛选、sudo 处理和沙箱路径。
+开启后，所有已接入的 `shell` / `run_shell_command` 调用，包括 `python3 skill.py` 和
+含 `sudo` 的原始命令，都进入策略授权。明确禁止命令仍可提前阻断；原生文件工具、MCP
+及其他入口不在此 Hook 的覆盖范围内。
+
+RPM 核心包自动安装 `/etc/agent-sec/sandbox/permissions.json.template`，无需权限文件环境变量
+或手工复制。源码安装遵循已有 `CONFIGDIR` 布局，并同步生成 Hook 使用的路径；标准 RPM
+安装使用上述路径。raw 遵循其管理的配置根目录，默认路径为
+`/etc/anolisa/sec-core/sandbox/permissions.json.template`，并按同一布局生成 Hook 路径。
+生成的路径模块属于安装元数据，不提供用户覆盖入口。模板及父目录必须由 root 所有、不可由组或其他用户写入，路径不得含
+符号链接。RPM 使用 `%config(noreplace)`；源码重复安装保留已有配置及权限模式。
+
+默认采用 [Codex workspace-write](https://learn.chatgpt.com/docs/agent-approvals-security#protected-paths-in-writable-roots)
+的可写范围及 Git 保护：允许当前运行身份可读的文件，只允许实际工作目录、`/tmp` 和绝对路径
+`$TMPDIR` 下写入，禁止 IPv4/IPv6 网络。每个可写目录下已有的 `.git` 文件或目录只读，
+包含其后代；`.git` 指针还保护其实际指向的 Git 目录。不会扫描嵌套仓库，也不解析
+`commondir`。不按其他目录名称额外排除路径，也不因工作目录是 `/`、HOME 或 HOME 的祖先
+目录而拒绝申请。PAP/PDP 可进一步收窄申请权限或拒绝执行。默认配置不隔离敏感文件读取、
+继承的环境秘密或共享临时目录。
+
+含符号链接的受保护路径、无效 Git 指针或不可用的绝对路径 `$TMPDIR` 会阻断；
+Git 指针路径中的空白原样保留。这些默认值不能替代策略，也不表示两个沙箱后端完全相同。
+
+管理员编辑该模板修改默认申请。`format_version` 为
+`asc.sandbox.permissions-template.v1`；`permissions` 使用上述 OS 权限对象，仅允许路径
+开头的 `${cwd}` 占位符。
+`include_tmpdir` 控制是否读取命令环境中的 `$TMPDIR`（忽略空值和相对路径）；
+`read_only_subpaths` 列出每个可写根目录下检查的目录名称，其中 `.git` 也支持指针文件，
+缺失路径跳过。不执行 shell 表达式或任意环境变量替换。Rust prepare 每次在内存中展开并校验模板，
+再通过现有权限提供层绑定路径。配置修改影响后续请求，不改变已经接受的调用。
+本版本不调用意图识别，也不向 PAP 发布候选策略。
+
+PDP 仍决定允许、拒绝、修改或要求原生审批，有效权限不能超过申请。批准命令不等于开放
+网络或授予宿主 root。不可用的提权能力在沙箱内失败，不剥离 `sudo`、扩大权限或无隔离重试。
+请求提供 `principal.agent_type: "cosh"`；Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
+会话 ID 不建立授权身份。现有 PDP 命令变换仍然支持；Hook 自身不在授权前改写原始命令。
+
+模板缺失、无效或不可信，依赖缺失，daemon 不可用，授权超时及异常响应均报告可见错误并
+阻止执行。交付的前置 Hook 显式设置 `fail_open=false`，并将 `require_output_when_env`
+绑定全 shell 开关，须保持启用并使用支持此字段的配套 Cosh NG 构建。开关关闭时保留
+extension 空输出兼容，开启或非法值时空输出阻断。Hook 在授权前还会检查宿主提供的
+`COSH_HOOK_EMPTY_OUTPUT_POLICY=block` 信号；缺失或值不匹配时阻断并提示升级。这是当次
+调用的内部元数据，不是用户设置，不应通过手工导出来使旧宿主看似兼容。本源码版本同时
+包含检查的两端；相同包版本号的不同 Preview 构建不能仅靠版本字符串区分。
+受管理的扩展安装会检查能力指纹；从系统目录直接加载的扩展在升级后不一定要求重新同意，
+该机制不能替代宿主兼容要求。Cosh NG 必须在
+PreToolUse 启动失败、崩溃、非零退出、空或无效输出、超时时阻断；忽略此类失败的旧宿主
+不能提供该保证。prepare 子进程期限为 55 秒，外层 Hook 为 60 秒；finish 为 10 秒，外层
+为 15 秒。外层超时终止进程组。原生 ask 在 prepare 之后，不占用其期限。运行时权限错误
+作为执行失败返回；回执或 finish 失败报告命令可能已经执行，绝不重跑。其他 Hook 行为不变。
+
+使用 `agent-sec-cli capabilities --agent cosh --capability sandbox --output json`
+查看继承的环境配置；模式为 `all-shell`、`dangerous` 或非法开关对应的 `blocked`。
+该视图不读取模板，也不证明 daemon 就绪、Hook 加载或宿主兼容。重启 Cosh 前将开关设为 `0` 可恢复
+原有筛选。原权限文件覆盖变量已经删除；管理员默认权限改为维护安装的模板。
 
 Hook 通过私有 `sandbox hook prepare` 入口准备权限申请。ALLOW/MODIFY 替换为获准命令的执行入口；
 STEP_UP 使用 Cosh 原生 ask，warn 显示为通知。daemon 保管完整请求和决定，包装命令只携带决定 ID。
@@ -264,7 +322,8 @@ STEP_UP 使用 Cosh 原生 ask，warn 显示为通知。daemon 保管完整请�
 code-scanner 仍可针对递归删除请求确认。这类审批应当保留。
 
 本授权接入面向 Cosh NG，其 PostToolUse 在工具成功或失败后均会触发。
-同一次调用只由 sandbox Hook 改写 shell 命令。原版 Cosh 不保证多个改写之间的顺序。
+同一次调用只由 sandbox Hook 改写 shell 命令；使用 sandbox 能力时须保持 tokenless 禁用。
+Cosh 不会自动强制执行该限制。
 若其他前置 Hook 阻断，Cosh NG 不会通知 sandbox，命令也不会启动。名额在同一轮下次申请 sandbox 时释放；若本轮就此结束，名额会保留到 daemon 重启。等待用户审批不设时限。
 工具超时且执行器已领取决定却未提交回执时，daemon 记为“执行结果未知”并释放名额。
 内存中的交接在 daemon 重启后失效；异常退出可能留下未完成交接，受现有每 UID 容量限制。

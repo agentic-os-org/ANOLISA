@@ -112,6 +112,20 @@ fn resolve_one(
             EnvValue::text(default),
         ),
         EnvKind::Identifier => resolve_l2_model(spec.name, raw, diagnostics),
+        EnvKind::AllShell => {
+            let effective = match raw.map(|value| v1_strip(value).to_lowercase()).as_deref() {
+                None | Some("0" | "false") => EnvValue::Bool(false),
+                Some("1" | "true") => EnvValue::Bool(true),
+                Some(_) => {
+                    diagnostics.push(format!(
+                        "{} is invalid; shell execution is blocked",
+                        spec.name
+                    ));
+                    EnvValue::text("invalid")
+                }
+            };
+            (effective, EnvValue::Bool(false))
+        }
         EnvKind::DataHome { default } => (
             resolve_data_home(spec.name, raw, default, diagnostics),
             EnvValue::text(default),
@@ -359,6 +373,16 @@ pub(crate) fn enabled(values: &[ResolvedEnv]) -> bool {
 
 /// Returns the interaction mode of the capability, or its manifest default.
 pub(crate) fn mode(values: &[ResolvedEnv], default: &str) -> String {
+    if find(values, "AGENT_SEC_COSH_SANDBOX_ALL_SHELL")
+        .is_some_and(|value| value.effective == EnvValue::text("invalid"))
+    {
+        return "blocked".to_owned();
+    }
+    if find(values, "AGENT_SEC_COSH_SANDBOX_ALL_SHELL")
+        .is_some_and(|value| value.effective == EnvValue::Bool(true))
+    {
+        return "all-shell".to_owned();
+    }
     for name in [
         "CODE_SCANNER_MODE",
         "PROMPT_SCANNER_MODE",

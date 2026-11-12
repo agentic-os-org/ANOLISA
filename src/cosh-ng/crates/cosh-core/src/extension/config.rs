@@ -88,6 +88,11 @@ pub struct CommandHookConfig {
     /// Explicitly permit this hook to fail open.
     #[serde(default)]
     pub fail_open: bool,
+    /// Require nonempty output when this child environment variable is set,
+    /// except for `0` or `false` (case-insensitive, surrounding whitespace ignored).
+    /// Unset preserves legacy behavior; invalid values require output.
+    #[serde(default)]
+    pub require_output_when_env: Option<String>,
     /// Environment variables for this hook's child process. Passed through to
     /// [`HookDefinition::env`] verbatim; see there for the scoping guarantees.
     #[serde(default)]
@@ -128,6 +133,7 @@ impl HookGroup {
                 timeout: h.timeout,
                 sequential: self.sequential,
                 fail_open: h.fail_open,
+                require_output_when_env: h.require_output_when_env.clone(),
                 env: h.env.clone(),
             })
             .collect()
@@ -287,6 +293,7 @@ mod tests {
                     description: None,
                     timeout: Some(3000),
                     fail_open: false,
+                    require_output_when_env: None,
                     env: BTreeMap::from([("TOKENLESS_AGENT_ID".to_string(), "cosh".to_string())]),
                 }],
             },
@@ -300,6 +307,7 @@ mod tests {
                     description: None,
                     timeout: None,
                     fail_open: false,
+                    require_output_when_env: None,
                     env: BTreeMap::new(),
                 }],
             },

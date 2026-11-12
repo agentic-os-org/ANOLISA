@@ -26,7 +26,11 @@ for the permission format, runtime requirements and isolation boundaries.
 Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
 using PAP-managed Cedar policies selected by daemon `--authorization-config`.
 Successful Policy updates apply to subsequent authorization requests.
-Cosh can opt into this flow with `AGENT_SEC_COSH_SANDBOX_PERMISSIONS`, using its native approval UI.
+Cosh opts into this flow with `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`, using its native
+approval UI and the installed default permission template. Every hooked `shell` /
+`run_shell_command` call is authorized, including ordinary Python scripts and original
+`sudo` commands. The switch defaults off; see the sandbox guide for configuration,
+permission boundaries and failure handling.
 
 ## Background
 
