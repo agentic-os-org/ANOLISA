@@ -668,13 +668,47 @@ where
     const UNIT_TEMPLATE: &str = include_str!("../../../../../systemd/anolisa-telemetry.service.in");
 
     let executable = current_exe().map_err(|error| runtime(command, error))?;
-    let unit_content = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", &executable.display().to_string());
+    let executable = systemd_exec_path(&executable).ok_or_else(|| {
+        runtime(
+            command,
+            format!(
+                "executable path {} is not valid UTF-8, so it cannot be written into a unit",
+                executable.display()
+            ),
+        )
+    })?;
+    let unit_content = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", &executable);
     let layout = FsLayout::system(ctx.prefix.clone());
     let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
     if let Some(parent) = unit_path.parent() {
         fs::create_dir_all(parent).map_err(|error| runtime(command, error))?;
     }
     fs::write(&unit_path, unit_content).map_err(|error| runtime(command, error))
+}
+
+/// Quotes a path for a systemd `Exec*=` command line.
+///
+/// systemd splits these lines on whitespace, so an executable reached through a
+/// path containing spaces must be quoted or the unit runs a truncated command.
+/// Inside the quotes systemd still expands `%` specifiers, so a literal `%` is
+/// doubled. A `$` is written as-is: command-line variables are substituted only
+/// in the arguments, never in the program to execute, so `$$` here would make
+/// systemd look for a literal `$$` directory. Returns `None` when the path is
+/// not valid UTF-8, which cannot be represented in a unit file.
+fn systemd_exec_path(path: &Path) -> Option<String> {
+    let raw = path.to_str()?;
+    let mut quoted = String::with_capacity(raw.len() + 2);
+    quoted.push('"');
+    for character in raw.chars() {
+        match character {
+            '%' => quoted.push_str("%%"),
+            '\\' => quoted.push_str(r"\\"),
+            '"' => quoted.push_str("\\\""),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    Some(quoted)
 }
 
 fn disable_service_with<R: CommandRunner>(systemd: &Systemd<R>) -> Result<(), String> {
@@ -1399,18 +1433,48 @@ mod tests {
         let ctx = sandbox.context(InstallMode::System);
         let unit_path = ctx.layout().systemd_unit_dir.join(UNIT_FILENAME);
         let executable = sandbox.root().join("bin with spaces/anolisa");
+        let unquoted_exec_start = format!("ExecStart={} ", executable.display());
+        // Spelled out here instead of calling the renderer, so a missing quote
+        // cannot pass by being exactly as wrong as the code under test (#9806).
         let expected = include_str!("../../../../../systemd/anolisa-telemetry.service.in")
-            .replace("@@ANOLISA_BIN@@", &executable.display().to_string());
+            .replace("@@ANOLISA_BIN@@", &format!("\"{}\"", executable.display()));
         let runner = ScriptedRunner::new(vec![output(Some(0), "", "")]);
         let calls = runner.calls.clone();
         install_and_enable_service_offline_with(&ctx, &Systemd::with_runner(runner), || {
             Ok(executable)
         })
         .unwrap();
-        assert_eq!(fs::read_to_string(&unit_path).unwrap(), expected);
+        let rendered = fs::read_to_string(&unit_path).unwrap();
+        assert_eq!(rendered, expected);
+        assert!(
+            !rendered.contains(&unquoted_exec_start),
+            "unquoted executable path in unit: {rendered}"
+        );
         assert_eq!(
             *calls.borrow(),
             vec![vec!["--no-reload", "enable", SERVICE_NAME]]
+        );
+    }
+
+    #[test]
+    fn unit_file_quotes_and_escapes_the_executable_path() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let executable = Path::new("/tmp/a b/c\"d\\e%f$g/anolisa");
+        write_unit_file("telemetry prepare", &ctx, || Ok(executable.to_path_buf())).unwrap();
+        let rendered =
+            fs::read_to_string(ctx.layout().systemd_unit_dir.join(UNIT_FILENAME)).unwrap();
+        // The `$` stays single: systemd substitutes variables only in the
+        // arguments, never in the executable path, so doubling it would point
+        // the unit at a directory that does not exist.
+        assert!(
+            rendered.contains(r#"ExecStartPre="/tmp/a b/c\"d\\e%%f$g/anolisa" telemetry init"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains(r#"ExecStart="/tmp/a b/c\"d\\e%%f$g/anolisa" telemetry upload --loop"#),
+            "{rendered}"
         );
     }
 
@@ -1439,7 +1503,7 @@ mod tests {
         let unit_path = ctx.layout().systemd_unit_dir.join(UNIT_FILENAME);
         let executable = sandbox.root().join("bin with spaces/anolisa");
         let expected = include_str!("../../../../../systemd/anolisa-telemetry.service.in")
-            .replace("@@ANOLISA_BIN@@", &executable.display().to_string());
+            .replace("@@ANOLISA_BIN@@", &format!("\"{}\"", executable.display()));
         let mut runner =
             ScriptedRunner::new(vec![output(Some(0), "", ""), output(Some(0), "", "")]);
         runner.expected_unit = Some((unit_path.clone(), expected.clone()));
