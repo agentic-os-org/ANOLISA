@@ -10,11 +10,15 @@ The verified baseline is QwenPaw 2.2.2.post1 with AgentScope 2.0.10. Install Qwe
 with its compatible dependencies and initialize its model configuration through
 QwenPaw. AW records the installed version and checks the plugin, middleware and
 native task lifecycle interfaces for other releases. The example uses `argv: [qwenpaw, app]`. Set
-`QWENPAW_WORKING_DIR` to the existing initialized absolute directory. AW adds only
-its owned temporary plugin, preserves existing plugins and native configuration,
-and removes its plugin after the App exits. Each installation has its own
-`aw-native-<uuid>` directory and manifest ID, preserving user-owned `aw-native`
-plugins and settings. AW leaves `config.json` loading and native MCP updates to
+`QWENPAW_WORKING_DIR` to the existing initialized absolute directory. Ordinary
+launches through a recognized absolute Python console script register AW through
+the native Registry from a private temporary package. This avoids the filesystem
+plugin loader's module sweep and leaves the workspace plugin directory untouched.
+AW owns this integration and its cleanup; it does not appear in QwenPaw's
+filesystem plugin inventory. Custom entrypoints, `--reloadable` and external
+startup integration retain the native plugin loader. Each installation has its
+own `aw-native-<uuid>` directory and manifest ID, preserving user-owned
+`aw-native` plugins and settings. AW leaves `config.json` loading and native MCP updates to
 QwenPaw. Native factory arguments are forwarded unchanged, and tool generators
 finish cleanup before their terminal result reaches the Coordinator.
 
@@ -78,8 +82,17 @@ The shared sec-core Provider also supports [Skill validation before loading](../
 Recognized absolute Python console scripts read the installed literal version
 with their own interpreter and import path, without importing QwenPaw's App
 configuration. Custom entrypoints and nonliteral versions retain the native
-`--version` probe within the same five-second budget. App launch, native Hook
-installation and readiness checks still use the original command.
+`--version` probe within the same five-second budget. Native Hook installation
+and readiness checks retain the native interfaces. Managed console
+launches execute the original script in the same interpreter and process, with
+its original arguments and import precedence. User plugins keep their native
+loading and isolation. Requests arriving before the acknowledged startup receipt
+wait up to 30 seconds before Agent construction. This boundary is installed
+before the console script runs, covering requests during Hub initialization
+before the first plugin phase. Construction also requires the resident middleware
+installation guard. AW module imports begin in
+the native plugin initialization phase, before Agent loading. Initialization
+failure stops the App; a missing or mismatched receipt blocks Agent construction.
 
 ## Separate HTTP startup and first protected work
 
