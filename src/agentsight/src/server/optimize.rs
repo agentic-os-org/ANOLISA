@@ -102,14 +102,7 @@ impl OptLlmConfig {
         }
         let json = serde_json::to_string_pretty(&on_disk)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(path, json)?;
-        // Defense in depth: keep the sealed config owner-only as well.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
+        crate::config::atomic_write::write_private_config_atomically(path, &json)
     }
 
     fn effective_base_url(&self) -> String {
@@ -2431,3 +2424,7 @@ mod tests {
         assert!(!serialized.contains("search_timeout_secs"), "{serialized}");
     }
 }
+
+#[cfg(test)]
+#[path = "../config/optimization_save_tests.rs"]
+mod atomic_save_tests;
