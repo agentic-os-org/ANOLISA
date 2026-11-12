@@ -132,7 +132,7 @@ impl Fixture {
             "Path": "/usr/bin/python3", "Args": ["-c", "print(1)"],
             "Config": {
                 "Entrypoint": ["/usr/bin/python3"], "Cmd": ["-c", "print(1)"],
-                "WorkingDir": self.work
+                "WorkingDir": self.work, "OpenStdin": true
             },
             "HostConfig": {
                 "Privileged": false, "CapAdd": null,
@@ -213,6 +213,29 @@ fn successful_run_maps_the_container_lifecycle() {
     }
     assert!(create.iter().any(|arg| arg == "agent@sha256:abc123"));
     assert_eq!(fixture.read_calls("rm.calls").len(), 3);
+}
+
+#[test]
+fn closed_stdin_aborts_before_start() {
+    for open in [serde_json::json!(false), serde_json::Value::Null] {
+        let fixture = fixture();
+        fixture.write_inspect("none");
+        let path = fixture.state.join("inspect.json");
+        let mut inspected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        inspected[0]["Config"]["OpenStdin"] = open;
+        std::fs::write(path, serde_json::to_vec(&inspected).unwrap()).unwrap();
+        let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
+        assert!(error.to_string().contains("stdin"), "{error}");
+        assert!(!fixture.state.join("start.args").exists());
+        assert_eq!(fixture.read_calls("rm.calls").len(), 3);
+        assert!(
+            fixture
+                .read_calls("create.args")
+                .iter()
+                .any(|arg| arg == "--interactive")
+        );
+    }
 }
 
 #[test]

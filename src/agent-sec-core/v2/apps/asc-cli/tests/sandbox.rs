@@ -23,6 +23,116 @@ fn sandbox_terminal_and_nonterminal_lifecycle() {
     );
 }
 
+#[test]
+#[ignore = "requires host mount privileges, local Docker, Python and built sibling guard"]
+fn docker_cli_forwards_stdin_and_terminal_eof() {
+    let image = std::env::var("ASC_DOCKER_TEST_IMAGE")
+        .expect("set ASC_DOCKER_TEST_IMAGE to a locally available pinned Python image");
+    let cli = env!("CARGO_BIN_EXE_agent-sec-cli");
+    assert!(
+        std::path::Path::new(cli)
+            .with_file_name("asc-sandbox-docker-guard")
+            .is_file(),
+        "build asc-sandbox-docker-guard beside agent-sec-cli first"
+    );
+    let output = Command::new("python3")
+        .args(["-c", DOCKER_STDIO, cli, &image])
+        .output()
+        .expect("run Docker CLI stdin acceptance");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+const DOCKER_STDIO: &str = r#"
+import errno, json, os, pathlib, pty, select, signal, subprocess, sys, tempfile, time
+
+with tempfile.TemporaryDirectory(prefix='asc-docker-stdio-') as directory:
+    root = pathlib.Path(directory)
+    work = root / 'work'
+    work.mkdir()
+    permissions = root / 'permissions.json'
+    permissions.write_text(json.dumps({
+        'version': 1, 'filesystem': {'default': 'deny', 'rules': [
+            {'effect': 'allow', 'path': str(work), 'rights': ['read', 'write']}]},
+        'execution': {'deny_paths': []}, 'network': {'mode': 'off'}}))
+    # Record only this test's container and config directory; never read personal Docker config.
+    wrapper = root / 'docker'
+    wrapper.write_text('#!/bin/sh\nif [ "$5" = start ]; then\n'
+        f' printf "%s" "$8" > "{root}/name"\n'
+        f' printf "%s" "$2" > "{root}/client"\n'
+        'fi\nexec /usr/bin/docker "$@"\n')
+    wrapper.chmod(0o700)
+    (root / 'config.json').write_text('{}')
+    env = {'PATH': '/usr/bin:/bin', 'AGENT_SEC_DAEMON_SOCKET': '/does/not/exist'}
+    def argv(*target):
+        return [sys.argv[1], 'sandbox', 'run', '--backend', 'docker',
+            '--image', sys.argv[2], '--docker-cli', str(wrapper),
+            '--permissions', str(permissions), '--', *target]
+    def assert_clean():
+        assert not pathlib.Path((root / 'client').read_text()).exists(), 'guard config leaked'
+        name = (root / 'name').read_text()
+        result = subprocess.run(['/usr/bin/docker', '--config', str(root), '--host',
+            'unix:///var/run/docker.sock', 'ps', '--all', '--filter', f'name=^/{name}$',
+            '--format', '{{.ID}}'], env=env, capture_output=True, timeout=10, check=True)
+        assert not result.stdout.strip(), ('container leaked', name, result.stdout)
+    # Cover binary data, input larger than the pipe buffer and empty input; cat must exit on EOF.
+    for payload in (b'hello\n\x00\xff' + b'0123456789' * 8192, b''):
+        result = subprocess.run(argv('/bin/cat'), cwd=work, env=env, input=payload,
+            capture_output=True, timeout=15, check=False)
+        assert result.returncode == 0, (result.returncode, result.stderr)
+        assert result.stdout == payload, ('stdin corrupted', len(result.stdout), len(payload))
+        assert_clean()
+    code = "import sys; print('READY', flush=True); line=input(); print('GOT:'+line, flush=True); assert sys.stdin.read() == ''; print('EOF', flush=True)"
+    pid, master = pty.fork()
+    if pid == 0:
+        os.chdir(work)
+        os.execve(sys.argv[1], argv('/usr/local/bin/python3', '-c', code), env)
+    data = b''
+    completed = False
+    deadline = time.monotonic() + 15
+    def read_until(marker):
+        global data, completed
+        while marker not in data:
+            dead, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            if dead:
+                completed = not os.WIFSTOPPED(status)
+                raise AssertionError(('exited/stopped before terminal input', status, data))
+            assert time.monotonic() < deadline, ('terminal input timeout', data)
+            if select.select([master], [], [], .05)[0]:
+                try:
+                    data += os.read(master, 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+    try:
+        read_until(b'READY\r\n')
+        os.write(master, b'hello terminal\n')
+        read_until(b'GOT:hello terminal\r\n')
+        os.write(master, b'\x04')
+        read_until(b'EOF\r\n')
+        while True:
+            dead, status = os.waitpid(pid, os.WNOHANG)
+            if dead:
+                completed = True
+                assert os.waitstatus_to_exitcode(status) == 0, (status, data)
+                break
+            assert time.monotonic() < deadline, ('EOF did not finish CLI', data)
+            time.sleep(.05)
+        assert_clean()
+    finally:
+        if not completed:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+        os.close(master)
+"#;
+
 const LIFECYCLE: &str = r##"
 import errno, json, os, pathlib, pty, select, shutil, signal, subprocess, sys, tempfile, time
 

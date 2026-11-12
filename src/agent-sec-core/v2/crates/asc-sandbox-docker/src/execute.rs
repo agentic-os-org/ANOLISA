@@ -359,6 +359,11 @@ fn verify_invocation(
     launch: &LaunchSpec,
 ) -> Result<(), DockerError> {
     let config = &inspected["Config"];
+    if config["OpenStdin"].as_bool() != Some(true) {
+        return Err(DockerError::Protocol(
+            "container stdin is not open for interactive attach".into(),
+        ));
+    }
     if !string_list_matches(&config["Entrypoint"], std::slice::from_ref(&launch.program))
         || !string_list_matches(&config["Cmd"], &launch.args)
         || inspected["Path"].as_str() != Some(launch.program.as_str())
