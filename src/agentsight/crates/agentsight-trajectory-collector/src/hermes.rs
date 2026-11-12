@@ -392,11 +392,7 @@ fn ingest_session(
             .steps
             .iter()
             .find_map(|step| step.timestamp.clone()),
-        end_time: trajectory
-            .steps
-            .iter()
-            .rev()
-            .find_map(|step| step.timestamp.clone()),
+        end_time: crate::last_activity(&trajectory),
         first_user_message,
         last_user_message,
         atif_json,
