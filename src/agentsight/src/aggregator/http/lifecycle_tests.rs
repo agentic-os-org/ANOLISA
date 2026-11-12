@@ -147,7 +147,7 @@ fn soft_snapshot_borrows_once_and_hard_tick_owns_the_partial() {
 }
 
 #[test]
-fn byte_budget_evicts_oldest_until_all_retained_allocations_fit() {
+fn byte_budget_full_rejects_new_flow_without_evicting_existing_flows() {
     let mut http = HttpConnectionAggregator::with_capacity(8);
     let body = vec![b'x'; 4096];
     http.process_request(request(1, &body, body.len()));
@@ -158,12 +158,12 @@ fn byte_budget_evicts_oldest_until_all_retained_allocations_fit() {
     assert_eq!(http.active_connections(), 2);
     assert_eq!(http.metrics().connection_cache_bytes, 2 * per_connection);
     let results = http.take_ready();
-    reason(&results, RemoveReason::OverBudget);
+    reason(&results, RemoveReason::CapacityRejected);
     let AggregatedResult::Abandoned { partial, .. } = &results[0] else {
         unreachable!()
     };
     assert!(
-        matches!(partial.as_ref(), AggregatedResult::RequestOnly { connection_id, .. } if connection_id.ssl_ptr == 1)
+        matches!(partial.as_ref(), AggregatedResult::RequestOnly { connection_id, .. } if connection_id.ssl_ptr == 3)
     );
     http.clear();
     assert_eq!(http.metrics().connection_cache_bytes, 0);

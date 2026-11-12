@@ -1279,6 +1279,28 @@ impl Http2StreamAggregator {
     /// so a stream that never reaches END_STREAM would otherwise grow until the
     /// process exits.
     fn insert_stream_state(&mut self, stream_id: StreamId, state: Http2StreamState) {
+        let new_stream = !self.last_activity.contains(&stream_id);
+        // Refuse a new stream once the shared byte budget is exhausted. A
+        // state refresh for an existing stream must stay admitted: its payload
+        // is already charged and rejecting here would drop an in-flight call.
+        // Checked before the retained probe below so a rejected stream never
+        // creates an uncharged side-cache entry.
+        if new_stream && self.bytes_budget != 0 {
+            let retained = self.metrics().connection_cache_bytes;
+            if retained >= self.bytes_budget {
+                let budget = self.bytes_budget;
+                let message = format!(
+                    "[Http2Aggregator] byte budget exhausted, reject new stream={stream_id:?} | retained={retained} budget={budget}"
+                );
+                log::warn!("{message}");
+                self.emit_abandoned(
+                    stream_id,
+                    state,
+                    crate::aggregator::RemoveReason::CapacityRejected,
+                );
+                return;
+            }
+        }
         if self
             .retained
             .entry(stream_id)
@@ -1309,6 +1331,21 @@ impl Http2StreamAggregator {
         }
         self.last_activity.put(stream_id, Instant::now());
         self.streams.put(stream_id, state);
+        self.refresh_retained(stream_id);
+        // The pre-insert check only sees the bytes charged so far. Reject the
+        // new stream itself when its own payload pushes the cache over budget,
+        // instead of letting the global sweep evict an active stream.
+        if new_stream && self.bytes_budget != 0 {
+            let retained = self.metrics().connection_cache_bytes;
+            if retained > self.bytes_budget {
+                let budget = self.bytes_budget;
+                let message = format!(
+                    "[Http2Aggregator] new stream={stream_id:?} exceeds byte budget | retained={retained} budget={budget}"
+                );
+                log::warn!("{message}");
+                self.abandon_stream(stream_id, crate::aggregator::RemoveReason::CapacityRejected);
+            }
+        }
     }
 
     /// Release the side maps belonging to a stream that is no longer retained.
