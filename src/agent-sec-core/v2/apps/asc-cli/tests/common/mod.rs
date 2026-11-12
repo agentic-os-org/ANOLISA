@@ -46,9 +46,21 @@ impl Drop for Directory {
 }
 
 /// Copies the real CLI into the test directory so dropped-UID processes need not traverse the build path.
+///
+/// The copy runs in a child process because process creation is fork+exec: a
+/// fork in a parallel test thread snapshots this process' descriptors and drops
+/// the inherited ones only at its own exec, so a copy written here can outlive
+/// `fs::copy` as an open write handle and make the copy's first launch fail with
+/// `ETXTBSY` (`ExecutableFileBusy`). A child process owns the write handle for
+/// its whole lifetime, so no other fork can inherit it.
 pub fn executable(directory: &Path) -> PathBuf {
     let binary = directory.join("agent-sec-cli");
-    std::fs::copy(env!("CARGO_BIN_EXE_agent-sec-cli"), &binary).unwrap();
+    let status = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_agent-sec-cli"))
+        .arg(&binary)
+        .status()
+        .expect("spawn the CLI copy");
+    assert!(status.success(), "copy the CLI: {status}");
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     binary
 }
