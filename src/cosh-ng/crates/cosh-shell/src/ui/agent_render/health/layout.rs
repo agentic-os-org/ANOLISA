@@ -13,19 +13,25 @@ pub(super) fn render_health_banner(
     } else {
         severity_color(severity)
     };
+    let show_status = health_status_fits_title(report, i18n, area.width);
+    let mut title = vec![Span::styled(
+        format!(
+            "─ {}{}",
+            i18n.t(crate::MessageId::HealthBannerTitle),
+            if show_status { ": " } else { " " }
+        ),
+        Style::default()
+            .fg(severity_color(severity))
+            .add_modifier(Modifier::BOLD),
+    )];
+    if show_status {
+        title.push(Span::styled(
+            format!("{} ", health_status_label(report, i18n)),
+            health_status_style(report).add_modifier(Modifier::BOLD),
+        ));
+    }
     let block = Block::bordered()
-        .title(Line::from(vec![
-            Span::styled(
-                format!("─ {}: ", i18n.t(crate::MessageId::HealthBannerTitle)),
-                Style::default()
-                    .fg(severity_color(severity))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} ", health_status_label(report, i18n)),
-                health_status_style(report).add_modifier(Modifier::BOLD),
-            ),
-        ]))
+        .title(Line::from(title))
         .border_set(ROUNDED)
         .padding(Padding::horizontal(1))
         .border_style(Style::default().fg(border_color));
@@ -33,6 +39,16 @@ pub(super) fn render_health_banner(
     block.render(area, buffer);
 
     render_health_panel_sections(sections, inner, buffer);
+}
+
+fn health_status_fits_title(report: &HealthScanReport, i18n: crate::I18n, width: u16) -> bool {
+    let title = format!(
+        "─ {}: {} ",
+        i18n.t(crate::MessageId::HealthBannerTitle),
+        health_status_label(report, i18n)
+    );
+    (has_resource_facts(report) || !report.findings.is_empty())
+        && display_width(&title) <= width.saturating_sub(2) as usize
 }
 
 pub(super) fn health_body_lines(
@@ -102,13 +118,8 @@ pub(super) fn health_panel_sections(
     let content_width = width.saturating_sub(4).max(1) as usize;
 
     if report.findings.is_empty() {
-        let title = format!(
-            "─ {}: {} ",
-            i18n.t(crate::MessageId::HealthBannerTitle),
-            health_status_label(report, i18n)
-        );
         let mut main = Vec::new();
-        if !has_resource_facts(report) || display_width(&title) > width.saturating_sub(2) as usize {
+        if !health_status_fits_title(report, i18n, width) {
             main.push(summary_line(report, i18n, allow_meter));
         }
         main.extend(metric_band_lines(report, i18n, content_width, allow_meter));
@@ -131,7 +142,11 @@ pub(super) fn health_panel_sections(
         };
     }
 
-    let mut main = metric_band_lines(report, i18n, content_width, allow_meter);
+    let mut main = Vec::new();
+    if !health_status_fits_title(report, i18n, width) {
+        main.push(summary_line(report, i18n, allow_meter));
+    }
+    main.extend(metric_band_lines(report, i18n, content_width, allow_meter));
     let mut findings = Vec::new();
     findings.push(section_line(
         i18n.t(crate::MessageId::HealthBannerFindingsSection),
@@ -279,7 +294,7 @@ pub(super) fn metric_band_lines(
 ) -> Vec<HealthBannerLine> {
     let mut pressure = Vec::new();
     let mut resources = Vec::new();
-    for mut cell in metric_cells(report, i18n) {
+    for mut cell in metric_cells(report, i18n, false) {
         let label = match cell.kind {
             HealthMetricKind::Load => {
                 pressure.push(cell);

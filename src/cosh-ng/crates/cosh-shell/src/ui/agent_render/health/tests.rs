@@ -69,7 +69,7 @@ fn p6_resource_report(kernel_gap: Option<HealthUnavailableReason>) -> HealthScan
 }
 
 #[test]
-fn p6_resource_banner_scopes_kernel_gap_without_unavailable_headline_or_noise() {
+fn p6_resource_banner_marks_incomplete_checks_without_technical_noise() {
     for reason in [
         HealthUnavailableReason::PermissionDenied,
         HealthUnavailableReason::ParseError,
@@ -79,14 +79,22 @@ fn p6_resource_banner_scopes_kernel_gap_without_unavailable_headline_or_noise() 
         assert_eq!(report.resource_severity, HealthSeverity::Ok);
         assert_eq!(report.overall_severity, HealthSeverity::Unavailable);
         for (language, expected) in [
-            (crate::Language::EnUs, "no anomalies in checked items"),
-            (crate::Language::ZhCn, "已检查项未见异常"),
+            (crate::Language::EnUs, "some checks incomplete"),
+            (crate::Language::ZhCn, "部分检查未完成"),
         ] {
             let renderer = RatatuiInlineRenderer::with_width(120).with_language(language);
             let text = renderer
                 .health_banner_lines(HealthBannerModel::new(&report))
                 .join("\n");
             assert!(text.contains(expected), "{text}");
+            let i18n = crate::I18n::new(language);
+            assert!(health_startup_row_text(&report, i18n).contains(expected));
+            assert!(summary_line(&report, i18n, false)
+                .plain_text()
+                .contains(expected));
+            assert_ne!(health_status_style(&report).fg, Some(Color::Green));
+            assert!(!text.contains("permission denied"), "{text}");
+            assert!(!text.contains("权限不足"), "{text}");
             assert!(!text.contains("Unavailable:"), "{text}");
             assert!(!text.contains("parse error"), "{text}");
             assert!(!text.contains("解析错误"), "{text}");
@@ -272,6 +280,8 @@ fn resource_categories_stay_on_separate_rows() {
             }
         }
     }
+    assert_health_card_status_appears_once_at_compact_and_wide_widths();
+    assert_plain_health_card_status_appears_once_at_compact_and_wide_widths();
 }
 
 #[test]
@@ -312,7 +322,11 @@ fn healthy_card_colors_only_observed_status_green() {
                 .filter(|cell| cell.fg == Color::Green)
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert_eq!(green.trim(), health_status_label(&report, i18n));
+            if gap.is_some() {
+                assert!(green.trim().is_empty(), "{green}");
+            } else {
+                assert_eq!(green.trim(), health_status_label(&report, i18n));
+            }
             assert_eq!(buffer[(0, 0)].fg, Color::Gray);
             assert!(buffer
                 .content
@@ -338,6 +352,7 @@ fn healthy_card_colors_only_observed_status_green() {
             assert_eq!(buffer[(0, 0)].fg, severity_color(severity));
         }
     }
+    assert_health_card_keeps_status_for_findings_with_and_without_resource_facts();
 }
 
 #[test]
@@ -379,11 +394,127 @@ fn partial_memory_keeps_available_capacity_without_inventing_used_percentage() {
             .join("\n");
         assert!(text.contains("6.0 GiB"), "{text}");
         assert!(!text.contains("25%"), "{text}");
-        let memory = metric_cells(&report, crate::I18n::new(language))
+        let memory = metric_cells(&report, crate::I18n::new(language), false)
             .into_iter()
             .find(|cell| cell.render().contains("6.0 GiB"))
             .unwrap();
         assert!(memory.ratio.is_none());
         assert!(!memory.render().contains("used") && !memory.render().contains("已用"));
+    }
+}
+
+#[test]
+fn guide_banner_with_only_load_metric_does_not_repeat_the_load_label() {
+    let mut report = p6_resource_report(None);
+    report.facts.retain(|fact| fact.key.starts_with("cpu."));
+    report
+        .check_results
+        .retain(|check| check.id == "resource.load");
+    report.recompute_overall_severity();
+    assert!(health_uses_startup_row(&report));
+
+    for language in [crate::Language::ZhCn, crate::Language::EnUs] {
+        let renderer = RatatuiInlineRenderer::with_width(120).with_language(language);
+        let startup = renderer
+            .health_banner_lines(HealthBannerModel::new(&report))
+            .join("\n");
+        assert!(startup.contains("0.0 / 8"), "{startup}");
+        for width in [40, 80, 120] {
+            let guided = RatatuiInlineRenderer::with_width(width)
+                .with_language(language)
+                .health_banner_lines(HealthBannerModel::new(&report).with_guide())
+                .join("\n");
+            assert!(!guided.contains("负载  1分钟负载"), "{guided}");
+            assert!(!guided.contains("Load  Load"), "{guided}");
+            assert!(guided.contains("0.0 / 8"), "{guided}");
+        }
+    }
+}
+
+fn assert_health_card_status_appears_once_at_compact_and_wide_widths() {
+    for language in [crate::Language::ZhCn, crate::Language::EnUs] {
+        for gap in [None, Some(HealthUnavailableReason::PermissionDenied)] {
+            let report = p6_resource_report(gap);
+            let i18n = crate::I18n::new(language);
+            let status = health_status_label(&report, i18n);
+            for width in [40, 80, 120] {
+                let lines = RatatuiInlineRenderer::with_width(width)
+                    .with_language(language)
+                    .health_banner_lines(HealthBannerModel::new(&report));
+                let text = lines.join("\n");
+                assert_eq!(text.matches(&status).count(), 1, "{width}: {text}");
+                assert!(
+                    lines[0].contains(i18n.t(crate::MessageId::HealthBannerTitle)),
+                    "{text}"
+                );
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| display_width(line) <= width as usize),
+                    "{text}"
+                );
+                let status_prefix = status.chars().take(5).collect::<String>();
+                assert!(
+                    !lines[0].contains(&status_prefix) || lines[0].contains(&status),
+                    "truncated status in title: {text}"
+                );
+            }
+        }
+    }
+}
+
+fn assert_plain_health_card_status_appears_once_at_compact_and_wide_widths() {
+    for language in [crate::Language::ZhCn, crate::Language::EnUs] {
+        for gap in [None, Some(HealthUnavailableReason::PermissionDenied)] {
+            let report = p6_resource_report(gap);
+            let status = health_status_label(&report, crate::I18n::new(language));
+            for width in [40, 80, 120] {
+                let lines = RatatuiInlineRenderer::plain_with_width(width)
+                    .with_language(language)
+                    .health_banner_lines(HealthBannerModel::new(&report));
+                let text = lines.join("\n");
+                let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert_eq!(flattened.matches(&status).count(), 1, "{width}: {text}");
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| display_width(line) <= width as usize),
+                    "{text}"
+                );
+            }
+        }
+    }
+}
+
+fn assert_health_card_keeps_status_for_findings_with_and_without_resource_facts() {
+    let mut report = HealthScanReport::new("service-only", 1000);
+    report.overall_severity = HealthSeverity::Warning;
+    report.findings.push(HealthFinding {
+        id: "service.failed:sshd".to_string(),
+        severity: HealthSeverity::Warning,
+        category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+        title_id: HealthMessageId::HealthFindingServiceFailed,
+        detail_id: None,
+        detail_args: [("service".to_string(), "sshd".to_string())].into(),
+        evidence_fact_ids: vec![],
+        suggested_try_ids: vec![],
+    });
+    let mut partial = p6_resource_report(Some(HealthUnavailableReason::PermissionDenied));
+    let mut gap = report.findings[0].clone();
+    gap.category = crate::diagnostics::health::HealthFindingCategory::CollectionGap;
+    gap.title_id = HealthMessageId::HealthFindingCoreCollectorUnavailable;
+    partial.findings.push(gap);
+    for report in [report, partial] {
+        for language in [crate::Language::ZhCn, crate::Language::EnUs] {
+            let i18n = crate::I18n::new(language);
+            for width in [40, 80] {
+                let sections = health_panel_sections(&report, i18n, width, true);
+                let area = Rect::new(0, 0, width, sections.body_len() as u16 + 2);
+                let mut buffer = Buffer::empty(area);
+                render_health_banner(&report, i18n, sections, area, &mut buffer);
+                let text = buffer_to_lines(&buffer, area).join("\n");
+                assert!(text.contains(&health_status_label(&report, i18n)), "{text}");
+            }
+        }
     }
 }

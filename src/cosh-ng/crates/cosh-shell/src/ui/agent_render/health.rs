@@ -139,14 +139,16 @@ impl RatatuiInlineRenderer {
         let width = self.panel_standard_width();
         let content_width = width.saturating_sub(2).max(1) as usize;
         let i18n = self.i18n();
-        let mut lines = wrap_plain_line(
-            &format!(
+        let title = if model.report.findings.is_empty() {
+            i18n.t(crate::MessageId::HealthBannerTitle).to_string()
+        } else {
+            format!(
                 "{}: {}",
                 i18n.t(crate::MessageId::HealthBannerTitle),
                 health_status_label(model.report, i18n)
-            ),
-            width.max(1) as usize,
-        );
+            )
+        };
+        let mut lines = wrap_plain_line(&title, width.max(1) as usize);
         for line in health_body_lines(model.report, i18n, width, false) {
             lines.extend(wrap_prefixed_line("  ", &line.plain_text(), content_width));
         }
@@ -282,7 +284,7 @@ fn health_startup_row_text(report: &HealthScanReport, i18n: crate::I18n) -> Stri
         cells.push(format!("{}ms", report.elapsed_ms));
     }
     cells.extend(
-        metric_cells(report, i18n)
+        metric_cells(report, i18n, true)
             .into_iter()
             .map(|cell| cell.render()),
     );
@@ -307,6 +309,9 @@ fn health_display_severity(report: &HealthScanReport) -> HealthSeverity {
 }
 
 fn health_status_style(report: &HealthScanReport) -> Style {
+    if health_collection_gap_only(report) {
+        return Style::default().fg(Color::Gray);
+    }
     let severity = health_display_severity(report);
     if severity == HealthSeverity::Ok && !report.facts.is_empty() {
         Style::default().fg(Color::Green)
@@ -317,6 +322,13 @@ fn health_status_style(report: &HealthScanReport) -> Style {
 
 fn health_status_label(report: &HealthScanReport, i18n: crate::I18n) -> String {
     let collection_gap_only = health_collection_gap_only(report);
+    if collection_gap_only {
+        return if is_zh(i18n) {
+            "部分检查未完成".to_string()
+        } else {
+            "some checks incomplete".to_string()
+        };
+    }
     if report.overall_severity != HealthSeverity::Ok && !collection_gap_only {
         return severity_label(report.overall_severity, i18n);
     }
@@ -326,11 +338,10 @@ fn health_status_label(report: &HealthScanReport, i18n: crate::I18n) -> String {
         } else {
             "not checked".to_string()
         }
-    } else if collection_gap_only
-        || report
-            .check_results
-            .iter()
-            .any(|check| check.status != crate::diagnostics::health::model::HealthCheckStatus::Ok)
+    } else if report
+        .check_results
+        .iter()
+        .any(|check| check.status != crate::diagnostics::health::model::HealthCheckStatus::Ok)
     {
         if is_zh(i18n) {
             "已检查项未见异常".to_string()

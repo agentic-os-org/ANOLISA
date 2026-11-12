@@ -61,14 +61,18 @@ pub(super) fn dynamic_load_5m_cell(
     Some(cell)
 }
 
-pub(super) fn metric_cells(report: &HealthScanReport, i18n: crate::I18n) -> Vec<HealthMetricCell> {
+pub(super) fn metric_cells(
+    report: &HealthScanReport,
+    i18n: crate::I18n,
+    startup_row: bool,
+) -> Vec<HealthMetricCell> {
     let mut cells = Vec::new();
     if let Some(cell) = load_metric_cell(
         report,
         i18n,
         "cpu.load_1m",
         "cpu.load_per_core_1m",
-        !health_uses_startup_row(report),
+        !startup_row,
     ) {
         cells.push(cell);
     }
