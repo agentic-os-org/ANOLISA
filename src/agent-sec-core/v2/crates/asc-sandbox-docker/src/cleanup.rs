@@ -22,7 +22,10 @@ impl<'a, T> Cleanup<'a, T> {
             "config": client.directory,
             "staging": plan.mounts.iter().map(|mount| &mount.source).collect::<Vec<_>>(),
             "state": "unknown-until-cleanup-confirmed",
-                        "recovery_argv": ["docker", "--host", client.host.as_str(), "--config", &client.directory.to_string_lossy(), "rm", "-f", name]
+            "recovery_argv": [
+                "docker", "--host", client.host.as_str(), "--config",
+                &client.directory.to_string_lossy(), "rm", "-f", "--volumes", name
+            ]
         });
         std::fs::write(
             client.directory.join("recovery.json"),
@@ -74,7 +77,10 @@ impl<T> Drop for Cleanup<'_, T> {
 
 fn remove(client: &Client, name: &str) -> Result<(), DockerError> {
     for _ in 0..3 {
-        let _ = client.output(client.command(&["rm", "-f", name]), Duration::from_secs(10));
+        let _ = client.output(
+            client.command(&["rm", "-f", "--volumes", name]),
+            Duration::from_secs(10),
+        );
         let filter = format!("name=^/{name}$");
         let output = client.output(
             client.command(&["ps", "--all", "--filter", &filter, "--format", "{{.ID}}"]),

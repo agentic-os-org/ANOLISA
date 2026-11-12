@@ -160,6 +160,12 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 Docker 仅接受 OS permission JSON；Cedar 原文和 Cedar source envelope 必须使用 Linux 后端，
 在调用 Docker 前即被拒绝。
 
+目标程序必须使用容器内的绝对路径；后端显式覆盖镜像 ENTRYPOINT，参数仅使用请求值，
+空参数列表也不会继承镜像 CMD。启动前核验实际 executable、args、工作目录和安全选项，
+拒绝额外挂载（包括镜像声明产生的匿名卷）；清理时一并删除该容器的匿名卷。
+执行身份仍由可信镜像的 USER 决定，不自动映射宿主 UID。结束时要求容器已停止，
+并交叉核验 attach 与容器退出码。
+
 Docker 挂载要求宿主 root、`CAP_SYS_ADMIN` 和内核 `open_tree`/`move_mount` 支持；
 不自动提权，缺少能力即拒绝（包括通常的 rootless 部署）。源路径不能含符号链接。
 后端逐级打开源对象，在持有的 FD 上核验授权身份，再挂载到 root 管理的
@@ -185,6 +191,7 @@ create 限时 60 秒，超时或删除无法确认时保留 staging/config 和 `
 后，再卸载记录中的 staging 并清理目录。guard 自身被强杀、宿主故障或 daemon 长期不可达
 仍可能留下资源；不能把这些情况视作清理成功。
 
+网络权限 `off` 映射为 Docker `none`，`full` 映射为 `host`，后者共享宿主网络命名空间。
 Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
 网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair
 和兼容 ABI 被阻断。Docker seccomp 仅支持原生 x86_64 和 aarch64。拒绝 socket、设备、FIFO

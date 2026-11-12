@@ -212,6 +212,15 @@ Deny rules, noexec and runtime-owned paths are rejected rather than approximated
 Docker accepts OS permission JSON only; raw Cedar and Cedar source envelopes
 require the Linux backend and are rejected before invoking Docker.
 
+The target program must be an absolute container path. The backend explicitly
+overrides the image ENTRYPOINT and uses only the requested arguments; an empty
+argument list does not inherit image CMD. Before start it verifies the effective
+executable, args, working directory and security options, rejecting extra mounts
+including image-declared anonymous volumes. Cleanup also removes the container's
+anonymous volumes. The trusted image USER still determines execution identity;
+host UIDs are not automatically mapped. Completion requires a stopped container
+and matching attach/container exit codes.
+
 Docker mounts require host root, `CAP_SYS_ADMIN`, and kernel support for
 `open_tree`/`move_mount`. Missing capabilities are rejected without automatic
 privilege elevation, including typical rootless deployments. Source paths must
@@ -248,6 +257,8 @@ has settled and the container is absent, then unmount recorded staging paths and
 remove those directories. Killing the guard itself, host failure or a persistently
 unreachable daemon may still leave resources; these are not successful cleanup.
 
+Network permission `off` maps to Docker `none`; `full` maps to `host`, sharing
+the host network namespace.
 Both Docker network modes block external Unix sockets, including pathname
 sockets inside an allowed directory and abstract sockets in the host network
 namespace. Local stream/seqpacket socket pairs remain available; datagram pairs
