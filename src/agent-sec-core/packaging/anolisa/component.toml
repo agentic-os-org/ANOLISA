@@ -145,6 +145,18 @@ source = "share/doc/sec-core/LICENSE"
 target = "{datadir}/doc/sec-core/LICENSE"
 mode = "0644"
 
+[[component.layout.files]]
+source = "share/anolisa/sec-core/sandbox/permissions.json.template"
+target = "{etcdir}/sec-core/sandbox/permissions.json.template"
+mode = "0644"
+type = "config"
+
+[[component.layout.files]]
+source = "share/anolisa/sec-core/sandbox_paths.py.in"
+target = "{datadir}/extensions/agent-sec-core/hooks/sandbox_paths.py"
+mode = "0644"
+render = "anolisa-paths-v1"
+
 [[component.services]]
 unit = "agent-sec-core.service"
 scope = "system"

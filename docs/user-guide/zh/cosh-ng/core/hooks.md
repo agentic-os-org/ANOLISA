@@ -63,7 +63,14 @@ timeout = 60000
 `allow` 表示继续，`block`/`deny` 表示停止操作，`ask` 请求用户确认。退出码 `2` 也会拦截。
 在 `cosh-core` 中，配置 `PreToolUse` Hook 遇到空输出、非法 JSON、超时或非预期的非零
 退出码时默认阻断，除非该 Hook 显式设置 `fail_open = true`。Extension Hook 成功时
-允许空输出，但执行错误仍默认阻断。配置 Hook 可返回 `{}` 显式透传。
+允许空输出，但执行错误仍默认阻断。Extension Hook 可将 `require_output_when_env` 设为
+环境变量名：该子进程变量已设置且不是 `0` 或 `false` 时，空输出视为失败；忽略大小写和
+前后空白。未设置保留原行为，空值或非法值要求输出；Hook 的 `env` 覆盖继承的变量值。
+这样可让安全模式开启后要求响应，同时保持扩展默认模式兼容。
+Cosh 将 `COSH_HOOK_EMPTY_OUTPUT_POLICY` 设置为当次调用实际使用的 `block` 或 `allow`，
+覆盖继承值及 Hook 的 `env` 声明。Hook 可通过该内部兼容信号拒绝缺少所需行为的宿主。
+它不是认证机制或用户配置选项；若输出失败必须阻止执行，仍须保持 `fail_open = false`。
+配置 Hook 可返回 `{}` 显式透传。
 默认超时为 60 秒；需要快速完成的检查可以设置更短的 `timeout`。
 同一事件的多个 Hook 需要按顺序运行时，设置 `sequential = true`。
 

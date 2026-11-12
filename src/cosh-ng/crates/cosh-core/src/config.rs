@@ -246,6 +246,11 @@ pub struct HookDefinition {
     /// PreToolUse hook failure must never silently authorize a tool call.
     #[serde(default)]
     pub fail_open: bool,
+    /// Require nonempty output when this child environment variable is set,
+    /// except for `0` or `false` (case-insensitive, surrounding whitespace ignored).
+    /// Unset preserves legacy behavior; invalid values require output.
+    #[serde(default)]
+    pub require_output_when_env: Option<String>,
     /// Environment variables injected into this hook's child process only.
     /// The child inherits the parent environment first, so an entry here
     /// overrides an inherited value of the same name. The host never calls

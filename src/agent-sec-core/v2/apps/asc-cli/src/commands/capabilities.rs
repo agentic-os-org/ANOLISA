@@ -28,7 +28,7 @@ pub struct CapabilitiesCommand {
     /// Filter by agent. Allowed: qoder, qwen, codex, cosh, openclaw, hermes.
     #[arg(long, short = 'a')]
     agent: Option<String>,
-    /// Filter by capability. Allowed: code-scan, prompt-scan, pii-check, skill-ledger, observability.
+    /// Filter by capability. Allowed: code-scan, prompt-scan, pii-check, skill-ledger, observability, sandbox (Cosh only).
     #[arg(long, short = 'c')]
     capability: Option<String>,
     /// Output format: table or json.
@@ -129,7 +129,7 @@ mod tests {
             ),
             (
                 vec!["--capability", "scan-code"],
-                "Error: unknown capability: scan-code. Allowed values: code-scan, prompt-scan, pii-check, skill-ledger, observability\n",
+                "Error: unknown capability: scan-code. Allowed values: code-scan, prompt-scan, pii-check, skill-ledger, observability, sandbox\n",
             ),
             (
                 vec!["--output", "yaml"],

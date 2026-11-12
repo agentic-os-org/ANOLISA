@@ -21,7 +21,10 @@ Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- comm
 [Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。应用可通过
 `asc-pep-runtime::PepRuntime` 接入策略授权，由 daemon `--authorization-config`
 选择 PAP 管理的 Cedar 策略。Policy 更新成功后，后续授权请求使用新版本。
-Cosh 可通过 `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接入这条流程，并复用原生审批界面。
+Cosh 通过 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 接入这条流程，使用原生审批界面和
+已安装的默认权限模板。所有已接入的 `shell` / `run_shell_command` 调用，包括普通
+Python 脚本和含 `sudo` 的原始命令，均经过授权。开关默认关闭；配置、权限边界和失败
+处理见 Sandbox 指南。
 
 ## 背景
 

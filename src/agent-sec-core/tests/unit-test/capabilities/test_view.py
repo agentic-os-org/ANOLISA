@@ -115,10 +115,10 @@ def _single_record(agent: str, capability: str, env: dict[str, str] | None = Non
     return records[0]
 
 
-def test_query_all_returns_six_agents_and_five_capabilities() -> None:
+def test_query_all_includes_the_cosh_sandbox_capability() -> None:
     records = query_capabilities(env={})
 
-    assert len(records) == 30
+    assert len(records) == 31
     assert {record.agent for record in records} == {
         "qoder",
         "qwen",
@@ -133,7 +133,48 @@ def test_query_all_returns_six_agents_and_five_capabilities() -> None:
         "pii-check",
         "skill-ledger",
         "observability",
+        "sandbox",
     }
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, False),
+        ("true", True),
+        (" TRUE ", True),
+        ("false", False),
+        ("1", True),
+        ("0", False),
+        ("invalid", "invalid"),
+    ],
+)
+def test_cosh_sandbox_view_matches_hook_switch(monkeypatch, raw, expected):
+    name = "AGENT_SEC_COSH_SANDBOX_ALL_SHELL"
+    env = {} if raw is None else {name: raw}
+    helper = load_standalone_hook(
+        "cosh_sandbox_config_view",
+        _SEC_CORE_ROOT / "cosh-extension/hooks/sandbox_authorization.py",
+    )
+    monkeypatch.delenv(name, raising=False)
+    if raw is not None:
+        monkeypatch.setenv(name, raw)
+    record = _single_record("cosh", "sandbox", env)
+    if expected == "invalid":
+        with pytest.raises(ValueError):
+            helper.all_shell_enabled()
+    else:
+        assert helper.all_shell_enabled() == expected
+    assert record.env[name]["effective"] == expected
+    assert record.env[name]["default"] is False
+    assert set(record.env) == {name}
+    assert record.mode == (
+        "blocked" if expected == "invalid" else "all-shell" if expected else "dangerous"
+    )
+    assert record.effective == "enabled" and record.timeout == "55"
+    assert [
+        item.agent for item in query_capabilities(capability="sandbox", env={})
+    ] == ["cosh"]
 
 
 @pytest.mark.parametrize(

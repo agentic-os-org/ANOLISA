@@ -69,9 +69,11 @@ DELIVERY_CORE_INPUTS = \
 	--file "$(DELIVERY_LICENSE_SOURCE)" \
 	--file "$(DELIVERY_ROOT)/packaging/systemd/agent-sec-core-v2.service.in" \
 	--file "$(DELIVERY_ROOT)/packaging/systemd/skillsec.json" \
+	--file "$(DELIVERY_ROOT)/packaging/sandbox/permissions.json.template" \
 	--target-file "$(DELIVERY_BINDIR)/linux-sandbox" \
 	--target-file "$(DELIVERY_UNITDIR)/agent-sec-core.service" \
 	--target-file "$(DELIVERY_CONFIGDIR)/skillsec.json" \
+	--target-file "$(DELIVERY_CONFIGDIR)/sandbox/permissions.json.template" \
 	--target-file "$(DELIVERY_DATADIR)/LICENSE" \
 	$(foreach file,asc_gateway_addon.py asc_gateway_policy.py mitmproxy.provenance github.cedar install-mitmproxy.sh,--file "$(DELIVERY_BUILD_OUTPUT)/gateway/$(file)" --target-file "$(DELIVERY_DATADIR)/gateway/$(file)") \
 	--executable "$(DELIVERY_BUILD_OUTPUT)/gateway/install-mitmproxy.sh" \
@@ -87,6 +89,7 @@ DELIVERY_PLUGIN_INPUTS = \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/hermes-plugin" \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/cosh-extension/cosh-extension.json" \
+	--file "$(DELIVERY_BUILD_OUTPUT)/cosh-extension/hooks/sandbox_paths.py" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/codex-plugin/install.sh" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin/install.sh" \
 	--glob "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin/hooks/*.py" \

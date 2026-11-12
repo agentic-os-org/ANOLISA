@@ -319,6 +319,8 @@ fi
 %{_datadir}/anolisa/sec-core/gateway/mitmproxy.provenance
 %attr(0755,root,root) %{_datadir}/anolisa/sec-core/gateway/install-mitmproxy.sh
 %dir %{_sysconfdir}/agent-sec
+%dir %attr(0755,root,root) %{_sysconfdir}/agent-sec/sandbox
+%config(noreplace) %attr(0644,root,root) %{_sysconfdir}/agent-sec/sandbox/permissions.json.template
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/agent-sec/skillsec.json
 %license LICENSE
 

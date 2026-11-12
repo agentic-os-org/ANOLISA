@@ -10,6 +10,7 @@ from cli.conftest import run_cli
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 _CAPABILITY_ENV_NAMES = (
+    "AGENT_SEC_COSH_SANDBOX_ALL_SHELL",
     "CODE_SCANNER_HOOK_ENABLED",
     "CODE_SCANNER_MODE",
     "CODE_SCANNER_TIMEOUT",
@@ -211,9 +212,10 @@ def test_capabilities_json_lists_complete_default_matrix_in_stable_order() -> No
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     payload = json.loads(result.stdout)
-    assert len(payload) == len(_AGENTS) * len(_CAPABILITIES)
+    assert len(payload) == len(_AGENTS) * len(_CAPABILITIES) + 1
     assert [(item["agent"], item["capability"]) for item in payload] == sorted(
-        (agent, capability) for agent in _AGENTS for capability in _CAPABILITIES
+        [(agent, capability) for agent in _AGENTS for capability in _CAPABILITIES]
+        + [("cosh", "sandbox")]
     )
     assert all(item["enabled"] == "enabled" for item in payload)
     assert all(
@@ -637,6 +639,7 @@ _STATIC_DEFAULT_TIMEOUTS = {
     ("hermes", "skill-ledger"): "5",
 }
 _DEFAULT_TIMEOUTS = {
+    ("cosh", "sandbox"): "55",
     **{(agent, "observability"): "5" for agent in _AGENTS},
     **{(agent, "code-scan"): "10" for agent in ("qoder", "qwen", "codex")},
     **{(agent, "prompt-scan"): "10" for agent in ("qoder", "qwen", "codex")},
@@ -658,6 +661,22 @@ def test_capabilities_default_timeouts_match_every_hook_runtime() -> None:
     assert reported == _DEFAULT_TIMEOUTS
 
 
+def test_capabilities_cosh_sandbox_reports_switch_without_source_override() -> None:
+    with _EnvPatch(
+        AGENT_SEC_COSH_SANDBOX_ALL_SHELL=" TRUE ",
+    ):
+        result = run_cli("capabilities", "--capability", "sandbox", "--output", "json")
+    assert result.returncode == 0, result.stderr
+    records = json.loads(result.stdout)
+    assert len(records) == 1 and records[0]["agent"] == "cosh"
+    assert records[0]["mode"] == "all-shell"
+    assert records[0]["env"]["AGENT_SEC_COSH_SANDBOX_ALL_SHELL"] == {
+        "effective": True,
+        "default": False,
+    }
+    assert set(records[0]["env"]) == {"AGENT_SEC_COSH_SANDBOX_ALL_SHELL"}
+
+
 def test_capabilities_table_keeps_the_documented_column_order() -> None:
     with _EnvPatch(NO_COLOR="1", COLUMNS="200"):
         result = run_cli("capabilities", "--agent", "cosh")
@@ -674,7 +693,7 @@ def test_capabilities_table_keeps_the_documented_column_order() -> None:
         "DIAGNOSTICS",
     ]
     assert set(lines[2]) == {"-", " "}
-    assert len(lines) == 3 + len(_CAPABILITIES)
+    assert len(lines) == 3 + len(_CAPABILITIES) + 1
 
 
 @pytest.mark.parametrize("socket", [None, "relative.sock", "/nonexistent/daemon.sock"])

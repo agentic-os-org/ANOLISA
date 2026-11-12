@@ -96,6 +96,9 @@ stage_payload() {
         "$ROOT/packaging/systemd/agent-sec-core-v2.service.in" \
         "$stage/share/anolisa/sec-core/agent-sec-core.service.in"
     install -p -m 0644 "$ROOT/LICENSE" "$stage/share/doc/sec-core/LICENSE"
+    install -d -m 0755 "$stage/share/anolisa/sec-core/sandbox"
+    install -p -m 0644 "$ROOT/packaging/sandbox/permissions.json.template" \
+        "$stage/share/anolisa/sec-core/sandbox/permissions.json.template"
     install -d -m 0755 "$stage/share/anolisa/sec-core/gateway"
     install -p -m 0644 "$BUILD_DIR/gateway/asc_gateway_addon.py" \
         "$BUILD_DIR/gateway/asc_gateway_policy.py" \
@@ -124,6 +127,12 @@ stage_payload() {
     copy_tree "$BUILD_DIR/qwen-code-extension" "$stage/adapters/sec-core/qwencode"
     copy_tree "$BUILD_DIR/cosh-extension" "$stage/adapters/sec-core/cosh"
     copy_tree "$BUILD_DIR/skills" "$stage/share/anolisa/skills"
+
+    # Render only the path module; the rest of the Python bundle is copied verbatim.
+    sed 's|/etc/agent-sec/sandbox/permissions.json.template|{etcdir}/sec-core/sandbox/permissions.json.template|g' \
+        "$ROOT/cosh-extension/hooks/sandbox_paths.py" \
+        > "$stage/share/anolisa/sec-core/sandbox_paths.py.in"
+    rm -f "$stage/adapters/sec-core/cosh/hooks/sandbox_paths.py"
 
     python3 "$ROOT/packaging/raw/adapt_payload.py" "$stage"
 
