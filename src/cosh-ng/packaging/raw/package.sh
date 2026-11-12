@@ -79,7 +79,6 @@ normalize_modes() {
     chmod 0755 \
         "$stage/bin/cosh-cli" \
         "$stage/bin/cosh" \
-        "$stage/bin/cosh-switch" \
         "$stage/libexec/anolisa/cosh-ng/cosh-core" \
         "$stage/libexec/anolisa/cosh-ng/cosh-gateway" \
         "$stage/libexec/anolisa/cosh-ng/cosh-shell"
@@ -103,7 +102,6 @@ stage_payload() {
         '{datadir}/skills' '{datadir}/extensions'
     install -p -m 0755 \
         "$SCRIPT_DIR/assets/bin/cosh" \
-        "$SCRIPT_DIR/assets/bin/cosh-switch" \
         "$stage/bin/"
     if [ "$TARGET_OS" = "linux" ]; then
         install -d -m 0755 \
@@ -158,8 +156,7 @@ for input in \
     "$SOURCE_ROOT/README.md" \
     "$SOURCE_ROOT/skills/manage-task-checkpoints/SKILL.md" \
     "$SOURCE_ROOT/packaging/systemd/cosh-gateway@.service.in" \
-    "$SCRIPT_DIR/assets/bin/cosh" \
-    "$SCRIPT_DIR/assets/bin/cosh-switch"; do
+    "$SCRIPT_DIR/assets/bin/cosh"; do
     require_file "$input"
 done
 for binary in cosh-cli $COSH_PRIVATE_BINARIES; do

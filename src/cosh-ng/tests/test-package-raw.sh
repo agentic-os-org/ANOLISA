@@ -307,6 +307,7 @@ TARGET_OS=linux \
 TARGET_ARCH=x86_64 \
 DESTDIR="$STAGED" \
     "$ROOT/packaging/raw/package.sh" stage >/dev/null
+test ! -e "$STAGED/bin/cosh-switch"
 
 install -d -m 0755 "$TMP/not-empty"
 printf 'occupied\n' > "$TMP/not-empty/file"
@@ -439,16 +440,7 @@ test "$(bash "$LINKED_BIN/cosh" --version)" = $'1\n--version'
 test "$("$EXTRACTED/bin/cosh" prompt)" = $'1\nprompt'
 test "$(printf '' | "$EXTRACTED/bin/cosh")" = "0"
 
-NO_RPM_OUTPUT="$TMP/cosh-switch-no-rpm.out"
-if PATH="$TMP/no-rpm-path" "$BASH" \
-    "$EXTRACTED/bin/cosh-switch" >"$NO_RPM_OUTPUT" 2>&1; then
-    echo "ERROR: cosh-switch unexpectedly succeeded without RPM ownership" >&2
-    exit 1
-else
-    test "$?" -eq 1
-fi
-grep -Fq 'only supported for RPM-managed cosh-ng/copilot-shell' "$NO_RPM_OUTPUT"
-grep -Fq 'switch components with anolisa install/uninstall' "$NO_RPM_OUTPUT"
+test ! -e "$EXTRACTED/bin/cosh-switch"
 
 python3 "$ROOT/packaging/raw/verify-release.py" \
     "$SOURCE" "$LINUX_CONTRACT" --os linux --arch x86_64 >/dev/null

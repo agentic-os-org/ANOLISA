@@ -21,7 +21,6 @@ enum Action {
     CheckTarget(PathBuf),
     Replace(PathBuf),
     Downgrade(PathBuf),
-    SwapToCopilot,
 }
 
 pub(crate) fn run_cli(args: &[OsString]) -> i32 {
@@ -39,7 +38,7 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
 }
 
 fn usage() -> Error {
-    Error { message: "usage: login-preflight --verify-installed --entry /usr/bin/cosh --record-version 1 | check-erase | check-protocol 1 --record-version 1 --entry /usr/bin/cosh | check-target|replace|downgrade ABSOLUTE_RPM | swap-to-copilot | erase".into(), usage: true }
+    Error { message: "usage: login-preflight --verify-installed --entry /usr/bin/cosh --record-version 1 | check-erase | check-protocol 1 --record-version 1 --entry /usr/bin/cosh | check-target|replace|downgrade ABSOLUTE_RPM | erase".into(), usage: true }
 }
 
 fn parse(args: &[OsString]) -> Result<Action> {
@@ -59,7 +58,6 @@ fn parse(args: &[OsString]) -> Result<Action> {
         ["check-protocol", "1", "--record-version", "1", "--entry", COSH_PATH] => {
             Ok(Action::CheckProtocol)
         }
-        ["swap-to-copilot"] => Ok(Action::SwapToCopilot),
         [action @ ("check-target" | "replace" | "downgrade"), path] => {
             let path = PathBuf::from(path);
             if !path.is_absolute()
@@ -269,16 +267,11 @@ fn run(action: Action, euid: u32) -> Result<()> {
             inherit_lock(&lock)?;
             Err(Error::io(command.exec()))
         }
-        Action::SwapToCopilot | Action::Erase => {
-            let erase = action == Action::Erase;
+        Action::Erase => {
             let lock = store.lock()?;
             prepare_transaction(&store, false, audit)?;
             let mut command = account::command("/usr/bin/dnf")?;
-            if erase {
-                command.args(["remove", "cosh-ng"]);
-            } else {
-                command.args(["swap", "cosh-ng", "copilot-shell"]);
-            }
+            command.args(["remove", "cosh-ng"]);
             inherit_lock(&lock)?;
             Err(Error::io(command.exec()))
         }

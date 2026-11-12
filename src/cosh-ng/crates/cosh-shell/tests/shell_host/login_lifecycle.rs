@@ -109,14 +109,12 @@ fn missing_old_backend_allows_only_absent_empty_or_safe_lock_state() {
 #[test]
 fn packaged_shell_assets_parse_and_noninteractive_loader_is_silent() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/login");
-    for name in ["login-preflight", "cosh-switch"] {
-        assert!(std::process::Command::new("/bin/sh")
-            .arg("-n")
-            .arg(root.join(name))
-            .status()
-            .unwrap()
-            .success());
-    }
+    assert!(std::process::Command::new("/bin/sh")
+        .arg("-n")
+        .arg(root.join("login-preflight"))
+        .status()
+        .unwrap()
+        .success());
     let loader = root.join("../system-integration/bashrc-source.bash");
     assert!(std::process::Command::new("/bin/bash")
         .arg("-n")

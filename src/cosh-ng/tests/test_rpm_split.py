@@ -80,7 +80,6 @@ class RpmPackageTests(unittest.TestCase):
                     "LICENSE",
                     "README.md",
                     "packaging/payload.sh",
-                    "packaging/login/cosh-switch",
                     "packaging/login/login-preflight",
                     "packaging/login/login-capability.json",
                     "packaging/bash/cosh-integration.bash",
@@ -119,7 +118,8 @@ class RpmPackageTests(unittest.TestCase):
                 )
                 ownership = file_entries(self.source, "%files", macros)
                 files = [p for p in stage.rglob("*") if p.is_symlink() or p.is_file()]
-                self.assertEqual(len(files), 13)
+                self.assertFalse((stage / "usr/bin/cosh-switch").exists())
+                self.assertEqual(len(files), 12)
                 self.assertFalse((stage / "etc/profile.d").exists())
                 self.assertFalse((stage / "etc/bashrc").exists())
                 for path in files:
@@ -139,7 +139,6 @@ class RpmPackageTests(unittest.TestCase):
                 self.assertEqual(
                     os.readlink(stage / "usr/bin/cosh"), macros["_libexecdir_cosh"] + "/cosh-shell"
                 )
-                self.assertIn("login-preflight swap-to-copilot", (stage / "usr/bin/cosh-switch").read_text())
                 preflight = stage / "usr/libexec/cosh/login-preflight"
                 self.assertIn(macros["_libexecdir_cosh"] + "/cosh-shell", preflight.read_text())
                 resources = stage / macros["_libexecdir_cosh"].lstrip("/") / "resources.conf"

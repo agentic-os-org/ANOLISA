@@ -63,7 +63,6 @@ chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
 # TUI-vs-passthrough decision lives in cosh-shell's invocation classifier.
 ln -s %{_libexecdir_cosh}/cosh-shell %{buildroot}%{_bindir}/cosh
 
-install -m 0755 packaging/login/cosh-switch %{buildroot}%{_bindir}/cosh-switch
 install -d %{buildroot}%{_libexecdir}/cosh
 sed 's|/usr/libexec/anolisa/cosh-ng/cosh-shell|%{_libexecdir_cosh}/cosh-shell|g' \
     packaging/login/login-preflight > %{buildroot}%{_libexecdir}/cosh/login-preflight
@@ -88,7 +87,6 @@ bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 %doc %{_docdir}/%{name}/README.md
 %{_bindir}/cosh-cli
 %{_bindir}/cosh
-%{_bindir}/cosh-switch
 %dir %{_libexecdir}/cosh
 %{_libexecdir}/cosh/login-preflight
 %dir %{_datadir}/cosh
