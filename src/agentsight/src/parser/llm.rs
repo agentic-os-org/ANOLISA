@@ -265,13 +265,17 @@ fn gemini_content_to_messages(content: &Value) -> Vec<Value> {
             }
         }
         if let Some(call) = part.get("functionCall").filter(|c| c.is_object()) {
-            tool_calls.push(serde_json::json!({
+            let mut tool_call = serde_json::json!({
                 "type": "function",
                 "function": {
                     "name": call.get("name").and_then(|n| n.as_str()).unwrap_or_default(),
                     "arguments": call.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
                 },
-            }));
+            });
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                tool_call["id"] = Value::String(id.to_owned());
+            }
+            tool_calls.push(tool_call);
         }
         if let Some(response) = part.get("functionResponse").filter(|r| r.is_object()) {
             push_gemini_pending_message(
@@ -281,14 +285,18 @@ fn gemini_content_to_messages(content: &Value) -> Vec<Value> {
                 &mut tool_calls,
                 &mut has_text,
             );
-            messages.push(serde_json::json!({
+            let mut message = serde_json::json!({
                 "role": "tool",
                 "name": response
                     .get("name")
                     .and_then(|n| n.as_str())
                     .unwrap_or_default(),
                 "content": response.get("response").unwrap_or(&Value::Null).to_string(),
-            }));
+            });
+            if let Some(id) = response.get("id").and_then(Value::as_str) {
+                message["tool_call_id"] = Value::String(id.to_owned());
+            }
+            messages.push(message);
         }
     }
     push_gemini_pending_message(
