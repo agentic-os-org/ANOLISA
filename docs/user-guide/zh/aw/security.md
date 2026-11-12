@@ -23,7 +23,7 @@ AW Provider 不包含也不启动后端。root daemon 必须使用 root 控制�
 先[安装 AW CLI](installation.md)，再安装 Provider 桥接程序：
 
 ```bash
-export AW_VERSION=0.1.0
+export AW_VERSION=0.1.1
 export AW_SEC_BUNDLE="aw-provider-sec-core-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_SEC_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"

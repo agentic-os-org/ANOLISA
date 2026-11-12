@@ -15,7 +15,7 @@ Tokenless 压缩工具文本，减少后续模型上下文，也可以建议输�
 安装到独立的扩展 prefix：
 
 ```bash
-export AW_VERSION=0.1.0
+export AW_VERSION=0.1.1
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
@@ -62,7 +62,8 @@ Shell 工具。其他运行时见
 ## 运行时会发生什么
 
 - 启用输入替换后，Tokenless 在同次工具调用内改写受支持的命令，后续安全步骤检查候选参数，再交给原生权限流程与执行器。
-- 已发布的 AW 0.1.0 使用重试建议。输入替换需要包含该能力的源码构建，首个 before 步骤声明 `[replace_input]`，所有 before 步骤使用 `on_error: block`；见[集成参考](../../../developer-guide/zh/aw/providers/tokenless.md#pretool-与权限行为)。
+- 已发布的 AW 0.1.0 使用重试建议。AW 0.1.1 支持输入替换，首个 before 步骤需声明
+  `[replace_input]`，所有 before 步骤使用 `on_error: block`；见[集成参考](../../../developer-guide/zh/aw/providers/tokenless.md#pretool-与权限行为)。
 - 执行后会处理受支持的成功文本结果。失败结果、图片和不支持的内容保持原样。
 - 压缩失败、超时或没有收益时保留原结果。安全检查的拒绝不会被压缩步骤覆盖。
 

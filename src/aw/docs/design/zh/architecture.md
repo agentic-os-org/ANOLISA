@@ -40,7 +40,7 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，`aw-provider` 的测试还依赖 `aw-config`，CLI 集成测试还使用
 `aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用配置与本地扩展管理 API。
 独立 `aw-package` 可执行文件已删除，Rust crate 保留。`make -C src/aw build`
-构建 AW CLI；`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
+构建 AW CLI；`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
 `distribution/packaging/aw/` 下的普通脚本组装独立归档。
 扩展记录、文件校验和持久事务位于 `aw-package` 私有 `store` 模块；
 运行时文件读锁位于 `aw-exec`，不依赖包数据库访问。

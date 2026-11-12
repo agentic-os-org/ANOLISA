@@ -58,7 +58,7 @@ make -C providers/tokenless install PREFIX=/usr/local DESTDIR="$PWD/target/aw-ro
 使用干净源码工作树和空的绝对输出目录：
 
 ```bash
-make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' \
+make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' \
   OUTPUT="$PWD/target/aw-packages"
 cd target/aw-packages
 sha256sum -c SHA256SUMS
@@ -68,9 +68,9 @@ sha256sum -c SHA256SUMS
 
 | 条目 | 归档 | 内容 |
 | --- | --- | --- |
-| `core` | `aw-core-0.1.0-linux-<arch>.tar.gz` | `bin/aw`、普通安装 Makefile、来源和许可证文档 |
-| `sec-core` | `aw-provider-sec-core-0.1.0-linux-<arch>.tar.gz` | Provider `package.json`、桥接 payload、schema、示例和配置模板 |
-| `tokenless` | `aw-provider-tokenless-0.1.0-linux-<arch>.tar.gz` | Provider `package.json`、桥接 payload、示例和配置模板 |
+| `core` | `aw-core-0.1.1-linux-<arch>.tar.gz` | `bin/aw`、普通安装 Makefile、来源和许可证文档 |
+| `sec-core` | `aw-provider-sec-core-0.1.1-linux-<arch>.tar.gz` | Provider `package.json`、桥接 payload、schema、示例和配置模板 |
+| `tokenless` | `aw-provider-tokenless-0.1.1-linux-<arch>.tar.gz` | Provider `package.json`、桥接 payload、示例和配置模板 |
 
 选择一个或多个条目，不使用 `all` 或组合归档。`VERSION` 标记产物版本，不选择
 源码 tag。`distribution/packaging/aw/` 负责归档装配与具体模板。后端程序由自己的

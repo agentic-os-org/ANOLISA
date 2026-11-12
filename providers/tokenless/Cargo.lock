@@ -39,7 +39,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aw-exec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "aw-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jsonschema",
  "serde",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "aw-provider-sec-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-exec",
  "aw-provider",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "aw-provider-tokenless"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aw-exec",
  "aw-provider",

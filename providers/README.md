@@ -42,7 +42,7 @@ are not yet supported. Standalone SDK publication and artifact-based composition
 are future work. Integration builds select and test compatible framework, Provider
 and backend versions together; extension packages have independent IDs and versions.
 
-The distribution target `make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` builds
+The distribution target `make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` builds
 independent core, sec-core Provider and Tokenless Provider archives through scripts in
 `distribution/packaging/aw/`. A new folder
 is not automatically bundled or installed; independent Providers supply their

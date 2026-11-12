@@ -33,7 +33,7 @@ AW 框架与协议库留在 `../src/aw/crates/`。
 桥接库，尚不支持仓库外构建。SDK 独立发布和基于产物的组合测试留待后续。
 集成构建共同选择并验证兼容的框架、Provider 与后端版本；扩展包有独立的 ID 和版本。
 
-distribution 的 `make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
+distribution 的 `make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
 `distribution/packaging/aw/` 中的普通脚本构建独立 core、sec-core Provider、Tokenless Provider 归档。新增目录不会自动加入安装包；
 独立 Provider 自带安装方式。若要纳入统一分发，还需补包清单、构建安装逻辑及生命周期测试。
 

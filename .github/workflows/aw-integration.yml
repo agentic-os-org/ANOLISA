@@ -139,7 +139,7 @@ jobs:
       - name: Test installer and build independent artifacts
         run: |
           make -C distribution test-aw-packages
-          make -C distribution aw-packages VERSION=0.1.0 \
+          make -C distribution aw-packages VERSION=0.1.1 \
             OUTPUT="$AW_PACKAGE_DIR/packages" COMPONENTS="core sec-core tokenless"
           make -C distribution aw-integration-backends BACKENDS="sec-core tokenless"
       - name: Stage the same build for native acceptance

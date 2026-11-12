@@ -1,6 +1,6 @@
 [package]
 name = "aw-provider-tokenless"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "AW tool lifecycle Provider bridge to the Tokenless Protocol v2 CLI"

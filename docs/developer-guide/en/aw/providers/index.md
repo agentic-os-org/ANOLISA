@@ -76,7 +76,7 @@ yet build outside the repository. Pinned SDKs, independent releases and artifact
 composition tests are deferred. Integration builds test framework, Provider and
 backend versions together; local extensions retain independent IDs and versions.
 
-`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes the scripts in
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` invokes the scripts in
 `distribution/packaging/aw/` to build independent core and Provider archives.
 Local Provider extension
 installation accepts verified independent `package.json` bundles in the

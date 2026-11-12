@@ -62,7 +62,7 @@ cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 桥接库，尚不能脱离仓库独立构建。固定版本 SDK、独立发布及产物级组合测试留待后续。
 集成构建共同验证框架、Provider 与后端版本；本地扩展有独立的 ID 和版本。
 
-`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
+`make -C distribution aw-packages VERSION=0.1.1 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 调用 `distribution/packaging/aw/`
 中的脚本构建独立 core 与 Provider 归档。本地 Provider 扩展安装可接受已核验的独立
 `package.json`，格式见[本地 Provider 包参考](../reference/packages.md)，不下载社区
 Provider 或解析产品名称。`aw-package` 的 Provider 文件事务保留为私有实现；
