@@ -115,7 +115,13 @@ impl DockerBackend {
         let outcome = (|| {
             self.create_container(client, spec, &plan)?;
             cleanup.creation_confirmed = true;
-            Self::verify_fence(client, name, &plan, &crate::seccomp::network_profile()?)?;
+            Self::verify_fence(
+                client,
+                name,
+                spec,
+                &plan,
+                &crate::seccomp::network_profile()?,
+            )?;
             let status = attach(client, name)?;
             Self::finished(client, name, status)
         })();
@@ -173,7 +179,6 @@ impl DockerBackend {
             format!("seccomp={}", seccomp.path().display()),
         ]);
         create_args.push(self.config.image.clone());
-        create_args.push(spec.launch.program.clone());
         create_args.extend(spec.launch.args.iter().cloned());
         let mut command = client.command(&["create", "--pull", "never"]);
         command.args(&create_args);
@@ -207,6 +212,11 @@ impl DockerBackend {
                 diagnostic(state["Error"].as_str().unwrap_or_default().as_bytes())
             )));
         }
+        if state["Running"].as_bool() != Some(false) {
+            return Err(DockerError::Protocol(
+                "container has not confirmed a stopped state".into(),
+            ));
+        }
         result.exit_code = state["ExitCode"]
             .as_i64()
             .and_then(|code| i32::try_from(code).ok());
@@ -215,7 +225,7 @@ impl DockerBackend {
                 "container state lacks an exit code".into(),
             ));
         }
-        if status != Some(0) && result.exit_code != status {
+        if result.exit_code != status {
             return Err(DockerError::Protocol(format!(
                 "docker start status {:?} disagrees with container exit code {:?}",
                 status, result.exit_code
@@ -228,30 +238,47 @@ impl DockerBackend {
     fn verify_fence(
         client: &Client,
         name: &str,
+        spec: &ExecutionSpec,
         plan: &crate::ContainerPlan,
         profile: &serde_json::Value,
     ) -> Result<(), DockerError> {
         let inspected = Self::inspect(client, name)?;
+        verify_invocation(&inspected, &spec.launch)?;
         let host = &inspected["HostConfig"];
         if host["NetworkMode"].as_str() != Some(plan.network_mode.as_str())
             || host["ReadonlyRootfs"].as_bool() != Some(true)
-            || !host["CapDrop"]
-                .as_array()
-                .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("ALL")))
+            || host["Privileged"].as_bool() != Some(false)
+            || !string_list_matches(&host["CapAdd"], &[])
+            || host["CapDrop"] != serde_json::json!(["ALL"])
         {
             return Err(DockerError::Protocol(
                 "created container does not match the planned network/rootfs/capability fence"
                     .into(),
             ));
         }
-        if !seccomp_matches(host, profile) {
+        if !seccomp_matches(host, profile)
+            || !host["SecurityOpt"].as_array().is_some_and(|options| {
+                options.len() == 2
+                    && options.iter().any(|option| {
+                        matches!(
+                            option.as_str(),
+                            Some("no-new-privileges" | "no-new-privileges=true")
+                        )
+                    })
+            })
+        {
             return Err(DockerError::Protocol(
-                "container lacks the exact AF_UNIX seccomp fence".into(),
+                "container lacks the exact AF_UNIX seccomp/no-new-privileges fence".into(),
             ));
         }
         let actual = inspected["Mounts"]
             .as_array()
             .ok_or_else(|| DockerError::Protocol("container inspect lacks mounts".into()))?;
+        if actual.len() != plan.mounts.len() {
+            return Err(DockerError::Protocol(
+                "container has unexpected mounts or image anonymous volumes".into(),
+            ));
+        }
         for mount in &plan.mounts {
             if mount.read_only && !recursive_readonly_matches(host, mount) {
                 return Err(DockerError::Unsupported(format!(
@@ -260,9 +287,11 @@ impl DockerBackend {
                 )));
             }
             let matched = actual.iter().any(|entry| {
-                entry["Source"].as_str() == Some(mount.source.as_str())
+                entry["Type"].as_str() == Some("bind")
+                    && entry["Source"].as_str() == Some(mount.source.as_str())
                     && entry["Destination"].as_str() == Some(mount.destination.as_str())
                     && entry["RW"].as_bool() == Some(!mount.read_only)
+                    && entry["Propagation"].as_str() == Some("rprivate")
             });
             if !matched {
                 return Err(DockerError::Protocol(format!(
@@ -311,6 +340,36 @@ impl DockerBackend {
             network_off: true,
         })
     }
+}
+
+// Docker encodes empty arguments as null or []; reject other types and extra arguments.
+fn string_list_matches(value: &serde_json::Value, expected: &[String]) -> bool {
+    (expected.is_empty() && value.is_null())
+        || value.as_array().is_some_and(|actual| {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, e)| a.as_str() == Some(e.as_str()))
+        })
+}
+
+fn verify_invocation(
+    inspected: &serde_json::Value,
+    launch: &LaunchSpec,
+) -> Result<(), DockerError> {
+    let config = &inspected["Config"];
+    if !string_list_matches(&config["Entrypoint"], std::slice::from_ref(&launch.program))
+        || !string_list_matches(&config["Cmd"], &launch.args)
+        || inspected["Path"].as_str() != Some(launch.program.as_str())
+        || !string_list_matches(&inspected["Args"], &launch.args)
+        || config["WorkingDir"].as_str() != Some(launch.cwd.as_str())
+    {
+        return Err(DockerError::Protocol(
+            "container executable/args/workdir differ from the requested invocation".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn recursive_readonly_matches(host: &serde_json::Value, mount: &crate::MountPlan) -> bool {

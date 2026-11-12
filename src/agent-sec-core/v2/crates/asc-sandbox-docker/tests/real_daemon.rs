@@ -46,6 +46,131 @@ fn spec(work: &Path, code: &str) -> ExecutionSpec {
     })).unwrap()
 }
 
+// Derive only test-owned container config; do not build, access the network or alter user images.
+struct ImageFixture {
+    directory: tempfile::TempDir,
+    seed: String,
+    image: String,
+}
+
+impl ImageFixture {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("/usr/bin/docker");
+        command
+            .env_clear()
+            .args(["--host", "unix:///var/run/docker.sock", "--config"])
+            .arg(self.directory.path())
+            .args(args);
+        command
+    }
+
+    fn entrypoint_image() -> Self {
+        let mut fixture = Self {
+            directory: tempfile::tempdir().unwrap(),
+            seed: format!("asc-entrypoint-test-{}", uuid::Uuid::new_v4()),
+            image: String::new(),
+        };
+        std::fs::write(fixture.directory.path().join("config.json"), "{}").unwrap();
+        let base = std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap();
+        let created = fixture
+            .command(&["create", "--pull", "never", "--name", &fixture.seed, &base])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let committed = fixture
+            .command(&[
+                "commit",
+                "--change",
+                "ENTRYPOINT [\"/bin/false\"]",
+                "--change",
+                "CMD [\"inherited-image-argument\"]",
+                "--change",
+                "USER 65534",
+                &fixture.seed,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            committed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&committed.stderr)
+        );
+        String::from_utf8(committed.stdout)
+            .unwrap()
+            .trim()
+            .clone_into(&mut fixture.image);
+        assert!(fixture.image.starts_with("sha256:"));
+        fixture
+    }
+}
+
+impl Drop for ImageFixture {
+    fn drop(&mut self) {
+        let removed = self
+            .command(&["rm", "-f", "--volumes", &self.seed])
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "test seed cleanup failed");
+        if !self.image.is_empty() {
+            let removed = self
+                .command(&["image", "rm", &self.image])
+                .output()
+                .unwrap();
+            assert!(
+                removed.status.success(),
+                "test image cleanup failed: {}",
+                String::from_utf8_lossy(&removed.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires host mount privileges, local Docker and pinned Python image"]
+fn requested_program_overrides_image_entrypoint_and_cmd() {
+    let image = ImageFixture::entrypoint_image();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let backend = DockerBackend::new(DockerConfig {
+        cli: "/usr/bin/docker".into(),
+        host: "unix:///var/run/docker.sock".into(),
+        guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
+        image: image.image.clone(),
+        memory: None,
+        cpus: None,
+        pids_limit: Some(64),
+    })
+    .unwrap();
+    let mut request = spec(
+        work.path(),
+        "import os, sys; from pathlib import Path; assert os.getuid() == 65534; assert sys.argv[1:] == ['a b', '', '--literal']; Path('executed').write_text(os.getcwd()); sys.exit(7)",
+    );
+    request
+        .launch
+        .args
+        .extend(["a b".into(), String::new(), "--literal".into()]);
+    assert_eq!(backend.execute_bound(&request).unwrap().exit_code, Some(7));
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("executed")).unwrap(),
+        work.path().to_str().unwrap()
+    );
+    // Empty args must not inherit image CMD; the custom script fails on any extra argument.
+    let executable = work.path().join("no-args");
+    std::fs::write(&executable, "#!/bin/sh\n[ \"$#\" = 0 ]\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    request.launch.program = executable.to_str().unwrap().into();
+    request
+        .launch
+        .resolved_program
+        .clone_from(&request.launch.program);
+    request.launch.args.clear();
+    assert_eq!(backend.execute_bound(&request).unwrap().exit_code, Some(0));
+}
+
 fn wait_for(mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !ready() {

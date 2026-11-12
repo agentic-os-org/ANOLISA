@@ -134,6 +134,8 @@ pub fn translate(
         config.pids_limit.unwrap_or(DEFAULT_PIDS_LIMIT).to_string(),
         "--workdir".into(),
         cwd.clone(),
+        "--entrypoint".into(),
+        spec.launch.program.clone(),
     ];
     if let Some(memory) = &config.memory {
         args.extend(["--memory".into(), memory.clone()]);
@@ -235,6 +237,8 @@ mod tests {
             "512",
             "--workdir",
             "/work",
+            "--entrypoint",
+            "/usr/bin/python3",
             "--env",
             "FOO=bar",
             "type=bind,source=/work,target=/work,bind-propagation=rprivate,readonly,bind-recursive=readonly",

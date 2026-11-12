@@ -18,6 +18,9 @@
 //!   Workspaces remain live; replacing a source path cannot change a pinned object. Fail closed.
 //! - The target program must be an absolute path inside the image; the working
 //!   directory must be covered by an allow rule so it exists in the container.
+//!   Override image ENTRYPOINT without inheriting CMD; verify program, args and cwd before start.
+//!   Reject extra mounts and anonymous image volumes. Retain image USER without mapping host UID.
+//!   Normal completion requires a stopped container and matching attach/container exit codes.
 //! - The trusted Docker CLI uses an absolute path, cleared environment and per-run empty config.
 //!   Local Unix endpoints require ownership, peer identity and staging visibility checks.
 //!   All calls pin endpoint/config; personal contexts, proxies, credentials and auto-pull are unused.
