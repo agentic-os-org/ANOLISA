@@ -1082,7 +1082,7 @@ fn startup_auth_hint_uses_the_probe_without_overriding_disabled_ai() {
     let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
     let hint = model.extra.join(" ");
     assert!(hint.contains("/auth"));
-    assert!(hint.contains("ECS"));
+    assert!(hint.contains("AI"));
     assert!(!hint.contains("AI not configured"));
     state.personalization.ai_disabled = true;
     let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
@@ -1091,18 +1091,18 @@ fn startup_auth_hint_uses_the_probe_without_overriding_disabled_ai() {
 }
 
 #[test]
-fn startup_auth_hint_presents_ecs_trial_and_optional_model_setup_in_both_languages() {
+fn startup_auth_hint_presents_direct_questions_and_optional_model_setup_in_both_languages() {
     for (language, direct_question, model_choice, misleading_claims) in [
         (
             Language::EnUs,
-            "ask directly",
-            "your preferred model",
+            "Ask a question",
+            "a model",
             ["AI not configured", "unlock", "must run /auth"],
         ),
         (
             Language::ZhCn,
-            "可直接提问",
-            "自选模型",
+            "可先提问",
+            "配置模型",
             ["尚未配置 AI", "解锁", "必须先"],
         ),
     ] {
@@ -1113,11 +1113,62 @@ fn startup_auth_hint_presents_ecs_trial_and_optional_model_setup_in_both_languag
         state.startup_auth.resolved = Some(false);
         let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
         let hint = model.extra.join(" ");
-        for expected in ["ECS", direct_question, "/auth", model_choice] {
+        for expected in [direct_question, "/auth", model_choice] {
             assert!(hint.contains(expected), "missing {expected:?}: {hint}");
         }
         for claim in misleading_claims {
             assert!(!hint.contains(claim), "misleading claim {claim:?}: {hint}");
+        }
+    }
+}
+
+#[test]
+fn startup_auth_hint_matches_each_environment_in_both_languages() {
+    use crate::adapter::StartupAuthHint;
+    for (hint, chinese, english) in [
+        (
+            StartupAuthHint::Ecs,
+            "直接提问，开始 AI 问答",
+            "Ask directly to start an AI conversation",
+        ),
+        (
+            StartupAuthHint::Configure,
+            "使用 /auth 配置模型后，即可开始 AI 问答",
+            "Configure a model with /auth to start an AI conversation",
+        ),
+        (
+            StartupAuthHint::Unknown,
+            "可先提问，按提示接入 AI · /auth 配置模型",
+            "Ask a question and follow the AI setup prompts · /auth to configure a model",
+        ),
+    ] {
+        for (language, expected) in [(Language::ZhCn, chinese), (Language::EnUs, english)] {
+            let mut state = InlineState {
+                language,
+                ..InlineState::default()
+            };
+            state.startup_auth.resolved = Some(false);
+            state.startup_auth.hint = hint;
+            assert_eq!(
+                super::welcome::welcome_model(&state, Some(("bash", "/tmp"))).extra,
+                vec![expected]
+            );
+            assert!(super::welcome::welcome_model(&state, None).extra.is_empty());
+            for resolved in [None, Some(true)] {
+                state.startup_auth.resolved = resolved;
+                assert!(
+                    super::welcome::welcome_model(&state, Some(("bash", "/tmp")))
+                        .extra
+                        .is_empty()
+                );
+            }
+            state.startup_auth.resolved = Some(false);
+            state.personalization.ai_disabled = true;
+            assert!(
+                super::welcome::welcome_model(&state, Some(("bash", "/tmp")))
+                    .extra
+                    .is_empty()
+            );
         }
     }
 }
@@ -1192,9 +1243,13 @@ fn startup_auth_state_resolves_bounded_and_fails_quiet() {
     let mut ready = StartupAuthState::default();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     ready.pending = Some(receiver);
-    sender.send(Some(false)).unwrap();
+    sender
+        .send(Some((false, crate::adapter::StartupAuthHint::Ecs)))
+        .unwrap();
+    drop(sender);
     ready.wait_ready(Duration::from_millis(150));
     assert!(ready.ai_unconfigured());
+    assert_eq!(ready.hint, crate::adapter::StartupAuthHint::Ecs);
     assert!(ready.pending.is_none());
 
     // Timeout leaves the probe unresolved without consuming it.
@@ -1205,18 +1260,43 @@ fn startup_auth_state_resolves_bounded_and_fails_quiet() {
     assert!(!slow.ai_unconfigured());
     assert!(slow.pending.is_some());
     // A late result is still picked up by a later non-blocking poll.
-    slow_sender.send(Some(false)).unwrap();
+    slow_sender
+        .send(Some((false, crate::adapter::StartupAuthHint::Configure)))
+        .unwrap();
     slow.poll_ready();
     assert!(slow.ai_unconfigured());
+    assert_eq!(slow.hint, crate::adapter::StartupAuthHint::Configure);
 
     // A dropped probe (failed thread) resolves to quiet, not to a hint.
     let mut dropped = StartupAuthState::default();
-    let (broken_sender, receiver) = std::sync::mpsc::sync_channel::<Option<bool>>(1);
+    let (broken_sender, receiver) =
+        std::sync::mpsc::sync_channel::<Option<(bool, crate::adapter::StartupAuthHint)>>(1);
     dropped.pending = Some(receiver);
     drop(broken_sender);
     dropped.wait_ready(Duration::from_millis(150));
     assert!(!dropped.ai_unconfigured());
     assert!(dropped.pending.is_none());
+}
+
+#[test]
+fn startup_auth_keeps_known_credentials_while_metadata_is_pending() {
+    use crate::adapter::StartupAuthHint;
+    let mut state = StartupAuthState::default();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+    state.pending = Some(receiver);
+    sender
+        .send(Some((false, StartupAuthHint::Unknown)))
+        .unwrap();
+    state.wait_ready(Duration::from_millis(10));
+    assert!(state.ai_unconfigured());
+    assert_eq!(state.hint, StartupAuthHint::Unknown);
+    assert!(state.pending.is_some());
+    sender.send(Some((false, StartupAuthHint::Ecs))).unwrap();
+    drop(sender);
+    state.poll_ready();
+    assert!(state.ai_unconfigured());
+    assert_eq!(state.hint, StartupAuthHint::Ecs);
+    assert!(state.pending.is_none());
 }
 
 #[test]

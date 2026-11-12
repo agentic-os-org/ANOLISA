@@ -38,7 +38,14 @@ pub(super) fn welcome_model(
             && !state.personalization.ai_disabled
             && state.startup_auth.ai_unconfigured()
         {
-            vec![i18n.t(MessageId::StartupAuthHintLine).to_string()]
+            let hint = match state.startup_auth.hint {
+                crate::adapter::StartupAuthHint::Ecs => MessageId::StartupEcsAuthHintLine,
+                crate::adapter::StartupAuthHint::Configure => {
+                    MessageId::StartupConfigureAuthHintLine
+                }
+                crate::adapter::StartupAuthHint::Unknown => MessageId::StartupAuthHintLine,
+            };
+            vec![i18n.t(hint).to_string()]
         } else {
             Vec::new()
         },

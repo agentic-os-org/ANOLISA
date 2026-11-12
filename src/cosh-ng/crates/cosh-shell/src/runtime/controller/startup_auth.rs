@@ -1,10 +1,10 @@
 use std::sync::{mpsc, Mutex};
 
-use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::adapter::{AdapterInstance, CoshCoreAdapter, StartupAuthHint};
 use crate::shell_host::ShellHostConfig;
 
-type ProbeSender = mpsc::SyncSender<Option<bool>>;
-type ProbeReceiver = mpsc::Receiver<Option<bool>>;
+type ProbeSender = mpsc::SyncSender<Option<(bool, StartupAuthHint)>>;
+type ProbeReceiver = mpsc::Receiver<Option<(bool, StartupAuthHint)>>;
 
 pub(super) fn probe_core(
     adapter: &AdapterInstance,
@@ -78,7 +78,7 @@ pub(super) fn arm(
 }
 
 fn channel() -> (ProbeSender, ProbeReceiver) {
-    mpsc::sync_channel(1)
+    mpsc::sync_channel(2)
 }
 
 fn start(core: CoshCoreAdapter) -> ProbeReceiver {
@@ -91,6 +91,12 @@ fn launch(core: CoshCoreAdapter, sender: ProbeSender) {
     let _ = std::thread::Builder::new()
         .name("cosh-startup-auth-probe".to_string())
         .spawn(move || {
-            let _ = sender.send(core.ai_configured().ok());
+            let initial = core.startup_auth_state().ok();
+            if sender.send(initial).is_err() {
+                return;
+            }
+            if initial == Some((false, StartupAuthHint::Unknown)) {
+                let _ = sender.send(Some((false, core.startup_ecs_hint())));
+            }
         });
 }

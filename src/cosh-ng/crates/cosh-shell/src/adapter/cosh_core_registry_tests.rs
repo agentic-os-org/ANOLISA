@@ -86,6 +86,56 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":tru
 }
 
 #[test]
+fn startup_auth_state_keeps_environment_probing_off_and_honors_disabled_auto_access() {
+    let script = write_mock_script(
+        "startup-auth",
+        r#"read REQUEST
+case "$REQUEST" in
+    *'"params":null'*) ;;
+    *) exit 2 ;;
+esac
+printf '%s\n' '{"type":"registry_response","request_id":"startup-auth","success":true,"data":{"effective_auth_required":true,"trial_preferences":{"auto_use":false}}}'
+"#,
+    );
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let result = adapter.startup_auth_state();
+    let _ = std::fs::remove_file(&script);
+    assert_eq!(result, Ok((false, super::StartupAuthHint::Configure)));
+}
+
+#[test]
+fn startup_ecs_hint_uses_read_only_prepare_and_preserves_probe_errors() {
+    use super::StartupAuthHint;
+    for (response, expected) in [
+        (
+            r#"{"mode":"ecs_ram_role","instance_id":"i-test","console_url":"https://example.test"}"#,
+            StartupAuthHint::Ecs,
+        ),
+        (r#"{"mode":"manual"}"#, StartupAuthHint::Unknown),
+        (
+            r#"{"error_code":"MetadataAccessDenied"}"#,
+            StartupAuthHint::Unknown,
+        ),
+    ] {
+        let success = expected == StartupAuthHint::Ecs || response.contains("manual");
+        let body = format!(
+            r#"read REQUEST
+case "$REQUEST" in
+    *'"action":"prepare"'*'"provider_type":"aliyun"'*) ;;
+    *) exit 2 ;;
+esac
+printf '%s\n' '{{"type":"registry_response","request_id":"startup-ecs","success":{success},"data":{response},"error":null}}'
+"#
+        );
+        let script = write_mock_script("startup-ecs", &body);
+        let adapter = test_adapter_with_program(&script.to_string_lossy());
+        let result = adapter.startup_ecs_hint();
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(result, expected);
+    }
+}
+
+#[test]
 fn registry_query_returns_error_on_failure() {
     let script = write_mock_script(
         "failure",

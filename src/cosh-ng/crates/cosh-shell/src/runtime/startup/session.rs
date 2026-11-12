@@ -83,8 +83,9 @@ impl StartupHealthState {
 /// Explicit initial questions let Core select trial access or request authentication.
 #[derive(Default)]
 pub(crate) struct StartupAuthState {
-    pub(crate) pending: Option<mpsc::Receiver<Option<bool>>>,
+    pub(crate) pending: Option<mpsc::Receiver<Option<(bool, crate::adapter::StartupAuthHint)>>>,
     pub(crate) resolved: Option<bool>,
+    pub(crate) hint: crate::adapter::StartupAuthHint,
 }
 
 impl StartupAuthState {
@@ -97,39 +98,32 @@ impl StartupAuthState {
     }
 
     pub(crate) fn wait_ready(&mut self, timeout: Duration) {
-        if self.resolved.is_some() {
-            return;
-        }
-        let Some(receiver) = &self.pending else {
-            return;
-        };
-        match receiver.recv_timeout(timeout) {
-            Ok(resolved) => {
-                self.resolved = resolved;
-                self.pending = None;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.pending = None;
+        let deadline = Instant::now() + timeout;
+        while let Some(receiver) = &self.pending {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(resolved) => {
+                    self.resolved = resolved.map(|(configured, _)| configured);
+                    self.hint = resolved.map(|(_, hint)| hint).unwrap_or_default();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.pending = None;
+                }
             }
         }
     }
 
     pub(crate) fn poll_ready(&mut self) {
-        if self.resolved.is_some() {
-            return;
-        }
-        let Some(receiver) = &self.pending else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(resolved) => {
-                self.resolved = resolved;
-                self.pending = None;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.pending = None;
+        while let Some(receiver) = &self.pending {
+            match receiver.try_recv() {
+                Ok(resolved) => {
+                    self.resolved = resolved.map(|(configured, _)| configured);
+                    self.hint = resolved.map(|(_, hint)| hint).unwrap_or_default();
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = None;
+                }
             }
         }
     }

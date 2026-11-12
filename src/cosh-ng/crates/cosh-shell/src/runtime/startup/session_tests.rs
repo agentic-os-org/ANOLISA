@@ -588,7 +588,7 @@ fn initial_question_rejects_snapshot_after_already_owned_user_write() {
             b"echo keyboard\r",
         )
         .unwrap();
-        auth_tx.send(Some(true)).unwrap();
+        auth_tx.send(Some((true, Default::default()))).unwrap();
     });
     copied_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let mut state = crate::runtime::state::InlineState::default();

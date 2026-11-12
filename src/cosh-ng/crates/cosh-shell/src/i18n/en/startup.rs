@@ -15,8 +15,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Rust project detected from `Cargo.toml`; `/skill` can show project-oriented Agent capabilities."
         }
         MessageId::StartupAuthHintLine => {
-            "\u{1f4a1} On ECS, ask directly to try AI Shell; use /auth to set up your preferred model."
+            "Ask a question and follow the AI setup prompts · /auth to configure a model"
         }
+        MessageId::StartupEcsAuthHintLine => "Ask directly to start an AI conversation",
+        MessageId::StartupConfigureAuthHintLine => "Configure a model with /auth to start an AI conversation",
         MessageId::StartupUpgradeHintLine => {
             "\u{1f4e6} Update available: cosh-ng {current} → {latest} — run `{command}` to upgrade, then log in again"
         }

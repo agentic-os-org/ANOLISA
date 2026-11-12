@@ -15,8 +15,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "检测到 `Cargo.toml` Rust 项目；`/skill` 可查看面向项目的 Agent 能力。"
         }
         MessageId::StartupAuthHintLine => {
-            "\u{1f4a1} ECS 上可直接提问体验 AI Shell；也可用 /auth 配置自选模型。"
+            "可先提问，按提示接入 AI · /auth 配置模型"
         }
+        MessageId::StartupEcsAuthHintLine => "直接提问，开始 AI 问答",
+        MessageId::StartupConfigureAuthHintLine => "使用 /auth 配置模型后，即可开始 AI 问答",
         MessageId::StartupUpgradeHintLine => {
             "\u{1f4e6} 发现 cosh-ng 更新：{current} → {latest}，运行 `{command}` 升级，完成后重新登录"
         }

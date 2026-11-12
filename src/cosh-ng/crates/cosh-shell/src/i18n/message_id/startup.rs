@@ -45,6 +45,7 @@ macro_rules! startup_guidance_ids {
 
 macro_rules! startup_welcome_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
-        $next!($remaining, $($ids,)* StartupHelpLabel, StartupAskOnlyLine,);
+        $next!($remaining, $($ids,)* StartupHelpLabel, StartupAskOnlyLine,
+            StartupEcsAuthHintLine, StartupConfigureAuthHintLine,);
     };
 }
