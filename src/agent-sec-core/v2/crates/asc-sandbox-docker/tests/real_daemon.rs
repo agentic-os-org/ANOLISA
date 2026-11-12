@@ -4,6 +4,7 @@
 use asc_pep_runtime::SandboxBackend;
 use asc_sandbox_docker::{DockerBackend, DockerConfig};
 use asc_sandbox_types::{ExecutionSpec, NetworkMode};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
@@ -31,6 +32,59 @@ fn spec(work: &Path, code: &str) -> ExecutionSpec {
             ]}, "execution": {"deny_paths": []}, "network": {"mode": "off"}},
         "path_facts": []
     })).unwrap()
+}
+
+#[test]
+#[ignore = "requires host root, CAP_SYS_ADMIN, a local Docker daemon and pinned Python image"]
+fn source_replacement_at_start_keeps_authorized_inode() {
+    for bound in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let work = directory.path().join("work");
+        let old = directory.path().join("old");
+        let secret = directory.path().join("secret");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(work.join("value"), "authorized").unwrap();
+        std::fs::write(secret.join("value"), "secret").unwrap();
+        let cli = directory.path().join("docker");
+        std::fs::write(&cli, format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = start ]; then\n /usr/bin/mv '{}' '{}'\n /usr/bin/ln -s '{}' '{}'\n fi\ndone\nexec /usr/bin/docker \"$@\"\n",
+            work.display(), old.display(), secret.display(), work.display()
+        )).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let backend = DockerBackend::new(DockerConfig {
+            cli,
+            image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
+            memory: None,
+            cpus: None,
+            pids_limit: Some(64),
+        })
+        .unwrap();
+        let mut request = spec(
+            &work,
+            "from pathlib import Path; assert Path('value').read_text() == 'authorized'; Path('value').write_text('changed')",
+        );
+        if bound {
+            let metadata = std::fs::metadata(&work).unwrap();
+            request.path_facts.push(asc_sandbox_types::PathFact {
+                path: work.to_str().unwrap().into(),
+                canonical_path: work.to_str().unwrap().into(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                is_directory: true,
+            });
+        }
+        let result = backend.execute_bound(&request).unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            std::fs::read_to_string(old.join("value")).unwrap(),
+            "changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(secret.join("value")).unwrap(),
+            "secret"
+        );
+    }
 }
 
 #[test]
