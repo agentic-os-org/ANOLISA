@@ -163,6 +163,43 @@ class HookParity(unittest.TestCase):
                         else:
                             self.assertEqual(replaced, {**shell, "stdout": expected["output"]})
 
+    def test_maven_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        content = (Path(corpus.REPO_ROOT) / "crates/tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt").read_text()
+        for agent, agent_env in {**corpus.RESPONSE_AGENTS, "codex": {"TOKENLESS_AGENT_ID": "codex"}}.items():
+            for failed in (False, True):
+                with self.subTest(agent=agent, failed=failed):
+                    shell = {"stdout": content, "stderr": "diagnostic field stays exact\n", "exit_code": int(failed), "duration_ms": 123}
+                    response = shell
+                    if agent == "cosh-ng":
+                        response = {"llmContent": json.dumps(shell), "returnDisplay": "display-only"}
+                    elif agent == "opencode":
+                        if failed:
+                            continue  # This text-only wire shape carries no exit status.
+                        response = content
+                    payload = {"tool_name": "Bash", "tool_input": {"command": "mvn --batch-mode clean package"},
+                               "tool_response": response, "session_id": "maven", "tool_use_id": "maven"}
+                    actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
+                        extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1", "TOKENLESS_STASH_ENABLED": "0"})
+                    self.assertEqual(actual.returncode, 0, actual.stderr)
+                    envelope = json.loads(actual.stdout)
+                    if failed or agent in {"codex", "qwencode"}:
+                        self.assertEqual(envelope, {})
+                        continue
+                    fields = envelope["hookSpecificOutput"]
+                    self.assertNotIn("additionalContext", fields)
+                    if agent == "cosh-ng":
+                        replaced = json.loads(fields["updatedToolResponse"])
+                    else:
+                        replaced = fields["updatedToolOutput"]
+                    if agent == "opencode":
+                        compact = replaced
+                    else:
+                        compact = replaced["stdout"]
+                        self.assertEqual(replaced, {**shell, "stdout": compact})
+                    self.assertLess(len(compact), len(content))
+                    self.assertIn("Maven templates", compact)
+                    self.assertNotIn("tokenless retrieve", compact)
+
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
 class PathListHooks(unittest.TestCase):

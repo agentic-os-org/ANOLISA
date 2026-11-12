@@ -1,0 +1,351 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO] SLF4J BOM                                                          [pom]
+[INFO] SLF4J Parent POM                                                   [pom]
+[INFO] SLF4J API Module                                                   [jar]
+[INFO] SLF4J Simple Provider                                              [jar]
+[INFO] 
+[INFO] ------------------------< org.slf4j:slf4j-bom >-------------------------
+[INFO] Building SLF4J BOM 2.0.17                                          [1/4]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ slf4j-bom ---
+[INFO] 
+[INFO] -----------------------< org.slf4j:slf4j-parent >-----------------------
+[INFO] Building SLF4J Parent POM 2.0.17                                   [2/4]
+[INFO]   from parent/pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ slf4j-parent ---
+[INFO] 
+[INFO] --- compiler:3.10.1:compile (default-compile) @ slf4j-parent ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- compiler:3.10.1:compile (module-compile) @ slf4j-parent ---
+[WARNING]  Parameter 'compileSourceRoots' is read-only, must not be used in configuration
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- bundle:5.1.9:manifest (bundle-manifest) @ slf4j-parent ---
+[WARNING] Ignoring project type pom - supportedProjectTypes = [jar, bundle]
+[INFO] 
+[INFO] --- jar:3.2.0:jar (default-jar) @ slf4j-parent ---
+[INFO] Skipping packaging of the jar
+[INFO] 
+[INFO] >>> source:3.2.1:jar (default) > generate-sources @ slf4j-parent >>>
+[INFO] 
+[INFO] <<< source:3.2.1:jar (default) < generate-sources @ slf4j-parent <<<
+[INFO] 
+[INFO] 
+[INFO] --- source:3.2.1:jar (default) @ slf4j-parent ---
+[INFO] 
+[INFO] ------------------------< org.slf4j:slf4j-api >-------------------------
+[INFO] Building SLF4J API Module 2.0.17                                   [3/4]
+[INFO]   from slf4j-api/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ slf4j-api ---
+[INFO] Deleting /work/source/slf4j-api/target
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ slf4j-api ---
+[INFO] skip non existing resourceDirectory /work/source/slf4j-api/src/main/resources
+[INFO] Copying 1 resource from .. to target/classes/META-INF
+[INFO] 
+[INFO] --- compiler:3.10.1:compile (default-compile) @ slf4j-api ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 47 source files to /work/source/slf4j-api/target/classes
+[INFO] /work/source/slf4j-api/src/main/java/org/slf4j/LoggerFactory.java: Some input files use or override a deprecated API that is marked for removal.
+[INFO] /work/source/slf4j-api/src/main/java/org/slf4j/LoggerFactory.java: Recompile with -Xlint:removal for details.
+[INFO] 
+[INFO] --- compiler:3.10.1:compile (module-compile) @ slf4j-api ---
+[WARNING]  Parameter 'compileSourceRoots' is read-only, must not be used in configuration
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 1 source file to /work/source/slf4j-api/target/classes/META-INF/versions/9
+[INFO] 
+[INFO] --- bundle:5.1.9:manifest (bundle-manifest) @ slf4j-api ---
+[INFO] No MANIFEST.MF file found, generating manifest.
+[WARNING] Manifest org.slf4j:slf4j-api:jar:2.0.17 : Classes found in the wrong directory: {META-INF/versions/9/module-info.class=module-info}
+[INFO] Writing manifest: /work/source/slf4j-api/target/classes/META-INF/MANIFEST.MF
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ slf4j-api ---
+[INFO] skip non existing resourceDirectory /work/source/slf4j-api/src/test/resources
+[INFO] 
+[INFO] --- compiler:3.10.1:testCompile (default-testCompile) @ slf4j-api ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 20 source files to /work/source/slf4j-api/target/test-classes
+[INFO] 
+[INFO] --- surefire:3.0.0-M7:test (default-test) @ slf4j-api ---
+[WARNING]  Parameter 'forkMode' (user property 'forkMode') is deprecated: No reason given
+[INFO] Using auto detected provider org.apache.maven.surefire.junit4.JUnit4Provider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running org.slf4j.eventTest.EventRecordingLoggerTest
+[INFO] Tests run: 16, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.028 s - in org.slf4j.eventTest.EventRecordingLoggerTest
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMarkerMessageThreeParametersThrowable  Time elapsed: 0.005 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.oneParameter  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.singleMessage  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMessageTwoParametersThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMarkerMessageTwoParameters  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.testMessageThreeParametersThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.markerMessageOneParameter  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.markerMessageThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.markerMessageOneParameterThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMarkerMessageTwoParametersThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.messageTwoParameters  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMessageThreeParameters  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.testMessageThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.markerMessage  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMessageOneParameterThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.eventTest.EventRecordingLoggerTest.traceMarkerMessageThreeParameters  Time elapsed: 0 s
+[INFO] Running org.slf4j.LoggerFactoryTest
+SLF4J(I): Attempting to load provider "org.slf4j.LoggerFactoryTest$TestingProvider" specified via "slf4j.provider" system property
+
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.031 s - in org.slf4j.LoggerFactoryTest
+[INFO] org.slf4j.LoggerFactoryTest.testExplicitlySpecifyNonServiceProvider  Time elapsed: 0.009 s
+[INFO] org.slf4j.LoggerFactoryTest.testExplicitlySpecifyMissingServiceProvider  Time elapsed: 0.001 s
+[INFO] org.slf4j.LoggerFactoryTest.testExplicitlySpecified  Time elapsed: 0.001 s
+[INFO] org.slf4j.LoggerFactoryTest.testExplicitlySpecifiedNull  Time elapsed: 0 s
+[INFO] Running org.slf4j.basicTests.BasicMarkerTest
+[INFO] Tests run: 11, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.026 s - in org.slf4j.basicTests.BasicMarkerTest
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testSelfRecursion  Time elapsed: 0.002 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testPrimitive  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testPrimitiveByName  Time elapsed: 0.001 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testComposite  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testMultiComposite  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testHomonyms  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testCompositeByName  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testAddRemove  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testMultiCompositeByName  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testMultiAdd  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.BasicMarkerTest.testIndirectRecursion  Time elapsed: 0 s
+[INFO] Running org.slf4j.basicTests.NoBindingMultithreadedInitializationTest
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.031 s - in org.slf4j.basicTests.NoBindingMultithreadedInitializationTest
+[INFO] org.slf4j.basicTests.NoBindingMultithreadedInitializationTest.multiThreadedInitialization  Time elapsed: 0.013 s
+[INFO] Running org.slf4j.basicTests.NoBindingTest
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.024 s - in org.slf4j.basicTests.NoBindingTest
+[INFO] org.slf4j.basicTests.NoBindingTest.testMDC  Time elapsed: 0.006 s
+[INFO] org.slf4j.basicTests.NoBindingTest.testLogger  Time elapsed: 0 s
+[INFO] org.slf4j.basicTests.NoBindingTest.testMarker  Time elapsed: 0 s
+[INFO] Running org.slf4j.rule.BlaTest
+[WARNING] Tests run: 1, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 0.006 s - in org.slf4j.rule.BlaTest
+[WARNING] org.slf4j.rule.BlaTest skipped
+[INFO] Running org.slf4j.helpers.SubstitutableLoggerTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.048 s - in org.slf4j.helpers.SubstitutableLoggerTest
+[INFO] org.slf4j.helpers.SubstitutableLoggerTest.delegateIsInvokedTest  Time elapsed: 0.016 s
+[INFO] Running org.slf4j.helpers.SubstituteLoggerFactoryTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.019 s - in org.slf4j.helpers.SubstituteLoggerFactoryTest
+[INFO] org.slf4j.helpers.SubstituteLoggerFactoryTest.testFactory  Time elapsed: 0.002 s
+[INFO] org.slf4j.helpers.SubstituteLoggerFactoryTest.testLoggers  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.SubstituteLoggerFactoryTest.testLoggerNameList  Time elapsed: 0 s
+[INFO] Running org.slf4j.helpers.BasicMDCAdapterTest
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.028 s - in org.slf4j.helpers.BasicMDCAdapterTest
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testClearingMDC  Time elapsed: 0.009 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testMDCDoesntGetValuesFromChildThread  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testGetCopyOfContextMapFromMDC  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testMDCChildThreadCanOverwriteParentThread  Time elapsed: 0.001 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testMDCInheritsValuesFromParentThread  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testOverwritingAKeyInMDC  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testInvokingSetContextMap_WithANullMap_SLF4J_414  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.BasicMDCAdapterTest.testSettingAndGettingWithMDC  Time elapsed: 0 s
+[INFO] Running org.slf4j.helpers.MessageFormatterTest
+SLF4J(E): Failed toString() invocation on an object of type [org.slf4j.helpers.MessageFormatterTest$1]
+SLF4J(E): Reported exception:
+java.lang.IllegalStateException: a
+	at org.slf4j.helpers.MessageFormatterTest$1.toString(MessageFormatterTest.java:156)
+	at org.slf4j.helpers.MessageFormatter.safeObjectAppend(MessageFormatter.java:291)
+	at org.slf4j.helpers.MessageFormatter.deeplyAppendParameter(MessageFormatter.java:263)
+	at org.slf4j.helpers.MessageFormatter.arrayFormat(MessageFormatter.java:225)
+	at org.slf4j.helpers.MessageFormatter.arrayFormat(MessageFormatter.java:160)
+	at org.slf4j.helpers.MessageFormatter.format(MessageFormatter.java:124)
+	at org.slf4j.helpers.MessageFormatterTest.testExceptionIn_toString(MessageFormatterTest.java:159)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)
+	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+	at org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)
+	at org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)
+	at org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:63)
+	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
+	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
+	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
+	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
+	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
+	at org.apache.maven.surefire.junit4.JUnit4Provider.execute(JUnit4Provider.java:377)
+	at org.apache.maven.surefire.junit4.JUnit4Provider.executeWithRerun(JUnit4Provider.java:284)
+	at org.apache.maven.surefire.junit4.JUnit4Provider.executeTestSet(JUnit4Provider.java:248)
+	at org.apache.maven.surefire.junit4.JUnit4Provider.invoke(JUnit4Provider.java:167)
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:456)
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:169)
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:595)
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:581)
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.025 s - in org.slf4j.helpers.MessageFormatterTest
+[INFO] org.slf4j.helpers.MessageFormatterTest.testParamaterContainingAnAnchor  Time elapsed: 0.001 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testNull  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testArrayFormat  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testMultiDimensionalArrayValues  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testArrayThrowable  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.verifyOneParameterIsHandledCorrectly  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testArrayValues  Time elapsed: 0.001 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testExceptionIn_toString  Time elapsed: 0.002 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testCyclicArrays  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testTwoParameters  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.nullParametersShouldBeHandledWithoutBarfing  Time elapsed: 0 s
+[INFO] org.slf4j.helpers.MessageFormatterTest.testNullArray  Time elapsed: 0 s
+[INFO] 
+[INFO] Results:
+[INFO] 
+[WARNING] Tests run: 60, Failures: 0, Errors: 0, Skipped: 1
+[INFO] 
+[INFO] 
+[INFO] --- jar:3.2.0:jar (default-jar) @ slf4j-api ---
+[INFO] Building jar: /work/source/slf4j-api/target/slf4j-api-2.0.17.jar
+[INFO] 
+[INFO] --- jar:3.2.0:test-jar (bundle-test-jar) @ slf4j-api ---
+[INFO] Building jar: /work/source/slf4j-api/target/slf4j-api-2.0.17-tests.jar
+[INFO] 
+[INFO] >>> source:3.2.1:jar (default) > generate-sources @ slf4j-api >>>
+[INFO] 
+[INFO] <<< source:3.2.1:jar (default) < generate-sources @ slf4j-api <<<
+[INFO] 
+[INFO] 
+[INFO] --- source:3.2.1:jar (default) @ slf4j-api ---
+[INFO] Building jar: /work/source/slf4j-api/target/slf4j-api-2.0.17-sources.jar
+[INFO] 
+[INFO] -----------------------< org.slf4j:slf4j-simple >-----------------------
+[INFO] Building SLF4J Simple Provider 2.0.17                              [4/4]
+[INFO]   from slf4j-simple/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ slf4j-simple ---
+[INFO] Deleting /work/source/slf4j-simple/target
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ slf4j-simple ---
+[INFO] Copying 1 resource from src/main/resources to target/classes
+[INFO] Copying 1 resource from .. to target/classes/META-INF
+[INFO] 
+[INFO] --- compiler:3.10.1:compile (default-compile) @ slf4j-simple ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 5 source files to /work/source/slf4j-simple/target/classes
+[INFO] /work/source/slf4j-simple/src/main/java/org/slf4j/simple/SimpleLogger.java: /work/source/slf4j-simple/src/main/java/org/slf4j/simple/SimpleLogger.java uses or overrides a deprecated API.
+[INFO] /work/source/slf4j-simple/src/main/java/org/slf4j/simple/SimpleLogger.java: Recompile with -Xlint:deprecation for details.
+[INFO] /work/source/slf4j-simple/src/main/java/org/slf4j/simple/SimpleLoggerConfiguration.java: /work/source/slf4j-simple/src/main/java/org/slf4j/simple/SimpleLoggerConfiguration.java uses or overrides a deprecated API that is marked for removal.
+[INFO] /work/source/slf4j-simple/src/main/java/org/slf4j/simple/SimpleLoggerConfiguration.java: Recompile with -Xlint:removal for details.
+[INFO] 
+[INFO] --- compiler:3.10.1:compile (module-compile) @ slf4j-simple ---
+[WARNING]  Parameter 'compileSourceRoots' is read-only, must not be used in configuration
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 1 source file to /work/source/slf4j-simple/target/classes/META-INF/versions/9
+[INFO] 
+[INFO] --- bundle:5.1.9:manifest (bundle-manifest) @ slf4j-simple ---
+[INFO] No MANIFEST.MF file found, generating manifest.
+[WARNING] Manifest org.slf4j:slf4j-simple:jar:2.0.17 : Classes found in the wrong directory: {META-INF/versions/9/module-info.class=module-info}
+[INFO] Writing manifest: /work/source/slf4j-simple/target/classes/META-INF/MANIFEST.MF
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ slf4j-simple ---
+[INFO] Copying 1 resource from src/test/resources to target/test-classes
+[INFO] 
+[INFO] --- compiler:3.10.1:testCompile (default-testCompile) @ slf4j-simple ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 11 source files to /work/source/slf4j-simple/target/test-classes
+[INFO] 
+[INFO] --- surefire:3.0.0-M7:test (default-test) @ slf4j-simple ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junit4.JUnit4Provider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running org.slf4j.simple.SimpleLoggerTest
+^\[.*\] tid=\d{1,12} INFO org.slf4j.simple.SimpleLoggerTest - hello
+[main] tid=1 INFO org.slf4j.simple.SimpleLoggerTest - hello
+
+^tid=\d{1,12} INFO org.slf4j.simple.SimpleLoggerTest - hello
+tid=1 INFO org.slf4j.simple.SimpleLoggerTest - hello
+
+[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.027 s - in org.slf4j.simple.SimpleLoggerTest
+[INFO] org.slf4j.simple.SimpleLoggerTest.testThreadId  Time elapsed: 0.004 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.loggerNameWithNoDots_WithLevel  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.offLevel  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.testTheadIdWithoutThreadName  Time elapsed: 0.001 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.checkUseOfCachedOutputStream  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.checkUseOfLastSystemStreamReference  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.loggerNameWithOneDotShouldInheritFromParent  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.loggerNameWithOneDot_NoSetLevel  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.loggerNameWithNoDots_WithNoSetLevel  Time elapsed: 0 s
+[INFO] org.slf4j.simple.SimpleLoggerTest.emptyLoggerName  Time elapsed: 0 s
+[INFO] Running org.slf4j.simple.Slf4jVersionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.018 s - in org.slf4j.simple.Slf4jVersionTest
+[INFO] org.slf4j.simple.Slf4jVersionTest.slf4jVersionTest  Time elapsed: 0.001 s
+[INFO] Running org.slf4j.simple.DoubleInitializationPitfallTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.025 s - in org.slf4j.simple.DoubleInitializationPitfallTest
+[INFO] org.slf4j.simple.DoubleInitializationPitfallTest.verifyImpactOfMarkerFactory  Time elapsed: 0.006 s
+[INFO] org.slf4j.simple.DoubleInitializationPitfallTest.verifyImpactOfMDC  Time elapsed: 0 s
+[INFO] Running org.slf4j.simple.InvocationTest
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.028 s - in org.slf4j.simple.InvocationTest
+[INFO] org.slf4j.simple.InvocationTest.testMDC  Time elapsed: 0.006 s
+[INFO] org.slf4j.simple.InvocationTest.testNull  Time elapsed: 0.003 s
+[INFO] org.slf4j.simple.InvocationTest.testNullParameter_BUG78  Time elapsed: 0 s
+[INFO] org.slf4j.simple.InvocationTest.test1  Time elapsed: 0.001 s
+[INFO] org.slf4j.simple.InvocationTest.test2  Time elapsed: 0 s
+[INFO] org.slf4j.simple.InvocationTest.testMarker  Time elapsed: 0 s
+[INFO] Running org.slf4j.simple.AcceptanceTest
+[WARNING] Tests run: 1, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 0.007 s - in org.slf4j.simple.AcceptanceTest
+[WARNING] org.slf4j.simple.AcceptanceTest skipped
+[INFO] Running org.slf4j.simple.multiThreadedExecution.MultithereadedExecutionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.126 s - in org.slf4j.simple.multiThreadedExecution.MultithereadedExecutionTest
+[INFO] org.slf4j.simple.multiThreadedExecution.MultithereadedExecutionTest.test  Time elapsed: 0.107 s
+[INFO] Running org.slf4j.simple.SimpleLoggerMultithreadedInitializationTest
+THREAD_COUNT=68
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.099 s - in org.slf4j.simple.SimpleLoggerMultithreadedInitializationTest
+[INFO] org.slf4j.simple.SimpleLoggerMultithreadedInitializationTest.multiThreadedInitialization  Time elapsed: 0.08 s
+[INFO] Running org.slf4j.simple.DetectLoggerNameMismatchTest
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.032 s - in org.slf4j.simple.DetectLoggerNameMismatchTest
+[INFO] org.slf4j.simple.DetectLoggerNameMismatchTest.testPassIfMatch  Time elapsed: 0.01 s
+[INFO] org.slf4j.simple.DetectLoggerNameMismatchTest.verifyLoggerDefinedInBaseWithOverridenGetClassMethod  Time elapsed: 0 s
+[INFO] org.slf4j.simple.DetectLoggerNameMismatchTest.testTriggerWholeMessage  Time elapsed: 0.001 s
+[INFO] org.slf4j.simple.DetectLoggerNameMismatchTest.testNoTriggerWithoutProperty  Time elapsed: 0 s
+[INFO] org.slf4j.simple.DetectLoggerNameMismatchTest.testTriggerWithProperty  Time elapsed: 0 s
+[INFO] 
+[INFO] Results:
+[INFO] 
+[WARNING] Tests run: 27, Failures: 0, Errors: 0, Skipped: 1
+[INFO] 
+[INFO] 
+[INFO] --- jar:3.2.0:jar (default-jar) @ slf4j-simple ---
+[INFO] Building jar: /work/source/slf4j-simple/target/slf4j-simple-2.0.17.jar
+[INFO] 
+[INFO] >>> source:3.2.1:jar (default) > generate-sources @ slf4j-simple >>>
+[INFO] 
+[INFO] <<< source:3.2.1:jar (default) < generate-sources @ slf4j-simple <<<
+[INFO] 
+[INFO] 
+[INFO] --- source:3.2.1:jar (default) @ slf4j-simple ---
+[INFO] Building jar: /work/source/slf4j-simple/target/slf4j-simple-2.0.17-sources.jar
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for SLF4J BOM 2.0.17:
+[INFO] 
+[INFO] SLF4J BOM .......................................... SUCCESS [  0.071 s]
+[INFO] SLF4J Parent POM ................................... SUCCESS [  1.004 s]
+[INFO] SLF4J API Module ................................... SUCCESS [  4.400 s]
+[INFO] SLF4J Simple Provider .............................. SUCCESS [  1.572 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  7.287 s
+[INFO] Finished at: 2026-11-12T09:10:32Z
+[INFO] ------------------------------------------------------------------------

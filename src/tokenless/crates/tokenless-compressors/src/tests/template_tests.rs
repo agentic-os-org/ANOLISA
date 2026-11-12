@@ -16,4 +16,13 @@ fn generic_templates_require_numbered_progress_language() {
     assert_eq!(generic_progress_template("customer record 42"), None);
     assert_eq!(generic_progress_template("processing next item"), None);
     assert_eq!(generic_progress_template(""), None);
+    assert_eq!(
+        generic_progress_template("Downloading from central: https://repo.example/a-1.jar"),
+        None
+    );
+    assert_eq!(generic_progress_template("Progress (0): 1 kB\r"), None);
+    assert_eq!(
+        generic_progress_template("progress: step 1\ropaque redraw 2"),
+        None
+    );
 }

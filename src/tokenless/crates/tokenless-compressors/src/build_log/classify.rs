@@ -11,6 +11,7 @@ pub(crate) enum BuildLogFormat {
     Unittest,
     Npm,
     Pnpm,
+    Maven,
     Jest,
     Go,
     Make,
@@ -79,17 +80,18 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
             trimmed.starts_with("error[E")
                 || trimmed.starts_with("test result:")
                 || (trimmed.starts_with("Finished ") && trimmed.contains(" profile [")),
-            starts_any(
-                trimmed,
-                &[
-                    "$ cargo ",
-                    "Compiling ",
-                    "Checking ",
-                    "Downloading ",
-                    "Downloaded ",
-                    "Updating crates.io index",
-                ],
-            ),
+            !super::maven::is_download_line(trimmed)
+                && starts_any(
+                    trimmed,
+                    &[
+                        "$ cargo ",
+                        "Compiling ",
+                        "Checking ",
+                        "Downloading ",
+                        "Downloaded ",
+                        "Updating crates.io index",
+                    ],
+                ),
         ),
         BuildLogFormat::Pytest => (
             trimmed.contains("test session starts")
@@ -134,7 +136,7 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
                 || is_c_diagnostic(trimmed),
             is_compiler_command(trimmed),
         ),
-        BuildLogFormat::Pnpm | BuildLogFormat::Generic => (false, false),
+        BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Generic => (false, false),
     };
     Evidence {
         strong: usize::from(strong),
@@ -263,7 +265,9 @@ fn routine_family(
         BuildLogFormat::Cargo => {
             if starts_any(trimmed, &["Compiling ", "Checking ", "Building ", "Fresh "]) {
                 Some(RoutineFamily::CargoCompile)
-            } else if starts_any(trimmed, &["Downloading ", "Downloaded "]) {
+            } else if !super::maven::is_download_line(trimmed)
+                && starts_any(trimmed, &["Downloading ", "Downloaded "])
+            {
                 Some(RoutineFamily::CargoDownload)
             } else if trimmed.starts_with("test ") && trimmed.ends_with(" ... ok") {
                 Some(RoutineFamily::CargoTestPass)
@@ -293,7 +297,7 @@ fn routine_family(
                 None
             }
         }
-        BuildLogFormat::Pnpm => None,
+        BuildLogFormat::Pnpm | BuildLogFormat::Maven => None,
         BuildLogFormat::Jest => (trimmed.starts_with("PASS ") || trimmed.starts_with('✓'))
             .then_some(RoutineFamily::JestPass),
         BuildLogFormat::Go => {
