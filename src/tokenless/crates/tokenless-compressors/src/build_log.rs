@@ -3,6 +3,7 @@
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod maven;
 mod pnpm;
 mod template;
 mod trace;
@@ -23,6 +24,30 @@ const MIN_ROUTINE_RUN_LINES: usize = 9;
 const ROUTINE_EDGE_LINES: usize = 2;
 const MAX_OMISSION_BLOCKS: usize = 8;
 const GENERIC_TEMPLATE_MIN_LINES: usize = 9;
+
+/// One lossless replacement of the line range `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LayoutEdit {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) replacement: &'static str,
+}
+
+/// Owns the dynamically-built replacement strings referenced by `LayoutEdit`.
+/// Replacements are process-leaked for the duration of one compression call —
+/// bounded by the layout-edit budget, and the plan is dropped immediately
+/// after `render_reduced` reads them.
+#[derive(Default)]
+pub(crate) struct StringSpares {
+    allocated: usize,
+}
+
+impl StringSpares {
+    pub(crate) fn alloc(&mut self, value: String) -> &'static str {
+        self.allocated += 1;
+        Box::leak(value.into_boxed_str())
+    }
+}
 
 /// Stable operations performed inside the build-log domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +130,7 @@ impl BuildLogCompressor {
         let Some(format) = detect_format(&cleaned) else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        if format != BuildLogFormat::Pnpm && store.is_none() {
+        if format != BuildLogFormat::Pnpm && format != BuildLogFormat::Maven && store.is_none() {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
@@ -116,6 +141,9 @@ impl BuildLogCompressor {
             .collect::<Vec<_>>();
         let (mut roles, run_starts, mut layouts) = if format == BuildLogFormat::Pnpm {
             let plan = pnpm::plan(&lines);
+            (plan.roles, plan.run_starts, plan.layouts)
+        } else if format == BuildLogFormat::Maven {
+            let plan = maven::plan(&lines);
             (plan.roles, plan.run_starts, plan.layouts)
         } else {
             let templates = dominant_generic_templates(format, &stripped);
@@ -145,9 +173,17 @@ impl BuildLogCompressor {
         let Some(store) = store else {
             return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         };
-        let Some(plans) = omission_plans(&lines, &roles, &run_starts, recovery) else {
+        // An omission plan inside a replaced layout range can never emit its
+        // marker: the layout consumes those lines first. Drop such plans so
+        // no stash write is orphaned without a marker in the output.
+        let Some(mut plans) = omission_plans(&lines, &roles, &run_starts, recovery) else {
             return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         };
+        plans.retain(|plan| {
+            !layouts
+                .iter()
+                .any(|edit| edit.start <= plan.start && plan.end <= edit.end)
+        });
         if plans.is_empty() {
             return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         }
@@ -277,7 +313,7 @@ fn render_reduced(
     plans: &[OmissionPlan],
     keys: &[String],
     recovery: &RecoveryMethod,
-    layouts: &[pnpm::LayoutEdit],
+    layouts: &[LayoutEdit],
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0;
@@ -298,7 +334,7 @@ fn render_reduced(
         } else if let Some(layout) = layouts.peek()
             && layout.start == cursor
         {
-            output.push_str(&layout.replacement);
+            output.push_str(layout.replacement);
             cursor = layout.end;
             layouts.next();
         } else {
@@ -326,6 +362,9 @@ fn detect_format(input: &str) -> Option<BuildLogFormat> {
     let sample = sample_lines(input);
     if pnpm::detect(&sample) {
         return Some(BuildLogFormat::Pnpm);
+    }
+    if maven::detect(&sample) {
+        return Some(BuildLogFormat::Maven);
     }
     let formats = [
         BuildLogFormat::Cargo,
@@ -444,4 +483,10 @@ mod tests {
 mod pnpm_tests {
     use super::*;
     include!("tests/pnpm_tests.rs");
+}
+
+#[cfg(test)]
+mod maven_tests {
+    use super::*;
+    include!("tests/maven_tests.rs");
 }

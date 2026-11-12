@@ -1,0 +1,33 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------< com.example:inventory-api >--------------------------
+[INFO] Building inventory-api 0.9.2
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ inventory-api ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 18 source files to /work/inventory-api/target/classes
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR :
+[INFO] -------------------------------------------------------------
+[ERROR] /work/inventory-api/src/main/java/com/example/inventory/StockMapper.java:[18,33] cannot find symbol
+[INFO]   symbol:   variable StockLevel
+[INFO]   location: class com.example.inventory.StockMapper
+[ERROR] /work/inventory-api/src/main/java/com/example/inventory/StockMapper.java:[27,9] method does not override or implement a method from a supertype
+[INFO] 2 errors
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  3.874 s
+[INFO] Finished at: 2026-11-05T14:25:02+08:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile) on project inventory-api: Compilation failure: Compilation failure:
+[ERROR] /work/inventory-api/src/main/java/com/example/inventory/StockMapper.java:[18,33] cannot find symbol
+[ERROR] /work/inventory-api/src/main/java/com/example/inventory/StockMapper.java:[27,9] method does not override or implement a method from a supertype
+[ERROR] -> [Help 1]
+[ERROR]
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR]
+[ERROR] For more information about the errors and possible solutions, please read the following sections of the plugin's debug output:
+[ERROR] -> [Help 1]

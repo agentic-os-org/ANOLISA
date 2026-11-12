@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use super::{LineRole, RoutineFamily, saves_both};
+use super::{LayoutEdit, LineRole, RoutineFamily, StringSpares, saves_both};
 
 const MAX_LINE_BYTES: usize = 4096;
 const MAX_NOTICE_BYTES: usize = 8192;
@@ -10,16 +10,11 @@ const MAX_DEPENDENCY_ROWS: usize = 256;
 const MAX_DEPENDENCY_BYTES: usize = 64 * 1024;
 const MAX_LAYOUT_EDITS: usize = 256;
 
-pub(super) struct LayoutEdit {
-    pub start: usize,
-    pub end: usize,
-    pub replacement: String,
-}
-
 pub(super) struct Plan {
     pub roles: Vec<LineRole>,
     pub run_starts: HashSet<usize>,
     pub layouts: Vec<LayoutEdit>,
+    pub spares: StringSpares,
 }
 
 impl Plan {
@@ -28,6 +23,7 @@ impl Plan {
             roles: vec![LineRole::Unknown; line_count],
             run_starts: HashSet::new(),
             layouts: Vec::new(),
+            spares: StringSpares::default(),
         }
     }
 }
@@ -81,6 +77,7 @@ pub(super) fn plan(lines: &[&str]) -> Plan {
         .iter()
         .map(|line| line.strip_suffix('\n').unwrap_or(line))
         .collect::<Vec<_>>();
+
     let mut index = 0;
     let mut previous_counts: Option<[u64; 4]> = None;
     while index < lines.len() {
@@ -127,7 +124,7 @@ pub(super) fn plan(lines: &[&str]) -> Plan {
                 plan.layouts.push(LayoutEdit {
                     start: index + 1,
                     end: index + 2,
-                    replacement: String::new(),
+                    replacement: "",
                 });
                 plan.roles[index + 1] = LineRole::Phase;
                 index += 1;
@@ -150,7 +147,7 @@ pub(super) fn plan(lines: &[&str]) -> Plan {
                 plan.layouts.push(LayoutEdit {
                     start: index,
                     end,
-                    replacement,
+                    replacement: plan.spares.alloc(replacement),
                 });
             }
             index = end;

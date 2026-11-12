@@ -1,0 +1,58 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ------------------------< com.example:catalog-service >------------------------
+[INFO] Building catalog-service 1.4.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-clean-plugin:3.2.0:clean (default-clean) @ catalog-service ---
+[INFO] Deleting /work/catalog-service/target
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ catalog-service ---
+[INFO] Copying 3 resources from src/main/resources to target/classes
+[INFO] Copying 2 resources from src/main/resources to target/classes
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ catalog-service ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 42 source files to /work/catalog-service/target/classes
+[INFO] ------------------------------------------------------------
+[INFO] download records from central: https://repo.maven.apache.org/maven2/
+[INFO] get org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom
+[INFO] ok org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom
+[INFO] get org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar
+[INFO] ok org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar
+[INFO] get org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.pom
+[INFO] ok org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.pom
+[INFO] get org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar
+[INFO] ok org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar
+[INFO] get com/fasterxml/jackson/core/jackson-databind/2.17.1/jackson-databind-2.17.1.pom
+[INFO] ok com/fasterxml/jackson/core/jackson-databind/2.17.1/jackson-databind-2.17.1.pom
+[INFO] get com/fasterxml/jackson/core/jackson-databind/2.17.1/jackson-databind-2.17.1.jar
+[INFO] ok com/fasterxml/jackson/core/jackson-databind/2.17.1/jackson-databind-2.17.1.jar
+[INFO] get junit/junit/4.13.2/junit-4.13.2.pom
+[INFO] ok junit/junit/4.13.2/junit-4.13.2.jar
+[INFO] ------------------------------------------------------------
+[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) @ catalog-service ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO]
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.412 s -- in com.example.catalog.CatalogServiceTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 0.131 s -- in com.example.catalog.PriceMapperTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 1
+[INFO]
+[INFO] --- maven-jar-plugin:3.3.0:jar (default-jar) @ catalog-service ---
+[INFO] Building jar: /work/catalog-service/target/catalog-service-1.4.0.jar
+[INFO] --- maven-install-plugin:3.1.1:install (default-install) @ catalog-service ---
+[INFO] Installing /work/catalog-service/target/catalog-service-1.4.0.jar to /repo/com/example/catalog-service/1.4.0/catalog-service-1.4.0.jar
+[INFO] Installing /work/catalog-service/pom.xml to /repo/com/example/catalog-service/1.4.0/catalog-service-1.4.0.pom
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  11.502 s
+[INFO] Finished at: 2026-11-05T14:22:31+08:00
+[INFO] ------------------------------------------------------------------------

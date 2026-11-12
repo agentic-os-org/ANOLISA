@@ -30,7 +30,16 @@ const FIXTURES: &[&str] = &[
     "go_failure",
     "shell_success",
     "shell_failure",
+    "maven_success",
+    "maven_failure",
+    "maven_batch_downloads",
 ];
+
+/// Fixtures whose compression uses lossless structural layout edits rather
+/// than stash markers. Reassembly via stored payloads cannot restore them
+/// (the same reason the pnpm fixtures are not committed here); their
+/// fact-preservation is asserted by the unit suite's independent decoder.
+const STRUCTURAL_FIXTURES: &[&str] = &["maven_success", "maven_batch_downloads"];
 
 /// Task facts (§6.1) that must survive compression verbatim: error identity,
 /// file:line references, exit state, summaries.
@@ -98,6 +107,29 @@ const PROBES: &[(&str, &[&str])] = &[
             "src/util.c:42:5: error: 'foo' undeclared (first use in this function)",
             "make: *** [Makefile:12: build/util.o] Error 1",
             "Exit code: 2",
+        ],
+    ),
+    (
+        "maven_success",
+        &[
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 1",
+            "Building jar: /work/catalog-service/target/catalog-service-1.4.0.jar",
+            "BUILD SUCCESS",
+        ],
+    ),
+    (
+        "maven_failure",
+        &[
+            "COMPILATION ERROR",
+            "StockMapper.java:[18,33] cannot find symbol",
+            "BUILD FAILURE",
+        ],
+    ),
+    (
+        "maven_batch_downloads",
+        &[
+            "maven-clean-plugin-3.2.0.pom (0 B at 0 B/s)",
+            "maven-surefire-common-3.1.2.jar (303 kB at 2.6 MB/s)",
         ],
     ),
 ];
@@ -173,6 +205,9 @@ fn markers_are_valid_and_keys_match_payloads() {
 #[test]
 fn reassembly_reproduces_the_lossy_stage_input_byte_exactly() {
     for name in FIXTURES {
+        if STRUCTURAL_FIXTURES.contains(name) {
+            continue;
+        }
         let input = load(&format!("{name}.txt"));
         let store = InMemoryStore::new();
         let (cleaned, outcome) = run_chain(&input, &store);

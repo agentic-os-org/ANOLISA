@@ -11,6 +11,7 @@ pub(crate) enum BuildLogFormat {
     Unittest,
     Npm,
     Pnpm,
+    Maven,
     Jest,
     Go,
     Make,
@@ -43,6 +44,7 @@ pub(crate) enum RoutineFamily {
     NpmFetch,
     NpmSpinner,
     PnpmProgress,
+    MavenDownload,
     JestPass,
     GoDownload,
     GoPass,
@@ -62,6 +64,7 @@ impl RoutineFamily {
             Self::NpmFetch => "package fetch",
             Self::NpmSpinner => "spinner progress",
             Self::PnpmProgress => "package progress",
+            Self::MavenDownload => "dependency download",
             Self::JestPass => "passing test suite",
             Self::GoDownload => "dependency download",
             Self::GoPass => "passing package",
@@ -134,7 +137,7 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
                 || is_c_diagnostic(trimmed),
             is_compiler_command(trimmed),
         ),
-        BuildLogFormat::Pnpm | BuildLogFormat::Generic => (false, false),
+        BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Generic => (false, false),
     };
     Evidence {
         strong: usize::from(strong),
@@ -294,6 +297,7 @@ fn routine_family(
             }
         }
         BuildLogFormat::Pnpm => None,
+        BuildLogFormat::Maven => None,
         BuildLogFormat::Jest => (trimmed.starts_with("PASS ") || trimmed.starts_with('✓'))
             .then_some(RoutineFamily::JestPass),
         BuildLogFormat::Go => {
