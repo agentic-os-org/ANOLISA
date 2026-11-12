@@ -149,7 +149,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun Nov 08 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Nov 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Reject unsupported telemetry preparation options and preserve warnings in JSON.
+- Quote executable paths in generated telemetry service units.
+- Refresh component catalog versions.
+
+* Sun Nov 08 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.4.0-1
 - Add telemetry preparation for image builds without starting collection.
 - Clarify adapter quick start and remove the obsolete QwenWork RTK warning.
 - Refresh component catalog versions and installed resource declarations.
