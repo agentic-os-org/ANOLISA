@@ -48,6 +48,9 @@ pub struct SandboxRun {
     /// Trusted docker CLI absolute path (docker backend).
     #[arg(long, default_value = "/usr/bin/docker")]
     pub docker_cli: PathBuf,
+    /// Trusted local Docker Unix endpoint; personal contexts are not used.
+    #[arg(long, default_value = "unix:///var/run/docker.sock")]
+    pub docker_host: String,
     /// Container memory limit in docker syntax, such as 512m (docker backend).
     #[arg(long)]
     pub memory: Option<String>,
@@ -135,6 +138,7 @@ fn docker_execute(
     };
     let backend = DockerBackend::new(DockerConfig {
         cli: options.docker_cli.clone(),
+        host: options.docker_host.clone(),
         image: options.image.clone().unwrap_or_default(),
         memory: options.memory.clone(),
         cpus: options.cpus.clone(),

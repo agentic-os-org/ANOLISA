@@ -168,6 +168,13 @@ Docker 挂载要求宿主 root、`CAP_SYS_ADMIN` 和内核 `open_tree`/`move_mou
 只读授权使用 `--mount ... readonly,bind-recursive=readonly`，要求 Docker/runtime
 强制递归只读（Linux 5.12+）；启动前核验强制选项，能力不足直接失败，不回退到普通 `:ro`。
 
+`--docker-host` 仅接受本地 `unix:///绝对路径`，默认 `unix:///var/run/docker.sock`。
+后端验证 endpoint 所有权、socket 类型及本地 root dockerd 身份，并核对 daemon 可见的
+staging 对象；不支持远程 daemon 或未经验证的代理。标准 systemd socket activation
+通过 root PID 文件和 dockerd 持有的监听 FD 交叉确认。每次运行使用独立受保护的空
+Docker client 配置，所有调用固定同一 endpoint/config，不继承个人 context、proxy 或
+registry credentials；镜像必须已在该 daemon 缓存，禁止自动 pull。
+
 Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
 网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair
 和兼容 ABI 被阻断。Docker seccomp 仅支持原生 x86_64 和 aarch64。拒绝 socket、设备、FIFO

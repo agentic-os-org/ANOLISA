@@ -2,7 +2,6 @@
 #![cfg(target_os = "linux")]
 
 use crate::{DockerBackend, DockerConfig};
-use asc_pep_runtime::SandboxBackend;
 use asc_sandbox_types::{ExecutionSpec, LaunchSpec, NetworkMode, OsPermissionSet};
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -17,7 +16,11 @@ impl ScriptedBackend {
         spec: &ExecutionSpec,
     ) -> Result<asc_sandbox_types::ExecutionResult, asc_pep_runtime::PepError> {
         self.0
-            .run_with_stager(spec, |_, _| Ok(()))
+            .run_with_stager(
+                spec,
+                &crate::client::Client::scripted(&self.0.config),
+                |_, _| Ok(()),
+            )
             .map_err(Into::into)
     }
 
@@ -38,7 +41,7 @@ impl ScriptedBackend {
     fn capabilities(
         &self,
     ) -> Result<asc_sandbox_types::BackendCapabilities, asc_pep_runtime::PepError> {
-        self.0.capabilities()
+        DockerBackend::capabilities_with_client(&crate::client::Client::scripted(&self.0.config))
     }
 }
 
@@ -64,6 +67,12 @@ fn fixture() -> Fixture {
         format!(
             r#"#!/bin/bash
 state='{state}'
+[ "$1" = --config ] || exit 65
+[ -d "$2" ] || exit 65
+[ "$3" = --host ] || exit 65
+[ "$4" = unix:///var/run/docker.sock ] || exit 65
+printf '%s\n' "$1" "$2" "$3" "$4" >> "$state/client.calls"
+shift 4
 case "$1" in
   version)
     [ -f "$state/fail-version" ] && exit 1
@@ -97,6 +106,7 @@ esac
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
     let backend = DockerBackend::new(DockerConfig {
         cli,
+        host: "unix:///var/run/docker.sock".into(),
         image: "agent@sha256:abc123".into(),
         memory: None,
         cpus: None,
@@ -191,6 +201,31 @@ fn successful_run_maps_the_container_lifecycle() {
     }
     assert!(create.iter().any(|arg| arg == "agent@sha256:abc123"));
     assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+}
+
+#[test]
+fn client_endpoint_and_config_remain_fixed_for_lifecycle() {
+    let fixture = fixture();
+    fixture.write_inspect("none");
+    fixture.backend.execute_bound(&fixture.spec()).unwrap();
+    let calls = fixture.read_calls("client.calls");
+    assert_eq!(calls.len(), 20);
+    for invocation in calls.chunks_exact(4) {
+        assert_eq!(invocation, &calls[..4]);
+    }
+    assert!(!Path::new(&calls[1]).exists());
+    let create = fixture.read_calls("create.args");
+    assert_eq!(&create[..2], ["--pull", "never"]);
+    let mut config = fixture.backend.0.config.clone();
+    for host in [
+        "tcp://remote:2375",
+        "ssh://remote",
+        "unix://relative",
+        "unix:///run/../sock",
+    ] {
+        config.host = host.into();
+        assert!(DockerBackend::new(config.clone()).is_err());
+    }
 }
 
 #[test]
@@ -327,6 +362,7 @@ fn direct_execute_convenience_matches_bound_execution() {
 fn relative_cli_path_is_rejected_at_construction() {
     let error = DockerBackend::new(DockerConfig {
         cli: Path::new("docker").to_owned(),
+        host: "unix:///var/run/docker.sock".into(),
         image: "agent:1.0".into(),
         memory: None,
         cpus: None,

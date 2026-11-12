@@ -225,6 +225,15 @@ Docker/runtime enforced recursive read-only support (Linux 5.12+). The force
 option is verified before start; unsupported deployments fail without falling
 back to ordinary `:ro`.
 
+`--docker-host` accepts only a local `unix:///absolute/path`, defaulting to
+`unix:///var/run/docker.sock`. The backend verifies endpoint ownership, socket
+type and local root dockerd identity, and checks the daemon's staging view.
+Remote daemons and unverified proxies are unsupported. Standard systemd socket
+activation is cross-checked against the root-owned PID file and dockerd's held
+listening FD. Each run uses a protected empty Docker client configuration; all
+calls use the same explicit endpoint/config without personal context, proxy or
+registry credentials. Images must already be cached; automatic pull is disabled.
+
 Both Docker network modes block external Unix sockets, including pathname
 sockets inside an allowed directory and abstract sockets in the host network
 namespace. Local stream/seqpacket socket pairs remain available; datagram pairs

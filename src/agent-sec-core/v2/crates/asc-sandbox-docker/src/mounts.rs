@@ -148,7 +148,7 @@ fn verify_source(
     Ok(())
 }
 
-fn trusted_root() -> Result<PathBuf, DockerError> {
+pub(crate) fn trusted_root() -> Result<PathBuf, DockerError> {
     let run = open_source(Path::new("/run"))?;
     let metadata = run.metadata()?;
     if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {

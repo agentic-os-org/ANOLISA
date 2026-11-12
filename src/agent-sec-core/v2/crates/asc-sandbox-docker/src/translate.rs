@@ -180,6 +180,7 @@ mod tests {
     fn config() -> DockerConfig {
         DockerConfig {
             cli: PathBuf::from("/usr/bin/docker"),
+            host: "unix:///var/run/docker.sock".into(),
             image: "agent@sha256:abc123".into(),
             memory: None,
             cpus: None,
