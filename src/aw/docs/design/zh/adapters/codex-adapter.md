@@ -19,6 +19,13 @@ Provider 步骤的有序执行及允许或阻断结果。
 `tool.before` 还会拒绝其他 PreToolUse Hook：Codex 并发运行匹配的 Hook，可能在 AW 检查原始输入后执行其他 Hook 的
 `updatedInput`。非必需检查保留这种原生组合，证据仅对应原始输入。
 
+本地 app-server stdio 也可作为启动入口。AW 沿用继承的 stdin/stdout 传输并检查同一套启动
+Hook 清单；探测进程和正式进程均携带 Codex 远程控制禁用标记。0.166.0 在启动后报告禁用状态。
+两个已验证版本在新线程沿用启动工作目录与原生配置时，均执行提示词、工具前后 Hook。
+app-server 接受客户端 RPC 覆盖线程与轮次的工作目录和配置；原生实验中，
+`thread/start.config` 关闭 Hook 后绕过了 AW。启动准入因此只覆盖受信、固定配置的客户端；
+任意 app-server RPC 还需要独立的受控请求边界。
+
 Adapter 以会话和工具调用身份标准化原生事件。单个 AW 命令经 Service、Host、Provider
 依次执行准入步骤。工具执行前的阻断使用 Codex 原生拒绝状态；允许结果仍由原生审批决定。
 Codex 0.163.0 和 0.166.0 可将 PostToolUse 的 `continue:false` reason 用作普通模型请求中的文本。

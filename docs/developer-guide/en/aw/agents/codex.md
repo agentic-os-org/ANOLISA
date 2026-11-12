@@ -39,6 +39,37 @@ Rerun installation and review native trust after editing Hook definitions.
 Cancellation observed before publication leaves the live Hooks unchanged; once
 publication commits, AW completes its sync and recovery checks.
 
+For a business client using local app-server stdio, set `spec.agents.codex.argv` to
+`[/absolute/path/to/codex, app-server]`. Have the client spawn
+`aw run --config aw.yaml --agent codex` as its stdio child. The same AW Provider
+steps apply to new threads using
+the launch directory and native Codex configuration. This path passed native
+prompt denial, tool denial and ordinary model-text replacement on 0.163.0 and
+0.166.0. `aw run` admits only local stdio (`app-server` or
+`--listen stdio://`), with no app-server startup overrides. AW sets Codex's
+remote-control disabled marker for both the inventory probe and the launched
+app-server. Codex 0.166.0 consumes this marker before resolving persisted
+remote-control state; the launched server reports remote control disabled.
+
+Each Codex AW instance retains at most 1024 cumulative event correlations,
+including closed events. A tool's before and after Hooks consume two entries;
+prompt Hooks share this capacity, so prompt checks reduce the 512-tool-pair upper
+bound. Starting another Codex thread in the same app-server does not reset it.
+At exhaustion, AW reports `native_event_limit`; `on_error: block` rejects further
+prompt/tool operations and `withhold_result` withholds further results. A `report`
+step continues according to its configured failure policy. Plan worker rotation
+between completed tasks before the limit: close the stdio child, wait for `aw run`
+to exit, then launch a new `aw run` instance. This releases the old correlations
+and restores capacity while allowing the shared AW service to remain running.
+
+The app-server client must keep thread and turn cwd and configuration unchanged.
+Codex accepts `thread/start.config` overrides that can disable Hooks; AW does
+not currently inspect each app-server RPC. Use this path with a trusted client
+that creates new threads under the launch configuration. If the worker syncs
+`config.toml` between turns, keep Hooks enabled and the AW definitions intact.
+Thread resume, fork, cwd/config overrides and configuration writes require a controlled RPC boundary
+before they can carry the same security claim.
+
 The example checks user text for prompt injection and PII before model dispatch.
 For Bash tools, sec-core checks code and input PII before execution. The example
 blocks unmapped tools until their native input fields are mapped and verified.
@@ -66,9 +97,10 @@ results become replacement text in the ordinary model request. Keep output PII
 controls in the native tool or another enforcing boundary when full delivery
 protection is required.
 
-The admitted launch forms are a new local TUI or `codex exec`. AW rejects
-resume, fork, remote modes, cwd/profile/config overrides and unknown arguments
-because they can change the checked Hook inventory or session boundary. Put a command-line prompt after
+The admitted launch forms are a new local TUI, `codex exec` and local
+`codex app-server` stdio. AW rejects other CLI entrypoints, remote listeners,
+startup configuration overrides and unknown arguments because they can change
+the checked Hook inventory or session boundary. Put a command-line prompt after
 Codex's `--` delimiter so it cannot be interpreted as a hidden or future subcommand.
 For a TUI target use `aw run --config aw.yaml --agent codex -- -- "Check this project"`;
 for an exec target use `argv: [/absolute/path/to/codex, exec]` and the same prompt

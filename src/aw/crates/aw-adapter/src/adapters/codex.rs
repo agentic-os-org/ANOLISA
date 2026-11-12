@@ -27,7 +27,7 @@ struct Prepared {
 impl Adapter for Codex {
     fn prepare(
         &self,
-        input: LaunchInput,
+        mut input: LaunchInput,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<Box<dyn PreparedLaunch>> {
         if !input.options.is_empty()
@@ -39,6 +39,13 @@ impl Adapter for Codex {
             );
         }
         let invocation = preflight::arguments(&input.command.args)?;
+        if invocation.entrypoint == preflight::Entrypoint::AppServer {
+            // Codex consumes this before resolving persisted remote-control state.
+            input.command.environment.insert(
+                "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED".into(),
+                "1".into(),
+            );
+        }
         let version =
             adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?;
         let version = version
@@ -140,10 +147,8 @@ impl Adapter for Codex {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        let mut capabilities = adapter::catalog::CODEX.capabilities(
-            &self.version,
-            if self.invocation.exec { "exec" } else { "tui" },
-        );
+        let mut capabilities = adapter::catalog::CODEX
+            .capabilities(&self.version, self.invocation.entrypoint.as_str());
         capabilities
             .failure_actions
             .insert("tool.after".into(), vec!["withhold_result".into()]);
@@ -176,7 +181,7 @@ impl PreparedLaunch for Prepared {
             }))?,
         )?;
         let mut command = self.input.command.clone();
-        if !self.invocation.exec {
+        if self.invocation.entrypoint == preflight::Entrypoint::Tui {
             command.args.insert(0, "--no-daemon".into());
         }
         command

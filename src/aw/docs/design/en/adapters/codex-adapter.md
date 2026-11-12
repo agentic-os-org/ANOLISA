@@ -26,6 +26,17 @@ A required `tool.before` also rejects other PreToolUse Hooks: Codex runs matchin
 execute another Hook's `updatedInput` after AW checked the original input.
 Optional checks retain this native composition and attest only to original input.
 
+Local app-server stdio is another admitted launch entrypoint. AW leaves its
+transport on inherited stdin/stdout and checks the same startup Hook inventory;
+the probe and launched process both receive Codex's remote-control disabled
+marker. Codex 0.166.0 reports the disabled state at startup. Both verified CLI
+versions execute prompt, before-tool and after-tool Hooks on
+new threads using the launch cwd and native config. App-server accepts client
+RPCs that override thread or turn cwd and configuration. A thread/start config
+override disabling Hooks bypassed AW in the native fixture. Startup admission
+therefore covers a trusted fixed-config client, while arbitrary app-server RPCs
+need a separate controlled request boundary.
+
 The Adapter normalizes each native event with session and tool-call identity.
 One AW command invokes its admitted steps in order through Service, Host and
 Provider. A before block exits with Codex's native denial status; an allow leaves

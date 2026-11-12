@@ -23,7 +23,8 @@ elif request["method"] == "invoke":
         sys.exit(1)
     reply["input_digest"] = request["input_digest"]
     reply["effects"] = [{"type": "observe", "reason_code": "observed"}]
-    if op == "scan_prompt" and mode == "prompt-deny":
+    if op == "scan_prompt" and (mode == "prompt-deny" or
+                                "BLOCK_ME" in request["event"]["input"]["text"]):
         reply["effects"] = [{"type": "block", "reason_code": "prompt_denied"}]
     if op == "scan" and (mode == "deny" or "CANDIDATE" in command):
         reply["effects"] = [{"type": "block", "reason_code": "security_denied"}]

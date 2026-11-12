@@ -4689,9 +4689,10 @@
       "mode": "automated",
       "versions": {},
       "npm_packages": [
-        "@openai/codex@0.166.0"
+        "@openai/codex@0.166.0",
+        "codex163@npm:@openai/codex@0.163.0"
       ],
-      "boundary": "Codex 0.166.0 native exec and UserPromptSubmit/PreToolUse/PostToolUse Hooks with local Responses fixture. Includes ordinary model-side PostToolUse text replacement and withheld Provider failure, input and tool denial, native denial and input rewrite, peer-Hook and Code Mode rejection, MCP text replacement and media withholding, trust refusal and cleanup. Code Mode, pre-Hook capture/telemetry, failed tools, hosted models, TUI trust UI, sandbox enforcement are not certified as protected output.",
+      "boundary": "Codex 0.163.0 and 0.166.0 native exec and local app-server stdio with UserPromptSubmit/PreToolUse/PostToolUse Hooks and a local Responses fixture. Exec covers ordinary model-side PostToolUse text replacement and withheld Provider failure, input and tool denial, native denial and input rewrite, peer-Hook and Code Mode rejection, MCP text replacement and media withholding, trust refusal and cleanup. App-server covers same-cwd/default-config output replacement and code/prompt denial. Client-controlled thread/turn cwd and config overrides, Code Mode, pre-Hook capture/telemetry, failed tools, hosted models, TUI trust UI, and sandbox enforcement are not certified as protected output.",
       "cases": [
         {
           "name": "native-cli",
@@ -4744,6 +4745,121 @@
                   "passed": true,
                   "cleaned": true
                 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-app-server-stdio",
+          "argv": [
+            "{python}",
+            "tests/test_codex_app_server.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/.bin/codex",
+            "--expected-version",
+            "0.166.0",
+            "--output",
+            "{output}/codex-app-server"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex-app-server/result.json",
+              "values": {
+                "version": "codex-cli 0.166.0",
+                "entrypoint": "app-server stdio",
+                "output_replaced": true,
+                "code_blocked": true,
+                "prompt_blocked": true,
+                "cleaned": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-cli-0163",
+          "argv": [
+            "{python}",
+            "tests/test_codex_native.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/codex163/bin/codex.js",
+            "--expected-version",
+            "0.163.0",
+            "--output",
+            "{output}/codex-0163"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex-0163/result.json",
+              "cases": {
+                "at": "results",
+                "key": "case",
+                "names": [
+                  "untrusted",
+                  "disabled",
+                  "prompt-deny",
+                  "allow",
+                  "deny",
+                  "offline",
+                  "retry",
+                  "native-deny",
+                  "native-rewrite",
+                  "native-rewrite-deny",
+                  "native-rewrite-required",
+                  "after-failure",
+                  "long",
+                  "replace",
+                  "replace-failure",
+                  "replace-peer",
+                  "replace-code-mode",
+                  "replace-apply",
+                  "replace-mcp",
+                  "replace-mcp-large",
+                  "replace-media",
+                  "replace-long",
+                  "replace-parallel"
+                ],
+                "values": {
+                  "passed": true,
+                  "cleaned": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-app-server-stdio-0163",
+          "argv": [
+            "{python}",
+            "tests/test_codex_app_server.py",
+            "--aw",
+            "{bin}/aw",
+            "--codex",
+            "{npm}/node_modules/codex163/bin/codex.js",
+            "--expected-version",
+            "0.163.0",
+            "--output",
+            "{output}/codex-app-server-0163"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/codex-app-server-0163/result.json",
+              "values": {
+                "version": "codex-cli 0.163.0",
+                "entrypoint": "app-server stdio",
+                "output_replaced": true,
+                "code_blocked": true,
+                "prompt_blocked": true,
+                "cleaned": true
               }
             }
           ]
