@@ -238,15 +238,15 @@ fn mark_recommendation_notice_shown(state: &mut InlineState) {
 fn recommendation_notice_lines(i18n: &I18n) -> Vec<String> {
     if i18n.language() == Language::ZhCn {
         vec![
-            "提示词推荐已开启，将由当前 AI 参考近期 Shell 与 Agent 使用记录生成建议。".to_string(),
-            "凭证会脱敏；用 /recommendations off 关闭，/recommendations privacy 查看详情。"
+            "推荐已开启：当前 AI 参考近期 Shell 与 Agent 记录；尝试识别并脱敏常见凭证，不能保证覆盖所有敏感信息。".to_string(),
+            "用 /recommendations off 关闭，/recommendations privacy 查看详情。"
                 .to_string(),
         ]
     } else {
         vec![
             "Prompt recommendations are on; the current AI uses recent Shell and Agent activity."
                 .to_string(),
-            "Credentials are sanitized. Use /recommendations off to disable or /recommendations privacy for details."
+            "We attempt to identify and redact common credentials, but cannot guarantee removal of all sensitive information. Use /recommendations off to disable or /recommendations privacy for details."
                 .to_string(),
         ]
     }
@@ -641,6 +641,24 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("/recommendations off"));
         assert!(text.contains("/recommendations privacy"));
+    }
+
+    #[test]
+    fn review_regression_first_disclosure_limits_redaction_guarantees() {
+        for (language, required) in [
+            (Language::ZhCn, ["尝试", "常见凭证", "不能保证"]),
+            (
+                Language::EnUs,
+                ["attempt", "common credentials", "cannot guarantee"],
+            ),
+        ] {
+            let text = recommendation_notice_lines(&I18n::new(language)).join("\n");
+            for term in required {
+                assert!(text.contains(term), "missing {term}: {text}");
+            }
+            assert!(text.contains("/recommendations off"));
+            assert!(text.contains("/recommendations privacy"));
+        }
     }
     #[test]
     fn known_unconfigured_auth_hides_suggestions_without_blocking_unknown_auth() {

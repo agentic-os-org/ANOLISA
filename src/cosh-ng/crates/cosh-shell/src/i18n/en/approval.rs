@@ -58,13 +58,13 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalKeysPrefix => "Keys: ",
         MessageId::ApprovalKeysText => "Left/Right select  Enter confirm  d details  Esc cancel",
         MessageId::ApprovalExecutableToolPolicy => {
-            "Policy: user approval is required before any executable tool request."
+            "This tool request requires your approval."
         }
         MessageId::ApprovalExecutableToolPolicyExtra => {
-            "Only approved read-only Bash/shell tool requests may run in this MVP."
+            "Approved Bash/Shell commands run in the foreground Shell after validation."
         }
         MessageId::ApprovalCommandDefaultPolicy => {
-            "Default: deny. Approved command is rechecked by read-only broker."
+            "Default: deny. Approved commands run in the foreground Shell after validation."
         }
         MessageId::ApprovalRunShellCommandPrompt => "Run shell command?",
         MessageId::ApprovalRunBashCommandPrompt => "Run Bash command?",

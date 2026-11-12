@@ -48,11 +48,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Read-only tools auto-approved; risky requests need confirmation."
         }
         MessageId::ApprovalModeTrustFooter => {
-            "All tools auto-approved; audit trail preserved via control protocol."
+            "Ordinary supported tools auto-approved with audit trail; unknown tools, Hook requests and selected high-risk exceptions still need confirmation."
         }
         MessageId::ApprovalModeTrustConfirmationTitle => "Trust confirmation required",
         MessageId::ApprovalModeTrustConfirmationBody => {
-            "Trust mode auto-approves provider tool requests for this session."
+            "Trust mode auto-approves ordinary supported tools for this session with audit trail; unknown tools, Hook requests and selected high-risk exceptions still need confirmation."
         }
         MessageId::ApprovalModeTrustConfirmationCommandBody => {
             "Run /mode approval trust confirm to enable it explicitly."
@@ -69,7 +69,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "{marker}[ auto      ] Read-only auto-approved; risky needs confirmation"
         }
         MessageId::ApprovalModeCardTrustLine => {
-            "{marker}[ trust     ] All tools auto-approved with audit trail"
+            "{marker}[ trust     ] Ordinary supported tools auto-approved with audit trail; unknown tools, Hook requests and selected high-risk exceptions still need confirmation"
         }
         MessageId::ApprovalModeCardFooter => "Keys: Left/Right select | Enter apply | Esc cancel",
         MessageId::ApprovalModeRemainsBody => "Mode remains {mode}.",

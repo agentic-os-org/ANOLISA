@@ -107,6 +107,54 @@ mod tests {
     }
 
     #[test]
+    fn review_regression_approval_copy_describes_foreground_execution() {
+        for (language, foreground) in [
+            (Language::EnUs, "foreground Shell"),
+            (Language::ZhCn, "前台 Shell"),
+        ] {
+            let i18n = I18n::new(language);
+            assert_eq!(
+                i18n.t(MessageId::ApprovalExecutableToolPolicy),
+                match language {
+                    Language::EnUs => "This tool request requires your approval.",
+                    Language::ZhCn => "此工具请求需要你的批准。",
+                }
+            );
+            for id in [
+                MessageId::ApprovalExecutableToolPolicyExtra,
+                MessageId::ApprovalCommandDefaultPolicy,
+            ] {
+                let text = i18n.t(id);
+                assert!(text.contains(foreground), "{id:?}: {text}");
+                assert!(!text.contains("MVP") && !text.contains("broker"));
+            }
+        }
+    }
+
+    #[test]
+    fn review_regression_trust_copy_preserves_approval_exceptions() {
+        for (language, required) in [
+            (
+                Language::EnUs,
+                ["supported", "unknown", "Hook", "high-risk"],
+            ),
+            (Language::ZhCn, ["受支持", "未知", "Hook", "高风险"]),
+        ] {
+            let i18n = I18n::new(language);
+            for id in [
+                MessageId::ApprovalModeTrustFooter,
+                MessageId::ApprovalModeCardTrustLine,
+                MessageId::ApprovalModeTrustConfirmationBody,
+            ] {
+                let text = i18n.t(id);
+                for term in required {
+                    assert!(text.contains(term), "{id:?} missing {term}: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn message_id_catalog_order_matches_declared_segments() {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);

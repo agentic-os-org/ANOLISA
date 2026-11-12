@@ -299,17 +299,20 @@ fn render_privacy<W: Write>(state: &InlineState, output: &mut W) -> std::io::Res
 pub(super) fn privacy_lines(i18n: &I18n) -> Vec<String> {
     if i18n.language() == Language::ZhCn {
         vec![
-            "采集：脱敏后的 Shell 命令、Agent 请求与结果、推荐反馈及可选的 Bash history。"
-                .to_string(),
-            "保护：密码、Token 等凭证会脱敏；项目、服务、Pod 等推荐所需语义可能保留。".to_string(),
+            "采集：Shell 命令、Agent 请求、推荐反馈及可选的 Bash history。".to_string(),
+            "运行结果：仅记录工具类别与完成状态，不采集完整 AI 输出。".to_string(),
+            "保护：尝试识别并脱敏常见凭证，不能保证覆盖所有敏感信息。".to_string(),
+            "上下文：项目、服务、Pod 等推荐所需语义可能保留。".to_string(),
             "分析：有限的近期活动会发送给当前 AI 服务生成画像；后台不会操作 Shell。".to_string(),
             "本地保留：活动 7 天、近期画像 14 天、长期模式 90 天，并受容量限制。".to_string(),
             "/recommendations clear 仅清除本地数据；AI 服务侧保留遵循其政策。".to_string(),
         ]
     } else {
         vec![
-            "Collected: sanitized Shell commands, Agent activity, feedback, and optional Bash history.".to_string(),
-            "Protected: credentials are sanitized; useful project, service, and Pod context may remain.".to_string(),
+            "Collected: Shell commands, Agent requests, feedback, and optional Bash history.".to_string(),
+            "Run results: only tool categories and completion status, without complete AI output.".to_string(),
+            "Protection: we attempt to identify and redact common credentials, but cannot guarantee removal of all sensitive information.".to_string(),
+            "Context: useful project, service, and Pod context may remain.".to_string(),
             "Analysis: bounded recent activity may be sent to the current AI; it cannot operate the Shell.".to_string(),
             "Local retention: activity 7 days, recent profiles 14 days, long-term patterns 90 days, within capacity limits.".to_string(),
             "/recommendations clear removes local data only; AI-side retention follows its policy.".to_string(),

@@ -44,11 +44,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalModeRecommendFooter => "Agent 只解释和建议；不会发出 tool call。",
         MessageId::ApprovalModeAutoFooter => "只读工具会自动批准；高风险请求仍需确认。",
         MessageId::ApprovalModeTrustFooter => {
-            "所有工具会自动批准；审计记录仍通过 control protocol 保留。"
+            "受支持普通工具自动批准并保留审计；未知工具、Hook 要求及高风险例外仍需确认。"
         }
         MessageId::ApprovalModeTrustConfirmationTitle => "需要确认 trust 模式",
         MessageId::ApprovalModeTrustConfirmationBody => {
-            "trust 模式会在当前会话自动批准 provider tool 请求。"
+            "trust 模式在当前会话自动批准受支持普通工具并保留审计；未知工具、Hook 要求及高风险例外仍需确认。"
         }
         MessageId::ApprovalModeTrustConfirmationCommandBody => {
             "运行 /mode approval trust confirm 显式启用。"
@@ -61,7 +61,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "{marker}[ auto      ] 只读自动批准；高风险请求仍需确认"
         }
         MessageId::ApprovalModeCardTrustLine => {
-            "{marker}[ trust     ] 所有工具自动批准并保留审计记录"
+            "{marker}[ trust     ] 受支持普通工具自动批准并保留审计；未知工具、Hook 要求及高风险例外仍需确认"
         }
         MessageId::ApprovalModeCardFooter => "按键: Left/Right 选择 | Enter 应用 | Esc 取消",
         MessageId::ApprovalModeRemainsBody => "模式仍为 {mode}。",
