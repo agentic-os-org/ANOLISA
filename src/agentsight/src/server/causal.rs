@@ -24,12 +24,15 @@ use crate::storage::sqlite::GenAISqliteStore;
 // model is asked anything.
 use crate::grounding;
 
+#[path = "causal_cache_source.rs"]
+mod cache_source;
+
 // ─── In-memory cache ─────────────────────────────────────────────────────────
 //
 // Caches the last successful causal case per (session_id, round_index) so the
 // dashboard can re-open a run instantly without replaying three LLM calls.
 // The cache is invalidated automatically when the user submits a different
-// complaint (stale-complaint check) or explicitly via `CausalRequest.force`.
+// complaint or the source changes, or explicitly via `CausalRequest.force`.
 
 type CausalCacheKey = (String, Option<usize>);
 type CausalCacheMap = std::collections::HashMap<CausalCacheKey, CausalCacheEntry>;
@@ -47,6 +50,7 @@ static CAUSAL_CACHE_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 #[derive(Clone)]
 struct CausalCacheEntry {
     complaint: String,
+    source_hash: Option<String>,
     case: CausalCase,
     /// Monotonic counter bumped on every read/write; the smallest value in
     /// the map is the eviction candidate when the cap is exceeded.
@@ -384,10 +388,27 @@ pub async fn run_causal_attribution(
         format!("{scope_tag}:{resolved_session_id}"),
         req.round_index,
     );
+    // Read first so an appended or corrected trajectory cannot reuse an old
+    // case. A missing source can still serve the paid, retained analysis.
+    let loaded = load_trajectory(
+        &state.storage_path,
+        &resolved_session_id,
+        genai_store.as_deref(),
+        trajectory_store.as_deref(),
+        id_kind,
+    );
+    let source_hash = loaded.as_ref().ok().and_then(|trajectory| {
+        let round = slice_round(trajectory, req.round_index).ok()?;
+        cache_source::fingerprint(trajectory, round).ok()
+    });
+    let source_available = loaded.is_ok();
     if !req.force {
         if let Ok(mut guard) = causal_cache().lock() {
             if let Some(entry) = guard.get_mut(&cache_key) {
-                if entry.complaint == req.complaint {
+                if entry.complaint == req.complaint
+                    && (!source_available
+                        || (source_hash.is_some() && entry.source_hash == source_hash))
+                {
                     entry.last_used = next_cache_tick();
                     log::info!(
                         "Causal attribution: cache hit for {}='{}' round={:?}, returning prior case",
@@ -413,19 +434,23 @@ pub async fn run_causal_attribution(
             };
             match store.get(key) {
                 Ok(Some(case_json)) => {
-                    // The stored bytes are exactly what the client received
-                    // last time; replaying them verbatim cannot drift.
                     match serde_json::from_str::<serde_json::Value>(&case_json) {
                         Ok(case_value) => {
-                            log::info!(
-                                "Causal attribution: restored case for {} round={:?} from causal.db",
-                                resolved_session_id,
-                                req.round_index,
-                            );
-                            return HttpResponse::Ok().json(serde_json::json!({
-                                "case": case_value,
-                                "cached": true,
-                            }));
+                            if let Some(case_value) = cache_source::restored_case(
+                                case_value,
+                                source_hash.as_deref(),
+                                source_available,
+                            ) {
+                                log::info!(
+                                    "Causal attribution: restored case for {} round={:?} from causal.db",
+                                    resolved_session_id,
+                                    req.round_index,
+                                );
+                                return HttpResponse::Ok().json(serde_json::json!({
+                                    "case": case_value,
+                                    "cached": true,
+                                }));
+                            }
                         }
                         Err(error) => {
                             // A corrupt row must not wedge the feature: log it
@@ -450,13 +475,7 @@ pub async fn run_causal_attribution(
         }
     }
 
-    let trajectory = match load_trajectory(
-        &state.storage_path,
-        &resolved_session_id,
-        genai_store.as_deref(),
-        trajectory_store.as_deref(),
-        id_kind,
-    ) {
+    let trajectory = match loaded {
         Ok(t) => t,
         Err(e) => {
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -497,7 +516,7 @@ pub async fn run_causal_attribution(
                     round: cache_key.1,
                     complaint: &req.complaint,
                 };
-                match serde_json::to_string(&case_) {
+                match cache_source::persisted_case(&case_, source_hash.as_deref()) {
                     Ok(case_json) => {
                         if let Err(error) = store.put(key, &case_json) {
                             log::warn!(
@@ -525,6 +544,7 @@ pub async fn run_causal_attribution(
                     cache_key,
                     CausalCacheEntry {
                         complaint: req.complaint.clone(),
+                        source_hash,
                         case: case_.clone(),
                         last_used: tick,
                     },

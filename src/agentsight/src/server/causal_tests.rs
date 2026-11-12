@@ -817,6 +817,9 @@ fn probe_requires_a_session_match_in_an_unscoped_table() {
 // id_kind gate
 // ---------------------------------------------------------------------------
 
+#[path = "causal_freshness_tests.rs"]
+mod freshness_tests;
+
 fn test_app_state() -> actix_web::web::Data<AppState> {
     use crate::config::ServerAuthConfig;
     use crate::grader::EvaluationStore;

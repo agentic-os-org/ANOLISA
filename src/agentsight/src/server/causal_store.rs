@@ -5,8 +5,10 @@
 //! paid pipeline run, so losing it meant paying again to see the same answer,
 //! and nothing could be audited after the fact.
 //!
-//! The case is stored as the exact JSON sent to the client, and restored by
-//! replaying those bytes. That is deliberate: `CausalCase` derives `Serialize`
+//! The handler stores case JSON with private source identity metadata.
+//! Reads strip that metadata without changing the client-visible case fields.
+//! Legacy cases remain readable when the original source is unavailable.
+//! `CausalCase` derives `Serialize`
 //! only, and threading `Deserialize` through its whole nested tree would be a
 //! larger change than this store needs. Lossless by construction, and the day
 //! a consumer wants typed reads is the day to add the derive.
