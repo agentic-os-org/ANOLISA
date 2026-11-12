@@ -415,6 +415,44 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --text "some text" --include-low-confidence
 ```
 
+#### Gateway outbound PII demo
+
+To block sensitive request bodies, first configure Gateway Policy/Scope/Binding
+and wait for the Agent's Binding to be `READY`. Add these settings to
+`/var/lib/agent-sec-gateway/config.yaml` and restart the gateway:
+
+```yaml
+agent_sec_pii_scan: true
+agent_sec_pii_cli: /usr/bin/agent-sec-cli
+```
+
+```bash
+sudo systemctl restart agent-sec-gateway.service
+```
+
+Use an absolute path to the installed Rust CLI, executable by `agent-sec-gw`.
+From a routed Agent's shell tool, replace the URL with an endpoint you control:
+
+```bash
+curl -i -H 'Content-Type: text/plain' --data-binary 'hello world' https://your-echo-service/demo
+curl -i -H 'Content-Type: text/plain' --data-binary 'Contact 13812345678' https://your-echo-service/demo
+```
+
+Only a complete daemon PII `pass` forwards the body unchanged. The second
+request returns 403 (`pii_blocked`) and must be absent from upstream logs;
+`warn` and `deny` both block. Failed, timed-out, busy or incomplete scans return
+503. Invalid content returns 400 and unsupported content returns 415.
+
+Only uncompressed UTF-8 `text/plain` and `application/json` are supported, up to
+256 KiB; oversized uploads are aborted, including chunked uploads before EOF.
+JSON escapes and duplicate keys are scanned after decoding. Empty bodies are
+also scanned; trailers and upgrades are rejected. Each scan has a five-second
+deadline, with at most two concurrent CLI processes.
+
+The setting defaults to `false`; disable it and restart to restore streaming.
+Coverage is limited to routed request bodies: URL/header PII, IPv6/QUIC/other
+ports and direct traffic after routing removal are outside this demo.
+
 #### Host hook policy
 
 All six hosts scan with the PII checker. It runs in observe-only, fail-open mode by

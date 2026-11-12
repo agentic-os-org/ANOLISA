@@ -389,6 +389,39 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --text "some text" --include-low-confidence
 ```
 
+#### Gateway 外发 PII 演示
+
+要阻断敏感请求正文，先配置 Gateway Policy/Scope/Binding，等待 Agent 的 Binding 为
+`READY`，再向 `/var/lib/agent-sec-gateway/config.yaml` 添加以下设置并重启网关：
+
+```yaml
+agent_sec_pii_scan: true
+agent_sec_pii_cli: /usr/bin/agent-sec-cli
+```
+
+```bash
+sudo systemctl restart agent-sec-gateway.service
+```
+
+CLI 路径必须指向已安装的 Rust 二进制，使用绝对路径且 `agent-sec-gw` 能够执行。
+在已被引流的 Agent 的 shell 工具中执行以下命令，将 URL 替换成自己控制的接口：
+
+```bash
+curl -i -H 'Content-Type: text/plain' --data-binary 'hello world' https://your-echo-service/demo
+curl -i -H 'Content-Type: text/plain' --data-binary 'Contact 13812345678' https://your-echo-service/demo
+```
+
+只有 daemon 完整扫描且结果为 `pass` 才原样转发正文。第二条请求返回 403（`pii_blocked`），
+上游日志中应没有该请求；`warn`、`deny` 都阻断。扫描失败、超时、繁忙或覆盖不完整返回
+503；内容无效返回 400，不支持的内容返回 415。
+
+仅支持不超过 256 KiB 的未压缩 UTF-8 `text/plain` 和 `application/json`；超限上传直接
+终止，chunked 上传也会在 EOF 之前检查。JSON 转义和重复键解码后扫描。空正文也扫描，
+拒绝 trailers 和协议升级。每次扫描限时五秒，最多两个 CLI 进程并发。
+
+开关默认 `false`，关闭并重启可恢复流式转发。覆盖范围仅限已引流的请求正文，不包括
+URL/header 中的 PII、IPv6/QUIC/其他端口，以及撤销引流后的直连流量。
+
 #### 宿主 Hook Policy
 
 六个宿主都会执行 PII 检测。默认启用 observe-only 和 fail-open；原始扫描内容只通过

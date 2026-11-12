@@ -223,10 +223,15 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 
 ### 4.2 请求判定与响应
 
-请求在 `requestheaders` 阶段完成授权与 fake→真实值替换，不等待正文。请求正文原样流式
-传输，不解压、不缓存、不检查或改写；不再执行请求正文真实凭据检查。URL（含 query 的原始
+请求在 `requestheaders` 阶段完成授权与 fake→真实值替换。默认关闭 `agent_sec_pii_scan`，
+请求正文原样流式传输，不解压、不缓存、不检查或改写。URL（含 query 的原始
 及 URL 解码形式）、header 值以及解析后的 Basic 用户名/密码中既有真实凭据拒绝仍保留。
 query 不作为凭据替换 carrier，Policy path 匹配不含 query。
+
+开启 `agent_sec_pii_scan` 后，addon 缓冲正文，通过 stdin 调用 Rust CLI 的
+`scan-pii --stdin --format json`，复用已有 UDS 身份验证、daemon PII 规则和脱敏审计。
+只有完整扫描且结果为 `pass` 才转发；审计调用者为 Gateway CLI。配置、限额和演示见
+[用户指南](../../../../docs/user-guide/zh/agent-sec-core/index.md#gateway-外发-pii-演示)。
 
 请求校验顺序保持：generation/listener → Authorization 重复与 Basic 格式 → URL/header 中
 真实值泄露 → fake 的 carrier、Scope 与 tombstone → 明文 → Host/SNI/authority → Upgrade →

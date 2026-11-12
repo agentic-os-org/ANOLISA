@@ -135,6 +135,9 @@ Key list returns active IDs only (`{"credentials":["github"]}`); add/remove retu
 successful enable/disable return `{}`. See the
 [Secret Gateway design (Chinese)](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md).
 
+For optional request-body scanning, enable `agent_sec_pii_scan` (default off).
+See the [outbound PII demo](../../docs/user-guide/en/agent-sec-core/index.md#gateway-outbound-pii-demo).
+
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables
