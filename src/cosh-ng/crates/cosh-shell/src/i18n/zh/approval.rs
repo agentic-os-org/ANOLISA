@@ -55,11 +55,13 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalNextLabel => "下一个: ",
         MessageId::ApprovalKeysPrefix => "按键: ",
         MessageId::ApprovalKeysText => "左/右选择  Enter 确认  d 详情  Esc 取消",
-        MessageId::ApprovalExecutableToolPolicy => "策略: 可执行 tool 请求必须先经过用户审批。",
+        MessageId::ApprovalExecutableToolPolicy => "此工具请求需要你的批准。",
         MessageId::ApprovalExecutableToolPolicyExtra => {
-            "MVP 中只有已审批的只读 Bash/shell tool 请求可以运行。"
+            "批准的 Bash/Shell 命令通过校验后交给前台 Shell 执行。"
         }
-        MessageId::ApprovalCommandDefaultPolicy => "默认: 拒绝。批准的命令仍会由只读 broker 复查。",
+        MessageId::ApprovalCommandDefaultPolicy => {
+            "默认: 拒绝。批准的命令通过校验后交给前台 Shell 执行。"
+        }
         MessageId::ApprovalRunShellCommandPrompt => "运行 shell 命令？",
         MessageId::ApprovalRunBashCommandPrompt => "运行 Bash 命令？",
         MessageId::ApprovalNotFoundTitle => "审批未找到",

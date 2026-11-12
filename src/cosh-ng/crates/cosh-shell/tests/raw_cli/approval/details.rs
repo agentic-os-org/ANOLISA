@@ -159,7 +159,7 @@ fn raw_cli_details_for_approval_uses_structured_panel() {
     assert!(output.contains("Cancelled req-1"), "{output}");
     assert!(output.contains("medium risk"), "{output}");
     assert!(
-        output.contains("Policy: user approval is required before any executable tool request"),
+        output.contains("This tool request requires your approval."),
         "{output}"
     );
     assert!(
@@ -191,10 +191,7 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
     assert!(output.contains("已取消 req-1"), "{output}");
     assert!(output.contains("Bash · 中风险"), "{output}");
     assert!(!output.contains("风险 medium"), "{output}");
-    assert!(
-        output.contains("策略: 可执行 tool 请求必须先经过用户审批。"),
-        "{output}"
-    );
+    assert!(output.contains("此工具请求需要你的批准。"), "{output}");
     assert!(output.contains("命令:"), "{output}");
     assert!(output.contains("git status"), "{output}");
     assert!(!output.contains("Approval required"), "{output}");
@@ -202,7 +199,7 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
     assert!(!output.contains("Approval details"), "{output}");
     assert!(!output.contains("Cancelled req-1"), "{output}");
     assert!(
-        !output.contains("Policy: user approval is required"),
+        !output.contains("This tool request requires your approval."),
         "{output}"
     );
     assert!(!output.contains("Keys:"), "{output}");

@@ -912,7 +912,10 @@ fn approval_details_panel_renders_structured_request_context() {
     assert!(text.contains("Request: Bash command"), "{text}");
     assert!(text.contains("Command:"), "{text}");
     assert!(text.contains("ps aux -m"), "{text}");
-    assert!(text.contains("Policy: user approval is required"), "{text}");
+    assert!(
+        text.contains("This tool request requires your approval."),
+        "{text}"
+    );
     assert!(!text.contains("Subject: tool Bash"), "{text}");
     assert!(!text.contains("Tool input"), "{text}");
     assert!(!text.contains("Approval details\nid:"), "{text}");
@@ -970,10 +973,7 @@ fn approval_details_panel_uses_zh_catalog_labels() {
     assert!(text.contains("默认: 拒绝"), "{text}");
     assert!(text.contains("请求: Bash 命令"), "{text}");
     assert!(text.contains("命令:"), "{text}");
-    assert!(
-        text.contains("策略: 可执行 tool 请求必须先经过用户审批。"),
-        "{text}"
-    );
+    assert!(text.contains("此工具请求需要你的批准。"), "{text}");
     assert!(!text.contains("Approval details"), "{text}");
     assert!(!text.contains("Tool input"), "{text}");
 }
@@ -1039,7 +1039,10 @@ fn approval_details_panel_renders_audit_reference_inside_panel() {
     assert!(closing_border.contains('└'), "{text}");
     assert!(!closing_border.contains("audit_ref"), "{text}");
     assert!(text.contains("ls -la"), "{text}");
-    assert!(text.contains("Policy: user approval is required"), "{text}");
+    assert!(
+        text.contains("This tool request requires your approval."),
+        "{text}"
+    );
     assert_rendered_width(&text, 70);
     assert_box_lines_aligned(&text, 70);
 }
@@ -1055,7 +1058,7 @@ fn panel_content_without_layout(text: &str) -> String {
 }
 
 #[test]
-fn approval_details_panel_wraps_audit_reference_at_minimum_width() {
+fn review_regression_approval_details_keeps_audit_and_policy_at_minimum_width() {
     // The 40-column minimum panel is narrower than `audit_ref: <uuid>`; the id
     // must wrap instead of being clipped, or it cannot be traced in the audit log.
     let renderer = RatatuiInlineRenderer::with_width(40);
@@ -1091,7 +1094,16 @@ fn approval_details_panel_wraps_audit_reference_at_minimum_width() {
     assert!(!text.contains(" ..."), "{text}");
     // The wrapped rows must be budgeted, not stolen from the rows below.
     assert_eq!(with_ref.len(), without_ref.len() + 2, "{text}");
-    assert!(text.contains("Policy:"), "{text}");
+    assert!(
+        panel_content_without_layout(&text).contains("Thistoolrequestrequiresyourapproval."),
+        "{text}"
+    );
+    assert!(
+        panel_content_without_layout(&without_ref.join("\n"))
+            .contains("Thistoolrequestrequiresyourapproval."),
+        "{}",
+        without_ref.join("\n")
+    );
     assert_rendered_width(&text, 40);
     assert_box_lines_aligned(&text, 40);
 }
