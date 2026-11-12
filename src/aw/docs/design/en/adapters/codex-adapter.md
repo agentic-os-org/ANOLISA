@@ -29,9 +29,13 @@ Optional checks retain this native composition and attest only to original input
 The Adapter normalizes each native event with session and tool-call identity.
 One AW command invokes its admitted steps in order through Service, Host and
 Provider. A before block exits with Codex's native denial status; an allow leaves
-native approval intact. PostToolUse is observation only because Codex does not
-offer a general tool-result replacement contract. Tool output enforcement needs
-an independently verified result-delivery boundary.
+native approval intact. Codex 0.163.0 can turn a PostToolUse `continue:false`
+reason into ordinary model-visible text. AW admits this version-specific path
+only with Code Mode disabled and no peer PostToolUse Hooks. The final replacement
+step uses `withhold_result` on Provider failure or unsupported projection.
+Codex still captures and logs some original results before the Hook, and native
+Hook command failures may expose the original; complete result enforcement
+needs an independently verified result-delivery boundary.
 
 See the [integration guide](../../../../../../docs/developer-guide/en/aw/agents/codex.md)
 for setup and the [capability reference](../../../../../../docs/user-guide/en/aw/capabilities.md)

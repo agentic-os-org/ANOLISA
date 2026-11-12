@@ -6,14 +6,14 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 
 ## Hook 支持矩阵
 
-✓ 已声明且有契约测试覆盖，× 尚不支持。结果替换限于获准的文本槽，保留原生回执及失败状态。
+✓ 已声明且有契约测试覆盖，× 尚不支持。多数 Adapter 在获准文本槽中替换结果并保留原生回执与失败状态；Codex 的普通模型文本替换范围见下文。
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
-| `codex` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -25,7 +25,8 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
 Qoder CLI 尚未接入失败工具的 Post 回调。Codex CLI 0.163.0 支持提交与工具执行前阻断，
-其 PostToolUse 仅支持观察，见 [Codex 指南](../../../developer-guide/zh/aw/agents/codex.md)。
+并可在关闭 Code Mode 且没有其他 PostToolUse Hook 时替换普通模型请求中的文本；
+策略前捕获、遥测和 Hook 故障仍不受保护，见 [Codex 指南](../../../developer-guide/zh/aw/agents/codex.md)。
 其他结果类型和接点限制见各 Agent 页。
 Codex 的 `tool.before` 标为必需时，AW 拒绝其他可在检查后改写参数的原生 PreToolUse Hook；
 非必需检查仅覆盖原始输入。

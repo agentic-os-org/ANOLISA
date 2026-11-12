@@ -50,7 +50,11 @@ pub(super) fn callback(args: &Arguments, adapter_id: &str, config_env: &str) -> 
         Ok(output) => output,
         Err(error) => {
             eprintln!("AW {adapter_id} hook failed: {error}");
-            native.reply(event != "tool.after")
+            if event == "tool.after" {
+                withheld_result()
+            } else {
+                native.reply(true)
+            }
         }
     };
     hook::emit(output)
@@ -96,7 +100,7 @@ fn invoke(
         &binding.native_context(),
         event,
         input,
-        false,
+        route.replacement_step.is_some(),
     )?;
     let result = (|| {
         for step in &chain.steps {
@@ -154,7 +158,21 @@ fn invoke(
                         return Ok(reply);
                     }
                     std::io::stderr().write_all(&reply.stderr)?;
+                    if event == "tool.after"
+                        && route.replacement_step.as_deref() == Some(step.id.as_str())
+                        && normalized["tool"].get("result_projection").is_none()
+                    {
+                        return Ok(withheld_result());
+                    }
                     if output.status.success() {
+                        if event == "tool.after"
+                            && route.replacement_step.as_deref() == Some(step.id.as_str())
+                            && serde_json::from_slice::<serde_json::Value>(&reply.stdout).is_ok_and(
+                                |value| value["continue"] == false && value["reason"].is_string(),
+                            )
+                        {
+                            return Ok(reply);
+                        }
                         continue;
                     }
                     eprintln!(
@@ -170,6 +188,9 @@ fn invoke(
                 let mut reply = native.reply(true);
                 aw_adapter::block_reason(adapter_id, &mut reply, "AW policy callback unavailable")?;
                 return Ok(reply);
+            }
+            if event == "tool.after" && step.on_error == "withhold_result" {
+                return Ok(withheld_result());
             }
         }
         Ok(native.reply(false))
@@ -209,4 +230,12 @@ fn invoke(
         eprintln!("AW {adapter_id} event cleanup failed: {error}");
     }
     result
+}
+
+fn withheld_result() -> HookOutput {
+    HookOutput {
+        exit: NativeExit::Code(0),
+        stdout: br#"{"continue":false,"reason":"AW result withheld"}"#.to_vec(),
+        stderr: Vec::new(),
+    }
 }

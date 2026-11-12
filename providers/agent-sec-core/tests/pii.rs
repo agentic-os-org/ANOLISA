@@ -161,6 +161,27 @@ fn qoder_read_projection_allows_replacement_only_with_a_safe_retained_envelope()
 }
 
 #[test]
+fn codex_whole_mcp_projection_replaces_serialized_result() {
+    let d = support::Directory::new(json!({"pii":true}));
+    let native = json!({"tool_name":"mcp__fixture__echo",
+        "tool_input":{"value":"safe"},
+        "tool_response":{"content":[{"type":"text","text":"SENSITIVE"}],
+            "structuredContent":{"private":"SENSITIVE"},"isError":false}});
+    let mut req = request(true);
+    req["event"]["agent"]["adapter"] = json!("codex");
+    req["event"]["tool"]["result"] = native["tool_response"].clone();
+    req["event"]["tool"]["result_projection"] =
+        aw_adapter::projection::project("codex", &native).unwrap();
+    let response = run(req.clone(), &d);
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(response["effects"][0]["type"], "replace_result");
+    assert!(!response.to_string().contains("SENSITIVE"));
+
+    req["event"]["tool"]["result_projection"]["text"] = json!("SENSITIVE");
+    assert_eq!(run(req, &d)["error_code"], "unsupported_pii_result");
+}
+
+#[test]
 fn observe_modes_preserve_risk_and_enforcement_requires_admission() {
     for output in [false, true] {
         let d = support::Directory::new(json!({"pii":true}));

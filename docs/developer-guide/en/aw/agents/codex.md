@@ -45,10 +45,35 @@ When `tool.before` is required, AW rejects other native PreToolUse Hooks at
 launch. Codex can execute arguments rewritten by another Hook after AW checks
 the original input. Without `required`, retained PreToolUse Hooks may rewrite
 the executed arguments; AW attests only to the original input.
-PostToolUse records completion; Codex 0.163.0 does not provide a
-supported result-replacement seam, so AW rejects `replace_result` and cannot
-redact a tool result before Codex consumes it. Keep output PII controls in the
-native tool or another enforcing boundary when required.
+PostToolUse records completion. On Codex 0.163.0, a final Provider step can
+return `replace_result` to replace the ordinary model-visible text. Configure
+that step with `on_error: withhold_result`; AW then supplies a fixed withheld
+text when the Provider fails or the Hook result lacks a supported text
+projection. A bound PostToolUse Hook also withholds if callback preparation
+fails, including inputs above the 1 MiB Hook limit, before Provider scanning.
+Admission rejects Code Mode and other PostToolUse Hooks for this
+configuration. The sec-core example stays observe-only; an opt-in output PII
+step uses `scan_tool_output`, `effects: [observe, replace_result]` and
+`pii.output_mode: replace_result`.
+
+In a copy of the example, set `spec.providers.security.config.pii.output_mode`
+to `replace_result` and append this as the last `spec.events.tool.after.steps`
+entry:
+
+```yaml
+- id: output-pii
+  provider: security
+  operation: scan_tool_output
+  effects: [observe, replace_result]
+  on_error: withhold_result
+```
+
+This version-specific Hook behavior marks the native Hook as stopped. It does
+not protect Code Mode, tool failures without PostToolUse, prior result capture,
+telemetry, terminal streaming, or a failed native Hook command. MCP structured
+results become replacement text in the ordinary model request. Keep output PII
+controls in the native tool or another enforcing boundary when full delivery
+protection is required.
 
 The admitted launch forms are a new local TUI or `codex exec`. AW rejects
 resume, fork, remote modes, cwd/profile/config overrides and unknown arguments

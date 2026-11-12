@@ -4691,7 +4691,7 @@
       "npm_packages": [
         "@openai/codex@0.163.0"
       ],
-      "boundary": "Codex 0.163.0 native exec and UserPromptSubmit/PreToolUse/PostToolUse Hooks with local Responses fixture. Includes input and tool denial, provider failure, native denial and input rewrite, required-check rejection of peer PreToolUse Hooks, serial steps, unchanged tool results, trust refusal and cleanup. Tool output is observe-only; hosted models, TUI trust UI, sandbox enforcement and MCP are not certified.",
+      "boundary": "Codex 0.163.0 native exec and UserPromptSubmit/PreToolUse/PostToolUse Hooks with local Responses fixture. Includes ordinary model-side PostToolUse text replacement and withheld Provider failure, input and tool denial, native denial and input rewrite, peer-Hook and Code Mode rejection, MCP text replacement and media withholding, trust refusal and cleanup. Code Mode, pre-Hook capture/telemetry, failed tools, hosted models, TUI trust UI, sandbox enforcement are not certified as protected output.",
       "cases": [
         {
           "name": "native-cli",
@@ -4726,7 +4726,17 @@
                   "native-rewrite-deny",
                   "native-rewrite-required",
                   "after-failure",
-                  "long"
+                  "long",
+                  "replace",
+                  "replace-failure",
+                  "replace-peer",
+                  "replace-code-mode",
+                  "replace-apply",
+                  "replace-mcp",
+                  "replace-mcp-large",
+                  "replace-media",
+                  "replace-long",
+                  "replace-parallel"
                 ],
                 "values": {
                   "passed": true,

@@ -1241,6 +1241,10 @@
     "codex-large-denial": {
       "target": "aw-cli/test/codex",
       "test": "report_cannot_override_a_large_native_denial"
+    },
+    "codex-replacement": {
+      "target": "aw-cli/test/codex",
+      "test": "native_replacement_returns_feedback_to_codex"
     }
   },
   "agents": {
@@ -1966,6 +1970,10 @@
         "tool.after": {
           "observe": [
             "codex-launch"
+          ],
+          "replace_result": [
+            "final-replacement",
+            "codex-replacement"
           ]
         }
       },
@@ -1982,18 +1990,13 @@
       ],
       "tokenless": [
         "codex-launch",
-        "codex-admission"
+        "codex-admission",
+        "final-replacement"
       ],
       "admission": [
         "codex-admission"
       ],
-      "unsupported": {
-        "tool.after": {
-          "replace_result": [
-            "codex-admission"
-          ]
-        }
-      }
+      "unsupported": {}
     }
   },
   "providers": {

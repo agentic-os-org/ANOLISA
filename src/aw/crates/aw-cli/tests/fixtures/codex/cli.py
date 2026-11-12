@@ -70,7 +70,8 @@ for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
     if event == "UserPromptSubmit":
         native["prompt"] = mode
     if event == "PostToolUse":
-        native["tool_response"] = {"stdout": "original output", "stderr": "original error", "exit_code": 7}
+        native["tool_response"] = ("original output" if mode == "replace" else
+                                   {"stdout": "original output", "stderr": "original error", "exit_code": 7})
     blocked = False
     for group in hooks[event]:
         for hook in group["hooks"]:

@@ -160,6 +160,52 @@ fn submission_denial_prevents_tool_execution_and_releases_event() {
 }
 
 #[test]
+fn native_replacement_returns_feedback_to_codex() {
+    let f = Fixture::new();
+    let mut doc = setup(&f);
+    doc["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
+        json!(["observe", "replace_result"]);
+    doc["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    f.save(&doc);
+    let service = Service::start(&f, &doc);
+    install(&f);
+    let mut launch = command(&f, "run");
+    launch.args(["--", "--", "replace"]);
+    let output = f.run(launch);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reply: Value =
+        serde_json::from_str(result["results"][2]["stdout"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        reply,
+        json!({"continue":false,"reason":"AW_REDACTED_RESULT"})
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("policy-calls")).unwrap(),
+        "scan_prompt\nscan\nretry\nrecord\n"
+    );
+    service.released(&f);
+}
+
+#[test]
+fn bound_after_hook_withholds_when_registration_is_unreadable() {
+    let f = Fixture::new();
+    let mut hook = f.command();
+    hook.args(["codex-hook", "--event", "tool.after"])
+        .env("AW_CODEX_CONFIG", f.root.join("missing-chain.json"));
+    let output = f.run(hook);
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"continue":false,"reason":"AW result withheld"})
+    );
+}
+
+#[test]
 fn untrusted_disabled_and_unsupported_launches_never_start_tools() {
     for case in [
         "untrusted",
