@@ -300,14 +300,20 @@ fn bracket_sniffed_non_json_passes_through_instead_of_failing() {
     // Two concatenated JSON documents look like JSON to the bracket
     // sniff but do not parse. The detector delegates authority to the
     // JSON compressor, so this misroute must degrade to passthrough
-    // rather than failing the whole PostTool call.
+    // rather than failing the whole PostTool call -- reported under the
+    // classification that describes the text actually handled, not under
+    // the sniff that misrouted it.
     let input = "{\"items\": [1, 2, 3]}\n{\"second\": \"document\"}\n";
     let mut req = request(input);
     req.tool_name = "WebFetch".into();
     let run = PostToolPipeline::run(&req, &build_log_config(), None);
     assert_eq!(run.response.disposition, Disposition::Passthrough);
     assert_eq!(run.response.output, input);
-    assert_eq!(run.response.content_type, Some(ContentType::Json));
+    assert_ne!(run.response.content_type, Some(ContentType::Json));
+    assert_eq!(
+        run.response.content_type,
+        Some(detect_excluding_json(input))
+    );
     assert!(run.response.applied_operations.is_empty());
     assert!(run.response.stash_keys.is_empty());
 }
@@ -1290,6 +1296,78 @@ fn quoted_json_scalar_passes_through() {
     assert_eq!(run.response.disposition, Disposition::Passthrough);
     assert_eq!(run.response.output, input);
     assert!(run.operations.is_empty());
+}
+
+/// Content the JSON bracket sniff routes to the JSON domain but whose
+/// authoritative parse fails: an NDJSON stream, two concatenated documents
+/// and an `[INFO] … [ok]` log.
+fn json_rejecting_inputs() -> Vec<String> {
+    vec![
+        (0..12)
+            .map(|index| format!(r#"{{"id": {index}, "message": "record-{index} payload"}}"#))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        // Two documents concatenated with no separator at all.
+        (0..12)
+            .map(|index| format!(r#"{{"id": {index}, "state": "open"}}"#))
+            .collect::<Vec<_>>()
+            .concat(),
+        (0..12)
+            .map(|index| {
+                format!("[2026-09-25 10:00:{index:02}] INFO worker {index} status=200 [ok]")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ]
+}
+
+#[test]
+fn rejected_json_parse_degrades_to_passthrough() {
+    for input in json_rejecting_inputs() {
+        // The sniff routes these to the JSON domain with detection on and
+        // with `force_json`; neither may fail the operation.
+        for force_json in [true, false] {
+            let mut config = config(Duration::from_secs(1), 32);
+            config.force_json = force_json;
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+
+            let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
+
+            assert_eq!(run.response.disposition, Disposition::Passthrough);
+            assert_eq!(run.response.output, input);
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert!(run.response.applied_operations.is_empty());
+            assert!(run.operations.is_empty());
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(run.response.before_tokens, run.response.after_tokens);
+            // The reported domain describes the text that was handled.
+            assert_ne!(run.response.content_type, Some(ContentType::Json));
+            assert_eq!(
+                run.response.content_type,
+                Some(detect_excluding_json(&input))
+            );
+            // Parsing precedes every candidate: nothing was tentatively
+            // written, so no rollback is owed.
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(concrete.len(), 0);
+        }
+    }
+}
+
+#[test]
+fn rejected_json_parse_passes_through_in_dry_run() {
+    let input = json_rejecting_inputs().remove(0);
+    let mut config = config(Duration::from_secs(1), 32);
+    config.compression_enabled = false;
+
+    let run = PostToolPipeline::run(&request(&input), &config, None);
+
+    assert_eq!(run.response.disposition, Disposition::Passthrough);
+    assert_eq!(run.response.output, input);
+    assert!(run.response.applied_operations.is_empty());
+    assert_ne!(run.response.content_type, Some(ContentType::Json));
 }
 
 #[test]
