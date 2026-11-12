@@ -138,7 +138,15 @@ fn cli_as(uid: u32, socket: &Path, args: &[&str]) -> (Option<i32>, String, Strin
     use std::os::unix::process::CommandExt as _;
     let scratch =
         std::env::temp_dir().join(format!("asc-cli-dual-uid-{}-{}", std::process::id(), uid));
-    std::fs::copy(env!("CARGO_BIN_EXE_agent-sec-cli"), &scratch).expect("copy the CLI");
+    // The copy runs in a child process: a fork in a parallel test thread would
+    // inherit this process' write handle and keep the copy `ETXTBSY` after
+    // `fs::copy` returns.
+    let copied = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_agent-sec-cli"))
+        .arg(&scratch)
+        .status()
+        .expect("spawn the CLI copy");
+    assert!(copied.success(), "copy the CLI: {copied}");
     std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o755))
         .expect("world-executable copy");
     let output = Command::new(&scratch)
