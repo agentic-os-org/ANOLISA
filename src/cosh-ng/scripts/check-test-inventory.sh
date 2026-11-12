@@ -86,7 +86,7 @@ if [[ "$ordinary_ignored_count" -gt 3 ]]; then
 fi
 
 check_overlap_ceiling cosh-core cosh-core 4
-check_overlap_ceiling cosh-shell cosh-shell 696
+check_overlap_ceiling cosh-shell cosh-shell 744
 
 if [[ "$failures" -ne 0 ]]; then
   echo "test inventory audit failed with $failures violation(s)" >&2

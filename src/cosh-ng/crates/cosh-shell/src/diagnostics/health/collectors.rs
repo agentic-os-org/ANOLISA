@@ -27,7 +27,8 @@ pub(super) use command::{
     begin_worker_check, enter_worker_job, stop_worker_job, worker_command_stopped,
 };
 pub(crate) use command::{
-    run_health_command, HealthCommandConfig, HealthCommandError, HealthCommandOutput,
+    run_health_command, run_health_command_filtered, HealthCommandConfig, HealthCommandError,
+    HealthCommandOutput, HealthFilteredCommandOutput, HealthLineFilter,
 };
 #[cfg(test)]
 use kernel::parse_kernel_signals_with_boot_epoch;

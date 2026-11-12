@@ -172,6 +172,38 @@ fn warning_disk_requires_high_ratio_or_critical_mount_with_low_space() {
 
     assert_eq!(report.findings[0].id, "J10");
     assert_eq!(report.findings[0].severity, HealthSeverity::Warning);
+
+    let config = HealthConfig::default();
+    for (mount, ratio, available) in [
+        ("/boot/efi", 0.04, 0.189),
+        ("/sys/firmware/efi/efivars", 0.03, 0.0002),
+        ("/small-data", 0.40, 0.8),
+    ] {
+        assert_eq!(
+            disk_severity(Some(ratio), Some(available), mount, &config),
+            None
+        );
+    }
+
+    let mut config = HealthConfig::default();
+    assert_eq!(
+        disk_severity(Some(0.96), Some(0.189), "/boot/efi", &config),
+        Some(HealthSeverity::Critical)
+    );
+    config.critical_mounts.push("/boot/efi".into());
+    assert_eq!(
+        disk_severity(Some(0.04), Some(0.189), "/boot/efi", &config),
+        Some(HealthSeverity::Critical)
+    );
+
+    let config = HealthConfig {
+        critical_mounts: vec!["/data".into()],
+        ..HealthConfig::default()
+    };
+    assert_eq!(
+        disk_severity(Some(0.04), Some(1.0), "/", &config),
+        Some(HealthSeverity::Critical)
+    );
 }
 
 #[test]

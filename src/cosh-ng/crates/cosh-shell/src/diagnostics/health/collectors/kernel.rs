@@ -4,10 +4,20 @@ use std::time::Instant;
 use super::super::builder::HealthReportBuilder;
 use super::super::model::{
     HealthCollector, HealthFactCategory, HealthFactCoverage, HealthFactScope, HealthFactSource,
-    HealthFactValue, HealthSeverity,
+    HealthFactValue, HealthSeverity, HealthUnavailableReason,
 };
-use super::system::{run_system_command, system_program};
-use super::{unavailable_from_stderr, HealthCommandConfig, HealthCommandError};
+use super::system::system_program;
+use super::{
+    run_health_command_filtered, unavailable_from_stderr, HealthCommandConfig, HealthCommandError,
+    HealthLineFilter,
+};
+use oom::{
+    count_oom_events, is_oom_line, merge_oom_signal, oom_scope_label_id_from_constraint, OomSignal,
+};
+
+mod oom;
+
+const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|oom_reaper|killed as a result of limit of|kernel panic|panic:";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct KernelSignalFacts {
@@ -180,42 +190,39 @@ impl KernelSignalFacts {
     }
 }
 
-fn oom_scope_label_id_from_constraint(raw: &str) -> &'static str {
-    match raw {
-        "CONSTRAINT_MEMCG" => "memcg",
-        "CONSTRAINT_NONE" => "host",
-        "CONSTRAINT_CPUSET" => "cpuset",
-        "CONSTRAINT_MEMORY_POLICY" => "memory_policy",
-        _ => "unknown",
-    }
-}
-
 pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoch_seconds: u64) {
     let started = Instant::now();
     match system_program("journalctl") {
-        Ok(program) => match super::run_health_command(
-            program,
-            &[
-                "-k",
-                "--since",
-                "24 hours ago",
-                "--no-pager",
-                "-n",
-                "200",
-                "-o",
-                "short-unix",
-            ],
-            HealthCommandConfig::default(),
-        ) {
-            Ok(output) if output.exit_code == Some(0) => {
-                parse_kernel_signals(&output.stdout, "journalctl", now_epoch_seconds)
-                    .record(builder, output.elapsed_ms);
+        Ok(program) => match read_journal_signals(HealthCommandConfig::default(), |args, config| {
+            super::run_health_command_filtered(
+                program,
+                args,
+                config,
+                HealthLineFilter {
+                    newest_first: true,
+                    ..HealthLineFilter::default()
+                },
+                is_kernel_signal_line,
+            )
+        }) {
+            Ok(output)
+                if output.exit_code == Some(0)
+                    || !output.stdout.trim().is_empty()
+                    || (output.exit_code == Some(1) && output.stderr.trim().is_empty()) =>
+            {
+                let mut facts = parse_reverse_journal_signals(&output.stdout, now_epoch_seconds);
+                // A partial read cannot prove which event was the most recent one.
+                if output.stdout_truncated && facts.oom_latest_confidence.as_deref() == Some("high")
+                {
+                    facts.oom_latest_confidence = Some("low".to_string());
+                }
+                facts.record(builder, output.elapsed_ms);
                 builder.add_check_done("kernel_signal");
             }
             Ok(output) => {
                 builder.add_unavailable(
                     HealthCollector::KernelSignal,
-                    unavailable_from_stderr(&output.stderr),
+                    kernel_unavailable_reason(output.exit_code, &output.stderr),
                     HealthSeverity::Unavailable,
                     output.elapsed_ms,
                 );
@@ -243,6 +250,86 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
     }
 }
 
+fn read_journal_signals(
+    config: HealthCommandConfig,
+    mut run: impl FnMut(
+        &[&str],
+        HealthCommandConfig,
+    ) -> Result<super::HealthFilteredCommandOutput, HealthCommandError>,
+) -> Result<super::HealthCommandOutput, HealthCommandError> {
+    let started = Instant::now();
+    let args = [
+        "--quiet",
+        "-k",
+        "--since",
+        "24 hours ago",
+        "--no-pager",
+        "--reverse",
+        "-n",
+        "200",
+        "-o",
+        "short-unix",
+        "--grep",
+        JOURNAL_SIGNAL_PATTERN,
+    ];
+    let output = run(&args, config)?;
+    // Localized option errors still name --grep; permission failures do not.
+    if !matches!(output.exit_code, Some(code) if code != 0)
+        || !output.filtered.lines.is_empty()
+        || !output.stderr.contains("--grep")
+    {
+        return Ok(journal_lines_output(output, 0));
+    }
+    let remaining = config.timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(HealthCommandError::Timeout);
+    }
+    let compatible = run(
+        &args[..args.len() - 2],
+        HealthCommandConfig {
+            timeout: remaining,
+            ..config
+        },
+    )?;
+    Ok(journal_lines_output(compatible, output.elapsed_ms))
+}
+
+fn journal_lines_output(
+    output: super::HealthFilteredCommandOutput,
+    prior_elapsed_ms: u128,
+) -> super::HealthCommandOutput {
+    super::HealthCommandOutput {
+        exit_code: output.exit_code,
+        stdout: output.filtered.lines.join("\n"),
+        stderr: output.stderr,
+        stdout_truncated: !output.filtered.complete || output.filtered.truncated_lines > 0,
+        stderr_truncated: false,
+        elapsed_ms: output.elapsed_ms + prior_elapsed_ms,
+    }
+}
+
+fn is_kernel_signal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    is_oom_line(&lower) || lower.contains("kernel panic") || lower.contains("panic:")
+}
+
+fn kernel_unavailable_reason(exit_code: Option<i32>, stderr: &str) -> HealthUnavailableReason {
+    if exit_code.is_none() {
+        // No observed exit means a budget cut, not a failure to parse the log.
+        return HealthUnavailableReason::Timeout;
+    }
+    unavailable_from_stderr(stderr)
+}
+
+pub(super) fn parse_reverse_journal_signals(
+    content: &str,
+    now_epoch_seconds: u64,
+) -> KernelSignalFacts {
+    // Group event fragments chronologically, including those within the same second.
+    let chronological = content.lines().rev().collect::<Vec<_>>().join("\n");
+    parse_kernel_signals(&chronological, "journalctl", now_epoch_seconds)
+}
+
 pub(crate) fn parse_kernel_signals(
     content: &str,
     log_source: impl Into<String>,
@@ -257,16 +344,18 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
     now_epoch_seconds: u64,
     boot_epoch_seconds: Option<u64>,
 ) -> KernelSignalFacts {
-    let mut latest_oom = None;
-    let mut oom_epochs = Vec::new();
+    let mut oom_events = Vec::new();
     let mut unclocked_oom_lines = 0;
     let mut panic_recent = false;
     for line in content.lines() {
         let lower = line.to_ascii_lowercase();
         if is_oom_line(&lower) {
             if let Some(epoch) = parse_time_prefix(line, boot_epoch_seconds) {
-                oom_epochs.push(epoch);
-                merge_oom_signal(&mut latest_oom, OomSignal::from_line(epoch, line));
+                merge_oom_signal(
+                    &mut oom_events,
+                    OomSignal::from_line(epoch, line),
+                    lower.contains("invoked oom-killer"),
+                );
             } else {
                 unclocked_oom_lines += 1;
             }
@@ -275,6 +364,7 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
             panic_recent = true;
         }
     }
+    let latest_oom = oom_events.iter().max_by_key(|event| event.epoch);
     let oom_latest_age_seconds = latest_oom
         .as_ref()
         .map(|signal| now_epoch_seconds.saturating_sub(signal.epoch));
@@ -300,8 +390,8 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
         oom_latest_oom_cgroup: latest_oom
             .as_ref()
             .and_then(|signal| signal.oom_cgroup.clone()),
-        oom_event_count_last_1h: count_unique_oom_events(&oom_epochs, now_epoch_seconds, 3600),
-        oom_event_count_last_24h: count_unique_oom_events(&oom_epochs, now_epoch_seconds, 86400),
+        oom_event_count_last_1h: count_oom_events(&oom_events, now_epoch_seconds, 3600),
+        oom_event_count_last_24h: count_oom_events(&oom_events, now_epoch_seconds, 86400),
         oom_latest_source_line_count: latest_oom
             .as_ref()
             .map(|signal| signal.source_line_count)
@@ -317,85 +407,6 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OomSignal {
-    epoch: u64,
-    process: Option<String>,
-    pid: Option<u64>,
-    constraint: Option<String>,
-    task_cgroup: Option<String>,
-    oom_cgroup: Option<String>,
-    source_line_count: u64,
-}
-
-impl OomSignal {
-    fn from_line(epoch: u64, line: &str) -> Self {
-        Self {
-            epoch,
-            process: parse_killed_process(line)
-                .or_else(|| parse_oom_key_value(line, "task"))
-                .or_else(|| parse_oom_key_value(line, "comm")),
-            pid: parse_killed_pid(line).or_else(|| parse_oom_key_value(line, "pid")?.parse().ok()),
-            constraint: parse_oom_key_value(line, "constraint"),
-            task_cgroup: parse_oom_key_value(line, "task_memcg")
-                .or_else(|| parse_oom_key_value(line, "task_cgroup")),
-            oom_cgroup: parse_oom_key_value(line, "oom_memcg")
-                .or_else(|| parse_oom_key_value(line, "oom_cgroup")),
-            source_line_count: 1,
-        }
-    }
-
-    fn merge_from(&mut self, other: OomSignal) {
-        self.epoch = self.epoch.max(other.epoch);
-        self.process = self.process.take().or(other.process);
-        self.pid = self.pid.or(other.pid);
-        self.constraint = self.constraint.take().or(other.constraint);
-        self.task_cgroup = self.task_cgroup.take().or(other.task_cgroup);
-        self.oom_cgroup = self.oom_cgroup.take().or(other.oom_cgroup);
-        self.source_line_count += other.source_line_count;
-    }
-}
-
-fn merge_oom_signal(latest: &mut Option<OomSignal>, signal: OomSignal) {
-    let Some(current) = latest else {
-        *latest = Some(signal);
-        return;
-    };
-    if signal.epoch + 5 < current.epoch {
-        return;
-    }
-    if signal.epoch > current.epoch + 5 {
-        *latest = Some(signal);
-    } else if signal.epoch >= current.epoch.saturating_sub(5) {
-        current.merge_from(signal);
-    }
-}
-
-fn is_oom_line(lower: &str) -> bool {
-    lower.contains("oom-kill")
-        || lower.contains("out of memory")
-        || lower.contains("killed process")
-}
-
-fn count_unique_oom_events(epochs: &[u64], now_epoch_seconds: u64, window_seconds: u64) -> u64 {
-    let mut epochs = epochs
-        .iter()
-        .copied()
-        .filter(|epoch| now_epoch_seconds.saturating_sub(*epoch) <= window_seconds)
-        .collect::<Vec<_>>();
-    epochs.sort_unstable();
-    let mut count = 0;
-    let mut last_counted = None;
-    for epoch in epochs {
-        if last_counted.is_some_and(|last| epoch <= last + 5) {
-            continue;
-        }
-        count += 1;
-        last_counted = Some(epoch);
-    }
-    count
-}
-
 fn collect_kernel_from_dmesg(
     builder: &mut HealthReportBuilder,
     now_epoch_seconds: u64,
@@ -403,26 +414,49 @@ fn collect_kernel_from_dmesg(
 ) {
     let boot_epoch_seconds =
         read_proc_uptime_seconds(builder).map(|uptime| now_epoch_seconds.saturating_sub(uptime));
-    match run_system_command("dmesg", &[], HealthCommandConfig::default()) {
-        Ok(output) if output.exit_code == Some(0) => {
-            let mut lines = output.stdout.lines().rev().take(200).collect::<Vec<_>>();
-            lines.reverse();
-            parse_kernel_signals_with_boot_epoch(
-                &lines.join("\n"),
+    let program = match system_program("dmesg") {
+        Ok(program) => program,
+        Err(err) => {
+            builder.add_unavailable(
+                HealthCollector::KernelSignal,
+                err.unavailable_reason(),
+                HealthSeverity::Unavailable,
+                started.elapsed().as_millis(),
+            );
+            return;
+        }
+    };
+    match run_health_command_filtered(
+        program,
+        &[],
+        HealthCommandConfig::default(),
+        HealthLineFilter::default(),
+        is_kernel_signal_line,
+    ) {
+        Ok(output) => {
+            if output.exit_code != Some(0) && output.filtered.lines.is_empty() {
+                builder.add_unavailable(
+                    HealthCollector::KernelSignal,
+                    kernel_unavailable_reason(output.exit_code, &output.stderr),
+                    HealthSeverity::Unavailable,
+                    output.elapsed_ms,
+                );
+                return;
+            }
+            let mut facts = parse_kernel_signals_with_boot_epoch(
+                &output.filtered.lines.join("\n"),
                 "dmesg",
                 now_epoch_seconds,
                 boot_epoch_seconds,
-            )
-            .record(builder, output.elapsed_ms);
-            builder.add_check_done("kernel_signal");
-        }
-        Ok(output) => {
-            builder.add_unavailable(
-                HealthCollector::KernelSignal,
-                unavailable_from_stderr(&output.stderr),
-                HealthSeverity::Unavailable,
-                output.elapsed_ms,
             );
+            // A partial read cannot prove which event was the most recent one.
+            if (!output.filtered.complete || output.filtered.truncated_lines > 0)
+                && facts.oom_latest_confidence.as_deref() == Some("high")
+            {
+                facts.oom_latest_confidence = Some("low".to_string());
+            }
+            facts.record(builder, output.elapsed_ms);
+            builder.add_check_done("kernel_signal");
         }
         Err(err) => {
             builder.add_unavailable(
@@ -459,35 +493,6 @@ fn parse_dmesg_uptime_prefix(line: &str) -> Option<u64> {
         .map(|value| value.floor() as u64)
 }
 
-fn parse_killed_process(line: &str) -> Option<String> {
-    let marker = "Killed process";
-    let start = line.find(marker)? + marker.len();
-    let rest = line[start..].trim_start();
-    let mut tokens = rest.split_whitespace();
-    tokens.next()?;
-    tokens
-        .next()
-        .map(|token| token.trim_matches(|ch| ch == '(' || ch == ')' || ch == ':' || ch == ','))
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn parse_killed_pid(line: &str) -> Option<u64> {
-    let marker = "Killed process";
-    let start = line.find(marker)? + marker.len();
-    line[start..].split_whitespace().next()?.parse().ok()
-}
-
-fn parse_oom_key_value(line: &str, key: &str) -> Option<String> {
-    let marker = format!("{key}=");
-    let start = line.find(&marker)? + marker.len();
-    let value = line[start..]
-        .split([',', ' ', '\t'])
-        .next()?
-        .trim_matches(|ch| ch == '"' || ch == '\'' || ch == ':' || ch == ';');
-    (!value.is_empty()).then(|| value.to_string())
-}
-
 fn kernel_source(log_source: &str) -> HealthFactSource {
     if log_source == "dmesg" {
         HealthFactSource::Dmesg
@@ -519,28 +524,4 @@ fn read_proc_uptime_seconds(builder: &HealthReportBuilder) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod sample_tests {
-    use super::*;
-
-    #[test]
-    fn dmesg_reuses_the_already_sampled_host_uptime() {
-        let mut builder = HealthReportBuilder::for_started_at(1);
-        builder.start_check_id(
-            "host.uptime",
-            HealthCollector::Host,
-            HealthFactScope::Host,
-            HealthFactCoverage::Snapshot,
-            1,
-        );
-        builder.add_fact(
-            HealthFactCategory::Host,
-            "host.uptime_seconds",
-            HealthFactValue::Unsigned(123),
-            Some("seconds".into()),
-            HealthFactSource::ProcUptime,
-            0,
-        );
-        builder.add_check_done("host.uptime").complete_check();
-        assert_eq!(read_proc_uptime_seconds(&builder), Some(123));
-    }
-}
+mod tests;
