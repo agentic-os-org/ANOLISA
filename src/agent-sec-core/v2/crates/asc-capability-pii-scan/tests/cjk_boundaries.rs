@@ -48,13 +48,6 @@ fn structured_tokens_keep_exact_spans_and_redaction_next_to_cjk_prose() {
                 Verdict::Warn,
             ),
             (
-                "aliyun_access_key_id",
-                "",
-                "LTAIabcdefghijkl",
-                "LTAI...[REDACTED]...ijkl",
-                Verdict::Deny,
-            ),
-            (
                 "bearer_token",
                 "Bearer ",
                 "Abcdefghijklmnop",
@@ -94,6 +87,19 @@ fn structured_tokens_keep_exact_spans_and_redaction_next_to_cjk_prose() {
             }
         }
     }
+}
+
+#[test]
+fn a_bare_ltai_value_is_not_attributed_to_alibaba_cloud_next_to_cjk() {
+    // Version 2.2.0 retired the `LTAI` value-prefix rule: provider ownership now
+    // requires a documented environment-variable assignment.
+    let scanner = PiiScanner::new().unwrap();
+    let report = scanner
+        .scan("中文LTAIabcdefghijkl", &PiiScanOptions::default())
+        .unwrap();
+    assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+    assert_eq!(report.verdict, Verdict::Pass);
+    assert!(report.findings.is_empty());
 }
 
 #[test]

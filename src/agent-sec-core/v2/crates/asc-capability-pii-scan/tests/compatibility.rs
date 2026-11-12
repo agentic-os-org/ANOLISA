@@ -301,11 +301,13 @@ fn candidate_search_preserves_versioned_boundaries_and_redacted_spans() {
         ),
         ("aliyun_access_key_id", "_", key, "", None),
         (
+            // A bare `LTAI…` value is no longer attributed to Alibaba Cloud, so
+            // CJK adjacency no longer turns it into a finding.
             "aliyun_access_key_id",
             "",
             key,
             "中",
-            Some("LTAI...[REDACTED]...ijkl"),
+            None,
         ),
         ("cn_id", "中", id, "!", Some("１１０***********００２Ｘ")),
         ("cn_id", "９", id, "", None),

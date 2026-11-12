@@ -203,6 +203,7 @@ mod tests {
                 },
                 bytes: 0..input.len(),
                 metadata: BTreeMap::new(),
+                mask: None,
             };
             redactor.push(&candidate);
             findings.push(candidate, true);
