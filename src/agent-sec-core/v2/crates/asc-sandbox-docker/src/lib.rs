@@ -25,7 +25,8 @@
 //!   Local Unix endpoints require ownership, peer identity and staging visibility checks.
 //!   All calls pin endpoint/config; personal contexts, proxies, credentials and auto-pull are unused.
 //! - `asc-sandbox-docker-guard` owns resources before create in a separate process group.
-//!   The parent keeps foreground attach. Pipe EOF triggers cleanup; normal return requires deletion.
+//!   The parent keeps foreground attach. Create opens stdin and verifies `OpenStdin`, forwarding
+//!   data and EOF without a container TTY. Control-pipe EOF triggers cleanup; return requires deletion.
 //!   Timeouts or unknown deletion retain staging/config and recovery records. A killed guard,
 //!   host failure or unavailable daemon may still leave resources; cleanup success is not claimed.
 

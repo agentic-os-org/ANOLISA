@@ -3,11 +3,11 @@
 [English](../../en/agent-sec-core/sandbox.md)
 
 `agent-sec-cli sandbox run` 根据调用方提供的文件和网络权限限制目标命令及其子进程，
-在本地执行，无需 daemon。调用方选择权限，sandbox 在启动命令前安装这些限制。
+在本地执行，无需 `agent-sec-daemon`。调用方选择权限，sandbox 在启动命令前安装这些限制。
 
 ## 运行要求
 
-按[组件指南](index.md#安装)安装 Rust V2 CLI。此命令要求 Linux、非特权 user namespace，
+按[组件指南](index.md#安装)安装 Rust V2 CLI。默认 Linux 后端要求 Linux、非特权 user namespace，
 以及支持 `--bind-fd`、`--ro-bind-fd`、`--cap-add` 和 `--unshare-user` 的非 setuid 系统
 bubblewrap；支持发行版回移这些功能的版本。静态链接 `linux-sandbox` 须与 `agent-sec-cli`
 安装在同一目录。noexec 规则还要求递归 `mount_setattr` 可用。
@@ -165,6 +165,17 @@ Docker 仅接受 OS permission JSON；Cedar 原文和 Cedar source envelope 必�
 拒绝额外挂载（包括镜像声明产生的匿名卷）；清理时一并删除该容器的匿名卷。
 执行身份仍由可信镜像的 USER 决定，不自动映射宿主 UID。结束时要求容器已停止，
 并交叉核验 attach 与容器退出码。
+
+创建时启用 `--interactive`，启动前要求 `OpenStdin=true`；stdin/stdout/stderr 由前台
+attach 转发，支持管道数据、空输入和终端行输入。EOF 会传给目标程序，不分配容器 TTY。
+例如，在获准工作目录内，将 `IMAGE` 设为已缓存且包含 `/bin/cat` 的固定镜像引用，
+使用仅含 allow 规则、无 `/` 根挂载且 `execution.deny_paths` 为空的 `permissions.json`：
+
+```bash
+printf 'hello sandbox\n' | agent-sec-cli sandbox run --backend docker --image "$IMAGE" --permissions permissions.json -- /bin/cat
+```
+
+应原样输出 `hello sandbox` 后退出；不要直接复用上文含 `/` 和 noexec 的 Linux 示例权限。
 
 Docker 挂载要求宿主 root、`CAP_SYS_ADMIN` 和内核 `open_tree`/`move_mount` 支持；
 不自动提权，缺少能力即拒绝（包括通常的 rootless 部署）。源路径不能含符号链接。

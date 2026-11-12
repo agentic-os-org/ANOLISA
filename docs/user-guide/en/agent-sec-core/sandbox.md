@@ -3,13 +3,13 @@
 [中文版](../../zh/agent-sec-core/sandbox.md)
 
 `agent-sec-cli sandbox run` confines a command and its children to caller-supplied
-filesystem and network permissions. It runs locally without a daemon. The caller
+filesystem and network permissions. It runs locally without `agent-sec-daemon`. The caller
 chooses the permissions; the sandbox installs them before starting the command.
 
 ## Requirements
 
 Install the Rust V2 CLI using the [component guide](index.md#installation).
-This command requires Linux, unprivileged user namespaces, and non-setuid system
+The default Linux backend requires Linux, unprivileged user namespaces, and non-setuid system
 bubblewrap with `--bind-fd`, `--ro-bind-fd`, `--cap-add` and `--unshare-user`.
 Distribution backports of these options are supported. The statically linked
 `linux-sandbox` must be installed beside `agent-sec-cli`. A noexec rule also
@@ -220,6 +220,20 @@ including image-declared anonymous volumes. Cleanup also removes the container's
 anonymous volumes. The trusted image USER still determines execution identity;
 host UIDs are not automatically mapped. Completion requires a stopped container
 and matching attach/container exit codes.
+
+Creation enables `--interactive`; before start, `OpenStdin=true` is required.
+Foreground attach forwards stdin/stdout/stderr, supporting pipe data, empty input
+and terminal line input. EOF reaches the target; no container TTY is allocated.
+For example, from an allowed working directory, set `IMAGE` to a cached pinned
+image containing `/bin/cat`. Use a `permissions.json` containing only allow rules,
+no `/` root mount and an empty `execution.deny_paths`:
+
+```bash
+printf 'hello sandbox\n' | agent-sec-cli sandbox run --backend docker --image "$IMAGE" --permissions permissions.json -- /bin/cat
+```
+
+It should echo `hello sandbox` unchanged and exit. Do not reuse the Linux example
+permissions above with their `/` grant and noexec restriction.
 
 Docker mounts require host root, `CAP_SYS_ADMIN`, and kernel support for
 `open_tree`/`move_mount`. Missing capabilities are rejected without automatic
