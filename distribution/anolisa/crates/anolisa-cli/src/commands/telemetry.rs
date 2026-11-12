@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::context::CliContext;
-use crate::response::{CliError, render_json};
+use crate::response::{CliError, render_json, render_json_with_warnings};
 
 use self::application::{
     TelemetryApplicationOutcome, TelemetryApplied, TelemetryPreview, TelemetryRequest,
@@ -172,41 +172,13 @@ fn render_mutation(result: TelemetryApplicationOutcome, ctx: &CliContext) -> Res
                 }
             }
             if ctx.json {
-                // Preserve these public JSON keys: scripts consume them independently
-                // of human messages and internal result variant names.
-                let data = match &result {
-                    // collection_enabled reports the resulting collection setting.
-                    TelemetryApplied::Enabled => serde_json::json!({"collection_enabled": true}),
-                    TelemetryApplied::Disabled => serde_json::json!({"collection_enabled": false}),
-                    // link/unlink report named-reporting state via linked, independently
-                    // of collection. link_id echoes the persisted ID used by the uploader;
-                    // already_linked distinguishes an idempotent no-op from ID creation.
-                    TelemetryApplied::Linked {
-                        link_id,
-                        already_linked,
-                    } => serde_json::json!({
-                        "linked": true,
-                        "link_id": link_id,
-                        "already_linked": already_linked,
-                    }),
-                    TelemetryApplied::Unlinked => serde_json::json!({"linked": false}),
-                    // loop_flag identifies whether the completed uploader ran continuously.
-                    TelemetryApplied::Uploaded { loop_flag } => {
-                        serde_json::json!({"loop_flag": loop_flag})
-                    }
-                    // initialized confirms ops-channel setup, without changing consent.
-                    TelemetryApplied::Initialized => serde_json::json!({"initialized": true}),
-                    // prepared reports an image-build setup; service_enabled says whether
-                    // the resident unit was written and enabled for future boots.
-                    TelemetryApplied::Prepared { service_enabled } => serde_json::json!({
-                        "prepared": true,
-                        "service_enabled": service_enabled,
-                    }),
-                };
-                for warning in outcome.warnings() {
-                    eprintln!("warn: {warning}");
-                }
-                return render_json(result.command(), data);
+                // Warnings ride in the envelope here instead of stderr, so stdout stays
+                // the only stream a script has to parse.
+                return render_json_with_warnings(
+                    result.command(),
+                    applied_json(&result),
+                    outcome.warnings().to_vec(),
+                );
             }
             for output in applied_output(&result, outcome.warnings()) {
                 match output {
@@ -216,6 +188,40 @@ fn render_mutation(result: TelemetryApplicationOutcome, ctx: &CliContext) -> Res
             }
             Ok(())
         }
+    }
+}
+
+fn applied_json(result: &TelemetryApplied) -> serde_json::Value {
+    // Preserve these public JSON keys: scripts consume them independently
+    // of human messages and internal result variant names.
+    match result {
+        // collection_enabled reports the resulting collection setting.
+        TelemetryApplied::Enabled => serde_json::json!({"collection_enabled": true}),
+        TelemetryApplied::Disabled => serde_json::json!({"collection_enabled": false}),
+        // link/unlink report named-reporting state via linked, independently
+        // of collection. link_id echoes the persisted ID used by the uploader;
+        // already_linked distinguishes an idempotent no-op from ID creation.
+        TelemetryApplied::Linked {
+            link_id,
+            already_linked,
+        } => serde_json::json!({
+            "linked": true,
+            "link_id": link_id,
+            "already_linked": already_linked,
+        }),
+        TelemetryApplied::Unlinked => serde_json::json!({"linked": false}),
+        // loop_flag identifies whether the completed uploader ran continuously.
+        TelemetryApplied::Uploaded { loop_flag } => {
+            serde_json::json!({"loop_flag": loop_flag})
+        }
+        // initialized confirms ops-channel setup, without changing consent.
+        TelemetryApplied::Initialized => serde_json::json!({"initialized": true}),
+        // prepared reports an image-build setup; service_enabled says whether
+        // the resident unit was written and enabled for future boots.
+        TelemetryApplied::Prepared { service_enabled } => serde_json::json!({
+            "prepared": true,
+            "service_enabled": service_enabled,
+        }),
     }
 }
 
@@ -956,6 +962,32 @@ mod tests {
                         .to_string()
                 ),
             ]
+        );
+    }
+
+    /// The `--json` path has to carry the same boot guidance the human path
+    /// prints: an image-build script that reads only JSON would otherwise skip
+    /// `telemetry init` and leave the image's instance snapshot empty.
+    #[test]
+    fn prepare_no_service_json_envelope_carries_boot_guidance() {
+        let warning = "anolisa-telemetry.service not written; run `anolisa telemetry init` at boot for this host's instance snapshot, then `anolisa telemetry upload --loop`".to_string();
+        let envelope = crate::response::success_envelope(
+            "telemetry prepare",
+            applied_json(&TelemetryApplied::Prepared {
+                service_enabled: false,
+            }),
+            vec![warning.clone()],
+        );
+
+        assert_eq!(envelope.warnings, vec![warning]);
+        let rendered = serde_json::to_string(&envelope).expect("envelope must serialize");
+        assert!(
+            rendered.contains("anolisa telemetry init"),
+            "boot guidance must reach the JSON envelope, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"service_enabled\":false"),
+            "prepared payload must stay unchanged, got: {rendered}"
         );
     }
 
