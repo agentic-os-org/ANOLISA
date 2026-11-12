@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-11-12
+
+### Changed
+
+- Source installs record the skill directories they own in an install manifest, and
+  `make uninstall` removes only those directories, so skills added by hand or by
+  another installer are no longer deleted; `make install` also refuses to overwrite
+  an unrecorded directory of the same name unless `REPLACE_UNOWNED=1` is passed. A
+  collection installed before this release has no manifest, so its first upgrade
+  needs `REPLACE_UNOWNED=1 make install`; otherwise both commands stop with an
+  explanation (#9886)
+- `make install INSTALL_PROFILE=user` refuses to run when `HOME` is unset, empty,
+  `/` or relative while the install paths still derive from it, instead of silently
+  writing into `/.copilot-shell/skills`; passing `PREFIX`, `DATADIR` and `SKILLS_DIR`
+  explicitly still installs without a home directory (#9886)
+
+### Fixed
+
+- The `install-openclaw` skill writes `openclaw.json` (which holds the API key in
+  cleartext), its backup, `identity/device-auth.json` and `devices/paired.json` with
+  mode `0600`, so operator tokens are no longer readable by every local user and a
+  re-run no longer downgrades a hardened configuration back to `0644` (#7846)
+- The `aliyun-ecs` skill documents `DeleteKeyPairs --KeyPairNames` with the array
+  form the API requires, so the example is no longer rejected by the parameter
+  check (#9547)
+- `check-env.sh` in the `kernel-dev` skill no longer adds the `kernel-build-dir`
+  pseudo-package to its `yum install` hint, which made the whole transaction fail
+  on dnf hosts; missing packages and the absent kernel build directory are now
+  reported on separate lines (#7922)
+
 ## [0.6.5] - 2026-11-09
 
 ### Changed

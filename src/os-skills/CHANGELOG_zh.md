@@ -9,6 +9,31 @@
 
 ## [未发布]
 
+## [0.6.6] - 2026-11-12
+
+### 变更
+
+- 源码安装会把自身安装的 Skill 目录记录到安装清单中，`make uninstall` 只删除清单
+  记录的目录，手动添加或由其他安装器放入的同名 Skill 不再被静默删除；
+  `make install` 也不再覆盖未记录的同名目录，除非传入 `REPLACE_UNOWNED=1`。
+  本次发布之前安装的集合没有安装清单，首次升级需执行
+  `REPLACE_UNOWNED=1 make install`，否则安装与卸载都会报错停止 (#9886)
+- 当安装路径仍由 `HOME` 推导时，`make install INSTALL_PROFILE=user` 在 `HOME`
+  未设置、为空、为 `/` 或为相对路径时拒绝执行，不再静默写入
+  `/.copilot-shell/skills`；显式传入 `PREFIX`、`DATADIR` 和 `SKILLS_DIR` 时仍可在
+  没有家目录的环境中安装 (#9886)
+
+### 修复
+
+- `install-openclaw` Skill 以 `0600` 权限写入 `openclaw.json`（其中以明文保存 API
+  Key）、其备份、`identity/device-auth.json` 与 `devices/paired.json`，本地其他用户
+  不再能读取 operator token，重复执行也不会把加固过的配置权限降回 `0644` (#7846)
+- `aliyun-ecs` Skill 中的 `DeleteKeyPairs --KeyPairNames` 示例改为 API 要求的数组
+  形式，示例命令不再被参数校验拒绝 (#9547)
+- `kernel-dev` Skill 的 `check-env.sh` 不再把 `kernel-build-dir` 伪包混入
+  `yum install` 提示，避免 dnf 环境下整条安装事务失败；缺失的软件包与缺失的内核
+  构建目录改为分行提示 (#7922)
+
 ## [0.6.5] - 2026-11-09
 
 ### 变更
