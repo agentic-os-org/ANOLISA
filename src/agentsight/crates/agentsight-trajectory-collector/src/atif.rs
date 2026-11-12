@@ -36,6 +36,7 @@ pub fn convert_qoder_events(
     };
 
     let mut steps: Vec<Step> = Vec::new();
+    let mut unmatched_tool_results = Vec::new();
     let mut step_id: usize = 0;
     let mut total_prompt_tokens: u64 = 0;
     let mut total_completion_tokens: u64 = 0;
@@ -66,14 +67,16 @@ pub fn convert_qoder_events(
             let mixed_event = !tool_results.is_empty() && has_text_block(&content);
             let result_ts = e.get("timestamp").and_then(|v| v.as_str());
 
-            // A user event that only carries tool_results is not a user turn:
-            // the results answer an earlier agent step's tool calls and must
-            // merge into that step's observation. Attaching them to "the
-            // previous step" used to put them on an intervening user step
-            // (overwriting each other when several events arrived), hiding
-            // them from analyzers that pair a step's results with its calls.
+            let unmatched =
+                merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+            // Partial transcripts can omit an issuing call. Preserve its
+            // result as metadata without inventing a user turn or call owner.
             if !tool_results.is_empty() && !mixed_event {
-                let _ = merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
+                if let Some(observation) = observation_from_tool_results(&unmatched) {
+                    unmatched_tool_results.push(
+                        serde_json::json!({"timestamp": result_ts, "results": observation.results}),
+                    );
+                }
                 i += 1;
                 continue;
             }
@@ -81,16 +84,7 @@ pub fn convert_qoder_events(
             // Regular user message
             step_id += 1;
             let text = extract_text_from_content(&content);
-            // Mixed replies answer their issuing calls too. Keep unmatched
-            // replayed results on the user step, without replacing earlier
-            // observations or attaching known results to intervening text.
-            let observation = if mixed_event {
-                let unmatched =
-                    merge_tool_results_into_agent_steps(&mut steps, &tool_results, result_ts);
-                observation_from_tool_results(&unmatched)
-            } else {
-                None
-            };
+            let observation = observation_from_tool_results(&unmatched);
             steps.push(Step {
                 step_id,
                 timestamp: e
@@ -323,37 +317,9 @@ pub fn convert_qoder_events(
                 is_copied_context: None,
             });
 
-            // Collect tool_results that follow
-            let mut k = j;
-            while k < events.len() {
-                let ne = &events[k];
-                let nt = ne.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if SKIP_TYPES.contains(&nt) {
-                    k += 1;
-                    continue;
-                }
-                if nt == "user" {
-                    let nc = ne
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    let trs = extract_tool_results(&nc);
-                    // A mixed event (tool_result + genuine text) is a user
-                    // turn, exactly as the main loop classifies it above.
-                    // Consuming it here would drop the user's text entirely;
-                    // break instead so the main loop emits the user step.
-                    if !trs.is_empty() && !has_text_block(&nc) {
-                        let result_ts = ne.get("timestamp").and_then(|v| v.as_str());
-                        let _ = merge_tool_results_into_agent_steps(&mut steps, &trs, result_ts);
-                        k += 1;
-                        continue;
-                    }
-                }
-                break;
-            }
-
-            i = k;
+            // Route every following user event through the same ownership and
+            // replay handling, including result-only events after an assistant.
+            i = j;
             continue;
         }
 
@@ -385,7 +351,12 @@ pub fn convert_qoder_events(
         final_metrics,
         continued_trajectory_ref: None,
         subagent_trajectories: None,
-        extra: None,
+        extra: (!unmatched_tool_results.is_empty()).then(|| {
+            HashMap::from([(
+                "unmatched_tool_results".into(),
+                serde_json::json!(unmatched_tool_results),
+            )])
+        }),
     })
 }
 
@@ -583,14 +554,9 @@ fn has_text_block(content: &serde_json::Value) -> bool {
 
 /// Merge tool results into the observation of the agent step owning the calls.
 ///
-/// The post-assistant scan consumes contiguous result-only user events, but a
-/// mixed `tool_result`+text event or a plain user turn stops it; those results
-/// then reach the main loop. They still answer the earlier agent step's calls,
-/// and downstream analyzers pair a step's observations with that same step's
-/// calls (`agentsight-opt::trace`), so results are merged into the owning
-/// agent step instead of replacing its observation or landing on a user step.
-/// Results the scan already collected are extended, never overwritten.
-/// Returns unowned results for a mixed user event to retain as replayed context.
+/// Downstream analyzers pair a step's observations with that same step's calls,
+/// so known results extend the owning agent step. Return unowned results for
+/// the caller to keep on a mixed user step or in `extra["unmatched_tool_results"]`.
 fn merge_tool_results_into_agent_steps(
     steps: &mut [Step],
     tool_results: &[ExtractedToolResult],
@@ -617,8 +583,9 @@ fn merge_tool_results_into_agent_steps(
                         .any(|call| &call.tool_call_id == id)
             })
         }) else {
-            // The mixed-event caller can retain replayed context on its user
-            // step; result-only carriers keep the existing discard policy.
+            // Mixed events retain replayed context on their user step;
+            // result-only carriers preserve unowned results in
+            // extra["unmatched_tool_results"].
             unmatched.push(tr.clone());
             continue;
         };

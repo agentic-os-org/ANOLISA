@@ -199,7 +199,16 @@ fn process_session(
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
-    if trajectory.steps.is_empty() {
+    // A partial transcript can contain retained tool evidence without any
+    // complete conversation steps. Persist that evidence without inventing
+    // user turns; truly empty/unsupported documents still follow the old path.
+    let has_unmatched_results = trajectory
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get("unmatched_tool_results"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|results| !results.is_empty());
+    if trajectory.steps.is_empty() && !has_unmatched_results {
         if is_gemini && gemini::explicitly_cleared(&events) {
             // A successful rewind can remove every turn. The previous
             // snapshot must not survive under the new file fingerprint.
