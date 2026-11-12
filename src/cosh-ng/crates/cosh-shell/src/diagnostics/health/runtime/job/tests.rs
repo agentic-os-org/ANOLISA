@@ -97,6 +97,34 @@ fn deadline_job_child() {
         .unwrap();
         return;
     }
+    if std::env::var_os("COSH_HEALTH_TEST_FILTERED_DEADLINE").is_some() {
+        use crate::diagnostics::health::collectors;
+        collectors::enter_worker_job(JobDeadline::after(Duration::from_secs(5)).unwrap()).unwrap();
+        collectors::begin_worker_check(Duration::from_millis(60)).unwrap();
+        let result = collectors::run_health_command_filtered(
+            "/bin/sh",
+            &[
+                "-c",
+                "while :; do printf '[ 1234.567890] audit: unrelated noise record\\n'; done",
+            ],
+            collectors::HealthCommandConfig {
+                timeout: Duration::from_secs(5),
+                output_limit_bytes: 16 * 1024,
+            },
+            collectors::HealthLineFilter::default(),
+            |line| line.contains("oom-kill"),
+        );
+        fs::write(
+            &marker,
+            format!(
+                "ok={};stopped={}",
+                result.is_ok(),
+                collectors::worker_command_stopped()
+            ),
+        )
+        .unwrap();
+        return;
+    }
     if std::env::var_os("COSH_HEALTH_DEADLINE_TEST_COMMAND").is_some() {
         crate::diagnostics::health::collectors::enter_worker_job(
             JobDeadline::after(Duration::from_secs(2)).expect("command scope"),
@@ -153,6 +181,23 @@ fn one_command_output_limit_does_not_cancel_unrelated_worker_checks() {
     assert_eq!(
         fs::read_to_string(&marker).unwrap(),
         "Err(OutputLimit);stopped=false"
+    );
+}
+
+#[test]
+fn filtered_check_budget_cut_does_not_cancel_unrelated_worker_checks() {
+    let _guard = crate::diagnostics::test_env::env_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("filtered-deadline-state");
+    let deadline = JobDeadline::after(Duration::from_secs(5)).unwrap();
+    let mut command = helper_command(&marker, deadline);
+    command.env("COSH_HEALTH_TEST_FILTERED_DEADLINE", "1");
+    let mut child = own_child(&mut command, deadline);
+    wait_exit(&child);
+    let _ = child.cleanup();
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        "ok=true;stopped=false"
     );
 }
 

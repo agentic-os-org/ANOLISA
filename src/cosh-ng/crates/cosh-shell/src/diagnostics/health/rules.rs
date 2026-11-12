@@ -324,7 +324,10 @@ fn disk_severity(
     config: &HealthConfig,
 ) -> Option<HealthSeverity> {
     if used_ratio.is_some_and(|value| value >= 0.95)
-        || available_gib.is_some_and(|value| value < 2.0)
+        || (available_gib.is_some_and(|value| value < 2.0)
+            && (mount == "/"
+                || is_critical_mount(mount, config)
+                || used_ratio.is_some_and(|value| value >= 0.85)))
     {
         Some(HealthSeverity::Critical)
     } else if used_ratio.is_some_and(|value| value >= 0.90)
