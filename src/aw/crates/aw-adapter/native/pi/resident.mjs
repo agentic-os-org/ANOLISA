@@ -15,7 +15,7 @@ async function bounded(promise, milliseconds) {
   } finally { clearTimeout(timer); }
 }
 
-export async function runWorker(app, sdk, core, args, versions = {}) {
+export async function runWorker(app, sdk, core, args) {
   const startup = configuration();
   const active = new Map();
   const closed = new WeakSet();
@@ -72,8 +72,8 @@ export async function runWorker(app, sdk, core, args, versions = {}) {
         policy = configuration({ ...startup, hooks: snapshot.hooks,
           replacement_step: snapshot.events?.["tool.after"]?.replacement_step ?? null });
         if (policy.hooks.some(hook => hook.on_error === "withhold_result") &&
-            (versions.sdk !== "0.84.2" || versions.core !== "0.84.2"))
-          throw new Error("AW strict Pi output requires pi-coding-agent and pi-agent-core 0.84.2");
+            startup.strict_output_supported !== true)
+          throw new Error("AW strict Pi output requires a verified SDK pair");
       }
       if (typeof app.run === "function" && policy.hooks.some(hook => hook.event === "input.submit"))
         throw new Error("AW Pi input.submit requires the runWorker factory");

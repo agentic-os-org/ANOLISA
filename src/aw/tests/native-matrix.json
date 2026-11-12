@@ -1773,7 +1773,11 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
-      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch. Strict output uses the verified 0.84.2 Agent.processEvents boundary, suppressing partial tool updates target-wide and adopting safe final results before early listeners and HTTP model requests. Controlled scanner faults withhold the full result and allow the next prompt; cancellation and native callback faults retain task failure and cleanup. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
+      "npm_fixtures": {
+        "legacy": "crates/aw-cli/tests/fixtures/pi/legacy",
+        "latest": "crates/aw-cli/tests/fixtures/pi/latest"
+      },
+      "boundary": "Published Coding Agent/Core SDK 0.84.2, 1.3.0 and 1.5.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch. Strict output admits matching stable 0.84.2–1.5.2 pairs; the pinned baselines verify the Agent.processEvents boundary, suppressing partial tool updates target-wide and adopting safe final results before early listeners and HTTP model requests. Controlled scanner faults withhold the full result and allow the next prompt; cancellation and native callback faults retain task failure and cleanup. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
       "cases": [
         {
           "name": "public-factory",
@@ -1790,6 +1794,132 @@
           "results": [
             {
               "file": "npm/public-smoke-results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-before-denial",
+                  "late-after-replacement",
+                  "late-before-replacement-session",
+                  "late-after-replacement-session",
+                  "allow",
+                  "deny",
+                  "tool-error",
+                  "native-mutation",
+                  "native-replacement",
+                  "two-sessions-parallel",
+                  "before-error-block",
+                  "after-error-report",
+                  "await-both-hooks",
+                  "factory-new",
+                  "factory-resume",
+                  "factory-fork",
+                  "factory-import",
+                  "block-reason-model",
+                  "aw-replacement-metadata",
+                  "aw-replacement-parallel",
+                  "aw-replacement-error-neutral",
+                  "aw-replacement-multiblock-neutral",
+                  "aw-replacement-image-neutral",
+                  "native-invalid-before",
+                  "native-invalid-after-neutral",
+                  "native-forged-after-neutral",
+                  "native-empty-neutral",
+                  "native-block-reason-model",
+                  "native-after-exception",
+                  "native-error-cleared-replaced",
+                  "native-nullish-success",
+                  "native-nullish-error",
+                  "reused-native-id",
+                  "early-denial-forty",
+                  "early-error-block",
+                  "early-native-invalid-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "public-factory-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/public-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "npm_legacy/public-smoke-results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "late-before-denial",
+                  "late-after-replacement",
+                  "late-before-replacement-session",
+                  "late-after-replacement-session",
+                  "allow",
+                  "deny",
+                  "tool-error",
+                  "native-mutation",
+                  "native-replacement",
+                  "two-sessions-parallel",
+                  "before-error-block",
+                  "after-error-report",
+                  "await-both-hooks",
+                  "factory-new",
+                  "factory-resume",
+                  "factory-fork",
+                  "factory-import",
+                  "block-reason-model",
+                  "aw-replacement-metadata",
+                  "aw-replacement-parallel",
+                  "aw-replacement-error-neutral",
+                  "aw-replacement-multiblock-neutral",
+                  "aw-replacement-image-neutral",
+                  "native-invalid-before",
+                  "native-invalid-after-neutral",
+                  "native-forged-after-neutral",
+                  "native-empty-neutral",
+                  "native-block-reason-model",
+                  "native-after-exception",
+                  "native-error-cleared-replaced",
+                  "native-nullish-success",
+                  "native-nullish-error",
+                  "reused-native-id",
+                  "early-denial-forty",
+                  "early-error-block",
+                  "early-native-invalid-block"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "public-factory-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/public-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "npm_latest/public-smoke-results.json",
               "cases": {
                 "at": "",
                 "key": "case",
@@ -2235,6 +2365,102 @@
           ]
         },
         {
+          "name": "input-submission-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/input-submission-legacy"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-legacy/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/input-submission-latest"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-latest/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
           "name": "strict-output",
           "argv": [
             "{python}",
@@ -2272,7 +2498,107 @@
                   "mutation-content",
                   "mutation-metadata",
                   "mutation-extra",
-                  "mutation-after"
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-output-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/pi-strict-output-legacy"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/pi-strict-output-legacy/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-output-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/pi-strict-output-latest"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/pi-strict-output-latest/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after",
+                  "after-structured",
+                  "structured-replacement"
                 ],
                 "values": {
                   "status": "passed"
@@ -2294,6 +2620,46 @@
           "results": [
             {
               "file": "fixtures/skill-objects/result.json",
+              "values": {
+                "passed": true,
+                "case_count": 10
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects-legacy",
+          "argv": [
+            "node",
+            "crates/aw-cli/tests/fixtures/pi/skill-objects.mjs",
+            "{npm_legacy}",
+            "{output}/skill-objects-legacy/result.json"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-objects-legacy/result.json",
+              "values": {
+                "passed": true,
+                "case_count": 10
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects-latest",
+          "argv": [
+            "node",
+            "crates/aw-cli/tests/fixtures/pi/skill-objects.mjs",
+            "{npm_latest}",
+            "{output}/skill-objects-latest/result.json"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-objects-latest/result.json",
               "values": {
                 "passed": true,
                 "case_count": 10
@@ -2353,6 +2719,108 @@
           ]
         },
         {
+          "name": "skill-input-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/skill-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_legacy}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-input-legacy"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-input-legacy/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "signed",
+                  "plain",
+                  "unsigned",
+                  "drifted",
+                  "tampered",
+                  "denied",
+                  "error",
+                  "changed",
+                  "directory-swap",
+                  "forged-manifest",
+                  "missing-digest",
+                  "cancel",
+                  "prompt-denied",
+                  "pii-denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-input-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/skill-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm_latest}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-input-latest"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-input-latest/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "signed",
+                  "plain",
+                  "unsigned",
+                  "drifted",
+                  "tampered",
+                  "denied",
+                  "error",
+                  "changed",
+                  "directory-swap",
+                  "forged-manifest",
+                  "missing-digest",
+                  "cancel",
+                  "prompt-denied",
+                  "pii-denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
           "name": "native-start",
           "argv": [
             "{python}",
@@ -2371,8 +2839,74 @@
               "file": "fixtures/native-start/result.json",
               "values": {
                 "passed": true,
+                "versions/pi-coding-agent": "1.3.0",
+                "versions/pi-agent-core": "1.3.0",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup",
+                  "task-observation-unknown"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start-legacy",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start-legacy",
+            "--npm",
+            "{npm_legacy}"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start-legacy/result.json",
+              "values": {
+                "passed": true,
                 "versions/pi-coding-agent": "0.84.2",
                 "versions/pi-agent-core": "0.84.2",
+                "cases": [
+                  "native-start",
+                  "busy-rejected",
+                  "native-tool-effect",
+                  "updated-tool-denial",
+                  "session-cleanup",
+                  "task-observation-unknown"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "native-start-latest",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/native-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/native-start-latest",
+            "--npm",
+            "{npm_latest}"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-start-latest/result.json",
+              "values": {
+                "passed": true,
+                "versions/pi-coding-agent": "1.5.2",
+                "versions/pi-agent-core": "1.5.2",
                 "cases": [
                   "native-start",
                   "busy-rejected",
@@ -2406,8 +2940,8 @@
               "file": "fixtures/native-start-run/result.json",
               "values": {
                 "passed": true,
-                "versions/pi-coding-agent": "0.84.2",
-                "versions/pi-agent-core": "0.84.2",
+                "versions/pi-coding-agent": "1.3.0",
+                "versions/pi-agent-core": "1.3.0",
                 "cases": [
                   "native-start",
                   "busy-rejected",

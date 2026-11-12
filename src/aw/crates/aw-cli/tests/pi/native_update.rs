@@ -72,18 +72,80 @@ export async function createSession({sdk,args}) {
 }
 
 #[test]
+fn native_start_rechecks_packages_before_application_import() {
+    for package in ["pi-coding-agent", "pi-agent-core"] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        document["spec"]["events"] = json!({});
+        document["spec"]["providers"] = json!({});
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi");
+        fs::copy(
+            assets.join("native-start.mjs"),
+            fixture.root.join("native-start.mjs"),
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("app.mjs"),
+            "import {writeFileSync} from 'node:fs'; writeFileSync('business-imported', 'true');",
+        )
+        .unwrap();
+        fs::write(fixture.root.join("aw.yaml"), document.to_string()).unwrap();
+        let service = Service::start(&fixture, &document);
+        let mut command = Command::new(
+            document["spec"]["agents"]["pi"]["argv"][0]
+                .as_str()
+                .unwrap(),
+        );
+        command
+            .arg(fixture.root.join("native-start.mjs"))
+            .current_dir(&fixture.root)
+            .env("HOME", fixture.root.join("home"))
+            .env("FAKE_ROOT", &fixture.root)
+            .env("PI_MUTATE_PACKAGE", package)
+            .env("AW_TEST_EXECUTABLE", env!("CARGO_BIN_EXE_aw"));
+        let output = fixture.run(command);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{package}: {stderr}");
+        assert!(
+            stderr.contains("Pi SDK packages changed after AW admission"),
+            "{package}: {stderr}"
+        );
+        assert!(!fixture.root.join("business-imported").exists());
+        service.released(&fixture);
+    }
+}
+
+#[test]
 fn native_worker_updates_only_between_closed_sessions() {
-    native_updates("0.84.2", "0.84.2");
+    for version in [
+        "0.84.2", "0.84.4", "0.85.0", "0.85.1", "0.99.2", "1.0.1", "1.2.0", "1.3.0", "1.5.2",
+    ] {
+        native_updates(version, version, true, true);
+    }
 }
 
 #[test]
 fn native_worker_rejects_strict_update_for_unverified_package_pairs() {
-    for (sdk, core) in [("0.84.3", "0.84.2"), ("0.84.2", "0.84.3")] {
-        native_updates(sdk, core);
+    for (sdk, core) in [
+        ("0.84.3", "0.84.2"),
+        ("0.84.2", "0.84.3"),
+        ("1.3.0", "0.84.2"),
+        ("1.3.0", "1.3.1"),
+        ("0.84.1", "0.84.1"),
+        ("1.5.3", "1.5.3"),
+        ("1.6.0", "1.6.0"),
+        ("1.5.2-beta.1", "1.5.2-beta.1"),
+    ] {
+        native_updates(sdk, core, false, true);
     }
 }
 
-fn native_updates(sdk: &str, core: &str) {
+#[test]
+fn native_worker_rejects_missing_strict_seam_before_application_import() {
+    native_updates("1.3.0", "1.3.0", true, false);
+}
+
+fn native_updates(sdk: &str, core: &str, admit_strict: bool, has_seam: bool) {
     let fixture = Fixture::new();
     let mut document = setup(&fixture);
     document["spec"]["agents"]["pi"]["argv"]
@@ -102,6 +164,15 @@ fn native_updates(sdk: &str, core: &str) {
         ),
     ] {
         fs::copy(assets.join(source), fixture.root.join(target)).unwrap();
+    }
+    if !has_seam {
+        fs::write(
+            fixture
+                .root
+                .join("node_modules/@earendil-works/pi-agent-core/dist/index.js"),
+            "export class Agent { subscribe(){ return ()=>{}; } }",
+        )
+        .unwrap();
     }
     for (name, version) in [("pi-coding-agent", sdk), ("pi-agent-core", core)] {
         let path = fixture
@@ -137,16 +208,17 @@ fn native_updates(sdk: &str, core: &str) {
         .current_dir(&fixture.root)
         .env("HOME", fixture.root.join("home"))
         .env("FAKE_ROOT", &fixture.root)
-        .env(
-            "PI_REJECT_STRICT",
-            if sdk == "0.84.2" && core == "0.84.2" {
-                "0"
-            } else {
-                "1"
-            },
-        )
+        .env("PI_REJECT_STRICT", if admit_strict { "0" } else { "1" })
         .env("AW_TEST_EXECUTABLE", env!("CARGO_BIN_EXE_aw"));
     let output = fixture.run(command);
+    if !has_seam {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(stderr.contains("native event dispatch seam"), "{stderr}");
+        assert!(!fixture.root.join("business-imported").exists());
+        service.released(&fixture);
+        return;
+    }
     assert!(
         output.status.success(),
         "{}",

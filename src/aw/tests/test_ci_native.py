@@ -182,6 +182,27 @@ class NativeTests(GateFixture):
                 with self.assertRaises(ValueError):
                     load(AW)
 
+    def test_pi_release_baselines_remain_scheduled(self) -> None:
+        original = Path.read_text
+        for mode in ("fixture", "case"):
+            manifest = copy.deepcopy(self.manifest)
+            row = manifest["agents"]["pi"]
+            if mode == "fixture":
+                del row["npm_fixtures"]["legacy"]
+            else:
+                row["cases"] = [
+                    case for case in row["cases"] if case["name"] != "strict-output-latest"
+                ]
+
+            def read(path: Path, *args: object, **kwargs: object) -> str:
+                if path == AW / "tests/native-matrix.json":
+                    return json.dumps(manifest)
+                return original(path, *args, **kwargs)
+
+            with self.subTest(mode=mode), patch.object(Path, "read_text", read):
+                with self.assertRaisesRegex(ValueError, "pi: retain"):
+                    load(AW)
+
     def test_qoder_reload_pin_entrypoint_and_cases_are_required(self) -> None:
         original = Path.read_text
         for mode in ("pin", "version", "suite", "entrypoint", "case"):

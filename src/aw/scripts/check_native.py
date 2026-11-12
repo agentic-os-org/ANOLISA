@@ -91,6 +91,25 @@ def load(root: Path) -> dict:
             for name in ("package.json", "package-lock.json"):
                 if not (root / row["npm_fixture"] / name).is_file():
                     raise ValueError(f"{agent}: missing locked npm fixture")
+        for label, fixture in row.get("npm_fixtures", {}).items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", label):
+                raise ValueError(f"{agent}: invalid npm fixture label")
+            for name in ("package.json", "package-lock.json"):
+                if not (root / fixture / name).is_file():
+                    raise ValueError(f"{agent}/{label}: missing locked npm fixture")
+        if agent == "pi":
+            if set(row.get("npm_fixtures", {})) != {"legacy", "latest"}:
+                raise ValueError("pi: retain locked legacy and latest SDK baselines")
+            required = {
+                f"{name}-{label}"
+                for label in ("legacy", "latest")
+                for name in (
+                    "public-factory", "input-submission", "strict-output",
+                    "skill-objects", "skill-input", "native-start",
+                )
+            }
+            if not required.issubset({case["name"] for case in row.get("cases", [])}):
+                raise ValueError("pi: retain release-line native acceptance cases")
         for package in row.get("npm_packages", []):
             if not re.search(r"@\d+\.\d+\.\d+$", package):
                 raise ValueError(f"{agent}: pin the npm package")

@@ -1,4 +1,4 @@
-# Pi Coding Agent/Core 0.84.2 public SDK worker, Node.js >=22.19.0.
+# Verified Pi Coding Agent/Core baselines: 0.84.2, 1.3.0, 1.5.2; Node.js >=22.19.0.
 # application.mjs exports createSession({sdk,args}) and run(session,{args,createSession}).
 # This neutral command demonstrates both hook points, not a security policy.
 apiVersion: aw/v1alpha1
