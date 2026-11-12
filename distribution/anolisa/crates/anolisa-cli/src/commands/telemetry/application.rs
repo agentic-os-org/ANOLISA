@@ -2116,52 +2116,64 @@ mod tests {
                         _ => unreachable!(),
                     }
                     assert!(stderr.is_empty());
+                } else if mode.ends_with("json") {
+                    let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                    let (command, data) = match scenario {
+                        "enable" | "enable-failure" => (
+                            "telemetry enable",
+                            serde_json::json!({"collection_enabled": true}),
+                        ),
+                        "disable" | "disable-failure" => (
+                            "telemetry disable",
+                            serde_json::json!({"collection_enabled": false}),
+                        ),
+                        "link" | "already-linked" => (
+                            "telemetry link",
+                            serde_json::json!({
+                                "linked": true,
+                                "link_id": if scenario == "link" { "generated-link" } else { "existing-link" },
+                                "already_linked": scenario == "already-linked",
+                            }),
+                        ),
+                        "unlink" => ("telemetry unlink", serde_json::json!({"linked": false})),
+                        "upload" => ("telemetry upload", serde_json::json!({"loop_flag": false})),
+                        "init" => ("telemetry init", serde_json::json!({"initialized": true})),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(json["ok"], true);
+                    assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
+                    assert_eq!(json["command"], command);
+                    assert_eq!(json["data"], data);
+                    // `--json` carries warnings in the envelope only: a script that
+                    // parses stdout must never have to scrape stderr as well.
+                    assert_eq!(
+                        json["warnings"],
+                        match scenario {
+                            "enable-failure" => serde_json::json!([
+                                "could not enable anolisa-telemetry.service (execution failed: systemctl daemon-reload failed: reload denied); falling back to lazy start",
+                                "telemetry enabled, but uploader failed to start: spawn failed",
+                            ]),
+                            "disable-failure" => serde_json::json!([
+                                "failed to disable anolisa-telemetry.service: systemctl command failed: disable denied",
+                            ]),
+                            _ => serde_json::json!([]),
+                        }
+                    );
+                    assert!(stderr.is_empty(), "json mode wrote to stderr: {stderr}");
                 } else {
-                    if mode.ends_with("json") {
-                        let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
-                        let (command, data) = match scenario {
-                            "enable" | "enable-failure" => (
-                                "telemetry enable",
-                                serde_json::json!({"collection_enabled": true}),
-                            ),
-                            "disable" | "disable-failure" => (
-                                "telemetry disable",
-                                serde_json::json!({"collection_enabled": false}),
-                            ),
-                            "link" | "already-linked" => (
-                                "telemetry link",
-                                serde_json::json!({
-                                    "linked": true,
-                                    "link_id": if scenario == "link" { "generated-link" } else { "existing-link" },
-                                    "already_linked": scenario == "already-linked",
-                                }),
-                            ),
-                            "unlink" => ("telemetry unlink", serde_json::json!({"linked": false})),
-                            "upload" => {
-                                ("telemetry upload", serde_json::json!({"loop_flag": false}))
-                            }
-                            "init" => ("telemetry init", serde_json::json!({"initialized": true})),
+                    assert_eq!(
+                        rendered,
+                        match scenario {
+                            "enable" | "enable-failure" => "Telemetry collection enabled.\n",
+                            "disable" | "disable-failure" =>
+                                "Telemetry collection disabled.\n  The uploader stops shortly; buffered logs are preserved.\n",
+                            "link" => "Linked to named reporting.\n  link id: generated-link\n",
+                            "already-linked" => "Already linked (link id: existing-link).\n",
+                            "unlink" => "Unlinked from named reporting.\n",
+                            "upload" | "init" => "",
                             _ => unreachable!(),
-                        };
-                        assert_eq!(json["ok"], true);
-                        assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
-                        assert_eq!(json["command"], command);
-                        assert_eq!(json["data"], data);
-                    } else {
-                        assert_eq!(
-                            rendered,
-                            match scenario {
-                                "enable" | "enable-failure" => "Telemetry collection enabled.\n",
-                                "disable" | "disable-failure" =>
-                                    "Telemetry collection disabled.\n  The uploader stops shortly; buffered logs are preserved.\n",
-                                "link" => "Linked to named reporting.\n  link id: generated-link\n",
-                                "already-linked" => "Already linked (link id: existing-link).\n",
-                                "unlink" => "Unlinked from named reporting.\n",
-                                "upload" | "init" => "",
-                                _ => unreachable!(),
-                            }
-                        );
-                    }
+                        }
+                    );
                     assert_eq!(
                         stderr,
                         match scenario {
