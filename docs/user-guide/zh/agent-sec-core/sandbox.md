@@ -175,6 +175,16 @@ staging 对象；不支持远程 daemon 或未经验证的代理。标准 system
 Docker client 配置，所有调用固定同一 endpoint/config，不继承个人 context、proxy 或
 registry credentials；镜像必须已在该 daemon 缓存，禁止自动 pull。
 
+构建和安装会同时提供 `asc-sandbox-docker-guard`，由 CLI 自动从同目录启动，不设
+setuid、不自动提权；库嵌入方可通过受信任的 `DockerConfig.guard` 指定安装位置。
+guard 在独立进程组中持有 staging/config，创建前登记资源，管道 EOF 表示监督进程
+失联。create 完成后才清理，避免迟到创建；父进程保留前台 attach 的终端和 stdio。
+正常返回也要求 guard 确认容器已删除。清理最多重试 3 次，每次 Docker 调用限时 10 秒；
+create 限时 60 秒，超时或删除无法确认时保留 staging/config 和 `recovery.json`，明确报告
+未知状态。管理员按记录中的 `recovery_argv` 参数删除该容器，确认创建已结束且容器不存在
+后，再卸载记录中的 staging 并清理目录。guard 自身被强杀、宿主故障或 daemon 长期不可达
+仍可能留下资源；不能把这些情况视作清理成功。
+
 Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
 网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair
 和兼容 ABI 被阻断。Docker seccomp 仅支持原生 x86_64 和 aarch64。拒绝 socket、设备、FIFO

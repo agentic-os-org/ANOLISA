@@ -234,6 +234,20 @@ listening FD. Each run uses a protected empty Docker client configuration; all
 calls use the same explicit endpoint/config without personal context, proxy or
 registry credentials. Images must already be cached; automatic pull is disabled.
 
+Build/install also delivers `asc-sandbox-docker-guard`, automatically launched
+beside the CLI without setuid or automatic privilege elevation. Library embedders
+can pin its installed path with trusted `DockerConfig.guard`. The guard owns
+staging/config in an independent process group and records ownership before
+create. Pipe EOF signals supervisor loss; cleanup waits for create to settle,
+preventing late creation. The parent retains foreground attach terminal/stdio.
+Normal return also requires confirmed container deletion. Cleanup retries up to
+three times with a 10-second limit per Docker call. Create has a 60-second limit;
+unknown creation/deletion retains staging/config and `recovery.json`, reporting
+an unknown state. Administrators use the record's `recovery_argv`, confirm create
+has settled and the container is absent, then unmount recorded staging paths and
+remove those directories. Killing the guard itself, host failure or a persistently
+unreachable daemon may still leave resources; these are not successful cleanup.
+
 Both Docker network modes block external Unix sockets, including pathname
 sockets inside an allowed directory and abstract sockets in the host network
 namespace. Local stream/seqpacket socket pairs remain available; datagram pairs

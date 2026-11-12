@@ -4,12 +4,15 @@ use crate::DockerError;
 use std::path::PathBuf;
 
 /// Placement inputs fixed by the deployment, never by the sandbox request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerConfig {
     /// Trusted docker CLI, invoked by absolute path with a cleared environment.
     pub cli: PathBuf,
     /// Fixed local Unix endpoint; personal Docker contexts are never read.
     pub host: String,
+    /// Trusted absolute guard path; defaults to the installed sibling of the calling executable.
+    pub guard: Option<PathBuf>,
     /// Operator-pinned image; a digest reference is strongly recommended.
     pub image: String,
     /// Optional memory limit in docker syntax, such as `512m`.
@@ -26,6 +29,11 @@ impl DockerConfig {
     /// # Errors
     /// Rejects relative CLI paths, empty or malformed images and limits.
     pub fn validate(&self) -> Result<(), DockerError> {
+        if self.guard.as_ref().is_some_and(|path| !path.is_absolute()) {
+            return Err(DockerError::Unsupported(
+                "guard requires an absolute path".into(),
+            ));
+        }
         if !self.cli.is_absolute() {
             return Err(DockerError::Unsupported(
                 "docker CLI must be an explicit absolute path".into(),
@@ -91,6 +99,7 @@ mod tests {
         DockerConfig {
             cli: PathBuf::from("/usr/bin/docker"),
             host: "unix:///var/run/docker.sock".into(),
+            guard: None,
             image: "registry.example.com/team/agent@sha256:abc123".into(),
             memory: None,
             cpus: None,

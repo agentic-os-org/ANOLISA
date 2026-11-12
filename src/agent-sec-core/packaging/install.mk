@@ -87,7 +87,7 @@ install-cli-site: ## RPM: Copy staged site-packages to private dir + wrappers
 	install -p -m 0755 scripts/agent-sec-cli-wrapper.sh $(DESTDIR)/usr/bin/agent-sec-cli
 	install -p -m 0755 scripts/agent-sec-daemon-wrapper.sh $(DESTDIR)/usr/bin/agent-sec-daemon
 
-V2_RUNTIME_BINARIES := agent-sec-cli agent-sec-daemon agent-sec-daemon-health
+V2_RUNTIME_BINARIES := agent-sec-cli agent-sec-daemon agent-sec-daemon-health asc-sandbox-docker-guard
 
 define install_v2_binaries
 	install -d -m 0755 "$(DESTDIR)$(1)"
@@ -206,6 +206,7 @@ require-source-v2-artifacts: ## Fail unless every V2 source-install artifact has
 		"$(V2_BIN_BUILD_DIR)/agent-sec-cli" \
 		"$(V2_BIN_BUILD_DIR)/agent-sec-daemon" \
 		"$(V2_BIN_BUILD_DIR)/agent-sec-daemon-health" \
+		"$(V2_BIN_BUILD_DIR)/asc-sandbox-docker-guard" \
 		"$(BUILD_DIR)/linux-sandbox"; do \
 		if [ ! -f "$$artifact" ]; then \
 			echo "ERROR: refusing to remove the V1 source runtime; missing V2 artifact: $$artifact" >&2; \
@@ -389,6 +390,7 @@ uninstall-cli-v2-source: ## Remove V2 source-build CLI and daemon binaries
 	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
 	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon
 	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon-health
+	rm -f $(DESTDIR)$(BINDIR)/asc-sandbox-docker-guard
 
 .PHONY: uninstall-systemd-system-source
 uninstall-systemd-system-source: ## Remove V2 source-build system unit

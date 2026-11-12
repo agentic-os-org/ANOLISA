@@ -21,14 +21,22 @@
 //! - The trusted Docker CLI uses an absolute path, cleared environment and per-run empty config.
 //!   Local Unix endpoints require ownership, peer identity and staging visibility checks.
 //!   All calls pin endpoint/config; personal contexts, proxies, credentials and auto-pull are unused.
-//! - A container created by this backend is removed on every completed or
-//!   failed run; a SIGKILL of the supervising process can leak one container.
+//! - `asc-sandbox-docker-guard` owns resources before create in a separate process group.
+//!   The parent keeps foreground attach. Pipe EOF triggers cleanup; normal return requires deletion.
+//!   Timeouts or unknown deletion retain staging/config and recovery records. A killed guard,
+//!   host failure or unavailable daemon may still leave resources; cleanup success is not claimed.
 
 #![forbid(unsafe_code)]
 
+mod cleanup;
 mod client;
 mod config;
 mod execute;
+#[cfg(target_os = "linux")]
+mod guard;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use guard::guard_main;
 #[cfg(target_os = "linux")]
 mod mounts;
 mod seccomp;

@@ -90,6 +90,7 @@ stage_payload() {
     install -p -m 0755 "$BUILD_DIR/v2/bin/agent-sec-cli" "$stage/bin/agent-sec-cli"
     install -p -m 0755 "$BUILD_DIR/v2/bin/agent-sec-daemon" "$stage/bin/agent-sec-daemon"
     install -p -m 0755 "$BUILD_DIR/v2/bin/agent-sec-daemon-health" "$stage/bin/agent-sec-daemon-health"
+    install -p -m 0755 "$BUILD_DIR/v2/bin/asc-sandbox-docker-guard" "$stage/bin/asc-sandbox-docker-guard"
     install -p -m 0755 "$ROOT/packaging/raw/assets/bin/agent-sec-python" \
         "$stage/bin/agent-sec-python"
     install -p -m 0644 \
@@ -173,6 +174,8 @@ TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
     die "missing V2 build output $BUILD_DIR/v2/bin/agent-sec-daemon"
 [ -x "$BUILD_DIR/v2/bin/agent-sec-daemon-health" ] || \
     die "missing V2 build output $BUILD_DIR/v2/bin/agent-sec-daemon-health"
+[ -x "$BUILD_DIR/v2/bin/asc-sandbox-docker-guard" ] || \
+    die "missing V2 build output $BUILD_DIR/v2/bin/asc-sandbox-docker-guard"
 [ -x "$BUILD_DIR/linux-sandbox" ] || die "missing build output $BUILD_DIR/linux-sandbox"
 
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" "$ROOT" "$CONTRACT")"

@@ -13,10 +13,15 @@ autotests = false
 asc-pep-runtime = { workspace = true }
 asc-sandbox-types = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 rustix = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tempfile = { workspace = true }
+
+[[bin]]
+name = "asc-sandbox-docker-guard"
+path = "src/bin/guard.rs"
 
 [[test]]
 name = "real_daemon"

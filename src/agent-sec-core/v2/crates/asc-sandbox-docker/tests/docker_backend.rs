@@ -78,14 +78,16 @@ case "$1" in
     [ -f "$state/fail-version" ] && exit 1
     echo 27.0.0 ;;
   create)
-    shift; printf '%s\n' "$@" > "$state/create.args"; echo fake-id ;;
+    shift; printf '%s\n' "$@" > "$state/create.args"
+    p=$(grep '^seccomp=' "$state/create.args" | head -n1 | cut -d= -f2-)
+    cp "$p" "$state/seccomp.json" || exit 1
+    echo fake-id ;;
   inspect)
     if [ -f "$state/create.args" ] && grep -q '^seccomp=' "$state/create.args" \
        && [ ! -f "$state/strip-seccomp" ]; then
       # Mimic the daemon expanding the staged profile file into SecurityOpt;
       # the profile is echoed as a JSON string, so escape its quotes.
-      p=$(grep '^seccomp=' "$state/create.args" | head -n1 | cut -d= -f2-)
-      esc=$(sed 's/"/\\\\"/g' "$p")
+      esc=$(sed 's/"/\\\\"/g' "$state/seccomp.json") || exit 1
       sed "s|\"HostConfig\":{{|\"HostConfig\":{{\"SecurityOpt\":[\"no-new-privileges\",\"seccomp=$esc\"],|" "$state/inspect.json"
     else
       cat "$state/inspect.json"
@@ -94,6 +96,7 @@ case "$1" in
     printf '%s\n' "$@" > "$state/start.args"
     code=$(cat "$state/start.code" 2>/dev/null || echo 7)
     exit "$code" ;;
+  ps) exit 0 ;;
   rm)
     shift; printf '%s\n' "$@" >> "$state/rm.calls" ;;
   *) exit 64 ;;
@@ -107,6 +110,7 @@ esac
     let backend = DockerBackend::new(DockerConfig {
         cli,
         host: "unix:///var/run/docker.sock".into(),
+        guard: None,
         image: "agent@sha256:abc123".into(),
         memory: None,
         cpus: None,
@@ -209,7 +213,7 @@ fn client_endpoint_and_config_remain_fixed_for_lifecycle() {
     fixture.write_inspect("none");
     fixture.backend.execute_bound(&fixture.spec()).unwrap();
     let calls = fixture.read_calls("client.calls");
-    assert_eq!(calls.len(), 20);
+    assert_eq!(calls.len(), 24);
     for invocation in calls.chunks_exact(4) {
         assert_eq!(invocation, &calls[..4]);
     }
@@ -363,6 +367,7 @@ fn relative_cli_path_is_rejected_at_construction() {
     let error = DockerBackend::new(DockerConfig {
         cli: Path::new("docker").to_owned(),
         host: "unix:///var/run/docker.sock".into(),
+        guard: None,
         image: "agent:1.0".into(),
         memory: None,
         cpus: None,

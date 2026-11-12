@@ -2,13 +2,18 @@
 
 use crate::{ContainerPlan, DockerConfig, DockerError};
 use std::fs;
+use std::io::{Read as _, Seek as _};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub(crate) struct Client {
-    pub(crate) directory: tempfile::TempDir,
+    pub(crate) directory: PathBuf,
+    temporary: Option<tempfile::TempDir>,
+    preserve: std::cell::Cell<bool>,
+    guard: Option<PathBuf>,
     pub(crate) host: String,
     cli: PathBuf,
     peer: Option<UnixStream>,
@@ -54,13 +59,16 @@ impl Client {
             .tempdir_in(crate::mounts::trusted_root()?)?;
         fs::write(directory.path().join("config.json"), b"{}")?;
         let client = Self {
-            directory,
+            directory: directory.path().to_owned(),
+            temporary: Some(directory),
+            preserve: std::cell::Cell::new(false),
+            guard: config.guard.clone(),
             host: format!("unix://{}", endpoint.display()),
             cli: config.cli.clone(),
             peer: Some(peer),
             daemon_root: Some(proc.join("root")),
         };
-        client.verify_visible(client.directory.path())?;
+        client.verify_visible(client.directory.as_path())?;
         Ok(client)
     }
 
@@ -68,7 +76,13 @@ impl Client {
         for mount in &plan.mounts {
             let destination = Path::new(&mount.destination);
             let endpoint = Path::new(self.host.trim_start_matches("unix://"));
-            if endpoint.starts_with(destination) || self.directory.path().starts_with(destination) {
+            if endpoint.starts_with(destination)
+                || self.directory.starts_with(destination)
+                || self
+                    .guard
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(destination))
+            {
                 return Err(DockerError::Unsupported(
                     "mount exposes Docker control paths".into(),
                 ));
@@ -102,7 +116,7 @@ impl Client {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .arg("--config")
-            .arg(self.directory.path())
+            .arg(self.directory.as_path())
             .arg("--host")
             .arg(&self.host)
             .args(args)
@@ -112,10 +126,57 @@ impl Client {
         command
     }
 
+    pub(crate) fn preserve(&self) {
+        self.preserve.set(true);
+    }
+
+    pub(crate) fn output(
+        &self,
+        mut command: Command,
+        timeout: Duration,
+    ) -> Result<std::process::Output, DockerError> {
+        let mut stdout = tempfile::tempfile_in(&self.directory)?;
+        let mut stderr = tempfile::tempfile_in(&self.directory)?;
+        let mut child = command
+            .stdout(stdout.try_clone()?)
+            .stderr(stderr.try_clone()?)
+            .spawn()?;
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DockerError::Protocol(
+                    "Docker CLI timed out; operation state unknown".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        stdout.rewind()?;
+        stderr.rewind()?;
+        let mut output = std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        stdout
+            .take(8 * 1024 * 1024)
+            .read_to_end(&mut output.stdout)?;
+        stderr.take(4096).read_to_end(&mut output.stderr)?;
+        Ok(output)
+    }
+
     #[cfg(test)]
     pub(crate) fn scripted(config: &DockerConfig) -> Self {
+        let directory = tempfile::tempdir().unwrap();
         Self {
-            directory: tempfile::tempdir().unwrap(),
+            directory: directory.path().to_owned(),
+            temporary: Some(directory),
+            preserve: std::cell::Cell::new(false),
+            guard: None,
             host: config.host.clone(),
             cli: config.cli.clone(),
             peer: None,
@@ -128,6 +189,11 @@ impl Drop for Client {
     fn drop(&mut self) {
         // Retain the connection for the lifecycle; a single socket stat cannot establish daemon identity.
         let _ = self.peer.take();
+        if self.preserve.get()
+            && let Some(directory) = self.temporary.take()
+        {
+            let _ = directory.keep();
+        }
     }
 }
 
@@ -172,7 +238,7 @@ fn daemon_process(peer_pid: i32, endpoint: &Path) -> Result<PathBuf, DockerError
 }
 
 #[cfg(target_os = "linux")]
-fn trusted_path(path: &Path, socket: bool) -> Result<(), DockerError> {
+pub(crate) fn trusted_path(path: &Path, socket: bool) -> Result<(), DockerError> {
     for (index, ancestor) in path.ancestors().enumerate() {
         let metadata = fs::symlink_metadata(ancestor)?;
         let forbidden = if socket && index == 0 { 0o002 } else { 0o022 };

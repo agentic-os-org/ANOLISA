@@ -6,8 +6,10 @@ use asc_sandbox_docker::{DockerBackend, DockerConfig};
 use asc_sandbox_types::{ExecutionSpec, NetworkMode};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 // Unmount before cleanup so TempDir cannot recursively traverse a mounted directory.
 struct Mounted(std::path::PathBuf);
@@ -21,6 +23,7 @@ fn backend() -> DockerBackend {
     DockerBackend::new(DockerConfig {
         cli: "/usr/bin/docker".into(),
         host: "unix:///var/run/docker.sock".into(),
+        guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
         image: std::env::var("ASC_DOCKER_TEST_IMAGE")
             .expect("set ASC_DOCKER_TEST_IMAGE to a locally available pinned Python image"),
         memory: None,
@@ -41,6 +44,144 @@ fn spec(work: &Path, code: &str) -> ExecutionSpec {
             ]}, "execution": {"deny_paths": []}, "network": {"mode": "off"}},
         "path_facts": []
     })).unwrap()
+}
+
+fn wait_for(mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !ready() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for lifecycle transition"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+#[ignore = "requires host mount privileges, local Docker and pinned Python image"]
+fn supervisor_exit_removes_container() {
+    if let Ok(work) = std::env::var("ASC_DOCKER_CHILD_WORK") {
+        let backend = DockerBackend::new(DockerConfig {
+            cli: Path::new(&work).join("docker"),
+            host: "unix:///var/run/docker.sock".into(),
+            guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
+            image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
+            memory: None,
+            cpus: None,
+            pids_limit: Some(64),
+        })
+        .unwrap();
+        let _ = backend.execute_bound(&spec(
+            Path::new(&work),
+            "from pathlib import Path; import time; Path('running').touch(); time.sleep(3600)",
+        ));
+        return;
+    }
+    for (signal, group) in [
+        (rustix::process::Signal::TERM, false),
+        (rustix::process::Signal::HUP, false),
+        (rustix::process::Signal::INT, false),
+        (rustix::process::Signal::TERM, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let work = directory.path();
+        let cli = work.join("docker");
+        std::fs::write(&cli, format!("#!/bin/sh\nif [ \"$5\" = start ]; then\n printf '%s' \"$8\" > '{}/name'\n printf '%s' \"$2\" > '{}/client'\nfi\nexec /usr/bin/docker \"$@\"\n", work.display(), work.display())).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "supervisor_exit_removes_container"])
+            .env("ASC_DOCKER_CHILD_WORK", work)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        wait_for(|| work.join("running").exists());
+        let name = std::fs::read_to_string(work.join("name")).unwrap();
+        let client = std::fs::read_to_string(work.join("client")).unwrap();
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        if group {
+            rustix::process::kill_process_group(pid, signal).unwrap();
+        } else {
+            rustix::process::kill_process(pid, signal).unwrap();
+        }
+        assert!(!child.wait().unwrap().success());
+        wait_for(|| !Path::new(&client).exists());
+        let result = Command::new("/usr/bin/docker")
+            .args([
+                "--config",
+                work.to_str().unwrap(),
+                "--host",
+                "unix:///var/run/docker.sock",
+                "ps",
+                "--all",
+                "--filter",
+                &format!("name=^/{name}$"),
+                "--format",
+                "{{.ID}}",
+            ])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(
+            result.stdout.is_empty(),
+            "container survived supervisor death"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires host mount privileges, local Docker and pinned Python image"]
+fn guard_eof_waits_for_inflight_create() {
+    use std::io::{BufRead as _, Write as _};
+    let directory = tempfile::tempdir().unwrap();
+    let work = directory.path();
+    let cli = work.join("docker");
+    std::fs::write(&cli, format!("#!/bin/sh\nif [ \"$5\" = create ]; then\n touch '{}/creating'\n sleep 1\nfi\nexec /usr/bin/docker \"$@\"\n", work.display())).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = DockerConfig {
+        cli,
+        host: "unix:///var/run/docker.sock".into(),
+        guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
+        image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
+        memory: None,
+        cpus: None,
+        pids_limit: Some(64),
+    };
+    let name = format!("asc-sandbox-{}", uuid::Uuid::new_v4());
+    let request = serde_json::json!({"config": config, "spec": spec(work, "pass"), "name": name});
+    let mut guard = Command::new(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard"))
+        .process_group(0)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = guard.stdin.take().unwrap();
+    writeln!(input, "{request}").unwrap();
+    let mut output = std::io::BufReader::new(guard.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let owned: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let client = owned["Owned"]["directory"].as_str().unwrap();
+    wait_for(|| work.join("creating").exists());
+    drop(input);
+    assert!(guard.wait().unwrap().success());
+    assert!(!Path::new(client).exists());
+    let result = Command::new("/usr/bin/docker")
+        .args([
+            "--config",
+            work.to_str().unwrap(),
+            "--host",
+            "unix:///var/run/docker.sock",
+            "ps",
+            "--all",
+            "--filter",
+            &format!("name=^/{name}$"),
+            "--format",
+            "{{.ID}}",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty(), "late create leaked a container");
 }
 
 #[test]
@@ -64,6 +205,7 @@ fn source_replacement_at_start_keeps_authorized_inode() {
         let backend = DockerBackend::new(DockerConfig {
             cli,
             host: "unix:///var/run/docker.sock".into(),
+            guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
             image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
             memory: None,
             cpus: None,
@@ -119,6 +261,7 @@ fn personal_context_and_proxy_config_are_isolated() {
     let backend = DockerBackend::new(DockerConfig {
         cli,
         host: "unix:///var/run/docker.sock".into(),
+        guard: Some(env!("CARGO_BIN_EXE_asc-sandbox-docker-guard").into()),
         image: std::env::var("ASC_DOCKER_TEST_IMAGE").unwrap(),
         memory: None,
         cpus: None,

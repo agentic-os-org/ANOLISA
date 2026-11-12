@@ -740,6 +740,7 @@ dependencies = [
  "asc-pep-runtime",
  "asc-sandbox-types",
  "rustix",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

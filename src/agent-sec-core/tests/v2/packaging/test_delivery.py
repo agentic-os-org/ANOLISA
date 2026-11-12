@@ -36,6 +36,7 @@ class DeliveryTests(unittest.TestCase):
             "v2/bin/agent-sec-cli",
             "v2/bin/agent-sec-daemon",
             "v2/bin/agent-sec-daemon-health",
+            "v2/bin/asc-sandbox-docker-guard",
             "linux-sandbox",
         ):
             self.artifact(name, "#!/bin/sh\nexit 0\n", executable=True)
@@ -221,6 +222,7 @@ class DeliveryTests(unittest.TestCase):
             "agent-sec-cli",
             "agent-sec-daemon",
             "agent-sec-daemon-health",
+            "asc-sandbox-docker-guard",
             "linux-sandbox",
         ):
             self.assertTrue((stage / "usr/bin" / name).stat().st_mode & 0o111)
@@ -374,6 +376,7 @@ class DeliveryTests(unittest.TestCase):
                     "agent-sec-cli",
                     "agent-sec-daemon",
                     "agent-sec-daemon-health",
+                    "asc-sandbox-docker-guard",
                 },
             )
             self.assertTrue(
