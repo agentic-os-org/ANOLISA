@@ -2620,7 +2620,7 @@ fn startup_recovery_resumes_mixed_scope_discovery_after_credential_retirement() 
                 "target": {
                     "type": "http_request", "credentialId": "github", "scheme": "https",
                     "host": "api.github.com", "path": "/repos/**", "methods": ["GET"],
-                    "responseRewrite": "buffered"
+                    "responseRewrite": true
                 },
                 "because": "credential execution contract"
             }]
