@@ -21,6 +21,60 @@ fn en_state() -> InlineState {
 }
 
 #[test]
+fn review_regression_skills_chinese_host_labels_preserve_skill_text() {
+    let (adapter, script) = mock_core(
+        r#"read REQUEST
+printf '%s\n' '{"success":true,"data":{"name":"example","description":"Third-party English","level":"user","base_dir":"/tmp/example"}}'"#,
+    );
+    let mut state = zh_state();
+    for (action, arg, expected) in [
+        ("detail", Some("example"), "名称"),
+        ("enable", Some("example"), "已启用"),
+        ("disable", Some("example"), "已禁用"),
+        ("detail", None, "用法"),
+        ("unknown", None, "用法"),
+    ] {
+        let mut output = Vec::new();
+        render_skills_command(Some(action), arg, &adapter, &mut state, &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(expected), "{action}: {output}");
+        if action == "detail" && arg.is_some() {
+            assert!(output.contains("Third-party English"), "{output}");
+        }
+    }
+    std::fs::remove_file(script).unwrap();
+    let rows = format_skills_list(
+        &serde_json::json!([{"name":"example","level":"user","disabled":true}]),
+        &state.i18n(),
+    );
+    assert!(rows[0].contains("已禁用"), "{rows:?}");
+}
+
+#[test]
+fn review_regression_skills_chinese_registry_error_keeps_original() {
+    let (adapter, script) = mock_core(
+        r#"read REQUEST
+printf '%s\n' '{"success":false,"error":"third-party refusal"}'"#,
+    );
+    let mut state = zh_state();
+    for action in ["list", "detail", "enable", "disable"] {
+        let mut output = Vec::new();
+        render_skills_command(
+            Some(action),
+            Some("example"),
+            &adapter,
+            &mut state,
+            &mut output,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("错误"), "{action}: {output}");
+        assert!(output.contains("third-party refusal"), "{output}");
+    }
+    std::fs::remove_file(script).unwrap();
+}
+
+#[test]
 fn skills_non_cosh_core_shows_unavailable_zh() {
     let adapter = AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
     let mut state = zh_state();
@@ -137,7 +191,7 @@ fn skills_detail_still_shows_full_description() {
         "level": "system",
         "base_dir": "/tmp/skills/agentsight",
     });
-    let lines = format_skill_detail(&data);
+    let lines = format_skill_detail(&data, &I18n::new(Language::EnUs));
     assert!(
         lines.contains(&format!("  Description: {NOISY_DESC}")),
         "detail must keep the untruncated description: {lines:?}"
