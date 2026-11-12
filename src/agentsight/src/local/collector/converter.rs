@@ -94,6 +94,7 @@ fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Resu
     let mut message_version = None;
     let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
+    let mut unmatched_tool_results = Vec::new();
     let mut step_id: usize = 0;
     let mut events = content
         .lines()
@@ -179,12 +180,7 @@ fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Resu
                     // same time (typing while a tool call is pending). Both
                     // belong to the trajectory: the results as observations on
                     // the agent step, the text as its own user step.
-                    if blocks
-                        .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                    {
-                        append_tool_results(&mut steps, blocks, timestamp.as_deref());
-                    }
+                    let unmatched = append_tool_results(&mut steps, blocks, timestamp.as_deref());
 
                     let mut message_text = String::new();
                     for block in blocks {
@@ -198,7 +194,11 @@ fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Resu
                             }
                         }
                     }
-                    if !message_text.is_empty() {
+                    if message_text.is_empty() && !unmatched.is_empty() {
+                        unmatched_tool_results.push(
+                            serde_json::json!({"timestamp": timestamp, "results": unmatched}),
+                        );
+                    } else if !message_text.is_empty() {
                         step_id += 1;
                         steps.push(Step {
                             step_id,
@@ -209,7 +209,8 @@ fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Resu
                             reasoning_effort: None,
                             reasoning_content: None,
                             tool_calls: None,
-                            observation: None,
+                            observation: (!unmatched.is_empty())
+                                .then_some(Observation { results: unmatched }),
                             metrics: None,
                             extra: None,
                             llm_call_count: None,
@@ -428,7 +429,12 @@ fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Resu
         final_metrics: Some(final_metrics),
         continued_trajectory_ref: None,
         subagent_trajectories: None,
-        extra: None,
+        extra: (!unmatched_tool_results.is_empty()).then(|| {
+            HashMap::from([(
+                "unmatched_tool_results".into(),
+                serde_json::json!(unmatched_tool_results),
+            )])
+        }),
     })
 }
 
@@ -458,7 +464,12 @@ fn flatten_tool_result_content(content: &Value) -> String {
     }
 }
 
-fn append_tool_results(steps: &mut [Step], blocks: &[Value], timestamp: Option<&str>) {
+fn append_tool_results(
+    steps: &mut [Step],
+    blocks: &[Value],
+    timestamp: Option<&str>,
+) -> Vec<ObservationResult> {
+    let mut unmatched = Vec::new();
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -468,7 +479,26 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value], timestamp: Option<&
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let Some(id) = source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+        let content = block
+            .get("content")
+            .map(flatten_tool_result_content)
+            .unwrap_or_default();
+        let extra = declared_tool_failure(block)
+            .or_else(|| {
+                serde_json::from_str::<Value>(content.trim())
+                    .ok()
+                    .filter(Value::is_object)
+                    .and_then(|envelope| declared_tool_failure(&envelope))
+            })
+            .map(is_error_extra);
+        let mut result = ObservationResult {
+            source_call_id,
+            content: Some(Value::String(content)),
+            subagent_trajectory_ref: None,
+            extra,
+        };
+        let Some(id) = result.source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+            unmatched.push(result);
             continue;
         };
         // Prefer the original ID across the whole history before considering
@@ -497,6 +527,7 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value], timestamp: Option<&
             owner
         });
         let Some(step) = owner.map(|index| &mut steps[index]) else {
+            unmatched.push(result);
             continue;
         };
         let source_call_id = agentsight_atif::resolve_call_id(
@@ -520,27 +551,10 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value], timestamp: Option<&
         let observation = step.observation.get_or_insert_with(|| Observation {
             results: Vec::new(),
         });
-        let content = block
-            .get("content")
-            .map(flatten_tool_result_content)
-            .unwrap_or_default();
-        // An outer declaration wins; only otherwise look through the JSON
-        // envelope MCP tools commonly serialize into the content string.
-        let extra = declared_tool_failure(block)
-            .or_else(|| {
-                serde_json::from_str::<Value>(content.trim())
-                    .ok()
-                    .filter(Value::is_object)
-                    .and_then(|envelope| declared_tool_failure(&envelope))
-            })
-            .map(is_error_extra);
-        observation.results.push(ObservationResult {
-            source_call_id,
-            content: Some(Value::String(content)),
-            subagent_trajectory_ref: None,
-            extra,
-        });
+        result.source_call_id = source_call_id;
+        observation.results.push(result);
     }
+    unmatched
 }
 
 #[cfg(test)]
@@ -817,7 +831,11 @@ mod tests {
     fn test_tool_result_without_prior_agent_step() {
         let content = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"result"}]}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
-        assert_eq!(traj.steps.len(), 0);
+        assert!(traj.steps.is_empty());
+        assert_eq!(
+            traj.extra.as_ref().unwrap()["unmatched_tool_results"][0]["results"][0]["content"],
+            "result"
+        );
     }
 
     #[test]
