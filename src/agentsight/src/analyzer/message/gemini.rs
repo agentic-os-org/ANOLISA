@@ -291,13 +291,25 @@ pub struct GeminiUsageMetadata {
 // GeminiParser
 // ============================================================================
 
-/// A prompt-level block reason (`promptFeedback.blockReason`), when present
+/// A prompt-level safety block (`promptFeedback.blockReason`), when present
 /// and non-empty. Google's response shape uses this instead of a candidate
 /// when the input itself was refused.
-fn prompt_block_reason(body: &serde_json::Value) -> Option<&str> {
+///
+/// Only the safety-class spellings are surfaced. `OTHER` means the prompt was
+/// refused for an unstated reason and `BLOCK_REASON_UNSPECIFIED` says nothing;
+/// carrying either as a finish reason would make the detector read the call as
+/// a normal stop (`other`) or a truncated stream. They keep the pre-existing
+/// empty-response behaviour instead of being recorded as a success.
+fn safety_prompt_block_reason(body: &serde_json::Value) -> Option<&str> {
+    /// Gemini's `BlockReason` values that name a safety policy.
+    const SAFETY_BLOCK_REASONS: &[&str] = &["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"];
     body.pointer("/promptFeedback/blockReason")
         .and_then(serde_json::Value::as_str)
-        .filter(|reason| !reason.is_empty())
+        .filter(|reason| {
+            SAFETY_BLOCK_REASONS
+                .iter()
+                .any(|known| reason.eq_ignore_ascii_case(known))
+        })
 }
 
 /// Parser for Google's Gemini `generateContent` API
@@ -359,7 +371,7 @@ impl GeminiParser {
         // no usage metadata; its only answer signal is `promptFeedback`.
         if body.get("candidates").is_none()
             && body.get("usageMetadata").is_none()
-            && prompt_block_reason(body).is_none()
+            && safety_prompt_block_reason(body).is_none()
         {
             return None;
         }
@@ -370,7 +382,7 @@ impl GeminiParser {
         // reason the interruption detector can classify (the provider blocks
         // the prompt, not a candidate, and sends no candidates at all).
         if response.candidates.is_empty()
-            && let Some(reason) = prompt_block_reason(body)
+            && let Some(reason) = safety_prompt_block_reason(body)
         {
             response.candidates.push(GeminiCandidate {
                 finish_reason: Some(reason.to_string()),
@@ -400,7 +412,7 @@ impl GeminiParser {
         let mut prompt_block: Option<String> = None;
 
         for chunk in chunks {
-            if let Some(reason) = prompt_block_reason(chunk) {
+            if let Some(reason) = safety_prompt_block_reason(chunk) {
                 saw_gemini = true;
                 prompt_block = Some(reason.to_string());
             }
@@ -696,6 +708,43 @@ mod tests {
         // An empty promptFeedback carries no block and must not turn an
         // unrelated body into a Gemini response.
         assert!(GeminiParser::parse_response(&serde_json::json!({"promptFeedback": {}})).is_none());
+    }
+
+    /// `OTHER` and `BLOCK_REASON_UNSPECIFIED` are prompt blocks too, but they
+    /// do not name a safety policy. Carrying them as a finish reason would
+    /// make the detector read the call as a normal stop (`other`) or a
+    /// truncated stream, turning a withheld answer into a silent success.
+    /// They keep the pre-existing empty-response behaviour.
+    #[test]
+    fn non_safety_prompt_block_keeps_the_empty_response_behaviour() {
+        // With usage metadata the body is still parseable, as before this
+        // fix, but no candidate or finish reason is synthesized.
+        let other = serde_json::json!({
+            "promptFeedback": {"blockReason": "OTHER"},
+            "usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}
+        });
+        let response =
+            GeminiParser::parse_response(&other).expect("usage metadata keeps it parseable");
+        assert!(response.candidates.is_empty());
+        assert_eq!(response.finish_reason(), None);
+
+        // Without a Gemini-shaped sibling field the body is not a Gemini
+        // answer, exactly as before the safety fix.
+        assert!(
+            GeminiParser::parse_response(&serde_json::json!({
+                "promptFeedback": {"blockReason": "BLOCK_REASON_UNSPECIFIED"}
+            }))
+            .is_none()
+        );
+
+        // A non-safety block must not mask a later safety block in a stream.
+        let chunks = serde_json::json!([
+            {"promptFeedback": {"blockReason": "OTHER"}},
+            {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}},
+            {"usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}}
+        ]);
+        let response = GeminiParser::parse_response(&chunks).expect("stream block aggregates");
+        assert_eq!(response.finish_reason(), Some("PROHIBITED_CONTENT"));
     }
 
     #[test]
