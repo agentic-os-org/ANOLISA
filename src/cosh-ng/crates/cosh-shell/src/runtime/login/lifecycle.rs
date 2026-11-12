@@ -134,6 +134,13 @@ fn inherit_lock(lock: &File) -> Result<()> {
     Ok(())
 }
 
+fn is_cosh_login_shell(shell: &str) -> bool {
+    matches!(
+        shell,
+        COSH_PATH | "/bin/cosh" | "/usr/bin/cosh-login" | "/bin/cosh-login"
+    )
+}
+
 fn check_state(records: &[Record], accounts: &[Account], compatible: bool) -> Result<()> {
     for record in records {
         let mut matching = accounts
@@ -153,9 +160,13 @@ fn check_state(records: &[Record], accounts: &[Account], compatible: bool) -> Re
             ));
         }
     }
-    if !compatible && accounts.iter().any(|account| account.shell == COSH_PATH) {
+    if !compatible
+        && accounts
+            .iter()
+            .any(|account| is_cosh_login_shell(&account.shell))
+    {
         return Err(Error::new(
-            "restore accounts still using /usr/bin/cosh before removing this package",
+            "restore accounts still using cosh or cosh-login before removing this package",
         ));
     }
     Ok(())
@@ -173,7 +184,7 @@ fn audit(store: &Store, compatible: bool) -> Result<Vec<Record>> {
     }
     for local in account::local_accounts()?
         .into_iter()
-        .filter(|account| account.shell == COSH_PATH)
+        .filter(|account| is_cosh_login_shell(&account.shell))
     {
         let current = account::lookup(Some(&local.name), local.uid)?;
         if current != local {
