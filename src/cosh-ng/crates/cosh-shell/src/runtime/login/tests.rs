@@ -489,6 +489,14 @@ fn managed_shell_assets_must_be_readable_and_executable_by_the_target_account() 
         "target cannot traverse root-only parent"
     );
     assert!(account::validate_public_execution(0o711, true, false).is_ok());
+    for mode in [0o111, 0o4111, 0o555, 0o755] {
+        assert!(account::validate_command_execution(mode, false).is_ok());
+    }
+    for mode in [0o000, 0o110, 0o500, 0o750] {
+        assert!(account::validate_command_execution(mode, false).is_err());
+    }
+    assert!(account::validate_command_execution(0o4111, true).is_err());
+    assert!(account::validate_public_execution(0o4111, false, false).is_err());
 }
 
 #[test]
