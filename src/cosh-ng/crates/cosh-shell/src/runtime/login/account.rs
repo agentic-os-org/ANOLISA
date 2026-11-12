@@ -130,7 +130,25 @@ fn account_from_entry(entry: &nix::libc::passwd) -> Result<Account> {
     Ok(account)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    TrustedFile,
+    Execute,
+    ReadExecute,
+}
+
 pub(super) fn trusted_path(path: &Path, executable: bool) -> Result<PathBuf> {
+    trusted_path_for(
+        path,
+        if executable {
+            Access::ReadExecute
+        } else {
+            Access::TrustedFile
+        },
+    )
+}
+
+fn trusted_path_for(path: &Path, access: Access) -> Result<PathBuf> {
     if !path.is_absolute()
         || path
             .components()
@@ -138,12 +156,14 @@ pub(super) fn trusted_path(path: &Path, executable: bool) -> Result<PathBuf> {
     {
         return Err(Error::new("untrusted system path"));
     }
-    let canonical = resolve_trusted_path(path, &mut 16, executable)?;
+    let canonical = resolve_trusted_path(path, &mut 16, access != Access::TrustedFile)?;
     let metadata = fs::metadata(&canonical).map_err(Error::io)?;
     if !metadata.is_file() {
         return Err(Error::new("invalid trusted system file"));
     }
-    if executable {
+    if access == Access::Execute {
+        validate_command_execution(metadata.mode(), has_access_acl(&canonical)?)?;
+    } else if access == Access::ReadExecute {
         validate_public_execution(metadata.mode(), false, has_access_acl(&canonical)?)?;
     }
     Ok(canonical)
@@ -244,7 +264,7 @@ pub(super) fn read_trusted(path: &Path, limit: usize) -> Result<Vec<u8>> {
 }
 
 pub(super) fn command(program: &str) -> Result<Command> {
-    let path = trusted_path(Path::new(program), true)?;
+    let path = trusted_path_for(Path::new(program), Access::Execute)?;
     let mut command = Command::new(path);
     command
         .env_clear()
@@ -398,6 +418,14 @@ pub(super) fn validate_public_execution(
     has_access_acl: bool,
 ) -> Result<()> {
     let required = if directory { 0o111 } else { 0o555 };
+    validate_public_access(mode, required, has_access_acl)
+}
+
+pub(super) fn validate_command_execution(mode: u32, has_access_acl: bool) -> Result<()> {
+    validate_public_access(mode, 0o111, has_access_acl)
+}
+
+fn validate_public_access(mode: u32, required: u32, has_access_acl: bool) -> Result<()> {
     if has_access_acl || mode & required != required {
         return Err(Error::new(
             "managed shell assets must be publicly accessible without extended access ACLs",
