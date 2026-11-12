@@ -92,8 +92,11 @@ class ResidentPolicyTests:
                    for line in path.read_text().splitlines()]
         facts = [record["record"].get("plan", {}).get("executionEvent") for record in records]
         observed = [fact for fact in facts if fact and fact["data"]["subject"]["configRevision"]["value"] == mw.config["policy_revision"]]
-        self.assertEqual({fact["data"]["name"] for fact in observed}, {"tool.before", "tool.after"})
-        self.assertTrue(all(fact["data"]["association"]["status"] == "verified" for fact in observed))
+        self.assertEqual({fact["data"]["name"] for fact in observed},
+                         {"instance.started", "tool.before", "tool.after"})
+        for fact in observed:
+            expected = "unassociated" if fact["data"]["name"] == "instance.started" else "verified"
+            self.assertEqual(fact["data"]["association"]["status"], expected)
         self.assertNotEqual(mw.config["policy_revision"], first_revision)
         await self.update_policy(self.document)
         call.input = '{"deny":true}'
