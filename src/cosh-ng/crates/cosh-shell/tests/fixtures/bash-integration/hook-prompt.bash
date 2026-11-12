@@ -9,6 +9,41 @@ setup)
         builtin source "$COSH_BASH_TEST_ASSETS/tests/hook-prompt.bash" configure
     fi
     ;;
+retreat)
+    [[ $__cosh_hook_active == 1 &&
+       ${PROMPT_COMMAND[$__cosh_hook_slot]-} == "$__cosh_hook_entry" ]] || exit 83
+    case $COSH_PROMPT_MODE in
+        overwrite) PROMPT_COMMAND[$__cosh_hook_slot]='builtin printf USER_PROMPT_MARKER' ;;
+        delete) builtin unset "PROMPT_COMMAND[$__cosh_hook_slot]" ;;
+        readonly)
+            PROMPT_COMMAND=('builtin printf USER_PROMPT_MARKER')
+            builtin readonly -a PROMPT_COMMAND
+            ;;
+    esac
+    __cosh_hook_event_command=sentinel_command
+    __cosh_hook_event_status=77
+    __cosh_hook_event_cwd=sentinel_cwd
+    __cosh_hook_event_time=sentinel_time
+    __cosh_hook_event_pipe_count=77
+    __cosh_hook_event_subshell=77
+    __cosh_hook_event_functions=77
+    __cosh_hook_event_sources=77
+    __cosh_hook_event_flags=sentinel_flags
+    __event_before=$(builtin declare -p ${!__cosh_hook_event_@})
+    __prompt_before=$(builtin declare -p PROMPT_COMMAND)
+    __state_before="$__cosh_hook_active:$__cosh_hook_trusted:$__cosh_hook_slot:$__cosh_hook_entry"
+    ;;
+check)
+    __event_after=$(builtin declare -p ${!__cosh_hook_event_@})
+    [[ $__event_after == "$__event_before" ]] || {
+        builtin printf 'EVENT_CHANGED:%s\n' "$__event_after"
+        exit 84
+    }
+    [[ $(builtin declare -p PROMPT_COMMAND) == "$__prompt_before" &&
+       "$__cosh_hook_active:$__cosh_hook_trusted:$__cosh_hook_slot:$__cosh_hook_entry" == "$__state_before" ]] || exit 85
+    builtin trap 'builtin printf "USER_ERR:%s:%s\n" "$?" "$BASH_COMMAND" >>"$COSH_BASH_TEST_WORKDIR/user.err"' ERR
+    __user_err_before=$(builtin trap -p ERR)
+    ;;
 configure)
     case $COSH_PROMPT_PHASE in registered) __expected_phase=0 ;; active) __expected_phase=1 ;; esac
     [[ $__cosh_hook_active == "$__expected_phase" &&
@@ -24,6 +59,18 @@ configure)
     if [[ $COSH_PROMPT_MODE == baseline ]]; then builtin unset "PROMPT_COMMAND[$__user_slot]"; fi
     ;;
 finish)
+    if [[ $COSH_PROMPT_CODE == retreat ]]; then
+        [[ $(builtin declare -p PROMPT_COMMAND) == "$__prompt_before" &&
+           "$__cosh_hook_active:$__cosh_hook_trusted:$__cosh_hook_slot:$__cosh_hook_entry" == "$__state_before" &&
+           $(builtin trap -p ERR) == "$__user_err_before" &&
+           $(builtin declare -p ${!__cosh_hook_event_@}) == "$__event_before" ]] || exit 86
+        builtin mapfile -t __records <"$COSH_BASH_TEST_WORKDIR/user.err"
+        [[ ${#__records[@]} == 1 && ${__records[0]} == 'USER_ERR:5:( exit 5 )' ]] || exit 87
+        builtin mapfile -t __records <"$COSH_BASH_TEST_WORKDIR/hook.calls"
+        [[ ${#__records[@]} == 2 ]] || exit 88
+        builtin printf 'HOOK_RETREAT_OK:%s\n' "$COSH_PROMPT_MODE"
+        exit 0
+    fi
     PROMPT_COMMAND=()
     builtin trap - ERR
     builtin mapfile -t __records <"$COSH_BASH_TEST_WORKDIR/user.err"

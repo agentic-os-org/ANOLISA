@@ -54,5 +54,7 @@ without invoking a Shell to parse them.
 
 ERR observes a failure fragment, not the user's complete input or proven top-level call;
 a returned wrapper function can expose its last external command. Keep the recorder
-assignment-only and preserve user functions. Known runtime conflicts retire the observer;
+limited to a pure ownership check and assignments, preserving user functions.
+If the owned prompt slot is replaced or removed, stop recording payloads; an
+observer that cannot safely uninstall may remain inert. Other known conflicts retire the observer;
 do not add DEBUG tracing, history inference or input interception to improve attribution.
