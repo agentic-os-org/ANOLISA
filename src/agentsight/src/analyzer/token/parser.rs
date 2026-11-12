@@ -135,8 +135,12 @@ impl TokenParser {
         // order. A gateway that spells them snake_case is the reason
         // `detect_provider_from_usage` reads `prompt_token_count` as the
         // Gemini signal.
-        let gemini_input =
-            find_u64(data, "promptTokenCount").or_else(|| find_u64(data, "prompt_token_count"));
+        let tool_prompt = find_u64(data, "toolUsePromptTokenCount")
+            .or_else(|| find_u64(data, "tool_use_prompt_token_count"))
+            .unwrap_or(0);
+        let gemini_input = find_u64(data, "promptTokenCount")
+            .or_else(|| find_u64(data, "prompt_token_count"))
+            .map(|prompt| prompt.saturating_add(tool_prompt));
         // Thinking models report the reasoning budget in a counter of its
         // own, outside `candidatesTokenCount`, while `totalTokenCount`
         // covers both — the direct parse folds it into the output count
