@@ -149,7 +149,8 @@ def main():
     config = private_json(Path(os.environ["AW_NATIVE_CONFIG"]), limit=1024 * 1024)
     sys.argv = [program, *arguments]
     # Preserve native import precedence before loading any framework modules.
-    sys.path[0] = str(Path(program).parent)
+    if not sys.flags.safe_path:
+        sys.path[0] = str(Path(program).resolve().parent)
     install(Path(source), config)
     runpy.run_path(program, run_name="__main__")
 

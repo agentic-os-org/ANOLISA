@@ -10,7 +10,8 @@
 通过 QwenPaw 初始化模型配置。其他版本沿用插件、middleware 与原生任务生命周期接口检查，
 AW 记录已安装版本。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
-普通启动识别出绝对路径 Python 标准启动脚本后，从私有临时包通过原生 Registry 注册 AW，
+普通启动识别 pip／uv 生成的绝对路径标准启动脚本，包括 uv 可重定位入口后，
+从私有临时包通过原生 Registry 注册 AW，
 减少文件系统插件加载后的全局模块扫描，并保持工作区插件目录原样。AW 负责该集成及其
 退出清理，QwenPaw 的文件系统插件列表不展示该集成。自定义入口、`--reloadable` 和外部
 启动集成继续使用原生插件加载器。
@@ -62,8 +63,10 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 
 共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。
 
-识别出的绝对路径 Python 标准启动脚本，使用同一解释器与导入路径读取实际安装包的
-字面量版本，避免为版本探测加载 QwenPaw App 配置。自定义入口和动态版本继续使用
+AW 按 Python 语法树识别标准 CLI 入口，允许安装器的注释、引号和格式差异；
+uv 可重定位入口使用脚本实际目录中的解释器。探测和受管启动复用该识别结果，
+使用同一解释器与导入路径读取实际安装包的字面量版本，避免为版本探测加载 App 配置。
+自定义入口和动态版本继续使用
 原生 `--version`，共用五秒预算。原生 Hook 安装与就绪检查沿用原生接口。受管启动在同一
 解释器、同一进程内执行原启动脚本，保留原参数和导入优先级；用户插件沿用原生加载与
 隔离机制。Startup 回执确认前到达的请求最多等待 30 秒，再开始构造 Agent。等待边界在
