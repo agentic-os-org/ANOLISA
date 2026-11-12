@@ -90,6 +90,11 @@ pub(super) struct OscParser {
     last_prompt_display_start: Option<usize>,
     last_prompt_display: Vec<u8>,
     capture_prompt_display: bool,
+    /// Columns the child shell wraps its readline echo at, published by the
+    /// raw relay each time it syncs the outer terminal's winsize onto the PTY.
+    /// Zero means "never published", so wrap-sensitive erase math degrades to
+    /// the single-row path instead of guessing (#3401).
+    terminal_columns: usize,
     prompt_ready_display_start: Option<usize>,
     prompt_presentation_display_starts: Vec<super::prompt_presentation::PromptDisplayStart>,
     prompt_epoch_exchange: Option<crate::raw_input::PromptEpochExchange>,
@@ -150,6 +155,18 @@ impl OscParser {
 
     pub(crate) fn set_prompt_cwd(&mut self, cwd: crate::input::ShellPromptCwd) {
         self.shell_prompt_cwd = cwd;
+    }
+
+    /// Records the width the child shell wraps at. The relay owns the value:
+    /// it is the winsize just pushed onto the PTY, which is what the shell's
+    /// own readline echo wrapped against (#3401).
+    pub(crate) fn set_terminal_columns(&mut self, columns: usize) {
+        self.terminal_columns = columns;
+    }
+
+    /// Width the child shell wraps at; zero when the relay never published one.
+    pub(crate) fn terminal_columns(&self) -> usize {
+        self.terminal_columns
     }
 
     pub(crate) fn set_shell_path_command_names(
