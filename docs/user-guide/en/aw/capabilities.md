@@ -24,8 +24,9 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
-Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 can
-replace ordinary model-visible text through PostToolUse with Code Mode disabled
+Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 and
+0.166.0 have been verified for ordinary model-visible text replacement through
+PostToolUse with Code Mode disabled
 and no peer PostToolUse Hooks; this does not protect prior capture, telemetry or
 Hook failures. See the [Codex guide](../../../developer-guide/en/aw/agents/codex.md). See each Agent
 page for result types and callback limits.

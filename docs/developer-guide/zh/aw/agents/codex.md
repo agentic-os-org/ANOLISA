@@ -3,11 +3,12 @@
 [English](../../../en/aw/agents/codex.md)
 
 AW 通过 `aw run` 启动本地 Codex CLI，接入 `UserPromptSubmit`、
-`PreToolUse` 和 `PostToolUse` 命令 Hook。Codex 保留模型配置、原生权限和工具结果。
+`PreToolUse` 和 `PostToolUse` 命令 Hook。Codex 保留模型配置和原生权限。
 AW 在每个事件的单个命令 Hook 内依次执行已配置的 Provider 步骤。
 
-以 [sec-core 示例](../../../../../src/aw/crates/aw-service/examples/aw.codex-security.yaml)
-为起点，填写 Codex、sec-core Provider、CLI 和正在运行的 sec-core socket 的绝对路径。
+将 [sec-core 示例](../../../../../src/aw/crates/aw-service/examples/aw.codex-security.yaml)
+作为一份 `aw.yaml`，覆盖提示词、工具输入和工具输出检查。填写 Codex、sec-core Provider、
+CLI 和正在运行的 sec-core socket 的绝对路径。
 先单独安装并登录 Codex。从 `aw.yaml` 所在目录运行：
 
 ```bash
@@ -37,27 +38,18 @@ AW 在同一 Codex home 内串行安装。更新已有 Hook 文件时，将被�
 `tool.before` 标为必需时，AW 在启动前拒绝其他原生 PreToolUse Hook。
 Codex 可能在 AW 检查原始输入后执行其他 Hook 改写的参数。若未标为必需，
 已有 PreToolUse Hook 可改写实际执行参数；AW 的检查仅对应原始输入。
-PostToolUse 记录完成事件。Codex 0.163.0 可让最后一个 Provider 步骤返回
-`replace_result`，替换普通模型请求中的文本。该步骤需配置 `on_error: withhold_result`；
+PostToolUse 记录完成事件。Codex 0.163.0 和 0.166.0 已验收示例中最后的
+`scan_tool_output` 步骤：检测到输出 PII 时返回 `replace_result`，替换普通模型请求中的文本。
+该步骤配置 `on_error: withhold_result`；
 Provider 失败或 Hook 结果缺少受支持的文本投影时，AW 返回固定 withheld 文本。已绑定的
 PostToolUse Hook 在回调准备失败时也会交付 withheld；超过 1 MiB 的 Hook 输入会在进入
 Provider 扫描前触发这一处理。
-启用替换时，启动准入拒绝 Code Mode 和其他 PostToolUse Hook。sec-core 示例仍为观察模式；
-可选的输出 PII 步骤使用 `scan_tool_output`、`effects: [observe, replace_result]` 和
-`pii.output_mode: replace_result`。
+启用替换时，启动准入拒绝 Code Mode 和其他 PostToolUse Hook。示例已设置
+`pii.output_mode: replace_result`；sec-core 对命中的 PII 交付固定 withheld 文本，
+当前不按字段保留原始结果结构。
 
-复制示例配置，将 `spec.providers.security.config.pii.output_mode` 设为
-`replace_result`，并在 `spec.events.tool.after.steps` 末尾追加：
-
-```yaml
-- id: output-pii
-  provider: security
-  operation: scan_tool_output
-  effects: [observe, replace_result]
-  on_error: withhold_result
-```
-
-这一版本专属行为会把原生 Hook 标记为 stopped。Code Mode、未触发 PostToolUse 的工具失败、
+这一 Hook 行为会把原生 Hook 标记为 stopped。CLI 报告版本保留为验收证据；启动准入
+检查 Hook 接口，不使用版本白名单。Code Mode、未触发 PostToolUse 的工具失败、
 策略前结果捕获、遥测、终端流式输出和原生 Hook 命令失败仍不受保护。MCP 结构化结果在普通
 模型请求中转成替换文本。需要完整的输出交付保护时，应在原生工具或其他可强制执行的边界实现。
 

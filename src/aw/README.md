@@ -79,9 +79,10 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 
 Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
 
-Codex CLI 0.163.0 can replace ordinary model-visible PostToolUse text through a
-version-scoped native Hook behavior. Code Mode, prior capture and telemetry, and
-Hook transport failures remain outside that protection; see the
+Codex CLI 0.163.0 and 0.166.0 have been verified with one `aw run` configuration
+for sec-core checks and ordinary model-visible PostToolUse text replacement.
+Code Mode, prior capture and telemetry, and Hook transport failures remain
+outside that protection; see the
 [Codex guide](../../docs/developer-guide/en/aw/agents/codex.md).
 
 Pi `runWorker` factories also support literal user text checks before model dispatch; see the [Pi submission guide](../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions).

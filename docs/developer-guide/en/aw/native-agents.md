@@ -15,7 +15,7 @@ After changing an application dependency, follow [native validation](validation.
 | Integration | Verified baseline | Entrypoint |
 | --- | --- | --- |
 | [Qoder CLI](agents/qoder.md) | 1.1.64 | CLI |
-| [Codex CLI](agents/codex.md) | 0.163.0 | Local TUI / exec |
+| [Codex CLI](agents/codex.md) | 0.163.0, 0.166.0 | Local TUI / exec |
 | [Qoder SDK](agents/qoder-sdk.md) | 1.0.56 / Worker 1.1.78 | Node.js worker |
 | [OpenClaw](agents/openclaw.md) | 2026.9.6 | Gateway |
 | [DeepSeek Harness](agents/deepseek-harness.md) | 0.2.1-rc.5 | headless CLI; profile selection is open |

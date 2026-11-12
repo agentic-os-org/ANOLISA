@@ -27,7 +27,7 @@ spec:
         mode: block
         unmapped_tool: error
         prompt: {mode: block, scan_mode: fast}
-        pii: {input_mode: block, output_mode: observe}
+        pii: {input_mode: block, output_mode: replace_result}
         tools:
           Bash: {language: bash, input_pointer: /command}
   events:
@@ -58,3 +58,5 @@ spec:
       steps:
         - {id: completion, provider: security, operation: observe_tool,
            effects: [observe], on_error: report}
+        - {id: output-pii, provider: security, operation: scan_tool_output,
+           effects: [observe, replace_result], on_error: withhold_result}

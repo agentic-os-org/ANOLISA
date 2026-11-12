@@ -253,13 +253,14 @@ def main():
     parser.add_argument("--aw", type=Path, required=True)
     parser.add_argument("--codex", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--expected-version", required=True)
     args = parser.parse_args()
     args.aw = args.aw.resolve()
     args.codex = args.codex.absolute()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True)
     version = subprocess.check_output([args.codex, "--version"], text=True, timeout=5).strip()
-    assert version == "codex-cli 0.163.0", version
+    assert version == f"codex-cli {args.expected_version}", version
     results = []
     for mode in ("untrusted", "disabled", "prompt-deny", "allow", "deny", "offline", "retry", "native-deny", "native-rewrite", "native-rewrite-deny", "native-rewrite-required", "after-failure", "long", "replace", "replace-failure", "replace-peer", "replace-code-mode", "replace-apply", "replace-mcp", "replace-mcp-large", "replace-media", "replace-long", "replace-parallel"):
         results.append(case(args, mode))

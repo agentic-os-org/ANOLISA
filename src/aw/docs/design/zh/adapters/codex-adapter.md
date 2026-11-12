@@ -15,14 +15,14 @@ Provider 步骤的有序执行及允许或阻断结果。
 取消、发布失败和连续重装按状态转换组合测试。
 
 启动前检查记录 CLI 报告的版本，并核对公开 Hook 清单、启用状态、信任状态和 AW 定义。
-0.163.0 是原生验收基线，不是运行时版本白名单。必需的 `tool.before` 还会拒绝其他
-PreToolUse Hook：Codex 并发运行匹配的 Hook，可能在 AW 检查原始输入后执行其他 Hook 的
+0.163.0 和 0.166.0 已有原生验收证据；报告版本不作为运行时白名单。必需的
+`tool.before` 还会拒绝其他 PreToolUse Hook：Codex 并发运行匹配的 Hook，可能在 AW 检查原始输入后执行其他 Hook 的
 `updatedInput`。非必需检查保留这种原生组合，证据仅对应原始输入。
 
 Adapter 以会话和工具调用身份标准化原生事件。单个 AW 命令经 Service、Host、Provider
 依次执行准入步骤。工具执行前的阻断使用 Codex 原生拒绝状态；允许结果仍由原生审批决定。
-Codex 0.163.0 可将 PostToolUse 的 `continue:false` reason 用作普通模型请求中的文本。
-AW 只在关闭 Code Mode、没有其他 PostToolUse Hook 时准入这一版本专属路径；最终替换步骤的
+Codex 0.163.0 和 0.166.0 可将 PostToolUse 的 `continue:false` reason 用作普通模型请求中的文本。
+AW 只在关闭 Code Mode、没有其他 PostToolUse Hook 时准入这一 Hook 路径；最终替换步骤的
 Provider 失败或结果缺少可投影文本时，使用 `withhold_result`。Codex 仍在 Hook 前捕获和记录
 部分原结果，原生 Hook 命令失败时也可能交付原文；完整结果保护需要另行验证交付门禁。
 

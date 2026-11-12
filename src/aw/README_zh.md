@@ -79,8 +79,8 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 
 Qoder CLI 也可通过 `input.submit` 检查原生 `UserPromptSubmit` 文本，见 [Qoder 输入检查](../../docs/developer-guide/zh/aw/agents/qoder.md#检查用户提交)。
 
-Codex CLI 0.163.0 沿用 `aw run` 配置进行提交文本、工具输入和执行前 sec-core 检查。
-Codex CLI 0.163.0 可通过原生 Hook 替换普通模型请求中的 PostToolUse 文本。
+Codex CLI 0.163.0 和 0.166.0 已通过同一份 `aw run` 配置验收 sec-core 检查，
+并可通过原生 Hook 替换普通模型请求中的 PostToolUse 文本。
 Code Mode、策略前捕获与遥测、Hook 传输故障仍不受此能力保护；见
 [Codex 指南](../../docs/developer-guide/zh/aw/agents/codex.md)。
 

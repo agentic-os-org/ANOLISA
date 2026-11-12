@@ -24,7 +24,8 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
-Qoder CLI 尚未接入失败工具的 Post 回调。Codex CLI 0.163.0 支持提交与工具执行前阻断，
+Qoder CLI 尚未接入失败工具的 Post 回调。Codex CLI 0.163.0 和 0.166.0
+已验收提交与工具执行前阻断，
 并可在关闭 Code Mode 且没有其他 PostToolUse Hook 时替换普通模型请求中的文本；
 策略前捕获、遥测和 Hook 故障仍不受保护，见 [Codex 指南](../../../developer-guide/zh/aw/agents/codex.md)。
 其他结果类型和接点限制见各 Agent 页。

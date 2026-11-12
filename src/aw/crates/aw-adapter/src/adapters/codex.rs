@@ -65,9 +65,6 @@ impl Adapter for Codex {
                         })
                     })
                 });
-        if replacement && version != "0.163.0" {
-            return Err("Codex native result replacement is verified only on 0.163.0".into());
-        }
         preflight::hooks(
             &input.command,
             &events,
