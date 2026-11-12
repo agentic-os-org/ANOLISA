@@ -7,8 +7,9 @@ use asc_sandbox_types::{
     Validate,
 };
 use std::fs;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::io::Write as _;
+use std::os::unix::fs::MetadataExt as _;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Diagnostics carried into errors are bounded independently of CLI output.
@@ -70,9 +71,15 @@ impl DockerBackend {
         // Bind sources must exist before placement; the container cannot
         // create them and a missing source would silently change the view.
         for rule in &spec.permissions.filesystem.rules {
-            fs::metadata(&rule.path).map_err(|error| {
+            let metadata = fs::metadata(&rule.path).map_err(|error| {
                 DockerError::Unsupported(format!("bind source {}: {error}", rule.path))
             })?;
+            if !metadata.is_file() && !metadata.is_dir() {
+                return Err(DockerError::Unsupported(format!(
+                    "bind source must be a regular file or directory, not a socket or special object: {}",
+                    rule.path
+                )));
+            }
         }
         if !fs::metadata(&spec.launch.cwd)
             .map(|meta| meta.is_dir())
@@ -86,20 +93,14 @@ impl DockerBackend {
         let name = format!("asc-sandbox-{}", uuid::Uuid::new_v4());
         let plan = translate::translate(spec, &self.config, &name)?;
         let mut create_args = plan.create_args.clone();
-        // Host netns sharing exposes abstract Unix endpoints; deny AF_UNIX
-        // like the linux backend. The CLI only accepts profile file paths,
-        // so stage an operator-owned file that cleanup removes afterwards.
-        let seccomp = if plan.network_mode == "host" {
-            let path = std::env::temp_dir().join(format!("asc-sandbox-seccomp-{name}.json"));
-            fs::write(&path, crate::seccomp::full_network_profile())?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-            let option = format!("seccomp={}", path.display());
-            create_args.push("--security-opt".into());
-            create_args.push(option.clone());
-            Some((path, option))
-        } else {
-            None
-        };
+        // network=none does not isolate pathname sockets, so both modes need this filter.
+        let profile = crate::seccomp::network_profile()?;
+        let mut seccomp = tempfile::NamedTempFile::new()?;
+        seccomp.write_all(&serde_json::to_vec(&profile)?)?;
+        create_args.extend([
+            "--security-opt".into(),
+            format!("seccomp={}", seccomp.path().display()),
+        ]);
         create_args.push(self.config.image.clone());
         create_args.push(spec.launch.program.clone());
         create_args.extend(spec.launch.args.iter().cloned());
@@ -118,10 +119,9 @@ impl DockerBackend {
             cli: &self.config.cli,
             name: name.clone(),
             armed: true,
-            profile: seccomp.as_ref().map(|(path, _)| path.clone()),
         };
         let mut result = ExecutionResult::default();
-        self.verify_fence(&name, &plan)?;
+        self.verify_fence(&name, &plan, &profile)?;
         result.installed = true;
         // Attach keeps the target's stdio interactive; the CLI exit status is
         // cross-checked against the inspected state below.
@@ -164,7 +164,12 @@ impl DockerBackend {
     }
 
     /// Confirms the created container installs exactly the planned fence.
-    fn verify_fence(&self, name: &str, plan: &crate::ContainerPlan) -> Result<(), DockerError> {
+    fn verify_fence(
+        &self,
+        name: &str,
+        plan: &crate::ContainerPlan,
+        profile: &serde_json::Value,
+    ) -> Result<(), DockerError> {
         let inspected = self.inspect(name)?;
         let host = &inspected["HostConfig"];
         if host["NetworkMode"].as_str() != Some(plan.network_mode.as_str())
@@ -178,9 +183,9 @@ impl DockerBackend {
                     .into(),
             ));
         }
-        if plan.network_mode == "host" && !seccomp_denies_af_unix(host) {
+        if !seccomp_matches(host, profile) {
             return Err(DockerError::Protocol(
-                "host-network container lacks the AF_UNIX seccomp fence".into(),
+                "container lacks the exact AF_UNIX seccomp fence".into(),
             ));
         }
         let actual = inspected["Mounts"]
@@ -273,7 +278,6 @@ struct Cleanup<'a> {
     cli: &'a Path,
     name: String,
     armed: bool,
-    profile: Option<PathBuf>,
 }
 
 impl Cleanup<'_> {
@@ -284,9 +288,6 @@ impl Cleanup<'_> {
 
 impl Drop for Cleanup<'_> {
     fn drop(&mut self) {
-        if let Some(profile) = &self.profile {
-            let _ = fs::remove_file(profile);
-        }
         if self.armed {
             let _ = Command::new(self.cli)
                 .env_clear()
@@ -300,41 +301,22 @@ impl Drop for Cleanup<'_> {
     }
 }
 
-/// Confirms the inspected host config carries a seccomp profile that denies
-/// `AF_UNIX` sockets; the daemon expands the staged file into `SecurityOpt`.
-fn seccomp_denies_af_unix(host: &serde_json::Value) -> bool {
+// Docker expands the file to JSON; compare the full policy, not permissive heuristics.
+fn seccomp_matches(host: &serde_json::Value, expected: &serde_json::Value) -> bool {
     let Some(options) = host["SecurityOpt"].as_array() else {
         return false;
     };
-    options.iter().any(|option| {
-        let Some(profile) = option
-            .as_str()
-            .and_then(|text| text.strip_prefix("seccomp="))
-        else {
-            return false;
-        };
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(profile) else {
-            return false;
-        };
-        parsed["syscalls"].as_array().is_some_and(|syscalls| {
-            !syscalls.iter().any(|entry| {
-                entry["names"]
-                    .as_array()
-                    .is_some_and(|names| names.iter().any(|name| name.as_str() == Some("socket")))
-                    && entry["action"] == "SCMP_ACT_ALLOW"
-                    && entry["args"].as_array().is_some_and(|args| {
-                        args.iter().any(|arg| {
-                            arg["index"] == 0
-                                && arg["value"] == 1
-                                && matches!(
-                                    arg["op"].as_str(),
-                                    Some("SCMP_CMP_EQ" | "SCMP_CMP_LT" | "SCMP_CMP_LE")
-                                )
-                        })
-                    })
-            })
+    let profiles: Vec<_> = options
+        .iter()
+        .filter_map(|option| {
+            option
+                .as_str()
+                .and_then(|text| text.strip_prefix("seccomp="))
         })
-    })
+        .collect();
+    profiles.len() == 1
+        && serde_json::from_str::<serde_json::Value>(profiles[0])
+            .is_ok_and(|actual| actual == *expected)
 }
 
 fn path_fact(path: &Path) -> Result<PathFact, DockerError> {

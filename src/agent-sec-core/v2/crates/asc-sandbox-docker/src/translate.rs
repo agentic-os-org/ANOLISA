@@ -146,9 +146,16 @@ pub fn translate(
 /// Paths owned by the container runtime or exposing the whole host.
 fn reserved(path: &str) -> bool {
     path == "/"
-        || ["/proc", "/dev", "/sys"]
-            .iter()
-            .any(|base| path == *base || path.starts_with(&format!("{base}/")))
+        || [
+            "/proc",
+            "/dev",
+            "/sys",
+            "/run",
+            "/var/run",
+            "/var/lib/docker",
+        ]
+        .iter()
+        .any(|base| path == *base || path.starts_with(&format!("{base}/")))
 }
 
 #[cfg(test)]
