@@ -220,6 +220,10 @@ identity on the held FD, then publishes the pinned object under root-owned priva
 `/run/asc-sandbox-docker` staging. Reads and writes remain live even if the original
 path is replaced before start. Staging is not exposed to workloads and subsequent
 mount propagation is isolated.
+Read-only grants use `--mount ... readonly,bind-recursive=readonly`, requiring
+Docker/runtime enforced recursive read-only support (Linux 5.12+). The force
+option is verified before start; unsupported deployments fail without falling
+back to ordinary `:ro`.
 
 Both Docker network modes block external Unix sockets, including pathname
 sockets inside an allowed directory and abstract sockets in the host network

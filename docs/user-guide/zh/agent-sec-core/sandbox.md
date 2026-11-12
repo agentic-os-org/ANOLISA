@@ -165,6 +165,8 @@ Docker 挂载要求宿主 root、`CAP_SYS_ADMIN` 和内核 `open_tree`/`move_mou
 后端逐级打开源对象，在持有的 FD 上核验授权身份，再挂载到 root 管理的
 `/run/asc-sandbox-docker` 私有 staging，保留实时读写；即使启动前原路径被替换，
 仍使用原来获准的对象。staging 禁止向工作负载暴露，且隔离后续挂载传播。
+只读授权使用 `--mount ... readonly,bind-recursive=readonly`，要求 Docker/runtime
+强制递归只读（Linux 5.12+）；启动前核验强制选项，能力不足直接失败，不回退到普通 `:ro`。
 
 Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
 网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair

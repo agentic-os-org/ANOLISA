@@ -13,10 +13,24 @@ const DEFAULT_PIDS_LIMIT: u32 = 512;
 pub struct MountPlan {
     /// Host path exposed to the container.
     pub source: String,
-    /// Container path, identical to the source in this backend.
+    /// Original authorized container path; the published source points to protected staging.
     pub destination: String,
     /// True unless the rule grants write.
     pub read_only: bool,
+}
+
+impl MountPlan {
+    pub(crate) fn argument(&self) -> String {
+        let access = if self.read_only {
+            ",readonly,bind-recursive=readonly"
+        } else {
+            ",bind-recursive=enabled"
+        };
+        format!(
+            "type=bind,source={},target={},bind-propagation=rprivate{access}",
+            self.source, self.destination
+        )
+    }
 }
 
 /// Container placement derived from one execution spec.
@@ -132,9 +146,8 @@ pub fn translate(
         args.push(format!("{key}={value}"));
     }
     for mount in &mounts {
-        args.push("--volume".into());
-        let suffix = if mount.read_only { ":ro" } else { "" };
-        args.push(format!("{}:{}{suffix}", mount.source, mount.destination));
+        args.push("--mount".into());
+        args.push(mount.argument());
     }
     Ok(ContainerPlan {
         create_args: args,
@@ -222,8 +235,8 @@ mod tests {
             "/work",
             "--env",
             "FOO=bar",
-            "/work:/work:ro",
-            "/data:/data",
+            "type=bind,source=/work,target=/work,bind-propagation=rprivate,readonly,bind-recursive=readonly",
+            "type=bind,source=/data,target=/data,bind-propagation=rprivate,bind-recursive=enabled",
         ] {
             assert!(
                 plan.create_args.iter().any(|arg| arg == expected),

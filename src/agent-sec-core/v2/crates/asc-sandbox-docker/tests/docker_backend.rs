@@ -118,7 +118,11 @@ impl Fixture {
             "HostConfig": {
                 "NetworkMode": network,
                 "ReadonlyRootfs": true,
-                "CapDrop": ["ALL"]
+                "CapDrop": ["ALL"],
+                "Mounts": [{"Type": "bind", "Source": self.work, "Target": self.work,
+                    "ReadOnly": true, "BindOptions": {
+                        "ReadOnlyForceRecursive": true, "Propagation": "rprivate"
+                    }}]
             },
             "Mounts": [
                 {"Source": self.work, "Destination": self.work, "RW": false},
@@ -228,6 +232,27 @@ fn fence_mismatch_aborts_before_start_and_cleans_up() {
     let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
     assert!(error.to_string().contains("fence"), "{error}");
     assert!(!fixture.state.join("start.args").exists());
+    assert_eq!(fixture.read_calls("rm.calls").len(), 2);
+}
+
+#[test]
+fn recursive_readonly_downgrade_aborts_before_start() {
+    let fixture = fixture();
+    fixture.write_inspect("none");
+    let path = fixture.state.join("inspect.json");
+    let mut inspect: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    inspect[0]["HostConfig"]["Mounts"][0]["BindOptions"]["ReadOnlyForceRecursive"] = false.into();
+    std::fs::write(path, serde_json::to_vec(&inspect).unwrap()).unwrap();
+    let error = fixture.backend.execute_bound(&fixture.spec()).unwrap_err();
+    assert!(error.to_string().contains("recursive readonly"), "{error}");
+    assert!(!fixture.state.join("start.args").exists());
+    let args = fixture.read_calls("create.args");
+    assert!(
+        args.iter()
+            .any(|arg| arg.ends_with(",readonly,bind-recursive=readonly"))
+    );
+    assert!(!args.iter().any(|arg| arg == "--volume"));
     assert_eq!(fixture.read_calls("rm.calls").len(), 2);
 }
 

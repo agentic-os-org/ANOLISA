@@ -212,6 +212,12 @@ impl DockerBackend {
             .as_array()
             .ok_or_else(|| DockerError::Protocol("container inspect lacks mounts".into()))?;
         for mount in &plan.mounts {
+            if mount.read_only && !recursive_readonly_matches(host, mount) {
+                return Err(DockerError::Unsupported(format!(
+                    "runtime did not retain forced recursive readonly: {}",
+                    mount.destination
+                )));
+            }
             let matched = actual.iter().any(|entry| {
                 entry["Source"].as_str() == Some(mount.source.as_str())
                     && entry["Destination"].as_str() == Some(mount.destination.as_str())
@@ -267,6 +273,22 @@ impl DockerBackend {
             .stderr(Stdio::piped());
         command
     }
+}
+
+fn recursive_readonly_matches(host: &serde_json::Value, mount: &crate::MountPlan) -> bool {
+    host["Mounts"].as_array().is_some_and(|mounts| {
+        mounts.iter().any(|entry| {
+            let options = &entry["BindOptions"];
+            entry["Type"].as_str() == Some("bind")
+                && entry["Source"].as_str() == Some(mount.source.as_str())
+                && entry["Target"].as_str() == Some(mount.destination.as_str())
+                && entry["ReadOnly"].as_bool() == Some(true)
+                && options["ReadOnlyForceRecursive"].as_bool() == Some(true)
+                && options["ReadOnlyNonRecursive"].as_bool() != Some(true)
+                && options["NonRecursive"].as_bool() != Some(true)
+                && options["Propagation"].as_str() == Some("rprivate")
+        })
+    })
 }
 
 impl SandboxBackend for DockerBackend {

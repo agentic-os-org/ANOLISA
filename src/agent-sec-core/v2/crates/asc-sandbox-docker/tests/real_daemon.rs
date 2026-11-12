@@ -9,6 +9,14 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
 
+// Unmount before cleanup so TempDir cannot recursively traverse a mounted directory.
+struct Mounted(std::path::PathBuf);
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        rustix::mount::unmount(&self.0, rustix::mount::UnmountFlags::DETACH).unwrap();
+    }
+}
+
 fn backend() -> DockerBackend {
     DockerBackend::new(DockerConfig {
         cli: "/usr/bin/docker".into(),
@@ -85,6 +93,44 @@ fn source_replacement_at_start_keeps_authorized_inode() {
             "secret"
         );
     }
+}
+
+#[test]
+#[ignore = "requires host mount privileges, local Docker and pinned Python image"]
+fn recursive_readonly_blocks_writable_submount() {
+    let directory = tempfile::tempdir().unwrap();
+    let work = directory.path().join("work");
+    let nested = work.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let data = directory.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::write(data.join("value"), "original").unwrap();
+    rustix::mount::mount_bind(&data, &nested).unwrap();
+    let _mounted = Mounted(nested);
+    let mut request = spec(
+        &work,
+        r"
+import errno, os
+from pathlib import Path
+assert Path('nested/value').read_text() == 'original'
+for path in ('top', 'nested/value'):
+    try:
+        Path(path).write_text('changed')
+    except OSError as error:
+        assert error.errno == errno.EROFS, error
+    else:
+        raise AssertionError('read-only write succeeded')
+assert os.statvfs('nested').f_flag & os.ST_RDONLY
+",
+    );
+    request.permissions.filesystem.rules[0].rights = vec![asc_sandbox_types::FileRight::Read];
+    let result = backend().execute_bound(&request).unwrap();
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(
+        std::fs::read_to_string(data.join("value")).unwrap(),
+        "original"
+    );
+    std::fs::write(data.join("value"), "host-still-writable").unwrap();
 }
 
 #[test]
