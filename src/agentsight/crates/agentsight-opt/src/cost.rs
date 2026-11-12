@@ -1067,10 +1067,11 @@ pub(crate) fn build_turn_ledger(
                     .iter()
                     .find(|r| observation_result_is_error(r));
                 let files: Vec<String> = step.calls().iter().filter_map(write_target).collect();
-                let backtrack = step
-                    .calls()
-                    .iter()
-                    .any(|c| c.command().is_some_and(is_backtrack_cmd));
+                let backtrack = step.calls().iter().any(|c| {
+                    crate::tool_command::from_arguments(&c.arguments)
+                        .as_deref()
+                        .is_some_and(is_backtrack_cmd)
+                });
                 let action_sig = step
                     .calls()
                     .first()
