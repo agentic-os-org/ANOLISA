@@ -158,7 +158,7 @@ class HookParity(unittest.TestCase):
                             replaced = json.loads(fields["updatedToolResponse"])
                         else:
                             replaced = fields["updatedToolOutput"]
-                        if agent == "opencode":
+                        if agent in {"opencode", "qwenwork"}:
                             self.assertEqual(replaced, expected["output"])
                         else:
                             self.assertEqual(replaced, {**shell, "stdout": expected["output"]})
@@ -223,11 +223,22 @@ class PathListHooks(unittest.TestCase):
             "duration_ms": 123,
             "metadata": {"source": "native-find", "count": 60},
         }
-        for agent in ("qwenwork", "qoder-cli"):
-            output = self.replacement(self.run_response(source, agent=agent))
-            self.assertIsInstance(output, dict)
-            self.assertEqual(self.restore(output["stdout"]), source["stdout"])
-            self.assertEqual({**output, "stdout": source["stdout"]}, source)
+        output = self.replacement(self.run_response(source, agent="qoder-cli"))
+        self.assertIsInstance(output, dict)
+        self.assertEqual(self.restore(output["stdout"]), source["stdout"])
+        self.assertEqual({**output, "stdout": source["stdout"]}, source)
+
+        self.assertEqual(self.run_response(source, agent="qwenwork"), {})
+        clean_shell = {
+            "stdout": self.paths(),
+            "stderr": "",
+            "exit_code": 0,
+            "interrupted": False,
+            "duration_ms": 123,
+        }
+        qwenwork_output = self.replacement(self.run_response(clean_shell, agent="qwenwork"))
+        self.assertIsInstance(qwenwork_output, str)
+        self.assertEqual(self.restore(qwenwork_output), clean_shell["stdout"])
 
     def test_files_disabled_domain_and_mixed_results_are_not_replaced(self):
         source = self.paths()

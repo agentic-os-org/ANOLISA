@@ -119,10 +119,15 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
             data = json.loads(content)
             if isinstance(data, str):
                 data = json.loads(data)
-            compressed = {
-                k: (v[:20] if isinstance(v, str) and len(v) > 20 else v)
-                for k, v in data.items()
-            }
+            def truncate_strings(val):
+                if isinstance(val, str):
+                    return val[:20] if len(val) > 20 else val
+                if isinstance(val, dict):
+                    return {k: truncate_strings(v) for k, v in val.items()}
+                if isinstance(val, list):
+                    return [truncate_strings(v) for v in val]
+                return val
+            compressed = truncate_strings(data)
             respond(json.dumps(compressed, separators=(",", ":")), "applied")
         """)
     elif behavior == "compress-text":
@@ -694,10 +699,13 @@ class TestReplacementProtocol(unittest.TestCase):
                     hso = result["hookSpecificOutput"]
                     self.assertEqual(hso["hookEventName"], "PostToolUse")
                     replacement = hso["updatedToolOutput"]
-                    self.assertIsInstance(replacement, type(response))
-                    if isinstance(replacement, str):
-                        replacement = json.loads(replacement)
-                    self.assertEqual(replacement, {**large_payload, "stdout": "x" * 20})
+                    if tool == "Bash" and isinstance(response, dict):
+                        self.assertEqual(replacement, "x" * 20)
+                    else:
+                        self.assertIsInstance(replacement, type(response))
+                        if isinstance(replacement, str):
+                            replacement = json.loads(replacement)
+                        self.assertEqual(replacement, {**large_payload, "stdout": "x" * 20})
                     self.assertNotIn("additionalContext", hso)
 
     def test_qwenwork_mcp_telemetry_cannot_replace_real_output(self):
@@ -1297,6 +1305,8 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
 
     def test_qwenwork_rewrapped_envelope_preserves_metadata(self):
         log = "npm verbose progress line\n" * 150
+        # Non-empty stderr cannot be faithfully represented in QwenWork's single
+        # text replacement slot without dropping stderr or stringifying the object.
         result = _run_hook(
             {
                 "tool_name": "Bash",
@@ -1308,8 +1318,211 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
             mock_tokenless_path=self.mock_bin,
             isolated_home=self.isolated_home,
         )
-        updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertEqual(updated, self._bash_envelope(log[:40], "warning"))
+        self.assertEqual(result, {})
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            self.assertFalse(json.load(captured)["capabilities"]["replace_output"])
+
+        clean = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(log, ""),
+                "session_id": "s",
+                "tool_use_id": "t-clean",
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertEqual(clean["hookSpecificOutput"]["updatedToolOutput"], log[:40])
+
+    def test_qwenwork_bash_text_slot_boundary_and_delivered_savings(self):
+        adapters_dir = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "adapters", "tokenless")
+        )
+        hooks_dir = os.path.join(adapters_dir, "common", "hooks")
+        sys.path.insert(0, hooks_dir)
+        sys.path.insert(0, adapters_dir)
+        try:
+            import hook_dispatch
+
+            qwenwork = hook_dispatch.load_adapter("qwenwork")
+        finally:
+            sys.path.remove(adapters_dir)
+            sys.path.remove(hooks_dir)
+
+        def host_project(reply):
+            hso = reply.get("hookSpecificOutput")
+            if not isinstance(hso, dict) or "updatedToolOutput" not in hso:
+                return None
+            updated = hso["updatedToolOutput"]
+            if isinstance(updated, str):
+                return updated
+            return json.dumps(updated, separators=(",", ":"), ensure_ascii=False)
+
+        # Issue #10036 deterministic boundary: 237 original chars -> 236 candidate chars
+        # (60 -> 59 heuristic-v1 tokens) must deliver 236 chars of pure text, not 317.
+        original = json.dumps({"message": "x" * 222}, separators=(",", ":")) + "\n"
+        candidate = original[:-1]
+        data = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": original,
+                "stderr": "",
+                "exitCode": 0,
+                "interrupted": False,
+            },
+        }
+        tool_result = qwenwork.response(data)
+        reply = qwenwork.response_output(data, tool_result, candidate, "")
+        delivered = host_project(reply)
+        self.assertEqual(delivered, candidate)
+        self.assertEqual(len(delivered), 236)
+        self.assertNotIn("exitCode", delivered)
+
+        # 236 -> 235 ASCII chars saves 1 character but 0 heuristic-v1 tokens (59 -> 59):
+        # complete replacement has no token benefit and must preserve original output.
+        no_token_benefit_orig = json.dumps({"message": "x" * 221}, separators=(",", ":")) + "\n"
+        no_token_benefit_cand = no_token_benefit_orig[:-1]
+        data_no_benefit = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": no_token_benefit_orig,
+                "stderr": "",
+                "exitCode": 0,
+                "interrupted": False,
+            },
+        }
+        res_no_benefit = qwenwork.response(data_no_benefit)
+        self.assertEqual(
+            qwenwork.response_output(data_no_benefit, res_no_benefit, no_token_benefit_cand, ""),
+            {},
+        )
+
+        # Sample 1 arithmetic from #10036: 853 chars / 281 tokens -> 797 chars / 267 tokens.
+        sample_orig = "汉" * 90 + "a" * 763
+        sample_cand = "汉" * 90 + "a" * 707
+        self.assertEqual((len(sample_orig), qwenwork._estimate_tokens(sample_orig)), (853, 281))
+        self.assertEqual((len(sample_cand), qwenwork._estimate_tokens(sample_cand)), (797, 267))
+        sample_data = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": sample_orig,
+                "stderr": "",
+                "exitCode": 0,
+                "interrupted": False,
+            },
+        }
+        sample_reply = qwenwork.response_output(
+            sample_data, qwenwork.response(sample_data), sample_cand, ""
+        )
+        self.assertEqual(host_project(sample_reply), sample_cand)
+
+        # If adapter-delivered additionalContext erases the candidate savings, keep original.
+        heavy_context = "[tokenless:env] " + "x" * 60
+        rejected_with_context = qwenwork.response_output(
+            sample_data, qwenwork.response(sample_data), sample_cand, heavy_context
+        )
+        self.assertNotIn("updatedToolOutput", rejected_with_context["hookSpecificOutput"])
+        self.assertEqual(
+            rejected_with_context["hookSpecificOutput"]["additionalContext"], heavy_context
+        )
+
+    def test_qwenwork_unfaithful_envelopes_and_errors_preserve_native_output(self):
+        long_out = "build output line\n" * 30
+        with tempfile.TemporaryDirectory() as force_dir:
+            force_applied = _create_mock_tokenless(force_dir, "force-applied")
+            for bad_envelope in (
+                {"kind": "completed", "stdout": long_out, "stderr": "warn", "exitCode": 0},
+                {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": 1},
+                {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": False},
+                {"kind": "completed", "stdout": long_out, "stderr": "", "interrupted": True},
+                {"stdout": long_out, "stderr": "", "isImage": True},
+                {"stdout": None, "stderr": "", "exitCode": 0},
+                {"stdout": long_out, "stderr": "", "exitCode": 0, "extra": "metadata"},
+                {"content": [{"type": "text", "text": long_out}]},
+            ):
+                with self.subTest(envelope=list(bad_envelope.keys())):
+                    warnings = []
+                    result = _run_hook(
+                        {"tool_name": "Bash", "tool_response": bad_envelope},
+                        agent_id="qwenwork",
+                        mock_tokenless_path=force_applied,
+                        isolated_home=self.isolated_home,
+                        stderr_sink=warnings,
+                    )
+                    self.assertEqual(result, {})
+
+            # Multimodal blocks on Bash or MCP tools must pass through untouched.
+            multimodal = [
+                {"type": "text", "text": long_out},
+                {"type": "image", "data": "iVBORw0KGgo=" * 40, "mimeType": "image/png"},
+            ]
+            for tool in ("Bash", "mcp__browser__capture"):
+                with self.subTest(multimodal_tool=tool):
+                    self.assertEqual(
+                        _run_hook(
+                            {"tool_name": tool, "tool_response": multimodal},
+                            agent_id="qwenwork",
+                            mock_tokenless_path=force_applied,
+                            isolated_home=self.isolated_home,
+                            stderr_sink=[],
+                        ),
+                        {},
+                    )
+
+        # Structured MCP records with list/object business `type` fields must not crash
+        # multimodal block detection and must still compress as structured JSON.
+        compress_bin = _create_mock_tokenless(self.tmpdir, "compress")
+        for structured_mcp in (
+            [
+                {"type": ["string", "null"], "description": "schema field " * 25}
+                for _ in range(10)
+            ],
+            {
+                "content": [
+                    {"type": {"kind": "record"}, "description": "schema field " * 25}
+                    for _ in range(10)
+                ]
+            },
+        ):
+            with self.subTest(mcp_shape=type(structured_mcp).__name__):
+                mcp_res = _run_hook(
+                    {
+                        "tool_name": "mcp__schema__inspect",
+                        "tool_response": structured_mcp,
+                        "session_id": "s",
+                        "tool_use_id": "t-mcp-type",
+                    },
+                    agent_id="qwenwork",
+                    mock_tokenless_path=compress_bin,
+                    isolated_home=self.isolated_home,
+                )
+                self.assertNotIn("_subprocess_error", mcp_res)
+                updated_mcp = mcp_res["hookSpecificOutput"]["updatedToolOutput"]
+                self.assertIsInstance(updated_mcp, type(structured_mcp))
+
+        # Failed native Bash commands keep their native output while emitting diagnostics.
+        failed = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {
+                    "kind": "completed",
+                    "stdout": "",
+                    "stderr": "bash: rg: command not found\n",
+                    "exitCode": 127,
+                    "interrupted": False,
+                },
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=compress_bin,
+            isolated_home=self.isolated_home,
+        )
+        specific = failed["hookSpecificOutput"]
+        self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
+        self.assertNotIn("updatedToolOutput", specific)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

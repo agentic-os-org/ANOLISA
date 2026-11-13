@@ -102,7 +102,7 @@ class HostAdapterIsolation(unittest.TestCase):
                     value = json.loads(specific["updatedToolResponse"])
                 else:
                     value = specific["updatedToolOutput"]
-                if host == "opencode":
+                if host in {"opencode", "qwenwork"}:
                     self.assertIsInstance(value, str)
                 else:
                     self.assertIsInstance(value, dict)
