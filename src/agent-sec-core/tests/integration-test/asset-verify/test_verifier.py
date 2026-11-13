@@ -274,6 +274,31 @@ class TestLoadConfig(unittest.TestCase):
         config = load_config(Path(config_path))
         self.assertEqual(config["skills_dirs"], ["/opt/skills1", "/opt/skills2"])
 
+    def test_comma_terminated_list_is_valid(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skills_dir = [\n")
+            f.write("    /opt/skills1,\n")
+            f.write("    /opt/skills2,\n")
+            f.write("],\n")
+
+        config = load_config(config_path)
+
+        self.assertEqual(config["skills_dirs"], ["/opt/skills1", "/opt/skills2"])
+
+    def test_comma_terminated_list_does_not_swallow_the_next_key(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skills_dir = [\n")
+            f.write("    /opt/skills1,\n")
+            f.write("],\n")
+            f.write("trusted_keys_dir = /opt/keys\n")
+
+        config = load_config(config_path)
+
+        self.assertEqual(config["skills_dirs"], ["/opt/skills1"])
+        self.assertEqual(config["trusted_keys_dir"], "/opt/keys")
+
     def test_empty_list_is_valid(self):
         config_path = Path(self.tmpdir) / "config.conf"
         with open(config_path, "w") as f:
