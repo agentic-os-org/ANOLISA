@@ -95,6 +95,17 @@ pub(crate) async fn dispatch_with_context(
         _ => {}
     }
 
+    // Keep legacy control-bearing IDs addressable for recovery and deletion.
+    // Refuse new ones before bootstrap or auto-init can mutate the workspace.
+    if let Request::Checkpoint { id, .. } = &request {
+        if id.chars().any(char::is_control) {
+            return Response::Error {
+                code: ErrorCode::InvalidPath,
+                message: format!("snapshot id must not contain control characters: {id:?}"),
+            };
+        }
+    }
+
     let result = match request {
         Request::Init { workspace } => match state.ensure_bootstrapped().await {
             Err(e) => Err(e),
@@ -951,6 +962,7 @@ mod tests {
         snapshots_root_path: PathBuf,
         creates: std::sync::Mutex<Vec<String>>,
         deletes: std::sync::Mutex<Vec<String>>,
+        rollbacks: std::sync::Mutex<Vec<String>>,
         diffs: std::sync::Mutex<Vec<String>>,
     }
 
@@ -961,6 +973,7 @@ mod tests {
                 snapshots_root_path: root.join("mount/snapshots"),
                 creates: std::sync::Mutex::new(Vec::new()),
                 deletes: std::sync::Mutex::new(Vec::new()),
+                rollbacks: std::sync::Mutex::new(Vec::new()),
                 diffs: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -1022,8 +1035,9 @@ mod tests {
             tokio::fs::create_dir_all(self.snapshots_root().join(ws_id).join(snapshot_id)).await?;
             Ok(())
         }
-        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
-            unimplemented!()
+        async fn rollback(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<PathBuf> {
+            self.rollbacks.lock().unwrap().push(snapshot_id.to_string());
+            Ok(self.data_root().join(ws_id))
         }
         async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
             self.deletes.lock().unwrap().push(snapshot_id.to_string());
@@ -1137,6 +1151,42 @@ mod tests {
             state.all_workspaces().is_empty(),
             "an unsafe id must not even auto-initialize the workspace"
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_refuses_control_ids_before_auto_init() {
+        for id in [
+            "evil\nINJECTED-ROW",
+            "tab\there",
+            "carriage\rreturn",
+            "esc\u{1b}[31m",
+            "del\u{7f}",
+            "c1\u{85}",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+            let state = legacy_id_state(temp.path(), backend.clone());
+            let ws = legacy_workspace(temp.path());
+
+            let response = dispatch(&state, checkpoint_request(&ws, id)).await;
+            match response {
+                Response::Error { code, message } => {
+                    assert_eq!(code, ErrorCode::InvalidPath, "{id:?}");
+                    assert!(message.contains("control characters"), "{message}");
+                    assert!(!message.chars().any(char::is_control), "{message:?}");
+                }
+                other => panic!("expected rejection for {id:?}, got {other:?}"),
+            }
+            assert!(backend.create_ids().is_empty());
+            assert!(state.all_workspaces().is_empty());
+            assert!(!ws.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(
+                std::fs::read(ws.join("payload")).unwrap(),
+                b"workspace data"
+            );
+            assert!(!backend.data_root().exists());
+            assert!(!backend.snapshots_root().exists());
+        }
     }
 
     #[tokio::test]
@@ -1344,6 +1394,77 @@ mod tests {
                 index.snapshots.insert(id.to_string(), stub_meta(None));
             }
         });
+    }
+
+    #[tokio::test]
+    async fn legacy_control_ids_remain_addressable() {
+        for id in [
+            "evil\nINJECTED-ROW",
+            "tab\there",
+            "esc\u{1b}[31m",
+            "c1\u{85}",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+            let state = legacy_id_state(temp.path(), backend.clone());
+            register_stub_workspace(temp.path(), &state, "ws-controls", &[id, "normal"]);
+            let snapshot = backend.snapshots_root().join("ws-controls").join(id);
+            std::fs::create_dir_all(&snapshot).unwrap();
+
+            let preview = dispatch(
+                &state,
+                Request::RollbackPreview {
+                    workspace: "ws-controls".into(),
+                    to: Some(id.into()),
+                    num_ancestors: None,
+                },
+            )
+            .await;
+            assert!(matches!(preview, Response::RollbackPreviewOk { to, .. } if to == id));
+            let diff = dispatch(
+                &state,
+                Request::Diff {
+                    workspace: "ws-controls".into(),
+                    from: id.into(),
+                    to: None,
+                },
+            )
+            .await;
+            assert!(matches!(diff, Response::DiffOk { .. }));
+            assert_eq!(
+                backend.diff_from_ids(),
+                vec![id.to_string(), id.to_string()]
+            );
+
+            let rollback = dispatch(
+                &state,
+                Request::Rollback {
+                    workspace: "ws-controls".into(),
+                    to: Some(id.into()),
+                    num_ancestors: None,
+                },
+            )
+            .await;
+            assert!(matches!(rollback, Response::RollbackOk { to, .. } if to == id));
+            assert_eq!(*backend.rollbacks.lock().unwrap(), vec![id.to_string()]);
+
+            let delete = dispatch(
+                &state,
+                Request::Delete {
+                    workspace: Some("ws-controls".into()),
+                    snapshot: id.into(),
+                    force: false,
+                },
+            )
+            .await;
+            assert!(matches!(delete, Response::DeleteOk { .. }), "{delete:?}");
+            assert_eq!(backend.delete_ids(), vec![id.to_string()]);
+            assert!(!snapshot.exists());
+            let ws = state.resolve_workspace("ws-controls").await.unwrap();
+            let ws = ws.read().await;
+            assert!(!ws.index.snapshots.contains_key(id));
+            assert!(ws.index.snapshots.contains_key("normal"));
+        }
     }
 
     #[tokio::test]

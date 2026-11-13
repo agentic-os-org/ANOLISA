@@ -110,6 +110,10 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt reload` | 重载 daemon 配置 |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | 启动 daemon 进程 |
 
+新建 checkpoint 的 ID 不得包含控制字符（例如换行或制表符）。已有此类 ID 的快照
+仍可删除、回滚或 diff。`list` 表格会转义快照 ID、工作区路径和备注中的控制字符及
+反斜杠；JSON 保留原始字段值，使用 JSON 转义。
+
 ### 查询大量快照
 
 `list` 内部使用按字节限制的游标分页。不指定 `--limit` 和 `--cursor` 时，CLI 会自动

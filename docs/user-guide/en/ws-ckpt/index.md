@@ -111,6 +111,12 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | `ws-ckpt reload` | Reload daemon configuration |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | Start the daemon process |
 
+New checkpoint IDs must not contain control characters (such as newline or tab).
+Existing snapshots with those IDs remain available for deletion, rollback and diff.
+`list` table output escapes control characters and backslashes in snapshot IDs,
+workspace paths and messages; JSON retains the original field values using JSON
+escaping.
+
 ### Listing large snapshot histories
 
 `list` uses byte-bounded cursor pages internally. With neither `--limit` nor
