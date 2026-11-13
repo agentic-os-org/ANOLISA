@@ -1429,3 +1429,40 @@ fn empty_agent_only_round_still_anchors() {
         "the fallback must still anchor a round with no agent message"
     );
 }
+
+/// `serve --db` selects the GenAI database to serve. The causal resolver
+/// receives that same path, but looked the trace id up in
+/// `<dirname>/genai_events.db` — the default name — instead of the file the
+/// server actually opened. A trace from a custom database therefore resolved
+/// to nothing and the request fell through to a 404.
+#[test]
+fn trace_id_resolves_in_the_database_being_served() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should follow Unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "agentsight-causal-served-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).expect("create served database directory");
+    let path = dir.join("snapshot-2026.db");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("create served database");
+        conn.execute_batch("CREATE TABLE genai_events(trace_id TEXT, session_id TEXT)")
+            .expect("create genai_events table");
+        conn.execute(
+            "INSERT INTO genai_events(trace_id, session_id) VALUES (?1, ?2)",
+            ["trace-custom", "session-custom"],
+        )
+        .expect("insert trace mapping");
+    }
+
+    assert_eq!(
+        resolve_to_session_id(&path, "trace-custom").as_deref(),
+        Some("session-custom"),
+        "the served database itself must answer the trace id"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
