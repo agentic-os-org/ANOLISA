@@ -39,6 +39,8 @@ pub const ENFORCEMENT_DB_NAME: &str = "enforcement.db";
 pub const REUSE_DB_NAME: &str = "reuse.db";
 /// Private causal analysis database filename.
 pub const CAUSAL_DB_NAME: &str = "causal.db";
+/// Learned static-SSL offset cache filename.
+pub const SSL_OFFSETS_LEARNED_NAME: &str = "ssl_offsets_learned.json";
 
 /// Default audit table name.
 pub const DEFAULT_AUDIT_TABLE: &str = "audit_events";
@@ -163,6 +165,34 @@ pub fn set_poll_timeout_ms(ms: u64) {
 /// Current ring-buffer poll timeout (milliseconds).
 pub fn poll_timeout_ms() -> u64 {
     POLL_TIMEOUT_MS.load(Ordering::SeqCst)
+}
+
+// ==================== Global Learned SSL Offset Cache Path ====================
+
+/// Process-wide location of the learned static-SSL offset cache, published
+/// by `AgentSight::new` from [`StorageConfig::ssl_offsets_learned_path`].
+///
+/// `SslSniff::build` loads the cache from code that cannot see the config
+/// object — the same publication pattern as the poll timeout above.
+static SSL_OFFSETS_LEARNED_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Publish where the learned static-SSL offset cache lives.
+pub fn set_ssl_offsets_learned_path(path: PathBuf) {
+    *SSL_OFFSETS_LEARNED_PATH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+}
+
+/// Current learned static-SSL offset cache path.
+///
+/// Falls back to the default storage directory when never published
+/// (standalone probe binaries that do not load the full config).
+pub fn ssl_offsets_learned_path() -> PathBuf {
+    SSL_OFFSETS_LEARNED_PATH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| default_base_path().join(SSL_OFFSETS_LEARNED_NAME))
 }
 
 // ==================== Global HTTP Trace Duration Floor ====================
@@ -453,6 +483,11 @@ impl StorageConfig {
     /// Returns the fixed path of the optimization database.
     pub fn optimization_path(&self) -> PathBuf {
         self.base_path.join(OPTIMIZATION_DB_NAME)
+    }
+
+    /// Returns the fixed path of the learned static-SSL offset cache.
+    pub fn ssl_offsets_learned_path(&self) -> PathBuf {
+        self.base_path.join(SSL_OFFSETS_LEARNED_NAME)
     }
 
     pub(crate) fn validate_total_size_mb(max_total_size_mb: u64) -> Result<(), String> {
@@ -2880,6 +2915,29 @@ mod tests {
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(!config.server_auth.enabled);
+    }
+
+    #[test]
+    fn storage_learned_offsets_path_follows_base_path() {
+        let storage = StorageConfig::default();
+        assert_eq!(
+            storage.ssl_offsets_learned_path(),
+            storage.base_path.join(SSL_OFFSETS_LEARNED_NAME)
+        );
+    }
+
+    #[test]
+    fn learned_offsets_path_falls_back_until_published() {
+        // Nothing publishes the global in a default `cargo test` run (the
+        // BPF-gated publishers are #[ignore]d), so the fallback is observable
+        // here; `AgentSight::new` publishes the configured path in production.
+        assert_eq!(
+            ssl_offsets_learned_path(),
+            default_base_path().join(SSL_OFFSETS_LEARNED_NAME)
+        );
+        let published = unique_temp_dir().join(SSL_OFFSETS_LEARNED_NAME);
+        set_ssl_offsets_learned_path(published.clone());
+        assert_eq!(ssl_offsets_learned_path(), published);
     }
 
     // ── schema_version / config upgrade ─────────────────────────────────
