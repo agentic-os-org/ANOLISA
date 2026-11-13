@@ -89,7 +89,10 @@ class ContractSourcePublishing(unittest.TestCase):
 
     def test_archive_gate_rejects_missing_or_drifted_metadata(self) -> None:
         script = action_script("Verify tokenless component contract in archive")
-        for contract in (None, 'version = "99.0.0"\n'):
+        for contract in (
+            None,
+            '[component]\nname = "tokenless"\nversion = "99.0.0"\n',
+        ):
             with self.subTest(contract=contract):
                 files = {"Cargo.toml": '[workspace.package]\nversion = "0.9.0"\n'}
                 if contract is not None:
@@ -123,9 +126,9 @@ class ContractSourcePublishing(unittest.TestCase):
 
     def test_memory_source_export_builds_plugin_without_component_owned_metadata(self) -> None:
         source = self.work / "build" / "agent-memory"
-        (source / "packaging/anolisa/rpm").mkdir(parents=True)
+        (source / "packaging/anolisa/rpm").mkdir(parents=True, exist_ok=True)
         executable = self.work / "bin"
-        executable.mkdir()
+        executable.mkdir(exist_ok=True)
         (executable / "jq").write_text("#!/bin/sh\nexit 0\n")
         (executable / "make").write_text(
             '#!/bin/sh\n[ "$#" -eq 3 ] && [ "$3" = build-openclaw-plugin ] || exit 91\n'
@@ -187,10 +190,10 @@ class ContractSourcePublishing(unittest.TestCase):
                 ignore=shutil.ignore_patterns("target", "__pycache__"),
             )
         generated = source / "v2/crates/asc-sandbox-types/target/generated"
-        generated.parent.mkdir()
+        generated.parent.mkdir(exist_ok=True)
         generated.write_text("must not ship")
         script = self.work / "scripts/rpm-build.sh"
-        script.parent.mkdir()
+        script.parent.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "scripts/rpm-build.sh", script)
         rpmbuild = self.work / "rpmbuild"
         rpmbuild.write_text("#!/bin/sh\nexit 0\n")
@@ -210,7 +213,9 @@ class ContractSourcePublishing(unittest.TestCase):
             names = set(archive.getnames())
 
             def manifest(name: str) -> dict:
-                return tomllib.loads(archive.extractfile(prefix + name).read().decode())
+                member = archive.extractfile(prefix + name)
+                self.assertIsNotNone(member, f"{name} missing from archive")
+                return tomllib.loads(member.read().decode())
 
             sandbox = manifest("linux-sandbox/Cargo.toml")
             deps = sandbox["target"]['cfg(target_os = "linux")']["dependencies"]
@@ -227,7 +232,10 @@ class ContractSourcePublishing(unittest.TestCase):
                 self.assertTrue(manifest(crate + "/Cargo.toml")["package"]["version"]["workspace"])
             self.assertIn("version", workspace["package"])
             self.assertFalse(any("/target/" in name or "/v2/apps/" in name for name in names))
-            archive.extractall(self.work / "unpacked", filter="data")
+            try:
+                archive.extractall(self.work / "unpacked", filter="data")
+            except TypeError:  # Python < 3.11.4 lacks the filter argument.
+                archive.extractall(self.work / "unpacked")
         dry_run = subprocess.run(
             ["make", "-n", "build-all-v1"],
             cwd=self.work / "unpacked/agent-sec-core-9.9.9",
@@ -252,14 +260,14 @@ class ContractSourcePublishing(unittest.TestCase):
             script = text[start:end] + '\nprintf "%s\\n" "$CONTRACT_DIR"\n'
             source = self.work / component
             legacy = source / ".anolisa"
-            legacy.mkdir(parents=True)
+            legacy.mkdir(parents=True, exist_ok=True)
             modern = source / "packaging/anolisa"
             if component != "agent-sec-core":
                 modern /= "raw"
             for use_modern in (False, True):
                 with self.subTest(component=component, modern=use_modern):
                     if use_modern:
-                        modern.mkdir(parents=True)
+                        modern.mkdir(parents=True, exist_ok=True)
                     self.environment["COMPONENT_ROOT"] = str(source)
                     result = self.run_script(script)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
