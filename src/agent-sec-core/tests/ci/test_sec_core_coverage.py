@@ -8,7 +8,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from sec_core_coverage import normalize_report, validate_report
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/ci"))
+
+from sec_core_coverage import normalize_report, validate_report  # noqa: E402
 
 DIFF_COVER = shutil.which("diff-cover") or str(
     Path(sys.executable).with_name("diff-cover")
