@@ -1,7 +1,7 @@
 # Distribution-owned integration contract; version follows the component Cargo.toml.
 [component]
 name = "agent-memory"
-version = "0.2.15"
+version = "0.2.16"
 layer = "runtime"
 domain = "state"
 display_name = "Agent Memory"

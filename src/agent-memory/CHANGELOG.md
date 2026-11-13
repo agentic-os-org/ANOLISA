@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.16] - 2026-11-13
+
+### Fixed
+
+- `mem_snapshot_restore` preserves a separate pre-restore tree for every successful restore, including repeated restores of the same snapshot within one second. Existing recovery directories are never overwritten, and legacy rollback leftovers no longer block new restores. Failed trash creation or moves retain old data in that attempt's rollback directory and report its path; failure to reserve a rollback directory stops restoration before moving live files. Snapshot archives, MCP arguments and successful responses are unchanged. Retained trash and rollback data require manual cleanup; keep these directories intact when downgrading (#10007).
+
 ## [0.2.15] - 2026-11-12
 
 ### Fixed
