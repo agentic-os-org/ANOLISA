@@ -157,6 +157,29 @@ fn shell_handoff_timeout_recovery_action<W: Write>(
     )
 }
 
+/// The budget that governs the front pending handoff: an agent-proposed
+/// `timeout_ms` travels on the request itself (#9593) and outranks the
+/// operator's global `COSH_SHELL_HANDOFF_TIMEOUT_SECS`; handoffs without an
+/// explicit budget (user send-to-shell, legacy requests) keep the global
+/// fallback, including "none configured" meaning never interrupt. Mirroring
+/// the local shell-tool path, a declared `timeout_ms` of 0 is caller
+/// nonsense (the tool schema defaults to 30000) and reads as "no explicit
+/// budget" rather than an instant interrupt.
+fn effective_shell_handoff_timeout(
+    state: &InlineState,
+    configured: Option<Duration>,
+) -> Option<Duration> {
+    let Some(handoff) = state.control.shell_handoff().pending_front() else {
+        return configured;
+    };
+    handoff
+        .request()
+        .timeout_ms
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .or(configured)
+}
+
 fn shell_handoff_timeout_recovery_action_with_timeout<W: Write>(
     state: &mut InlineState,
     shell_busy: bool,
@@ -175,7 +198,7 @@ fn shell_handoff_timeout_recovery_action_with_timeout<W: Write>(
         return Ok(None);
     }
 
-    let Some(timeout) = timeout else {
+    let Some(timeout) = effective_shell_handoff_timeout(state, timeout) else {
         return Ok(None);
     };
     let marked_timeout = state

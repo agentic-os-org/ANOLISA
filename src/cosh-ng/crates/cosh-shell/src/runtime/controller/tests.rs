@@ -207,6 +207,181 @@ fn pending_shell_handoff_timeout_interrupts_before_preexec_without_notice() {
 }
 
 #[test]
+fn agent_declared_timeout_ms_interrupts_even_without_a_configured_global_timeout() {
+    // #9593: the provider shell tool's timeout_ms must survive the approval
+    // handoff. With no COSH_SHELL_HANDOFF_TIMEOUT_SECS at all (the default),
+    // the handoff used to run to natural completion; a request carrying an
+    // explicit budget must still interrupt.
+    let mut state = InlineState::default();
+    let mut request = ShellHandoffRequest::new(
+        "sleep 30",
+        "$ sleep 30",
+        "approved_provider_shell_tool",
+        "user",
+        "req-tool-timeout",
+        "run-tool-timeout",
+        1,
+    )
+    .expect("handoff request");
+    request.timeout_ms = Some(4_000);
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .backdate_pending_emit_for_test(Duration::from_millis(4_100));
+    let mut output = Vec::new();
+
+    let action =
+        shell_handoff_timeout_recovery_action_with_timeout(&mut state, false, &mut output, None)
+            .expect("timeout action from the request budget");
+
+    assert_eq!(action, Some(RawObserverAction::InterruptForeground));
+    assert_eq!(
+        state.pending_shell_handoff_timeout_notice,
+        Some(Duration::from_millis(4_000)),
+        "the deferred notice must show the request's own budget"
+    );
+}
+
+#[test]
+fn agent_declared_timeout_ms_outranks_the_configured_global_timeout() {
+    let mut state = InlineState::default();
+    let mut request = ShellHandoffRequest::new(
+        "sleep 30",
+        "$ sleep 30",
+        "approved_provider_shell_tool",
+        "user",
+        "req-tool-timeout-overrides-global",
+        "run-tool-timeout-overrides-global",
+        1,
+    )
+    .expect("handoff request");
+    request.timeout_ms = Some(30_000);
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .backdate_pending_emit_for_test(Duration::from_secs(2));
+    let mut output = Vec::new();
+
+    let action = shell_handoff_timeout_recovery_action_with_timeout(
+        &mut state,
+        false,
+        &mut output,
+        Some(Duration::from_secs(1)),
+    )
+    .expect("recovery probe");
+
+    assert_eq!(
+        action, None,
+        "the global 1s budget must not fire while the request allows 30s"
+    );
+}
+
+#[test]
+fn handoff_without_declared_timeout_keeps_the_configured_global_fallback() {
+    let mut state = InlineState::default();
+    let request = ShellHandoffRequest::new(
+        "sleep 10",
+        "$ sleep 10",
+        "send_to_shell",
+        "user",
+        "req-user-handoff",
+        "run-user-handoff",
+        1,
+    )
+    .expect("handoff request");
+    assert_eq!(
+        request.timeout_ms, None,
+        "user-driven handoffs carry no explicit budget"
+    );
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .backdate_pending_emit_for_test(Duration::from_secs(2));
+    let mut output = Vec::new();
+
+    let action = shell_handoff_timeout_recovery_action_with_timeout(
+        &mut state,
+        false,
+        &mut output,
+        Some(Duration::from_secs(1)),
+    )
+    .expect("timeout action from the global fallback");
+
+    assert_eq!(action, Some(RawObserverAction::InterruptForeground));
+}
+
+#[test]
+fn zero_declared_timeout_ms_reads_as_no_explicit_budget() {
+    let mut state = InlineState::default();
+    let mut request = ShellHandoffRequest::new(
+        "sleep 10",
+        "$ sleep 10",
+        "approved_provider_shell_tool",
+        "user",
+        "req-zero-timeout",
+        "run-zero-timeout",
+        1,
+    )
+    .expect("handoff request");
+    request.timeout_ms = Some(0);
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .backdate_pending_emit_for_test(Duration::from_secs(2));
+    let mut output = Vec::new();
+
+    let action = shell_handoff_timeout_recovery_action_with_timeout(
+        &mut state,
+        false,
+        &mut output,
+        Some(Duration::from_secs(1)),
+    )
+    .expect("timeout action from the global fallback");
+
+    assert_eq!(
+        action,
+        Some(RawObserverAction::InterruptForeground),
+        "a 0ms budget must not become an instant interrupt of the foreground command"
+    );
+}
+
+#[test]
 fn shell_handoff_timeout_notice_is_deferred_until_foreground_is_idle() {
     let mut state = InlineState::default();
     let request = ShellHandoffRequest::new(

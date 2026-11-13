@@ -87,6 +87,14 @@ pub struct ShellHandoffRequest {
     /// their original semantics.
     #[serde(default)]
     pub implicit_pager_policy: ImplicitPagerPolicy,
+    /// Explicit execution budget in milliseconds declared by the caller that
+    /// proposed the command (the provider shell tool's `timeout_ms`).
+    /// `None` for user-driven handoffs, which keep the configured global
+    /// handoff timeout. Defaults to `None` so previously persisted requests
+    /// keep their original semantics. This does not become part of the typed
+    /// PTY line — enforcement happens shell-side from this field.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl ShellHandoffRequest {
@@ -113,6 +121,7 @@ impl ShellHandoffRequest {
             created_at_ms,
             token: uuid::Uuid::new_v4().to_string(),
             implicit_pager_policy: ImplicitPagerPolicy::default(),
+            timeout_ms: None,
         };
         request.validate()?;
         Ok(request)
@@ -403,6 +412,29 @@ mod tests {
         assert!(
             request.token.is_empty(),
             "requests persisted before #2142 carry no token and keep text matching"
+        );
+    }
+
+    #[test]
+    fn shell_handoff_missing_timeout_ms_deserializes_as_none() {
+        let json = r#"{
+            "command": "git log",
+            "exact_preview": "$ git log",
+            "source": "test",
+            "actor": "user",
+            "approval_id": "approval-1",
+            "run_id": "run-1",
+            "request_id": null,
+            "tool_use_id": null,
+            "created_at_ms": 42,
+            "preview_hash": "fnv1a64:0000000000000000"
+        }"#;
+
+        let request: ShellHandoffRequest = serde_json::from_str(json).expect("legacy request");
+
+        assert_eq!(
+            request.timeout_ms, None,
+            "requests persisted before the field existed keep the configured global timeout"
         );
     }
 
