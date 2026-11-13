@@ -74,13 +74,13 @@ returns ALLOW/DENY/MODIFY/STEP_UP/DEFER, and records owner-bound execution recei
 through `authorization.evaluate` and `authorization.report`. Approval remains in
 the application, and execution uses the same local backend. PAP includes Cedar sources
 whose statements all have explicit principal headers; Cedar matches the request against
-the combined set independently of Scope/Binding assignments. `--authorization-config`
-loads root-owned JSON containing only `environment_permissions` (the OS-permission
-ceiling) and `ttl_seconds` (the decision acceptance deadline). The old `baseline_policy`
-and `task_policy` keys are rejected. Review their previous intersection semantics before
-adapting request policies to the combined set; see the
-[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for configuration
-and migration.
+the combined set independently of Scope/Binding assignments. Authorization is always
+enabled; an empty set denies requests. There is no separate authorization configuration
+or environment-permission ceiling. A decision must be accepted within 60 seconds.
+Remove the old `--authorization-config` argument when upgrading and express shared
+restrictions in PAP-managed Cedar. Review the old baseline/task intersection semantics
+before adapting request policies to the combined set; see the
+[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for migration.
 
 The current crates are:
 
@@ -91,12 +91,15 @@ The current crates are:
 - `asc-os-permission-types`: the versioned OS permission set.
 - `asc-sandbox-types`: local invocation, path identities, mount plan and backend results.
 - Runtime requests, decisions and receipts live in `asc-daemon-protocol::authorization`.
+  `AuthorizationRequest<C>` carries principal/action/resource entity references and
+  a consumer-specific context. `OsAuthorizationRequest` binds the OS context to
+  `process.spawn`; the current daemon evaluates only this specialization.
 - `asc-pep-runtime`: command and path preparation, strict sandbox execution and
   installation-handshake supervision, plus upper-PEP authorization, approval and
   receipt handling for embedding applications.
 - `asc-pdp-runtime`: OS request evaluation over a combined Cedar policy set, advice
-  handling and five-state decisions under the requested and environment limits.
-  The legacy `from_snapshot` API retains baseline/task intersection semantics.
+  handling and five-state decisions within the requested permissions.
+  `from_policy_set` is the sole policy-loading API.
 - `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
   whole-network permission schema, strict SDK validation, common-subset checks
   through `validate` and official typed PST output through `pst`. Agent Hook
@@ -251,7 +254,7 @@ when a condition cannot be summarized. `--format cedar` prints the unapproved ca
 its caveats as comments, and that text is the artifact a later approval step consumes. The
 candidate covers only the command's own demand, so the program, cwd and loader paths are still
 not included; the CLI adds none of them.
-The PDP still intersects every request with `environment_permissions` and the policy layers.
+The PDP restricts every request to the PAP-managed Cedar policy set.
 A candidate returns determinable permissions
 plus non-blocking `caveats` for gaps such as an unresolved PATH lookup or unknown
 script behavior; only an inexpressible command yields a clarification, and an empty policy is a

@@ -948,16 +948,17 @@ OS 权限和命令，不访问 daemon、不读取其数据库、不取得策略�
 其余命令继续遵循已有 daemon 所有权规则。上层应用需要授权时使用 `asc-pep-runtime`，
 通过现有 client/UDS 调用 `authorization.evaluate/claim/report`；daemon 始终不执行目标命令。
 
-`agent-sec-daemon --authorization-config <file>` 配置 `environment_permissions` 和 `ttl_seconds`。
-配置不含策略正文或策略 ID；文件及祖先目录由 root 管理，
-不可被组/其他用户写入。未配置时授权接口返回 unavailable，不影响其他服务。
-请求主体只含可选 `agent_type`，由接入方提供，Cosh Hook 使用 `cosh`。
+daemon 默认启用授权，空策略集返回 DENY。独立授权配置文件已移除，决定接收期限固定为
+60 秒。升级时移除启动命令及 systemd drop-in 中的 `--authorization-config` 参数，并将
+必要环境约束迁移为 PAP 管理的 Cedar；不自动转换旧配置。daemon 与授权客户端须同步
+升级到公共 PARC 请求结构。请求通过 context.agent.agent_type 提供可选分类，Cosh Hook
+使用 cosh。
 本阶段不认证 Agent 身份/类型，不要求 UID 登记；类型只用于策略分类匹配。
 内核 peer UID 仍用于 claim/report 的凭据归属校验，不参与策略主体选择。
 每次 evaluate 从 PAP 单个事务读取全部当前策略，排除原生 JSON 与全裸 principal header 的
 Cedar 源码，混合 header 整份报错。有效集摘要覆盖成员、revision、schema 与正文；缓存锁覆盖
 读取及加载，版本未变才复用，完整候选成功才替换。创建、删除和资格变更在下一次请求刷新；
-空集默认拒绝，读取或加载失败清空缓存。旧 baseline/task 配置报错，不自动把限制变成授权并集。
+空集默认拒绝，读取或加载失败清空缓存。旧 baseline/task 配置不再读取，不自动把限制变成授权并集。
 Scope/Binding 的选择、固定版本、部署和清理均不改变。
 PEP 须在 expires_at 前接收决定；接收后的 ask 等待、安装和运行不再因该期限失败，
 策略更新不撤回已接收的决定。MODIFY 在事实齐备时由 PDP 同次完成最终授权；缺事实才 DEFER。

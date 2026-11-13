@@ -1,8 +1,8 @@
 //! Coordinates five-state outcomes while preserving every matching requirement.
 
 use asc_daemon_protocol::authorization::{
-    ApprovalRequirement, ApprovalTarget, AuthorizationRequest, CommandRequest, Decision,
-    DecisionVerdict, Validate,
+    ApprovalRequirement, ApprovalTarget, CommandRequest, Decision, DecisionVerdict,
+    OsAuthorizationRequest, Validate,
 };
 use asc_policy_cedar::advice::{Advice, AdviceVerdict, Transform};
 
@@ -22,7 +22,7 @@ struct Requirements {
 impl PdpRuntime {
     pub(crate) fn evaluate_request(
         &self,
-        input: &AuthorizationRequest,
+        input: &OsAuthorizationRequest,
         now: u64,
     ) -> Result<Decision, PdpError> {
         let mut decision = self.base_decision(input, now)?;
@@ -36,16 +36,16 @@ impl PdpRuntime {
 
     fn evaluate_final(
         &self,
-        input: &AuthorizationRequest,
+        input: &OsAuthorizationRequest,
         decision: &mut Decision,
     ) -> Result<(), PdpError> {
         let mut current = input.clone();
         let (mut projection, advice) = self.authorize(&current)?;
         let mut requirements = Requirements::collect(advice)?;
         if let Some(transform) = requirements.transform.take() {
-            let mut candidate = transform_candidate(&current.launch, &transform)?;
-            let program_changed = candidate.program != current.launch.program;
-            if (program_changed || candidate.cwd != current.launch.cwd)
+            let mut candidate = transform_candidate(&current.context.launch, &transform)?;
+            let program_changed = candidate.program != current.context.launch.program;
+            if (program_changed || candidate.cwd != current.context.launch.cwd)
                 && !candidate.program.starts_with('/')
             {
                 decision.verdict = DecisionVerdict::Defer;
@@ -57,8 +57,13 @@ impl PdpRuntime {
                 candidate.resolved_program.clone_from(&candidate.program);
             }
             candidate.validate()?;
-            if candidate != current.launch {
-                current.launch = candidate;
+            if candidate != current.context.launch {
+                current.context.launch = candidate;
+                current
+                    .resource
+                    .id
+                    .clone_from(&current.context.launch.program);
+                current.validate()?;
                 let (final_projection, final_advice) = self.authorize(&current)?;
                 projection = final_projection;
                 let final_requirements = Requirements::collect(final_advice)?;
@@ -92,12 +97,12 @@ impl PdpRuntime {
         decision.warnings = requirements.warnings;
         decision.verdict = if requirements.approval {
             DecisionVerdict::StepUp
-        } else if current.launch != input.launch || projection.narrowed {
+        } else if current.context.launch != input.context.launch || projection.narrowed {
             DecisionVerdict::Modify
         } else {
             DecisionVerdict::Allow
         };
-        decision.launch = current.launch;
+        decision.launch = current.context.launch;
         decision.require_files = projection.require_files;
         decision.effective_permissions = Some(projection.permissions);
         requirements.approval_items.sort();
@@ -119,54 +124,56 @@ impl PdpRuntime {
 
     fn authorize(
         &self,
-        input: &AuthorizationRequest,
+        input: &OsAuthorizationRequest,
     ) -> Result<(Projection, Vec<ScopedAdvice>), PdpError> {
         let command = request::invocation(input, &self.schema, true)?;
         let executable = request::invocation(input, &self.schema, false)?;
         let mut advice = Vec::new();
-        for layer in &self.layers {
-            let command = layer.evaluate(&command)?;
-            let executable = layer.evaluate(&executable)?;
-            if command.forbidden || executable.forbidden {
-                return Err(PdpError::Denied("an invocation view matched forbid".into()));
-            }
-            if !command.allowed && !executable.allowed {
-                return Err(PdpError::Denied(
-                    "neither process.spawn nor file.exec is permitted".into(),
-                ));
-            }
-            advice.extend(
-                command
-                    .advice
-                    .into_iter()
-                    .chain(executable.advice)
-                    .map(|value| {
-                        (
-                            ApprovalTarget::Execution {
-                                original_request: false,
-                            },
-                            value,
-                        )
-                    }),
-            );
+        let command = self.policy.evaluate(&command)?;
+        let executable = self.policy.evaluate(&executable)?;
+        if command.forbidden || executable.forbidden {
+            return Err(PdpError::Denied("an invocation view matched forbid".into()));
         }
+        if !command.allowed && !executable.allowed {
+            return Err(PdpError::Denied(
+                "neither process.spawn nor file.exec is permitted".into(),
+            ));
+        }
+        advice.extend(
+            command
+                .advice
+                .into_iter()
+                .chain(executable.advice)
+                .map(|value| {
+                    (
+                        ApprovalTarget::Execution {
+                            original_request: false,
+                        },
+                        value,
+                    )
+                }),
+        );
         let permissions = self.permissions(input, &mut advice)?;
         Ok((permissions, advice))
     }
 
-    fn base_decision(&self, input: &AuthorizationRequest, now: u64) -> Result<Decision, PdpError> {
+    fn base_decision(
+        &self,
+        input: &OsAuthorizationRequest,
+        now: u64,
+    ) -> Result<Decision, PdpError> {
         let expires_at = now
-            .checked_add(self.ttl_seconds)
+            .checked_add(crate::DECISION_TTL_SECONDS)
             .ok_or_else(|| PdpError::Configuration("decision expiry overflow".into()))?;
         Ok(Decision {
             decision_id: uuid::Uuid::new_v4().to_string(),
             request_id: input.request_id.clone(),
-            execution_id: input.execution_id.clone(),
+            execution_id: input.context.execution_id.clone(),
             request_digest: input.digest()?,
             policy_version: self.version.clone(),
             expires_at,
-            principal: input.principal.clone(),
-            launch: input.launch.clone(),
+            principal: input.context.agent.clone(),
+            launch: input.context.launch.clone(),
             verdict: DecisionVerdict::Deny,
             effective_permissions: None,
             reason: String::new(),

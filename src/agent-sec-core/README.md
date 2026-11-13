@@ -24,8 +24,8 @@ each PDP permission request through `PermissionInput` or the Cosh sandbox Hook.
 See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
 for the permission format, runtime requirements and isolation boundaries.
 Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
-using the current eligible PAP-managed Cedar policy set and runtime limits from
-daemon `--authorization-config`.
+using PAP-managed Cedar policies. The daemon enables authorization by default;
+an empty applicable policy set denies requests.
 Successful Policy updates apply to subsequent authorization requests.
 Cosh opts into this flow with `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`, using its native
 approval UI and the installed default permission template. Every hooked `shell` /

@@ -241,9 +241,8 @@ Cedar。`--format cedar` 把 `caveats` 写成 `// Not covered:` 注释；澄清�
 两种结果退出码均为 `0`；daemon 会拒绝的输入在本地退出 `2`，不发出请求。
 
 `--format cedar` 输出未审批候选原文，审批与执行不在本子命令范围内。候选只含命令自身需求，
-program、cwd 与 loader 路径不在其中，需执行侧显式补齐；CLI 不做隐式补齐。实际生效仍由 PDP
-与发布的 `environment_permissions` 和策略层求交：
-`effective = 请求 ∩ environment_permissions ∩ 策略`。
+program、cwd 与 loader 路径不在其中，需执行侧显式补齐；CLI 不做隐式补齐。PDP 将请求限制在
+PAP 管理的 Cedar 策略授权范围内：`effective = 请求 ∩ PAP 策略授权`，匹配的 forbid 优先。
 
 本路径不读取或改写 base policy，不在本地计算 `effective`，也不执行命令。
 
@@ -439,7 +438,8 @@ Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保�
 
 Sandbox 运行时授权复用同一组 Policy 对象，使用
 `schema: {schemaId: "seccore.system", revision: 1}`。OS 授权 PDP 支持 Agent 主体、`process.spawn` 及 permit 上约定的 advice。
-按 [Sandbox 指南](sandbox.md#接入策略授权)配置 daemon 的权限上限和决定有效期。
+授权默认启用，无独立权限上限配置。决定须在 60 秒内接收；接收后的审批等待和执行可稍后完成。
+操作方式见 [Sandbox 指南](sandbox.md#接入策略授权)。
 每次求值从 PAP 一起读取当前策略，纳入所有语句均有显式 principal header 的 Cedar 源码；
 无需配置 Policy ID。使用 `principal is SecCore::Subject` 并按可选的 `agent_type` 匹配请求。
 更新或删除影响后续请求；集合为空时拒绝，读取或校验失败时停止新授权。

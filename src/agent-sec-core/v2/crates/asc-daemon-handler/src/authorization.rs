@@ -2,7 +2,7 @@
 
 use asc_daemon_core::{AuthorizationError, AuthorizationService, PeerCredentials};
 use asc_daemon_protocol::{
-    AuthorizationRequest, DaemonResponse, DecisionClaim, ExecutionReceipt, RequestId, error_code,
+    DaemonResponse, DecisionClaim, ExecutionReceipt, OsAuthorizationRequest, RequestId, error_code,
     method::AuthorizationMethod,
 };
 use asc_daemon_service::DispatchControl;
@@ -55,7 +55,7 @@ fn dispatch(
 ) -> Result<Value, AuthorizationError> {
     match method {
         AuthorizationMethod::Evaluate => {
-            let request: AuthorizationRequest =
+            let request: OsAuthorizationRequest =
                 serde_json::from_value(params).map_err(|_| AuthorizationError::InvalidArgument)?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -96,7 +96,7 @@ mod tests {
     impl AuthorizationEvaluator for Unavailable {
         fn evaluate(
             &self,
-            _: &AuthorizationRequest,
+            _: &OsAuthorizationRequest,
             _: u64,
         ) -> Result<Decision, AuthorizationError> {
             Err(AuthorizationError::Unavailable)

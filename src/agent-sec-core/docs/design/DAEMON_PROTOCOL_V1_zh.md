@@ -1285,17 +1285,15 @@ Rust 入口为 `asc_intent::propose_command(provider, model, &CommandInput, dead
 
 需在 daemon 启动环境显式启用 Intent 并配置本节的模型凭据。command/cwd 会发往该模型服务，
 可能包含敏感信息并产生费用。本接口不读取或改写 PAP/base policy，不计算 effective，也不执行命令。
-PDP 仍负责把候选与 `environment_permissions`（部署基线）及 Cedar 策略求交；CLI 的
+PDP 仍负责将申请权限限制在 PAP 管理的 Cedar 策略授权范围内；CLI 的
 `--format cedar` 输出未审批候选原文，审批与执行不在本接口范围内。程序、cwd 与 loader
 不在候选中，需执行侧显式补齐，CLI 不做隐式补齐。
 停用 Intent 并重启可关闭入口，无状态迁移或策略回滚需求。
 
 候选是**命令自身**的需求集，不是完整沙箱视图：程序、loader 与 PATH 目录不在候选中，
-`sandbox run` 要求 program 与 cwd 显式可读，需执行侧补齐。最终仍由 PDP 与
-`environment_permissions` 和策略层求交：
-`effective = 请求 ∩ environment_permissions ∩ 策略`，默认 deny、deny 优先。因此 不写 `/usr`
-的 `file.exec` 不代表缺失，而代表基线已覆盖；副作用是若发布侧未授予某类系统路径 ，命令在求交后
-会被拒绝，而不是在候选生成时被拦截。
+`sandbox run` 要求 program 与 cwd 显式可读，需执行侧补齐。最终由 PDP 计算
+`effective = 请求 ∩ PAP 策略授权`，默认 deny、deny 优先。程序和运行依赖须同时在申请中
+声明并获 Cedar 授权；候选不列出这些路径不代表它们已获准，缺少授权会在 PDP 阶段拒绝。
 
 CLI 不再提供 `--format permission` 投影。
 
@@ -1316,16 +1314,25 @@ CLI 在渲染前对返回的 Cedar 重新执行一次本地校验。两种结果
 
 `authorization.evaluate`、`authorization.claim` 与 `authorization.report` 使用现有 UDS、JSON 信封和 peer UID，
 不修改 V1 oracle。这些方法面向已准入的运行时调用者，不接受调用方上传 Cedar 策略。
-授权 `request_id`、`execution_id` 位于 params 内，与传输层生成的 request ID 分开。
+授权 `request_id`、`context.execution_id` 位于 params 内，与传输层生成的 request ID 分开。
 
 | method | params / data | 处理 |
 |---|---|---|
-| `authorization.evaluate` | `AuthorizationRequest` → `Decision` | 读取一个有效策略版本、求值；不启动进程、不等待 ask。 |
+| `authorization.evaluate` | `OsAuthorizationRequest` → `Decision` | 读取一个有效策略版本、求值；不启动进程、不等待 ask。 |
 | `authorization.claim` | `DecisionClaim` → `ClaimResponse` | accept 在期限内接收；execute 向同 UID 一次性转交原请求、决定与已固定的执行状态；abandon 关闭未执行交接。不重新授权。 |
 | `authorization.report` | `ExecutionReceipt` → `ReceiptAck` | 校验当前 peer 对决策的归属和执行引用，确认日志持久化；不重新授权或执行。 |
 
 类型定义见 [`authorization.rs`](../../v2/crates/asc-daemon-protocol/src/authorization.rs)。
-request 包含 type=os、request_id、execution_id、principal、launch、requested_permissions。launch 仅含 program、resolved_program、args、cwd。PEP 在本地固定环境与路径身份，跨进程交接时在 claim 的 accept 阶段一次性提交 execution。execute 和 abandon 只传标识与阶段。
+公共 `AuthorizationRequest<C>` 是 PARC 信封，字段为 request_id、
+principal、action、resource、context。三个实体引用均为 `{type, id}`；完整信封参与摘要。
+OS 特化 `OsAuthorizationRequest` 的 context 包含 execution_id、agent、launch、
+requested_permissions；launch 仅含 program、resolved_program、args、cwd。
+OS 适配器固定 principal 为 `SecCore::Subject::"request"`，action 为
+`SecCore::Action::"process.spawn"`，resource 为与 launch.program 一致的 `SecCore::Process`。
+agent 只含可选 agent_type。未知 action、绑定不一致、未知字段和原 type=os 载荷拒绝。
+通用 context 可供其它 consumer 定义；当前 RPC 只处理 OS 请求，未提供通用非 OS 决策端。
+PEP 在本地固定环境与路径身份，跨进程交接时在 claim 的 accept 阶段一次性提交 execution。
+execute 和 abandon 只传标识与阶段。daemon 与授权客户端须同步升级。
 Decision 返回最终命令、有效权限、策略版本、接收期限和 warnings。仅当路径条件要求区分文件与目录时，require_files 列出须由执行侧核实为文件的路径。
 `approval_requirements` 是 V2 sandbox 决定附带的展示来源，缺省为空，空列表不序列化。
 每项包含 `target` 与可选的策略 `message`：target.kind 为 execution、filesystem 或 network。
@@ -1338,15 +1345,17 @@ PEP 从已固定的路径事实及只用于标签的本地查询区分文件与�
 新客户端可读取缺少该字段的旧决定并回退为整体原因。旧版严格解码器不接受非空新字段，因此本次
 未发布的 V2 扩展应连同 daemon 与 CLI 一起更新；不改变 V1 oracle。对应 fixture 为
 `asc-daemon-protocol/tests/authorization_display.rs` 和 `asc-pdp-runtime/tests/authorization.rs`。
-所有类型拒绝未知字段。daemon 从 PAP 同一事务读取配置所选策略的当前版本；策略更新成功后供下一次授权使用，删除或不可用时拒绝授权，不回退缓存旧版本。
+公共信封和 OS 类型拒绝未知字段。daemon 默认启用授权，从 PAP 同一事务读取当前适用
+策略集；策略更新成功后供下一次授权使用，空集返回 DENY，读取或加载失败不回退旧版本。
 
 MODIFY 携带 PDP 已完整授权的最终命令与权限，绑定原请求摘要；PEP 本地核验后直接执行。
 DEFER 没有执行权，PEP 停止并回执。STEP_UP 的本地确认通过后
-直接执行绑定动作，不再 evaluate。PEP 须在 expires_at 前一次性接收决定；接收后的审批等待和执行不再检查该期限。report 只接受同一 peer UID 的决策，包含 approval、
+直接执行绑定动作，不再 evaluate。PEP 须在签发后 60 秒的 expires_at 前一次性接收决定；接收后的审批等待和执行不再检查该期限。report 只接受同一 peer UID 的决策，包含 approval、
 installed/started、exit_code/signal/cancel_signal、错误和记录时间。
 已成功报告的决策拒绝重复回执，包括 DEFER。未通过 claim 接收的决策保留到 expires_at 后 24 小时；已接收交接保留到回执或 daemon 重启，仍受全局和每 UID 容量限制；它不限制已接收决定的执行。回执事件中的 warnings 来自 daemon 保存的 Decision。
 
-领域 DENY 是成功 RPC 中的决策。错误使用既有目录：无配置返回 `unavailable`，
+领域 DENY 是成功 RPC 中的决策。默认 daemon 不再因缺少授权配置返回 `unavailable`。
+错误使用既有目录：嵌入式 dispatcher 未接入授权服务时返回 `unavailable`，
 非法载荷 `invalid_argument`，跨 UID `permission_denied`，过期/引用冲突 `conflict`，
 容量不足 `resource_exhausted`，存储或内部失败 `internal`。只有所有配置的 SQLite/JSONL
 记录成功后才 Ack；部分写入失败返回错误，不承诺跨存储事务或自动重试。

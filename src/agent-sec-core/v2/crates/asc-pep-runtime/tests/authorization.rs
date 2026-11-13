@@ -2,8 +2,8 @@
 #![cfg(target_os = "linux")]
 
 use asc_daemon_protocol::authorization::{
-    AgentPrincipal, AuthorizationRequest, Decision, DecisionVerdict, ExecutionReceipt, LaunchSpec,
-    OsPermissionSet, ReceiptAck,
+    AgentPrincipal, Decision, DecisionVerdict, ExecutionReceipt, LaunchSpec,
+    OsAuthorizationRequest, OsPermissionSet, ReceiptAck,
 };
 use asc_pep_runtime::{
     ApprovalHandler, AuthorizationClient, FixedPermissions, PepError, PepRuntime, PermissionInput,
@@ -21,19 +21,19 @@ struct Client {
     fail_report: bool,
 }
 impl AuthorizationClient for Client {
-    fn evaluate(&self, request: &AuthorizationRequest) -> Result<Decision, PepError> {
+    fn evaluate(&self, request: &OsAuthorizationRequest) -> Result<Decision, PepError> {
         self.calls.set(self.calls.get() + 1);
         Ok(Decision {
             decision_id: "decision-1".into(),
             request_id: request.request_id.clone(),
-            execution_id: request.execution_id.clone(),
+            execution_id: request.context.execution_id.clone(),
             request_digest: request.digest()?,
             policy_version: "version-1".into(),
             expires_at: now() + 60,
-            principal: request.principal.clone(),
-            launch: request.launch.clone(),
+            principal: request.context.agent.clone(),
+            launch: request.context.launch.clone(),
             verdict: self.verdict,
-            effective_permissions: Some(request.requested_permissions.clone()),
+            effective_permissions: Some(request.context.requested_permissions.clone()),
             reason: "test".into(),
             approval_requirements: vec![],
             warnings: vec![],
@@ -164,7 +164,7 @@ fn pushed_decisions_reject_replay_changed_argv_and_expiry() {
     let request = request(launch, permissions.0);
     let decision = client.evaluate(&request.request).unwrap();
     let mut changed = request.clone();
-    changed.request.launch.args.push("changed".into());
+    changed.request.context.launch.args.push("changed".into());
     assert!(
         runtime
             .apply(&changed, decision.clone(), &client, None)
@@ -259,7 +259,7 @@ fn approval_cannot_refresh_changed_path_identity() {
 fn authorized_modify_and_approval_execute_without_a_second_evaluation() {
     struct TransformClient(Client);
     impl AuthorizationClient for TransformClient {
-        fn evaluate(&self, request: &AuthorizationRequest) -> Result<Decision, PepError> {
+        fn evaluate(&self, request: &OsAuthorizationRequest) -> Result<Decision, PepError> {
             let mut decision = self.0.evaluate(request)?;
             decision.launch.args = vec!["authorized".into()];
             Ok(decision)
@@ -365,10 +365,11 @@ fn modified_decision_cannot_expand_the_requested_permissions() {
 fn prepared_alias_keeps_both_identities_for_direct_modified_launch() {
     struct AliasClient(Client, String);
     impl AuthorizationClient for AliasClient {
-        fn evaluate(&self, request: &AuthorizationRequest) -> Result<Decision, PepError> {
+        fn evaluate(&self, request: &OsAuthorizationRequest) -> Result<Decision, PepError> {
             let mut decision = self.0.evaluate(request)?;
             assert!(
                 request
+                    .context
                     .requested_permissions
                     .filesystem
                     .rules
