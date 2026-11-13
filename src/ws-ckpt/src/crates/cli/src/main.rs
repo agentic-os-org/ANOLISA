@@ -9,9 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
-    decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file,
-    load_config_file_unvalidated, save_config_file, ChangeType, CleanupRetention, DaemonConfig,
-    ErrorCode, GlobalConfigJson, PolicyFieldOp, RecoveryPreview, Request, Response,
+    decode_payload, default_auto_cleanup_keep, encode_frame, escape_terminal_text,
+    load_config_file, load_config_file_unvalidated, save_config_file, ChangeType, CleanupRetention,
+    DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp, RecoveryPreview, Request, Response,
     SnapshotListItem, StatusReport, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
     DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
@@ -1085,26 +1085,39 @@ async fn print_health_advisory_if_needed() {
 async fn handle_response(response: Response, original_request: &Request) -> Result<()> {
     match response {
         Response::InitOk { ws_id } => {
-            println!("\x1b[32m✓ Workspace initialized: {}\x1b[0m", ws_id);
+            println!(
+                "\x1b[32m✓ Workspace initialized: {}\x1b[0m",
+                escape_terminal_text(&ws_id)
+            );
         }
         Response::CheckpointOk { snapshot_id } => {
-            println!("\x1b[32m✓ Checkpoint created: {}\x1b[0m", snapshot_id);
+            println!(
+                "\x1b[32m✓ Checkpoint created: {}\x1b[0m",
+                escape_terminal_text(&snapshot_id)
+            );
         }
         Response::RollbackOk { from, to } => {
             println!(
                 "\x1b[32m✓ Rolled back workspace {} to snapshot: {}\x1b[0m",
-                from, to
+                escape_terminal_text(&from),
+                escape_terminal_text(&to)
             );
         }
         Response::DeleteOk { target } => {
-            println!("\x1b[32m✓ Deleted: {}\x1b[0m", target);
+            println!(
+                "\x1b[32m✓ Deleted: {}\x1b[0m",
+                escape_terminal_text(&target)
+            );
         }
         Response::RecoverWithWarning { workspace, warning } => {
-            eprintln!("WARNING: {}", warning);
-            println!("Workspace recovered: {}", workspace);
+            print_recovery_warning(&warning);
+            println!("Workspace recovered: {}", escape_terminal_text(&workspace));
         }
         Response::RecoverOk { workspace } => {
-            println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
+            println!(
+                "\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m",
+                escape_terminal_text(&workspace)
+            );
         }
         Response::Error {
             code: ErrorCode::ConfirmationRequired,
@@ -1319,11 +1332,11 @@ fn write_snapshot_table(
                 ),
             };
             (
-                escape_diff_text(workspace),
-                escape_diff_text(&id),
+                escape_terminal_text(workspace),
+                escape_terminal_text(&id),
                 created_at,
                 pinned,
-                escape_diff_text(&message),
+                escape_terminal_text(&message),
             )
         })
         .collect();
@@ -1443,27 +1456,23 @@ fn format_diff_entry(entry: &ws_ckpt_common::DiffEntry) -> String {
     let detail = entry
         .detail
         .as_deref()
-        .map(|detail| format!(" ({})", escape_diff_text(detail)))
+        .map(|detail| format!(" ({})", escape_terminal_text(detail)))
         .unwrap_or_default();
     format!(
         "{}  {}{}\x1b[0m",
         marker,
-        escape_diff_text(&entry.path),
+        escape_terminal_text(&entry.path),
         detail
     )
 }
 
-fn escape_diff_text(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        // Backslashes distinguish literal escape text from encoded controls.
-        if character.is_control() || character == '\\' {
-            escaped.extend(character.escape_default());
-        } else {
-            escaped.push(character);
-        }
+fn print_recovery_warning(warning: &str) {
+    if let Some(formatted) = warning.strip_prefix('\n') {
+        eprintln!("WARNING: {formatted}");
+    } else {
+        // Older daemons may interpolate raw paths into the warning.
+        eprintln!("WARNING: {}", escape_terminal_text(warning));
     }
-    escaped
 }
 
 /// Handle StatusOk response, formatting the status report.
@@ -1549,7 +1558,12 @@ fn handle_status_response(
                     println!("  {:<25} {:<40} SNAPSHOTS", "WORKSPACE", "PATH");
                     println!("  {}", "-".repeat(75));
                     for ws in &report.workspaces {
-                        println!("  {:<25} {:<40} {}", ws.ws_id, ws.path, ws.snapshot_count);
+                        println!(
+                            "  {:<25} {:<40} {}",
+                            escape_terminal_text(&ws.ws_id),
+                            escape_terminal_text(&ws.path),
+                            ws.snapshot_count
+                        );
                     }
                     println!("\n  Total: {} workspace(s)", report.workspaces.len());
                 }
@@ -1560,7 +1574,7 @@ fn handle_status_response(
                             "\x1b[33m  Watcher: {} workspace(s) run without a live file \
                              watcher (change detection degraded): {}\x1b[0m",
                             workspaces_without_watcher.len(),
-                            workspaces_without_watcher.join(", ")
+                            escape_terminal_text(&workspaces_without_watcher.join(", "))
                         );
                     }
                     if *watcher_queue_overflows > 0 {
@@ -2470,11 +2484,11 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             let resp = send_request_to_daemon(&req).await?;
             match resp {
                 Response::RecoverWithWarning { workspace, warning } => {
-                    eprintln!("WARNING: {}", warning);
-                    println!("Workspace recovered: {}", workspace);
+                    print_recovery_warning(&warning);
+                    println!("Workspace recovered: {}", escape_terminal_text(&workspace));
                 }
                 Response::RecoverOk { workspace } => {
-                    println!("Workspace recovered: {}", workspace);
+                    println!("Workspace recovered: {}", escape_terminal_text(&workspace));
                 }
                 Response::Error { code, message } => {
                     eprintln!(
@@ -2538,11 +2552,14 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         let resp = send_request_to_daemon(&req).await?;
         match resp {
             Response::RecoverWithWarning { workspace, warning } => {
-                eprintln!("WARNING: {}", warning);
-                println!("Workspace recovered: {}", workspace);
+                print_recovery_warning(&warning);
+                println!("Workspace recovered: {}", escape_terminal_text(&workspace));
             }
             Response::RecoverOk { workspace } => {
-                println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
+                println!(
+                    "\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m",
+                    escape_terminal_text(&workspace)
+                );
             }
             Response::Error { code, message } => {
                 eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
