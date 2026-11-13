@@ -1,6 +1,8 @@
 """Exercise Gateway admission settlement and session retirement boundaries."""
 
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -77,3 +79,44 @@ class GatewayLifecycleTests(NativeFixture):
               patch("hermes_state_runtime.list_session_admissions", return_value=[])):
             self.assertEqual(self.gateway_rpc["retire"](params), {"retired": True})
         self.gateway_manager.unload()
+
+    def test_changed_launch_snapshot_keeps_active_registration(self):
+        async def run(_authority, _ref, _live, _row):
+            raise RuntimeError("native outcome unknown")
+
+        self.bind_gateway([("tool.before", "observe")], turn_run=run, prime_only=True)
+        from gateway.session_authority import SessionAuthority
+
+        with self.assertRaisesRegex(RuntimeError, "native outcome unknown"):
+            asyncio.run(SessionAuthority._execute_claimed(
+                SimpleNamespace(), SimpleNamespace(session_id="session"), None,
+                {"request_id": "unknown", "admission_id": "unknown"}))
+        launch = Path(__import__("os").environ["AW_HERMES_LAUNCH"])
+        config = json.loads(launch.read_text())
+        config["hooks"][0]["timeout"] += 1
+        launch.write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, "launch snapshot differs"):
+            self.gateway_rpc["retire"]({
+                "target_session_id": "session", "launch_path": str(launch),
+                "token": "fixture-token"})
+        with self.assertRaisesRegex(RuntimeError, "active turn"):
+            self.gateway_manager.unload()
+
+    def test_changed_launch_snapshot_keeps_pending_registration(self):
+        self.bind_gateway([("tool.before", "observe")], prime_only=True)
+        launch = Path(__import__("os").environ["AW_HERMES_LAUNCH"])
+        config = json.loads(launch.read_text())
+        config["hooks"][0]["timeout"] += 1
+        launch.write_text(json.dumps(config))
+        authority = SimpleNamespace(db=SimpleNamespace(
+            get_session=lambda _session: {"ended_at": "closed"}))
+        with (patch("gateway.run_api._ACTIVE_RUNNER", object()),
+              patch("gateway.session_authorities.active_authority", return_value=authority),
+              patch("hermes_state_runtime.list_session_admissions",
+                    return_value=[{"status": "queued"}])):
+            with self.assertRaisesRegex(ValueError, "launch snapshot differs"):
+                self.gateway_rpc["retire"]({
+                    "target_session_id": "session", "launch_path": str(launch),
+                    "token": "fixture-token"})
+        with self.assertRaisesRegex(RuntimeError, "registered session"):
+            self.gateway_manager.unload()

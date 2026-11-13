@@ -301,14 +301,16 @@ confirms a terminal status. Hermes retains control over tool batch scheduling. E
 configured Hooks still run; AW does not import or reorder their configuration.
 The Gateway refuses plugin unload while an AW session remains registered, so
 queued admissions cannot lose their callbacks between turns.
-After the CLI closes a session, `retire` waits for queued, started and unknown
-admissions to settle. Prime and retire are idempotent for the same launch; an old
-launch's retire cannot remove a newer registration. The CLI records a session
-before sending prime, so a lost reply remains eligible for retirement. Its
-private retirement receipt permits the parent AW process to release the service
-instance and launch files. If a signal or drain failure prevents the receipt,
-AW reports and retains both resources for operator reconciliation. A later AW
-launch can register the same session after retirement, and plugin unload is allowed.
+After the native CLI exits, the parent AW process reads its private session list
+and calls Gateway `retire` for each recorded session. Retire waits for queued,
+started and unknown admissions to settle. Prime and retire are idempotent for
+the same launch; an old launch's retire cannot remove a newer registration, and
+a changed snapshot at the same launch path cannot bypass drain. The CLI records
+a session before sending prime, so a lost reply remains eligible for retirement.
+AW releases the service instance and launch files only after Gateway confirms
+every retirement. If a signal or drain failure prevents confirmation, AW reports
+and retains both resources for operator reconciliation. A later AW launch can
+register the same session after retirement, and plugin unload is allowed.
 Native Hook configuration has no per-Hook environment object in the verified
 baseline.
 

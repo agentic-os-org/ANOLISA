@@ -1722,7 +1722,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 73
+          "tests": 75
         },
         {
           "name": "gateway-live",
