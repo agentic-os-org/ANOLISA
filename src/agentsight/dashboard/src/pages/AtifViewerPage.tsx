@@ -806,11 +806,11 @@ export const AtifViewerPage: React.FC = () => {
   // mount can race an explicit load, and the late response would otherwise
   // replace the document (and attach the wrong savings card).
   const loadRequestIdRef = useRef(0);
-  const requestedQueryRef = useRef<typeof loadedQuery>(null);
+  const requestedTargetRef = useRef<string | null>(null);
   const snapshotRequestRef = useRef<AbortController | null>(null);
   useEffect(() => () => {
     ++loadRequestIdRef.current;
-    requestedQueryRef.current = null;
+    requestedTargetRef.current = null;
     snapshotRequestRef.current?.abort();
     snapshotRequestRef.current = null;
   }, []);
@@ -852,7 +852,7 @@ export const AtifViewerPage: React.FC = () => {
     const i = id ?? queryId;
     if (!i.trim()) return;
     const requestId = ++loadRequestIdRef.current;
-    requestedQueryRef.current = { type: qt, id: i.trim() };
+    requestedTargetRef.current = JSON.stringify([qt, i.trim()]);
     snapshotRequestRef.current?.abort();
     snapshotRequestRef.current = null;
 
@@ -861,7 +861,7 @@ export const AtifViewerPage: React.FC = () => {
     // Node selection and highlights only carry over when the target is unchanged
     // (an explicit reload of a different id starts at the root trajectory).
     let initialPath: string[] = [];
-    if (currentSearchParams.get('id') === i.trim()) {
+    if (currentSearchParams.get('id') === i.trim() && currentSearchParams.get('type') === qt) {
       const highlightCallId = currentSearchParams.get('highlight_call_id');
       const interruptionId = currentSearchParams.get('interruption_id');
       const node = currentSearchParams.get('node');
@@ -950,24 +950,34 @@ export const AtifViewerPage: React.FC = () => {
     setSelectedRound(initialRound(groupIntoRounds(stepsOf(findNodeByPath(tree, urlPath).doc), t), new Set()));
   }, [searchParams, tree, nodePath, t]);
 
-  // Hash navigation can change the target without remounting the viewer.
+  // URL changes can reuse this mounted route. A button-driven load has already
+  // claimed its target before updating the URL, so do not request it twice.
   const urlType = searchParams.get('type');
-  const urlId = searchParams.get('id')?.trim();
+  const urlId = searchParams.get('id') ?? '';
+  const loadFromUrlRef = useRef(handleLoad);
+  loadFromUrlRef.current = handleLoad;
   useEffect(() => {
-    if ((urlType !== 'session' && urlType !== 'conversation') || !urlId) {
-      requestedQueryRef.current = null;
-      return;
+    const valid = (urlType === 'session' || urlType === 'conversation') && !!urlId?.trim();
+    const target = valid ? JSON.stringify([urlType, urlId.trim()]) : '';
+    if (requestedTargetRef.current === target) return;
+    requestedTargetRef.current = target;
+    if (valid) {
+      setQueryType(urlType);
+      setQueryId(urlId);
+      void loadFromUrlRef.current(urlType, urlId);
+    } else {
+      ++loadRequestIdRef.current;
+      snapshotRequestRef.current?.abort();
+      snapshotRequestRef.current = null;
+      setSnapshotBatch(null);
+      setDoc(null);
+      setLoadedQuery(null);
+      setSavingsDetail(null);
+      setLoading(false);
+      setError(null);
+      setQueryId('');
     }
-    const requested = requestedQueryRef.current;
-    if (requested?.type === urlType && requested.id === urlId) return;
-    if (doc && loadedQuery?.type === urlType && loadedQuery.id === urlId) {
-      requestedQueryRef.current = loadedQuery;
-      return;
-    }
-    setQueryType(urlType);
-    setQueryId(urlId);
-    void handleLoad(urlType, urlId);
-  }, [urlType, urlId, handleLoad, doc, loadedQuery]);
+  }, [urlType, urlId]);
 
   // JSON file import
   const handleFileImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1003,6 +1013,8 @@ export const AtifViewerPage: React.FC = () => {
         setNodePath([]);
         const nextParams = new URLSearchParams(searchParamsRef.current);
         nextParams.delete('node');
+        // Import replaces the current display without navigating to a server
+        // document. Node-only URL changes must keep the imported root.
         setSearchParams(nextParams, { replace: true });
         setError(null);
         setQueryId(parsed.session_id ?? '');
