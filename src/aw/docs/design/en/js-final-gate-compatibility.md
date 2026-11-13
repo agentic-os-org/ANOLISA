@@ -115,12 +115,17 @@ result identity, nested agents and background delivery remain unsupported.
 All three inspected Qoder Workers call `firePostToolUseEvent` before applying
 `getUpdatedToolOutput()`/`getUpdatedMCPToolOutput()`. The same return path can
 rewrite `llmContent` for Read and append Hook context. The shipped Worker is an
-obfuscated, separately versioned bundle; these source observations identify a
-candidate checkpoint, not an adopted final-result gate. The release matrix
-checks exact SDK and Worker bytes and runs the SDK parser for each version.
-Native SDK/Worker acceptance must capture the actual model input before
-support is declared. Isolated Worker initialization without credentials was
-rejected by the model catalog or authentication gate on all three versions.
+obfuscated, separately versioned bundle. An isolated real Query with SDK
+1.0.56 and Worker 1.1.78 demonstrated the ordering: AW `tool.after` observed
+the original safe output, then an SDK `PostToolUse` callback changed it to
+`AW_QODER_LATE_POST_SECRET`. The Worker-delivered `tool_result` contained the
+marker, and the hosted model repeated it in its final answer. The raw hosted
+model request was not captured and no blocking Worker checkpoint is installed.
+All three versions therefore retain unsupported final-gate status. The matrix
+checks exact SDK and Worker bytes and runs the SDK parser for each version;
+the two additional releases lack native model-adoption acceptance. Isolated
+Worker initialization without credentials was rejected by the model catalog
+or authentication gate on all three versions.
 
 The inspected OpenClaw packages require Node `>=24.16.0 <25 || >=26.1.0`;
 these Gateway probes used Node 24.16.0. The 2026.9.6 middleware runner digest is
@@ -161,4 +166,6 @@ also add `--final-gate-provider-error` to verify failure withholding. The
 native acceptance matrix pins the package and schedules all three cases.
 Pass `--sec-core-provider /absolute/path/to/aw-provider-sec-core` with
 `--final-gate-enforce` for the real Provider case.
-Qoder Worker source inspection alone does not count as model adoption evidence.
+Qoder's credentialed isolated red case runs `post-native.py --case late-mutation`.
+It records result booleans and removes its Worker and temporary configuration;
+it does not persist the credential.
