@@ -34,8 +34,8 @@ pub use http::HttpStore;
 
 // Re-export GenAI SQLite storage
 pub use genai::{
-    GenAISqliteStore, PendingCallInfo, PendingOrigin, ResourceSample, SessionPhase,
-    SessionResourceTimeline, SseEnrichment,
+    GenAISqliteStore, MetricPercentiles, PendingCallInfo, PendingOrigin, ResourceSample,
+    SessionPhase, SessionResourceTimeline, SseEnrichment, TopGrouping, TopRow, TopWindowSummary,
 };
 
 // Re-export Interruption SQLite storage
