@@ -1386,7 +1386,7 @@ fn reclaim_removes_stale_meta_dir_write_tmp_and_keeps_young() {
 }
 
 #[test]
-fn reclaim_meta_dir_write_tmp_is_anchored_against_planted_symlink() {
+fn reclaim_meta_dir_write_tmp_symlink_is_refused_by_the_regular_file_filter() {
     let (_tmp, svc) = setup();
     // A symlink is never a `write_atomic` staging file (tempfile only
     // creates regular files), and the listing's regular-file filter drops
@@ -1448,6 +1448,15 @@ fn reclaim_meta_dir_symlink_is_not_followed_out_of_the_mount() {
     );
     assert_eq!(report.partials_removed, 0);
     assert_eq!(report.removal_failures, 0);
+    // The file-lock restore lock lives at `.anolisa/.restore.lock`; a meta
+    // directory swapped for a symlink makes that open fail, so the sweep
+    // refuses everything up front — no artefact is counted, classified or
+    // removed. Pin the all-zero report: the anchored per-entry probes this
+    // test was written for never run when the lock itself is unresolvable.
+    assert_eq!(
+        report.kept_young, 0,
+        "a refused lock must not classify the listed entry at all"
+    );
 }
 
 /// A real (gzip + tar, one regular entry) archive for repair tests: the
