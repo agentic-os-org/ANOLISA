@@ -10,8 +10,8 @@ use asc_daemon_protocol::authorization::{
     AgentPrincipal, AuthorizationRequest, Decision, ExecutionReceipt, ReceiptAck,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, PepError, PepRuntime,
-    PermissionInput, SandboxBackend, prepare_launch,
+    ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, LinuxSandboxBackend, PepError,
+    PepRuntime, PermissionInput, prepare_launch,
 };
 use clap::Parser;
 
@@ -101,7 +101,7 @@ fn run(options: Options) -> Result<u8, Box<dyn std::error::Error>> {
         &std::env::current_dir()?,
         environment,
     )?;
-    let mut runtime = PepRuntime::new(SandboxBackend::new(options.helper));
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(options.helper));
     let client = LocalClient(DaemonAuthorizationClient {
         socket: options.socket,
         timeout: Duration::from_secs(10),

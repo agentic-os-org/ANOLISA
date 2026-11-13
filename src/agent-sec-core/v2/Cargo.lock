@@ -252,6 +252,7 @@ dependencies = [
  "asc-policy-cedar",
  "asc-policy-repository-sqlite",
  "asc-policy-types",
+ "asc-sandbox-docker",
  "asc-security-events",
  "asc-telemetry",
  "chrono",
@@ -735,6 +736,20 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "asc-sandbox-docker"
+version = "1.2.1"
+dependencies = [
+ "asc-pep-runtime",
+ "asc-sandbox-types",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

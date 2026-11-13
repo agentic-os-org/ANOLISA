@@ -69,6 +69,7 @@ def test_legacy_removal_replaces_v1_runtime_when_v2_artifacts_exist(tmp_path):
         "agent-sec-cli",
         "agent-sec-daemon",
         "agent-sec-daemon-health",
+        "asc-sandbox-docker-guard",
     ):
         (build_dir / "v2/bin" / name).write_text("")
     (build_dir / "linux-sandbox").write_text("")

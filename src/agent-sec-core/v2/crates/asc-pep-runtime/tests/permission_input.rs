@@ -423,7 +423,7 @@ fn bound_alias_retargeting_is_rejected_before_helper_start() {
     let bound = input.prepare(&launch()).unwrap();
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(&second, &alias).unwrap();
-    let error = asc_pep_runtime::SandboxBackend::new(dir.path().join("absent-helper"))
+    let error = asc_pep_runtime::LinuxSandboxBackend::new(dir.path().join("absent-helper"))
         .execute_bound(&bound)
         .unwrap_err();
     assert!(
@@ -556,7 +556,7 @@ impl asc_pep_runtime::AuthorizationClient for Client {
 #[cfg(target_os = "linux")]
 #[test]
 fn fresh_cedar_sources_reach_the_pdp_as_permissions_and_remain_subject_to_policy() {
-    use asc_pep_runtime::{PepRuntime, SandboxBackend, prepare_launch};
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
     let dir = tempfile::tempdir().unwrap();
     let private = dir.path().join("private");
     std::fs::create_dir(&private).unwrap();
@@ -584,7 +584,7 @@ when {{ resource.path == {} || resource.path like {} }};
         agent_type: Some("cosh".into()),
     };
     let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
-    let mut runtime = PepRuntime::new(SandboxBackend::new(dir.path().join("unused-helper")));
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(dir.path().join("unused-helper")));
     let first = PermissionInput::parse(&source).unwrap();
     let (prepared, decision) = runtime
         .authorize(&principal, launch.clone(), &first, &client)
@@ -642,7 +642,7 @@ permit(principal, action == SecCore::Action::"network.use", resource);
 #[cfg(target_os = "linux")]
 #[test]
 fn dynamic_pdp_requests_use_bound_canonical_exclusions() {
-    use asc_pep_runtime::{PepRuntime, SandboxBackend, prepare_launch};
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("real");
     let alias = dir.path().join("alias");
@@ -662,7 +662,7 @@ when {{ resource.path == {} }};"#,
     };
     let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
     let input = PermissionInput::parse(&source).unwrap();
-    let mut runtime = PepRuntime::new(SandboxBackend::new(dir.path().join("unused-helper")));
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(dir.path().join("unused-helper")));
     runtime
         .authorize(&principal, launch.clone(), &input, &client)
         .unwrap();
@@ -717,7 +717,7 @@ when {{ resource.path == {} }};"#,
 #[cfg(target_os = "linux")]
 #[test]
 fn directory_exclusions_survive_pdp_compaction_and_check_hardlinked_descendants() {
-    use asc_pep_runtime::{PepRuntime, SandboxBackend, prepare_launch};
+    use asc_pep_runtime::{LinuxSandboxBackend, PepRuntime, prepare_launch};
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = tempfile::tempdir().unwrap();
@@ -746,7 +746,7 @@ fn directory_exclusions_survive_pdp_compaction_and_check_hardlinked_descendants(
         agent_type: Some("cosh".into()),
     };
     let launch = prepare_launch("/usr/bin/true", vec![], &cwd, BTreeMap::new()).unwrap();
-    let mut runtime = PepRuntime::new(SandboxBackend::new(helper));
+    let mut runtime = PepRuntime::new(LinuxSandboxBackend::new(helper));
     let client = Client::new("permit(principal, action, resource);".into());
     for (action, right) in [
         ("file.read", FileRight::Read),

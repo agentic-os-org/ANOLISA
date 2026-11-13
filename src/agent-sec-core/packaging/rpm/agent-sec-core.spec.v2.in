@@ -305,6 +305,7 @@ fi
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 %attr(0755,root,root) /usr/bin/agent-sec-daemon
 %attr(0755,root,root) /usr/bin/agent-sec-daemon-health
+%attr(0755,root,root) /usr/bin/asc-sandbox-docker-guard
 %attr(0755,root,root) /usr/bin/linux-sandbox
 %{_unitdir}/agent-sec-core.service
 %{_unitdir}/agent-sec-gateway.service

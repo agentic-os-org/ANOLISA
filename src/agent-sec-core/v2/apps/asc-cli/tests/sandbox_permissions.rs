@@ -80,6 +80,14 @@ with os.fdopen(int(sys.argv[4]), 'w') as status:
             capture_output=True, text=True, timeout=20, cwd=root)
         assert result.returncode == 23, (result.stdout, result.stderr)
         assert json.loads(result.stdout) == expected, result.stdout
+    for text in [cedar, json.dumps({'language':'cedar','content':{'text':cedar}})]:
+        source.write_text(text)
+        result = subprocess.run([str(cli), 'sandbox', 'run', '--backend', 'docker',
+            '--image', 'unused:test', '--docker-cli', str(root / 'absent-docker'),
+            '--permissions', str(source), '--', '/usr/bin/true'],
+            capture_output=True, text=True, timeout=20, cwd=root)
+        assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
+        assert 'Cedar inputs require the linux backend' in result.stderr, result.stderr
     for invalid in [b'permit this is broken', b'\xff', b' ' * (4 * 1024 * 1024 + 1)]:
         source.write_bytes(invalid)
         result = subprocess.run([str(cli), 'sandbox', 'run', '--permissions', str(source), '--', '/usr/bin/true'],

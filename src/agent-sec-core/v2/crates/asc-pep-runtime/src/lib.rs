@@ -5,12 +5,41 @@ pub mod permissions;
 pub mod runtime;
 pub mod supervisor;
 
-pub use linux_sandbox::{SandboxBackend, execute, prepare_launch, prepare_path_facts};
+pub use linux_sandbox::{LinuxSandboxBackend, execute, prepare_launch, prepare_path_facts};
 pub use permissions::PermissionInput;
 pub use runtime::{
     ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, FixedPermissions, PepOutcome,
     PepRuntime, PermissionProvider, PreparedInvocation,
 };
+
+/// Enforcement backend selected by the deployment, independent of the PDP flow.
+///
+/// Implementations must fail closed: a restriction they cannot install exactly
+/// is reported as [`PepError::Unsupported`], never approximated.
+pub trait SandboxBackend {
+    /// Probes the restrictions this backend can install on the current host.
+    ///
+    /// # Errors
+    /// Returns an error when the backend is unavailable or its probe is malformed.
+    fn capabilities(&self) -> Result<asc_sandbox_types::BackendCapabilities, PepError>;
+    /// Installs exactly the supplied permissions and runs the pinned invocation.
+    ///
+    /// # Errors
+    /// Rejects malformed input, changed path identities and unsupported
+    /// restrictions; installed execution failures stay in the returned result.
+    fn execute_bound(
+        &self,
+        spec: &asc_sandbox_types::ExecutionSpec,
+    ) -> Result<asc_sandbox_types::ExecutionResult, PepError>;
+    /// Validates backend-specific placement before approval is offered.
+    ///
+    /// # Errors
+    /// Rejects a plan this backend cannot install exactly.
+    fn preflight(&self, spec: &asc_sandbox_types::ExecutionSpec) -> Result<(), PepError> {
+        let _ = spec;
+        Ok(())
+    }
+}
 
 /// Failures before a backend outcome is available.
 #[derive(Debug, thiserror::Error)]

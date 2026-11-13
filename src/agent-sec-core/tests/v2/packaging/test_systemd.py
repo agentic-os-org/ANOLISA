@@ -123,6 +123,7 @@ def test_gateway_stages_unit_drop_in_and_data_plane_files(tmp_path):
         "agent-sec-cli",
         "agent-sec-daemon",
         "agent-sec-daemon-health",
+        "asc-sandbox-docker-guard",
     ):
         (binaries / name).write_text("#!/bin/sh\nexit 0\n")
     staged = tmp_path / "staged"

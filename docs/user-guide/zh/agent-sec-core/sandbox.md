@@ -3,11 +3,11 @@
 [English](../../en/agent-sec-core/sandbox.md)
 
 `agent-sec-cli sandbox run` 根据调用方提供的文件和网络权限限制目标命令及其子进程，
-在本地执行，无需 daemon。调用方选择权限，sandbox 在启动命令前安装这些限制。
+在本地执行，无需 `agent-sec-daemon`。调用方选择权限，sandbox 在启动命令前安装这些限制。
 
 ## 运行要求
 
-按[组件指南](index.md#安装)安装 Rust V2 CLI。此命令要求 Linux、非特权 user namespace，
+按[组件指南](index.md#安装)安装 Rust V2 CLI。默认 Linux 后端要求 Linux、非特权 user namespace，
 以及支持 `--bind-fd`、`--ro-bind-fd`、`--cap-add` 和 `--unshare-user` 的非 setuid 系统
 bubblewrap；支持发行版回移这些功能的版本。静态链接 `linux-sandbox` 须与 `agent-sec-cli`
 安装在同一目录。noexec 规则还要求递归 `mount_setattr` 可用。
@@ -151,6 +151,63 @@ CLI 返回目标退出码；收到信号退出报告时，返回 `128 + signal`�
 主命令结束时清理 sandbox 后代。父进程退出时终止直接 helper 和已建立的隔离进程树。
 bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的安装子进程；这一清理竞态仍是已知限制。
 实现与验证边界见[执行设计](../../../../src/agent-sec-core/docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)。
+
+## Docker 后端（源码 Preview）
+
+可选的 `sandbox run --backend docker --image <pinned-image>` 模式要求 Docker Engine；
+默认 Linux 后端和上述前置条件不变。镜像提供可信基础文件系统，仅挂载明确获准的宿主
+文件或目录；工作目录必须被授权覆盖。deny、noexec 和运行时保留路径会被拒绝，不做近似映射。
+Docker 仅接受 OS permission JSON；Cedar 原文和 Cedar source envelope 必须使用 Linux 后端，
+在调用 Docker 前即被拒绝。
+
+目标程序必须使用容器内的绝对路径；后端显式覆盖镜像 ENTRYPOINT，参数仅使用请求值，
+空参数列表也不会继承镜像 CMD。启动前核验实际 executable、args、工作目录和安全选项，
+拒绝额外挂载（包括镜像声明产生的匿名卷）；清理时一并删除该容器的匿名卷。
+执行身份仍由可信镜像的 USER 决定，不自动映射宿主 UID。结束时要求容器已停止，
+并交叉核验 attach 与容器退出码。
+
+创建时启用 `--interactive`，启动前要求 `OpenStdin=true`；stdin/stdout/stderr 由前台
+attach 转发，支持管道数据、空输入和终端行输入。EOF 会传给目标程序，不分配容器 TTY。
+例如，在获准工作目录内，将 `IMAGE` 设为已缓存且包含 `/bin/cat` 的固定镜像引用，
+使用仅含 allow 规则、无 `/` 根挂载且 `execution.deny_paths` 为空的 `permissions.json`：
+
+```bash
+printf 'hello sandbox\n' | agent-sec-cli sandbox run --backend docker --image "$IMAGE" --permissions permissions.json -- /bin/cat
+```
+
+应原样输出 `hello sandbox` 后退出；不要直接复用上文含 `/` 和 noexec 的 Linux 示例权限。
+
+Docker 挂载要求宿主 root、`CAP_SYS_ADMIN` 和内核 `open_tree`/`move_mount` 支持；
+不自动提权，缺少能力即拒绝（包括通常的 rootless 部署）。源路径不能含符号链接。
+后端逐级打开源对象，在持有的 FD 上核验授权身份，再挂载到 root 管理的
+`/run/asc-sandbox-docker` 私有 staging，保留实时读写；即使启动前原路径被替换，
+仍使用原来获准的对象。staging 禁止向工作负载暴露，且隔离后续挂载传播。
+只读授权使用 `--mount ... readonly,bind-recursive=readonly`，要求 Docker/runtime
+强制递归只读（Linux 5.12+）；启动前核验强制选项，能力不足直接失败，不回退到普通 `:ro`。
+
+`--docker-host` 仅接受本地 `unix:///绝对路径`，默认 `unix:///var/run/docker.sock`。
+后端验证 endpoint 所有权、socket 类型及本地 root dockerd 身份，并核对 daemon 可见的
+staging 对象；不支持远程 daemon 或未经验证的代理。标准 systemd socket activation
+通过 root PID 文件和 dockerd 持有的监听 FD 交叉确认。每次运行使用独立受保护的空
+Docker client 配置，所有调用固定同一 endpoint/config，不继承个人 context、proxy 或
+registry credentials；镜像必须已在该 daemon 缓存，禁止自动 pull。
+
+构建和安装会同时提供 `asc-sandbox-docker-guard`，由 CLI 自动从同目录启动，不设
+setuid、不自动提权；库嵌入方可通过受信任的 `DockerConfig.guard` 指定安装位置。
+guard 在独立进程组中持有 staging/config，创建前登记资源，管道 EOF 表示监督进程
+失联。create 完成后才清理，避免迟到创建；父进程保留前台 attach 的终端和 stdio。
+正常返回也要求 guard 确认容器已删除。清理最多重试 3 次，每次 Docker 调用限时 10 秒；
+create 限时 60 秒，超时或删除无法确认时保留 staging/config 和 `recovery.json`，明确报告
+未知状态。管理员按记录中的 `recovery_argv` 参数删除该容器，确认创建已结束且容器不存在
+后，再卸载记录中的 staging 并清理目录。guard 自身被强杀、宿主故障或 daemon 长期不可达
+仍可能留下资源；不能把这些情况视作清理成功。
+
+网络权限 `off` 映射为 Docker `none`，`full` 映射为 `host`，后者共享宿主网络命名空间。
+Docker 两种网络模式都阻断外部 Unix socket，包括授权目录内的 pathname socket 和宿主
+网络命名空间中的 abstract socket。本地 stream/seqpacket socketpair 保留；datagram pair
+和兼容 ABI 被阻断。Docker seccomp 仅支持原生 x86_64 和 aarch64。拒绝 socket、设备、FIFO
+作为 bind 根，以及 `/run`、`/var/run`、`/var/lib/docker` 目标。只读挂载不等于获准调用 socket
+API。这些限制不消除现有共享文件和硬链接边界。Cosh 授权 Hook 不选择 Docker 模式。
 
 ## 接入策略授权
 

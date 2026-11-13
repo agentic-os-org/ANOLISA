@@ -6,8 +6,8 @@ use asc_daemon_protocol::authorization::{
     OsPermissionSet, ReceiptAck,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, AuthorizationClient, FixedPermissions, PepError, PepRuntime, PermissionInput,
-    PermissionProvider, PreparedInvocation, SandboxBackend, prepare_launch,
+    ApprovalHandler, AuthorizationClient, FixedPermissions, LinuxSandboxBackend, PepError,
+    PepRuntime, PermissionInput, PermissionProvider, PreparedInvocation, prepare_launch,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -93,7 +93,7 @@ fi
     let provider = FixedPermissions(permissions(directory.path()));
     (
         directory,
-        PepRuntime::new(SandboxBackend::new(helper)),
+        PepRuntime::new(LinuxSandboxBackend::new(helper)),
         launch,
         provider,
     )

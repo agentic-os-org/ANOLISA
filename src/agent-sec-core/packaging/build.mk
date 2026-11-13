@@ -70,6 +70,7 @@ build-cli-v2: ## Build V2 Rust CLI and daemon binaries
 	cp -p "$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-cli" \
 		"$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-daemon" \
 		"$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-daemon-health" \
+		"$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/asc-sandbox-docker-guard" \
 		$(V2_BIN_BUILD_DIR)/
 
 .PHONY: setup

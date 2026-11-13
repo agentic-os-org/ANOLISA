@@ -3,13 +3,13 @@
 [中文版](../../zh/agent-sec-core/sandbox.md)
 
 `agent-sec-cli sandbox run` confines a command and its children to caller-supplied
-filesystem and network permissions. It runs locally without a daemon. The caller
+filesystem and network permissions. It runs locally without `agent-sec-daemon`. The caller
 chooses the permissions; the sandbox installs them before starting the command.
 
 ## Requirements
 
 Install the Rust V2 CLI using the [component guide](index.md#installation).
-This command requires Linux, unprivileged user namespaces, and non-setuid system
+The default Linux backend requires Linux, unprivileged user namespaces, and non-setuid system
 bubblewrap with `--bind-fd`, `--ro-bind-fd`, `--cap-add` and `--unshare-user`.
 Distribution backports of these options are supported. The statically linked
 `linux-sandbox` must be installed beside `agent-sec-cli`. A noexec rule also
@@ -201,6 +201,86 @@ bubblewrap initialization, parent termination can leave an installation child
 that has not started the target; this cleanup race remains a known limitation.
 See the [execution design](../../../../src/agent-sec-core/docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)
 for implementation and validation boundaries.
+
+## Docker backend (source Preview)
+
+The opt-in `sandbox run --backend docker --image <pinned-image>` mode requires
+Docker Engine; the default Linux backend and its requirements above are unchanged.
+The image supplies the trusted base filesystem. Only explicitly allowed host
+files/directories are bind-mounted; the working directory must be covered.
+Deny rules, noexec and runtime-owned paths are rejected rather than approximated.
+Docker accepts OS permission JSON only; raw Cedar and Cedar source envelopes
+require the Linux backend and are rejected before invoking Docker.
+
+The target program must be an absolute container path. The backend explicitly
+overrides the image ENTRYPOINT and uses only the requested arguments; an empty
+argument list does not inherit image CMD. Before start it verifies the effective
+executable, args, working directory and security options, rejecting extra mounts
+including image-declared anonymous volumes. Cleanup also removes the container's
+anonymous volumes. The trusted image USER still determines execution identity;
+host UIDs are not automatically mapped. Completion requires a stopped container
+and matching attach/container exit codes.
+
+Creation enables `--interactive`; before start, `OpenStdin=true` is required.
+Foreground attach forwards stdin/stdout/stderr, supporting pipe data, empty input
+and terminal line input. EOF reaches the target; no container TTY is allocated.
+For example, from an allowed working directory, set `IMAGE` to a cached pinned
+image containing `/bin/cat`. Use a `permissions.json` containing only allow rules,
+no `/` root mount and an empty `execution.deny_paths`:
+
+```bash
+printf 'hello sandbox\n' | agent-sec-cli sandbox run --backend docker --image "$IMAGE" --permissions permissions.json -- /bin/cat
+```
+
+It should echo `hello sandbox` unchanged and exit. Do not reuse the Linux example
+permissions above with their `/` grant and noexec restriction.
+
+Docker mounts require host root, `CAP_SYS_ADMIN`, and kernel support for
+`open_tree`/`move_mount`. Missing capabilities are rejected without automatic
+privilege elevation, including typical rootless deployments. Source paths must
+not contain symlinks. The backend opens each component and checks authorization
+identity on the held FD, then publishes the pinned object under root-owned private
+`/run/asc-sandbox-docker` staging. Reads and writes remain live even if the original
+path is replaced before start. Staging is not exposed to workloads and subsequent
+mount propagation is isolated.
+Read-only grants use `--mount ... readonly,bind-recursive=readonly`, requiring
+Docker/runtime enforced recursive read-only support (Linux 5.12+). The force
+option is verified before start; unsupported deployments fail without falling
+back to ordinary `:ro`.
+
+`--docker-host` accepts only a local `unix:///absolute/path`, defaulting to
+`unix:///var/run/docker.sock`. The backend verifies endpoint ownership, socket
+type and local root dockerd identity, and checks the daemon's staging view.
+Remote daemons and unverified proxies are unsupported. Standard systemd socket
+activation is cross-checked against the root-owned PID file and dockerd's held
+listening FD. Each run uses a protected empty Docker client configuration; all
+calls use the same explicit endpoint/config without personal context, proxy or
+registry credentials. Images must already be cached; automatic pull is disabled.
+
+Build/install also delivers `asc-sandbox-docker-guard`, automatically launched
+beside the CLI without setuid or automatic privilege elevation. Library embedders
+can pin its installed path with trusted `DockerConfig.guard`. The guard owns
+staging/config in an independent process group and records ownership before
+create. Pipe EOF signals supervisor loss; cleanup waits for create to settle,
+preventing late creation. The parent retains foreground attach terminal/stdio.
+Normal return also requires confirmed container deletion. Cleanup retries up to
+three times with a 10-second limit per Docker call. Create has a 60-second limit;
+unknown creation/deletion retains staging/config and `recovery.json`, reporting
+an unknown state. Administrators use the record's `recovery_argv`, confirm create
+has settled and the container is absent, then unmount recorded staging paths and
+remove those directories. Killing the guard itself, host failure or a persistently
+unreachable daemon may still leave resources; these are not successful cleanup.
+
+Network permission `off` maps to Docker `none`; `full` maps to `host`, sharing
+the host network namespace.
+Both Docker network modes block external Unix sockets, including pathname
+sockets inside an allowed directory and abstract sockets in the host network
+namespace. Local stream/seqpacket socket pairs remain available; datagram pairs
+and compatibility ABIs are blocked. The Docker seccomp profile supports native
+x86_64 and aarch64 only. Socket/device/FIFO bind roots and `/run`, `/var/run`,
+`/var/lib/docker` targets are rejected. Read-only mounts are not socket API
+permissions. These restrictions do not remove the existing shared-file/hardlink
+boundary. The Docker mode is not selected by the Cosh authorization hook.
 
 ## Use policy authorization
 
