@@ -1183,6 +1183,11 @@ impl GenAIBuilder {
         let mut tool_calls: Vec<MessagePart> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut saw_gemini = false;
+        // Gemini repeats a candidate's parts, calls included, as whole objects
+        // in every chunk. A call is identified by its candidate and part
+        // position; folding by value would merge two genuinely distinct calls
+        // that share name and arguments.
+        let mut call_slots: HashMap<(usize, usize), usize> = HashMap::new();
 
         for chunk in chunks {
             let Some(candidates) = chunk
@@ -1191,7 +1196,7 @@ impl GenAIBuilder {
             else {
                 continue;
             };
-            for candidate in candidates {
+            for (candidate_pos, candidate) in candidates.iter().enumerate() {
                 if let Some(reason) = candidate
                     .get("finishReason")
                     .and_then(|v| v.as_str())
@@ -1207,7 +1212,7 @@ impl GenAIBuilder {
                 else {
                     continue;
                 };
-                for part in parts {
+                for (part_pos, part) in parts.iter().enumerate() {
                     if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                         saw_gemini = true;
                         if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
@@ -1218,7 +1223,7 @@ impl GenAIBuilder {
                     }
                     if let Some(call) = part.get("functionCall") {
                         saw_gemini = true;
-                        tool_calls.push(MessagePart::ToolCall {
+                        let call = MessagePart::ToolCall {
                             id: call.get("id").and_then(|v| v.as_str()).map(str::to_owned),
                             name: call
                                 .get("name")
@@ -1226,7 +1231,14 @@ impl GenAIBuilder {
                                 .unwrap_or_default()
                                 .to_string(),
                             arguments: call.get("args").cloned(),
-                        });
+                        };
+                        if let Some(&existing) = call_slots.get(&(candidate_pos, part_pos)) {
+                            // The same whole call repeated by this chunk.
+                            tool_calls[existing] = call;
+                        } else {
+                            call_slots.insert((candidate_pos, part_pos), tool_calls.len());
+                            tool_calls.push(call);
+                        }
                     }
                 }
             }
@@ -2789,6 +2801,29 @@ mod tests {
             MessagePart::ToolCall { name, arguments, .. }
                 if name == "read_file" && arguments == &Some(serde_json::json!({"path": "/tmp/a.md"}))
         ));
+        assert_eq!(finish.as_deref(), Some("STOP"));
+    }
+
+    /// Gemini repeats a candidate's whole `functionCall` part in every chunk.
+    /// The merger appended each copy, so the drain path described one call
+    /// several times, exactly as the token merger did before it folded the
+    /// repeats. Fold by candidate and part position so two genuinely distinct
+    /// identical calls at different positions stay distinct.
+    #[test]
+    fn test_merge_gemini_sse_chunks_folds_a_repeated_tool_call() {
+        let body = r#"[
+            {"candidates":[{"content":{"parts":[{"text":"calling"},{"functionCall":{"id":"call-1","name":"read_file","args":{"path":"/a"}}}]},"index":0}]},
+            {"candidates":[{"content":{"parts":[{"text":" done"},{"functionCall":{"id":"call-1","name":"read_file","args":{"path":"/a"}}}]},"finishReason":"STOP","index":0}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        let calls = parts
+            .iter()
+            .filter(|part| matches!(part, MessagePart::ToolCall { .. }))
+            .count();
+        assert_eq!(
+            calls, 1,
+            "a call repeated by the stream must be recorded once: {parts:?}"
+        );
         assert_eq!(finish.as_deref(), Some("STOP"));
     }
 
