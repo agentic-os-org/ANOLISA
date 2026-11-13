@@ -344,6 +344,14 @@ async fn run_with_startup(
             return;
         }
     };
+    // The completed catch-up can win select even when shutdown is already ready.
+    if shutdown.is_requested() {
+        report(
+            "agent-sec-daemon: sqlite retention catch-up completed; admission skipped: shutdown requested",
+        );
+        let _ = admitted.send(false);
+        return;
+    }
     let _ = admitted.send(true);
     run_periodic(pass, schedule, report, first_check, cancelled, gate).await;
 }
