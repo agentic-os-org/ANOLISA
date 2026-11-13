@@ -231,7 +231,7 @@ fn preflight_step(
     let on_error = string(&step["on_error"])?;
     require(
         on_error == "report"
-            || (matches!(event, "input.submit" | "tool.before")
+            || (matches!(event, "input.submit" | "tool.before" | "security.violation")
                 && on_error == "block"
                 && adapter_effects.iter().any(|effect| effect == "block"))
             || (event == "tool.after"
@@ -307,7 +307,10 @@ fn check_provider(
 }
 
 fn supported_event(event: &str) -> bool {
-    matches!(event, "input.submit" | "tool.before" | "tool.after")
+    matches!(
+        event,
+        "input.submit" | "tool.before" | "tool.after" | "security.violation"
+    )
 }
 
 fn supported_effect(event: &str, effect: &str) -> bool {
@@ -316,6 +319,7 @@ fn supported_effect(event: &str, effect: &str) -> bool {
         ("input.submit" | "tool.before", "observe" | "block")
             | ("tool.before", "replace_input")
             | ("tool.after", "observe" | "replace_result")
+            | ("security.violation", "observe" | "block")
     )
 }
 

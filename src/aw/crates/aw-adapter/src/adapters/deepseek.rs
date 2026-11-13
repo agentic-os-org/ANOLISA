@@ -9,7 +9,7 @@ use crate::{
 };
 use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep, StepExecution};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, time::Duration};
+use std::{collections::BTreeMap, ffi::OsStr, fs, time::Duration};
 
 pub(crate) struct DeepSeek;
 
@@ -122,8 +122,10 @@ impl Adapter for DeepSeek {
     }
 
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
-        if !matches!(event, "input.submit" | "tool.before" | "tool.after")
-            || native["event"] != event
+        if !matches!(
+            event,
+            "input.submit" | "tool.before" | "tool.after" | "security.violation"
+        ) || native["event"] != event
         {
             return Err("DeepSeek event does not match binding".into());
         }
@@ -144,7 +146,7 @@ impl Adapter for DeepSeek {
             }
         }
         if !native["tool_call"]["input"].is_object()
-            || (event == "tool.after"
+            || (matches!(event, "tool.after" | "security.violation")
                 && (!native["tool_response"].is_object()
                     || !native["tool_response"]["isError"].is_boolean()))
         {
@@ -199,6 +201,14 @@ impl PreparedLaunch for Prepared {
             "callback.mjs",
             include_bytes!("../../native/deepseek-harness/callback.mjs"),
         )?;
+        let final_preload = if events.contains_key("security.violation") {
+            Some(context.files.write(
+                "deepseek-final-preload.mjs",
+                include_bytes!("../../native/deepseek-harness/final-preload.mjs"),
+            )?)
+        } else {
+            None
+        };
         // JSON is a YAML subset. Agent work waits for Hook registration.
         let patch = context.files.write(
             "deepseek.patch.json",
@@ -215,8 +225,24 @@ impl PreparedLaunch for Prepared {
         command
             .environment
             .insert("AW_NATIVE_CONFIG".into(), config.into_os_string());
+        let provider_environment = command.environment.clone();
+        if let Some(preload) = final_preload {
+            let url = reqwest::Url::from_file_path(preload)
+                .map_err(|_| "DeepSeek final preload path is not a file URL")?;
+            let mut options = command
+                .environment
+                .get(OsStr::new("NODE_OPTIONS"))
+                .cloned()
+                .or_else(|| std::env::var_os("NODE_OPTIONS"))
+                .unwrap_or_default();
+            if !options.is_empty() {
+                options.push(" ");
+            }
+            options.push(format!("--import={url}"));
+            command.environment.insert("NODE_OPTIONS".into(), options);
+        }
         Ok(LaunchPlan {
-            provider_environment: command.environment.clone(),
+            provider_environment,
             command,
             events,
             readiness: Some(Readiness {
@@ -234,9 +260,19 @@ fn routes(
     document: &Value,
     steps: &[AdmittedStep],
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
+    if document["spec"]["events"]["security.violation"]["enabled"] == true
+        && !steps.iter().any(|step| step.event == "security.violation")
+    {
+        return Err("DeepSeek final security gate requires a Provider step".into());
+    }
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
-    for event in ["input.submit", "tool.before", "tool.after"] {
+    for event in [
+        "input.submit",
+        "tool.before",
+        "tool.after",
+        "security.violation",
+    ] {
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
         if selected.is_empty() {
             continue;
@@ -325,6 +361,43 @@ mod tests {
         assert_eq!(event["input"]["text"], "inspect this repository");
         assert!(DeepSeek
             .normalize(&binding, "tool.before", &native)
+            .is_err());
+    }
+
+    #[test]
+    fn final_security_check_is_an_independent_route() {
+        let document = json!({"spec":{"execution":{"default_event_budget_ms":1000},
+            "events":{"security.violation":{"enabled":true}}}});
+        assert!(routes(&document, &[]).is_err());
+        let step = AdmittedStep {
+            event: "security.violation".into(),
+            step_id: "final-check".into(),
+            provider: "security".into(),
+            execution: StepExecution::Provider {
+                operation: "check_final_tool_output".into(),
+                effects: vec!["observe".into(), "block".into()],
+            },
+            on_error: "block".into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["*".into()],
+        };
+        let (events, hooks) = routes(&document, &[step]).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(hooks[0]["event"], "security.violation");
+        let binding = NativeContext {
+            target: "dsh".into(),
+            instance_id: "instance".into(),
+            cwd: PathBuf::from("/tmp"),
+        };
+        let mut native = json!({"event":"security.violation","session_id":"session",
+            "invocation_id":"invocation","tool_call":{"id":"call","name":"read_file",
+                "input":{}},"tool_response":{"isError":false,"content":[]}});
+        assert!(DeepSeek
+            .normalize(&binding, "security.violation", &native)
+            .is_ok());
+        native["tool_response"] = Value::Null;
+        assert!(DeepSeek
+            .normalize(&binding, "security.violation", &native)
             .is_err());
     }
 

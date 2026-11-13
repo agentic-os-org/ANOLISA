@@ -1213,6 +1213,10 @@
       "target": "aw-cli/test/deepseek",
       "test": "profile_overlay_blocks_tools_and_releases_binding"
     },
+    "deepseek-final-check": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::deepseek::tests::final_security_check_is_an_independent_route"
+    },
     "submit-deepseek": {
       "target": "aw-adapter/lib/aw_adapter",
       "test": "adapters::deepseek::tests::submission_uses_the_shared_input_contract"
@@ -1895,6 +1899,14 @@
           ],
           "replace_result": [
             "final-replacement"
+          ]
+        },
+        "security.violation": {
+          "observe": [
+            "deepseek-final-check"
+          ],
+          "block": [
+            "deepseek-final-check"
           ]
         }
       },

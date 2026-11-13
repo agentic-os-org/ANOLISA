@@ -7,6 +7,15 @@ callbacks, the local service manages bindings and events, the Host invokes
 Providers, and the Adapter returns results to the Agent. The Agent owns model
 calls, tool scheduling, and permission approval.
 
+DeepSeek Harness adds a launch-scoped plugin for submission and tool events.
+For `security.violation`, the Adapter also installs a Node preload in the Agent
+process. The pinned Agent loop awaits the final Provider decision after native
+result finalization and before Session commit. The preload is removed from
+inherited `NODE_OPTIONS` after registration, and Providers use the original
+launch environment. This path covers the verified headless top-level tool
+delivery on DSH `0.2.1-rc.5`; see [Adapter dispatch](adapters/adapter-dispatch.md#native-startup-evidence)
+for its identity, lifecycle and excluded paths.
+
 Resident SDK support uses the service's owned root and per-task child bindings.
 The root policy stays immutable; each task pins its own cwd and environment,
 keeps replay fences until release, and is reclaimed when its owner exits.

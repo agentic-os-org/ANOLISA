@@ -118,7 +118,8 @@ fn dispatch(
                 {"name":"scan_prompt", "events":["input.submit"], "effects":["observe","block"]},
                 {"name":"scan_user_input", "events":["input.submit"], "effects":["observe","block"]},
                 {"name":"scan_tool_input", "events":["tool.before"], "effects":["observe","block"]},
-                {"name":"scan_tool_output", "events":["tool.after"], "effects":["observe","replace_result"]}
+                {"name":"scan_tool_output", "events":["tool.after"], "effects":["observe","replace_result"]},
+                {"name":"check_final_tool_output", "events":["security.violation"], "effects":["observe","block"]}
             ]),
         )]));
     }
@@ -136,7 +137,7 @@ fn dispatch(
     let event = &value["event"];
     if matches!(
         value["operation"].as_str(),
-        Some("scan_tool_input" | "scan_tool_output")
+        Some("scan_tool_input" | "scan_tool_output" | "check_final_tool_output")
     ) {
         let fields = tool_pii::invoke(value, &config, cli, socket, backend_budget)?;
         remaining_budget(value, timeout, started)?;

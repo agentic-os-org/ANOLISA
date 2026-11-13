@@ -366,7 +366,8 @@ fn offline_methods_and_after_observation_do_not_need_the_daemon() {
             {"name":"scan_prompt","events":["input.submit"],"effects":["observe","block"]},
             {"name":"scan_user_input","events":["input.submit"],"effects":["observe","block"]},
             {"name":"scan_tool_input","events":["tool.before"],"effects":["observe","block"]},
-            {"name":"scan_tool_output","events":["tool.after"],"effects":["observe","replace_result"]}
+            {"name":"scan_tool_output","events":["tool.after"],"effects":["observe","replace_result"]},
+            {"name":"check_final_tool_output","events":["security.violation"],"effects":["observe","block"]}
         ])
     );
     let validated = run(

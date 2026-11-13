@@ -24,7 +24,7 @@ export function apply(ctx) {
     !Array.isArray(config.hooks) ||
     config.hooks.some(
       (hook) =>
-        !["input.submit", "tool.before", "tool.after"].includes(hook.event) ||
+        !["input.submit", "tool.before", "tool.after", "security.violation"].includes(hook.event) ||
         !hook.step ||
         !["block", "report"].includes(hook.on_error) ||
         !Number.isInteger(hook.budget_ms) ||
@@ -36,6 +36,10 @@ export function apply(ctx) {
   const before = config.hooks.filter((hook) => hook.event === "tool.before");
   const after = config.hooks.filter((hook) => hook.event === "tool.after");
   const submit = config.hooks.filter((hook) => hook.event === "input.submit");
+  const final = config.hooks.filter((hook) => hook.event === "security.violation");
+  const finalGate = Symbol.for("aw.deepseek.finalGate");
+  if (final.length && globalThis[Symbol.for("aw.deepseek.finalPatched")] !== true)
+    throw Error("AW final result gate was not installed before DSH Agent startup");
   if (
     config.replacement_step != null &&
     after.at(-1)?.step !== config.replacement_step
@@ -43,6 +47,7 @@ export function apply(ctx) {
     throw Error("AW replacement must be the final after step");
   const callback = transport(config);
   const active = new Map();
+  const completed = new WeakMap();
   const disposers = [];
   const evaluate = async (routes, payload, signal) => {
     for (const hook of routes) {
@@ -179,14 +184,41 @@ export function apply(ctx) {
       { prepend: true },
     ),
   );
-  disposers.push(
-    ctx.on("tools/result", (exec) => {
-      active.delete(exec.token);
-    }),
-  );
+  // shortcut: observers see raw results, upgrade when DSH has an awaited final Hook.
+  disposers.push(ctx.on("tools/result", (exec, result) => {
+    const record = active.get(exec.token);
+    active.delete(exec.token);
+    if (final.length && record) completed.set(result, record);
+  }));
+  if (final.length) {
+    globalThis[finalGate] = async (exec, result) => {
+      const record = completed.get(result);
+      completed.delete(result);
+      const denied = (reason) => ({
+        isError: true,
+        content: [{ type: "text", text: "AW withheld the final tool result" }],
+        error: { message: reason },
+      });
+      if (!record) return denied("AW final result identity was not verified");
+      try {
+        const directive = await evaluate(final, {
+          ...record.payload,
+          event: "security.violation",
+          tool_response: result,
+        }, exec.signal);
+        return directive.block ? denied("AW final result security check blocked the result") : result;
+      } catch (error) {
+        process.stderr.write(`AW final result gate: ${error.message}\n`);
+        return denied("AW final result security check failed");
+      }
+    };
+  }
   ctx.effect(() => () => {
     for (const dispose of disposers.reverse()) dispose();
     active.clear();
+    if (final.length) globalThis[finalGate] = async () => {
+      throw Error("AW final result gate was disposed");
+    };
     callback.dispose();
   });
   const temporary = `${config.ready_path}.${process.pid}.tmp`;

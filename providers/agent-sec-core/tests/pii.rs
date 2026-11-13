@@ -83,6 +83,27 @@ fn tool_input_and_output_distinguish_pass_risk_and_backend_error() {
 }
 
 #[test]
+fn final_tool_output_blocks_sensitive_finalized_content() {
+    for sensitive in [false, true] {
+        let d = support::Directory::new(json!({"pii":true}));
+        let mut req = request(true);
+        req["operation"] = json!("check_final_tool_output");
+        req["allowed_effects"] = json!(["observe", "block"]);
+        req["event"]["name"] = json!("security.violation");
+        req["event"]["agent"]["adapter"] = json!("deepseek-harness");
+        if sensitive {
+            req["event"]["tool"]["result"]["content"][0]["text"] = json!("SENSITIVE");
+        }
+        let response = run(req, &d);
+        assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["effects"][0]["type"],
+            if sensitive { "block" } else { "observe" }
+        );
+    }
+}
+
+#[test]
 fn retained_sensitive_fields_and_unsupported_slots_stop_result_delivery() {
     for shape in ["missing", "multiple", "stderr", "metadata"] {
         let d = support::Directory::new(json!({"pii":true}));

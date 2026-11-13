@@ -32,6 +32,9 @@ CASES = [
     "pii-clean",
     "pii-input-deny",
     "pii-output-replace",
+    "final-pii-deny",
+    "final-pii-replace",
+    "final-pii-error",
     "strict-output-rejected",
     "submit-allow",
     "submit-deny",
@@ -115,11 +118,13 @@ if 'scan-prompt' in sys.argv:
   'layers_failed':[],'layer_results':[{{'layer':'rule_engine'}}]}}))
  sys.exit(0)
 if 'scan-pii' in sys.argv:
+ with (pathlib.Path(__file__).parent/'scanner-node-options.jsonl').open('a') as output:
+  output.write(json.dumps(os.environ.get('NODE_OPTIONS'))+'\\n')
  text=sys.stdin.read()
  source=sys.argv[sys.argv.index('--source')+1]
  with (pathlib.Path(__file__).parent/'pii-scanned.jsonl').open('a') as output:
   output.write(json.dumps({{'source':source,'text':text}})+'\\n')
- if mode=='pii-backend-error' and source=='tool_output': sys.exit(7)
+ if mode in ('pii-backend-error','final-pii-error') and source=='tool_output': sys.exit(7)
  print(json.dumps({{'ok':True,'verdict':'deny' if {SECRET!r} in text else 'pass',
   'summary':{{'source':source,'truncated':False,'bytes_scanned':len(text.encode())}}}}))
  sys.exit(0)
@@ -197,7 +202,7 @@ raise SystemExit(result.returncode)
         "id": "compress", "provider": "tokenless", "operation": "post_tool",
         "effects": ["replace_result"], "on_error": "report",
     }]
-    if case.startswith("pii-"):
+    if case.startswith("pii-") or case == "final-pii-replace":
         after = [{
             "id": "pii-output", "provider": "security", "operation": "scan_tool_output",
             "effects": ["observe", "replace_result"], "on_error": "report",
@@ -208,6 +213,12 @@ raise SystemExit(result.returncode)
         "tool.before": {"enabled": True, "steps": before},
         "tool.after": {"enabled": True, "steps": after},
     }
+    if case.startswith("final-pii-"):
+        events["security.violation"] = {"enabled": True, "steps": [{
+            "id": "final-check", "provider": "security",
+            "operation": "check_final_tool_output",
+            "effects": ["observe", "block"], "on_error": "block",
+        }]}
     if case.startswith("submit-"):
         events["input.submit"] = {"enabled": True, "steps": [{
             "id": "prompt", "provider": "security", "operation": "scan_prompt",
@@ -252,7 +263,7 @@ raise SystemExit(result.returncode)
                      **({"prompt": {"mode": "block", "scan_mode": "fast"}}
                         if case.startswith("submit-") else {}),
                      **({"pii": {"input_mode": "block", "output_mode": "replace_result"}}
-                        if case.startswith("pii-") else {})},
+                        if case.startswith("pii-") or case.startswith("final-pii-") else {})},
                 ),
                 "tokenless": provider(
                     [
@@ -333,6 +344,20 @@ def verify(state: Path, case: str, stdout: str) -> None:
     elif case == "pii-clean":
         assert not results[0]["result"]["isError"]
         assert results[0]["result"]["content"][0]["text"] == results[0]["result"]["value"]
+    elif case.startswith("final-pii-"):
+        models = rows(state / "model.jsonl")
+        if case == "final-pii-deny":
+            assert rows(state / "node-child-options.jsonl") == ["--no-warnings"]
+            provider_options = rows(state / "scanner-node-options.jsonl")
+            assert provider_options and all(option == "--no-warnings" for option in provider_options)
+        assert SECRET not in json.dumps(models), "finalized secret reached model"
+        assert SECRET not in stdout, "finalized secret reached user output"
+        assert "AW_NATIVE_DONE" in stdout
+        if case in {"final-pii-deny", "final-pii-error"}:
+            assert "AW withheld the final tool result" in json.dumps(models)
+        else:
+            assert "content withheld" in json.dumps(models)
+            assert "native finalizer" in json.dumps(models)
     elif case.startswith("retry-"):
         assert len(scanned) == 2 and scanned[0] == "git status", scanned
         assert "TOKENLESS_AGENT_ID=dsh" in scanned[1], scanned
@@ -404,6 +429,8 @@ def main() -> None:
                     "TOKENLESS_SLS_ENABLED": "0",
                     "PATH": str(state / "bin") + os.pathsep + os.environ["PATH"],
                 }
+                if case == "final-pii-deny":
+                    env["NODE_OPTIONS"] = "--no-warnings"
                 try:
                     code, out, err = call(
                         [str(args.bin / "aw"), "run", "--config", str(config), "--agent", "dsh"],

@@ -40,10 +40,10 @@ Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查�
 | `providers.<id>.config` | 结构化 Provider 必填的私有 JSON 对象；原生 Hook 必填空对象；布尔 Hook 省略或填空对象 |
 | `events.<name>.enabled` | 已声明事件必填布尔值；省略事件等同关闭 |
 | `events.<name>.required` | 默认 `false`；关闭事件不能标为必需 |
-| `events.<name>.budget_ms` | 可选正整数，覆盖默认事件预算；嵌套 guard 同时共用父事件剩余预算 |
+| `events.<name>.budget_ms` | 可选正整数，覆盖默认事件预算 |
 | `events.<name>.steps` | 必填有序数组；空数组不调用 Provider |
 | `events.tool.before.match.tools`、`events.tool.after.match.tools` | 可选非空选择器数组；省略表示全部原生工具，`['*']` 不与精确选择器混用 |
-| `events.tool.before.guard` | 可选引用已声明的 `security.violation`，before 启用时被引用事件也须启用 |
+| `events.tool.before.guard` | 可解析并校验对 `security.violation` 的引用；当前运行时准入拒绝，配置中请勿设置 |
 | `steps[].id`、`steps[].enabled` | ID 在事件内唯一；enabled 默认 `true` |
 | `steps[].provider` | 已声明的 Provider ID，协议必须与步骤形态匹配 |
 | `steps[].match.tools` | 工具前后步骤可填的工具选择器数组；与事件选择器取交集；省略表示全部工具 |
@@ -136,15 +136,17 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 包括可选原因和提前事件关闭。这不开放原生批准或输入改写。
 
 当前运行时准入提交前观察/阻断、工具前 `observe`/`block`/`replace_input`、工具后 `observe` 或唯一且最后的结构化
-`replace_result`，以及这两个点位的原生步骤。布尔/原生步骤不能请求结构化输入或结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
+`replace_result`，以及这些点位的原生步骤。Adapter 提供经检查的交付边界时，
+`security.violation` 支持最终 `observe` 或 `block` 步骤。布尔/原生步骤不能请求结构化输入或结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
 Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 工厂均有启动 Adapter；
 已验证基线、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择
 
-配置识别以下 16 个名称。当前公共 Provider 只派发 `tool.before` 和 `tool.after`，
-其余 14 个名称为预留词汇。实现状态见[16 Hook 概览](../../../user-guide/zh/aw/capabilities.md#16-个通用-hook)。
+配置识别以下 16 个名称。所选 Adapter 支持时，当前公共 Provider 派发
+`input.submit`、`tool.before`、`tool.after` 和 `security.violation`；其余 12 个名称
+为预留词汇。实现状态见[16 Hook 概览](../../../user-guide/zh/aw/capabilities.md#16-个通用-hook)。
 各 Adapter 的效果支持见
 [能力矩阵](../../../user-guide/zh/aw/capabilities.md#hook-支持矩阵)。
 
@@ -164,22 +166,24 @@ Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 Agen
 | `model.before_request` | 模型请求到达已验证的发送边界 |
 | `runtime.observed` | 可信来源登记运行实例 |
 | `runtime.exited` | 可信来源观测根运行实例退出 |
-| `security.violation` | AW 工具前主动末尾检查的暂名 |
+| `security.violation` | 已验证的 DeepSeek Harness Agent loop 工具最终结果检查 |
 | `coverage.changed` | 已观测接入覆盖发生变化 |
 
-预留的 `security.violation` 设计通过启用的 `tool.before` 的 guard 执行；当前
-运行时拒绝 guard。该设计检查最终候选，
-允许 `observe`/`block`，不修改参数。它不是第二个原生 Hook，也不保证排在全部
-第三方 Hook 之后。检查后参数再次改变时，实际执行边界必须重新检查。
+DeepSeek Harness 将独立的 `security.violation` 事件映射到 `finalizeContent` 后、
+Session 提交前的 Agent loop 结果，支持 `observe`/`block`；结果替换仍由
+`tool.after` 执行。运行时仍拒绝 `events.tool.before.guard` 引用。其他 Adapter
+需要验证自己的结果边界后才能启用该事件。
 
 运行时准入支持 `input.submit` 的观察/阻断、`tool.before` 的观察/阻断/输入替换，
-以及 `tool.after` 的观察/结果替换。`replace_input` 步骤必须排在首个适用的 before 位置，
+`tool.after` 的观察/结果替换，以及 DeepSeek Harness `security.violation` 的观察/阻断。
+`replace_input` 步骤必须排在首个适用的 before 位置，
 只声明该效果，且整个 before 链使用 `on_error: block`。后续检查接收候选输入，
 最后一个成功回调交付改写，原生授权继续生效。`ask` 保留在 before 步骤中，
 启用步骤请求它时拒绝配置。显式关闭的 before 步骤可以保留 `ask` 供后续编辑，
 不因此获得审批能力。宿主原生审批不受影响。
 
-`on_error: block` 仅用于执行前的 `tool.before` 或 guard；`withhold_result`
+`on_error: block` 可用于 `input.submit`、`tool.before` 及经验证的 DeepSeek Harness
+`security.violation` 结果边界；`withhold_result`
 仅用于工具后；`report` 记录失败后继续。禁止原结果交付需要已验证的模型消费
 边界，只修改历史记录不足以满足要求。必需的安全隐藏不能使用 `report`。
 服务在准入时拒绝尚不能落实的效果与失败动作。普通 Qoder SDK 与 QwenPaw resident 启动

@@ -2,48 +2,122 @@
 
 [English](../../../en/aw/agents/deepseek-harness.md)
 
-Linux 下已用 DeepSeek Harness 0.2.1-rc.5 的 headless CLI 验证用户输入与工具 Hook。
-安装 DS、AW sec-core Provider 和 CLI，启动 sec-core，并在 `DSH_HOME` 中保留
-模型、凭据和原生权限配置。AW 在本次启动时通过补丁加载插件，不修改 DSH 配置文件。
-AW 读取实际 DS 版本，不按版本或 profile 名称限制 Agent 启动；其他组合需按
-[原生验收](../validation.md)确认工具调用的实际采用。
+DeepSeek Harness 通过 `aw run` 使用一份 AW 配置接入 Provider。Adapter 把 DSH 的输入和
+工具回调转换为 AW 事件；Provider 根据事件内容返回观察、阻断或结果替换决定。
+模型、凭据、工具权限及 profile 仍由 DSH 配置。当前在 Linux、DSH 0.2.1-rc.5 和
+Node 24.15.0 上验证了 headless 的实际调用。
 
-从 `src/aw` 目录出发，替换
-[`aw.deepseek.yaml`](../../../../../src/aw/crates/aw-service/examples/aw.deepseek.yaml)
-中的可执行文件和 socket 绝对路径，然后运行：
+## 准备与配置
+
+先按[接入教程](../integration.md)构建 AW，安装并初始化 DSH，在 `DSH_HOME` 中配置模型
+和凭据。准备一个实现 [`aw-provider/v1alpha1`](../providers/protocol.md) 的 Provider。
+仓库的[完整示例](../../../../../src/aw/crates/aw-service/examples/aw.deepseek.yaml)使用
+sec-core；沿用示例时须替换 Provider、CLI 和 socket 路径，并按
+[sec-core 接入说明](../providers/sec-core.md)启动后端。也可以使用自己的 Provider。
+
+从仓库的 `src/aw` 目录复制示例：
 
 ```bash
-target/debug/aw run --config crates/aw-service/examples/aw.deepseek.yaml --agent dsh -- "检查这个仓库"
+cp crates/aw-service/examples/aw.deepseek.yaml ./aw.yaml
 ```
 
-示例将任务文本作为 headless 的应用参数传入。其他业务 profile 可替换 `argv`
-中的 `headless`，并使用该 profile 的原生应用参数。`aw run` 等待插件就绪，DS 的
-Agent loop 在 Hook 注册后才处理工具工作，进程退出后释放绑定。示例与 Qoder SDK、
-QwenPaw 使用同一 sec-core Provider 合同：模型请求前检查用户文本中的提示词注入
-和 PII；工具执行前检查参数中的 PII 和 `execute_shell_command` 命令；工具完成后
-检查结果中的 PII。
-接入其他可执行代码的工具时，同时更新
-`providers.security.config.tools` 和 `scan-code` 选择器。被拒绝的调用不会执行。
-示例的输出检查使用 `on_error: report`。DS 在 `tools/post-execute` 之后还会执行
-工具的 `finalizeContent`，此时追加的文本未经过 AW 扫描，可能进入模型。
-DS 0.2.1-rc.5 在最终处理后没有可写 Hook，因此 Adapter 在准入阶段拒绝
-`withhold_result`。需要严格检查全部模型可见工具输出的业务暂不适用此接入。
+把 `spec.agents.dsh.argv` 中的可执行文件改为实际 DSH 路径，并选择业务使用的 profile。示例选用 `headless`；`aw run` 后面的任务文本会作为该 profile 的应用参数传入。
 
-已验证的原生边界是 `agent/pre-step`、`tools/pre-execute`、`tools.guard` 和
-`tools/post-execute`。`input.submit` 检查待提交用户消息中的文本块；配置该检查后，
-含非文本内容的提交会被拒绝。拒绝的轮次不会发起模型请求。DS 模型配置和权限仍由
-DS 管理。
+使用其他 Provider 时，在同一份 `aw.yaml` 的 `spec` 下替换 `providers` 和 `events`。
+下面的操作名只是配置位置示例，须改成该 Provider 在 `describe` 中声明的名称；
+`config` 也须填写其实际设置。
 
-AW 配置词汇识别 16 个 Hook 名称。公共 Provider 执行链目前支持 `input.submit`、
-`tool.before` 和 `tool.after`，此 Adapter 将这三个事件映射到 DSH 插件。其余名称
-需要先定义 AW 公共 Provider 执行与效果合同，并由 Adapter 验证相应原生边界，
-才能在 DSH 上启用。DSH 的生命周期通知本身不能形成策略决策及其生效保证。
+```yaml
+providers:
+  policy:
+    protocol: aw-provider/v1alpha1
+    transport:
+      type: stdio
+      location: agent
+      argv: [/absolute/path/to/provider]
+    timeout_ms: 4500
+    max_output_bytes: 4096
+    config: {}
+events:
+  input.submit:
+    enabled: true
+    required: true
+    steps:
+      - id: check-input
+        provider: policy
+        operation: check_input
+        effects: [observe, block]
+        on_error: block
+  tool.before:
+    enabled: true
+    required: true
+    steps:
+      - id: check-tool
+        provider: policy
+        operation: check_tool
+        effects: [observe, block]
+        on_error: block
+  tool.after:
+    enabled: true
+    required: true
+    steps:
+      - id: transform-result
+        provider: policy
+        operation: transform_result
+        effects: [observe, replace_result]
+        on_error: report
+  security.violation:
+    enabled: true
+    required: true
+    steps:
+      - id: check-final
+        provider: policy
+        operation: check_final
+        effects: [observe, block]
+        on_error: block
+```
 
-当前自动化的真实工具调用
-验收覆盖 headless；Web、SDK 和 ACP 已验证插件就绪，尚未完成工具调用验收。
-自定义 profile 也需验证实际工具调用。
-DS 面向模型的 `skill` 工具经过 `tool.before`，其参数只含 Skill 名称；具体对象由
-工具内部解析。用户显式调用 `/skill` 时，DS 还会在 `agent/pre-step` 直接注入内容。
-目前这两条路径都未向 AW 提供解析后的 Skill 对象，因此 Adapter 会在准入阶段
-拒绝 `check_skill` 步骤。工具结果文本替换仅支持成功的根调用单文本块，且保留的
-value 和元数据必须安全；原生 value 替换和嵌套程序调用结果保留原生内容。
+AW 启动时调用 Provider 的 `describe` 和 `validate_config`，核对操作、事件与效果。运行时每个步骤接收标准化事件并返回候选效果；Adapter 再把决定应用到 DSH：
+
+| AW 事件 | DSH 接点 | Provider 决定的效果 |
+| --- | --- | --- |
+| `input.submit` | `agent/pre-step` | 检查本次提交的用户文本；`block` 拒绝该次提交 |
+| `tool.before` | `tools/pre-execute` | 检查工具名和参数；`block` 阻止执行 |
+| `tool.after` | `tools/post-execute` | 观察工具结果，或用 `replace_result` 替换可采用的文本 |
+| `security.violation` | 最终处理后、顶层 Session 提交前 | 检查最终结果；`block` 暂扣交付 |
+
+需要最终结果阻断时，Provider 应检查 `security.violation` 收到的完整结果并在违规时
+返回 `block`；`on_error: block` 使检查故障也暂扣结果。`tool.after` 的替换只适用于
+成功的根调用单文本结果。DSH 的 `finalizeContent` 可能在该事件之后继续修改内容，
+因此最终检查使用独立的 `security.violation` 步骤。
+
+DSH 插件还注册原生 `tools.guard`：它在执行前同步复核 `tool.before` 已得到的决定，
+阻止其他插件绕过前置回调后放行工具，不会再次调用 Provider。AW 的
+`events.tool.before.guard` 引用字段会被运行时准入拒绝，这里无需设置。
+
+## 运行与核对
+
+在 `src/aw` 目录运行：
+
+```bash
+target/debug/aw validate --config ./aw.yaml
+target/debug/aw run --config ./aw.yaml --agent dsh -- "Review this repository"
+target/debug/aw status --config ./aw.yaml
+```
+
+`validate` 检查配置；`run` 还会完成 Provider 准入、插件注册及实际 Hook 调用。
+验证策略时分别触发允许、工具前阻断、工具后替换和最终结果阻断：被拒绝的工具
+不应执行；headless 顶层最终结果被阻断时，模型和 CLI 只接收暂扣错误结果。
+需要停止按需启动的 AW 服务时运行 `target/debug/aw stop --config ./aw.yaml`。
+
+## 适用范围
+
+启用 `security.violation` 时，Adapter 检查已发布的 DSH 0.2.1-rc.5 Agent loop 构建；
+构建不匹配会阻止启动。AW 不按版本或 profile 名称限制普通入口。Web、SDK、ACP 和
+自定义 profile 已有插件就绪检查，实际输入、工具调用及最终交付须按
+[原生验收](../validation.md)逐一确认。
+
+最终检查覆盖已验证的 headless 顶层模型、Session 和 CLI 交付。嵌套/PTC 结果及
+直接调用 `ToolRuntime.execute` 的消费者不经过该提交点；同进程的 `tools/result`
+观察插件会在终检前看到原始结果。DSH 的 `skill` 工具只向 Hook 提供名称，无法提供
+解析后的 Skill 对象，`check_skill` 步骤会在准入时被拒绝。

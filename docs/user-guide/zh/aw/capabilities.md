@@ -9,17 +9,17 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 ✓ 已声明且有契约测试覆盖，× 尚不支持。结果替换限于获准的文本槽，保留原生回执及失败状态。
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
@@ -60,7 +60,7 @@ Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用
 | `model.before_request` | 规划中 |
 | `runtime.observed` | 规划中 |
 | `runtime.exited` | 规划中 |
-| `security.violation` | 规划中 |
+| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5 工具最终结果边界，支持观察和阻断 |
 | `coverage.changed` | 规划中 |
 
 ## Skill 校验
@@ -126,7 +126,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 - AgentScope 2.0.6+ 的 tool.after 可配置 `withhold_result`：严格检查失败时在中间件链末端以错误态占位结果替换未检查原文，其余 after Hook 仍观察原始结果；仅在桥支持结果替换时准入。
 - Pi 受管 tool.after 配置 `on_error: report` 时，Provider 或传输故障保留已检查的原始结果，同一会话可继续下一次 prompt；before 故障、tool.after 的 `block`/`withhold_result` 故障、取消、身份与清理失败仍停止任务。输入拒绝及 block 输入检查故障只拒绝该次 prompt，清理后允许继续提交。
 - Claude SDK resident 的 `tool.after` 配置 `on_error: report` 时，已审计且可恢复的 Provider 故障保留原始结果并继续模型调用。范围包括原生 HTTP MCP 的文本及 `structuredContent` 结果、Bash 等内置工具；受管 SDK MCP 保留既有恢复行为。回调排空后，同一客户端可继续下一轮任务。身份/scope 失效、取消、生命周期/清理失败、before-Hook 故障、非法原生响应、未知传输详情及审计失败仍停止任务。`on_error: block` 与原生安全拒绝保留阻断语义。可恢复类别见[常驻部署](../../../developer-guide/zh/aw/deployment/resident.md)。后置检查无法撤销已执行工具。
-- 当前公共 Provider Hook 为上表两个事件。其余 14 个事件名、通用审批、输入替换、guard、Schema/BeforeModel 和 Retrieve 接入尚未开放。
+- 当前公共 Provider 执行链支持 `input.submit`、`tool.before`、`tool.after` 和 `security.violation`，具体以所选 Adapter 的能力为准。其余 12 个事件名、通用审批、guard、Schema/BeforeModel 和 Retrieve 接入尚未开放；输入替换仅在上表列出的 Adapter 与效果范围内可用。
 - AW 通过原生 Hook 执行策略，OS 沙箱隔离需另行部署。
 
 矩阵由[回归清单](../../../../src/aw/tests/regression-matrix.json)生成。[原生验收清单](../../../../src/aw/tests/native-matrix.json)记录固定版本及验证范围，操作方法见[贡献指南](../../../../src/aw/CONTRIBUTING_zh.md)。

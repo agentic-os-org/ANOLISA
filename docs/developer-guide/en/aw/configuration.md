@@ -47,10 +47,10 @@ All fields below are inside `spec` unless stated otherwise.
 | `providers.<id>.config` | Required opaque JSON object for structured Providers; native Hooks require an empty object; boolean Hooks omit it or use an empty object |
 | `events.<name>.enabled` | Required boolean for a declared event; omitted events are disabled |
 | `events.<name>.required` | Defaults to `false`; a disabled event cannot be required |
-| `events.<name>.budget_ms` | Optional positive override of the default event budget; a nested guard also shares the parent remaining budget |
+| `events.<name>.budget_ms` | Optional positive override of the default event budget |
 | `events.<name>.steps` | Required ordered array; an empty array invokes no Provider |
 | `events.tool.before.match.tools`, `events.tool.after.match.tools` | Optional nonempty selector array; omitted means all native tools; `['*']` cannot be mixed with exact selectors |
-| `events.tool.before.guard` | Optional reference to a declared `security.violation` event, enabled when this before event is enabled |
+| `events.tool.before.guard` | Parsed and checked as a `security.violation` reference; currently rejected by runtime admission, so omit it from configurations |
 | `steps[].id`, `steps[].enabled` | ID unique within its event; enabled defaults to `true` |
 | `steps[].provider` | Declared Provider ID whose protocol must match the step form |
 | `steps[].match.tools` | Optional tool selector array for a tool-before/after step; intersects the event selector; omitted means all tools |
@@ -166,7 +166,8 @@ native approvals or input rewrites.
 Runtime currently admits `input.submit` observation/blocking, `tool.before` with
 `observe`/`block`/`replace_input`, and `tool.after`
 with `observe` or a single final structured `replace_result`, plus native steps
-at these points. Boolean/native steps cannot request structured input or result replacement. Qoder CLI maps them to
+at these points. `security.violation` admits a final `observe` or `block` step
+where an Adapter provides a checked delivery boundary. Boolean/native steps cannot request structured input or result replacement. Qoder CLI maps them to
 `PreToolUse` and successful `PostToolUse`; failed tools are not yet connected.
 Other recognized events, guards and stronger execution guarantees
 are not runtime support. Qoder, Qoder SDK, OpenClaw, QwenPaw, Hermes, Pi, Claude SDK and explicit AgentScope factories have launch Adapters;
@@ -176,7 +177,8 @@ after-event coverage are listed in the [native Agent reference](native-agents.md
 ## Events, effects and tool selection
 
 The configuration recognizes these 16 names. Public Provider dispatch currently
-covers only `tool.before` and `tool.after`; the other fourteen names are reserved.
+covers `input.submit`, `tool.before`, `tool.after` and `security.violation` where
+the selected Adapter supports them; the other twelve names remain reserved.
 Implementation status is in the [16-Hook overview](../../../user-guide/en/aw/capabilities.md#16-common-hooks).
 See the [capability matrix](../../../user-guide/en/aw/capabilities.md#hook-support-matrix)
 for Adapter effect support.
@@ -197,18 +199,18 @@ for Adapter effect support.
 | `model.before_request` | Model request at a verified sending boundary |
 | `runtime.observed` | Trusted runtime registration |
 | `runtime.exited` | Trusted root runtime exit observation |
-| `security.violation` | Provisional name for AW's active, final internal tool-before check |
+| `security.violation` | Final tool-result check for the verified DeepSeek Harness Agent loop |
 | `coverage.changed` | Change in observed integration coverage |
 
-The reserved `security.violation` design runs through the guard of an enabled
-`tool.before`; the current runtime rejects guards.
-It inspects the final candidate and permits `observe`/`block`, without changing
-parameters. It is not a second native Hook or a promise to run after every
-third-party Hook. Parameter changes after the check require another check at
-the actual enforcement boundary.
+DeepSeek Harness maps an independent `security.violation` event to the
+Agent-loop result after `finalizeContent` and before Session commit. It permits
+`observe`/`block` and leaves result replacement to `tool.after`. The optional
+`events.tool.before.guard` reference remains unsupported by runtime admission.
+Other Adapters require their own verified result boundary before enabling this event.
 
 Runtime admission supports `input.submit` observation/blocking, `tool.before`
-observation/blocking/input replacement, and `tool.after` observation/result replacement.
+observation/blocking/input replacement, `tool.after` observation/result replacement,
+and DeepSeek Harness `security.violation` observation/blocking.
 A `replace_input` step must be the first applicable before step, declare only
 that effect, and use fail-closed (`on_error: block`) actions throughout the before
 chain. Later checks receive the candidate input; only the final successful
@@ -217,7 +219,8 @@ callback publishes it. Native authorization remains independent.
 An explicitly disabled before step can retain `ask` for future editing, without
 acquiring approval capability. Native host approval is unaffected.
 
-`on_error: block` is valid only before execution (`tool.before` or the guard).
+`on_error: block` is valid for `input.submit`, `tool.before`, and the verified
+DeepSeek Harness `security.violation` result boundary.
 `withhold_result` is valid only after a tool. `report` records a failure and
 continues. Withholding requires a verified model-consumption boundary; replacing
 a history entry is insufficient. Required redaction must not use `report`.

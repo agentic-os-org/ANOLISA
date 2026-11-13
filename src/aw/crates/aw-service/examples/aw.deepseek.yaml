@@ -73,3 +73,12 @@ spec:
           operation: scan_tool_output
           effects: [observe, replace_result]
           on_error: report
+    security.violation:
+      enabled: true
+      required: true
+      steps:
+        - id: final-pii
+          provider: security
+          operation: check_final_tool_output
+          effects: [observe, block]
+          on_error: block

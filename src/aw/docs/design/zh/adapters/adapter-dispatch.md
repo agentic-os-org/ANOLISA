@@ -18,6 +18,12 @@ CLI 与服务共用这个内部库；参数解析、RPC、信号和启动目录�
 限制，之后才启动或复用服务。启动器生成私有接线文件、绑定实例、写入带适配器标识的
 回调绑定，然后以前台方式启动 Agent。Provider 使用适配器固定的启动环境。
 
+DeepSeek Harness Adapter 通过原生 `--patch` 加载本次启动专属的插件与回调文件。
+配置 `security.violation` 时，还会在 Agent 启动前将 Node 预加载加入
+`NODE_OPTIONS`。预加载注册进程级模块加载 Hook，校验已发布 Agent loop 的源码
+摘要及最终结果锚点。注册后仅移除自己追加的 `NODE_OPTIONS` 参数，工具启动的
+Node 子进程保留用户原有选项；固定的 Provider 环境也不包含 AW 预加载。
+
 退出或失败时，启动器释放自身实例、执行适配器清理并删除本次启动目录。适配器负责
 目录外临时文件的回退，保留已有 profile 数据。共享 daemon 生命周期独立。持久原生
 安装是显式的适配器操作；Qoder 不需要该操作，调用 `install` 会明确拒绝。版本探测
@@ -49,6 +55,19 @@ CLI 与服务共用这个内部库；参数解析、RPC、信号和启动目录�
 `aw-exec` 持有前台进程期间，有界检查线程验证回执。证据缺失或非法时停止所属 Agent
 进程组并报告失败；进程成功退出本身不能证明 Hook 已就绪。线程结束后才释放实例和
 清理文件。Qoder 保留现有命令 Hook 注册方式，不需要插件启动回执。
+
+DeepSeek 回执证明插件已注册。最终结果防护还要求预加载在 Agent 开始工作前
+完成指定 Agent loop 构建的插桩；构建或锚点变化、插桩缺失均使启动失败。
+顶层模型工具调用中，插件通过 `WeakMap` 将执行 token 与原生结果关联；原生
+`finalize`/`finish` 完成后、Session 提交前，Agent loop 等待进程级最终检查。
+关联缺失、Provider 阻断或终检失败会交付暂扣错误结果。插件销毁时将全局检查
+替换为拒绝函数；进程终止与私有启动文件清理由公共启动器负责。
+
+该检查覆盖 DSH `0.2.1-rc.5` 已验收的 headless Agent loop 交付路径。同进程
+`tools/result` 观察者会在终检前收到原始内容；嵌套/PTC 结果及直接调用
+`ToolRuntime.execute` 的消费者不经过该顶层提交点。Web、SDK、ACP 与自定义
+profile 的交付仍需分别验证原生采用行为，见
+[DeepSeek 接入指南](../../../../../../docs/developer-guide/zh/aw/agents/deepseek-harness.md)。
 
 ## 交付边界
 

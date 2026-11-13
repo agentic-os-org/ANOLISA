@@ -1,4 +1,5 @@
 /** Real headless loop with a deterministic in-process model and observable tools. */
+import { spawnSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
@@ -107,23 +108,35 @@ export function apply(ctx) {
         schema: { type: "string" },
         render: (_args, value) => [{
           type: "text",
-          text: mode === "pii-output-replace"
+          text: ["pii-output-replace", "final-pii-replace"].includes(mode)
             ? "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP"
             : value,
         }],
         presentationMeta: () => ({ preserved: true }),
       },
-      ...(mode === "finalizer"
+      ...(["finalizer", "final-pii-deny", "final-pii-replace", "final-pii-error"].includes(mode)
         ? {
             finalizeContent: (_exec, result) => [
               ...result.content,
-              { type: "text", text: "native finalizer" },
+              { type: "text", text: mode === "final-pii-deny"
+                ? "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP"
+                : "native finalizer" },
             ],
           }
         : {}),
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         log("executed.jsonl", { id: exec.callId, command: args.command });
+        if (mode === "final-pii-deny") {
+          const child = spawnSync(
+            process.execPath,
+            ["-e", "process.stdout.write(process.env.NODE_OPTIONS ?? '<unset>')"],
+            { encoding: "utf8", timeout: 5000 },
+          );
+          if (child.error || child.status !== 0)
+            throw Error(child.error?.message ?? child.stderr);
+          log("node-child-options.jsonl", child.stdout);
+        }
         if (mode === "parallel") {
           if (++started === 2) release();
           await Promise.race([

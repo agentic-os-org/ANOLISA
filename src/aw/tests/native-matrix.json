@@ -3995,7 +3995,7 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/deepseek-harness",
-      "boundary": "Published DeepSeek Harness 0.2.1-rc.5 headless CLI, actual plugin loader and model/tool loop with real AW sec-core and Tokenless Providers/CLI. User text is scanned at agent/pre-step; prompt denial and scanner failure prevent model requests. Web, SDK and ACP startup confirm Hook readiness; their actual input/tool-call adoption remains unverified. Profile selection and version do not gate admission. Model, tool bodies, scanner and RTK execution are deterministic fixtures; no hosted model acceptance. Tool input PII blocks execution; tool output PII can be replaced for successful single-text root results. Strict output admission is rejected because tool finalizers run after the writable Hook; nested programmatic values and native value replacements retain native content. The Skill tool exposes only a name before execution, and direct /skill injection bypasses tool Hooks; resolved Skill checking is not claimed.",
+      "boundary": "Published DeepSeek Harness 0.2.1-rc.5 headless CLI, actual plugin loader and model/tool loop with real AW sec-core and Tokenless Providers/CLI. User text is scanned at agent/pre-step; prompt denial and scanner failure prevent model requests. Web, SDK and ACP startup confirm four-Hook readiness; their actual input/tool-call adoption remains unverified. Profile selection and version do not gate admission. Model, tool bodies, scanner and RTK execution are deterministic fixtures; no hosted model acceptance. Tool input PII blocks execution; tool output PII can be replaced for successful single-text root results. An exact-build Node preload awaits security.violation after finalization and before Agent-loop Session commit; finalizer-added PII is withheld from the model and CLI output, and safe finalized text survives. Same-process tools/result observers receive the raw result before this gate; nested programmatic values and native value replacements retain native content. The Skill tool exposes only a name before execution, and direct /skill injection bypasses tool Hooks; resolved Skill checking is not claimed.",
       "cases": [
         {
           "name": "headless",
@@ -4038,6 +4038,9 @@
                   "pii-clean",
                   "pii-input-deny",
                   "pii-output-replace",
+                  "final-pii-deny",
+                  "final-pii-replace",
+                  "final-pii-error",
                   "strict-output-rejected",
                   "submit-allow",
                   "submit-deny",

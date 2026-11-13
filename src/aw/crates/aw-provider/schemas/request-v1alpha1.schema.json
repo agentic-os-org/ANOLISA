@@ -148,7 +148,8 @@
               "enum": [
                 "input.submit",
                 "tool.before",
-                "tool.after"
+                "tool.after",
+                "security.violation"
               ]
             },
             "agent": {

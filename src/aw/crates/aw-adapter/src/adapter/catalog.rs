@@ -68,6 +68,7 @@ pub(crate) const DEEPSEEK: Profile = Profile {
         ("input.submit", &["observe", "block"]),
         ("tool.before", &["observe", "block"]),
         ("tool.after", &["observe", "replace_result"]),
+        ("security.violation", &["observe", "block"]),
     ],
 };
 
