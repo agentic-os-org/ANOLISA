@@ -328,24 +328,36 @@ impl TrajectoryRecorder {
     /// Append the step group of one recorded call (system / user / agent) to
     /// `steps`, advancing `step_id`.
     fn append_call_steps(steps: &mut Vec<Step>, step_id: &mut usize, call: &RecordedCall) {
-        // System prompt step (first system message, if any).
-        if let Some(sys) = call.messages.iter().find(|m| m.role == "system") {
+        // Each request replaces the previous instruction snapshot. Preserve
+        // separate blocks, and explicitly clear a prompt that was removed.
+        let mut systems: Vec<&str> = call
+            .messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .collect();
+        if systems.is_empty() {
+            systems.push("");
+        }
+        for (index, content) in systems.iter().enumerate() {
             *step_id += 1;
             steps.push(Step {
                 step_id: *step_id,
                 timestamp: Some(call.start_ts.clone()),
                 source: StepSource::System,
-                message: sys.content.clone(),
+                message: (*content).to_string(),
                 model_name: None,
                 reasoning_effort: None,
                 reasoning_content: None,
                 tool_calls: None,
                 observation: None,
                 metrics: None,
-                extra: Some(HashMap::from([(
-                    agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT.to_string(),
-                    serde_json::Value::Bool(true),
-                )])),
+                extra: (index == 0).then(|| {
+                    HashMap::from([(
+                        agentsight_atif::EXTRA_SYSTEM_PROMPT_SNAPSHOT.to_string(),
+                        serde_json::Value::Bool(true),
+                    )])
+                }),
                 llm_call_count: None,
                 is_copied_context: None,
             });
