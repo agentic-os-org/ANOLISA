@@ -1826,6 +1826,43 @@
               }
             }
           ]
+        },
+        {
+          "name": "final-result-order-baseline",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.6"
+              }
+            }
+          ]
         }
       ]
     },
