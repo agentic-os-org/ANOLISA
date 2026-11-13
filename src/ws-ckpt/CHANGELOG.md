@@ -2,6 +2,14 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.7.2
+
+### Changed
+- Recursive watching no longer follows directory symlinks inside a workspace; writes under a symlink target are detected only by a workspace registered on that target directory (#9988)
+
+### Fixed
+- Fixed rollback leaking one inotify watch per watched directory; rollback now releases the retired tree's watches before swapping and fails before the swap if they cannot be detached (#9988, #9986)
+
 ## 0.7.1
 
 ### Changed

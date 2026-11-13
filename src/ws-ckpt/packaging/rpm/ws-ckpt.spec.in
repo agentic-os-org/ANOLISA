@@ -283,6 +283,10 @@ if [ -f "$state_dir/state" ]; then
 fi
 
 %changelog
+* Fri Nov 13 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.7.2-1
+- Recursive watching no longer follows directory symlinks inside a workspace; writes under a symlink target are detected only by a workspace registered on that target directory
+- Fixed rollback leaking one inotify watch per watched directory; rollback now releases the retired tree's watches before swapping and fails before the swap if they cannot be detached
+
 * Wed Nov 11 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.7.1-1
 - Documentation: Documented that switching `btrfs-base.btrfs_mount` back to a previous root does not recover pruned snapshot records; subvolumes still on that root are re-adopted as pinned recovered orphans to review with `list --orphans` and delete explicitly
 - Documentation: Updated the RPM packaging guide for split-package ownership and `/usr/bin` executables, distinguishing RPM installation from the default `/usr/local/bin` source-install layout
