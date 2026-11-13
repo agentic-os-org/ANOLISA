@@ -149,6 +149,7 @@ class ArchiveTests(Fixture):
                                 {
                                     f"templates/{role}.json",
                                     "templates/sec-core-tokenless.json",
+                                    "templates/sec-core-tokenless-qoder.json",
                                     "templates/tokenless-openclaw.json",
                                     "templates/sec-core-tokenless-openclaw.json",
                                 },
@@ -215,6 +216,13 @@ class ArchiveTests(Fixture):
                 "TOKENLESS_CLI",
                 "STATE",
             },
+            "sec-core-tokenless-qoder": {
+                "PROVIDERS_DIR",
+                "SEC_CORE_CLI",
+                "SOCKET",
+                "TOKENLESS_CLI",
+                "STATE",
+            },
             "sec-core-tokenless-openclaw": {
                 "PROVIDERS_DIR",
                 "SEC_CORE_CLI",
@@ -231,7 +239,20 @@ class ArchiveTests(Fixture):
             self.assertNotIn("/libexec/aw/providers", text)
 
     def test_security_templates_scope_fail_closed_scans_to_mapped_native_tools(self) -> None:
-        for name in ("sec-core", "sec-core-tokenless", "sec-core-tokenless-openclaw"):
+        for name, expected_tools, mapped in (
+            ("sec-core", ["native:qoder:Bash", "native:openclaw:exec"], {"Bash", "exec"}),
+            (
+                "sec-core-tokenless",
+                ["native:qoder:Bash", "native:openclaw:exec"],
+                {"Bash", "exec"},
+            ),
+            (
+                "sec-core-tokenless-openclaw",
+                ["native:qoder:Bash", "native:openclaw:exec"],
+                {"Bash", "exec"},
+            ),
+            ("sec-core-tokenless-qoder", ["native:qoder:Bash"], {"Bash"}),
+        ):
             with self.subTest(template=name):
                 template = json.loads((package.TEMPLATES / f"{name}.json").read_text())
                 config = template["providers"]["security"]["config"]
@@ -239,16 +260,8 @@ class ArchiveTests(Fixture):
                 before = template["events"]["tool.before"]
                 self.assertTrue(before["required"])
                 scan = next(step for step in before["steps"] if step["id"] == "scan-code")
-                expected_tools = {
-                    "sec-core": ["native:qoder:Bash", "native:openclaw:exec"],
-                    "sec-core-tokenless": ["native:qoder:Bash", "native:openclaw:exec"],
-                    "sec-core-tokenless-openclaw": [
-                        "native:qoder:Bash",
-                        "native:openclaw:exec",
-                    ],
-                }[name]
                 self.assertEqual(scan["match"]["tools"], expected_tools)
-                self.assertEqual(set(config["tools"]), {"Bash", "exec"})
+                self.assertEqual(set(config["tools"]), mapped)
                 self.assertEqual(scan["on_error"], "block")
                 after = template["events"]["tool.after"]
                 observe = next(
@@ -270,6 +283,22 @@ class ArchiveTests(Fixture):
         self.assertEqual(before[1]["on_error"], "block")
         self.assertEqual(before[2]["match"]["tools"], ["native:openclaw:exec"])
         self.assertEqual(before[2]["effects"], ["block"])
+
+    def test_qoder_template_routes_rewrite_and_scan_without_other_agents(self) -> None:
+        template = json.loads((package.TEMPLATES / "sec-core-tokenless-qoder.json").read_text())
+        before = template["events"]["tool.before"]["steps"]
+        self.assertEqual([step["id"] for step in before], ["rewrite-command", "scan-code"])
+        self.assertEqual(before[0]["match"]["tools"], ["native:qoder:Bash"])
+        self.assertEqual(before[0]["effects"], ["replace_input"])
+        self.assertEqual(before[1]["match"]["tools"], ["native:qoder:Bash"])
+        self.assertEqual(before[1]["effects"], ["observe", "block"])
+        self.assertEqual(before[1]["on_error"], "block")
+        after = template["events"]["tool.after"]["steps"]
+        self.assertEqual(
+            [step["id"] for step in after], ["observe-completion", "compress-result"]
+        )
+        self.assertEqual(after[0]["match"]["tools"], ["native:qoder:Bash"])
+        self.assertNotIn("match", after[1])
 
     def test_tokenless_template_routes_rewrite_and_retry_for_both_agents(self) -> None:
         template = json.loads((package.TEMPLATES / "tokenless.json").read_text())

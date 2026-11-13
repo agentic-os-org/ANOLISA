@@ -257,24 +257,33 @@ platforms, and Agent runtime infrastructure.
 
 This example enables safety checks and context optimization in one configuration.
 Before running it, follow [AW installation](https://agentic-os.sh/docs/user-guide/aw/installation/)
-to install the Linux Preview version of `aw-all-in-one` and set `AW_PREFIX` and
-`PATH`. Then start sec-core using the [security backend setup](https://agentic-os.sh/docs/user-guide/aw/security/).
-CI packages require a Linux x86_64 system with glibc 2.39 or later. You also need
-Qoder CLI 1.1.64 or later, installed and signed in.
+to install the Linux Preview AW packages and set `AW_PREFIX` and `PATH`. Then start
+sec-core using the [security backend setup](https://agentic-os.sh/docs/user-guide/aw/security/),
+including installing the sec-core Provider archive and setting `AW_TEMPLATE_DIR` to
+its unpacked `templates/` directory. CI packages require a Linux x86_64 system with
+glibc 2.39 or later. You also need Qoder CLI 1.1.64 or later, installed and signed in.
 
-Run the following commands as the user who normally runs Qoder to create a new
+Run the following commands from the directory where you unpacked the sec-core
+Provider archive, as the user who normally runs Qoder, to create a new
 `anolisa.yaml` and start the Agent. The socket path below connects to the local
 trial backend in the security guide. If you are connecting to another existing
 security backend, set `AW_SEC_SOCKET` to that service's actual socket path.
 
 ```bash
 export AW_HOME="$HOME/aw"
+export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
 export AW_SEC_SOCKET=/run/aw-preview-sec/daemon.sock
+export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
+export AW_TEMPLATE_DIR="$PWD/aw-provider-sec-core-0.1.0-linux-$(uname -m)/templates"
 install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
-aw config init --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --config "$AW_HOME/anolisa.yaml" --state-dir "$AW_HOME/anolisa-state" \
   --qoder "$(command -v qodercli)" \
-  --provider sec-core+tokenless --socket "$AW_SEC_SOCKET"
+  --template "$AW_TEMPLATE_DIR/sec-core-tokenless-qoder.json" \
+  --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
+  --template-var "SEC_CORE_CLI=$(command -v agent-sec-cli)" \
+  --template-var "SOCKET=$AW_SEC_SOCKET" \
+  --template-var "TOKENLESS_CLI=$(command -v tokenless)"
 aw validate --config "$AW_HOME/anolisa.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/anolisa.yaml" --agent qoder

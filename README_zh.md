@@ -224,23 +224,32 @@ AI PC 与云桌面、Agent 应用与框架、Agent 平台，以及 Agent 运行�
 
 以下示例通过一份配置同时启用安全检查与上下文优化。运行该示例前，请先按
 [AW 安装指南](https://agentic-os.sh/zh/docs/user-guide/aw/installation/)安装 Linux
-Preview 版的 `aw-all-in-one`，设置 `AW_PREFIX` 与 `PATH`，再按
-[安全后台准备步骤](https://agentic-os.sh/zh/docs/user-guide/aw/security/)启动 sec-core。
-CI 安装包要求使用 Linux x86_64 系统，且 glibc 版本不低于 2.39。你还需要安装
-Qoder CLI 1.1.64 或更新版本，并完成登录。
+Preview 版 AW 安装包，设置 `AW_PREFIX` 与 `PATH`，再按
+[安全后台准备步骤](https://agentic-os.sh/zh/docs/user-guide/aw/security/)启动 sec-core
+（其中也包含安装 sec-core Provider 安装包、将 `AW_TEMPLATE_DIR` 设为解压后
+`templates/` 目录的步骤）。CI 安装包要求使用 Linux x86_64 系统，且 glibc 版本不低于
+2.39。你还需要安装 Qoder CLI 1.1.64 或更新版本，并完成登录。
 
-请使用平时运行 Qoder 的用户账号执行以下命令，创建新的 `anolisa.yaml` 并启动
-Agent。示例中的 socket 路径用于连接安全指南中的本地试用后台；如果你要连接
-已有的其他安全后台，请将 `AW_SEC_SOCKET` 改为该服务实际使用的 socket 路径。
+请在解压 sec-core Provider 安装包的目录中，使用平时运行 Qoder 的用户账号执行
+以下命令，创建新的 `anolisa.yaml` 并启动 Agent。示例中的 socket 路径用于连接
+安全指南中的本地试用后台；如果你要连接已有的其他安全后台，请将 `AW_SEC_SOCKET`
+改为该服务实际使用的 socket 路径。
 
 ```bash
 export AW_HOME="$HOME/aw"
+export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"
 export AW_SEC_SOCKET=/run/aw-preview-sec/daemon.sock
+export AW_PROVIDERS_DIR="$AW_EXTENSION_PREFIX/libexec/aw/providers"
+export AW_TEMPLATE_DIR="$PWD/aw-provider-sec-core-0.1.0-linux-$(uname -m)/templates"
 install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
-aw config init --prefix "$AW_PREFIX" \
+aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --config "$AW_HOME/anolisa.yaml" --state-dir "$AW_HOME/anolisa-state" \
   --qoder "$(command -v qodercli)" \
-  --provider sec-core+tokenless --socket "$AW_SEC_SOCKET"
+  --template "$AW_TEMPLATE_DIR/sec-core-tokenless-qoder.json" \
+  --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
+  --template-var "SEC_CORE_CLI=$(command -v agent-sec-cli)" \
+  --template-var "SOCKET=$AW_SEC_SOCKET" \
+  --template-var "TOKENLESS_CLI=$(command -v tokenless)"
 aw validate --config "$AW_HOME/anolisa.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/anolisa.yaml" --agent qoder
