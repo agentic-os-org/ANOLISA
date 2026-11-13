@@ -88,9 +88,14 @@ reloadable 策略、多模态、移除工具结果身份的上下文投影、嵌
 
 受检的三个 Qoder Worker 都在 `firePostToolUseEvent` 之后应用 `getUpdatedToolOutput()`／
 `getUpdatedMCPToolOutput()`；同一路径还可能改写 Read 的 `llmContent` 并附加 Hook
-上下文。Worker 是独立版本的混淆构建。源码观察只定位候选接点；授予能力前仍须
-在原生 SDK／Worker 中捕获真实模型输入。版本矩阵逐版校验 SDK 与 Worker 字节，
-并运行 SDK 解析器。隔离环境中无凭据启动 Worker 时，三版均被模型目录或认证门拒绝。
+上下文。Worker 是独立版本的混淆构建。1.0.56／1.1.78 的隔离真实 Query
+进一步验证：AW `tool.after` 读取原始安全输出，随后应用 SDK `PostToolUse` 回调
+把结果改为 `AW_QODER_LATE_POST_SECRET`；Worker 发布的 `tool_result` 含该标记，
+托管模型的最终回答也准确复述该标记。该红灯证明公开 Post 回调不足以提供最终保证；
+本次未捕获托管模型的原始网络请求，且未安装 Qoder Worker 的可阻断最终接点。
+因此三个版本仍不开放 `security.violation`。版本矩阵逐版校验 SDK 与 Worker 字节，
+并运行 SDK 解析器；两个新增版本尚无真实模型采用验收。隔离环境中无凭据启动
+Worker 时，三版均被模型目录或认证门拒绝。
 
 本次检查的 OpenClaw 包要求 Node `>=24.16.0 <25 || >=26.1.0`，Gateway 探针使用
 Node 24.16.0。2026.9.6 的 middleware runner 摘要为
@@ -129,3 +134,5 @@ python3 src/aw/crates/aw-cli/tests/openclaw_gateway.py \
 `--final-gate-provider-error` 验证故障暂扣。Qoder Worker 源码检查也不计作
 模型采用证据。增加 `--sec-core-provider /absolute/path/to/aw-provider-sec-core`
 可验证真实 Provider。
+Qoder 的授权隔离红灯用例运行 `post-native.py --case late-mutation`；它要求测试凭据，
+只输出结果布尔值并在退出时清理 Worker 和临时配置，不保存凭据。
