@@ -84,8 +84,8 @@ class AgentConfig(BaseModel):
     """Agent configuration."""
 
     name: str = Field(description="Agent name (e.g., 'cosh', 'openclaw')")
-    timeout: int = Field(default=1800, description="Timeout in seconds")
-    step_limit: int = Field(default=0, description="Max steps (0 = unlimited)")
+    timeout: int = Field(default=1800, gt=0, description="Timeout in seconds")
+    step_limit: int = Field(default=0, ge=0, description="Max steps (0 = unlimited)")
     workers: int = Field(default=1, ge=1, description="Number of parallel workers")
     docker_pull_registry: str | None = Field(
         default=None,
