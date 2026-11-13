@@ -227,10 +227,12 @@ impl LoopDetector {
             return None;
         }
 
-        // Filter to only calls that have text output
+        // Filter to only calls that have text output. Whitespace-only text
+        // tokenizes to the empty set, which `jaccard_similarity` scores as
+        // 1.0 — "identical" — so it must not count as an answer at all.
         let text_bearing: Vec<&RecentCallSummary> = calls
             .iter()
-            .filter(|c| !c.output_text_snippet.is_empty())
+            .filter(|c| !c.output_text_snippet.trim().is_empty())
             .collect();
 
         if text_bearing.len() < threshold {
@@ -275,10 +277,12 @@ impl LoopDetector {
             return None;
         }
 
-        // Filter to only calls that have text output (ignore pure tool_call responses)
+        // Filter to only calls that have text output (ignore pure tool_call
+        // responses). Whitespace-only text is not an answer here either, for
+        // the reason rule 2 gives.
         let text_bearing: Vec<&RecentCallSummary> = calls
             .iter()
-            .filter(|c| !c.output_text_snippet.is_empty())
+            .filter(|c| !c.output_text_snippet.trim().is_empty())
             .collect();
 
         if text_bearing.len() < threshold {
@@ -687,6 +691,50 @@ mod tests {
         ];
         let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_none());
+    }
+
+    /// A text part that carries only whitespace (a newline-only answer, an
+    /// empty text block joined with a space) tokenizes to the empty set, and
+    /// `jaccard_similarity` answers 1.0 for two empty sets. The text-bearing
+    /// filter only rejected the truly empty string, so three calls whose only
+    /// text was whitespace scored as identical answers — a Critical DeadLoop
+    /// (and, with auto-kill enabled, SIGTERM/SIGKILL) for calls that produced
+    /// different tool calls. Whitespace-only output is no evidence of a loop.
+    #[test]
+    fn whitespace_only_output_is_not_a_similar_answer() {
+        let detector = LoopDetector::default();
+        let calls = vec![
+            make_call_with_args(
+                vec![("Bash", serde_json::json!({"command": "ls /a"}))],
+                " ",
+                100,
+            ),
+            make_call_with_args(
+                vec![("Read", serde_json::json!({"file_path": "/a"}))],
+                "\n",
+                200,
+            ),
+            make_call_with_args(
+                vec![("Grep", serde_json::json!({"pattern": "x"}))],
+                "\t",
+                300,
+            ),
+        ];
+
+        assert!(
+            detector.detect_output_similarity_loop(&calls).is_none(),
+            "whitespace-only output must not satisfy the similarity rule"
+        );
+        assert!(
+            detector.detect_token_burn(&calls).is_none(),
+            "whitespace-only output must not satisfy the token-burn rule"
+        );
+        assert!(
+            detector
+                .detect("conv-1", None, None, None, 1000, Some(&calls))
+                .is_none(),
+            "distinct tool calls with whitespace-only text are not a dead loop"
+        );
     }
 
     #[test]
