@@ -784,8 +784,10 @@ QODER_ADAPTER_UNINSTALL="$TOKENLESS_ROOT/adapters/tokenless/qoder/scripts/uninst
 for f in "$CODEX_ADAPTER_UNINSTALL" "$HERMES_ADAPTER_UNINSTALL" "$QODER_ADAPTER_UNINSTALL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
-has "$CODEX_ADAPTER_UNINSTALL" 'CODEX_HOME:-$HOME/.codex' \
+has_re "$CODEX_ADAPTER_UNINSTALL" 'CODEX_CONFIG="\$\{USER_HOME\}/\.codex/config\.toml"|"no Codex config to check' \
   "codex checks its own config when the CLI cannot be queried"
+hasnt "$CODEX_ADAPTER_UNINSTALL" 'CODEX_HOME:-$HOME/.codex' \
+  "codex never expands \$HOME unguarded when the CLI cannot be queried"
 has "$CODEX_ADAPTER_UNINSTALL" "registration cannot be confirmed gone" \
   "codex fails closed rather than reporting a missing CLI as deregistered"
 has "$HERMES_ADAPTER_UNINSTALL" "cannot be confirmed removed" \
