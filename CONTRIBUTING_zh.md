@@ -161,6 +161,13 @@ cargo test --workspace
 CI 会根据变更路径追加 coverage、打包、前端、adapter 和集成任务。修改生成包或框架
 adapter 时请查看 [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)。
 
+### AgentSecCore CI
+
+组件测试和 Linux sandbox VM 测试独立运行，各自上传可跨 runner 使用的 Cobertura
+报告。`Check sec-core coverage` 等待两者完成，拒绝失败的报告生产任务或缺失的报告，
+并执行原有的 80% 变更行覆盖率门槛。Sandbox 失败不会阻止组件测试运行。
+覆盖率采集会实际执行测试，并非只生成报告。
+
 ### Skill 回归测试与路径归属
 
 修改 Skill 脚本的贡献者应将组件回归测试放在 `src/os-skills/tests/`。

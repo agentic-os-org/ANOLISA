@@ -155,8 +155,8 @@ jobs:
             KTUNER=true
           fi
 
-          # Run sandbox checks when their workflow changes.
-          if echo "$CHANGED" | grep -Eq '^\.github/workflows/ci\.yaml$'; then
+          # Run sec-core checks when their workflow or coverage tooling changes.
+          if echo "$CHANGED" | grep -Eq '^\.github/(workflows/ci\.yaml|scripts/(test_)?sec_core_coverage\.py)$'; then
             AGENT_SEC=true
           fi
 
@@ -363,7 +363,7 @@ jobs:
   # =========================================================================
   test-agent-sec-core:
     name: Test agent-sec-core
-    needs: [detect-changes, test-agent-sec-sandbox]
+    needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     environment: ${{ needs.detect-changes.outputs.cache_environment }}
@@ -515,11 +515,104 @@ jobs:
           cd src/agent-sec-core
           make test-rust-coverage
 
-      - name: Download sandbox VM coverage
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+
+      - name: Run openclaw-plugin tests with coverage
+        run: |
+          cd src/agent-sec-core
+          cd openclaw-plugin && npm install
+          cd ..
+          make test-openclaw-plugin-coverage
+
+      - name: Generate openclaw-plugin coverage summary
+        if: always()
+        shell: bash
+        run: |
+          COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
+          if [ -f "$COV_FILE" ]; then
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
+            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
+            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
+            {
+              echo "### 🧪 agent-sec-core/openclaw-plugin (TypeScript) Test Coverage"
+              echo ""
+              echo "| Metric | Coverage | Detail |"
+              echo "|--------|----------|--------|"
+              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Normalize component coverage
+        run: |
+          python3 .github/scripts/sec_core_coverage.py normalize \
+            src/agent-sec-core/coverage.xml \
+            src/agent-sec-core/rust-cli-coverage.xml \
+            src/agent-sec-core/rust-coverage.xml \
+            src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
+      - name: Upload component coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-core-component-coverage
+          path: |
+            src/agent-sec-core/coverage.xml
+            src/agent-sec-core/rust-cli-coverage.xml
+            src/agent-sec-core/rust-coverage.xml
+            src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
+          if-no-files-found: error
+
+  check-agent-sec-coverage:
+    name: Check sec-core coverage
+    needs: [detect-changes, test-agent-sec-core, test-agent-sec-sandbox]
+    if: ${{ !cancelled() && needs.detect-changes.outputs.agent_sec_core == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful test producers
+        env:
+          COMPONENT_RESULT: ${{ needs.test-agent-sec-core.result }}
+          SANDBOX_RESULT: ${{ needs.test-agent-sec-sandbox.result }}
+        run: |
+          test "$COMPONENT_RESULT" = success
+          test "$SANDBOX_RESULT" = success
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          enable-cache: false
+      - name: Install diff-cover
+        run: uv tool install diff-cover
+      - name: Test coverage report handling
+        run: python3 -m unittest discover -s .github/scripts -p test_sec_core_coverage.py
+      - name: Download component coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: sec-core-component-coverage
+          path: src/agent-sec-core
+      - name: Download sandbox coverage
         uses: actions/download-artifact@v4
         with:
           name: sandbox-coverage
           path: src/agent-sec-core
+      - name: Require complete portable coverage reports
+        run: |
+          python3 .github/scripts/sec_core_coverage.py validate \
+            src/agent-sec-core/coverage.xml \
+            src/agent-sec-core/rust-cli-coverage.xml \
+            src/agent-sec-core/rust-coverage.xml \
+            src/agent-sec-core/rust-sandbox-coverage.xml \
+            src/agent-sec-core/rust-v2-coverage.xml \
+            src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
 
       - name: Generate Rust coverage summary
         if: always()
@@ -559,44 +652,6 @@ jobs:
           emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
           emit_rust_cov_row rust-sandbox-coverage.xml linux-sandbox
           emit_rust_cov_row rust-v2-coverage.xml v2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.23.2'
-
-      - name: Run openclaw-plugin tests with coverage
-        run: |
-          cd src/agent-sec-core
-          cd openclaw-plugin && npm install
-          cd ..
-          make test-openclaw-plugin-coverage
-
-      - name: Generate openclaw-plugin coverage summary
-        if: always()
-        shell: bash
-        run: |
-          COV_FILE="src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml"
-          if [ -f "$COV_FILE" ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCHES_VALID=$(grep -oP 'branches-valid="\K[^"]+' "$COV_FILE" | head -1)
-            BRANCHES_COVERED=$(grep -oP 'branches-covered="\K[^"]+' "$COV_FILE" | head -1)
-            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
-            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf '%.1f')
-            {
-              echo "### 🧪 agent-sec-core/openclaw-plugin (TypeScript) Test Coverage"
-              echo ""
-              echo "| Metric | Coverage | Detail |"
-              echo "|--------|----------|--------|"
-              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
-              echo "| 🟢 Branch Coverage | **${BRANCH_PCT}%** | ${BRANCHES_COVERED}/${BRANCHES_VALID} branches |"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### ⚠️ openclaw-plugin coverage report not found" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Incremental coverage gate (PR only)
         if: github.event_name == 'pull_request'
@@ -753,26 +808,11 @@ jobs:
           cp linux-sandbox/target/debug/linux-sandbox v2/target/debug/linux-sandbox
           python3 tests/e2e/linux-sandbox/strict_cli.py v2/target/debug/agent-sec-cli
           ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-rust-v2-sandbox-coverage
-      - name: Normalize coverage paths for the component runner
-        working-directory: src/agent-sec-core
+      - name: Normalize sandbox coverage
         run: |
-          python3 - <<'PYTHON'
-          import pathlib
-          import xml.etree.ElementTree as ET
-
-          component = pathlib.Path.cwd()
-          for name in ("rust-sandbox-coverage.xml", "rust-v2-coverage.xml"):
-              tree = ET.parse(name)
-              source = tree.find("sources/source")
-              workspace = pathlib.Path(source.text)
-              classes = tree.findall(".//class")
-              assert classes, f"Empty coverage report: {name}"
-              for item in classes:
-                  path = (workspace / item.attrib["filename"]).resolve()
-                  item.set("filename", path.relative_to(component).as_posix())
-              source.text = "."
-              tree.write(name, encoding="utf-8", xml_declaration=True)
-          PYTHON
+          python3 .github/scripts/sec_core_coverage.py normalize \
+            src/agent-sec-core/rust-sandbox-coverage.xml \
+            src/agent-sec-core/rust-v2-coverage.xml
       - name: Upload sandbox coverage
         uses: actions/upload-artifact@v4
         with:
