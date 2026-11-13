@@ -114,6 +114,12 @@ class TaskMetadataCommentTests(unittest.TestCase):
         self.assertIn("    T001\u00a0#one\n", output)
         self.assertIn("Grand total: 1 tasks", output)
 
+    def test_leading_nbsp_before_hash_remains_task_identity(self) -> None:
+        self.write_task("task_id: \u00a0#one\ndifficulty: hard # comment\n")
+        output = self.run_inventory("--difficulty", "hard")
+        self.assertIn("    \u00a0#one\n", output)
+        self.assertIn("Grand total: 1 tasks", output)
+
     def test_trailing_nbsp_before_space_comment_is_retained(self) -> None:
         self.write_task("task_id: T001\u00a0 # comment\ndifficulty: hard\n")
         output = self.run_inventory("--prefix", "T", "--difficulty", "hard")
