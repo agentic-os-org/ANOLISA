@@ -128,7 +128,7 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
     assert len(received) == 3, received
     for request in received:
         assert request['method'] == 'authorization.evaluate', request
-        assert request['params']['principal'] == {'agent_id':'cosh:cedar-input','agent_type':'cosh'}
+        assert request['params']['principal'] == {'agent_type':'cosh'}, request
         assert 'policy' not in request['params'], request
     first, second, legacy = [item['params']['requested_permissions'] for item in received]
     assert first == legacy == original_json
