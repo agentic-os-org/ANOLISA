@@ -480,9 +480,9 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 `TokenlessConfig(search_path_sharing_enabled=False)` 关闭；Rust 将
 `RuntimeConfig.search_path_sharing_enabled` 设为 `false`。所有入口均默认开启。
 
-精确工具名 `Grep` 和识别为原生 `grep`、`rg` 的 Shell 命令只使用搜索压缩器，
-不受内容检测结果或 `force_json` 影响。关闭搜索路径共享、格式不支持或候选无收益时
-原样返回，不会转入 JSON、表格或日志压缩器。其他工具保留既有路由。
+精确工具名 `Grep`、宿主以 `search_listing` 声明的结果，以及识别为原生 `grep`、`rg` 的
+Shell 命令只使用搜索压缩器，不受内容检测结果或 `force_json` 影响。关闭搜索路径共享、
+格式不支持或候选无收益时原样返回，不会转入 JSON、表格或日志压缩器。其他工具保留既有路由。
 带行号的搜索记录接受这些已识别 Shell 搜索及 API 来源；纯路径列表也接受其他命令输出。
 文件内容和文件读取跳过路径列表策略；既有文件读取的 JSON、表格和日志处理仍可用。
 其他非文件来源工具结果无论工具名称如何，都可使用同一 Core 能力。

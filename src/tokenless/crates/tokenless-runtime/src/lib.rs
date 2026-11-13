@@ -828,6 +828,7 @@ pub fn compress_response_with_store(
         status: ToolResultStatus::Success,
         content_origin: ContentOrigin::ApiResponse,
         command: None,
+        search_listing: false,
         output_optimization: OutputOptimization::None,
         capabilities: PostToolCapabilities {
             replace_output: true,
@@ -1617,6 +1618,7 @@ mod tests {
                     status: ToolResultStatus::Success,
                     content_origin: ContentOrigin::ApiResponse,
                     command: None,
+                    search_listing: false,
                     output_optimization: OutputOptimization::None,
                     capabilities: PostToolCapabilities {
                         replace_output: true,
@@ -1665,6 +1667,7 @@ mod tests {
                     status: ToolResultStatus::Success,
                     content_origin: ContentOrigin::CommandOutput,
                     command: None,
+                    search_listing: false,
                     output_optimization: OutputOptimization::None,
                     capabilities: PostToolCapabilities {
                         replace_output: true,
@@ -1739,6 +1742,7 @@ mod tests {
                         .post_tool(
                             &PostToolRequest {
                                 result_kind: ResultKind::Tool,
+                                search_listing: false,
                                 tool_name: "fetch_record".to_owned(),
                                 content,
                                 status: ToolResultStatus::Success,

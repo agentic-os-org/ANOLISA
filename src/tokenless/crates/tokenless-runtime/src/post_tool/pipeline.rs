@@ -88,7 +88,13 @@ impl PostToolPipeline {
         // match; other domain compressors may drop rows or rewrite source text.
         // Compound commands have no per-command output boundaries. Protect the
         // complete result when any segment searches, even a quiet condition.
-        let protect_search_output = request.tool_name == "Grep"
+        // Adapters that know a result is a complete match listing declare it
+        // with `search_listing`, whatever the content shape — a match listing
+        // must not fall to JSON or tabular either. The exact name `Grep`
+        // keeps its reserved routing for hosts that predate the field, and
+        // shell search commands protect their whole output as before.
+        let protect_search_output = request.search_listing
+            || request.tool_name == "Grep"
             || (request.content_origin == ContentOrigin::CommandOutput
                 && request
                     .command
@@ -711,6 +717,117 @@ mod tests {
     }
 
     #[test]
+    fn native_search_aliases_route_like_grep_across_shapes_and_switches() {
+        // The adapters declare native search aliases with `search_listing`:
+        // Core routes the declared result through the lossless search-only
+        // path, whatever the content shape. A match listing that also looks
+        // like JSON, tabular data, a build log or HTML must never reach
+        // those compressors — including with force_json — and disabling
+        // path sharing preserves the text instead of unlocking lossy routes.
+        let json_shaped_search = format!(
+            "{}\n{}",
+            "src/project/module.py:1:{\"matches\": [1, 2, 3]}",
+            "src/project/module.py:2:{\"matches\": [4, 5, 6]}"
+        )
+        .repeat(12);
+        for tool in ["grep", "grep_code", "grep_search", "search_files", "Grep"] {
+            for (label, content) in [
+                ("listing", search_input()),
+                ("json_shaped", json_shaped_search.clone()),
+                (
+                    "tabular_shaped",
+                    format!("{}a,b\n", "src/x.py:1:").repeat(30),
+                ),
+                (
+                    "log_shaped",
+                    format!("{}Compiling package v0.1.0\n", "src/x.py:1:").repeat(30),
+                ),
+            ] {
+                for force_json in [false, true] {
+                    for sharing in [true, false] {
+                        let mut req = request(&content);
+                        req.tool_name = tool.into();
+                        req.content_origin = ContentOrigin::ApiResponse;
+                        req.search_listing = true;
+                        let mut cfg = config(Duration::from_secs(1), 32);
+                        cfg.force_json = force_json;
+                        cfg.search_path_sharing_enabled = sharing;
+                        let run = PostToolPipeline::run(&req, &cfg, None);
+                        let expected = if sharing {
+                            Disposition::Applied
+                        } else {
+                            // Disabling the search domain returns the text
+                            // unchanged without computing a candidate — the
+                            // do-not-touch boundary, not a lossy fallback.
+                            Disposition::Passthrough
+                        };
+                        assert_eq!(
+                            run.response.disposition, expected,
+                            "{tool}/{label}/force_json={force_json}/sharing={sharing}"
+                        );
+                        assert!(
+                            run.response
+                                .applied_operations
+                                .iter()
+                                .all(|op| *op == AppliedOperation::SearchPathSharing),
+                            "{tool}/{label}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_shaped_names_without_the_declaration_keep_their_domains() {
+        // AgentScope and QwenPaw return JSON results under search-shaped tool
+        // names and declare them as api_response without `search_listing`:
+        // their JSON compression must be unaffected by the alias family, and
+        // only the exact `Grep` name stays reserved.
+        let json = format!(
+            "[{}]",
+            (0..30)
+                .map(|i| format!("{{\"id\": {i}, \"name\": \"record {i}\"}}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for tool in ["grep", "grep_code", "grep_search", "search_files"] {
+            let mut req = request(&json);
+            req.tool_name = tool.into();
+            req.content_origin = ContentOrigin::ApiResponse;
+            let run = PostToolPipeline::run(&req, &config(Duration::from_secs(1), 32), None);
+            assert_eq!(
+                run.response.disposition,
+                Disposition::Applied,
+                "{tool} must still compress JSON"
+            );
+            assert!(
+                run.response.output.len() < json.len(),
+                "{tool} JSON output must be smaller: {} vs {}",
+                run.response.output.len(),
+                json.len()
+            );
+            assert!(!run.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
+    fn file_read_search_results_stay_byte_for_byte() {
+        // A file read whose text happens to look like a search listing is an
+        // authoritative file copy: file_content passes through before any
+        // compression decision, regardless of tool name.
+        for tool in ["Grep", "grep", "search_files", "Read"] {
+            let mut req = request(&search_input());
+            req.tool_name = tool.into();
+            req.content_origin = ContentOrigin::FileContent;
+            let run = PostToolPipeline::run(&req, &config(Duration::from_secs(1), 32), None);
+            assert_eq!(run.response.disposition, Disposition::Passthrough, "{tool}");
+            assert_eq!(run.response.output, search_input());
+            assert!(run.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
     fn compound_search_preserves_output_without_segment_boundaries() {
         for (command, input) in [
             (
@@ -890,6 +1007,7 @@ mod tests {
             status: ToolResultStatus::Success,
             content_origin: ContentOrigin::CommandOutput,
             command: None,
+            search_listing: false,
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,

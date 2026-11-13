@@ -498,5 +498,40 @@ class HermesLifecycleTest(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
 
+    def test_search_listing_wires_search_results_to_the_lossless_route(self):
+        # A search-tool result long enough to be a match listing is declared
+        # as api_response with search_listing=true; a short result and a
+        # non-search tool keep file_content / no flag. Disabling _search_origin
+        # entirely must fail here (the declaration is the whole Hermes change).
+        matches = "".join(
+            f"src/project/with/very/long/common/search/path/module.py:{i}:matched_value_{i}\n"
+            for i in range(1, 19)
+        )
+        self.response = {"output": "compact", "disposition": "applied", "recoverability": "lossless"}
+        cases = [
+            ("grep_code", matches, "api_response", True),
+            ("Grep", matches, "api_response", True),
+            ("grep_search", matches, "api_response", True),
+            ("search_files", matches, "api_response", True),
+            ("grep", matches, "api_response", True),
+            ("grep_code", "a.py:1:x", "file_content", False),
+            ("web_search", matches, "api_response", False),
+        ]
+        for tool, result, origin, listing in cases:
+            with self.subTest(tool=tool, listing=listing):
+                self.requests.clear()
+                self.plugin.on_transform_tool_result(
+                    tool_name=tool,
+                    args={},
+                    result=result,
+                    session_id="session-1",
+                    tool_call_id="call-1",
+                    status="ok",
+                )
+                _, request, _, _ = self.requests[0]
+                self.assertEqual(request["input"]["content_origin"], origin)
+                self.assertEqual(request["input"].get("search_listing", False), listing)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

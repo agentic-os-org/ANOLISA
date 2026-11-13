@@ -59,7 +59,10 @@ RETRIEVE_DECLARATION = {
 # tool name -> (content_origin wire value, RTK command field) for QwenPaw
 # 2.2.0's built-in tools. Core passes `file_content` through untouched, so a
 # tool absent from this table (skills, MCP servers, newer built-ins) falls
-# back to it and is never compressed or rewritten.
+# back to it and is never compressed or rewritten. QwenPaw's search results
+# are JSON payloads, not text match listings, so they are declared api_response
+# without `search_listing` and keep JSON compression under their search-shaped
+# names; only the exact Core name `Grep` is reserved.
 _CONTRACTS: dict[str, tuple[str, str | None]] = {
     "execute_shell_command": ("command_output", "command"),
     **{

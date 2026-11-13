@@ -651,6 +651,28 @@ test("PostTool maps API and file origins without authorized recovery", () => {
   assert.equal(requests()[0].request.input.content_origin, "file_content");
 });
 
+test("PostTool declares a search listing for every native search alias", () => {
+  const listing = Array.from(
+    { length: 20 },
+    (_, i) => `src/very/long/common/search/path/module.py:${i}:matched_value_${i}\n`,
+  ).join("");
+  for (const alias of ["Grep", "grep", "grep_code", "grep_search", "search_files"]) {
+    rmSync(requestLog, { force: true });
+    postTool(alias, `call-${alias}`, listing, { sessionId: "session-search" });
+    const request = requests()[0].request.input;
+    assert.equal(request.content_origin, "api_response", alias);
+    assert.equal(request.search_listing, true, alias);
+  }
+  // The same listing through a non-search tool keeps the plain API route.
+  rmSync(requestLog, { force: true });
+  postTool("web_fetch", "call-nosearch", listing, { sessionId: "session-api" });
+  assert.equal(requests()[0].request.input.search_listing, false);
+  // Below the listing minimum the search stays undeclared.
+  rmSync(requestLog, { force: true });
+  postTool("Grep", "call-short", "a.py:1:x", { sessionId: "session-short" });
+  assert.equal(requests()[0].request.input.search_listing, false);
+});
+
 test("PostTool replaces live text while preserving result metadata", () => {
   const message = {
     role: "toolResult",

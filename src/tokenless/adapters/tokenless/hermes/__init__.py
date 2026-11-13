@@ -287,8 +287,10 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    MIN_SEARCH_LISTING_CHARS,
 )
 from hook_utils import SHELL_TOOLS as _SHELL_TOOLS_SHARED
+from hook_utils import SEARCH_TOOLS
 from hook_utils import SKIP_TOOLS as _SKIP_TOOLS_SHARED
 from hook_utils import (
     build_post_tool_request,
@@ -357,6 +359,19 @@ def _content_origin(tool_name: str, args: Any) -> str:
     if tool_name in _SHELL_TOOLS:
         return "command_output"
     return "api_response"
+
+
+def _search_origin(tool_name: str, result: str) -> str | None:
+    """api_response for a native search's match-listing text, else ``None``.
+
+    Search listings are derived match data: Core's lossless search-only route
+    folds their repeated paths while every received match, line number, order,
+    duplicate and line ending is retained. A result too small to compress or
+    an unrecognized envelope keeps the ``file_content`` passthrough.
+    """
+    if tool_name not in SEARCH_TOOLS or not isinstance(result, str):
+        return None
+    return "api_response" if len(result) >= MIN_SEARCH_LISTING_CHARS else None
 
 
 def _output_optimization(args: Any) -> str:
@@ -485,6 +500,13 @@ def on_transform_tool_result(
     shell_envelope = None
     content = result
     content_origin = _content_origin(tool_name, args)
+    # A native search result is a derived match listing, not a file copy:
+    # declare api_response so Core's lossless search-only route applies.
+    # Unknown search envelopes keep the file_content passthrough.
+    search_origin = _search_origin(tool_name, result)
+    search_listing = search_origin is not None
+    if search_origin is not None:
+        content_origin = search_origin
     # Core reports a plain file print (`cat page.html`) as file_read from the
     # command line, so the page stays verbatim while data still compresses.
     command = None
@@ -524,6 +546,7 @@ def on_transform_tool_result(
         replace_output=True,
         replace_with_text=True,
         command=command if isinstance(command, str) else None,
+        search_listing=search_listing,
     )
     response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "post_tool")
     if not isinstance(response, dict):

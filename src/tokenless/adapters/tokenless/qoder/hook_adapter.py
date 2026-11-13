@@ -13,10 +13,13 @@ from hook_utils import (
     warn,
 )
 from result_utils import (
+    MIN_SEARCH_LISTING_CHARS,
     ToolResult,
     content_origin,
     process_result,
     result_status,
+    search_origin,
+    search_text_field,
     select_text_field,
 )
 
@@ -66,21 +69,30 @@ def response(data: dict) -> ToolResult:
     if isinstance(value, str) and is_skill_file(value):
         skip()
     envelope = value
-    minimum = 200
+    minimum = MIN_SEARCH_LISTING_CHARS
     can_replace = True
     if tool == "Bash" and isinstance(envelope, dict):
         # The native renderer consumes stdout, so no other field is replaceable.
         stdout = envelope.get("stdout")
         field = ("stdout", stdout) if isinstance(stdout, str) else None
         can_replace = field is not None
+    elif tool in SHELL_TOOLS:
+        field = select_text_field(envelope, ("stdout", "stderr"), minimum)
     else:
-        field = (
-            select_text_field(envelope, ("stdout", "stderr"), minimum)
-            if tool in SHELL_TOOLS
-            else None
-        )
+        field = None
     arguments = data.get("tool_input", {})
     origin = content_origin(tool)
+    # Native search results hold match listings in one text slot. Declaring
+    # that slot as api_response routes the derived match text through the
+    # lossless search-only path; the envelope's counters and other fields
+    # stay untouched, and replacement rewrites only the slot itself.
+    if search_origin(tool, envelope) == "api_response":
+        field = search_text_field(tool, envelope, ("content", "output", "text"))
+        origin = "api_response"
+        search_listing = True
+        can_replace = True
+    else:
+        search_listing = False
     command = (
         arguments.get("command")
         if origin == "command_output" and isinstance(arguments, dict)
@@ -101,6 +113,7 @@ def response(data: dict) -> ToolResult:
         status,
         can_replace,
         field is not None or not isinstance(raw, (dict, list)),
+        search_listing=search_listing,
     )
 
 

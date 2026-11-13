@@ -393,7 +393,11 @@ pub struct PostToolRequest {
     /// Whether this is an ordinary tool or Retrieve result.
     pub result_kind: ResultKind,
     /// Name of the tool that produced the result.
-    /// The exact name `Grep` restricts Core to search path sharing.
+    ///
+    /// The exact name `Grep` restricts Core to search path sharing. The alias
+    /// family (`grep`, `grep_code`, `grep_search`, `search_files`) routes
+    /// through the same search-only path when the adapter declares the result
+    /// with `search_listing`; see that field.
     pub tool_name: String,
     /// Model-visible result content.
     pub content: String,
@@ -409,6 +413,17 @@ pub struct PostToolRequest {
     /// including its generation; missing or modified commands retain RTK ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The host declares this result to be a complete search match listing.
+    ///
+    /// Set by adapters whose contract identifies the text as match-listing
+    /// output (native Grep-like tools or recognized shell searches), whatever
+    /// the content shape. Core then routes the result to the lossless
+    /// search-only path and keeps it out of the JSON, table, HTML and log
+    /// compressors even with `force_json`. Hosts that merely return JSON
+    /// under a search-shaped tool name leave this unset and keep their
+    /// usual content-based dispatch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search_listing: bool,
     /// Optimization state returned by PreTool.
     pub output_optimization: OutputOptimization,
     /// Host capabilities for applying the result.

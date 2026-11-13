@@ -43,6 +43,7 @@ fn requests() -> Vec<RequestEnvelope> {
                 status: ToolResultStatus::Success,
                 content_origin: ContentOrigin::CommandOutput,
                 command: None,
+                search_listing: false,
                 output_optimization: OutputOptimization::None,
                 capabilities: PostToolCapabilities {
                     replace_output: true,

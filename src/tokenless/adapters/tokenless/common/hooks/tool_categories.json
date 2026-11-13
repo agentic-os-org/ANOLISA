@@ -30,7 +30,9 @@
       "NotebookRead",
       "notebook_read",
       "notebookread"
-    ]
+    ],
+    "_search_note": "search_listing_tools are native search aliases. Hosts with text replacement declare their match-listing text as api_response so the lossless search-only route applies; Read-style tools keep file_content and stay byte-for-byte.",
+    "search_listing_tools": ["Grep", "grep", "grep_code", "grep_search", "search_files"]
   },
 
   "layer_2_shell": {

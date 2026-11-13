@@ -1358,8 +1358,6 @@ class TestGrepEnvelopeUnwrap(unittest.TestCase):
         cases = [
             ("claude-code", "count", {}),
             ("claude-code", "files_with_matches", {}),
-            ("qoder-cli", "content", {}),
-            ("opencode", "content", {}),
             *[("claude-code", "content", {flag: 2})
               for flag in ("-A", "-B", "-C", "context")],
         ]
@@ -1379,6 +1377,26 @@ class TestGrepEnvelopeUnwrap(unittest.TestCase):
                         request = json.load(captured)
                     self.assertEqual(json.loads(request["content"]), envelope)
                     self.assertFalse(request["capabilities"]["replace_with_text"])
+
+    def test_replacement_hosts_declare_content_mode_as_search_text(self) -> None:
+        # Content mode on a replacement host now unwraps the listing slot —
+        # the derived match text takes the lossless search-only route
+        # (api_response) instead of log-blind whole-envelope JSON.
+        for agent in ["qoder-cli", "opencode", "qwenwork", "cosh-ng"]:
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as directory:
+                binary = _create_mock_tokenless(directory, "no-savings")
+                _create_mock_claude(directory)
+                envelope = {"mode": "content", "content": "file.rs:1:match\n" * 20}
+                result = _run_hook(
+                    {"tool_name": "Grep", "tool_response": envelope},
+                    agent, binary, directory,
+                )
+                self.assertEqual(result, {})
+                with open(os.path.join(directory, "request.json")) as captured:
+                    request = json.load(captured)
+                self.assertEqual(request["content"], envelope["content"])
+                self.assertEqual(request["content_origin"], "api_response")
+                self.assertTrue(request["capabilities"]["replace_output"])
 
     def test_no_savings_and_old_claude_do_not_emit_replacements(self) -> None:
         for version in ["2.1.120", "2.1.259"]:

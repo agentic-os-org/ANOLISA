@@ -75,7 +75,7 @@ Tokenless 不增加截断回退，宿主自身的输出限制仍然有效。`max
 
 搜索压缩器开启但没有候选时，使用公共仲裁的 `no_savings`；连接持久化 Store 时，Stash
 计数为零。关闭搜索压缩或命中生命周期门槛时仍为透传。API 和文件读取结果上的 `command`
-元数据不会开启 Shell 搜索保护；精确工具名 `Grep` 保留其原生搜索契约。
+元数据不会开启 Shell 搜索保护；原生搜索别名家族保留其原生搜索契约。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
@@ -224,8 +224,9 @@ Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 关闭该域时搜索列表原样返回且不计算搜索候选。其他工具名仍可使用 JSON、表格和日志压缩。
 关闭路径共享时，已识别的原生 `find` 仍跳过 RTK 改写。这是独立于压缩的正确性边界：停用优化
 不应重新引入摘要化或被改动的查询路径。完整恢复此前的 RTK 路由策略需要回退此变更。
-精确名称 `Grep` 始终排除这些域，以保留全部已收到命中；关闭路径共享不会恢复此功能引入前
-自定义 `Grep` 工具的 JSON、表格和日志派发。全局压缩开关仍控制已开启域的 dry-run。
+精确名称 `Grep` 以及宿主以 `search_listing` 声明的结果始终排除这些域，以保留全部已收到命中；
+关闭路径共享不会恢复此功能引入前自定义 `Grep` 工具的 JSON、表格和日志派发，也不会恢复已声明
+搜索列表的派发。全局压缩开关仍控制已开启域的 dry-run。
 整任务节省取决于工作负载；保留全部收到的字节并不保证后续工具调用更少或总 Token 用量更低。
 
 两种视图有意共用 `search_path_sharing`，以该操作表示优化类别并保持 Protocol v2 不变。
@@ -239,9 +240,18 @@ Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 同一路径在非连续位置出现时会生成新的文件头。
 
 解包的 Grep 列表在统计中记作 `api_response`，而非 `file_content`，因为它是筛选后的工具响应，
-不是权威文件副本。按来源分组的历史查询因此存在版本边界。Core 将精确工具名 `Grep` 视为
-仅适用搜索压缩的工具；即使搜索路径共享关闭，也不会转入 JSON、表格或日志压缩。SDK 调用者
-仅应对符合此搜索契约的工具使用该名称。
+不是权威文件副本。按来源分组的历史查询因此存在版本边界。精确名称 `Grep` 和每个由宿主声明
+`search_listing` 的结果都是仅适用搜索压缩的：即使搜索路径共享关闭，也不会转入 JSON、表格或
+日志压缩。未带该声明的搜索形工具名保持原有领域（各 Adapter 仍从别名名单 `Grep`、`grep`、
+`grep_code`、`grep_search`、`search_files` 推导 `search_listing`，但 Core 本身除保留名 `Grep`
+外不做任何名称匹配）。支持文本替换的宿主把搜索文本槽位
+（宿主文本即命中列表时为整个结果）声明为 `api_response` 而非 `file_content`，因此同一段搜索
+文本经搜索工具与经 Shell 的压缩行为一致；文件读取保持 `file_content` 并逐字节保留。SDK 集成
+不应依赖工具名称来实现这一契约：请在结果上声明 `search_listing`（参见 AgentScope/QwenPaw 的
+`_contracts.py`）。只有 Claude Code Adapter 保留上下文选项前置条件；
+其他替换宿主允许上下文列表进入搜索路由，压缩器会拒绝任何不符合 `路径:行号:正文` 形状的行并
+原样返回输入（恰好符合该形状的行无论来源都会被折叠进文件分组，因此搜索输出可能缺失行号的宿主
+不应声明 `search_listing`）。
 
 ## Stats 查询
 
