@@ -17,6 +17,10 @@ from pathlib import Path
 
 from all_shell_host import run_all_shell_host
 from cosh_host import run_host
+from runner_permissions import (
+    make_fixture_executable,
+    verify_runner_permissions,
+)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -545,6 +549,9 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 "AGENT_SEC_COSH_SANDBOX_ALL_SHELL": "1",
             }
             hook_env.pop("AGENT_SEC_COSH_SANDBOX_PERMISSIONS", None)
+            assert shutil.which("linux-sandbox", path=hook_env["PATH"]) == str(
+                legacy_bin / "linux-sandbox"
+            ), "legacy helper fixture is not executable; PATH would use the runner checkout"
 
             def fire_hook(
                 event: str, tool_command: str, env: dict | None = None
@@ -812,6 +819,7 @@ def main() -> None:
     ]
     if args.isolation_root is not None:
         prepare_private_template(args.isolation_root)
+        verify_runner_permissions(args.isolation_root, binaries[2])
         run = args.isolation_root / "run"
         run.mkdir(mode=0o700)
         exercise(*binaries, run)
@@ -839,6 +847,12 @@ def prepare_private_template(root: Path) -> None:
     """Install test defaults and a private passwd home without changing host /etc."""
     assert os.readlink("/proc/self/ns/mnt") != (root / "parent-mountns").read_text()
     subprocess.run(["mount", "--make-rprivate", "/"], check=True)
+    print(
+        f"Fixture parent mount noexec: {bool(os.statvfs(root).f_flag & os.ST_NOEXEC)}",
+        flush=True,
+    )
+    # /run may be noexec; helper and fault-injection executables must remain runnable.
+    make_fixture_executable(root)
     upper, work = root / "etc-upper", root / "etc-work"
     upper.mkdir(mode=0o700)
     work.mkdir(mode=0o700)

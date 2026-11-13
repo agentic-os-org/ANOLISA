@@ -464,6 +464,7 @@ def _run_all_shell_host(
                         case,
                         messages,
                         (home / "stderr").read_text(),
+                        trace.read_text() if trace.exists() else "no Hook output",
                     )
                     approvals += 1
                     assert not marker.exists(), "command ran before native approval"
@@ -609,6 +610,11 @@ def _run_all_shell_host(
             else "allow" if started or case == "sudo-system" else "block"
         )
         assert outputs[0]["decision"] == expected, outputs
+        if case == "disabled-dangerous":
+            wrapper = shlex.split(
+                outputs[0]["hookSpecificOutput"]["tool_input"]["command"]
+            )
+            assert wrapper[0] == str(root / "legacy-bin/linux-sandbox"), wrapper
         if case in {"disabled-blocked", "enabled-blocked"}:
             assert "shutdown" in outputs[0]["reason"], outputs
             assert "hookSpecificOutput" not in outputs[0], outputs
