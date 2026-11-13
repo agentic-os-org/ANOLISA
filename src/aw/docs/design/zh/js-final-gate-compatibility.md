@@ -34,7 +34,7 @@ preload、最终回调，也不增加每次工具调用的进程。
 | Agent | 发行构建 | 已观察顺序 | 最终安全门状态 |
 | --- | --- | --- | --- |
 | DeepSeek Harness | 0.2.1-rc.5 | `finalize/finish` → 精确构建 preload → 顶层 Session commit | 仅既有 headless 测试范围已验证 |
-| OpenClaw | 2026.9.6 | 顺序执行结果 middleware → `after_tool_call` → 模型请求；后续 middleware 可改写前一项结果 | 暂不支持；须验证原生最终提交点 |
+| OpenClaw | 2026.9.6 | middleware → `after_tool_call` → 上下文转换 → Provider 请求 Hook → HTTP 请求 | 下述受控 Gateway 与显式 OpenAI-completions 路径已验证 |
 | Qoder SDK | SDK 1.0.56、Worker 1.1.78、Linux arm64 | `PostToolUse` → `updatedToolOutput`／Read 转换／附加上下文 → Worker 交付 | 暂不支持；公开 Post 回调早于最终转换 |
 
 OpenClaw 2026.9.6 的 middleware runner 逐个等待处理器，并把上一项结果传给
@@ -43,6 +43,38 @@ OpenClaw 2026.9.6 的 middleware runner 逐个等待处理器，并把上一项�
 middleware 注入 `AW_FINAL_GATE_SECRET_MARKER`，下一次模型 HTTP 请求包含标记。
 这是对早期 middleware 检查的红灯基线。一次探针中的 `tool_result_persist` 修改了
 持久化副本，但下一次模型请求未采用该修改，不能用它替代模型请求捕获。
+
+已验证的 OpenClaw 路径采用两个启动期接点。`agent-core-DG5aPUnb.mjs` 中
+`convertToLlm` 的返回点核对源结果身份、纯文本结构，以及上下文转换后非工具消息的
+来源。`@openclaw/ai/dist/transports.mjs` 的 OpenAI-completions 分支在
+`onPayload` 和 `before_provider_request` 完成后、调用
+`chat.completions.create` 前，检查最终 HTTP 请求。它把请求中实际采用的工具
+文本送给现有 `security.violation` Provider；阻断或检查失败时，改为安全的暂扣
+文案。序列化后若非工具消息或工具元数据被改写，模型请求直接停止。这两个接点分别
+防止上下文转换把工具内容复制到用户消息，以及后续请求 Hook 绕过检查。
+
+启动 admission 精确校验实际 `openclaw.mjs` 入口、Agent core、内建转换器、
+会话投影、调用 ID 规范化代码，以及 `@openclaw/ai@2026.9.6` 的传输与序列化
+文件。Node 加载时再校验两个插桩目标的字节和唯一锚点。两个目标摘要分别为
+`96221c65ea8e15d6499ca9f817e5d7629151b42c6d9742000791f2f48f2cebcd` 和
+`038e2c72e79a3e1c9d06e9c5f3a61a13acc297e1026696da24fee634a3bc4abc`；
+入口摘要为 `4dd36d2ed0cb154456c4a09a951a2e8f2508a5dd6ff2fe0688d4e1c8f773fcb5`。
+原生结果 middleware 只记录 session、run、tool call 和工具名。OpenClaw 启动时
+会注册两次插件，两次注册共享本次启动的身份表。固定传输实现可能删除调用 ID 的
+标点；AW 只在同一会话、同一工具中唯一对应一项待检调用时接受映射。歧义或身份缺失
+时暂扣。相同的已检查请求文本可复用摘要回执；历史文本变化时暂扣。admission
+要求显式主模型使用 `openai-completions` 且不配置 fallback，运行时再次核对实际
+模型 API，其他 API 在模型调用前停止。
+
+真实 Gateway 夹具验证安全内容放行、后置 middleware 植入
+`AW_FINAL_GATE_SECRET_MARKER` 后暂扣，以及 Provider 故障暂扣。Provider 收到
+实际序列化的工具文本，模型 HTTP 请求对危险结果只收到暂扣文案；原有 `tool.before` 阻断仍阻止
+工具副作用。同一 Gateway 路径还通过了真实 `agent-sec-core` 的
+`check_final_tool_output` Provider 与确定性本地 PII 扫描器。当前模型采用证据
+来自受测 OpenAI 兼容序列化路径。单元测试另覆盖序列化后的请求改写；
+`before_provider_request` 原生扩展的实际运行尚未验证。其他模型 API、
+reloadable 策略、多模态、移除工具结果身份的上下文投影、嵌套 Agent 和后台交付
+尚未覆盖。
 
 Qoder Worker 在 `firePostToolUseEvent` 之后应用 `getUpdatedToolOutput()`／
 `getUpdatedMCPToolOutput()`；同一路径还可能改写 Read 的 `llmContent` 并附加 Hook
@@ -60,10 +92,10 @@ Linux arm64 Worker 摘要为
 
 ## Admission 与覆盖范围
 
-OpenClaw 和 Qoder SDK 当前未在 Adapter catalog 声明 `security.violation`，必需
-最终策略因此会拒绝 admission；普通 `tool.after` 与空策略启动沿用既有行为。
-只有精确构建、可等待的最终接点、身份关联、Provider 故障暂扣及原生结果采用测试
-全部通过，才能改变该状态。必需安全门遇到不支持的 Node loader、模块摘要、唯一
+Qoder SDK 当前未在 Adapter catalog 声明 `security.violation`。OpenClaw 只对上文
+已验证的 2026.9.6 受控 Gateway Profile 开放该能力；其他版本和配置拒绝
+admission。普通 `tool.after` 与空策略启动沿用既有行为。必需安全门遇到不支持的
+Node loader、模块摘要、唯一
 锚点、SDK／Worker 组合或交付路径时必须拒绝。多模态、嵌套、后台、直接工具运行时
 及第三方早期观察者均需独立证据。
 
@@ -81,4 +113,7 @@ python3 src/aw/crates/aw-cli/tests/openclaw_gateway.py \
 
 输出的 `final-gate-baseline.json` 记录 middleware、Post 和模型可见阶段。
 `baseline_red` 表示标记进入模型夹具，不计作最终安全门通过。原生验收矩阵固定
-发行包并调度该用例。Qoder Worker 源码检查也不计作模型采用证据。
+发行包并调度该用例。增加 `--final-gate-enforce` 验证最终检查；再增加
+`--final-gate-provider-error` 验证故障暂扣。Qoder Worker 源码检查也不计作
+模型采用证据。增加 `--sec-core-provider /absolute/path/to/aw-provider-sec-core`
+可验证真实 Provider。

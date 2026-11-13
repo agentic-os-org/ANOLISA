@@ -48,6 +48,19 @@
                 "replaceResult": { "type": "boolean" }
               }
             }
+          },
+          "final": {
+            "type": "array",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["step", "onError", "budgetMs"],
+              "properties": {
+                "step": { "type": "string", "minLength": 1 },
+                "onError": { "type": "string", "enum": ["block"] },
+                "budgetMs": { "type": "integer", "minimum": 1, "maximum": 12000 },
+                "replaceResult": { "type": "boolean", "const": false }
+              }
+            }
           }
         }
       }

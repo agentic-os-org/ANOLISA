@@ -7,6 +7,7 @@ pub(super) mod codex;
 pub(super) mod deepseek;
 pub(super) mod hermes;
 pub(super) mod openclaw;
+mod openclaw_bundle;
 pub(super) mod pi;
 pub(super) mod qoder_sdk;
 pub(super) mod qwenpaw;

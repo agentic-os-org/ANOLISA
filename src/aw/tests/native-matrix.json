@@ -1863,6 +1863,102 @@
               }
             }
           ]
+        },
+        {
+          "name": "final-result-gate",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_error": false,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-error",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-error/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_error": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-sec-core",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-sec-core",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-sec-core/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_sec_core": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            }
+          ]
         }
       ]
     },
