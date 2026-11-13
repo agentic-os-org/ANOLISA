@@ -173,25 +173,21 @@ struct FactEntry {
 /// Returns (frontmatter_map, body).
 fn parse_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     let mut fm = HashMap::new();
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            let fm_str = &rest[..end];
-            let body = rest[end + 5..].to_string();
-            for line in fm_str.lines() {
-                if let Some(item) = line.strip_prefix("  - ") {
-                    // List item — skip for flat parsing
-                    let _ = item;
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once(": ") {
-                    let value = unquote_yaml(value.trim());
-                    fm.insert(key.trim().to_string(), value);
-                } else if let Some(key) = line.strip_suffix(':') {
-                    fm.insert(key.trim().to_string(), String::new());
-                }
+    if let Some((fm_str, body)) = super::frontmatter::split(content) {
+        for line in fm_str.lines() {
+            if let Some(item) = line.strip_prefix("  - ") {
+                // List item — skip for flat parsing
+                let _ = item;
+                continue;
             }
-            return (fm, body);
+            if let Some((key, value)) = line.split_once(": ") {
+                let value = unquote_yaml(value.trim());
+                fm.insert(key.trim().to_string(), value);
+            } else if let Some(key) = line.strip_suffix(':') {
+                fm.insert(key.trim().to_string(), String::new());
+            }
         }
+        return (fm, body.to_string());
     }
     (fm, content.to_string())
 }
@@ -224,6 +220,18 @@ fn take_preview(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_frontmatter_accepts_fence_at_end_of_file() {
+        // A closing fence that ends the file is a valid terminator: the map
+        // must carry the keys, and the body must be empty instead of the
+        // whole file — a summary fact parsed this way used to lose its
+        // category and confidence entirely.
+        let (fm, body) = parse_frontmatter("---\ncategory: summary\nconfidence: 0.9\n---");
+        assert_eq!(fm.get("category").unwrap(), "summary");
+        assert_eq!(fm.get("confidence").unwrap(), "0.9");
+        assert_eq!(body, "");
+    }
 
     #[test]
     fn parse_frontmatter_extracts_fields() {
