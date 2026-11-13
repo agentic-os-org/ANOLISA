@@ -37,7 +37,7 @@ OpenClaw 2026.9.7 在原生异步请求体编码完成后校验，并以不可�
 | --- | --- | --- | --- |
 | DeepSeek Harness | 0.2.1-rc.5 | `finalize/finish` → 精确构建 preload → 顶层 Session commit | 仅既有 headless 测试范围已验证 |
 | OpenClaw | 2026.9.5、2026.9.6、2026.9.7 | middleware → `after_tool_call` → 上下文转换 → Provider 请求 Hook → HTTP 请求 | 下述受控 Gateway 与显式 OpenAI-completions 路径已验证 |
-| Qoder SDK | SDK 1.0.55／Worker 1.1.75、1.0.56／1.1.78、1.0.57／1.1.81，Linux arm64 | `PostToolUse` → `updatedToolOutput`／Read 转换／附加上下文 → Worker 交付 | 发行包检查与解析器验收覆盖三版；最终安全门暂不支持 |
+| Qoder SDK | SDK 1.0.55／Worker 1.1.75、1.0.56／1.1.78、1.0.57／1.1.81，Linux arm64 | `PostToolUse` → `updatedToolOutput`／Read 转换／附加上下文 → Worker 交付 | 三版真实 Worker 后置改写红灯通过；最终安全门暂不支持 |
 
 受测 OpenClaw 的 middleware runner 逐个等待处理器，并把上一项结果传给
 下一项。内建 `tool_result` 扩展先运行这条链，随后执行已观察到的
@@ -88,13 +88,13 @@ reloadable 策略、多模态、移除工具结果身份的上下文投影、嵌
 
 受检的三个 Qoder Worker 都在 `firePostToolUseEvent` 之后应用 `getUpdatedToolOutput()`／
 `getUpdatedMCPToolOutput()`；同一路径还可能改写 Read 的 `llmContent` 并附加 Hook
-上下文。Worker 是独立版本的混淆构建。1.0.56／1.1.78 的隔离真实 Query
-进一步验证：AW `tool.after` 读取原始安全输出，随后应用 SDK `PostToolUse` 回调
+上下文。Worker 是独立版本的混淆构建。三个版本的隔离真实 Query
+均验证：AW `tool.after` 读取原始安全输出，随后应用 SDK `PostToolUse` 回调
 把结果改为 `AW_QODER_LATE_POST_SECRET`；Worker 发布的 `tool_result` 含该标记，
 托管模型的最终回答也准确复述该标记。该红灯证明公开 Post 回调不足以提供最终保证；
 本次未捕获托管模型的原始网络请求，且未安装 Qoder Worker 的可阻断最终接点。
-因此三个版本仍不开放 `security.violation`。版本矩阵逐版校验 SDK 与 Worker 字节，
-并运行 SDK 解析器；两个新增版本尚无真实模型采用验收。隔离环境中无凭据启动
+因此三个版本仍不开放 `security.violation`。版本矩阵逐版校验 SDK 与 Worker 字节、
+SDK 解析器和真实后置改写采用。隔离环境中无凭据启动
 Worker 时，三版均被模型目录或认证门拒绝。
 
 本次检查的 OpenClaw 包要求 Node `>=24.16.0 <25 || >=26.1.0`，Gateway 探针使用

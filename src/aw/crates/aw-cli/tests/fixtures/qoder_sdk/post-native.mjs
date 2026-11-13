@@ -75,7 +75,8 @@ try {
     assert(fs.existsSync(marker), "report/success prevented later tool execution");
   }
   fs.writeFileSync(path.join(root, "results.json"), JSON.stringify({ case: mode, status: "passed",
-    sdk: "1.0.56", worker: "1.1.78", post: post.native.hook_event_name, model_policy_calls: models.length,
+    sdk: process.env.QODER_TEST_SDK_VERSION, worker: process.env.QODER_TEST_WORKER_VERSION,
+    post: post.native.hook_event_name, model_policy_calls: models.length,
     delivered: !!delivered, finalized, later_tool: fs.existsSync(marker),
     late_mutation_adopted: mode === "late-mutation" && JSON.stringify(delivered?.content).includes(lateMarker),
     model_echoed_late_marker: mode === "late-mutation" && modelEchoedLateMarker }));

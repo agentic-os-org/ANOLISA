@@ -42,7 +42,7 @@ preload, final callback or extra per-tool process.
 | --- | --- | --- | --- |
 | DeepSeek Harness | 0.2.1-rc.5 | `finalize/finish` -> exact-build preload -> top-level Session commit | Verified for the existing headless tests only |
 | OpenClaw | 2026.9.5, 2026.9.6, 2026.9.7 | middleware -> `after_tool_call` -> context conversion -> provider payload hook -> HTTP request | Verified for the owned embedded Gateway and explicit OpenAI-completions path below |
-| Qoder SDK | SDK 1.0.55/Worker 1.1.75, 1.0.56/1.1.78, 1.0.57/1.1.81, Linux arm64 | `PostToolUse` -> `updatedToolOutput`/Read rendering/additional context -> Worker result delivery | Partial release inspection and parser acceptance; final gate unsupported |
+| Qoder SDK | SDK 1.0.55/Worker 1.1.75, 1.0.56/1.1.78, 1.0.57/1.1.81, Linux arm64 | `PostToolUse` -> `updatedToolOutput`/Read rendering/additional context -> Worker result delivery | Real Worker late-mutation red case passed on all three; final gate unsupported |
 
 The tested OpenClaw middleware runners await each handler and pass the
 previous result to the next. Its built-in `tool_result` extension applies that
@@ -115,15 +115,15 @@ result identity, nested agents and background delivery remain unsupported.
 All three inspected Qoder Workers call `firePostToolUseEvent` before applying
 `getUpdatedToolOutput()`/`getUpdatedMCPToolOutput()`. The same return path can
 rewrite `llmContent` for Read and append Hook context. The shipped Worker is an
-obfuscated, separately versioned bundle. An isolated real Query with SDK
-1.0.56 and Worker 1.1.78 demonstrated the ordering: AW `tool.after` observed
+obfuscated, separately versioned bundle. Isolated real Queries on all three
+SDK/Worker pairs demonstrated the ordering: AW `tool.after` observed
 the original safe output, then an SDK `PostToolUse` callback changed it to
 `AW_QODER_LATE_POST_SECRET`. The Worker-delivered `tool_result` contained the
 marker, and the hosted model repeated it in its final answer. The raw hosted
 model request was not captured and no blocking Worker checkpoint is installed.
 All three versions therefore retain unsupported final-gate status. The matrix
-checks exact SDK and Worker bytes and runs the SDK parser for each version;
-the two additional releases lack native model-adoption acceptance. Isolated
+checks exact SDK and Worker bytes, the SDK parser, and real late-mutation adoption
+for each version. Isolated
 Worker initialization without credentials was rejected by the model catalog
 or authentication gate on all three versions.
 
