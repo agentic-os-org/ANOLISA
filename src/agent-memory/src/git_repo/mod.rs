@@ -277,9 +277,10 @@ pub fn revert(root: &Path, root_fd: BorrowedFd<'_>, path: &str) -> Result<String
     })?;
 
     // Write back through the sandbox. assert_no_symlink_traversal on the
-    // parent closes the gap that std::fs::create_dir_all leaves open;
-    // safe_fs::write itself uses openat2 with NO_SYMLINKS so the final
-    // open cannot follow a leaf symlink either (live or dangling).
+    // parent rejects a symlinked directory component before
+    // std::fs::create_dir_all can follow one, and both helpers below open the
+    // leaf with openat2 and NO_SYMLINKS, so the final open cannot follow a
+    // symlink either (live or dangling).
     let rel_path = Path::new(path);
     if let Some(parent) = rel_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -288,7 +289,34 @@ pub fn revert(root: &Path, root_fd: BorrowedFd<'_>, path: &str) -> Result<String
             std::fs::create_dir_all(&parent_abs)?;
         }
     }
-    crate::safe_fs::write(root_fd, rel_path, blob.content())?;
+    // Rewriting a file that is still in the working tree stages the blob beside
+    // the destination and renames it: `safe_fs::write` truncated first, and a
+    // short write left a prefix of the HEAD content with the uncommitted
+    // working copy gone. A file the revert has to *bring back* has no
+    // destination to replace, and `write_atomic` cannot create one, so the
+    // create path keeps its own helper and falls back to the staged rewrite
+    // when the destination turns out to exist.
+    match crate::safe_fs::write_create_new(root_fd, rel_path, blob.content()) {
+        Err(MemoryError::AlreadyExists(_)) => {
+            // `MemoryService` always creates the staging directory; a direct
+            // caller can hold a bare repository root, so create it only on the
+            // replacement path. A revert that merely restores a deleted file
+            // must not leave an empty `.anolisa/` behind.
+            let staging_dir = root.join(crate::ns::RESERVED_FIRST_SEGMENTS[0]);
+            if !staging_dir.is_dir() {
+                std::fs::create_dir_all(&staging_dir)?;
+            }
+            crate::safe_fs::write_atomic(
+                root_fd,
+                Path::new(crate::ns::RESERVED_FIRST_SEGMENTS[0]),
+                rel_path,
+                blob.content(),
+            )?;
+        }
+        result => {
+            result?;
+        }
+    }
 
     // Restoring HEAD content needs no new commit. Staging the whole mount
     // here would commit unrelated edits and consume their own undo.

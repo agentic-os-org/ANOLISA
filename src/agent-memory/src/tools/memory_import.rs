@@ -417,7 +417,8 @@ fn import_single(
     // Reconstruct the markdown file
     let content = reconstruct_markdown(&mem.frontmatter, &mem.content);
 
-    // Use safe_fs::write for secure write with openat2 + RESOLVE_BENEATH
+    // Sandbox-anchored write: `write_create_new` for a new entry,
+    // `write_atomic` to stage a replacement, both resolved beneath the mount.
     let rel_path = crate::ns::paths::relative_to_mount(&svc.mount, &target_path);
     let rel_path_path = Path::new(&rel_path);
 
@@ -431,7 +432,26 @@ fn import_single(
         std::fs::create_dir_all(parent)?;
     }
 
-    crate::safe_fs::write(svc.mount.root_fd.as_fd(), rel_path_path, content.as_bytes())?;
+    // A merge that replaces an existing entry must not truncate it first: the
+    // overwrite is staged and renamed, while a new file keeps the destination
+    // parent's default ACL/group through `write_create_new`.
+    match crate::safe_fs::write_create_new(
+        svc.mount.root_fd.as_fd(),
+        rel_path_path,
+        content.as_bytes(),
+    ) {
+        Err(MemoryError::AlreadyExists(_)) => {
+            crate::safe_fs::write_atomic(
+                svc.mount.root_fd.as_fd(),
+                Path::new(svc.mount.meta_dir_name()),
+                rel_path_path,
+                content.as_bytes(),
+            )?;
+        }
+        result => {
+            result?;
+        }
+    }
 
     Ok(if exists {
         ImportAction::Overwritten
