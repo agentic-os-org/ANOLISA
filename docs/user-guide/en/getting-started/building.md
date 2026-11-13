@@ -53,7 +53,7 @@ component.
 
 | Need | Source of truth |
 |------|-----------------|
-| Node.js | The complete build uses Node.js 22 or newer, including AgentSight's DSH plugin. npm also builds the agent-memory, agent-sec-core, Tokenless and ws-ckpt plugins. |
+| Node.js | The script uses Node.js 22 or newer and npm for AgentSight's embedded dashboard and for standalone framework plugin builds. |
 | Python | System `python3` runs build helpers and installation checks. The default agent-sec-core V2 build does not require uv, a virtual environment or a fixed Python runtime. Python SDK wheels and Python-specific tests have their own requirements. |
 | Rust | AW and its two Providers pin `1.97.1`; agent-sec-core's linux-sandbox pins `1.93.0`; cosh-ng follows `stable`. Follow each component's `rust-toolchain.toml` and minimum `rust-version`; a minimum version does not require installing a separate toolchain. |
 | cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
@@ -124,6 +124,16 @@ the manifest rather than the backend name: `agent-sec-core` includes
 The checkout currently has nine default targets in total. New matching
 Providers join their backends automatically; unselected backends and their
 Providers are not added.
+
+When `aw` is selected, including in `--all`, the script builds and stages the
+selected components' core files, bundled skills, and matching AW Providers.
+It skips the standalone `-plugins` payloads for Tokenless, sec-core, ws-ckpt,
+AgentSight, and agent-memory. When the selection includes `cosh-ng`, the script
+also delivers the native Cosh extensions for the selected sec-core and Tokenless
+backends. These provide Cosh security Hooks and shell input and output
+optimization. AgentSight still builds its embedded dashboard. To build a
+component with its full standalone adapter bundle, select that component
+without `aw`.
 
 ```bash
 # Prepare dependencies, build the default targets and install system files
@@ -217,6 +227,9 @@ profile's files without runtime capability checks or service activation. Use
 Provider selected explicitly supplies the AW bridge without selecting its
 backend or granting the backend's required privileges.
 
+Start with an empty `--destdir` for each package. Reusing a package root leaves
+previously staged standalone adapters in that root.
+
 Dependency preparation covers the selected build requirements. It keeps
 component compilation outputs and caches for subsequent builds, and does not
 prepare uv or a fixed Python environment. RTK and ActPlane source preparation
@@ -239,6 +252,58 @@ runtimes or host capabilities are reported before component files are installed.
 Building and package staging do not require the build host to run
 the selected services. `--ignore-deps` skips both build environment preparation
 and runtime checks; use it on a host you have already provisioned.
+
+### Migrate an installed host to AW
+
+A file upgrade preserves existing adapter files and framework registrations.
+Before switching a framework to AW, use its actual service account or Agent
+user and the same profile, configuration paths and environment as the running
+framework. Record which plugins or Hooks are enabled and where they load from.
+Back up the active configuration and keep the previous adapter bundles
+available. For a registration managed by ANOLISA, use
+[`anolisa adapter status`](anolisa-cli.md#adapter) to identify the source. Use
+`anolisa adapter disable <component> <framework>` when retiring the whole
+registration. For standalone registrations, use the framework's plugin or Hook
+settings.
+
+1. Prepare and validate the [AW configuration](../aw/configuration.md). Match
+   its enabled Providers and event and tool selectors against the native
+   Hooks. Keep the native Hooks for capabilities that AW has yet to cover for
+   this profile. For Cosh, keep the sec-core and Tokenless extensions and
+   confirm their sources with [`/extensions list`](../cosh-ng/core/extensions.md).
+   Keep [the ws-ckpt plugin](../ws-ckpt/index.md#plugin-installation) on
+   OpenClaw or Hermes if you rely on its automatic checkpoints or native
+   tools. If you uninstall that plugin, its uninstall script also removes
+   the framework's local copy of the Skill. Restore that Skill through the
+   framework's Skill directory if you still use it.
+2. Stop the old Agent process or Gateway and disable the overlapping native
+   registrations before launching it through AW. For example, on the
+   [OpenClaw profile used by AW](../aw/configuration.md#openclaw), inspect
+   `agent-sec` and `tokenless` with `openclaw plugins inspect <id> --json`.
+   If AW now scans `exec` and you accept retiring the native scanner's plugin
+   self-protection, set `plugins.entries.agent-sec.config.capabilities.scan-code.enabled`
+   to `false` in the selected native JSON. Update any `CODE_SCANNER_HOOK_ENABLED`
+   override in the service environment as well. This keeps the other
+   `agent-sec` capabilities available. Set
+   `plugins.entries.tokenless.enabled` to `false` if the AW Tokenless steps cover
+   what the profile uses. Keep the native Tokenless plugin if you need its
+   recovery tool and leave the overlapping AW steps disabled for that profile.
+3. Start a fresh session or Gateway through AW. Run the
+   [security checks](../aw/security.md#verify-checks) and
+   [Tokenless checks](../aw/tokenless.md#check-results) for each capability
+   you switched. Confirm in the AW records and framework logs that a test
+   call invokes the intended check or compression once. Start the required
+   services and run the relevant core commands from that same environment,
+   such as `agent-sec-cli skillsec status`, `tokenless --version`, or
+   `ws-ckpt status`.
+   Confirm that the Agent can discover and use the Skills it needs. In
+   [Cosh](../cosh-ng/core/skills.md), use `/skills detail ws-ckpt` if the
+   checkpoint Skill is installed.
+
+To roll back, exit the AW-managed Agent and stop its AW service. Restore the
+saved native configuration and re-enable any registrations you disabled,
+using their original installer or framework settings. Start the native Agent
+or Gateway with the original profile and repeat the plugin, CLI and Skill checks.
 
 ## 5. Component build entry points
 

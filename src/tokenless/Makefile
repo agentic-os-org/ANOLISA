@@ -791,7 +791,7 @@ TOKENLESS_COSH_EXTENSION_DIR = $(if $(filter command line environment,$(origin C
 validate-adapter-layout:
 	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" --print-layout >/dev/null
 
-.PHONY: layout install install-core install-plugins test-packaging
+.PHONY: layout install install-core install-core-with-cosh install-plugins test-packaging
 layout:
 	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" --print-layout
 
@@ -800,6 +800,9 @@ install:
 
 install-core:
 	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" core
+
+install-core-with-cosh:
+	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" core-with-cosh
 
 install-plugins:
 	@$(DELIVERY_ENV) bash "$(DELIVERY_COMPONENT_ROOT)/packaging/install.sh" plugins

@@ -79,14 +79,18 @@ DELIVERY_CORE_INPUTS = \
 	--file "$(DELIVERY_BUILD_OUTPUT)/gateway/gateway.conf" \
 	--target-file "$(DELIVERY_UNITDIR)/agent-sec-gateway.service" \
 	--target-file "$(DELIVERY_UNITDIR)/agent-sec-core.service.d/gateway.conf"
-DELIVERY_PLUGIN_INPUTS = \
+DELIVERY_COSH_INPUTS = \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/cosh-extension" \
+	--file "$(DELIVERY_BUILD_OUTPUT)/cosh-extension/cosh-extension.json" \
+	--file "$(DELIVERY_BUILD_OUTPUT)/cosh-extension/hooks/sandbox-guard.py" \
+	--tree "$(DELIVERY_BUILD_OUTPUT)/cosh-extension" "$(DELIVERY_EXTENSIONDIR)"
+DELIVERY_PLUGIN_INPUTS = \
+	$(DELIVERY_COSH_INPUTS) \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/codex-plugin" \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin" \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/openclaw-plugin" \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/hermes-plugin" \
 	--directory "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension" \
-	--file "$(DELIVERY_BUILD_OUTPUT)/cosh-extension/cosh-extension.json" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/codex-plugin/install.sh" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin/install.sh" \
 	--glob "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin/hooks/*.py" \
@@ -99,7 +103,6 @@ DELIVERY_PLUGIN_INPUTS = \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension/scripts/deploy.sh" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension/hooks/observability_hook.py" \
 	--file "$(DELIVERY_BUILD_OUTPUT)/qwen-code-extension/hooks/skill_ledger_hook.py" \
-	--tree "$(DELIVERY_BUILD_OUTPUT)/cosh-extension" "$(DELIVERY_EXTENSIONDIR)" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/codex-plugin" "$(DELIVERY_ADAPTERDIR)/codex" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/qoder-plugin" "$(DELIVERY_ADAPTERDIR)/qoder" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/openclaw-plugin" "$(DELIVERY_ADAPTERDIR)/openclaw" \
@@ -110,9 +113,9 @@ DELIVERY_SKILL_INPUTS = \
 	--glob "$(DELIVERY_BUILD_OUTPUT)/skills/*/SKILL.md" \
 	--tree "$(DELIVERY_BUILD_OUTPUT)/skills" "$(DELIVERY_SKILLDIR)"
 
-.PHONY: delivery-validate-core delivery-validate-plugins delivery-validate-skills \
+.PHONY: delivery-validate-core delivery-validate-plugins delivery-validate-skills delivery-validate-cosh \
 	delivery-install-core-files delivery-install-plugins-files delivery-install-skills-files \
-	install-core install-plugins install-skills
+	install-core install-plugins install-skills install-core-and-skills install-core-and-skills-with-cosh
 
 delivery-validate-core: delivery-validate-layout
 	@python3 "$(DELIVERY_ROOT)/packaging/validate-stage.py" --destdir "$(DELIVERY_DESTDIR)" $(DELIVERY_CORE_INPUTS)
@@ -122,6 +125,9 @@ delivery-validate-plugins: delivery-validate-layout
 
 delivery-validate-skills: delivery-validate-layout
 	@python3 "$(DELIVERY_ROOT)/packaging/validate-stage.py" --destdir "$(DELIVERY_DESTDIR)" $(DELIVERY_SKILL_INPUTS)
+
+delivery-validate-cosh: delivery-validate-layout
+	@python3 "$(DELIVERY_ROOT)/packaging/validate-stage.py" --destdir "$(DELIVERY_DESTDIR)" $(DELIVERY_COSH_INPUTS)
 
 delivery-validate-install: delivery-validate-core delivery-validate-plugins delivery-validate-skills
 
@@ -145,6 +151,13 @@ install-plugins: delivery-validate-plugins ## Install prebuilt host integrations
 
 install-skills: delivery-validate-skills ## Install built skills without modifying host configuration
 	$(MAKE) -C "$(DELIVERY_ROOT)" delivery-install-skills-files
+
+install-core-and-skills: delivery-validate-core delivery-validate-skills ## Install core and skills after validating both groups
+	$(MAKE) -C "$(DELIVERY_ROOT)" delivery-install-core-files delivery-install-skills-files
+
+install-core-and-skills-with-cosh: delivery-validate-core delivery-validate-skills delivery-validate-cosh ## Install core, skills and the Cosh extension
+	$(MAKE) -C "$(DELIVERY_ROOT)" delivery-install-core-files delivery-install-skills-files
+	$(MAKE) -C "$(DELIVERY_ROOT)" install-source-v2-cosh-extension $(DELIVERY_INSTALL_ARGS)
 
 # All applicable inputs must pass before any role begins writing files.
 install: delivery-validate-install ## Install all prebuilt V2 files; DESTDIR optionally adds a temporary root

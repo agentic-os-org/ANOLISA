@@ -231,8 +231,18 @@ check_resource_owner() {
 }
 
 group="${1:-all}"
-[ "$#" -le 1 ] || { printf 'ERROR: usage: %s [all|core|plugins|uninstall]\n' "$0" >&2; exit 1; }
-case "$group" in all|core|plugins|uninstall) ;; *) printf 'ERROR: unsupported install group: %s\n' "$group" >&2; exit 1;; esac
+[ "$#" -le 1 ] || { printf 'ERROR: usage: %s [all|core|core-with-cosh|plugins|uninstall]\n' "$0" >&2; exit 1; }
+install_core=false
+install_adapters=false
+install_extension=false
+case "$group" in
+    all) install_core=true; install_adapters=true; install_extension=true ;;
+    core) install_core=true ;;
+    core-with-cosh) install_core=true; install_extension=true ;;
+    plugins) install_adapters=true; install_extension=true ;;
+    uninstall) ;;
+    *) printf 'ERROR: unsupported install group: %s\n' "$group" >&2; exit 1 ;;
+esac
 if [ "$group" = uninstall ]; then
     # Never recursively remove a shared prefix or a system directory.
     for directory in "$ADAPTERDIR" "$EXTENSIONDIR"; do
@@ -258,15 +268,19 @@ if [ "$group" = uninstall ]; then
     exit 0
 fi
 BIN_DIR="${BIN_DIR:-$COMPONENT_ROOT/target/release}"
-if [ "$group" != plugins ]; then
+if $install_core; then
     [ -x "$BIN_DIR/tokenless" ] || { printf 'ERROR: missing prebuilt executable: %s\n' "$BIN_DIR/tokenless" >&2; exit 1; }
     [ -f "$COMPONENT_ROOT/LICENSE" ] || { printf 'ERROR: missing component LICENSE\n' >&2; exit 1; }
 fi
 payload=""
 trap '[ -z "$payload" ] || rm -rf "$payload"' EXIT
-if [ "$group" != core ]; then
+if $install_extension; then
     adapters="$COMPONENT_ROOT/adapters/tokenless"
-    for relative in manifest.json openclaw/dist/index.js dsh/dist/index.js common/cosh-extension.json common/tool-ready-spec.json common/tokenless-env-fix.sh; do
+    required_files=(common/cosh-extension.json common/tool-ready-spec.json common/tokenless-env-fix.sh)
+    if $install_adapters; then
+        required_files+=(manifest.json openclaw/dist/index.js dsh/dist/index.js)
+    fi
+    for relative in "${required_files[@]}"; do
         [ -f "$adapters/$relative" ] || { printf 'ERROR: missing prebuilt plugin input: %s\n' "$adapters/$relative" >&2; exit 1; }
     done
     for relative in common/hooks common/commands; do
@@ -274,31 +288,38 @@ if [ "$group" != core ]; then
     done
     # Prepare only the selected runtime inventory, without compiling plugins.
     payload="$(mktemp -d "${TMPDIR:-/tmp}/tokenless-install.XXXXXX")"
-    tokenless_copy_adapters "$adapters" "$payload/adapters" system
+    if $install_adapters; then
+        tokenless_copy_adapters "$adapters" "$payload/adapters" system
+    fi
     tokenless_copy_extension "$adapters" "$payload/extension" system
 fi
-if [ "$group" != plugins ]; then
+if $install_core; then
     check_destination "$root$BINDIR/tokenless" file
     check_destination "$root$LIBEXECDIR/rtk" file
     check_destination "$root$DATADIR/LICENSE" file
 fi
-if [ "$group" != core ]; then
+if $install_adapters; then
     check_tree_destinations "$payload/adapters" "$root$ADAPTERDIR"
-    check_tree_destinations "$payload/extension" "$root$EXTENSIONDIR"
     check_resource_owner "$root$ADAPTERDIR"
+fi
+if $install_extension; then
+    check_tree_destinations "$payload/extension" "$root$EXTENSIONDIR"
     check_resource_owner "$root$EXTENSIONDIR"
 fi
-if [ "$group" != plugins ]; then
+if $install_core; then
     install -d -m 0755 "$root$BINDIR" "$root$DATADIR"
     install -p -m 0755 "$BIN_DIR/tokenless" "$root$BINDIR/tokenless"
     install -p -m 0644 "$COMPONENT_ROOT/LICENSE" "$root$DATADIR/LICENSE"
     remove_stale_helpers
 fi
-if [ "$group" != core ]; then
-    install -d -m 0755 "$root$ADAPTERDIR" "$root$EXTENSIONDIR"
+if $install_adapters; then
+    install -d -m 0755 "$root$ADAPTERDIR"
     cp -pR "$payload/adapters/." "$root$ADAPTERDIR/"
-    cp -pR "$payload/extension/." "$root$EXTENSIONDIR/"
     printf '%s\n' source-install:tokenless > "$root$ADAPTERDIR/.tokenless-owner"
+fi
+if $install_extension; then
+    install -d -m 0755 "$root$EXTENSIONDIR"
+    cp -pR "$payload/extension/." "$root$EXTENSIONDIR/"
     printf '%s\n' source-install:tokenless > "$root$EXTENSIONDIR/.tokenless-owner"
 fi
 printf 'Installed selected prebuilt files; framework registration and cosh discovery remain separate host operations.\n' >&2

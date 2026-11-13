@@ -18,6 +18,7 @@ a second public Makefile.
 core build outputs. Neither group
 installs or activates the other. Keep the explicit
 `install-legacy` entrypoint for the historical user/system installation profile.
+`make install-core-with-cosh` copies the core files and native Cosh extension.
 `make setup` builds, installs and registers adapters using the public layout;
 framework registration and `make uninstall` use that same resolved layout.
 

@@ -12,6 +12,7 @@
 # Default stack: cosh-ng, skillfs, ws-ckpt, tokenless, agentsight,
 # agent-sec-core V2 and aw. Matching providers/<component>/ packages are added
 # automatically; the provider package name comes from its Cargo.toml.
+# AW builds retain native sec-core and Tokenless extensions when cosh-ng is selected.
 # System files use PREFIX=/usr/local and AWPRJ=anolisa. sudo is used only for system
 # packages and direct system installation; DESTDIR staging needs no sudo.
 # User mode never installs system packages unless --install-system-deps is set.
@@ -196,6 +197,8 @@ Default components:
 Matching providers/<component>/ packages are added after component selection.
 Their aw-provider-* target names are read from Cargo.toml, without invoking Cargo.
 Explicit --component aw-provider-NAME selection remains available on its own.
+Selecting aw skips component plugin bundles, retaining core, skills and providers.
+With aw and cosh-ng selected, selected sec-core and Tokenless backends retain their Cosh extensions.
 Additional components: agent-memory, os-skills
 Aliases: sec-core=agent-sec-core, sight=agentsight,
          memory=agent-memory, skills=os-skills
@@ -307,8 +310,22 @@ run_interactive_wizard() {
     fi
 }
 run_component_make() {
-    local component="$1" target="$2" directory
+    local component="$1" phase="$2" target="$2" directory
     directory="$(component_dir "$component")"
+    if skip_component_plugins "$component"; then
+        case "$component:$phase" in
+            agentsight:build) target=build-all ;;
+            *:build) target=build-core ;;
+            agent-sec-core:install|ws-ckpt:install) target=install-core-and-skills ;;
+            *:install) target=install-core ;;
+        esac
+        # AW has no cosh-ng adapter. Keep the extensions for its native hooks.
+        if component_selected cosh-ng; then
+            case "$component:$phase" in
+                agent-sec-core:build|agent-sec-core:install|tokenless:install) target+=-with-cosh ;;
+            esac
+        fi
+    fi
     local -a command=(make --no-print-directory -C "$directory" "$target"
         "INSTALL_PROFILE=$INSTALL_MODE" "PREFIX=$PREFIX" "AWPRJ=$AWPRJ")
     case "$component" in
@@ -328,8 +345,8 @@ run_component_make() {
             fi
             ;;
     esac
-    if [[ "$target" != build ]]; then command+=("DESTDIR=$DESTDIR"); fi
-    if [[ "$target" == build ]]; then
+    if [[ "$phase" != build ]]; then command+=("DESTDIR=$DESTDIR"); fi
+    if [[ "$phase" == build ]]; then
         # Prefer directory pins over the fallback without changing rustup defaults.
         if [[ -n "${BUILD_FALLBACK_TOOLCHAIN:-}" ]]; then
             (

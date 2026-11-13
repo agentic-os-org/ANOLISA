@@ -41,6 +41,7 @@ class DeliveryTests(unittest.TestCase):
             self.artifact(name, "#!/bin/sh\nexit 0\n", executable=True)
         for name in (
             "cosh-extension/cosh-extension.json",
+            "cosh-extension/hooks/sandbox-guard.py",
             "codex-plugin/install.sh",
             "qoder-plugin/install.sh",
             "qoder-plugin/hooks/fixture.py",
@@ -113,6 +114,7 @@ class DeliveryTests(unittest.TestCase):
                     "install-core",
                     "install-plugins",
                     "install-skills",
+                    "install-core-and-skills-with-cosh",
                 }
                 for arg in arguments
             )
@@ -546,6 +548,50 @@ class DeliveryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
+
+    def test_core_skills_and_cosh_install_does_not_require_other_plugins(self):
+        for name in (
+            "codex-plugin",
+            "qoder-plugin",
+            "openclaw-plugin",
+            "hermes-plugin",
+            "qwen-code-extension",
+        ):
+            shutil.rmtree(self.build / name)
+        stage = self.base / "core-skills-cosh"
+        result = self.make(
+            "install-core-and-skills-with-cosh", "-j4", f"DESTDIR={stage}"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((stage / "usr/bin/agent-sec-cli").is_file())
+        self.assertTrue((stage / "usr/bin/linux-sandbox").is_file())
+        data = stage / "usr/share/anolisa"
+        self.assertTrue((data / "skills/demo/SKILL.md").is_file())
+        extension = data / "extensions/agent-sec-core"
+        self.assertTrue((extension / "cosh-extension.json").is_file())
+        self.assertTrue((extension / "hooks/sandbox-guard.py").is_file())
+        self.assertFalse((data / "agent-sec-core/adapters").exists())
+
+    def test_core_skills_and_cosh_install_preflights_all_groups_before_writing(self):
+        for name in (
+            "v2/bin/agent-sec-daemon",
+            "skills/demo/SKILL.md",
+            "cosh-extension/hooks/sandbox-guard.py",
+        ):
+            with self.subTest(name=name):
+                missing = self.build / name
+                saved = self.base / "saved-input"
+                missing.replace(saved)
+                stage = self.base / "missing-core-skills-cosh"
+                try:
+                    result = self.make(
+                        "install-core-and-skills-with-cosh", "-j4", f"DESTDIR={stage}"
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("missing", result.stderr)
+                    self.assertFalse(stage.exists())
+                finally:
+                    saved.replace(missing)
 
     def test_gateway_uninstall_withdraws_before_removal_and_retains_files_on_failure(
         self,
