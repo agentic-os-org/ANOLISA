@@ -96,12 +96,12 @@ anolisa install os-skills --backend raw
 
 GitHub Release 和 Preview 工作流从同一个源码提交生成 Linux x86_64 与 ARM64
 raw 压缩包。每个平台提供 `.tar.gz`、SHA256 校验和、CycloneDX SBOM 及其校验和。
-压缩包将已跟踪的技能目录安装到 `{datadir}/skills`，无需编译可执行程序。
+压缩包将[发布清单](packaging/released-skills.txt)中的技能安装到 `{datadir}/skills`。
 正式发布时 CI 校验 tag 与源码版本；本地发布流水线继续使用现有配置。
 
 ### 扩展安装
 
-一键安装全部技能：
+一次安装全部已发行技能：
 
 ```
 /extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills
@@ -150,6 +150,18 @@ sudo yum install os-skills
 
 脚本回归测试统一放在本组件的 `tests/` 目录。依赖、测试命令与组件归属规则见
 [贡献指南](../../CONTRIBUTING_zh.md#skill-回归测试与路径归属)。
+
+### 孵化与默认交付
+
+通过评审的技能可以留在原分类目录孵化。源码安装、发行包和 COSH 扩展都由发布清单
+决定默认交付范围。试用者可以按上面的手动安装说明，从经过评审的源码版本复制指定技能。
+
+源码安装和发布清单维护需要 Python 3.6 或更新版本及标准库。
+解释器选择方法见[源码安装说明](../../docs/user-guide/zh/os-skills/index.md#安装)。
+
+维护者同意纳入默认交付后，将目录加入 [`packaging/released-skills.txt`](packaging/released-skills.txt)，
+在仓库根目录运行 `python3 src/os-skills/packaging/cosh_manifests.py --write`，
+并在 `component.toml` 中维护适用的适配器登记。CI 核对 COSH 扩展和发布清单是否一致。
 
 ## 许可证
 

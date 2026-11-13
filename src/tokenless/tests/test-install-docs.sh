@@ -26,11 +26,11 @@ PACKAGE_NPM_JS="$TOKENLESS_ROOT/packaging/npm/package-npm.js"
 INSTALL_SH="$TOKENLESS_ROOT/scripts/install.sh"
 UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 
-# Managed Skill bundle. `anolisa adapter enable os-skills <framework>` deploys
-# only the skills a component manifest declares, and the RPM flattens
-# src/os-skills/<category>/<skill>/ into {datadir}/skills/<skill>/, so a
-# SKILL.md that is missing from the bundle lists ships but is never deployed.
+# Managed Skill bundle. The release catalog selects which source Skills the RPM
+# ships. The component manifest tells `anolisa adapter enable os-skills <framework>`
+# how to deploy those Skills from {datadir}/skills/<skill>/.
 OS_SKILLS_ROOT="$REPO_ROOT/src/os-skills"
+BUNDLE_RELEASE_CATALOG="$OS_SKILLS_ROOT/packaging/release_catalog.py"
 BUNDLE_COMPONENT="$OS_SKILLS_ROOT/component.toml"
 BUNDLE_DISTRIBUTION="$REPO_ROOT/distribution/anolisa/manifests/components/os-skills/component.toml"
 OS_SKILLS_INDEX_EN="$OS_SKILLS_ROOT/README.md"
@@ -40,7 +40,7 @@ SKILL_NAME="install-tokenless"
 for f in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART" "$DOC_EN_MANUAL" "$DOC_ZH_MANUAL" \
          "$DOC_SKILL" "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE" "$INSTALL_SH" "$UNINSTALL_SH" \
          "$DOC_README_EN" "$DOC_README_ZH" "$PACKAGE_NPM_JS" \
-         "$BUNDLE_COMPONENT" "$BUNDLE_DISTRIBUTION" \
+         "$BUNDLE_COMPONENT" "$BUNDLE_DISTRIBUTION" "$BUNDLE_RELEASE_CATALOG" \
          "$OS_SKILLS_INDEX_EN" "$OS_SKILLS_INDEX_ZH" "$DOC_SKILL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
@@ -233,20 +233,23 @@ for fw in openclaw hermes; do
   pass "manifests os-skills component.toml [$fw] declares only skills that exist on disk"
 done
 
-# The component manifest is the authoritative bundle: every skill on disk must be
-# reachable through it, or the RPM installs a directory no agent ever loads.
+# Every released Skill must be reachable through both source adapters.
+released_skill_manifests=$(python3 "$BUNDLE_RELEASE_CATALOG" paths "$OS_SKILLS_ROOT") \
+  || fail "cannot read the os-skills release catalog"
+grep -qxF "./ai/$SKILL_NAME/SKILL.md" <<< "$released_skill_manifests" \
+  || fail "the os-skills release catalog is missing $SKILL_NAME"
 missing_bundle_entries=0
 while IFS= read -r skill_md; do
   name=$(basename "$(dirname "$skill_md")")
   for fw in openclaw hermes; do
     declared_skills "$BUNDLE_COMPONENT" "$fw" | grep -qxF "$name" || {
-      echo "FAIL src/os-skills/component.toml [$fw] is missing the on-disk skill '$name'" >&2
+      echo "FAIL src/os-skills/component.toml [$fw] is missing the released skill '$name'" >&2
       missing_bundle_entries=1
     }
   done
-done < <(find "$OS_SKILLS_ROOT" -mindepth 3 -maxdepth 3 -type f -name SKILL.md | sort)
+done <<< "$released_skill_manifests"
 [ "$missing_bundle_entries" = "0" ] || exit 1
-pass "every on-disk OS Skill is declared in both bundle lists of the component manifest"
+pass "every released OS Skill is declared in both bundle lists of the component manifest"
 
 has "$BUNDLE_COMPONENT" 'source = "{datadir}/skills/install-tokenless/"' \
   "the component bundle points at the flattened RPM skill path"
