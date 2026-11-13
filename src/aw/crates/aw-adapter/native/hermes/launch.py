@@ -10,7 +10,6 @@ import os
 import subprocess
 from pathlib import Path
 import sys
-import time
 from types import ModuleType
 from typing import Any, Callable
 from uuid import uuid4
@@ -100,8 +99,6 @@ def main() -> None:
 
     original = native._prepare_agent_startup
     launch = json.loads(Path(launch_path).read_text())
-    retired_path = Path(launch_path).with_name("hermes-retired.json")
-    retired_path.unlink(missing_ok=True)
     skills = None
     skill_restore = None
     dispatch_restore = None
@@ -335,61 +332,28 @@ def main() -> None:
         plugins._get_pre_tool_call_directive_details = directives
         middleware.run_tool_execution_middleware = execution
         manager.discover_and_load = discovery
-    def retire_gateway_sessions() -> None:
-        if not primed_sessions:
-            return
-        from hermes_cli.gateway_connection import GatewayConnection
-
-        for session_id in sorted(primed_sessions):
-            reported_at = 0.0
-            while True:
-                connection = GatewayConnection()
-                try:
-                    receipt = connection.call(
-                        "plugin.aw-native-hooks.retire", timeout=10,
-                        target_session_id=session_id, launch_path=launch_path,
-                        token=launch["token"])
-                    if receipt == {"retired": True}:
-                        break
-                    if receipt != {"retired": False}:
-                        raise RuntimeError("invalid AW Hermes Gateway retirement receipt")
-                except (Exception, SystemExit) as error:
-                    if time.monotonic() - reported_at >= 30:
-                        print(f"AW Hermes Gateway session retirement pending: {error}",
-                              file=sys.stderr)
-                        reported_at = time.monotonic()
-                finally:
-                    connection.close()
-                time.sleep(0.2)
-
     try:
         native.main()
     finally:
-        try:
-            retire_gateway_sessions()
-            with retired_path.open("x") as receipt:
-                os.chmod(retired_path, 0o600)
-                json.dump({"token": launch["token"], "pid": os.getpid()}, receipt)
-        finally:
-            plugins._get_pre_tool_call_directive_details = original_directives
-            middleware.run_tool_execution_middleware = original_execution
-            if post_restore is not None:
-                module, callback = post_restore
-                module._emit_post_tool_call_hook = callback
-            if dispatch_restore is not None:
-                dispatch_restore[0].handle_function_call = dispatch_restore[1]
-            if skill_restore is not None:
-                skill_restore()
-            manager.discover_and_load = original_discovery
-            if reload_restore is not None:
-                reload_restore[0].chat = reload_restore[1]
-            if gateway_restore is not None:
-                gateway_restore[0].run_conversation = gateway_restore[1]
-            if input_restore is not None:
-                cli, original_main, original_images = input_restore
-                cli.main = original_main
-                cli._route_single_query_images = original_images
-            sys.modules.pop(session.__name__, None)
+        plugins._get_pre_tool_call_directive_details = original_directives
+        middleware.run_tool_execution_middleware = original_execution
+        if post_restore is not None:
+            module, callback = post_restore
+            module._emit_post_tool_call_hook = callback
+        if dispatch_restore is not None:
+            dispatch_restore[0].handle_function_call = dispatch_restore[1]
+        if skill_restore is not None:
+            skill_restore()
+        manager.discover_and_load = original_discovery
+        if reload_restore is not None:
+            reload_restore[0].chat = reload_restore[1]
+        if gateway_restore is not None:
+            gateway_restore[0].run_conversation = gateway_restore[1]
+        if input_restore is not None:
+            cli, original_main, original_images = input_restore
+            cli.main = original_main
+            cli._route_single_query_images = original_images
+        sys.modules.pop(session.__name__, None)
 
 
 if __name__ == "__main__":

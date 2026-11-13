@@ -222,12 +222,13 @@ launch 快照，在原生 admission 认领时使用真实 request ID 或 admissi
 绑定，包括 `settled_unknown`；发生异常时保留绑定，直到原生 admission 账本
 确认终态。Gateway 插件在对应原生 Hook 回调中运行准入的步骤。
 Gateway 在 AW 会话保持登记期间拒绝卸载插件，避免排队轮次在两轮之间失去回调。
-CLI 关闭会话后，`retire` 等待 queued、started 和 unknown admission 全部结算。
-同一 launch 的 prime 和 retire 可重试；旧 launch 的 retire 不会删除新登记。
-CLI 在发送 prime 前记录待对账会话，因此首次回执丢失仍会执行注销。CLI 写入
-私有注销回执后，父 AW 进程才释放服务实例和 launch 文件。信号或 drain 故障导致
-回执缺失时，AW 报告并保留两项资源，供运维对账。注销后，同一会话可由新的 AW
-启动重新登记，插件也可卸载。
+原生 CLI 退出后，父 AW 进程读取私有会话清单，对每个会话向 Gateway 调用
+`retire`。注销会等待 queued、started 和 unknown admission 全部结算。同一
+launch 的 prime 和 retire 可重试；旧 launch 的 retire 不会删除新登记，同路径
+launch 快照变化也不能绕过 drain。CLI 在发送 prime 前记录待对账会话，因此首次
+回执丢失仍会执行注销。只有 Gateway 确认全部注销，AW 才释放服务实例和 launch
+文件。信号或 drain 故障导致无法确认时，AW 报告并保留两项资源，供运维对账。
+注销后，同一会话可由新的 AW 启动重新登记，插件也可卸载。
 工具批次的串行或并行仍由 Hermes 调度。已有配置中的 Hook 继续执行；AW 不导入或
 重排其配置。已验证基线的原生 Hook 配置没有逐 Hook 的环境变量对象。
 

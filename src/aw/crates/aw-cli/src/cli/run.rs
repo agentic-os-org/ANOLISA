@@ -5,7 +5,7 @@ use super::{
     read_file, readiness, Arguments, Exit, Result,
 };
 use aw_adapter::LaunchFiles;
-use aw_exec::{CommandSpec, PackageLeases};
+use aw_exec::{CommandSpec, Limits, PackageLeases};
 use aw_service::{launch_service, Binding, Operation, RunOutcome};
 use std::{
     collections::BTreeMap,
@@ -17,6 +17,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicI32},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -181,7 +182,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     let binding_path = artifacts.0.join("binding.json");
     let mut instance = None;
     let mut started = false;
-    let mut launch_pid = None;
+    let mut hermes_command = None;
     let executed: Result<Exit> = (|| {
         let mut plan = prepared.configure(&LaunchContext {
             files: &artifacts,
@@ -189,6 +190,9 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             executable: &executable,
             steps: &steps,
         })?;
+        if name == "hermes" {
+            hermes_command = Some(plan.command.clone());
+        }
         let _launch_package_leases = PackageLeases::acquire([&mut plan.command])?;
         let bound = service.client.call_cancellable(
             Operation::Bind {
@@ -271,7 +275,6 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             name == "qoder-sdk",
             plan.readiness,
             |pid| {
-                launch_pid = Some(pid);
                 if reloadable || resident_policy_reload {
                     reported = service
                         .client
@@ -315,10 +318,17 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         })
     })();
     let preserve = if name == "hermes" && started {
-        match launch_pid.map(|pid| hermes_retired(&artifacts, pid)) {
+        let retirement_budget = if interrupted().is_some() { 5 } else { 30 };
+        match hermes_command.as_ref().map(|command| {
+            hermes_retired(
+                &artifacts,
+                command,
+                Instant::now() + Duration::from_secs(retirement_budget),
+            )
+        }) {
             Some(Ok(true)) => false,
             Some(Err(error)) => {
-                eprintln!("AW Hermes retirement receipt could not be verified: {error}");
+                eprintln!("AW Hermes Gateway retirement could not be verified: {error}");
                 true
             }
             _ => true,
@@ -391,25 +401,70 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     executed
 }
 
-fn hermes_retired(artifacts: &Artifacts, pid: u32) -> Result<bool> {
-    let path = artifacts.0.join("hermes-retired.json");
+fn hermes_retired(artifacts: &Artifacts, command: &CommandSpec, deadline: Instant) -> Result<bool> {
+    let path = artifacts.0.join("hermes-sessions.json");
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(error) => return Err(error.into()),
     };
     if !metadata.is_file()
         || metadata.mode() & 0o7777 != 0o600
         || metadata.uid() != unsafe { libc::geteuid() }
     {
-        return Ok(false);
+        return Err("AW Hermes session list is not a private regular file".into());
     }
-    let receipt: serde_json::Value = serde_json::from_slice(&read_file(&path, 4096)?)?;
+    let sessions: Vec<String> = serde_json::from_slice(&read_file(&path, 256 * 1024)?)?;
+    if sessions.len() > 512
+        || sessions
+            .iter()
+            .any(|session| session.is_empty() || session.len() > 512)
+    {
+        return Err("AW Hermes session list has invalid identities".into());
+    }
     let launch: serde_json::Value =
         serde_json::from_slice(&read_file(artifacts.0.join("hermes-launch.json"), 4096)?)?;
-    Ok(receipt["pid"].as_u64() == Some(u64::from(pid))
-        && receipt["token"].as_str().is_some()
-        && receipt["token"].as_str() == launch["token"].as_str())
+    let profile = launch["profile"]
+        .as_str()
+        .ok_or("AW Hermes launch has no profile")?;
+    let mut retire = command.clone();
+    retire
+        .environment
+        .insert(OsString::from("HERMES_HOME"), OsString::from(profile));
+    let uncancelled = AtomicBool::new(false);
+    for session in sessions {
+        retire.args = vec![
+            OsString::from("-P"),
+            artifacts.0.join("hermes-retire.py").into_os_string(),
+            artifacts.0.join("hermes-launch.json").into_os_string(),
+            OsString::from(session),
+        ];
+        loop {
+            let attempt_deadline = (Instant::now() + Duration::from_secs(8)).min(deadline);
+            if attempt_deadline <= Instant::now() {
+                return Ok(false);
+            }
+            let result = aw_exec::run(
+                &retire,
+                &[],
+                Limits {
+                    input_bytes: 0,
+                    stdout_bytes: 1024,
+                    stderr_bytes: 4096,
+                },
+                attempt_deadline,
+                &uncancelled,
+            );
+            if matches!(result, Ok(ref output) if output.status.success()) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    Ok(true)
 }
 
 pub(super) fn interrupted() -> Option<Exit> {
@@ -443,25 +498,62 @@ pub(super) fn install_signals() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{hermes_retired, Artifacts};
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use aw_exec::CommandSpec;
+    use std::{
+        collections::BTreeMap,
+        fs,
+        os::unix::fs::PermissionsExt,
+        time::{Duration, Instant},
+    };
 
     #[test]
-    fn hermes_launch_requires_matching_private_retirement_receipt() {
+    fn hermes_retirement_requires_private_session_list() {
         let root = tempfile::tempdir().unwrap();
         let launch = root.path().join("launch");
         fs::create_dir(&launch).unwrap();
         let artifacts = Artifacts(launch.clone(), true);
-        fs::write(launch.join("hermes-launch.json"), r#"{"token":"owned"}"#).unwrap();
-        assert!(!hermes_retired(&artifacts, 42).unwrap());
+        let command = CommandSpec {
+            program: "/bin/true".into(),
+            args: Vec::new(),
+            cwd: launch.clone(),
+            environment: BTreeMap::new(),
+        };
+        let deadline = || Instant::now() + Duration::from_millis(100);
+        assert!(hermes_retired(&artifacts, &command, deadline()).unwrap());
+        let sessions = launch.join("hermes-sessions.json");
+        fs::write(&sessions, r#"["session"]"#).unwrap();
+        assert!(hermes_retired(&artifacts, &command, deadline()).is_err());
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&sessions, r#"[""]"#).unwrap();
+        assert!(hermes_retired(&artifacts, &command, deadline()).is_err());
+    }
 
-        let receipt = launch.join("hermes-retired.json");
-        fs::write(&receipt, r#"{"token":"owned","pid":42}"#).unwrap();
-        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(hermes_retired(&artifacts, 42).unwrap());
-        assert!(!hermes_retired(&artifacts, 43).unwrap());
-        fs::write(&receipt, r#"{"token":"other","pid":42}"#).unwrap();
-        assert!(!hermes_retired(&artifacts, 42).unwrap());
-        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!hermes_retired(&artifacts, 42).unwrap());
+    #[test]
+    fn hermes_retirement_ignores_child_receipt_without_gateway_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = root.path().join("launch");
+        fs::create_dir(&launch).unwrap();
+        let artifacts = Artifacts(launch.clone(), true);
+        fs::write(launch.join("hermes-launch.json"), r#"{"profile":"/tmp"}"#).unwrap();
+        let sessions = launch.join("hermes-sessions.json");
+        fs::write(&sessions, r#"["session"]"#).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(
+            launch.join("hermes-retired.json"),
+            r#"{"token":"owned","pid":42}"#,
+        )
+        .unwrap();
+        let command = CommandSpec {
+            program: "/bin/false".into(),
+            args: Vec::new(),
+            cwd: launch,
+            environment: BTreeMap::new(),
+        };
+        assert!(!hermes_retired(
+            &artifacts,
+            &command,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .unwrap());
     }
 }

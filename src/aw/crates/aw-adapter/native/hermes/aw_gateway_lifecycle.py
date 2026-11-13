@@ -62,8 +62,10 @@ def register_retirement(ctx: Any, known: dict, active: dict, release: Any,
         discovery = getattr(manager, "_discovery_lock", None)
         with discovery if discovery is not None else nullcontext(), lock:
             registration = known.get(target)
-            if registration is None or registration[:2] != (path, launch):
+            if registration is None or registration[0] != path:
                 return {"retired": True}
+            if registration[1] != launch:
+                raise ValueError("AW Hermes Gateway launch snapshot differs")
             binding = active.get(target)
             if binding is not None:
                 if not admission_terminal(target, binding.admission_id):
