@@ -12,9 +12,9 @@ it is a real capture.
 |---|---|
 | Privileges | `trace` needs root (or `CAP_BPF` + `CAP_PERFMON`). Query commands need read access to `/var/log/sysak/.agentsight`, which the packaged service owns — use `sudo`. |
 | Config file | Commands that read rules accept `--config`, default `/etc/agentsight/config.json`. `discover` reads the same file `trace` does, so it reflects your custom rules. |
-| Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, `skill-metrics`, `audit`, `metrics`, `summary`, `interruption`, and `token` accept `--db` to point at a different database file. |
-| Machine output | `--json` is available on `discover`, `token`, `metrics`, `audit`, `summary`, `interruption *`, and `skill-metrics *`. |
-| Output language | `summary`, `metrics`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text. |
+| Data location | Fixed at `/var/log/sysak/.agentsight`. `serve`, `dashboard`, `skill-metrics`, `audit`, `metrics`, `summary`, `interruption`, `token`, and `top` accept `--db` to point at a different database file. |
+| Machine output | `--json` is available on `discover`, `token`, `metrics`, `audit`, `summary`, `interruption *`, `skill-metrics *`, and `top`. |
+| Output language | `summary`, `metrics`, `top`, and `interruption` print English; `discover` and `token` print Chinese regardless of locale. Use `--json` for stable, language-neutral text. |
 | Platform | On macOS only `trace` (trajectory collector) and `serve` exist. |
 | Sample IDs | Session, conversation, trace, and interruption IDs in the examples are placeholders — substitute the ones from your own output. |
 
@@ -33,6 +33,7 @@ SUBCOMMANDS:
     skill-metrics    Compute and display skill usage metrics
     summary          Print a unified summary of sessions, interruptions, and tokenless savings
     token            Query token consumption data
+    top              Watch live per-process or per-session LLM throughput and latency
     trace            Trace agent activity (default)
 ```
 
@@ -419,6 +420,83 @@ easier to scrape. See [Data and storage](data-and-storage.md#prometheus-metrics)
 ```bash
 agentsight metrics --db /backup/agentsight/genai_events.db
 ```
+
+## agentsight top
+
+A live, `top`-style view of the recorded LLM calls (Linux only). Every refresh re-aggregates the
+last `--window` seconds of `genai_events.db` and prints one row per agent process — or per session
+with `--session`. It reads the same database as the other query commands, so it needs read access
+to `/var/log/sysak/.agentsight`: use `sudo`.
+
+```bash
+$ sudo agentsight top
+agentsight top - 02:58:29  window 60s  procs 3  sessions 2  reqs 4  in 33.8K  out 5.0K  tps 83.3
+                 PID AGENT              MODEL                   REQS   SSE       IN      OUT    TOTAL      TPS     TTFT     TPOT     LAST
+               20530 node               acme-chat-large            1     1     2.6K      600     3.2K    104.9  280.0ms    9.5ms 02:58:05
+               20310 claude-code        acme-chat-large            2     2    27.0K     2.3K    29.3K    104.7  515.0ms    9.5ms 02:58:26
+               20420 qoder-cli          acme-code-small            1     0     4.2K     2.1K     6.3K        -        -        - 02:58:30
+
+Press Ctrl+C to stop. Refresh every 2.0s.
+```
+
+The first line totals the whole window: distinct processes, distinct sessions, completed requests,
+input tokens, output tokens, and output tokens per second across the window.
+
+| Column | Meaning |
+|---|---|
+| `PID` / `SESSION` | The grouping key: the agent process, or the recorded session ID with `--session`. A call whose session ID is missing or blank groups under its agent name, and its row shows the PID instead of a session ID. A session ID longer than the column keeps its first and last characters, because UUIDs share a prefix; `--json` reports it in full. |
+| `AGENT` | Agent name recorded for the group. |
+| `MODEL` | Most recent model recorded for the group. |
+| `REQS` / `SSE` | Completed calls in the window, and how many of them were streamed. |
+| `IN` / `OUT` / `TOTAL` | Tokens. `IN` is cache-aware: when the provider reports prompt tokens that already include the cached part, the cached part is not counted twice. |
+| `TPS` | p50 output tokens per second, measured over the streaming part of each call (first output token to completion). |
+| `TTFT` | p50 time from request start to the first streamed output token. |
+| `TPOT` | p50 time per output token after the first one. |
+| `LAST` | Clock time of the group's most recent call. |
+
+`TTFT`, `TPS` and `TPOT` come only from streamed calls — a non-streamed response has no
+first-output-token timestamp, so those cells stay `-` and the row sorts below every measured row in
+both directions. The percentiles are the same per-call values the latency API reports at
+`GET /api/metrics/latency`, aggregated over the window instead of over all history.
+
+```bash
+# refresh every 5 seconds over a 2 minute window
+sudo agentsight top -d 5 --window 120
+
+# group by session instead of process
+sudo agentsight top --session
+
+# lowest TTFT first
+sudo agentsight top --sort ttft --asc
+
+# one agent, one process, every row instead of the top 20
+sudo agentsight top --agent claude-code --pid 20310 --limit 0
+
+# all recorded history instead of a sliding window
+sudo agentsight top --window 0
+```
+
+`--sort` accepts `tps` (default), `ttft`, `tpot`, `reqs`, `in`, `out`, `total`, `agent`, `pid`,
+`session` and `last`; the metric columns compare p50. `--asc` reverses the order. `--delay` has a
+0.1 second floor.
+
+On a terminal the view redraws in place until Ctrl+C. When stdout is a pipe or a file it prints one
+refresh and no control codes, which makes `--batch` explicit rather than required; `-n/--iterations`
+bounds the number of refreshes either way. `--json` prints one object per refresh with
+`window_start_ns`, `window_end_ns`, `grouping`, `summary` and `rows`; every row carries `p50`,
+`p95` and `p99` for `ttft_ms`, `tps_tokens_per_second`, `tpot_ms_per_token` and `e2e_latency_ms`.
+End-to-end latency has no table column, so `--json` is the only way to read it here.
+
+`--db` reads a copy of `genai_events.db` instead of the default directory, which is the way to watch
+a database brought over from another host:
+
+```bash
+agentsight top --db /backup/agentsight/genai_events.db --batch
+```
+
+`top` only reads what tracing already stored. Without a running tracer, or on a host where
+`agentsight trace --no-ebpf` collects trajectories alone, the window stays empty — there is no
+eBPF-derived token or latency data to aggregate.
 
 ## agentsight interruption
 
