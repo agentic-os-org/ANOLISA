@@ -52,7 +52,15 @@ fn simultaneous_runs_retain_every_complete_artifact() {
     for (path, answer) in artifacts {
         let document: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(document["steps"][1]["message"], answer);
+        assert_eq!(
+            document["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|step| step["source"] == "agent")
+                .unwrap()["message"],
+            answer
+        );
         assert!(
             path.file_name()
                 .unwrap()
@@ -86,7 +94,15 @@ fn labels_that_sanitize_to_the_same_name_stay_separate() {
     assert_ne!(first, second);
     let document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(first).unwrap()).unwrap();
-    assert_eq!(document["steps"][1]["message"], "first");
+    assert_eq!(
+        document["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["source"] == "agent")
+            .unwrap()["message"],
+        "first"
+    );
 }
 
 #[test]
