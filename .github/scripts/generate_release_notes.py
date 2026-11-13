@@ -50,9 +50,14 @@ def previous_tag(tag: str, prefix: str) -> str | None:
 
 
 def markdown_lines(text: str) -> Iterator[tuple[str, bool]]:
-    """Identify fenced examples so their headings and links stay literal."""
+    """Keep fenced examples and HTML comment blocks literal."""
     fence = ""
+    comment = False
     for line in text.splitlines(keepends=True):
+        if not fence and (comment or re.match(r" {0,3}<!--", line)):
+            comment = "-->" not in line
+            yield line, True
+            continue
         marker = re.match(r" {0,3}(`{3,}|~{3,})", line)
         literal = bool(fence or marker)
         if fence:
