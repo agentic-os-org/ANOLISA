@@ -9,17 +9,17 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 ✓ Declared with contract coverage; × unsupported. Result replacement is limited to authorized text slots and preserves native envelopes and failure status.
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
@@ -73,7 +73,7 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `model.before_request` | Planned |
 | `runtime.observed` | Planned |
 | `runtime.exited` | Planned |
-| `security.violation` | Planned |
+| `security.violation` | Implemented for the pinned DeepSeek Harness 0.2.1-rc.5 final tool result boundary; supports observe and block |
 | `coverage.changed` | Planned |
 
 ## Skill checks
@@ -150,7 +150,7 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 - AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
 - Pi managed tool.after steps with `on_error: report` keep the checked original result when a Provider or transport fault occurs, and the same session continues with its next prompt. Before-tool faults, post-tool `block`/`withhold_result` faults, cancellation, identity and cleanup failures still stop the task. Input refusal and blocking input-check faults reject that prompt and allow another prompt after cleanup.
 - Claude SDK resident `tool.after` steps with `on_error: report` keep the original result and continue model calls for audited, recoverable Provider failures. This covers native HTTP MCP text and `structuredContent` results and built-in tools such as Bash; managed SDK MCP retains its existing recovery. The same client accepts another task after callbacks drain. Identity/scope failures, cancellation, lifecycle/cleanup failures, before-Hook failures, invalid native responses, unknown transport details and audit failures remain fail-stop. `on_error: block` and native security denial retain their blocking semantics. See [resident deployment](../../../developer-guide/en/aw/deployment/resident.md) for the recoverable categories. Post checks cannot undo an executed tool.
-- Public Provider Hooks currently cover the two events above. The other 14 event names, common approval, input replacement, guard, Schema/BeforeModel and Retrieve integration are not available.
+- Public Provider execution currently covers `input.submit`, `tool.before`, `tool.after` and `security.violation` where the selected Adapter supports them. The other 12 event names, common approval, guard, Schema/BeforeModel and Retrieve integration are not available; input replacement is limited to the Adapters and effects shown in the matrix above.
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
 
 The matrix is generated from the [regression manifest](../../../../src/aw/tests/regression-matrix.json). The [native manifest](../../../../src/aw/tests/native-matrix.json) records pinned versions and coverage; see [contributing](../../../../src/aw/CONTRIBUTING.md) for validation.

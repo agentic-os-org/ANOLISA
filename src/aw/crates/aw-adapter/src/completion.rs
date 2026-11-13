@@ -39,7 +39,7 @@ impl Error {
 /// Native terminal status when the callback carries an explicit supported result state.
 /// Absence remains unknown; tool text and successful callback transport are not status.
 pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
-    if event["name"] != "tool.after" {
+    if event["name"] != "tool.after" && event["name"] != "security.violation" {
         return None;
     }
     let result = &event["tool"]["result"];
@@ -60,7 +60,7 @@ pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
             Some("PostToolUse") => Some("success"),
             _ => None,
         },
-        "qoder" | "pi" => match result["isError"].as_bool() {
+        "qoder" | "pi" | "deepseek-harness" => match result["isError"].as_bool() {
             Some(true) => Some("error"),
             Some(false) => Some("success"),
             _ => None,

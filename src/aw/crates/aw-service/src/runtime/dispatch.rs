@@ -138,7 +138,10 @@ impl Runtime {
                 session_id,
                 call_id,
             } => {
-                if !matches!(event.as_str(), "tool.before" | "tool.after") {
+                if !matches!(
+                    event.as_str(),
+                    "tool.before" | "tool.after" | "security.violation"
+                ) {
                     return Err(rejected("native_tool_event_required"));
                 }
                 self.close_hook(&instance_id, &event, &session_id, &call_id, deadline)

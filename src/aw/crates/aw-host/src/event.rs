@@ -96,7 +96,10 @@ impl Host {
         let spec = &self.configuration().as_value()["spec"];
         let configured = &spec["events"][&name];
         if configured["enabled"] != true
-            || !matches!(name.as_str(), "input.submit" | "tool.before" | "tool.after")
+            || !matches!(
+                name.as_str(),
+                "input.submit" | "tool.before" | "tool.after" | "security.violation"
+            )
         {
             return Err(Error::Invalid("event was not enabled and admitted"));
         }

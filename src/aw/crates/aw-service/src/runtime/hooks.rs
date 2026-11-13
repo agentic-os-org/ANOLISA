@@ -62,8 +62,10 @@ impl Runtime {
         call: &str,
         deadline: Instant,
     ) -> Result<Value> {
-        if !matches!(event, "input.submit" | "tool.before" | "tool.after")
-            || session.is_empty()
+        if !matches!(
+            event,
+            "input.submit" | "tool.before" | "tool.after" | "security.violation"
+        ) || session.is_empty()
             || call.is_empty()
         {
             return Err(rejected("native_correlation_missing"));

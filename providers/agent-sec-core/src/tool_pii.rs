@@ -31,6 +31,12 @@ pub(super) fn invoke(
                 let result = event["tool"].get("result").ok_or("invalid_tool_result")?;
                 (result, Source::ToolOutput, enforcing, "replace_result")
             }
+            (Some("check_final_tool_output"), Some("security.violation")) => (
+                event["tool"].get("result").ok_or("invalid_tool_result")?,
+                Source::ToolOutput,
+                true,
+                "block",
+            ),
             _ => return Err("unsupported_operation_event"),
         };
     if enforcing && !admitted(request, action) {

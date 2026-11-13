@@ -41,11 +41,12 @@ pub(super) fn callback(args: &Arguments) -> Exit {
             {
                 return Exit::Code(1);
             }
-            let blocked = args
-                .flags
-                .get("--event")
-                .is_some_and(|v| matches!(v.as_str(), "input.submit" | "tool.before"))
-                && args.flags.get("--on-error").is_some_and(|v| v == "block");
+            let blocked = args.flags.get("--event").is_some_and(|v| {
+                matches!(
+                    v.as_str(),
+                    "input.submit" | "tool.before" | "security.violation"
+                )
+            }) && args.flags.get("--on-error").is_some_and(|v| v == "block");
             match emit(adapter.reply(blocked)) {
                 Ok(exit) => exit,
                 Err(error) => {

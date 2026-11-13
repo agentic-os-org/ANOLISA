@@ -19,6 +19,14 @@ def run_profile(profile: str, bin_dir: Path, npm: Path, model: Path, output: Pat
         state = Path(temporary)
         args = argparse.Namespace(bin=bin_dir, npm=npm)
         config = configuration(state, args, "submit-allow", model)
+        config["spec"]["providers"]["security"]["config"]["pii"] = {
+            "input_mode": "block", "output_mode": "replace_result",
+        }
+        config["spec"]["events"]["security.violation"] = {"enabled": True, "steps": [{
+            "id": "final-check", "provider": "security",
+            "operation": "check_final_tool_output",
+            "effects": ["observe", "block"], "on_error": "block",
+        }]}
         argv = [str(npm / "node_modules/.bin/dsh"), "--profile", profile,
                 "--patch", str(state / "fixture.patch.json")]
         if profile == "web":
@@ -53,7 +61,7 @@ def run_profile(profile: str, bin_dir: Path, npm: Path, model: Path, output: Pat
             ready = False
             while time.monotonic() < deadline and child.poll() is None:
                 receipts = list((state / "state").glob("launch-*/deepseek-ready.json"))
-                ready = len(receipts) == 1 and json.loads(receipts[0].read_text()).get("hooks") == 3
+                ready = len(receipts) == 1 and json.loads(receipts[0].read_text()).get("hooks") == 4
                 if ready:
                     break
                 time.sleep(0.1)

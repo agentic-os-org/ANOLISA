@@ -308,8 +308,8 @@ pub fn response(
     }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
-        if !matches!(event, "input.submit" | "tool.before") {
-            return Err("block requires a submission or pre-tool event".into());
+        if !matches!(event, "input.submit" | "tool.before" | "security.violation") {
+            return Err("block requires an admitted blocking event".into());
         }
         let mut reply = adapter.reply(true);
         if let Some(text) = effects

@@ -143,7 +143,10 @@ impl Ledger {
         let tool = value["tool"]["native_name"]
             .as_str()
             .ok_or_else(|| rejected("invocation_identity"))?;
-        if (if value["name"] == "tool.after" {
+        if (if matches!(
+            value["name"].as_str(),
+            Some("tool.after" | "security.violation")
+        ) {
             invocation.executed.unwrap_or(invocation.digest)
         } else {
             invocation.digest
@@ -274,7 +277,7 @@ impl Runtime {
             entry.session.clone()
         };
         if let Some(session) = &session {
-            for phase in ["tool.before", "tool.after"] {
+            for phase in ["tool.before", "tool.after", "security.violation"] {
                 self.close_hook(id, phase, session, call, deadline)?;
             }
         }
@@ -287,7 +290,7 @@ impl Runtime {
             .ok_or_else(|| rejected("invocation_protocol_required"))?;
         let mut hooks = hooks.lock().map_err(|_| rejected("state_poisoned"))?;
         if let Some(session) = session {
-            for phase in ["tool.before", "tool.after"] {
+            for phase in ["tool.before", "tool.after", "security.violation"] {
                 hooks.remove(&hooks::correlation(phase, &session, call)?);
             }
         }

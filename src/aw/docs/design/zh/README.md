@@ -22,7 +22,7 @@
 
 ## Adapter 与扩展
 
-[AgentScope](adapters/agentscope-adapter.md) · [Claude SDK](adapters/claude-sdk-adapter.md) · [Hermes](adapters/hermes-adapter.md) · [OpenClaw](adapters/openclaw-adapter.md) · [Pi](adapters/pi-adapter.md) · [QwenPaw](adapters/qwenpaw-adapter.md)
+[AgentScope](adapters/agentscope-adapter.md) · [Claude SDK](adapters/claude-sdk-adapter.md) · [DeepSeek Harness](adapters/adapter-dispatch.md#原生启动证据) · [Hermes](adapters/hermes-adapter.md) · [OpenClaw](adapters/openclaw-adapter.md) · [Pi](adapters/pi-adapter.md) · [QwenPaw](adapters/qwenpaw-adapter.md)
 
 | 主题 | 合同 |
 | --- | --- |
