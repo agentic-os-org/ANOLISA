@@ -526,8 +526,8 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     // 2. Two-stage rename swap. The previous implementation deleted the
     //    entire user-visible tree first, then moved staging in — a crash
     //    in that window left the mount empty. Now we rename each
-    //    top-level entry aside with a hidden rollback prefix, move
-    //    staging entries in, then drop the rollbacks. On any error we
+    //    top-level entry into a private rollback directory, move
+    //    staging entries in, then retain the rollbacks in trash. On error we
     //    rename the rollbacks back, leaving the pre-restore state intact.
     //
     //    Renames within the same directory are atomic per POSIX, so each
@@ -535,6 +535,25 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     //    (the swap window is bounded by a single rename(2) call, not by
     //    arbitrary IO duration).
     let rollback_prefix = format!(".{id}.rollback.");
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let rollback_name = format!("{rollback_prefix}{timestamp}");
+    let rollback_dir = match reserve_recovery_dir(&mount.meta_dir, &rollback_name) {
+        Ok(dir) => dir,
+        Err(error) => {
+            let error = format!(
+                "reserve snapshot rollback directory under {}: {error}",
+                mount.meta_dir.display()
+            );
+            if let Err(cleanup) =
+                crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)
+            {
+                return Err(MemoryError::Other(format!(
+                    "{error}; restore staging cleanup failed: {cleanup}"
+                )));
+            }
+            return Err(MemoryError::Other(error));
+        }
+    };
     let mut rollbacks: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     let mut applied: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
 
@@ -552,9 +571,7 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
                 continue;
             }
             let original = entry.path();
-            let rolled = mount
-                .meta_dir
-                .join(format!("{rollback_prefix}{}", name.to_string_lossy()));
+            let rolled = rollback_dir.join(&name);
             rename_preserving_directory_mode(&original, &rolled)?;
             rollbacks.push((original, rolled));
         }
@@ -572,12 +589,40 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
 
     if let Err(e) = restore_result {
         // Rollback: undo any applied staging moves, then move rollbacks back.
+        let mut rollback_errors = Vec::new();
         for (from, to) in applied.into_iter().rev() {
-            let _ = rename_preserving_directory_mode(&to, &from);
+            if let Err(error) = rename_preserving_directory_mode(&to, &from) {
+                rollback_errors.push(format!(
+                    "undo {} to {}: {error}",
+                    to.display(),
+                    from.display()
+                ));
+            }
         }
         for (original, rolled) in rollbacks.into_iter().rev() {
-            let _ = rename_preserving_directory_mode(&rolled, &original);
+            if let Err(error) = rename_preserving_directory_mode(&rolled, &original) {
+                rollback_errors.push(format!(
+                    "recover {} to {}: {error}",
+                    rolled.display(),
+                    original.display()
+                ));
+            }
         }
+        // Only an empty directory is disposable; failed undo data stays here.
+        if rollback_errors.is_empty() {
+            if let Err(error) = std::fs::remove_dir(&rollback_dir) {
+                rollback_errors.push(format!("remove empty {}: {error}", rollback_dir.display()));
+            }
+        }
+        let e = if rollback_errors.is_empty() {
+            e
+        } else {
+            MemoryError::Other(format!(
+                "{e}; rollback incomplete; retained data at {}: {}",
+                rollback_dir.display(),
+                rollback_errors.join("; ")
+            ))
+        };
         if let Err(cleanup) =
             crate::safe_fs::remove_restore_staging(mount.root_fd.as_fd(), staging_rel, &staging)
         {
@@ -600,30 +645,44 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
     // as the swap succeeded — an unrecoverable destruction of the prior
     // state. Operators (or a future GC tool) can purge `.anolisa/trash/`
     // explicitly when they decide the restore is good.
-    let trash_dir = mount
-        .meta_dir
-        .join("trash")
-        .join(format!("{}-{id}", Utc::now().format("%Y%m%dT%H%M%SZ")));
-    if let Err(e) = std::fs::create_dir_all(&trash_dir) {
-        // Trash creation failed — fall back to leaving rollback entries in
-        // place so the user still has a recovery path. Log loudly.
-        tracing::warn!(
-            "could not create trash dir {} ({e}); rollback entries left in meta dir",
-            trash_dir.display()
-        );
-    } else {
-        for (original, rolled) in rollbacks {
-            let leaf = original
-                .file_name()
-                .map(|s| s.to_os_string())
-                .unwrap_or_else(|| std::ffi::OsString::from("entry"));
-            let dest = trash_dir.join(&leaf);
-            if let Err(e) = rename_preserving_directory_mode(&rolled, &dest) {
-                tracing::warn!(
-                    "could not move rollback {} → {}: {e}",
-                    rolled.display(),
-                    dest.display()
-                );
+    let trash_root = mount.meta_dir.join("trash");
+    let trash_name = format!("{timestamp}-{id}");
+    let trash_dir = std::fs::create_dir_all(&trash_root)
+        .and_then(|()| reserve_recovery_dir(&trash_root, &trash_name));
+    match trash_dir {
+        Err(e) => {
+            // Trash creation failed — fall back to leaving rollback entries in
+            // place so the user still has a recovery path. Log loudly.
+            tracing::warn!(
+                "could not reserve trash dir under {} ({e}); rollback entries retained at {}",
+                trash_root.display(),
+                rollback_dir.display()
+            );
+        }
+        Ok(trash_dir) => {
+            let mut all_moved = true;
+            for (original, rolled) in rollbacks {
+                let leaf = original
+                    .file_name()
+                    .map(|s| s.to_os_string())
+                    .unwrap_or_else(|| std::ffi::OsString::from("entry"));
+                let dest = trash_dir.join(&leaf);
+                if let Err(e) = rename_preserving_directory_mode(&rolled, &dest) {
+                    all_moved = false;
+                    tracing::warn!(
+                        "could not move rollback {} → {}: {e}",
+                        rolled.display(),
+                        dest.display()
+                    );
+                }
+            }
+            if all_moved {
+                if let Err(e) = std::fs::remove_dir(&rollback_dir) {
+                    tracing::warn!(
+                        "could not remove empty rollback dir {}: {e}",
+                        rollback_dir.display()
+                    );
+                }
             }
         }
     }
@@ -633,6 +692,23 @@ pub fn restore_tarball(mount: &MountPoint, id: &str) -> Result<()> {
         tracing::warn!("staging cleanup {}: {e}", staging.display());
     }
     Ok(())
+}
+
+// Reserve a fresh namespace before moving user data; existing entries belong
+// to earlier restores and must never be reused or removed, even when empty.
+fn reserve_recovery_dir(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let mut path = parent.join(name);
+    let mut suffix = 0u64;
+    loop {
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                suffix += 1;
+                path = parent.join(format!("{name}-{suffix}"));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Linux requires write permission on a directory when changing its parent
@@ -733,6 +809,43 @@ fn read_sidecar(path: &Path) -> Result<SnapshotInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_directories_skip_existing_entries_without_changing_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        let name = "20261113T120000Z-snap_same";
+        std::fs::write(parent.join(name), b"old file\0\xff").unwrap();
+        let empty = parent.join(format!("{name}-1"));
+        std::fs::create_dir(&empty).unwrap();
+        let occupied = parent.join(format!("{name}-2"));
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("doc.md"), "old directory").unwrap();
+
+        let first = reserve_recovery_dir(parent, name).unwrap();
+        std::fs::write(first.join("doc.md"), "first").unwrap();
+        let second = reserve_recovery_dir(parent, name).unwrap();
+        std::fs::write(second.join("doc.md"), "second").unwrap();
+        assert_eq!(first, parent.join(format!("{name}-3")));
+        assert_eq!(second, parent.join(format!("{name}-4")));
+        assert_eq!(std::fs::read(parent.join(name)).unwrap(), b"old file\0\xff");
+        assert_eq!(std::fs::read_dir(empty).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(occupied.join("doc.md")).unwrap(),
+            "old directory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.join("doc.md")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("doc.md")).unwrap(),
+            "second"
+        );
+
+        let error = reserve_recovery_dir(&parent.join("missing"), name).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn failed_directory_move_restores_source_mode() {

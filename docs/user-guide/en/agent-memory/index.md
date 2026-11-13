@@ -386,9 +386,16 @@ substring-search fallback.
 
 Snapshot restore preserves read-only directory modes. Disposable extraction
 staging is cleaned after a failed attempt and before a retry. The previous live
-tree remains recoverable under `.anolisa/trash/` with its original modes;
-manual purging of read-only directories may require restoring owner write
-permission first. Restore does not automatically collect retained trash.
+tree remains recoverable with its original modes in a separate directory under
+`.anolisa/trash/` for each successful restore, including repeated restores of the
+same snapshot within one second. Existing recovery directories are never reused
+or overwritten. If trash creation or a move fails, the remaining old data stays
+in that attempt's `.anolisa/.<id>.rollback.<timestamp>[-<suffix>]/` directory;
+warnings identify the retained paths. If a rollback directory cannot be reserved,
+restore fails before moving live files. Older rollback leftovers remain in place
+and do not block new restores. Restore does not automatically delete retained
+trash or rollback data. Manual purging of read-only directories may require
+restoring owner write permission first.
 
 Restores and snapshot reclamation share a per-mount lock across `serve` processes.
 If that lock is busy, restore fails before changing files with
