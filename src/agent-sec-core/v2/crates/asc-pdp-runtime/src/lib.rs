@@ -8,101 +8,42 @@ mod os_permissions;
 mod path_conditions;
 mod request;
 
-use asc_daemon_protocol::authorization::OsPermissionSet;
-use asc_daemon_protocol::authorization::{AuthorizationRequest, Decision};
+use asc_daemon_protocol::authorization::{Decision, OsAuthorizationRequest};
 use asc_policy_types::Validate;
-use asc_policy_types::cedar::{AuthorizationPolicySet, CedarPolicySource};
+use asc_policy_types::cedar::AuthorizationPolicySet;
 use cedar_policy::Schema;
-use serde::{Deserialize, Serialize};
 
-use crate::cedar::PolicyLayer;
+use crate::cedar::CompiledPolicySet;
 
-/// Trusted, immutable publication consumed by the runtime, never by a PEP request.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PolicySnapshot {
-    /// Publication identity used in every issued decision.
-    pub version: String,
-    /// Mandatory upper bound on task policies.
-    pub baseline: CedarPolicySource,
-    /// Optional task policy, evaluated separately from the baseline.
-    #[serde(default)]
-    pub task: Option<CedarPolicySource>,
-    /// Deployment-specific upper bound on requested OS permissions.
-    pub environment_permissions: OsPermissionSet,
-    /// Time to accept an issued decision.
-    /// Does not limit approval waiting or execution after the PEP accepts a decision.
-    pub ttl_seconds: u64,
-}
+/// Deadline for accepting a decision; accepted approval and execution may finish later.
+pub const DECISION_TTL_SECONDS: u64 = 60;
 
 /// A version-pinned PDP.
 pub struct PdpRuntime {
     version: String,
-    environment_permissions: OsPermissionSet,
-    ttl_seconds: u64,
     schema: Schema,
-    layers: Vec<PolicyLayer>,
+    policy: CompiledPolicySet,
 }
 
 impl PdpRuntime {
-    /// Validates a published snapshot before it can be used for authorization.
-    ///
-    /// # Errors
-    /// Rejects unsupported schemas, invalid policies, unprojectable file conditions,
-    /// and invalid publication or permission metadata.
-    pub fn from_snapshot(snapshot: PolicySnapshot) -> Result<Self, PdpError> {
-        if snapshot.version.is_empty() || snapshot.ttl_seconds == 0 || snapshot.ttl_seconds > 3600 {
-            return Err(PdpError::Configuration(
-                "publication version and a TTL in 1..=3600 seconds are required".into(),
-            ));
-        }
-        snapshot.environment_permissions.validate()?;
-        let schema = asc_policy_cedar::schema::load_schema(&snapshot.baseline.schema)?;
-        let mut layers = vec![PolicyLayer::new(&snapshot.baseline)?];
-        if let Some(task) = &snapshot.task {
-            if task.schema != snapshot.baseline.schema {
-                return Err(PdpError::Configuration(
-                    "task and baseline must use the same schema revision".into(),
-                ));
-            }
-            layers.push(PolicyLayer::new(task)?);
-        }
-        Ok(Self {
-            version: snapshot.version,
-            environment_permissions: snapshot.environment_permissions,
-            ttl_seconds: snapshot.ttl_seconds,
-            schema,
-            layers,
-        })
-    }
-
     /// Loads one PAP-derived set with global Cedar forbid precedence.
-    /// Legacy baseline/task publications must still use [`Self::from_snapshot`]:
-    /// their intersection semantics cannot be reproduced by unioning grants.
     ///
     /// # Errors
     /// Rejects invalid metadata, ineligible members, incompatible schemas or OS
     /// projections. The empty set is valid and denies every request.
-    pub fn from_policy_set(
-        snapshot: AuthorizationPolicySet,
-        environment_permissions: OsPermissionSet,
-        ttl_seconds: u64,
-    ) -> Result<Self, PdpError> {
-        if snapshot.version.is_empty() || !(1..=3600).contains(&ttl_seconds) {
+    pub fn from_policy_set(snapshot: AuthorizationPolicySet) -> Result<Self, PdpError> {
+        if snapshot.version.is_empty() {
             return Err(PdpError::Configuration(
-                "publication version and a TTL in 1..=3600 seconds are required".into(),
+                "policy set version is required".into(),
             ));
         }
-        environment_permissions.validate()?;
-        let reference = asc_policy_cedar::schema::embedded_reference();
-        let schema = asc_policy_cedar::schema::load_schema(&reference)?;
-        let layer = PolicyLayer::from_members(&snapshot.policies)?;
+        let schema =
+            asc_policy_cedar::schema::load_schema(&asc_policy_cedar::schema::embedded_reference())?;
+        let policy = CompiledPolicySet::from_members(&snapshot.policies)?;
         Ok(Self {
             version: snapshot.version,
-            environment_permissions,
-            ttl_seconds,
             schema,
-            layers: vec![layer],
+            policy,
         })
     }
 
@@ -111,7 +52,11 @@ impl PdpRuntime {
     /// # Errors
     /// Rejects malformed requests. Policy
     /// denial, unsupported projections, and missing facts are returned as decisions.
-    pub fn evaluate(&self, request: &AuthorizationRequest, now: u64) -> Result<Decision, PdpError> {
+    pub fn evaluate(
+        &self,
+        request: &OsAuthorizationRequest,
+        now: u64,
+    ) -> Result<Decision, PdpError> {
         request.validate()?;
         self.evaluate_request(request, now)
     }

@@ -4,12 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use asc_daemon_protocol::authorization::{
-    ApprovalTarget, AuthorizationRequest, Decision, DecisionVerdict, PathFact,
+    ApprovalTarget, Decision, DecisionVerdict, OsAuthorizationRequest, PathFact,
 };
 use asc_os_permission_types::{FileRight, FilesystemPermissions, NetworkMode, RuleEffect};
 
 pub(super) fn format(
-    request: &AuthorizationRequest,
+    request: &OsAuthorizationRequest,
     decision: &Decision,
     facts: &[PathFact],
 ) -> String {
@@ -47,7 +47,7 @@ pub(super) fn format(
     lines.push(format!("Final command: {command}"));
     lines.push(format!("Directory: {}", display_text(&decision.launch.cwd)));
     if let Some(permissions) = &decision.effective_permissions {
-        let requested = &request.requested_permissions;
+        let requested = &request.context.requested_permissions;
         if changed && permissions.network != requested.network {
             lines.push(match permissions.network.mode {
                 NetworkMode::Off => "Network: blocked (IPv4/IPv6).".into(),
@@ -237,30 +237,33 @@ mod tests {
     use asc_daemon_protocol::authorization::ApprovalRequirement;
     use serde_json::json;
 
-    fn fixture(verdict: DecisionVerdict) -> (AuthorizationRequest, Decision) {
-        let request: AuthorizationRequest = serde_json::from_value(json!({
-            "type": "os", "request_id": "request", "execution_id": "execution",
-            "principal": {"agent_type": "cosh"},
-            "launch": {"program": "/bin/bash", "resolved_program": "/usr/bin/bash",
-                "args": ["-c", "rm -rf cache"], "cwd": "/work"},
-            "requested_permissions": {"version": 1,
-                "filesystem": {"default": "deny", "rules": [
-                    {"effect": "allow", "path": "/", "rights": ["read"]},
-                    {"effect": "allow", "path": "/work", "rights": ["read", "write"]}
-                ]}, "execution": {"deny_paths": []}, "network": {"mode": "off"}}
-        }))
-        .unwrap();
+    fn fixture(verdict: DecisionVerdict) -> (OsAuthorizationRequest, Decision) {
+        let request: OsAuthorizationRequest = OsAuthorizationRequest::new(
+            "request".into(),
+            serde_json::from_value(json!({
+                "execution_id": "execution",
+                "agent": {"agent_type": "cosh"},
+                "launch": {"program": "/bin/bash", "resolved_program": "/usr/bin/bash",
+                    "args": ["-c", "rm -rf cache"], "cwd": "/work"},
+                "requested_permissions": {"version": 1,
+                    "filesystem": {"default": "deny", "rules": [
+                        {"effect": "allow", "path": "/", "rights": ["read"]},
+                        {"effect": "allow", "path": "/work", "rights": ["read", "write"]}
+                    ]}, "execution": {"deny_paths": []}, "network": {"mode": "off"}}
+            }))
+            .unwrap(),
+        );
         let decision = Decision {
             decision_id: "decision".into(),
             request_id: request.request_id.clone(),
-            execution_id: request.execution_id.clone(),
+            execution_id: request.context.execution_id.clone(),
             request_digest: "digest".into(),
             policy_version: "policy".into(),
             expires_at: 0,
-            principal: request.principal.clone(),
-            launch: request.launch.clone(),
+            principal: request.context.agent.clone(),
+            launch: request.context.launch.clone(),
             verdict,
-            effective_permissions: Some(request.requested_permissions.clone()),
+            effective_permissions: Some(request.context.requested_permissions.clone()),
             reason: "Review file removal".into(),
             approval_requirements: vec![],
             warnings: vec![],
@@ -331,7 +334,7 @@ mod tests {
         assert!(!message.contains("Network:"));
         assert!(!message.contains("File access"));
 
-        decision.launch = request.launch.clone();
+        decision.launch = request.context.launch.clone();
         decision
             .effective_permissions
             .as_mut()

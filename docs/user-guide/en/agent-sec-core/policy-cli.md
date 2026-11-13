@@ -302,9 +302,8 @@ would reject exits `2` without a request.
 The `--format cedar` output is the unapproved candidate text; approval and execution stay
 outside this subcommand. The candidate covers only the command's own demand, so the program,
 cwd and loader paths are not included and a caller must add them explicitly; the CLI adds
-nothing implicitly. Enforcement still comes from the PDP intersecting the request with the
-published `environment_permissions` and the policy layers, i.e.
-`effective = request ∩ environment_permissions ∩ policies`.
+nothing implicitly. The PDP restricts the request to the PAP-managed Cedar policy set:
+`effective = request ∩ PAP policy grants`, with matching forbids taking precedence.
 
 This path does not read or rewrite base policies, does not compute `effective` locally, and
 does not execute the command.
@@ -533,9 +532,10 @@ use administrator-reviewed policies rather than untrusted generated input.
 
 Sandbox runtime authorization uses the same Policy objects with
 `schema: {schemaId: "seccore.system", revision: 1}`. The OS authorization PDP evaluates
-Agent subjects, `process.spawn` and supported permit advice. Configure the daemon's
-permission ceiling and decision lifetime as shown in the
-[sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads current
+Agent subjects, `process.spawn` and supported permit advice. Authorization is enabled
+by default, without a separate permission-ceiling configuration. Decisions must be
+accepted within 60 seconds; accepted approval waits and execution may finish later.
+See the [sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads current
 PAP policies together and includes Cedar sources whose statements all have explicit
 principal headers; no Policy IDs are configured. Use `principal is SecCore::Subject`
 with the optional `agent_type` attribute to match requests. Updates and deletions

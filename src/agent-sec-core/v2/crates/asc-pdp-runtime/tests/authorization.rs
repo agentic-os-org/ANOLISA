@@ -1,6 +1,8 @@
 use asc_daemon_protocol::authorization::*;
-use asc_pdp_runtime::{PdpRuntime, PolicySnapshot};
-use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
+use asc_pdp_runtime::PdpRuntime;
+use asc_policy_types::cedar::{
+    AuthorizationPolicy, AuthorizationPolicySet, CedarPolicySource, CedarSchemaReference,
+};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use serde_json::json;
 
@@ -37,32 +39,38 @@ permit(principal, action == SecCore::Action::"process.spawn", resource)
 when { resource.program == "python3" && principal has agent_type && principal.agent_type == "codex" };
 "#;
 
-fn snapshot(extra: &str) -> PolicySnapshot {
-    PolicySnapshot {
-        version: "snapshot-1".into(),
-        baseline: source(&format!("{FILES}{COMMAND}{extra}")),
-        task: None,
-        environment_permissions: permissions(),
-        ttl_seconds: 60,
+fn member(id: &str, text: &str) -> AuthorizationPolicy {
+    AuthorizationPolicy {
+        policy_id: ResourceId::new(id).unwrap(),
+        revision: Revision::new(1).unwrap(),
+        source: source(&text.replace("principal,", "principal is SecCore::Subject,")),
     }
 }
 
-fn request() -> AuthorizationRequest {
-    AuthorizationRequest {
-        request_type: RequestType::Os,
-        request_id: "request-1".into(),
-        execution_id: "execution-1".into(),
-        principal: AgentPrincipal {
-            agent_type: Some("codex".into()),
-        },
-        launch: CommandRequest {
-            program: "python3".into(),
-            resolved_program: "/usr/bin/python3".into(),
-            args: vec!["agent.py".into()],
-            cwd: "/work".into(),
-        },
-        requested_permissions: permissions(),
+fn snapshot(extra: &str) -> AuthorizationPolicySet {
+    AuthorizationPolicySet {
+        version: "snapshot-1".into(),
+        policies: vec![member("policy", &format!("{FILES}{COMMAND}{extra}"))],
     }
+}
+
+fn request() -> OsAuthorizationRequest {
+    OsAuthorizationRequest::new(
+        "request-1".into(),
+        OsAuthorizationContext {
+            execution_id: "execution-1".into(),
+            agent: AgentPrincipal {
+                agent_type: Some("codex".into()),
+            },
+            launch: CommandRequest {
+                program: "python3".into(),
+                resolved_program: "/usr/bin/python3".into(),
+                args: vec!["agent.py".into()],
+                cwd: "/work".into(),
+            },
+            requested_permissions: permissions(),
+        },
+    )
 }
 
 fn effective_runtime(sources: &[&str]) -> Result<PdpRuntime, asc_pdp_runtime::PdpError> {
@@ -76,14 +84,10 @@ fn effective_runtime(sources: &[&str]) -> Result<PdpRuntime, asc_pdp_runtime::Pd
             source: source(text),
         })
         .collect();
-    PdpRuntime::from_policy_set(
-        AuthorizationPolicySet {
-            version: "effective-1".into(),
-            policies,
-        },
-        permissions(),
-        60,
-    )
+    PdpRuntime::from_policy_set(AuthorizationPolicySet {
+        version: "effective-1".into(),
+        policies,
+    })
 }
 
 #[test]
@@ -97,13 +101,13 @@ fn effective_set_matches_agent_type_and_preserves_global_forbid_precedence() {
         DecisionVerdict::Allow
     );
     let mut other = request();
-    other.principal.agent_type = Some("qoder".into());
+    other.context.agent.agent_type = Some("qoder".into());
     assert_eq!(
         runtime.evaluate(&other, 100).unwrap().verdict,
         DecisionVerdict::Deny
     );
     other = request();
-    other.principal.agent_type = None;
+    other.context.agent.agent_type = None;
     assert_eq!(
         runtime.evaluate(&other, 100).unwrap().verdict,
         DecisionVerdict::Deny
@@ -125,16 +129,16 @@ fn effective_set_matches_agent_type_and_preserves_global_forbid_precedence() {
 }
 
 #[test]
-fn effective_set_keeps_advice_environment_ceiling_and_optional_type() {
+fn effective_set_keeps_advice_network_policy_and_optional_type() {
     let files = FILES.replace("principal,", "principal is SecCore::Subject,");
     let command = r#"@advice("{\"verdict\":\"escalate\"}")
         permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);"#;
     let runtime = effective_runtime(&[&files, command]).unwrap();
     let mut input = request();
-    input.principal.agent_type = None;
+    input.context.agent.agent_type = None;
     let decision = runtime.evaluate(&input, 100).unwrap();
     assert_eq!(decision.verdict, DecisionVerdict::StepUp);
-    input.requested_permissions.network.mode = NetworkMode::Full;
+    input.context.requested_permissions.network.mode = NetworkMode::Full;
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Deny
@@ -158,12 +162,12 @@ fn effective_set_does_not_ignore_a_forbid_evaluation_error() {
 
 #[test]
 fn one_invocation_view_can_permit_but_either_view_can_forbid() {
-    let runtime = PdpRuntime::from_snapshot(snapshot("")).unwrap();
+    let runtime = PdpRuntime::from_policy_set(snapshot("")).unwrap();
     assert_eq!(
         runtime.evaluate(&request(), 100).unwrap().verdict,
         DecisionVerdict::Allow
     );
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.exec", resource)
 when { resource.path == "/usr/bin/python3" };
@@ -177,7 +181,7 @@ when { resource.path == "/usr/bin/python3" };
 
 #[test]
 fn explicit_child_denies_survive_recursive_permissions() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.read", resource)
 when { resource.path == "/work/secrets" || resource.path like "/work/secrets/*" };
@@ -207,13 +211,16 @@ when { resource.path == "/work/secrets" || resource.path like "/work/secrets/*" 
 #[test]
 fn directory_point_grants_do_not_authorize_unknown_descendants() {
     let mut publication = snapshot("");
-    publication.baseline = source(&format!(
-        r#"{COMMAND}
+    publication.policies[0] = member(
+        "policy",
+        &format!(
+            r#"{COMMAND}
 permit(principal, action == SecCore::Action::"file.read", resource)
 when {{ resource.path == "/usr/bin/python3" || resource.path == "/work" }};
 "#
-    ));
-    let decision = PdpRuntime::from_snapshot(publication)
+        ),
+    );
+    let decision = PdpRuntime::from_policy_set(publication)
         .unwrap()
         .evaluate(&request(), 100)
         .unwrap();
@@ -223,7 +230,7 @@ when {{ resource.path == "/usr/bin/python3" || resource.path == "/work" }};
 
 #[test]
 fn new_exclusion_modifies_once_but_existing_or_redundant_rules_do_not() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.read", resource)
 when { resource.path == "/work/private" || resource.path like "/work/private/*" };
@@ -234,6 +241,7 @@ when { resource.path == "/work/private" || resource.path like "/work/private/*" 
     assert_eq!(decision.verdict, DecisionVerdict::Modify);
     let mut input = request();
     input
+        .context
         .requested_permissions
         .filesystem
         .rules
@@ -242,12 +250,18 @@ when { resource.path == "/work/private" || resource.path like "/work/private/*" 
             path: "/work/private".into(),
             rights: vec![FileRight::Read],
         });
-    input.requested_permissions.filesystem.rules.reverse();
     input
+        .context
         .requested_permissions
         .filesystem
         .rules
-        .push(input.requested_permissions.filesystem.rules[1].clone());
+        .reverse();
+    input
+        .context
+        .requested_permissions
+        .filesystem
+        .rules
+        .push(input.context.requested_permissions.filesystem.rules[1].clone());
     let unchanged = runtime.evaluate(&input, 100).unwrap();
     assert_eq!(
         unchanged.verdict,
@@ -258,15 +272,17 @@ when { resource.path == "/work/private" || resource.path like "/work/private/*" 
 }
 
 #[test]
-fn dynamic_permits_cannot_remove_baseline_forbids() {
+fn additional_permits_cannot_remove_global_forbids() {
     let mut publication = snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.exec", resource);
 "#,
     );
-    publication.task = Some(source("permit(principal, action, resource);"));
+    publication
+        .policies
+        .push(member("additional", "permit(principal, action, resource);"));
     assert_eq!(
-        PdpRuntime::from_snapshot(publication)
+        PdpRuntime::from_policy_set(publication)
             .unwrap()
             .evaluate(&request(), 100)
             .unwrap()
@@ -276,27 +292,30 @@ forbid(principal, action == SecCore::Action::"file.exec", resource);
 }
 
 #[test]
-fn legacy_task_remains_an_intersection_even_without_explicit_forbids() {
+fn additional_permits_use_the_current_set_union() {
     let mut publication = snapshot("");
-    publication.task = Some(source(&format!(
-        r#"{FILES}
+    publication.policies.push(member(
+        "additional",
+        &format!(
+            r#"{FILES}
         permit(principal, action == SecCore::Action::"process.spawn", resource)
         when {{ resource.program == "another-program" }};
     "#
-    )));
+        ),
+    ));
     assert_eq!(
-        PdpRuntime::from_snapshot(publication)
+        PdpRuntime::from_policy_set(publication)
             .unwrap()
             .evaluate(&request(), 100)
             .unwrap()
             .verdict,
-        DecisionVerdict::Deny
+        DecisionVerdict::Allow
     );
 }
 
 #[test]
 fn warning_and_approval_advice_are_not_erased_by_plain_permits() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 @advice("{\"verdict\":\"warn\",\"message\":\"network disabled\"}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
@@ -321,7 +340,7 @@ permit(principal, action == SecCore::Action::"file.exec", resource);
 
 #[test]
 fn transform_returns_final_authorization_and_preserves_original_approval_and_warning() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(r#"
+    let runtime = PdpRuntime::from_policy_set(snapshot(r#"
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.args\",\"value\":[\"safe.py\"]}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 @advice("{\"verdict\":\"escalate\"}")
@@ -370,10 +389,9 @@ when { resource.path == "/work/output" || resource.path like "/work/output/*" };
 permit(principal, action == SecCore::Action::"network.use", resource);
 "#;
     let mut input = request();
-    input.requested_permissions.network.mode = NetworkMode::Full;
-    let mut policy = snapshot(extra);
-    policy.environment_permissions.network.mode = NetworkMode::Full;
-    let decision = PdpRuntime::from_snapshot(policy)
+    input.context.requested_permissions.network.mode = NetworkMode::Full;
+    let policy = snapshot(extra);
+    let decision = PdpRuntime::from_policy_set(policy)
         .unwrap()
         .evaluate(&input, 100)
         .unwrap();
@@ -382,9 +400,8 @@ permit(principal, action == SecCore::Action::"network.use", resource);
         .filter(|line| !line.starts_with("@advice"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut control_policy = snapshot(&plain);
-    control_policy.environment_permissions.network.mode = NetworkMode::Full;
-    let control = PdpRuntime::from_snapshot(control_policy)
+    let control_policy = snapshot(&plain);
+    let control = PdpRuntime::from_policy_set(control_policy)
         .unwrap()
         .evaluate(&input, 100)
         .unwrap();
@@ -431,7 +448,7 @@ when { resource.path == "/work" || resource.path like "/work/*" };
 forbid(principal, action == SecCore::Action::"file.write", resource)
 when { resource.path == "/work/input" || resource.path like "/work/input/*" };
 "#;
-    let runtime = PdpRuntime::from_snapshot(snapshot(extra)).unwrap();
+    let runtime = PdpRuntime::from_policy_set(snapshot(extra)).unwrap();
     let decision = runtime.evaluate(&request(), 100).unwrap();
     assert_eq!(decision.verdict, DecisionVerdict::StepUp);
     assert_eq!(
@@ -469,7 +486,7 @@ permit(principal, action == SecCore::Action::"process.spawn", resource);
 permit(principal, action == SecCore::Action::"file.write", resource)
 when { resource.path == "/work" || resource.path like "/work/*" };
 "#;
-    let decision = PdpRuntime::from_snapshot(snapshot(extra))
+    let decision = PdpRuntime::from_policy_set(snapshot(extra))
         .unwrap()
         .evaluate(&request(), 100)
         .unwrap();
@@ -502,7 +519,7 @@ fn machine_reason_codes_are_preserved_in_decisions_but_not_used_as_item_messages
 @advice("{\"verdict\":\"escalate\",\"reason\":\"EXEC_REVIEW\"}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 "#;
-    let decision = PdpRuntime::from_snapshot(snapshot(extra))
+    let decision = PdpRuntime::from_policy_set(snapshot(extra))
         .unwrap()
         .evaluate(&request(), 100)
         .unwrap();
@@ -517,7 +534,7 @@ fn transform_returns_modify_in_one_evaluation_but_cannot_bypass_final_forbid() {
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.args\",\"value\":[\"safe.py\"]}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 "#;
-    let runtime = PdpRuntime::from_snapshot(snapshot(transform)).unwrap();
+    let runtime = PdpRuntime::from_policy_set(snapshot(transform)).unwrap();
     let input = request();
     let decision = runtime.evaluate(&input, 100).unwrap();
     assert_eq!(
@@ -529,13 +546,16 @@ permit(principal, action == SecCore::Action::"process.spawn", resource);
     assert_eq!(decision.launch.args, vec!["safe.py"]);
     assert_eq!(decision.request_digest, input.digest().unwrap());
     let mut publication = snapshot(transform);
-    publication.task = Some(source(&format!(
-        r#"{FILES}{COMMAND}
+    publication.policies.push(member(
+        "additional",
+        &format!(
+            r#"{FILES}{COMMAND}
 forbid(principal, action == SecCore::Action::"file.exec", resource)
 when {{ context.input.args.contains({{index: 0, value: "safe.py"}}) }};
 "#
-    )));
-    let denied = PdpRuntime::from_snapshot(publication)
+        ),
+    ));
+    let denied = PdpRuntime::from_policy_set(publication)
         .unwrap()
         .evaluate(&input, 100)
         .unwrap();
@@ -545,7 +565,7 @@ when {{ context.input.args.contains({{index: 0, value: "safe.py"}}) }};
 
 #[test]
 fn transformed_absolute_program_can_use_prepared_facts() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(r#"
+    let runtime = PdpRuntime::from_policy_set(snapshot(r#"
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.program\",\"value\":\"/usr/bin/python3\"}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 "#)).unwrap();
@@ -562,7 +582,7 @@ permit(principal, action == SecCore::Action::"process.spawn", resource);
 
 #[test]
 fn unresolved_program_defers_without_an_executable_candidate() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(r#"
+    let runtime = PdpRuntime::from_policy_set(snapshot(r#"
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.program\",\"value\":\"python-safe\"}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 "#)).unwrap();
@@ -574,7 +594,7 @@ permit(principal, action == SecCore::Action::"process.spawn", resource);
 
 #[test]
 fn final_authorization_rejects_a_second_distinct_transform() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(r#"
+    let runtime = PdpRuntime::from_policy_set(snapshot(r#"
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.args\",\"value\":[\"safe.py\"]}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource)
 when { context.input.args.contains({index: 0, value: "agent.py"}) };
@@ -596,15 +616,15 @@ fn runtime_file_conditions_and_arbitrary_globs_are_not_projected() {
         let text = format!(
             "forbid(principal, action == SecCore::Action::\"file.read\", resource) when {{ {condition} }};"
         );
-        assert!(PdpRuntime::from_snapshot(snapshot(&text)).is_err());
+        assert!(PdpRuntime::from_policy_set(snapshot(&text)).is_err());
     }
 }
 
 #[test]
 fn full_network_is_never_silently_downgraded() {
-    let runtime = PdpRuntime::from_snapshot(snapshot("")).unwrap();
+    let runtime = PdpRuntime::from_policy_set(snapshot("")).unwrap();
     let mut input = request();
-    input.requested_permissions.network.mode = NetworkMode::Full;
+    input.context.requested_permissions.network.mode = NetworkMode::Full;
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Deny
@@ -613,14 +633,14 @@ fn full_network_is_never_silently_downgraded() {
 
 #[test]
 fn noexec_requires_backend_support_and_cannot_cover_initial_program() {
-    let runtime = PdpRuntime::from_snapshot(snapshot("")).unwrap();
+    let runtime = PdpRuntime::from_policy_set(snapshot("")).unwrap();
     let mut input = request();
-    input.requested_permissions.execution.deny_paths = vec!["/work".into()];
+    input.context.requested_permissions.execution.deny_paths = vec!["/work".into()];
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Allow
     );
-    input.requested_permissions.execution.deny_paths = vec!["/usr/bin/python3".into()];
+    input.context.requested_permissions.execution.deny_paths = vec!["/usr/bin/python3".into()];
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Deny
@@ -629,7 +649,7 @@ fn noexec_requires_backend_support_and_cannot_cover_initial_program() {
 
 #[test]
 fn evaluation_errors_are_not_ignored_when_another_rule_permits() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 permit(principal, action == SecCore::Action::"process.spawn", resource)
 when { context.input.arg_count + 9223372036854775807 > 0 };
@@ -643,7 +663,7 @@ when { context.input.arg_count + 9223372036854775807 > 0 };
 
 #[test]
 fn command_rules_can_distinguish_ordered_arguments() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"process.spawn", resource)
 when { context.input.args.contains({index: 0, value: "-c"}) };
@@ -651,12 +671,12 @@ when { context.input.args.contains({index: 0, value: "-c"}) };
     ))
     .unwrap();
     let mut input = request();
-    input.launch.args = vec!["-c".into(), "print(1)".into()];
+    input.context.launch.args = vec!["-c".into(), "print(1)".into()];
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Deny
     );
-    input.launch.args = vec!["agent.py".into(), "-c".into()];
+    input.context.launch.args = vec!["agent.py".into(), "-c".into()];
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Allow
@@ -665,7 +685,7 @@ when { context.input.args.contains({index: 0, value: "-c"}) };
 
 #[test]
 fn executable_alias_does_not_bypass_file_invocation_forbid() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.exec", resource)
 when { resource.path == "/usr/bin/python3" };
@@ -673,7 +693,8 @@ when { resource.path == "/usr/bin/python3" };
     ))
     .unwrap();
     let mut input = request();
-    input.launch.program = "/bin/python3".into();
+    input.context.launch.program = "/bin/python3".into();
+    input.resource.id.clone_from(&input.context.launch.program);
     assert_eq!(
         runtime.evaluate(&input, 100).unwrap().verdict,
         DecisionVerdict::Deny
@@ -681,34 +702,33 @@ when { resource.path == "/usr/bin/python3" };
 }
 
 #[test]
-fn full_network_requires_both_policy_and_environment_grants() {
-    let mut publication = snapshot(
+fn full_network_requires_policy_and_request_grants() {
+    let publication = snapshot(
         r#"
 permit(principal, action == SecCore::Action::"network.use", resource == SecCore::Network::"all");
 "#,
     );
-    publication.environment_permissions.network.mode = NetworkMode::Full;
-    let mut input = request();
-    input.requested_permissions.network.mode = NetworkMode::Full;
-    let decision = PdpRuntime::from_snapshot(publication)
-        .unwrap()
-        .evaluate(&input, 100)
-        .unwrap();
-    assert_eq!(
-        decision.verdict,
-        DecisionVerdict::Allow,
-        "{}",
-        decision.reason
-    );
-    assert_eq!(
-        decision.effective_permissions.unwrap().network.mode,
-        NetworkMode::Full
-    );
+    let runtime = PdpRuntime::from_policy_set(publication).unwrap();
+    for requested in [NetworkMode::Full, NetworkMode::Off] {
+        let mut input = request();
+        input.context.requested_permissions.network.mode = requested;
+        let decision = runtime.evaluate(&input, 100).unwrap();
+        assert_eq!(
+            decision.verdict,
+            DecisionVerdict::Allow,
+            "{}",
+            decision.reason
+        );
+        assert_eq!(
+            decision.effective_permissions.unwrap().network.mode,
+            requested
+        );
+    }
 }
 
 #[test]
 fn conflicting_transform_requirements_fail_closed() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(r#"
+    let runtime = PdpRuntime::from_policy_set(snapshot(r#"
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.args\",\"value\":[\"one.py\"]}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.args\",\"value\":[\"two.py\"]}}")
@@ -721,7 +741,7 @@ permit(principal, action == SecCore::Action::"file.exec", resource);
 
 #[test]
 fn removed_write_grants_do_not_leave_approval_or_warning_requirements() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.read", resource)
 when { resource.path == "/work/secrets" || resource.path like "/work/secrets/*" };
@@ -758,12 +778,13 @@ when { resource.path == "/work/secrets" || resource.path like "/work/secrets/*" 
 
 #[test]
 fn cwd_transform_preserves_absolute_program_resolution_and_defers_relative_programs() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(r#"
+    let runtime = PdpRuntime::from_policy_set(snapshot(r#"
 @advice("{\"verdict\":\"transform\",\"transform\":{\"path\":\"$target.cwd\",\"value\":\"/work/secrets\"}}")
 permit(principal, action == SecCore::Action::"process.spawn", resource);
 "#)).unwrap();
     let mut input = request();
-    input.launch.program = "/bin/python3".into();
+    input.context.launch.program = "/bin/python3".into();
+    input.resource.id.clone_from(&input.context.launch.program);
     let decision = runtime.evaluate(&input, 100).unwrap();
     assert_eq!(
         decision.verdict,
@@ -776,7 +797,8 @@ permit(principal, action == SecCore::Action::"process.spawn", resource);
     assert_eq!(decision.launch.resolved_program, "/usr/bin/python3");
 
     for program in ["./python3", "python3"] {
-        input.launch.program = program.into();
+        input.context.launch.program = program.into();
+        input.resource.id.clone_from(&input.context.launch.program);
         let decision = runtime.evaluate(&input, 100).unwrap();
         assert_eq!(decision.verdict, DecisionVerdict::Defer, "{program}");
         assert!(decision.effective_permissions.is_none());
@@ -786,21 +808,21 @@ permit(principal, action == SecCore::Action::"process.spawn", resource);
 #[test]
 fn wire_request_contains_only_authorization_inputs() {
     let value = serde_json::to_value(request()).unwrap();
-    assert_eq!(value.as_object().unwrap().len(), 6);
-    assert_eq!(value["launch"].as_object().unwrap().len(), 4);
+    assert_eq!(value.as_object().unwrap().len(), 5);
+    assert_eq!(value["context"]["launch"].as_object().unwrap().len(), 4);
     for key in ["path_facts", "capabilities", "continuation"] {
         let mut extra = value.clone();
         extra[key] = json!(null);
-        assert!(serde_json::from_value::<AuthorizationRequest>(extra).is_err());
+        assert!(serde_json::from_value::<OsAuthorizationRequest>(extra).is_err());
     }
     let mut extra = value;
-    extra["launch"]["env"] = json!({"SECRET":"hidden"});
-    assert!(serde_json::from_value::<AuthorizationRequest>(extra).is_err());
+    extra["context"]["launch"]["env"] = json!({"SECRET":"hidden"});
+    assert!(serde_json::from_value::<OsAuthorizationRequest>(extra).is_err());
 }
 
 #[test]
 fn point_rights_on_an_unknown_object_require_a_local_file_check() {
-    let runtime = PdpRuntime::from_snapshot(snapshot(
+    let runtime = PdpRuntime::from_policy_set(snapshot(
         r#"
 forbid(principal, action == SecCore::Action::"file.read", resource)
 when { resource.path == "/work/one" };"#,
@@ -809,4 +831,12 @@ when { resource.path == "/work/one" };"#,
     let decision = runtime.evaluate(&request(), 100).unwrap();
     assert_eq!(decision.verdict, DecisionVerdict::Modify);
     assert_eq!(decision.require_files, vec!["/work/one"]);
+}
+
+#[test]
+fn decision_ttl_is_fixed_and_overflow_fails() {
+    let runtime = PdpRuntime::from_policy_set(snapshot("")).unwrap();
+    let decision = runtime.evaluate(&request(), 100).unwrap();
+    assert_eq!(decision.expires_at, 160);
+    assert!(runtime.evaluate(&request(), u64::MAX).is_err());
 }

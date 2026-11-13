@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use asc_daemon_protocol::authorization::{
-    AcceptedAuthorization, AuthorizationRequest, ClaimPhase, ClaimResponse, Decision,
-    DecisionClaim, DecisionVerdict, ExecutionReceipt, ExecutionSpec, ReceiptAck, Validate,
+    AcceptedAuthorization, ClaimPhase, ClaimResponse, Decision, DecisionClaim, DecisionVerdict,
+    ExecutionReceipt, ExecutionSpec, OsAuthorizationRequest, ReceiptAck, Validate,
 };
 use asc_security_events::{EventResult, SecurityEvent};
 
@@ -24,7 +24,7 @@ pub trait AuthorizationEvaluator: Send + Sync {
     /// Returns invalid-input, policy-loading or evaluation failures.
     fn evaluate(
         &self,
-        request: &AuthorizationRequest,
+        request: &OsAuthorizationRequest,
         now: u64,
     ) -> Result<Decision, AuthorizationError>;
 }
@@ -40,7 +40,7 @@ pub trait AuthorizationReceiptSink: Send + Sync {
 
 struct PendingDecision {
     owner: u32,
-    request: AuthorizationRequest,
+    request: OsAuthorizationRequest,
     decision: Decision,
     accepted_at: Option<u64>,
     execution: Option<ExecutionSpec>,
@@ -96,7 +96,7 @@ impl AuthorizationService {
     pub fn evaluate(
         &self,
         peer: PeerCredentials,
-        request: &AuthorizationRequest,
+        request: &OsAuthorizationRequest,
         now: u64,
     ) -> Result<Decision, AuthorizationError> {
         request
@@ -120,8 +120,8 @@ impl AuthorizationService {
         }
         let decision = self.evaluator.evaluate(request, now)?;
         if decision.request_id != request.request_id
-            || decision.execution_id != request.execution_id
-            || decision.principal != request.principal
+            || decision.execution_id != request.context.execution_id
+            || decision.principal != request.context.agent
             || decision.request_digest
                 != request.digest().map_err(|_| AuthorizationError::Internal)?
             || decision.decision_id.is_empty()
@@ -471,21 +471,21 @@ mod tests {
     impl AuthorizationEvaluator for Evaluator {
         fn evaluate(
             &self,
-            request: &AuthorizationRequest,
+            request: &OsAuthorizationRequest,
             now: u64,
         ) -> Result<Decision, AuthorizationError> {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Decision {
                 decision_id: format!("decision-{index}"),
                 request_id: request.request_id.clone(),
-                execution_id: request.execution_id.clone(),
+                execution_id: request.context.execution_id.clone(),
                 request_digest: request.digest().unwrap(),
                 policy_version: "publication-1".into(),
                 expires_at: now + 60,
-                principal: request.principal.clone(),
-                launch: request.launch.clone(),
+                principal: request.context.agent.clone(),
+                launch: request.context.launch.clone(),
                 verdict: self.verdict,
-                effective_permissions: Some(request.requested_permissions.clone()),
+                effective_permissions: Some(request.context.requested_permissions.clone()),
                 reason: "test".into(),
                 approval_requirements: vec![],
                 warnings: vec!["test warning".into()],
@@ -519,16 +519,19 @@ mod tests {
             sink,
         )
     }
-    fn request() -> AuthorizationRequest {
-        serde_json::from_value(json!({
-            "type":"os", "request_id":"request-1", "execution_id":"execution-1",
-            "principal":{"agent_type":"codex"},
-            "launch":{"program":"python3","resolved_program":"/usr/bin/python3",
-                "args":["agent.py"],"cwd":"/work"},
-            "requested_permissions":{"version":1,"filesystem":{"default":"deny","rules":[]},
-                "execution":{"deny_paths":[]},"network":{"mode":"off"}}
-        }))
-        .unwrap()
+    fn request() -> OsAuthorizationRequest {
+        OsAuthorizationRequest::new(
+            "request-1".into(),
+            serde_json::from_value(json!({
+                "execution_id":"execution-1",
+                "agent":{"agent_type":"codex"},
+                "launch":{"program":"python3","resolved_program":"/usr/bin/python3",
+                    "args":["agent.py"],"cwd":"/work"},
+                "requested_permissions":{"version":1,"filesystem":{"default":"deny","rules":[]},
+                    "execution":{"deny_paths":[]},"network":{"mode":"off"}}
+            }))
+            .unwrap(),
+        )
     }
     fn execution(decision: &Decision) -> ExecutionSpec {
         let mut launch = serde_json::to_value(&decision.launch).unwrap();
