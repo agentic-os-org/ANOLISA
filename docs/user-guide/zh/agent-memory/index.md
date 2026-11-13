@@ -611,7 +611,7 @@ enabled = true
 min_artifact_age_secs = 86400
 ```
 
-启用 reclaim 后，挂载打开时的清扫还会删除 `.anolisa/snapshots/` 下超过保留时长的崩溃残留：不完整的 `*.partial` 归档、缺 sidecar 的归档、缺归档的 sidecar，以及 restore 中断遗留的隐藏 `.<id>.staging` 目录。崩溃 restore 的 staging 目录包含整棵挂载树拷贝，因此 reclaim 也是防止该故障模式吃满磁盘的机制。
+启用 reclaim 后，挂载打开时的清扫还会删除 `.anolisa/snapshots/` 下超过保留时长的崩溃残留：不完整的 `*.partial` 归档、缺 sidecar 的归档、缺归档的 sidecar，以及 restore 中断遗留的隐藏 `.<id>.staging` 目录。清扫同样会删除 `.anolisa/` 本层因 `mem_write`、`mem_edit` 中断而残留的 `.memory-write-*.tmp` 暂存文件；这类文件位于快照目录上一级，此前不会被任何清扫删除。sidecar 修复是第三个以同样方式暂存的写入方，但它暂存在 `.anolisa/snapshots/` 内而非 meta 目录，因此由该目录的清扫负责删除。崩溃 restore 的 staging 目录包含整棵挂载树拷贝，因此 reclaim 也是防止该故障模式吃满磁盘的机制。
 
 清扫还会修复损坏的 sidecar：当其归档结构完整（gzip 流完整，且所有条目均通过 restore 提取前运行的同一套检查：仅含普通文件与目录条目、无 `..` 路径穿越、无重名文件条目、无文件落在已提取路径上的冲突）时，从归档自身的元数据重新生成 sidecar。即使 sidecar 可以正常解析，归档超过保留时长后也会接受这些检查。无效归档会被删除，并在清扫汇总中单独计数；其 sidecar 超过自身保留时长后也会被删除。有效的快照对会被保留，元数据不会被重写。这项校验会在挂载打开时完整读取每个符合年龄条件的归档。
 
