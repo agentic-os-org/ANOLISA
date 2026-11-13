@@ -53,8 +53,8 @@ or general Cedar authorization service in this path.
 | `context.input.operation == SecCore::WriteOperation::"delete"` | `delete: true` |
 | `context.input.operation == SecCore::WriteOperation::"write"` | `ordinary_write: true` |
 | Operation OR / literal-set `contains` | Preserve each operation's path conditions; combine flags only for identical targets and exclusions |
-| `resource.path == "/data/a"` | `exact_file`; the target must be an existing regular file at deployment |
-| `path == "/data" || path like "/data/*"` | `directory_tree`; the root must be an existing directory |
+| `resource.path == "/data/a"` | `exact_file`; matched as a single path at enforcement time |
+| `path == "/data" || path like "/data/*"` | `directory_tree`; matched as a subtree rooted at that path |
 | Literal path-set `contains`, path OR | Multiple targets |
 | `!=`, `!`, `unless` within a bounded path range | Exact-entry or directory-subtree exclusions where representable |
 | `&&`, `||`, Boolean constants | Bounded Boolean lowering, preserving intersections, unions and operation/path association |
@@ -72,6 +72,14 @@ directory, shell expansion, case folding or PAP-host filesystem resolution is
 used. A path equality does not denote a directory tree or Cedar entity UID.
 Deployment uses the existing process-tree Scope; the Translator rejects a
 `CgroupId` selector.
+
+Because nothing is resolved against the host filesystem here, translation and
+policy save do not check that a target exists or that it is a regular file: a
+path that does not exist yet, and a path that names a directory, are both
+accepted. `exact_file` and `directory_tree` describe how the enforcement side
+compares an observed path, not preconditions this stage validates, and whether a
+rule can act on a target at all depends on the backend capability that consumes
+the translated policy.
 
 Exclusions belong to their target, not to the entire policy. Any other matching
 target can still protect an excluded entry. Identical targets with identical
