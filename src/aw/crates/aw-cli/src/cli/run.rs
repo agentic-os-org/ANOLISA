@@ -23,6 +23,24 @@ use std::{
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 pub(super) static CANCELLED: AtomicBool = AtomicBool::new(false);
+const HERMES_RETIRE_SCRIPT: &str = r#"import json, sys
+from pathlib import Path
+from hermes_cli.gateway_connection import GatewayConnection
+
+launch_path = Path(sys.argv[1])
+session_id = sys.argv[2]
+launch = json.loads(launch_path.read_text())
+connection = GatewayConnection()
+try:
+    receipt = connection.call(
+        "plugin.aw-native-hooks.retire", timeout=5,
+        target_session_id=session_id, launch_path=str(launch_path),
+        token=launch["token"])
+finally:
+    connection.close()
+if receipt != {"retired": True}:
+    raise SystemExit("AW Hermes Gateway session retirement is pending")
+"#;
 
 extern "C" fn signal(value: libc::c_int) {
     SIGNAL.store(value, std::sync::atomic::Ordering::Release);
@@ -434,8 +452,10 @@ fn hermes_retired(artifacts: &Artifacts, command: &CommandSpec, deadline: Instan
     let uncancelled = AtomicBool::new(false);
     for session in sessions {
         retire.args = vec![
-            OsString::from("-P"),
-            artifacts.0.join("hermes-retire.py").into_os_string(),
+            OsString::from("-I"),
+            OsString::from("-B"),
+            OsString::from("-c"),
+            OsString::from(HERMES_RETIRE_SCRIPT),
             artifacts.0.join("hermes-launch.json").into_os_string(),
             OsString::from(session),
         ];
@@ -543,6 +563,7 @@ mod tests {
             r#"{"token":"owned","pid":42}"#,
         )
         .unwrap();
+        fs::write(launch.join("hermes-retire.py"), "raise SystemExit(0)").unwrap();
         let command = CommandSpec {
             program: "/bin/false".into(),
             args: Vec::new(),
