@@ -101,7 +101,7 @@ pub struct AuditSummary {
     pub total_events: u64,
     /// Policy decisions with an observed kernel block.
     pub blocked_events: u64,
-    /// Evidence-loss state events.
+    /// Enforcement-state events whose state code reports evidence loss.
     pub evidence_loss_events: u64,
 }
 
