@@ -175,6 +175,7 @@ OpenAI Responses API 的 `response.completed` 事件可能跨多个 TLS record�
 | `agentsight audit` | `src/bin/cli/audit.rs` | 查询审计事件 |
 | `agentsight discover` | `src/bin/cli/discover.rs` | 发现运行中的 AI Agent |
 | `agentsight metrics` | `src/bin/cli/metrics.rs` | Prometheus 格式指标 |
+| `agentsight top` | `src/bin/cli/top.rs` | 实时查看按进程/会话聚合的吞吐与时延（仅 Linux，只读 genai_events.db） |
 | `agentsight interruption` | `src/bin/cli/interruption.rs` | 查询/管理会话中断事件 |
 | `agentsight dashboard` | `src/bin/cli/dashboard.rs` | 查看 Dashboard 认证状态与 Token |
 

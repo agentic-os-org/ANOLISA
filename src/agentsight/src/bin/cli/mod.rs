@@ -22,6 +22,8 @@ pub mod skill_metrics;
 pub mod summary;
 #[cfg(target_os = "linux")]
 pub mod token;
+#[cfg(target_os = "linux")]
+pub mod top;
 #[cfg(any(target_os = "linux", feature = "server"))]
 pub mod trace;
 

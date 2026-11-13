@@ -17,7 +17,7 @@ use cli::trace::TraceCommand;
 use cli::{
     audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
     metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, summary::SummaryCommand,
-    token::TokenCommand,
+    token::TokenCommand, top::TopCommand,
 };
 
 #[derive(Debug, StructOpt)]
@@ -51,6 +51,9 @@ pub enum Command {
     /// Print per-agent token usage metrics in Prometheus text format
     #[cfg(target_os = "linux")]
     Metrics(MetricsCommand),
+    /// Watch live per-process or per-session LLM throughput and latency
+    #[cfg(target_os = "linux")]
+    Top(TopCommand),
     /// Query and manage session interruption events detected during agent conversations
     #[cfg(target_os = "linux")]
     Interruption(InterruptionCommand),
@@ -88,6 +91,8 @@ fn main() {
         #[cfg(target_os = "linux")]
         Command::Metrics(metrics_cmd) => metrics_cmd.execute(),
         #[cfg(target_os = "linux")]
+        Command::Top(top_cmd) => top_cmd.execute(),
+        #[cfg(target_os = "linux")]
         Command::Interruption(interruption_cmd) => interruption_cmd.execute(),
         #[cfg(target_os = "linux")]
         Command::SkillMetrics(skill_metrics_cmd) => skill_metrics_cmd.execute(),
@@ -119,5 +124,14 @@ mod tests {
         ])
         .expect("analyze-chatml must parse as a registered subcommand");
         assert!(matches!(cmd, Command::AnalyzeChatml(_)));
+    }
+
+    /// Same guard for `top`: a live-view module that is never wired into the
+    /// enum would still compile and ship as dead code.
+    #[test]
+    fn top_subcommand_is_reachable() {
+        let cmd = Command::from_iter_safe(["agentsight", "top", "--batch", "-n", "1"])
+            .expect("top must parse as a registered subcommand");
+        assert!(matches!(cmd, Command::Top(_)));
     }
 }

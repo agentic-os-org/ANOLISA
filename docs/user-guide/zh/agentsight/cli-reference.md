@@ -11,9 +11,9 @@
 |---|---|
 | 权限 | `trace` 需要 root（或 `CAP_BPF` + `CAP_PERFMON`）。查询类命令需要读取 `/var/log/sysak/.agentsight`，该目录归服务所有，请加 `sudo`。 |
 | 配置文件 | 需要读取规则的命令支持 `--config`，默认 `/etc/agentsight/config.json`。`discover` 读取与 `trace` 相同的文件，因此会反映你的自定义规则。 |
-| 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption`、`token` 支持用 `--db` 指定其他数据库文件。 |
-| 机器可读输出 | `discover`、`token`、`metrics`、`audit`、`summary`、`interruption *`、`skill-metrics *` 都支持 `--json`。 |
-| 输出语言 | `summary`、`metrics`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`。 |
+| 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption`、`token`、`top` 支持用 `--db` 指定其他数据库文件。 |
+| 机器可读输出 | `discover`、`token`、`metrics`、`audit`、`summary`、`interruption *`、`skill-metrics *`、`top` 都支持 `--json`。 |
+| 输出语言 | `summary`、`metrics`、`top`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`。 |
 | 平台 | macOS 上只有 `trace`（轨迹采集）和 `serve`。 |
 | 示例 ID | 示例里的会话、对话、调用、中断 ID 都是占位值，请替换成你自己输出里的实际 ID。 |
 
@@ -32,6 +32,7 @@ SUBCOMMANDS:
     skill-metrics    Compute and display skill usage metrics
     summary          Print a unified summary of sessions, interruptions, and tokenless savings
     token            Query token consumption data
+    top              Watch live per-process or per-session LLM throughput and latency
     trace            Trace agent activity (default)
 ```
 
@@ -400,6 +401,77 @@ $ sudo agentsight metrics --json
 ```bash
 agentsight metrics --db /backup/agentsight/genai_events.db
 ```
+
+## agentsight top
+
+以 `top` 的方式实时查看已记录的 LLM 调用（仅 Linux）。每次刷新都会重新聚合 `genai_events.db` 中
+最近 `--window` 秒的数据，按 Agent 进程输出一行；加上 `--session` 则按会话输出。它读取的数据库与
+其他查询类命令相同，因此需要 `/var/log/sysak/.agentsight` 的读权限：请加 `sudo`。
+
+```bash
+$ sudo agentsight top
+agentsight top - 02:58:29  window 60s  procs 3  sessions 2  reqs 4  in 33.8K  out 5.0K  tps 83.3
+                 PID AGENT              MODEL                   REQS   SSE       IN      OUT    TOTAL      TPS     TTFT     TPOT     LAST
+               20530 node               acme-chat-large            1     1     2.6K      600     3.2K    104.9  280.0ms    9.5ms 02:58:05
+               20310 claude-code        acme-chat-large            2     2    27.0K     2.3K    29.3K    104.7  515.0ms    9.5ms 02:58:26
+               20420 qoder-cli          acme-code-small            1     0     4.2K     2.1K     6.3K        -        -        - 02:58:30
+
+Press Ctrl+C to stop. Refresh every 2.0s.
+```
+
+第一行是整个窗口的汇总：去重后的进程数、会话数、已完成请求数、输入 Token、输出 Token，以及窗口内
+的每秒输出 Token 数。
+
+| 列 | 含义 |
+|---|---|
+| `PID` / `SESSION` | 分组键：Agent 进程，或加 `--session` 后记录的会话 ID。会话 ID 缺失或为空的调用按 Agent 名归组，该行显示 PID 而不是会话 ID。超出列宽的会话 ID 保留首尾字符，因为 UUID 的前缀往往相同；`--json` 输出完整值。 |
+| `AGENT` | 该组记录的 Agent 名称。 |
+| `MODEL` | 该组最近一次调用记录的模型。 |
+| `REQS` / `SSE` | 窗口内已完成的调用数，以及其中流式（SSE）的数量。 |
+| `IN` / `OUT` / `TOTAL` | Token 数。`IN` 按 cache-aware 规则计费：当服务商返回的 prompt token 已包含缓存部分时，缓存部分不会被重复计入。 |
+| `TPS` | p50 每秒输出 Token 数，按每次调用的流式区间（首个输出 Token 到结束）计算。 |
+| `TTFT` | p50 从请求开始到首个流式输出 Token 的耗时。 |
+| `TPOT` | p50 首个 Token 之后每个输出 Token 的耗时。 |
+| `LAST` | 该组最近一次调用的时钟时间。 |
+
+`TTFT`、`TPS`、`TPOT` 只来自流式调用——非流式响应没有首个输出 Token 的时间戳，因此这些单元格显示
+`-`，并且无论升序还是降序都排在所有有测量值的行之后。这些分位数与 `GET /api/metrics/latency` 返回的
+单次调用指标同源，只是聚合范围是窗口而不是全部历史。
+
+```bash
+# 每 5 秒刷新一次，窗口 2 分钟
+sudo agentsight top -d 5 --window 120
+
+# 按会话而不是按进程分组
+sudo agentsight top --session
+
+# TTFT 最小的排在最前
+sudo agentsight top --sort ttft --asc
+
+# 只看某个 Agent 的某个进程，并显示全部行而不是前 20 行
+sudo agentsight top --agent claude-code --pid 20310 --limit 0
+
+# 覆盖全部历史记录，而不是滑动窗口
+sudo agentsight top --window 0
+```
+
+`--sort` 支持 `tps`（默认）、`ttft`、`tpot`、`reqs`、`in`、`out`、`total`、`agent`、`pid`、
+`session`、`last`；指标列比较 p50。`--asc` 反转排序方向。`--delay` 的下限是 0.1 秒。
+
+在终端里视图会原地重绘，直到 Ctrl+C。当 stdout 是管道或文件时，只输出一次刷新且不含控制字符，因此
+`--batch` 只是显式声明而非必需；`-n/--iterations` 在两种模式下都能限定刷新次数。`--json` 每次刷新
+输出一个对象，包含 `window_start_ns`、`window_end_ns`、`grouping`、`summary` 与 `rows`；每行都带
+`ttft_ms`、`tps_tokens_per_second`、`tpot_ms_per_token`、`e2e_latency_ms` 的 `p50`、`p95`、`p99`。
+端到端时延没有对应的表格列，在这里只能通过 `--json` 读取。
+
+`--db` 改为读取 `genai_events.db` 的副本，不再读默认目录，适合查看从其他主机拷来的数据库：
+
+```bash
+agentsight top --db /backup/agentsight/genai_events.db --batch
+```
+
+`top` 只读取 trace 已经落库的数据。没有运行中的 tracer，或者主机上只用 `agentsight trace --no-ebpf`
+采集轨迹时，窗口会一直是空的——没有可供聚合的 eBPF Token 与时延数据。
 
 ## agentsight interruption
 
