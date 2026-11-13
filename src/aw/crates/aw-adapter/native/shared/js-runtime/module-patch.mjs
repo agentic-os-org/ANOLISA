@@ -2,11 +2,14 @@
 import { createHash } from "node:crypto";
 import { registerHooks } from "node:module";
 
-export function installVerifiedPatch({ target, digest, anchor, replacement, onPatched }) {
+export function installVerifiedPatch({ target, digest, anchor, replacement, variants, onPatched }) {
   if (typeof registerHooks !== "function")
     throw Error("AW final result gate requires synchronous Node module hooks");
-  if (!target.startsWith("/node_modules/") || !/^[a-f0-9]{64}$/.test(digest) ||
-      !anchor || typeof replacement !== "string" || anchor === replacement)
+  const profiles = variants ?? [{ digest, anchor, replacement }];
+  if (!target.startsWith("/node_modules/") || !Array.isArray(profiles) || !profiles.length ||
+      new Set(profiles.map(profile => profile.digest)).size !== profiles.length ||
+      !profiles.every(profile => /^[a-f0-9]{64}$/.test(profile.digest) && profile.anchor &&
+        typeof profile.replacement === "string" && profile.anchor !== profile.replacement))
     throw Error("AW final result gate profile is invalid");
   let matched = false;
   return registerHooks({
@@ -15,12 +18,13 @@ export function installVerifiedPatch({ target, digest, anchor, replacement, onPa
       if (!url.endsWith(target)) return loaded;
       if (matched) throw Error("AW final result gate target loaded more than once");
       const source = loaded.source?.toString();
-      if (!source || createHash("sha256").update(source).digest("hex") !== digest ||
-          source.split(anchor).length !== 2)
-        throw Error("AW final result gate does not support this module build");
+      const sourceDigest = source && createHash("sha256").update(source).digest("hex");
+      const profile = profiles.find(item => item.digest === sourceDigest);
+      if (!profile || source.split(profile.anchor).length !== 2)
+        throw Error(`AW final result gate does not support ${target} build`);
       matched = true;
-      onPatched?.({ url, digest });
-      return { ...loaded, source: source.replace(anchor, replacement) };
+      onPatched?.({ url, digest: sourceDigest });
+      return { ...loaded, source: source.replace(profile.anchor, profile.replacement) };
     },
   });
 }

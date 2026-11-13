@@ -68,8 +68,10 @@ Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用
 | `model.before_request` | 规划中 |
 | `runtime.observed` | 规划中 |
 | `runtime.exited` | 规划中 |
-| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5 工具最终结果边界，支持观察和阻断 |
+| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5；OpenClaw 2026.9.5–2026.9.7 已验证构建的显式 OpenAI-completions Gateway 路径提供实验性支持；支持观察和阻断 |
 | `coverage.changed` | 规划中 |
+
+OpenClaw 最终检查要求精确构建、前台 Gateway 和非 reloadable 模式。上方静态矩阵描述普通启动能力。最终检查在原生结果和请求改写完成后检查模型请求；未知构建或路径拒绝必需策略。接线限制见 [OpenClaw 指南](../../../developer-guide/zh/aw/agents/openclaw.md#工具结果最终检查)。Qoder SDK 1.0.55–1.0.57 的真实 Worker 测试证明后续 Post 回调可改变模型采用结果，其最终检查能力仍不支持。
 
 ## Skill 校验
 
