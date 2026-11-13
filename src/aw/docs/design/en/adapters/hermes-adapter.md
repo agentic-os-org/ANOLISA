@@ -291,18 +291,24 @@ launches without the AW launcher's session binding.
 ## Hook semantics
 
 The in-process path registers each admitted AW step as a native callback. In
-`0.23.1`, the CLI registers its Gateway session through the plugin RPC before
-native conversation handling. The Gateway binds every admitted turn at its
-execution claim using the actual submission identity, including queued prompts
-and background notifications. Pre-admission failures create no turn lease. Hermes retains
-control over tool batch scheduling. Existing
+`0.23.1`, the CLI primes its Gateway session before native conversation handling.
+The Gateway keeps an immutable launch snapshot for that session and creates one
+active binding at the native admission claim, using the row's request ID or
+admission ID. Queued prompts, adopted turns and background notifications use
+that same boundary. A returned native execution, including `settled_unknown`,
+releases the binding. An exception retains it until the native admission ledger
+confirms a terminal status. Hermes retains control over tool batch scheduling. Existing
 configured Hooks still run; AW does not import or reorder their configuration.
 The Gateway refuses plugin unload while an AW session remains registered, so
 queued admissions cannot lose their callbacks between turns.
-After the CLI closes a session, it waits for that session's queued and active
-admissions to settle before retiring the registration. AW keeps the launch
-files and service instance until the Gateway acknowledges retirement. A later
-AW launch can then register the same session, and plugin unload is allowed.
+After the CLI closes a session, `retire` waits for queued, started and unknown
+admissions to settle. Prime and retire are idempotent for the same launch; an old
+launch's retire cannot remove a newer registration. The CLI records a session
+before sending prime, so a lost reply remains eligible for retirement. Its
+private retirement receipt permits the parent AW process to release the service
+instance and launch files. If a signal or drain failure prevents the receipt,
+AW reports and retains both resources for operator reconciliation. A later AW
+launch can register the same session after retirement, and plugin unload is allowed.
 Native Hook configuration has no per-Hook environment object in the verified
 baseline.
 

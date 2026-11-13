@@ -100,6 +100,8 @@ def main() -> None:
 
     original = native._prepare_agent_startup
     launch = json.loads(Path(launch_path).read_text())
+    retired_path = Path(launch_path).with_name("hermes-retired.json")
+    retired_path.unlink(missing_ok=True)
     skills = None
     skill_restore = None
     dispatch_restore = None
@@ -116,6 +118,17 @@ def main() -> None:
     reload_runtime = None
     gateway_restore = None
     primed_sessions: set[str] = set()
+
+    def record_session(session_id: str) -> None:
+        primed_sessions.add(session_id)
+        path = Path(launch_path).with_name("hermes-sessions.json")
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w") as record:
+            os.chmod(temporary, 0o600)
+            json.dump(sorted(primed_sessions), record)
+            record.flush()
+            os.fsync(record.fileno())
+        os.replace(temporary, path)
 
     def discovery(force: bool = False) -> None:
         if not force:
@@ -210,6 +223,8 @@ def main() -> None:
 
                 def bound_run(agent: Any, *args: Any, **kwargs: Any) -> Any:
                     require_hooks()
+                    # A lost prime receipt still leaves a registration to reconcile.
+                    record_session(agent.session_id)
                     receipt = agent.connection.call(
                         "plugin.aw-native-hooks.prime", session_id=agent.session_id,
                         launch_path=launch_path, token=launch["token"])
@@ -218,7 +233,6 @@ def main() -> None:
                             or receipt.get("hooks") != len(launch["hooks"])
                             or not isinstance(receipt.get("gateway_pid"), int)):
                         raise RuntimeError("Hermes Gateway did not register the AW callbacks")
-                    primed_sessions.add(agent.session_id)
                     return original_run(agent, *args, **kwargs)
 
                 gateway_restore = (GatewayAgent, original_run)
@@ -336,14 +350,6 @@ def main() -> None:
                         target_session_id=session_id, launch_path=launch_path,
                         token=launch["token"])
                     if receipt == {"retired": True}:
-                        try:
-                            connection.call(
-                                "plugin.aw-native-hooks.acknowledge_retire", timeout=5,
-                                target_session_id=session_id, launch_path=launch_path,
-                                token=launch["token"])
-                        except Exception as error:
-                            print(f"AW Hermes Gateway retirement acknowledgement failed: {error}",
-                                  file=sys.stderr)
                         break
                     if receipt != {"retired": False}:
                         raise RuntimeError("invalid AW Hermes Gateway retirement receipt")
@@ -359,26 +365,31 @@ def main() -> None:
     try:
         native.main()
     finally:
-        retire_gateway_sessions()
-        plugins._get_pre_tool_call_directive_details = original_directives
-        middleware.run_tool_execution_middleware = original_execution
-        if post_restore is not None:
-            module, callback = post_restore
-            module._emit_post_tool_call_hook = callback
-        if dispatch_restore is not None:
-            dispatch_restore[0].handle_function_call = dispatch_restore[1]
-        if skill_restore is not None:
-            skill_restore()
-        manager.discover_and_load = original_discovery
-        if reload_restore is not None:
-            reload_restore[0].chat = reload_restore[1]
-        if gateway_restore is not None:
-            gateway_restore[0].run_conversation = gateway_restore[1]
-        if input_restore is not None:
-            cli, original_main, original_images = input_restore
-            cli.main = original_main
-            cli._route_single_query_images = original_images
-        sys.modules.pop(session.__name__, None)
+        try:
+            retire_gateway_sessions()
+            with retired_path.open("x") as receipt:
+                os.chmod(retired_path, 0o600)
+                json.dump({"token": launch["token"], "pid": os.getpid()}, receipt)
+        finally:
+            plugins._get_pre_tool_call_directive_details = original_directives
+            middleware.run_tool_execution_middleware = original_execution
+            if post_restore is not None:
+                module, callback = post_restore
+                module._emit_post_tool_call_hook = callback
+            if dispatch_restore is not None:
+                dispatch_restore[0].handle_function_call = dispatch_restore[1]
+            if skill_restore is not None:
+                skill_restore()
+            manager.discover_and_load = original_discovery
+            if reload_restore is not None:
+                reload_restore[0].chat = reload_restore[1]
+            if gateway_restore is not None:
+                gateway_restore[0].run_conversation = gateway_restore[1]
+            if input_restore is not None:
+                cli, original_main, original_images = input_restore
+                cli.main = original_main
+                cli._route_single_query_images = original_images
+            sys.modules.pop(session.__name__, None)
 
 
 if __name__ == "__main__":

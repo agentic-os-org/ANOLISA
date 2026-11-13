@@ -38,7 +38,7 @@ connect 备份配置后安装 AW 插件，报告 `backup` 和 `displaced` 路径
 
 before 阻断后，其他原生回调仍可运行；after 可观察失败或被阻断的尝试。
 AW 绑定的 Gateway 轮次内及进程内工具执行期间，强制插件重载会被拒绝。已提交的上下文压缩会延续该轮的 AW 绑定，保护后续工具调用。空策略仍须安装插件，运行时注册零个工具回调。
-已提交轮次由 Gateway 在服务端执行结束后释放绑定。CLI 断连或停止等待时，执行状态未确定的轮次继续保持绑定。CLI 退出时，AW 等待排队和执行中的轮次结算且会话关闭，然后释放 launch 文件和服务实例。执行状态始终无法确定时，需在 Hermes 中处理后再结束 AW 运行。
+Gateway 在认领已准入轮次时建立绑定，原生执行返回后释放，包括自动 unknown 结算。人工处理的 unknown admission 在下一次认领或注销时释放绑定。CLI 退出时，AW 等待 queued、started 和 unknown admission 全部结算且会话关闭，再释放 launch 文件和服务实例。信号或 drain 故障阻止注销时，AW 报告并保留实例与 launch 目录。处理 admission 期间保持 AW 服务和 Hermes Gateway 可用；目录中的私有 `hermes-sessions.json` 列出待对账会话。进程强杀无法完成握手。
 对于 `0.23.1`，连接或升级插件后重启已运行的 Gateway；Gateway 未确认 AW 会话绑定时，
 CLI 会拒绝提交轮次。`transform_tool_result` 在模型收到工具结果前执行替换。
 该回调失败或超时后，Hermes 会保留原始结果；必须阻止内容进入模型时，在

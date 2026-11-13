@@ -11,7 +11,10 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs::{self, DirBuilder},
-    os::unix::{fs::DirBuilderExt, process::ExitStatusExt},
+    os::unix::{
+        fs::{DirBuilderExt, MetadataExt},
+        process::ExitStatusExt,
+    },
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicI32},
     time::{Duration, Instant},
@@ -25,19 +28,23 @@ extern "C" fn signal(value: libc::c_int) {
     CANCELLED.store(true, std::sync::atomic::Ordering::Release);
 }
 
-pub(super) struct Artifacts(pub(super) PathBuf);
+pub(super) struct Artifacts(pub(super) PathBuf, bool);
 
 impl Artifacts {
     fn create(state: &Path) -> Result<Self> {
         let id = fs::read_to_string("/proc/sys/kernel/random/uuid")?;
         let path = state.join(format!("launch-{}", id.trim()));
         DirBuilder::new().mode(0o700).create(&path)?;
-        Ok(Self(path))
+        Ok(Self(path, false))
     }
 
     fn cleanup(&self) -> Result<()> {
         fs::remove_dir_all(&self.0)?;
         Ok(())
+    }
+
+    fn retain(&mut self) {
+        self.1 = true;
     }
 }
 
@@ -49,7 +56,7 @@ impl LaunchFiles for Artifacts {
 
 impl Drop for Artifacts {
     fn drop(&mut self) {
-        if self.0.exists() {
+        if !self.1 && self.0.exists() {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
@@ -170,10 +177,11 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     if remember_connection {
         super::connection::remember(configuration, &service.paths.socket, &service.client)?;
     }
-    let artifacts = Artifacts::create(&service.paths.state_dir)?;
+    let mut artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");
     let mut instance = None;
     let mut started = false;
+    let mut launch_pid = None;
     let executed: Result<Exit> = (|| {
         let mut plan = prepared.configure(&LaunchContext {
             files: &artifacts,
@@ -263,6 +271,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             name == "qoder-sdk",
             plan.readiness,
             |pid| {
+                launch_pid = Some(pid);
                 if reloadable || resident_policy_reload {
                     reported = service
                         .client
@@ -305,8 +314,30 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             None => Exit::Signal(status.signal().ok_or("Agent exit has no status")?),
         })
     })();
+    let preserve = if name == "hermes" && started {
+        match launch_pid.map(|pid| hermes_retired(&artifacts, pid)) {
+            Some(Ok(true)) => false,
+            Some(Err(error)) => {
+                eprintln!("AW Hermes retirement receipt could not be verified: {error}");
+                true
+            }
+            _ => true,
+        }
+    } else {
+        false
+    };
+    if preserve {
+        artifacts.retain();
+        eprintln!(
+            "AW Hermes Gateway retirement pending; retained instance {:?} and launch {}. \
+             Retire the session before releasing these resources.",
+            instance,
+            artifacts.0.display()
+        );
+    }
     let reported = instance
         .as_ref()
+        .filter(|_| !preserve)
         .map(|instance_id| {
             let outcome = match (&executed, started) {
                 (Ok(Exit::Code(code)), true) => RunOutcome::Exited {
@@ -329,6 +360,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         })
         .transpose();
     let released = instance
+        .filter(|_| !preserve)
         .map(|instance_id| {
             service.client.call(
                 Operation::ReleaseInstance { instance_id },
@@ -336,8 +368,12 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             )
         })
         .transpose();
-    let native_cleaned = prepared.finish();
-    let cleaned = artifacts.cleanup();
+    let native_cleaned = if preserve { Ok(()) } else { prepared.finish() };
+    let cleaned = if preserve {
+        Ok(())
+    } else {
+        artifacts.cleanup()
+    };
     if let Some(released) = released? {
         if let Some(observation) = released.get("observation").filter(|value| !value.is_null()) {
             eprintln!(
@@ -353,6 +389,27 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     cleaned?;
     reported?;
     executed
+}
+
+fn hermes_retired(artifacts: &Artifacts, pid: u32) -> Result<bool> {
+    let path = artifacts.0.join("hermes-retired.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Ok(false);
+    }
+    let receipt: serde_json::Value = serde_json::from_slice(&read_file(&path, 4096)?)?;
+    let launch: serde_json::Value =
+        serde_json::from_slice(&read_file(artifacts.0.join("hermes-launch.json"), 4096)?)?;
+    Ok(receipt["pid"].as_u64() == Some(u64::from(pid))
+        && receipt["token"].as_str().is_some()
+        && receipt["token"].as_str() == launch["token"].as_str())
 }
 
 pub(super) fn interrupted() -> Option<Exit> {
@@ -381,4 +438,30 @@ pub(super) fn install_signals() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hermes_retired, Artifacts};
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn hermes_launch_requires_matching_private_retirement_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = root.path().join("launch");
+        fs::create_dir(&launch).unwrap();
+        let artifacts = Artifacts(launch.clone(), true);
+        fs::write(launch.join("hermes-launch.json"), r#"{"token":"owned"}"#).unwrap();
+        assert!(!hermes_retired(&artifacts, 42).unwrap());
+
+        let receipt = launch.join("hermes-retired.json");
+        fs::write(&receipt, r#"{"token":"owned","pid":42}"#).unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(hermes_retired(&artifacts, 42).unwrap());
+        assert!(!hermes_retired(&artifacts, 43).unwrap());
+        fs::write(&receipt, r#"{"token":"other","pid":42}"#).unwrap();
+        assert!(!hermes_retired(&artifacts, 42).unwrap());
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!hermes_retired(&artifacts, 42).unwrap());
+    }
 }

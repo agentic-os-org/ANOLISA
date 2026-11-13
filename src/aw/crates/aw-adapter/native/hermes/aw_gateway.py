@@ -10,17 +10,15 @@ import shlex
 import sys
 from threading import RLock
 from typing import Any
-from uuid import uuid4
 
 from . import aw_skill
-from .aw_gateway_lifecycle import register_retirement
+from .aw_gateway_lifecycle import admission_terminal, register_retirement
 
 
 _bindings: dict[str, "Binding"] = {}
 _roots: dict[str, "Binding"] = {}
-_leases: dict[str, tuple["Binding", str]] = {}
+_active: dict[str, "Binding"] = {}
 _known: dict[str, tuple[str, dict[str, Any], Any, Any]] = {}
-_retired: dict[str, tuple[str, str]] = {}
 _checked: dict[tuple[str, str, str], tuple[str, dict | None]] = {}
 _lock = RLock()
 _restores = []
@@ -96,7 +94,8 @@ def _release(binding: "Binding") -> None:
     for key in list(_checked):
         if key[0] == binding.identity:
             _checked.pop(key)
-    _leases.pop(binding.identity, None)
+    if _active.get(binding.identity) is binding:
+        _active.pop(binding.identity)
 
 
 class Binding:
@@ -105,7 +104,8 @@ class Binding:
 
         self.path, self.launch, self.ctx, self.load = path, launch, ctx, load
         self.identity = ""
-        self.submission_id = ""
+        self.request_id = ""
+        self.admission_id = ""
         self.before, self.after, self.replacement = [], [], None
         seen = set()
         for hook in launch["hooks"]:
@@ -186,79 +186,8 @@ def register(ctx: Any, load: Any) -> None:
                 raise ValueError("Hermes session already belongs to another AW launch")
             _guard_manager(ctx)
             _known[session_id] = path, launch, ctx, load
-            _retired.pop(session_id, None)
         return {"adapter": "hermes", "token": launch["token"],
                 "hooks": len(launch["hooks"]), "gateway_pid": __import__("os").getpid()}
-
-    def bind(params: dict, *, session_id: str | None = None) -> dict:
-        if (not isinstance(session_id, str) or not session_id or len(session_id) > 512
-                or set(params) != {"session_id", "launch_path", "token", "submission_id"}
-                or params["session_id"] != session_id
-                or not isinstance(params["launch_path"], str)
-                or not isinstance(params["token"], str)
-                or not isinstance(params["submission_id"], str)
-                or not 1 <= len(params["submission_id"]) <= 512):
-            raise ValueError("invalid AW Hermes Gateway session binding")
-        path = params["launch_path"]
-        launch = load(path)
-        if (launch["token"] != params["token"]
-                or get_version_info().commit != launch["revision"]
-                or get_hermes_home().resolve() != Path(launch["profile"])):
-            raise ValueError("AW Hermes Gateway launch identity differs")
-        binding = Binding(path, launch, ctx, load)
-        manager = getattr(ctx, "_manager", None)
-        discovery = getattr(manager, "_discovery_lock", None)
-        with discovery if discovery is not None else nullcontext(), _lock:
-            if not _alive:
-                raise ValueError("AW Hermes Gateway plugin was unloaded")
-            active = _leases.get(session_id)
-            if active is not None:
-                if active[0].path != path or active[0].launch != launch:
-                    raise ValueError("Hermes session already belongs to another AW launch")
-                return {"adapter": "hermes", "token": launch["token"],
-                        "hooks": len(launch["hooks"]), "gateway_pid": __import__("os").getpid(),
-                        "lease": active[1],
-                        "adopted": active[0].submission_id != params["submission_id"]}
-            known = _known.get(session_id)
-            if known is not None and (known[0] != path or known[1] != launch):
-                raise ValueError("Hermes session already belongs to another AW launch")
-            for identity, active in list(_bindings.items()):
-                if not Path(active.path).exists():
-                    _bindings.pop(identity, None)
-            previous = _bindings.get(session_id)
-            if previous is not None and previous.launch != launch:
-                try:
-                    previous.load(previous.path)
-                except OSError:
-                    pass
-                else:
-                    raise ValueError("Hermes session already belongs to another AW launch")
-            binding.identity = session_id
-            binding.submission_id = params["submission_id"]
-            _install_guards(binding)
-            _guard_manager(ctx)
-            _bindings[session_id] = binding
-            _known[session_id] = path, launch, ctx, load
-            lease = uuid4().hex
-            _leases[session_id] = (binding, lease)
-        return {"adapter": "hermes", "token": launch["token"],
-                "hooks": len(launch["hooks"]), "gateway_pid": __import__("os").getpid(),
-                "lease": lease}
-
-    def finish(params: dict, *, session_id: str | None = None) -> dict:
-        if (not isinstance(params, dict) or set(params) != {"session_id", "token", "lease", "unadmitted"}
-                or not isinstance(session_id, str) or params["session_id"] != session_id
-                or not isinstance(params["token"], str) or not isinstance(params["lease"], str)
-                or params["unadmitted"] is not True):
-            raise ValueError("invalid AW Hermes Gateway finish request")
-        with _lock:
-            active = _leases.get(session_id)
-            if active is None:
-                return {"finished": True}
-            if active[1] != params["lease"] or active[0].launch["token"] != params["token"]:
-                raise ValueError("AW Hermes Gateway turn lease differs")
-            _release(active[0])
-        return {"finished": True}
 
     def compact(**values: Any) -> None:
         old, new = values.get("old_session_id"), values.get("session_id")
@@ -379,10 +308,8 @@ def register(ctx: Any, load: Any) -> None:
     ctx.register_hook("post_tool_call", post)
     ctx.register_hook("transform_tool_result", transform)
     ctx.register_hook("post_compaction", compact)
-    ctx.register_rpc("bind", bind)
     ctx.register_rpc("prime", prime)
-    ctx.register_rpc("finish", finish)
-    register_retirement(ctx, _known, _retired, _leases, _lock)
+    register_retirement(ctx, _known, _active, _release, _lock, load)
     ctx.on_unload(_unload)
     _guard_turns()
 
@@ -400,31 +327,34 @@ def _guard_turns() -> None:
         manager = getattr(known[2], "_manager", None) if known is not None else None
         discovery = getattr(manager, "_discovery_lock", None)
         with discovery if discovery is not None else nullcontext(), _lock:
-            active = _leases.get(ref.session_id)
+            active = _active.get(ref.session_id)
             known = _known.get(ref.session_id)
             request_id = row.get("request_id") or row.get("admission_id")
+            admission_id = row.get("admission_id") or request_id
             if known is not None:
                 if not isinstance(request_id, str) or not 1 <= len(request_id) <= 512:
                     raise RuntimeError("AW Hermes claimed turn has no bounded submission identity")
+                if active is not None and active.request_id != request_id:
+                    if not admission_terminal(ref.session_id, active.admission_id, authority):
+                        raise RuntimeError("AW Hermes claimed turn differs from the active admission")
+                    _release(active)
+                    active = None
                 if active is None:
                     path, launch, ctx, load = known
                     binding = Binding(path, launch, ctx, load)
                     binding.identity = ref.session_id
-                    binding.submission_id = request_id
+                    binding.request_id = request_id
+                    binding.admission_id = admission_id
                     binding.check()
                     _install_guards(binding)
                     _bindings[ref.session_id] = binding
-                    _leases[ref.session_id] = (binding, uuid4().hex)
-                elif active[0].submission_id != request_id:
-                    raise RuntimeError("AW Hermes claimed turn differs from the bound submission")
+                    _active[ref.session_id] = binding
         result = await original(authority, ref, live, row)
-        # The Gateway owns admitted execution. A disconnected CLI can return
-        # while this task continues; only the server's exit retires its binding.
-        if result[1] != "settled_unknown":
-            with _lock:
-                active = _leases.get(ref.session_id)
-                if active is not None and request_id == active[0].submission_id:
-                    _release(active[0])
+        # All returned outcomes have crossed the native execution boundary.
+        with _lock:
+            active = _active.get(ref.session_id)
+            if active is not None and request_id == active.request_id:
+                _release(active)
         return result
 
     SessionAuthority._execute_claimed = execute_turn
@@ -641,9 +571,8 @@ def _unload() -> None:
         _alive = False
         _bindings.clear()
         _roots.clear()
-        _leases.clear()
+        _active.clear()
         _known.clear()
-        _retired.clear()
         _checked.clear()
         if _turn_restore is not None:
             authority, original, installed = _turn_restore
