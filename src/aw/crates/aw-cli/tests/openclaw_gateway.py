@@ -24,6 +24,7 @@ import uuid
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", type=Path, required=True)
+    parser.add_argument("--expected-version", default="2026.9.6")
     parser.add_argument("--node", type=Path, default=Path(shutil.which("node") or "node"))
     parser.add_argument("--aw", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -33,6 +34,7 @@ def main() -> None:
     parser.add_argument("--final-gate-order-probe", action="store_true")
     parser.add_argument("--final-gate-enforce", action="store_true")
     parser.add_argument("--final-gate-provider-error", action="store_true")
+    parser.add_argument("--final-gate-provider-timeout", action="store_true")
     parser.add_argument("--sec-core-provider", type=Path)
     parser.add_argument("--benchmark-turns", type=int, default=0)
     args = parser.parse_args()
@@ -42,7 +44,10 @@ def main() -> None:
         parser.error("--final-gate-enforce requires --final-gate-order-probe")
     if args.final_gate_provider_error and not args.final_gate_enforce:
         parser.error("--final-gate-provider-error requires --final-gate-enforce")
-    if args.sec_core_provider and (not args.final_gate_enforce or args.final_gate_provider_error):
+    if args.final_gate_provider_timeout and (not args.final_gate_enforce or args.final_gate_provider_error):
+        parser.error("--final-gate-provider-timeout requires --final-gate-enforce without Provider error")
+    if args.sec_core_provider and (not args.final_gate_enforce or args.final_gate_provider_error or
+                                   args.final_gate_provider_timeout):
         parser.error("--sec-core-provider requires --final-gate-enforce without Provider error")
     if not 0 <= args.benchmark_turns <= 24:
         parser.error("--benchmark-turns must be 0..24")
@@ -97,7 +102,16 @@ def main() -> None:
         (profile / "credential-marker").write_text("fixture-persistent-state")
         (workspace / "AGENTS.md").write_text("Isolated no-model AW acceptance fixture.\n")
         package = json.loads((args.package / "package.json").read_text())
-        assert package["version"] == "2026.9.6"
+        assert package["version"] == args.expected_version
+        if args.final_gate_enforce:
+            preload = Path(__file__).resolve().parents[2] / "aw-adapter/native/openclaw/final-preload.mjs"
+            probe = Path(__file__).parent / "fixtures/openclaw/final-boundaries.mjs"
+            completed = subprocess.run([str(args.node), str(probe), str(args.package)],
+                env={**os.environ, "NODE_OPTIONS": f"--import={preload.as_uri()}"},
+                capture_output=True, text=True, timeout=30, check=True)
+            boundaries = json.loads(completed.stdout)
+            assert boundaries["custom_stream_sends"] == 0 and boundaries["unbound_history_rejected"]
+            write(args.output / "final-boundaries.json", boundaries)
         runner_file = next(path for path in (args.package / "dist").glob("hook-runner-global-*.mjs")
                            if "getGlobalHookRunner as t" in path.read_text())
         write(existing / "package.json", {"name": "aw-existing-fixture", "version": "0.0.1",
@@ -254,12 +268,14 @@ print(json.dumps({{'ok': True,
             else:
                 provider_command = ["/usr/bin/python3", str(action), "--root", str(runtime),
                                     "--label", label, "--behavior",
-                                    "final-error" if args.final_gate_provider_error else "observe"]
+                                    "final-error" if args.final_gate_provider_error else
+                                    "final-timeout" if args.final_gate_provider_timeout else "observe"]
                 provider_config = {}
                 operation = "check-final"
             config["spec"]["providers"][label] = {"protocol": "aw-provider/v1alpha1",
                 "transport": {"type": "stdio", "location": "agent", "argv": provider_command},
-                "timeout_ms": 4500, "max_output_bytes": 65536, "config": provider_config}
+                "timeout_ms": 500 if args.final_gate_provider_timeout else 4500,
+                "max_output_bytes": 65536, "config": provider_config}
             config["spec"]["events"]["security.violation"] = {"enabled": True, "steps": [
                 {"id": label, "provider": label, "on_error": "block", "operation": operation,
                  "effects": ["observe", "block"]}]}
@@ -363,7 +379,7 @@ print(json.dumps({{'ok': True,
                     assert marker not in json.dumps(received), "mutated result reached the model"
                     assert len(model_checked) >= 2, "model projection was not checked"
                     assert marker in json.dumps(model_checked), "model projection lost the injected result"
-                    if args.final_gate_provider_error:
+                    if args.final_gate_provider_error or args.final_gate_provider_timeout:
                         assert all("AW withheld" in json.dumps(row) for row in received if row), \
                             "Provider failure released a tool result"
                     else:
@@ -382,6 +398,7 @@ print(json.dumps({{'ok': True,
                 write(runtime / "final-gate-baseline.json", final_probe)
                 proof["final_gate_order_probe"] = status
                 proof["final_gate_provider_error"] = args.final_gate_provider_error
+                proof["final_gate_provider_timeout"] = args.final_gate_provider_timeout
                 proof["final_gate_sec_core"] = bool(args.sec_core_provider)
             write(runtime / "proof.json",proof)
         else:

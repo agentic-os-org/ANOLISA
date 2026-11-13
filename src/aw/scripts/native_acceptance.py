@@ -232,6 +232,19 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
         )
     if "@qoder-ai/qoder-agent-sdk@1.0.56" in row.get("npm_packages", []):
         commands.run(["node", str(npm / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")], AW)
+    npm_variants = {}
+    for key, package in row.get("npm_variants", {}).items():
+        directory = work / key
+        commands.run(
+            ["npm", "install", "--prefix", str(directory), "--ignore-scripts", "--no-audit",
+             "--no-fund", package],
+            AW,
+        )
+        if package.startswith("@qoder-ai/qoder-agent-sdk@"):
+            install = directory / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs"
+            commands.run(["node", str(install)], AW)
+        shutil.copyfile(directory / "package-lock.json", commands.evidence / f"{key}-lock.json")
+        npm_variants[key] = str(directory)
     if (npm / "package-lock.json").exists():
         shutil.copyfile(npm / "package-lock.json", commands.evidence / "npm-lock.json")
     extra_npm = {}
@@ -259,6 +272,7 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
         "qwenpaw": str(python.parent / "qwenpaw"),
         **extra_npm,
     }
+    values.update(npm_variants)
     if "qoder_cli" in row:
         commands.run(
             [

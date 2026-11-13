@@ -25,6 +25,8 @@ if "method" in request:
     elif request["method"] == "invoke":
         if args.behavior == "final-error" and request["operation"] == "check-final":
             sys.exit(3)
+        if args.behavior == "final-timeout" and request["operation"] == "check-final":
+            time.sleep(2)
         reply["input_digest"] = request["input_digest"]
         command = request["event"]["tool"]["input"].get("command", "")
         if request["operation"] == "check-final":

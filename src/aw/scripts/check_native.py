@@ -119,6 +119,11 @@ def load(root: Path) -> dict:
         for package in row.get("npm_packages", []):
             if not re.search(r"@\d+\.\d+\.\d+$", package):
                 raise ValueError(f"{agent}: pin the npm package")
+        for key, package in row.get("npm_variants", {}).items():
+            if not re.fullmatch(r"npm_[a-z0-9_]+", key) or not re.search(
+                r"@\d+\.\d+\.\d+$", package
+            ):
+                raise ValueError(f"{agent}: pin and name each npm variant")
         cases = row.get("cases", [])
         if not cases or len({case["name"] for case in cases}) != len(cases):
             raise ValueError(f"{agent}: missing or duplicate native cases")

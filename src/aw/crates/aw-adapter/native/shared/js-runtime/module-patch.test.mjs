@@ -39,12 +39,22 @@ test("a verified patch reaches its exact module and rejects changed or ambiguous
     writeFileSync(target, 'export const result = "changed";\n');
     const changed = run();
     assert.notEqual(changed.status, 0);
-    assert.match(changed.stderr, /does not support this module build/);
+    assert.match(changed.stderr, /does not support .* build/);
     writeFileSync(target, source + source);
     writePreload(createHash("sha256").update(source + source).digest("hex"));
     const ambiguous = run();
     assert.notEqual(ambiguous.status, 0);
-    assert.match(ambiguous.stderr, /does not support this module build/);
+    assert.match(ambiguous.stderr, /does not support .* build/);
+    writeFileSync(target, source);
+    writeFileSync(preload, `import { installVerifiedPatch, removeOwnPreload } from ${JSON.stringify(helper)};
+      installVerifiedPatch({target:'/node_modules/fixture-agent/lib/index.mjs', variants:[
+        {digest:'${"0".repeat(64)}',anchor:'unused',replacement:'other'},
+        {digest:'${digest}',anchor:${JSON.stringify(source.trim())},
+          replacement:'export const result = "checked";'}]});
+      removeOwnPreload(import.meta.url);`);
+    const selected = run();
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.equal(JSON.parse(selected.stdout).result, "checked");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
