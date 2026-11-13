@@ -202,8 +202,14 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/deepseek-harness/callback.mjs"),
         )?;
         let final_preload = if events.contains_key("security.violation") {
+            fs::create_dir(context.files.directory().join("deepseek-harness"))?;
+            fs::create_dir_all(context.files.directory().join("shared/js-runtime"))?;
+            context.files.write(
+                "shared/js-runtime/module-patch.mjs",
+                include_bytes!("../../native/shared/js-runtime/module-patch.mjs"),
+            )?;
             Some(context.files.write(
-                "deepseek-final-preload.mjs",
+                "deepseek-harness/final-preload.mjs",
                 include_bytes!("../../native/deepseek-harness/final-preload.mjs"),
             )?)
         } else {

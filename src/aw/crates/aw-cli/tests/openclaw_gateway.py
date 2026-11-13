@@ -28,9 +28,10 @@ def main() -> None:
     parser.add_argument("--model-turn", action="store_true")
     parser.add_argument("--compile-cache", action="store_true")
     parser.add_argument("--native-start", action="store_true")
+    parser.add_argument("--final-gate-order-probe", action="store_true")
     args = parser.parse_args()
-    if args.native_start and not args.model_turn:
-        parser.error("--native-start currently requires --model-turn")
+    if (args.native_start or args.final_gate_order_probe) and not args.model_turn:
+        parser.error("--native-start and --final-gate-order-probe require --model-turn")
     args.output.mkdir(parents=True, exist_ok=True)
     runtime = Path(tempfile.mkdtemp(prefix="aw-oc-gateway-"))
     records = []
@@ -87,8 +88,11 @@ def main() -> None:
                            if "getGlobalHookRunner as t" in path.read_text())
         write(existing / "package.json", {"name": "aw-existing-fixture", "version": "0.0.1",
               "private": True, "type": "module", "openclaw": {"extensions": ["./index.mjs"]}})
-        write(existing / "openclaw.plugin.json", {"id": "aw-existing-fixture", "activation": {"onStartup": True},
-              "configSchema": {"type": "object", "additionalProperties": False, "properties": {}}})
+        manifest = {"id": "aw-existing-fixture", "activation": {"onStartup": True},
+                    "configSchema": {"type": "object", "additionalProperties": False, "properties": {}}}
+        if args.final_gate_order_probe:
+            manifest["contracts"] = {"agentToolResultMiddleware": ["openclaw"]}
+        write(existing / "openclaw.plugin.json", manifest)
         (existing / "index.mjs").write_text("""import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { t as getRunner } from RUNNER;
@@ -116,14 +120,26 @@ export default { id:'aw-existing-fixture', register(api) {
 }};
 """.replace("RUNNER", json.dumps(runner_file.as_uri())).replace("ROOT", json.dumps(str(runtime))))
         if args.model_turn:
-            (existing / "index.mjs").write_text("""import { appendFileSync } from 'node:fs';
+            source = """import { appendFileSync } from 'node:fs';
 const root=ROOT;
 export default { id:'aw-existing-fixture',register(api){
   for(const hook of ['gateway_start','before_tool_call','after_tool_call']) api.on(hook,event=>{
     appendFileSync(root+'/existing.jsonl',JSON.stringify({hook,call:event.toolCallId,run:event.runId})+'\\n');
   },{priority:200});
+  MIDDLEWARE
 }};
-""".replace("ROOT",json.dumps(str(runtime))))
+"""
+            middleware = """api.registerAgentToolResultMiddleware(async event=>{
+    appendFileSync(root+'/middleware.jsonl',JSON.stringify({stage:'early',tool:event.toolName,result:event.result})+'\\n');
+    return undefined;
+  },{runtimes:['openclaw']});
+  api.registerAgentToolResultMiddleware(async event=>{
+    appendFileSync(root+'/middleware.jsonl',JSON.stringify({stage:'late',tool:event.toolName,result:event.result})+'\\n');
+    return {result:{...event.result,content:[...event.result.content,
+      {type:'text',text:'AW_FINAL_GATE_SECRET_MARKER'}]}};
+  },{runtimes:['openclaw']});""" if args.final_gate_order_probe else ""
+            (existing / "index.mjs").write_text(source.replace("ROOT",json.dumps(str(runtime)))
+                                               .replace("MIDDLEWARE",middleware))
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
@@ -144,6 +160,10 @@ export default { id:'aw-existing-fixture',register(api){
                     request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                     result["model_calls"] += 1
                     messages = request["messages"]
+                    if args.final_gate_order_probe:
+                        with (runtime / "model-results.jsonl").open("a") as stream:
+                            stream.write(json.dumps([message for message in messages
+                                                     if message.get("role") == "tool"]) + "\n")
                     has_result = any(message.get("role") == "tool" for message in messages)
                     denied = "DENY" in json.dumps([message for message in messages if message.get("role") == "user"])
                     marker = workspace / ("denied.marker" if denied else "allowed.marker")
@@ -199,6 +219,8 @@ export default { id:'aw-existing-fixture',register(api){
         environment = {"PATH": str(args.node.parent)+":/usr/bin:/bin", "HOME": str(runtime / "home"),
                        "OPENCLAW_HOME": str(runtime / "home"), "OPENCLAW_STATE_DIR": str(profile),
                        "OPENCLAW_CONFIG_PATH": str(native_file), "OPENCLAW_SKIP_CHANNELS": "1"}
+        if args.final_gate_order_probe:
+            environment["AW_FINAL_GATE_ORDER_PROBE"] = "1"
         if args.compile_cache:
             environment["NODE_COMPILE_CACHE"] = str(runtime / "compile-cache")
         daemon = start("daemon",[args.aw,"serve","--config",config_file,"--state-dir",state],environment)
@@ -251,6 +273,24 @@ export default { id:'aw-existing-fixture',register(api){
             proof = {"status":"passed","kind":"official Agent turns with a local model fixture","commands":commands,
                      "cloud_model_calls":0,"native_after_calls":4,"native_before_calls":2,"idle_policy_updates":2 if args.native_start else 0,
                      "allow_marker_present":True,"deny_marker_absent":True}
+            if args.final_gate_order_probe:
+                marker = "AW_FINAL_GATE_SECRET_MARKER"
+                post = [row["result"] for row in native_rows if row["hook"] == "after_tool_call"]
+                middleware = [json.loads(line) for line in (runtime / "middleware.jsonl").read_text().splitlines()]
+                received = [json.loads(line) for line in (runtime / "model-results.jsonl").read_text().splitlines()]
+                early = [row for row in middleware if row["stage"] == "early"]
+                late = [row for row in middleware if row["stage"] == "late"]
+                assert early and len(early) == len(late)
+                assert all(marker not in json.dumps(row["result"]) for row in early + late)
+                assert marker in json.dumps(post), "Post Hook did not observe the middleware result"
+                assert marker in json.dumps(received), "official Agent did not adopt the later middleware mutation"
+                final_probe = {"status": "baseline_red", "agent": "openclaw", "version": package["version"],
+                               "raw": "AW_ALLOW", "early_middleware": early, "post_hook": post,
+                               "native_final": marker,
+                               "checked": None, "model_received": received,
+                               "finding": "a middleware check can be followed by another middleware rewrite"}
+                write(runtime / "final-gate-baseline.json", final_probe)
+                proof["final_gate_order_probe"] = "baseline_red"
             write(runtime / "proof.json",proof)
         else:
             proof = json.loads((runtime / "proof.json").read_text())
@@ -270,7 +310,10 @@ export default { id:'aw-existing-fixture',register(api){
         assert not (state / "aw.sock").exists()
         with socket.socket() as probe:
             assert probe.connect_ex(("127.0.0.1",port))!=0,"owned Gateway port remains open"
-        for name in ("proof.json","existing.jsonl","raw-calls.jsonl"):
+        for name in ("proof.json","existing.jsonl","raw-calls.jsonl","middleware.jsonl",
+                     "model-results.jsonl","final-gate-baseline.json"):
+            if not (runtime / name).exists():
+                continue
             shutil.copyfile(runtime / name,args.output / name)
         result.update(status="passed",proof=proof,native_start=args.native_start,original_config_unchanged=True,
                       persistent_profile_preserved=True,bindings_after_exit=0,port_closed=True)

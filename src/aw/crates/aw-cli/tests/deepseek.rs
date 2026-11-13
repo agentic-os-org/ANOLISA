@@ -8,6 +8,25 @@ use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 use support::{Fixture, Service};
 
+#[test]
+fn final_preload_checks_builds_and_child_environment() {
+    let fixture = Fixture::new();
+    let native = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native");
+    let mut command = Command::new("node");
+    command
+        .args(["--test", "--test-reporter=tap"])
+        .arg(native.join("deepseek-harness/final-preload.test.mjs"))
+        .arg(native.join("shared/js-runtime/module-patch.test.mjs"));
+    let output = fixture.run(command);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 3"));
+}
+
 fn setup(f: &Fixture, mode: &str) -> Value {
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join("node"))

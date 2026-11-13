@@ -36,7 +36,9 @@ if "method" in request:
 
 with (args.root / "raw-calls.jsonl").open("a") as output:
     output.write(json.dumps({"label": args.label, "hook": request["hook"], "digest": hashlib.sha256(raw).hexdigest(), "pid": os.getpid(),
-                            "native_environment": os.environ.get("AW_OPENCLAW_NATIVE_ENV_FIXTURE")}) + "\n")
+                            "native_environment": os.environ.get("AW_OPENCLAW_NATIVE_ENV_FIXTURE"),
+                            "result": request["event"].get("result") if request["hook"] == "after_tool_call"
+                            and os.environ.get("AW_FINAL_GATE_ORDER_PROBE") == "1" else None}) + "\n")
 if args.behavior == "sleep":
     time.sleep(0.4)
 elif args.behavior == "barrier":
