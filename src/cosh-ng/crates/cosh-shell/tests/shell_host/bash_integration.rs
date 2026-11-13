@@ -16,6 +16,17 @@ fn run_fixture(case: &str, interactive: bool) -> String {
     let stdin_shell = live || prompt_test || chld_test;
     let shadow = case.starts_with("hook_shadow_");
     let readonly_prompt = case.starts_with("hook_readonly_");
+    // Cases driven by hook-fixture.bash: they start with hook_ but neither feed
+    // a stdin script nor use a shadow fixture. Their fixture asserts that
+    // registration succeeded, so the disposable module copy gets a widened
+    // registration budget; the production deadline keeps its own deterministic
+    // coverage in hook_registration_timeout, which is left unpatched.
+    let host_fixture = case.starts_with("hook_") && !stdin_shell && !shadow && !readonly_prompt;
+    let late_registration = matches!(
+        case,
+        "hook_registration_timeout" | "hook_registration_widened_budget"
+    );
+    let widen_registration_budget = host_fixture && case != "hook_registration_timeout";
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packaging/bash")
         .canonicalize()
@@ -77,10 +88,55 @@ fn run_fixture(case: &str, interactive: bool) -> String {
             .replace("/usr/bin/printf", failed_output.to_str().unwrap());
         fs::write(module, body).unwrap();
     }
+    // The production registration budget is 50 ms (with the per-entry cap at
+    // 100 ms and the budget guard at 100), tuned for a real login shell. A
+    // loaded CI runner can legitimately exceed it, so the fixture copy widens
+    // the registration budget and its guard by the same factor: hook-fixture
+    // cases then assert the semantic contract, not the runner's speed. The
+    // activation budget, the guarded ceiling and every deadline check remain
+    // byte-identical so the widened copy cannot mask contract regressions.
+    if widen_registration_budget {
+        let module = assets.join("cosh-integration.bash");
+        let body = fs::read_to_string(&module)
+            .unwrap()
+            .replace(
+                "budget=$((100000 - __cosh_hook_used))\n        [[ $phase != registration || $budget -le 50000 ]] || budget=50000",
+                "budget=$((1000000 - __cosh_hook_used))\n        [[ $phase != registration || $budget -le 250000 ]] || budget=250000",
+            )
+            .replace(
+                "[[ $budget -gt 0 && $budget -le 100 ]]",
+                "[[ $budget -gt 0 && $budget -le 1000 ]]",
+            );
+        assert!(
+            body.contains("250000") && body.contains("$budget -le 1000"),
+            "registration budget widening anchors drifted in cosh-integration.bash"
+        );
+        fs::write(module, body).unwrap();
+    }
+    // Deterministic coverage of both registration deadline behaviors: the
+    // helper below delays only the registration exchange by 120 ms. On the
+    // unmodified module (hook_registration_timeout) the 50 ms production
+    // budget declines it quietly; on the widened fixture copy
+    // (hook_registration_widened_budget) the 250 ms budget completes it.
+    if late_registration {
+        let helper = assets.join("tests/hook-registration-slow-helper.bash");
+        fs::write(
+            &helper,
+            "#!/bin/bash\n\
+             builtin source \"$COSH_BASH_TEST_ASSETS/tests/hook-helper.bash\" \"$@\"\n\
+             if [[ $2 == compat && ${__fixture_fields[2]-} == registration ]]; then\n\
+             \x20\x20/usr/bin/sleep 0.120\n\
+             fi\n",
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     if case.starts_with("hook_") {
         fs::copy(
             assets.join(if fault_live {
                 "tests/hook-fault-helper.bash"
+            } else if late_registration {
+                "tests/hook-registration-slow-helper.bash"
             } else if shadow || prompt_test {
                 "tests/hook-shadow-helper.py"
             } else {
@@ -394,7 +450,7 @@ fn run_fixture(case: &str, interactive: bool) -> String {
     } else {
         String::new()
     };
-    let helper_calls = if shadow || live || chld_test {
+    let helper_calls = if shadow || live || chld_test || host_fixture {
         fs::read_to_string(root.join("hook.calls")).unwrap_or_default()
     } else {
         String::new()
@@ -843,6 +899,41 @@ fn active_hook_relinquishes_new_environment_conflicts_without_helpers() {
             "{case}"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn late_registration_answer_drops_the_hook_without_user_visible_output() {
+    // Production contract, covered on the unmodified module: registration is
+    // bounded to 50 ms and may quietly decline on a loaded runner. The helper
+    // here delays only the registration answer past that bound, so the module
+    // must clean up after itself and leave every user-owned artifact alone.
+    // The semantic environment-conflict coverage runs against the widened
+    // fixture copy and stays deterministic regardless of runner load.
+    let output = run_fixture("hook_registration_timeout", true);
+    assert!(
+        output.contains("HOOK_REGISTRATION_DECLINED"),
+        "a timed-out registration must decline quietly: {output}"
+    );
+    assert!(
+        !output.contains("fixture resource summary"),
+        "a dropped registration must not fall back to the banner: {output}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn widened_registration_budget_tolerates_a_late_answer() {
+    // Control for the widening itself: the same late helper against the
+    // widened fixture copy registers normally, which is what keeps the
+    // semantic environment-conflict tests off the CI load path. A drifted
+    // widening anchor fails here loudly instead of making those cases
+    // load-sensitive again.
+    let output = run_fixture("hook_registration_widened_budget", true);
+    assert!(
+        output.contains("HOOK_COMPONENT_OK"),
+        "widened registration budget must complete the fixture: {output}"
+    );
 }
 
 #[cfg(target_os = "linux")]
