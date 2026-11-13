@@ -206,6 +206,14 @@ CI adds coverage, packaging, frontend, adapter, and integration jobs according
 to the changed paths. Check [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)
 when changing generated packages or framework adapters.
 
+### AgentSecCore CI
+
+The component tests and Linux sandbox VM tests run independently. Each job
+uploads portable Cobertura reports; `Check sec-core coverage` waits for both,
+rejects failed producers or missing reports, and applies the existing 80%
+changed-line threshold. A sandbox failure does not prevent the component tests
+from running. Coverage collection executes tests; it is not a report-only step.
+
 ### Skill regression tests and path ownership
 
 For contributors changing skill scripts, keep component regression tests in
