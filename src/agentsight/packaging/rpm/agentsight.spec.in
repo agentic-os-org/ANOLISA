@@ -117,6 +117,14 @@ fi
 %{_datadir}/agentsight/adapters/dsh/
 
 %changelog
+* Fri Nov 13 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.16.2-1
+- Capture the first TLS call of warm agents such as Claude Code
+- Ship Claude Code static SSL offsets and reuse learned offsets across restarts
+- Keep active SSE responses by rejecting new flows at the byte budget
+- Record safety-blocked Gemini prompts and count Gemini tool prompt tokens
+- Export inline Anthropic server tool results and keep Codex completion times
+- Fix system prompt replay and argv backtracks in cost analysis
+
 * Thu Nov 12 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.16.1-1
 - Require a trusted origin before bypassing dashboard authentication on loopback
 - Resolve init-namespace identity for containerized targets
