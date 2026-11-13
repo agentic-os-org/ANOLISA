@@ -42,6 +42,17 @@ class DailyWorkflowTests(GateFixture):
             env[name] = value
         return env
 
+    def test_semantic_backend_triggers_and_cache_stay_in_aw_job(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-ci.yml").read_text()
+        triggers = workflow.split("\njobs:\n", 1)[0]
+        for event, following in (("push", "pull_request"), ("pull_request", "merge_group")):
+            block = triggers.split(f"  {event}:\n", 1)[1].split(f"  {following}:", 1)[0]
+            self.assertIn("      - 'src/semantic-arbiter/**'\n", block)
+            self.assertIn("      - 'providers/**'\n", block)
+        for path in ("providers/semantic-arbiter", "src/semantic-arbiter"):
+            self.assertIn(f"            {path}\n", self.jobs["checks"])
+            self.assertNotIn(path, self.jobs["tokenless"])
+
     def test_workers_are_independent_and_required_always_joins_both(self) -> None:
         for job, output in (("checks", "selected"), ("tokenless", "tokenless")):
             block = self.jobs[job]

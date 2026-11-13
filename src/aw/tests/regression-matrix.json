@@ -24,6 +24,12 @@
     "aw-cli/test/installation",
     "aw-package/lib/aw_package",
     "aw-provider-sec-core/test/provider",
+    "aw-provider-semantic-arbiter/bin/aw-provider-semantic-arbiter",
+    "aw-provider-semantic-arbiter/test/provider",
+    "aw-provider-semantic-arbiter/test/session_parallel",
+    "aw-provider-semantic-arbiter/test/session_task",
+    "aw-provider-semantic-arbiter/test/shell_command",
+    "aw-provider-semantic-arbiter/test/storage_deadline",
     "aw-provider-tokenless/test/linked_rtk",
     "aw-provider-tokenless/test/pretool",
     "aw-provider-tokenless/test/provider",
@@ -53,6 +59,154 @@
     "aw-cli/test/deepseek"
   ],
   "cases": {
+    "semantic-delete": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "explicit_single_path_delete_is_advisory_and_rejects_extra_targets"
+    },
+    "semantic-budget-encoding": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "integral_decimal_and_exponent_budgets_follow_aw_protocol"
+    },
+    "semantic-host": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "public_aw_host_admits_and_invokes_observe_only_provider"
+    },
+    "semantic-offline": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "describe_and_offline_closed_config"
+    },
+    "semantic-config": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "invalid_config_and_duplicate_fields_are_sanitized"
+    },
+    "semantic-candidate": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "full_candidate_normal_and_denial_never_emit_effects"
+    },
+    "semantic-authority": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "explicit_permissions_are_not_candidate_derived"
+    },
+    "semantic-preserve": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "preserve_overrides_allowance_without_model_call"
+    },
+    "semantic-derived-identity": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "unenumerated_paths_get_a_derived_identity_usable_as_a_hard_constraint"
+    },
+    "semantic-bash-command": {
+      "target": "aw-provider-semantic-arbiter/test/shell_command",
+      "test": "shell_commands_project_named_targets_and_leave_the_rest_to_the_model"
+    },
+    "semantic-task-capture": {
+      "target": "aw-provider-semantic-arbiter/test/session_task",
+      "test": "session_turns_join_in_order_and_redelivery_is_ignored"
+    },
+    "semantic-task-missing": {
+      "target": "aw-provider-semantic-arbiter/test/session_task",
+      "test": "missing_or_oversized_session_task_is_uncovered_without_model"
+    },
+    "semantic-submit-context": {
+      "target": "aw-provider-semantic-arbiter/test/session_task",
+      "test": "submission_context_is_checked_before_capture"
+    },
+    "semantic-scenarios": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "preservation_scenario_is_refused_until_its_verifier_is_wired"
+    },
+    "semantic-uncovered": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "mismatches_missing_identity_and_unmapped_tools_are_uncovered"
+    },
+    "semantic-size": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "oversized_candidate_is_saved_without_truncation_or_inference"
+    },
+    "semantic-errors": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "credentials_and_remote_failures_remain_sanitized_shadow_results"
+    },
+    "semantic-binding": {
+      "target": "aw-provider-semantic-arbiter/test/provider",
+      "test": "changed_content_and_complete_native_ids_change_bindings"
+    },
+    "semantic-private-root": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "recording_requires_existing_private_nonsymlink_root"
+    },
+    "semantic-quotas": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "session_count_quota_spares_unbound_calls_and_keeps_files_private"
+    },
+    "semantic-byte-quotas": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "session_and_storage_byte_caps_count_actual_call_bytes"
+    },
+    "semantic-concurrency": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "record_lock_wait_obeys_original_budget_and_concurrent_sessions_cannot_overcommit"
+    },
+    "semantic-lock-release": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "released_record_lock_allows_inference_with_remaining_budget"
+    },
+    "semantic-parallel-sessions": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_aw_instance_parallel_sessions_share_task_without_identity_collision"
+    },
+    "semantic-parallel-instances": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_native_session_parallel_aw_instances_are_isolated"
+    },
+    "semantic-session-domains": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_native_session_parallel_adapter_and_binding_domains_are_isolated"
+    },
+    "semantic-session-continuity": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "same_session_later_call_keeps_task_session_and_changes_candidate"
+    },
+    "semantic-parallel-tasks": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "parallel_distinct_session_prompts_keep_text_and_versions_isolated"
+    },
+    "semantic-context-revisions": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "aw_revision_task_version_and_workspace_changes_keep_context_distinct"
+    },
+    "semantic-unsupported-first": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "unsupported_first_event_does_not_bind_task_and_later_valid_event_evaluates"
+    },
+    "semantic-rejected-first": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "rejected_first_context_and_size_do_not_publish_task_or_poison_later_calls"
+    },
+    "semantic-malformed-session": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "schema_permitted_malformed_sessions_reject_before_task_publication_and_network"
+    },
+    "semantic-session-schema": {
+      "target": "aw-provider-semantic-arbiter/test/session_parallel",
+      "test": "aw_schema_rejects_overlong_native_session_without_private_records_or_model"
+    },
+    "semantic-interruption": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "input_and_model_projection_survive_killed_process"
+    },
+    "semantic-directory-binding": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "pinned_root_ignores_path_replacement_during_inference"
+    },
+    "semantic-preparation-budget": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "preparation_time_consumes_original_aw_and_config_budgets"
+    },
+    "semantic-model-budget": {
+      "target": "aw-provider-semantic-arbiter/test/storage_deadline",
+      "test": "slow_http_keeps_budget_failure_and_no_effects"
+    },
     "package-doctor-files": {
       "target": "aw-cli/test/inventory",
       "test": "list_keeps_recorded_packages_while_doctor_reports_missing_files"
@@ -1924,6 +2078,45 @@
     }
   },
   "providers": {
+    "semantic-arbiter": [
+      "semantic-delete",
+      "semantic-budget-encoding",
+      "semantic-host",
+      "semantic-offline",
+      "semantic-config",
+      "semantic-candidate",
+      "semantic-authority",
+      "semantic-preserve",
+      "semantic-derived-identity",
+      "semantic-bash-command",
+      "semantic-task-capture",
+      "semantic-task-missing",
+      "semantic-submit-context",
+      "semantic-scenarios",
+      "semantic-uncovered",
+      "semantic-size",
+      "semantic-errors",
+      "semantic-binding",
+      "semantic-private-root",
+      "semantic-quotas",
+      "semantic-byte-quotas",
+      "semantic-concurrency",
+      "semantic-lock-release",
+      "semantic-parallel-sessions",
+      "semantic-parallel-instances",
+      "semantic-session-domains",
+      "semantic-session-continuity",
+      "semantic-parallel-tasks",
+      "semantic-context-revisions",
+      "semantic-unsupported-first",
+      "semantic-rejected-first",
+      "semantic-malformed-session",
+      "semantic-session-schema",
+      "semantic-interruption",
+      "semantic-directory-binding",
+      "semantic-preparation-budget",
+      "semantic-model-budget"
+    ],
     "sec-core": [
       "security-block",
       "security-error",
