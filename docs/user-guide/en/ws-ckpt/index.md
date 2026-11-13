@@ -115,7 +115,8 @@ New checkpoint IDs must not contain control characters (such as newline or tab).
 Existing snapshots with those IDs remain available for deletion, rollback and diff.
 `list` table output escapes control characters and backslashes in snapshot IDs,
 workspace paths and messages; JSON retains the original field values using JSON
-escaping.
+escaping. The `status` table and command receipts also escape control characters
+and backslashes in displayed workspace paths and IDs.
 
 ### Listing large snapshot histories
 
