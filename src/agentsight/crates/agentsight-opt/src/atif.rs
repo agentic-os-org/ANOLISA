@@ -20,7 +20,8 @@
 //!   result bounds model inference; otherwise that interval belongs to the
 //!   estimated tool window, avoiding double-booking the same gap.
 //! - A tool's recorded `extra.result_timestamp` bounds its execution window
-//!   from the issuing step's end. Without a valid result time, use the next
+//!   from its recorded `extra.start_timestamp`, falling back to the issuing
+//!   step's end. Without a valid result time, use the next
 //!   agent step's `start` (or end), only when no user step intervenes.
 //!   Parallel windows contribute their union to total tool wall time.
 
@@ -250,20 +251,34 @@ impl AtifTrajectory {
         self.steps
             .iter()
             .flat_map(|s| {
-                [s.start_ts(), s.end_ts()]
-                    .into_iter()
-                    .flatten()
-                    .chain(s.calls().iter().filter_map(|call| s.tool_result_ts(call)))
+                [s.start_ts(), s.end_ts()].into_iter().flatten().chain(
+                    s.calls()
+                        .iter()
+                        .flat_map(|call| [s.tool_start_ts(call), s.tool_result_ts(call)])
+                        .flatten(),
+                )
             })
             .max()
     }
 }
 
 impl AtifStep {
+    /// A grouped rollout step can dispatch its tools at different times.
+    pub(crate) fn tool_start_ts(&self, call: &AtifToolCall) -> Option<DateTime<Utc>> {
+        let step_end = self.end_ts()?;
+        call.extra
+            .as_ref()
+            .and_then(|extra| extra.get("start_timestamp"))
+            .and_then(|value| value.as_str())
+            .and_then(parse_ts)
+            .filter(|start| *start >= step_end)
+            .or(Some(step_end))
+    }
+
     /// A recorded result cannot finish before its issuing agent step.
     pub(crate) fn tool_result_ts(&self, call: &AtifToolCall) -> Option<DateTime<Utc>> {
         let timestamp = parse_ts(call.extra.as_ref()?.get("result_timestamp")?.as_str()?)?;
-        (self.is_agent() && timestamp >= self.end_ts()?).then_some(timestamp)
+        (self.is_agent() && timestamp >= self.tool_start_ts(call)?).then_some(timestamp)
     }
 
     pub fn is_agent(&self) -> bool {
