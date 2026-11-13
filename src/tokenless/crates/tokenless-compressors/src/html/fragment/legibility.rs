@@ -87,8 +87,17 @@ fn walk(nodes: &[Node], html: usize) -> Option<()> {
                     return None;
                 }
             }
-            // Head content and style text are never drawn.
-            NodeKind::Element { .. } if node.is_element("head") || node.is_element("style") => {}
+            // Head content, scripts, templates, styles and SVG metadata are
+            // never painted as text even when an enclosing symbol or group is
+            // instantiated via `<use>`.
+            NodeKind::Element { .. }
+                if matches!(
+                    node.local_name(),
+                    "head" | "style" | "script" | "noscript" | "template"
+                ) || matches!(
+                    node.name_in(super::serialize::SVG_NS),
+                    "title" | "desc" | "metadata" | "style" | "script"
+                ) => {}
             NodeKind::Element { .. } => {
                 let style = Rc::new(cascade.style(node, &inherited)?);
                 if node.is_element("html") {
@@ -277,7 +286,7 @@ impl Loose {
     fn of(nodes: &[Node]) -> Option<Self> {
         let mut loose = Self::default();
         for (id, node) in nodes.iter().enumerate() {
-            if node.is_element("style") {
+            if node.is_element("style") || node.name_in("http://www.w3.org/2000/svg") == "style" {
                 for declaration in css::sheet_declarations(&text_of(nodes, id))? {
                     loose.add(&declaration)?;
                 }
@@ -424,6 +433,12 @@ impl Cascade {
             "button" => {
                 colors = vec![Color::BLACK];
                 layer = painted(BUTTON_FACE);
+                font = Range::exact(BUTTON_FONT_PX);
+                leading = Leading::Normal;
+            }
+            "input" | "select" | "textarea" => {
+                colors = vec![Color::BLACK];
+                layer = painted(Color::WHITE);
                 font = Range::exact(BUTTON_FONT_PX);
                 leading = Leading::Normal;
             }

@@ -1,40 +1,32 @@
-//! Markdown views of HTML fragments embedded in structured data.
+//! Hybrid Markdown + HTML views of HTML fragments embedded in structured data.
 //!
 //! A page view chooses a main-content root and removes navigation, banners
 //! and controls around it. A fragment is already the content a field carries,
-//! so its view removes nothing visible: it is rendered whole, and it is
-//! rejected unless every element belongs to a vocabulary the renderer
-//! represents without loss, its styles only change how text looks, list
-//! numbering is reproduced, no structure was flattened, and every text node
-//! and link or image target reappears in source order. Rejection keeps the
-//! original string; that is the expected outcome for forms, scripts, media,
-//! foreign markup and anything else whose meaning a Markdown view could
-//! silently change.
+//! so its view removes nothing visible: global hazards (hidden or illegible
+//! text, executable scripts, external stylesheets, overflowing layout) still
+//! reject the whole fragment, while local HTML semantics (`<svg>`, JSON data
+//! `<script>` payloads, `data-*`/`aria-*` attributes, form controls, struck
+//! prices, superscripts, non-GFM tables and non-1-step lists) stay intact in
+//! place as compact HTML around Markdown-compressed rich-text subtrees.
 
 mod color;
 mod css;
 mod legibility;
+mod plan;
+mod serialize;
 
 use std::fmt::Write as _;
 
+pub(super) use plan::{FragmentPlan, PlanKind};
+
 use super::{
-    HtmlExtractor, Node, NodeKind, REMOVED_LABELS, Removed, Renderer, collapse, destination,
-    find_element, is_sectioning, link_tail, parse, table_children, text_of, tooltip,
+    HtmlExtractor, Node, NodeKind, REMOVED_CATEGORIES, REMOVED_LABELS, Removed, Renderer,
+    brackets_balanced, collapse, destination, find_element, is_sectioning, link_tail, parse,
+    table_children, text_of, tooltip,
 };
 
-/// Elements a fragment may contain. The parser adds `html`, `head` and
-/// `body` around any fragment. A `meta` may only declare how to decode or
-/// lay out the document, and the head's `title` is rendered as a `Title:`
-/// line. Everything else renders either as explicit Markdown structure or
-/// as a container that only styles its text. Left out on purpose because
-/// the view would change what a reader sees or lose a fact: form fields and
-/// their state, scripts, templates, media, frames, `link` (resources and
-/// URLs the view drops), `del`/`ins`/`s` (struck prices), `sub`/`sup`
-/// (exponents), `q` (generated quotes), `time`/`data` (machine values
-/// behind display text), `bdo` (reordered text), `base` (rewrites every
-/// link), and any element outside the HTML namespace. The same facts can be
-/// carried by styles and attributes, which [`within_vocabulary`] checks on
-/// every element.
+/// Elements the shared Markdown renderer represents directly when their
+/// attributes and styles carry no HTML-only semantics.
 const VOCABULARY: [&str; 61] = [
     "html",
     "head",
@@ -100,14 +92,14 @@ const VOCABULARY: [&str; 61] = [
 ];
 
 /// Removal categories a fragment view may apply. Neither carries visible
-/// text; every other category is outside the vocabulary.
+/// text; every other category is either rejected globally or preserved.
 const REMOVABLE: [Removed; 2] = [Removed::Style, Removed::Comment];
 
 /// First line of every fragment view. Rendered lines that start the same way
 /// are escaped, so the header can only come from the view itself.
 const HEADER: &str = "[HTML rendered as Markdown";
 
-/// A Markdown view of one HTML fragment, without its recovery instruction.
+/// A hybrid Markdown view of one HTML fragment, without its recovery instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HtmlFragmentView {
     /// `Title:` line when the fragment has a title, then the rendered body.
@@ -131,9 +123,10 @@ impl HtmlFragmentView {
 
 impl HtmlExtractor {
     /// Whether a string value is worth parsing as a fragment: it is wrapped
-    /// in markup and its first tag is a document opener or a vocabulary
-    /// element. Text such as `a < b` or `<T>` and XML records fail here,
-    /// before any parsing; [`Self::render_fragment`] is the authority.
+    /// in markup and its first tag is a document opener or a supported HTML5
+    /// or SVG element. Text such as `a < b` or `<T>` and arbitrary XML
+    /// records fail here, before any parsing; [`Self::render_fragment`] is
+    /// the authority.
     #[must_use]
     pub(crate) fn sniff_fragment(&self, value: &str) -> bool {
         let value = value.trim();
@@ -153,56 +146,57 @@ impl HtmlExtractor {
         matches!(
             head.get(name_len),
             Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r')
-        ) && VOCABULARY.contains(&name.as_str())
+        ) && (VOCABULARY.contains(&name.as_str())
+            || plan::EXTRA_SNIFF_TAGS.contains(&name.as_str()))
     }
 
-    /// Renders an HTML fragment as Markdown without dropping visible text or
-    /// link and image targets. Returns `None` when fidelity cannot be
-    /// established: an element outside the vocabulary, styles or attributes
-    /// that change meaning or visibility, text its styling makes illegible,
-    /// list numbering or table headers the view cannot reproduce, flattened
-    /// structure, a target the view cannot print, nothing visible to
-    /// render, or markup nested past the parse limit. Callers keep the
-    /// original then.
+    /// Renders an HTML fragment as a hybrid Markdown view without dropping
+    /// visible text, link or image targets, or local card payloads (`<svg>`,
+    /// JSON data `<script>` blocks, `data-*`/`aria-*` attributes, form state).
+    /// Returns `None` when global safety fails (hidden/illegible text,
+    /// executable scripts, external resources, custom/XML elements, deep
+    /// nesting) or when no subtree can be compressed to Markdown.
     #[must_use]
     pub(crate) fn render_fragment(&self, input: &str) -> Option<HtmlFragmentView> {
         let nodes = parse(input)?;
-        if !(0..nodes.len()).all(|id| within_vocabulary(&nodes, id)) {
-            return None;
-        }
-        let html = nodes[0]
-            .children
-            .iter()
-            .copied()
-            .find(|&id| nodes[id].is_element("html"))?;
-        if !legibility::text_is_legible(&nodes, html) {
-            return None;
-        }
-        let body = nodes[html]
-            .children
-            .iter()
-            .copied()
-            .find(|&id| nodes[id].is_element("body"))?;
-        let head = nodes[html]
-            .children
-            .iter()
-            .copied()
-            .find(|&id| nodes[id].is_element("head"));
-        let title = head
+        let plan = FragmentPlan::build(&nodes)?;
+        let title = plan
+            .head
             .and_then(|head| find_element(&nodes, head, "title"))
             .map(|id| collapse(&text_of(&nodes, id)))
             .filter(|title| !title.is_empty());
 
-        let mut renderer = Renderer::new(&nodes, true);
-        if let Some(head) = head {
+        let mut renderer = Renderer::fragment(&nodes, &plan);
+        let mut parts = Vec::new();
+        if let Some(head) = plan.head {
             renderer.count_removals(head, false);
+            for &child in &nodes[head].children {
+                if let PlanKind::Verbatim { html, removed, .. } = plan.kind(child) {
+                    for (dst, &count) in renderer.removed.iter_mut().zip(removed) {
+                        *dst += count;
+                    }
+                    if !html.trim().is_empty() {
+                        parts.push(html.clone());
+                    }
+                }
+            }
         }
-        // The fragment is all content: no root is chosen, and its own
-        // `header` or `footer` would be outside the vocabulary anyway.
-        let body_markdown = renderer.blocks(body, is_sectioning(&nodes[body]));
-        if renderer.lossy || body_markdown.trim().is_empty() {
+        let body_rendered = if matches!(plan.kind(plan.body), PlanKind::Shell { .. }) {
+            renderer.block(plan.body, is_sectioning(&nodes[plan.body]))
+        } else {
+            renderer.blocks(plan.body, is_sectioning(&nodes[plan.body]))
+        };
+        if renderer.lossy {
             return None;
         }
+        if !body_rendered.trim().is_empty() {
+            parts.push(escape_header_lines(&body_rendered));
+        }
+        let combined_body = parts.join("\n\n");
+        if combined_body.trim().is_empty() {
+            return None;
+        }
+
         let removed = REMOVED_LABELS
             .iter()
             .zip(renderer.removed)
@@ -221,22 +215,19 @@ impl HtmlExtractor {
         if let Some(title) = &title {
             let _ = writeln!(markdown, "Title: {title}");
         }
-        markdown.push_str(&escape_header_lines(&body_markdown));
-        let masked = masked_targets(&nodes, body, &markdown)?;
-        if !texts_in_order(&nodes, title.as_deref(), body, &masked) {
+        let body_start = markdown.len();
+        markdown.push_str(&combined_body);
+        let masked = masked_targets(&nodes, &plan, body_start, &markdown)?;
+        if !texts_in_order(&nodes, &plan, title.as_deref(), &masked) {
             return None;
         }
         Some(HtmlFragmentView { markdown, removed })
     }
 }
 
-/// Attributes any element may carry: identifiers and classes, text
-/// direction and language, editing and focus hints, ARIA roles, and the
-/// presentational attributes of legacy and email markup, which change only
-/// how text looks. Any other attribute carries something the view cannot
-/// show, such as `data-*` state, an `aria-*` label or state, a tooltip
-/// outside links and images, a `th` `abbr` or a quote's `cite`, and rejects
-/// the fragment unless [`element_attribute`] lists it for its element.
+/// Presentational and global layout attributes that carry no hidden machine
+/// state on converted Markdown elements (subject to value checks in `plan` for
+/// `id`, `class`, `style`, `role` and `face`).
 const ANY_ELEMENT_ATTRIBUTES: &[&str] = &[
     "class",
     "id",
@@ -279,18 +270,17 @@ const ANY_ELEMENT_ATTRIBUTES: &[&str] = &[
     "marginheight",
 ];
 
-/// Elements that flow inline with adjacent text. Every other element of the
-/// vocabulary is laid out apart from its neighbours by default: blocks,
-/// table parts, list items, line breaks and buttons.
+/// Vocabulary elements that flow inline with adjacent text unless CSS gives
+/// them a separate layout box.
 const INLINE: [&str; 17] = [
     "a", "abbr", "b", "cite", "code", "em", "font", "i", "img", "kbd", "mark", "samp", "small",
     "span", "strong", "u", "wbr",
 ];
 
-/// Table parts and images: whatever width or height they are given, they
-/// grow to fit their content.
-const GROWS_TO_FIT: [&str; 10] = [
-    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "col", "colgroup", "img",
+/// Table parts: whatever width or height they are given, they grow to fit
+/// their content.
+const GROWS_TO_FIT: [&str; 9] = [
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "col", "colgroup",
 ];
 
 /// `meta` names that only steer layout or formatting in mail clients.
@@ -299,36 +289,6 @@ const META_HINTS: [&str; 3] = [
     "format-detection",
     "x-apple-disable-message-reformatting",
 ];
-
-/// Whether a node may appear in a fragment, with attributes the view prints
-/// or can drop. Hidden text would become visible, semantic styles and
-/// attribute values would lose their fact, and list numbering the renderer
-/// reads differently from a browser would change step references; each
-/// rejects. So does content a browser does not show until the reader acts:
-/// the body of a closed `details`, whose collapse the view cannot mark.
-fn within_vocabulary(nodes: &[Node], id: usize) -> bool {
-    let node = &nodes[id];
-    let NodeKind::Element { attrs, .. } = &node.kind else {
-        return !matches!(node.kind, NodeKind::Other);
-    };
-    let name = node.local_name();
-    VOCABULARY.contains(&name)
-        && attrs
-            .iter()
-            .all(|attr| attribute_is_kept(nodes, id, name, &attr.name.local, &attr.value))
-        && match name {
-            "style" => css::sheet_is_cosmetic(&text_of(nodes, id)),
-            "details" => shows_all_of_details(nodes, id),
-            // A browser shows only the document's first title, in its tab;
-            // any other title element is hidden.
-            "title" => {
-                node.parent
-                    .is_some_and(|parent| nodes[parent].is_element("head"))
-                    && find_element(nodes, 0, "title") == Some(id)
-            }
-            _ => true,
-        }
-}
 
 /// Whether a `details` element shows a reader all it holds without a click:
 /// it has a `summary`, which labels it where a browser would print its own
@@ -352,45 +312,8 @@ fn shows_all_of_details(nodes: &[Node], id: usize) -> bool {
             }))
 }
 
-/// Whether one attribute of element `id` is printed by the view or changes
-/// nothing a reader could miss in it, with its value checked where that
-/// matters.
-fn attribute_is_kept(nodes: &[Node], id: usize, element: &str, name: &str, value: &str) -> bool {
-    let node = &nodes[id];
-    match (element, name) {
-        (_, "style") => css::inline_is_cosmetic(
-            value,
-            &css::Styled {
-                inline: INLINE.contains(&element) && element != "img",
-                grows: GROWS_TO_FIT.contains(&element),
-                has_text: &|| has_text(nodes, id),
-                keeps_whitespace: &|| keeps_whitespace(nodes, id),
-            },
-        ),
-        (_, "face") => !css::has_symbol_font(value),
-        // Hidden only from assistive technology: text inside may be an icon
-        // ligature or a duplicate, which the view cannot mark as decorative.
-        (_, "aria-hidden") => value.trim().eq_ignore_ascii_case("false") || !has_text(nodes, id),
-        // A tooltip is printed as the Markdown title of a printed target.
-        ("a", "title") => node.attr("href").is_some(),
-        ("img", "title") => node.attr("src").is_some(),
-        ("ol", "start") => plain_start(value),
-        ("ol", "type") => value.trim() == "1",
-        // Any other `meta` holds a fact no reader sees and the view drops,
-        // such as a description, or acts on the page, as a refresh does.
-        ("meta", "name") => META_HINTS.contains(&value.trim().to_ascii_lowercase().as_str()),
-        ("meta", "http-equiv") => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "content-type" | "x-ua-compatible"
-        ),
-        ("meta", "content") => node.attr("name").is_some() || node.attr("http-equiv").is_some(),
-        _ => ANY_ELEMENT_ATTRIBUTES.contains(&name) || element_attribute(element, name),
-    }
-}
-
-/// Attributes of one element that the view prints, or that only steer how
-/// a browser fetches, targets or lays out the element. A `details` `name`
-/// is left out: grouping can close a `details` marked `open`.
+/// Element-specific attributes that only steer browser fetching, targeting or
+/// layout without adding an unprinted fact.
 fn element_attribute(element: &str, name: &str) -> bool {
     matches!(
         (element, name),
@@ -418,9 +341,7 @@ fn element_attribute(element: &str, name: &str) -> bool {
 }
 
 /// Whether an `ol` start is a number a Markdown list can begin with:
-/// ASCII digits within `i32`, optionally padded with ASCII whitespace. A
-/// negative start has no Markdown marker, and a suffixed or overflowing
-/// one is malformed, so either leaves the fragment as it is.
+/// ASCII digits within `i32`, optionally padded with ASCII whitespace.
 fn plain_start(value: &str) -> bool {
     let digits = value.trim_matches(|c: char| c.is_ascii_whitespace());
     !digits.is_empty()
@@ -429,8 +350,7 @@ fn plain_start(value: &str) -> bool {
 }
 
 /// Whether the text under `id` has line breaks, tabs or space runs, which
-/// a style preserving whitespace would show and the view collapses. A `br`
-/// needs no such style: the view breaks the line there in every context.
+/// a style preserving whitespace would show and Markdown collapses.
 fn keeps_whitespace(nodes: &[Node], id: usize) -> bool {
     let mut stack = vec![id];
     while let Some(id) = stack.pop() {
@@ -444,146 +364,449 @@ fn keeps_whitespace(nodes: &[Node], id: usize) -> bool {
     false
 }
 
+/// Whether the subtree under `id` contains any ASCII whitespace byte.
+pub(super) fn subtree_has_ascii_whitespace(nodes: &[Node], id: usize) -> bool {
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if let NodeKind::Text(text) = &nodes[id].kind
+            && text.bytes().any(|b| b.is_ascii_whitespace())
+        {
+            return true;
+        }
+        stack.extend(&nodes[id].children);
+    }
+    false
+}
+
 fn has_text(nodes: &[Node], id: usize) -> bool {
     !text_of(nodes, id).trim().is_empty()
 }
 
-/// Every text node of the title and body reappears in the rendered Markdown
-/// in the order a browser draws it, which is source order except for table
-/// captions, headers and footers, and text a browser shows apart stays
-/// apart: where the source separates two text nodes, by whitespace or by an
-/// element laid out apart from inline text, the view has whitespace between
-/// them too. So no renderer path can fuse `a<br>b` into `ab` and still
-/// pass. Both sides are compared with whitespace collapsed and backslashes
-/// dropped, since the renderer only adds escapes, wrapping and line breaks.
-/// `markdown` has its link and image targets masked, so text cannot match
-/// inside them.
-fn texts_in_order(nodes: &[Node], title: Option<&str>, body: usize, markdown: &str) -> bool {
+/// Whether `node` is an HTML or SVG element whose subtree is never
+/// directly rendered on the canvas (metadata, scripts, stylesheets, or
+/// reusable SVG definitions such as `<defs>` and `<symbol>`).
+fn is_non_directly_rendered_element(node: &Node) -> bool {
+    matches!(
+        node.local_name(),
+        "head" | "style" | "script" | "noscript" | "template"
+    ) || matches!(
+        node.name_in(serialize::SVG_NS),
+        "defs"
+            | "symbol"
+            | "title"
+            | "desc"
+            | "metadata"
+            | "clipPath"
+            | "mask"
+            | "marker"
+            | "pattern"
+            | "linearGradient"
+            | "radialGradient"
+            | "filter"
+            | "style"
+            | "script"
+    )
+}
+
+/// Whether an SVG element's directly rendered subtree instantiates a `<use>`
+/// reference with an `href` (or `xlink:href`) attribute.
+pub(super) fn svg_has_rendered_use(nodes: &[Node], root: usize) -> bool {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let node = &nodes[id];
+        if let NodeKind::Element { name, .. } = &node.kind {
+            if id != root && is_non_directly_rendered_element(node) {
+                continue;
+            }
+            if *name.ns == *serialize::SVG_NS
+                && &*name.local == "use"
+                && node.attr("href").is_some()
+            {
+                return true;
+            }
+            stack.extend_from_slice(&node.children);
+        }
+    }
+    false
+}
+
+/// Whether `root` or any descendant draws visible text, replaced media, or
+/// interactive controls that a narrow or zero-sized container would clip or
+/// overflow.
+fn has_box_content(nodes: &[Node], root: usize) -> bool {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let node = &nodes[id];
+        match &node.kind {
+            NodeKind::Text(text) if !text.trim().is_empty() => return true,
+            NodeKind::Element { name, .. } => {
+                if id != root && is_non_directly_rendered_element(node) {
+                    continue;
+                }
+                if *name.ns == *serialize::SVG_NS {
+                    if (id != root && &*name.local == "svg")
+                        || (&*name.local == "image" && node.attr("href").is_some())
+                    {
+                        return true;
+                    }
+                } else if *name.ns == *serialize::HTML_NS {
+                    let local = &*name.local;
+                    if (local == "img"
+                        && (node.attr("src").is_some()
+                            || node.attr("srcset").is_some()
+                            || node.attr("alt").is_some_and(|alt| !alt.trim().is_empty())))
+                        || matches!(
+                            local,
+                            "audio"
+                                | "button"
+                                | "canvas"
+                                | "hr"
+                                | "input"
+                                | "meter"
+                                | "picture"
+                                | "progress"
+                                | "select"
+                                | "textarea"
+                                | "video"
+                        )
+                    {
+                        return true;
+                    }
+                }
+                stack.extend_from_slice(&node.children);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Verifies that every converted text node and every retained HTML tag or
+/// verbatim subtree reappears in rendered order, and that boxes laid out apart
+/// stay separated by whitespace.
+fn texts_in_order(
+    nodes: &[Node],
+    plan: &FragmentPlan,
+    title: Option<&str>,
+    masked_markdown: &str,
+) -> bool {
     enum Visit {
         Enter(usize),
         ExitApart,
+        ExitLink { cursor_at_enter: usize },
+        ExitShell { has_close: bool, apart_after: bool },
     }
-    let rendered = normalized(markdown);
-    let mut cursor = 0;
-    let mut matched_any = false;
-    let mut expect = |needle: &str, apart: bool| {
-        let Some(at) = rendered[cursor..].find(needle) else {
-            return false;
-        };
-        if apart && matched_any && !rendered[cursor..cursor + at].contains(' ') {
-            return false;
+    struct OrderCheck<'a> {
+        rendered: &'a str,
+        masks: &'a [usize],
+        mask_idx: usize,
+        cursor: usize,
+        matched_any: bool,
+        apart: bool,
+    }
+
+    impl OrderCheck<'_> {
+        fn expect_text(&mut self, needle: &str) -> bool {
+            let end = self
+                .masks
+                .get(self.mask_idx)
+                .copied()
+                .unwrap_or(self.rendered.len());
+            if end < self.cursor {
+                return false;
+            }
+            let Some(at) = self.rendered[self.cursor..end].find(needle) else {
+                return false;
+            };
+            if self.apart
+                && self.matched_any
+                && !self.rendered[self.cursor..self.cursor + at].contains(' ')
+            {
+                return false;
+            }
+            self.cursor += at + needle.len();
+            self.matched_any = true;
+            self.apart = false;
+            true
         }
-        cursor += at + needle.len();
-        matched_any = true;
-        true
+
+        fn advance_mask(&mut self, require_space_before: bool) -> bool {
+            let Some(&pos) = self.masks.get(self.mask_idx) else {
+                return false;
+            };
+            if pos < self.cursor {
+                return false;
+            }
+            let saw_space = self.rendered[self.cursor..pos].contains(' ');
+            if require_space_before && self.matched_any && !saw_space {
+                return false;
+            }
+            if saw_space {
+                self.apart = false;
+            }
+            self.cursor = pos + 1;
+            self.mask_idx += 1;
+            true
+        }
+    }
+
+    let (rendered, masks) = normalized_with_masks(masked_markdown);
+    let mut check = OrderCheck {
+        rendered: &rendered,
+        masks: &masks,
+        mask_idx: 0,
+        cursor: 0,
+        matched_any: false,
+        apart: false,
     };
-    if title.is_some_and(|title| !expect(&normalized(title), false)) {
+    if title.is_some_and(|title| !check.expect_text(&normalized(title))) {
         return false;
     }
-    // The title line ends before the body starts.
-    let mut apart = true;
-    let mut stack = vec![Visit::Enter(body)];
-    while let Some(visit) = stack.pop() {
-        let Visit::Enter(id) = visit else {
-            apart = true;
-            continue;
-        };
-        let node = &nodes[id];
-        match &node.kind {
-            NodeKind::Text(text) => {
-                apart |= text.starts_with(char::is_whitespace);
-                let needle = normalized(text);
-                if !needle.is_empty() {
-                    if !expect(&needle, apart) {
-                        return false;
-                    }
-                    apart = false;
+    check.apart = true;
+    if let Some(head) = plan.head {
+        for &child in &nodes[head].children {
+            if let PlanKind::Verbatim { html, .. } = plan.kind(child)
+                && !html.trim().is_empty()
+            {
+                if !check.advance_mask(true) {
+                    return false;
                 }
-                apart |= text.ends_with(char::is_whitespace);
+                check.matched_any = true;
+                check.apart = true;
             }
-            // Style text is not visible and is removed with its element.
-            NodeKind::Element { .. } if node.is_element("style") => {}
-            NodeKind::Element { .. } if !INLINE.contains(&node.local_name()) => {
-                apart = true;
-                stack.push(Visit::ExitApart);
-                stack.extend(drawn_children(nodes, id).rev().map(Visit::Enter));
-            }
-            _ => stack.extend(drawn_children(nodes, id).rev().map(Visit::Enter)),
         }
     }
-    true
+    let mut stack = vec![Visit::Enter(plan.body)];
+    while let Some(visit) = stack.pop() {
+        match visit {
+            Visit::ExitApart => {
+                check.apart = true;
+            }
+            Visit::ExitLink { cursor_at_enter } => {
+                let empty_link = check.cursor == cursor_at_enter;
+                if !check.advance_mask(empty_link && check.apart) {
+                    return false;
+                }
+                if empty_link {
+                    check.matched_any = true;
+                    check.apart = false;
+                }
+            }
+            Visit::ExitShell {
+                has_close,
+                apart_after,
+            } => {
+                if has_close && !check.advance_mask(false) {
+                    return false;
+                }
+                if apart_after {
+                    check.apart = true;
+                }
+            }
+            Visit::Enter(id) => match plan.kind(id) {
+                PlanKind::Removed(_) => {}
+                PlanKind::Verbatim { html, block, .. } => {
+                    let box_apart = *block || plan.is_apart_inline(id);
+                    if !html.trim().is_empty() {
+                        if !check.advance_mask(check.apart || box_apart) {
+                            return false;
+                        }
+                        check.matched_any = true;
+                        check.apart = box_apart;
+                    }
+                }
+                PlanKind::Shell { close, inline, .. } => {
+                    let box_apart = !*inline || plan.is_apart_inline(id);
+                    if !check.advance_mask(check.apart || box_apart) {
+                        return false;
+                    }
+                    check.matched_any = true;
+                    check.apart = !*inline;
+                    stack.push(Visit::ExitShell {
+                        has_close: close.is_some(),
+                        apart_after: box_apart,
+                    });
+                    stack.extend(drawn_children(nodes, plan, id).rev().map(Visit::Enter));
+                }
+                PlanKind::Markdown => {
+                    let node = &nodes[id];
+                    match &node.kind {
+                        NodeKind::Text(text) => {
+                            check.apart |= text.starts_with(char::is_whitespace);
+                            let needle = normalized(text);
+                            if !needle.is_empty() && !check.expect_text(&needle) {
+                                return false;
+                            }
+                            check.apart |= text.ends_with(char::is_whitespace);
+                        }
+                        NodeKind::Element { .. } if node.is_element("img") => {
+                            if matches!(markdown_img_token(node), Some(Some(_))) {
+                                let box_apart = plan.is_apart_inline(id);
+                                if !check.advance_mask(check.apart || box_apart) {
+                                    return false;
+                                }
+                                check.matched_any = true;
+                                check.apart = box_apart;
+                            }
+                        }
+                        NodeKind::Element { .. } => {
+                            let box_apart =
+                                !INLINE.contains(&node.local_name()) || plan.is_apart_inline(id);
+                            if box_apart {
+                                check.apart = true;
+                                stack.push(Visit::ExitApart);
+                            }
+                            if node.is_element("a") && node.attr("href").is_some() {
+                                stack.push(Visit::ExitLink {
+                                    cursor_at_enter: check.cursor,
+                                });
+                            }
+                            stack.extend(drawn_children(nodes, plan, id).rev().map(Visit::Enter));
+                        }
+                        _ => {
+                            stack.extend(drawn_children(nodes, plan, id).rev().map(Visit::Enter));
+                        }
+                    }
+                }
+            },
+        }
+    }
+    check.mask_idx == check.masks.len()
 }
 
-/// The rendered Markdown with every link and image target masked, or `None`
-/// when one does not reappear, with its tooltip as the Markdown title, in
-/// the order the renderer prints them: tables in drawing order, an image
-/// when it is reached, a link after its text, which may hold images of its
-/// own. Masking keeps text nodes from matching inside a URL, a title or alt
-/// text, none of which is a text node.
-fn masked_targets(nodes: &[Node], body: usize, markdown: &str) -> Option<String> {
+/// Replaces every emitted verbatim HTML subtree, shell tag, and Markdown link
+/// or image target with a single NUL sentinel in render order, or returns
+/// `None` when one does not reappear as expected.
+fn masked_targets(
+    nodes: &[Node],
+    plan: &FragmentPlan,
+    body_start: usize,
+    markdown: &str,
+) -> Option<String> {
     enum Visit {
         Enter(usize),
         Exit(usize),
     }
+    if markdown.contains('\0') {
+        return None;
+    }
     let mut masked = markdown.to_owned();
-    let mut cursor = 0;
+    let mut cursor = body_start;
     let mut expect = |printed: &str| {
+        if printed.is_empty() {
+            return None;
+        }
         let start = cursor + masked[cursor..].find(printed)?;
         let end = start + printed.len();
-        // NUL never occurs in parsed text, so masked bytes match no text.
-        masked.replace_range(start..end, &"\0".repeat(end - start));
-        cursor = end;
+        // One NUL per masked span avoids length collisions while matching no text.
+        masked.replace_range(start..end, "\0");
+        cursor = start + 1;
         Some(())
     };
-    let mut stack = vec![Visit::Enter(body)];
+    if let Some(head) = plan.head {
+        for &child in &nodes[head].children {
+            if let PlanKind::Verbatim { html, .. } = plan.kind(child)
+                && !html.trim().is_empty()
+            {
+                expect(html)?;
+            }
+        }
+    }
+    let mut stack = vec![Visit::Enter(plan.body)];
     while let Some(visit) = stack.pop() {
         match visit {
-            Visit::Enter(id) => {
-                let node = &nodes[id];
-                if node.is_element("img")
-                    && let Some(src) = node.attr("src")
-                {
-                    let alt = node.attr("alt").map(collapse).unwrap_or_default();
-                    let tail = link_tail(&destination(src)?, tooltip(node).as_deref());
-                    expect(&format!("![{alt}]{tail}"))?;
+            Visit::Enter(id) => match plan.kind(id) {
+                PlanKind::Removed(_) => {}
+                PlanKind::Verbatim { html, .. } => {
+                    if !html.trim().is_empty() {
+                        expect(html)?;
+                    }
                 }
-                stack.push(Visit::Exit(id));
-                stack.extend(drawn_children(nodes, id).rev().map(Visit::Enter));
-            }
-            Visit::Exit(id) => {
-                let node = &nodes[id];
-                if node.is_element("a")
-                    && let Some(href) = node.attr("href")
-                {
-                    let tail = link_tail(&destination(href)?, tooltip(node).as_deref());
-                    expect(&format!("]{tail}"))?;
+                PlanKind::Shell { open, .. } => {
+                    expect(open)?;
+                    stack.push(Visit::Exit(id));
+                    stack.extend(drawn_children(nodes, plan, id).rev().map(Visit::Enter));
                 }
-            }
+                PlanKind::Markdown => {
+                    let node = &nodes[id];
+                    if let Some(token) = markdown_img_token(node)? {
+                        expect(&token)?;
+                    }
+                    stack.push(Visit::Exit(id));
+                    stack.extend(drawn_children(nodes, plan, id).rev().map(Visit::Enter));
+                }
+            },
+            Visit::Exit(id) => match plan.kind(id) {
+                PlanKind::Shell {
+                    close: Some(close), ..
+                } => {
+                    expect(close)?;
+                }
+                PlanKind::Markdown => {
+                    let node = &nodes[id];
+                    if node.is_element("a")
+                        && let Some(href) = node.attr("href")
+                    {
+                        let tail = link_tail(&destination(href)?, tooltip(node).as_deref());
+                        expect(&format!("]{tail}"))?;
+                    }
+                }
+                _ => {}
+            },
         }
     }
     Some(masked)
 }
 
-/// Children of a node in the order the renderer prints them, which for a
-/// table is a browser's drawing order rather than source order.
-fn drawn_children(nodes: &[Node], id: usize) -> std::vec::IntoIter<usize> {
-    if nodes[id].is_element("table") {
+fn markdown_img_token(node: &Node) -> Option<Option<String>> {
+    if !node.is_element("img") {
+        return Some(None);
+    }
+    let alt = node.attr("alt").map(collapse).unwrap_or_default();
+    if let Some(src) = node.attr("src") {
+        let tail = link_tail(&destination(src)?, tooltip(node).as_deref());
+        Some(Some(format!("![{alt}]{tail}")))
+    } else if !alt.is_empty() && brackets_balanced(&alt) {
+        Some(Some(format!("![{alt}]")))
+    } else {
+        Some(None)
+    }
+}
+
+/// Children of a node in the order the renderer prints them: browser drawing
+/// order for GFM-converted tables, source order everywhere else.
+fn drawn_children(nodes: &[Node], plan: &FragmentPlan, id: usize) -> std::vec::IntoIter<usize> {
+    if nodes[id].is_element("table") && matches!(plan.kind(id), PlanKind::Markdown) {
         table_children(nodes, id).into_iter()
     } else {
         nodes[id].children.clone().into_iter()
     }
 }
 
-/// Whitespace runs collapsed to one space, backslashes dropped.
-fn normalized(text: &str) -> String {
+/// Whitespace runs collapsed to one space, backslashes dropped, and NUL mask
+/// byte positions recorded in order.
+fn normalized_with_masks(text: &str) -> (String, Vec<usize>) {
     let mut output = String::with_capacity(text.len());
+    let mut masks = Vec::new();
     for word in text.split_whitespace() {
         if !output.is_empty() {
             output.push(' ');
         }
-        output.extend(word.chars().filter(|&c| c != '\\'));
+        for ch in word.chars() {
+            if ch == '\0' {
+                masks.push(output.len());
+                output.push('\0');
+            } else if ch != '\\' {
+                output.push(ch);
+            }
+        }
     }
-    output
+    (output, masks)
+}
+
+/// Whitespace runs collapsed to one space, backslashes dropped.
+fn normalized(text: &str) -> String {
+    normalized_with_masks(text).0
 }
 
 fn escape_header_lines(text: &str) -> String {

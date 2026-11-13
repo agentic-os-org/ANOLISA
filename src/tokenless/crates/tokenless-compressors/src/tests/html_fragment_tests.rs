@@ -50,41 +50,38 @@ fn visible_control_labels_stay_in_the_view() {
 }
 
 #[test]
-fn form_state_and_markup_the_view_cannot_represent_pass_through() {
+fn global_hazards_and_standalone_uncompressible_markup_pass_through() {
     for fragment in [
-        // Form fields carry state in attributes or raw text.
-        "<p>Name</p><input name=\"n\" value=\"Ada\">",
+        // Standalone form controls carry no compressible rich text.
         "<select><option selected>Express</option><option>Standard</option></select>",
         "<textarea>draft reply</textarea>",
         "<form action=\"/pay\"><p>Pay now</p></form>",
         "<label>Agree</label>",
-        // Code, media, frames and foreign markup.
+        "<input name=\"n\" value=\"Ada\">",
+        "<video src=\"a.mp4\"></video>",
+        "<svg><text>label</text></svg>",
+        // Executable scripts, external frames, MathML, templates and non-HTML XML.
         "<p>Run</p><script>approve()</script>",
-        "<p>Video</p><video src=\"a.mp4\"></video>",
+        "<p>Data</p><script type=\"application/json\" src=\"https://example.com/a.json\"></script>",
+        "<p>Data</p><script type=\"application/json\">{\"close\":\"</script>\"}</script>",
         "<iframe src=\"https://example.com\"></iframe>",
-        "<p>Icon <svg><text>label</text></svg></p>",
         "<math><mi>x</mi></math>",
         "<template><p>later</p></template>",
         "<custom-card>Body</custom-card>",
         "<item><id>5</id><name>x</name></item>",
-        // Page chrome a page view would remove.
-        "<nav><a href=\"/\">Home</a></nav>",
-        "<div role=\"navigation\"><a href=\"/\">Home</a></div>",
-        // Meaning carried by presentation or attributes.
-        "<p>Price <del>$100</del> $80</p>",
-        "<p>x<sup>2</sup></p>",
-        "<p>Due <time datetime=\"2024-06-01\">tomorrow</time></p>",
+        "<base href=\"https://example.com/\"><a href=\"x\">X</a>",
+        // Standalone elements whose local semantics leave nothing to compress.
+        "<del>$100</del>",
+        "<sup>2</sup>",
+        "<time datetime=\"2024-06-01\">tomorrow</time>",
         "<ol reversed><li>a</li><li>b</li></ol>",
         "<ol type=\"a\"><li>a</li></ol>",
         "<ol><li value=\"7\">a</li></ol>",
-        "<base href=\"https://example.com/\"><a href=\"x\">X</a>",
-        // Targets the view cannot print.
-        "<p><a href=\"javascript:approve()\">Approve</a></p>",
-        "<p><img src=\"data:image/png;base64,AAAA\" alt=\"chart\"></p>",
-        "<p><a href=\"https://example.com\">[draft</a></p>",
+        "<a href=\"javascript:approve()\">Approve</a>",
+        "<img src=\"data:image/png;base64,AAAA\" alt=\"chart\">",
+        "<a href=\"https://example.com\">[draft</a>",
         "<pre>see <a href=\"https://example.com\">docs</a></pre>",
-        // Structure the view would flatten.
-        "<table><tr><td><table><tr><td>nested</td></tr></table></td></tr></table>",
+        // Standalone tables without rich cell content that GFM would flatten.
         "<table><tr><td>line one<br>line two</td></tr></table>",
         // Nothing visible.
         "<div><!-- only a comment --></div>",
@@ -92,6 +89,51 @@ fn form_state_and_markup_the_view_cannot_represent_pass_through() {
     ] {
         assert_eq!(HtmlExtractor.render_fragment(fragment), None, "{fragment}");
     }
+}
+
+#[test]
+fn local_unsupported_elements_stay_intact_inside_hybrid_views() {
+    assert_eq!(
+        markdown("<p>Name</p><input name=\"n\" value=\"Ada\">"),
+        "Name\n\n<input name=\"n\" value=\"Ada\">"
+    );
+    assert_eq!(
+        markdown("<p>Video</p><video src=\"a.mp4\"></video>"),
+        "Video\n\n<video src=\"a.mp4\"></video>"
+    );
+    assert_eq!(
+        markdown("<p>Icon <svg><text>label</text></svg></p>"),
+        "Icon <svg><text>label</text></svg>"
+    );
+    assert_eq!(
+        markdown("<nav><a href=\"/\">Home</a></nav>"),
+        "<nav>\n\n[Home](/)\n\n</nav>"
+    );
+    assert_eq!(
+        markdown("<div role=\"navigation\"><a href=\"/\">Home</a></div>"),
+        "<div role=\"navigation\">\n\n[Home](/)\n\n</div>"
+    );
+    assert_eq!(
+        markdown("<p>Price <del>$100</del> $80</p>"),
+        "Price <del>$100</del> $80"
+    );
+    assert_eq!(markdown("<p>x<sup>2</sup></p>"), "x<sup>2</sup>");
+    assert_eq!(
+        markdown("<p>Due <time datetime=\"2024-06-01\">tomorrow</time></p>"),
+        "Due <time datetime=\"2024-06-01\">tomorrow</time>"
+    );
+    assert_eq!(
+        markdown("<p><a href=\"javascript:approve()\">Approve</a></p>"),
+        "<a href=\"javascript:approve()\">Approve</a>"
+    );
+    assert_eq!(
+        markdown("<p><img src=\"data:image/png;base64,AAAA\" alt=\"chart\"></p>"),
+        "<img src=\"data:image/png;base64,AAAA\" alt=\"chart\">"
+    );
+    assert_eq!(
+        markdown("<p><a href=\"https://example.com\">[draft</a></p>"),
+        "<a href=\"https://example.com\">[draft</a>"
+    );
 }
 
 #[test]
@@ -162,6 +204,10 @@ fn sniff_requires_markup_opening_with_a_vocabulary_tag() {
         "<!doctype html><p>x</p>",
         "<br/>",
         "<table>\n<tr><td>1</td></tr></table>",
+        "<svg viewBox=\"0 0 24 24\"><use xlink:href=\"#pin\"></use></svg>",
+        "<script type=\"application/json\">{\"id\":1}</script>",
+        "<nav><a href=\"/\">Home</a></nav>",
+        "<header><h1>Card</h1></header>",
     ] {
         assert!(HtmlExtractor.sniff_fragment(value), "{value}");
     }
@@ -182,15 +228,9 @@ fn sniff_requires_markup_opening_with_a_vocabulary_tag() {
 }
 
 #[test]
-fn styles_that_change_meaning_or_visibility_pass_through() {
+fn styles_that_hide_or_cannot_be_verified_globally_pass_through() {
     for fragment in [
-        // The text nodes survive, but the exponent or the struck price does not.
-        "<p>Area: 2<span style=\"vertical-align:super\">3</span> square meters</p>",
-        "<p>Price: <span style=\"text-decoration:line-through\">$100</span> $80</p>",
-        "<p>Price: <span style=\"TEXT-DECORATION-LINE: Line-Through ! important\">$100</span> $80</p>",
-        "<p>Price: <span style=\"text-decoration:/* sale */line-through\">$100</span> $80</p>",
-        "<p>Price: <span style=\"font-family:'/*';text-decoration:line-through;font-family:'*/'\">\
-         $100</span> $80</p>",
+        // Sheet rules apply globally and cannot be preserved locally once stripped.
         "<style>.old{text-decoration:line-through}</style>\
          <p>Price: <span class=\"old\">$100</span> $80</p>",
         "<style>@media screen{.old{text-decoration:line-through}}</style>\
@@ -208,7 +248,8 @@ fn styles_that_change_meaning_or_visibility_pass_through() {
         "<p>Visible <span style=\"color:#0000\">Internal note</span></p>",
         "<p>Visible <span style=\"margin-left:-9999px\">Internal note</span></p>",
         "<p style=\"mso-hide:all\">Outlook only</p>",
-        // Generated text, list markers and line breaks the view cannot print.
+        "<div style=\"display:flex\"><span style=\"order:2\">First</span><span>Second</span></div>",
+        // Generated text, standalone list markers and standalone pre-formatted blocks.
         "<style>p::before{content:\"Draft: \"}</style><p>Approved</p>",
         "<ol style=\"list-style-type:upper-roman\"><li>Scope</li><li>Terms</li></ol>",
         "<p style=\"white-space:pre-wrap\">Line one\nLine two</p>",
@@ -227,6 +268,35 @@ fn styles_that_change_meaning_or_visibility_pass_through() {
     ] {
         assert_eq!(HtmlExtractor.render_fragment(fragment), None, "{fragment}");
     }
+}
+
+#[test]
+fn inline_styles_that_carry_local_meaning_stay_on_their_elements() {
+    assert_eq!(
+        markdown("<p>Area: 2<span style=\"vertical-align:super\">3</span> square meters</p>"),
+        "Area: 2<span style=\"vertical-align:super\">3</span> square meters"
+    );
+    assert_eq!(
+        markdown("<p>Price: <span style=\"text-decoration:line-through\">$100</span> $80</p>"),
+        "Price: <span style=\"text-decoration:line-through\">$100</span> $80"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Price: <span style=\"TEXT-DECORATION-LINE: Line-Through ! important\">$100</span> $80</p>"
+        ),
+        "Price: <span style=\"TEXT-DECORATION-LINE: Line-Through ! important\">$100</span> $80"
+    );
+    assert_eq!(
+        markdown("<p>Price: <span style=\"text-decoration:/* sale */line-through\">$100</span> $80</p>"),
+        "Price: <span style=\"text-decoration:/* sale */line-through\">$100</span> $80"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Price: <span style=\"font-family:'/*';text-decoration:line-through;font-family:'*/'\">\
+             $100</span> $80</p>"
+        ),
+        "Price: <span style=\"font-family:'/*';text-decoration:line-through;font-family:'*/'\">$100</span> $80"
+    );
 }
 
 #[test]
@@ -585,28 +655,72 @@ fn text_a_browser_shows_apart_stays_apart() {
 }
 
 #[test]
-fn attributes_the_view_cannot_show_pass_through() {
+fn standalone_semantic_attributes_without_compressible_content_pass_through() {
     for fragment in [
-        // State or machine values behind the display text.
         "<ul data-type=\"taskList\"><li data-checked=\"true\">Ship it</li></ul>",
         "<ol><li data-list=\"bullet\">One</li><li data-list=\"bullet\">Two</li></ol>",
-        "<p><span data-type=\"mention\" data-id=\"u-42\">@alice</span> approved</p>",
-        "<p><span title=\"2024-01-02T03:04:05Z\">Jan 2</span></p>",
-        "<p><abbr title=\"International Organization for Standardization\">ISO</abbr></p>",
         "<table><tr><th abbr=\"N\">Northbound lane closed</th></tr><tr><td>x</td></tr></table>",
-        "<blockquote cite=\"https://example.com/source\"><p>Quoted</p></blockquote>",
-        "<p><a href=\"https://example.com/i.pdf\" download=\"invoice-2024.pdf\">Invoice</a></p>",
-        "<p><button name=\"decision\" value=\"approve\">Approve</button></p>",
-        "<p><button disabled>Approve</button></p>",
-        "<p><a title=\"Not printed without a target\">Anchor</a></p>",
-        // Accessible names and states a reader of the view would miss.
-        "<p><a href=\"https://example.com/i.pdf\" aria-label=\"Download invoice PDF\">v</a></p>",
-        "<p><span role=\"checkbox\" aria-checked=\"true\">Terms accepted</span></p>",
-        // Text hidden from assistive technology may be an icon ligature.
-        "<p><span class=\"material-icons\" aria-hidden=\"true\">delete</span> Remove</p>",
+        "<span data-type=\"mention\" data-id=\"u-42\">@alice</span>",
+        "<span title=\"2024-01-02T03:04:05Z\">Jan 2</span>",
+        "<abbr title=\"International Organization for Standardization\">ISO</abbr>",
+        "<a href=\"https://example.com/i.pdf\" download=\"invoice-2024.pdf\">Invoice</a>",
+        "<button name=\"decision\" value=\"approve\">Approve</button>",
+        "<button disabled>Approve</button>",
+        "<a title=\"Not printed without a target\">Anchor</a>",
+        "<a href=\"https://example.com/i.pdf\" aria-label=\"Download invoice PDF\">v</a>",
+        "<span role=\"checkbox\" aria-checked=\"true\">Terms accepted</span>",
+        "<span class=\"material-icons\" aria-hidden=\"true\">delete</span>",
     ] {
         assert_eq!(HtmlExtractor.render_fragment(fragment), None, "{fragment}");
     }
+}
+
+#[test]
+fn attributes_with_machine_or_accessible_meaning_stay_on_their_elements() {
+    assert_eq!(
+        markdown("<p><span data-type=\"mention\" data-id=\"u-42\">@alice</span> approved</p>"),
+        "<span data-type=\"mention\" data-id=\"u-42\">@alice</span> approved"
+    );
+    assert_eq!(
+        markdown("<p><span title=\"2024-01-02T03:04:05Z\">Jan 2</span></p>"),
+        "<span title=\"2024-01-02T03:04:05Z\">Jan 2</span>"
+    );
+    assert_eq!(
+        markdown("<p><abbr title=\"International Organization for Standardization\">ISO</abbr></p>"),
+        "<abbr title=\"International Organization for Standardization\">ISO</abbr>"
+    );
+    assert_eq!(
+        markdown("<blockquote cite=\"https://example.com/source\"><p>Quoted</p></blockquote>"),
+        "<blockquote cite=\"https://example.com/source\">\n\nQuoted\n\n</blockquote>"
+    );
+    assert_eq!(
+        markdown("<p><a href=\"https://example.com/i.pdf\" download=\"invoice-2024.pdf\">Invoice</a></p>"),
+        "<a href=\"https://example.com/i.pdf\" download=\"invoice-2024.pdf\">Invoice</a>"
+    );
+    assert_eq!(
+        markdown("<p><button name=\"decision\" value=\"approve\">Approve</button></p>"),
+        "<button name=\"decision\" value=\"approve\">Approve</button>"
+    );
+    assert_eq!(
+        markdown("<p><button disabled>Approve</button></p>"),
+        "<button disabled>Approve</button>"
+    );
+    assert_eq!(
+        markdown("<p><a title=\"Not printed without a target\">Anchor</a></p>"),
+        "<a title=\"Not printed without a target\">Anchor</a>"
+    );
+    assert_eq!(
+        markdown("<p><a href=\"https://example.com/i.pdf\" aria-label=\"Download invoice PDF\">v</a></p>"),
+        "<a href=\"https://example.com/i.pdf\" aria-label=\"Download invoice PDF\">v</a>"
+    );
+    assert_eq!(
+        markdown("<p><span role=\"checkbox\" aria-checked=\"true\">Terms accepted</span></p>"),
+        "<span role=\"checkbox\" aria-checked=\"true\">Terms accepted</span>"
+    );
+    assert_eq!(
+        markdown("<p><span class=\"material-icons\" aria-hidden=\"true\">delete</span> Remove</p>"),
+        "<span class=\"material-icons\" aria-hidden=\"true\">delete</span> Remove"
+    );
 }
 
 #[test]
@@ -623,5 +737,483 @@ fn presentational_attributes_are_dropped_and_tooltips_become_titles() {
         ),
         "Order shipped [Track](https://example.com/track \"Say \\\"hi\\\" \\\\ now\") \
          ![Logo](https://example.com/logo.png \"Example Inc.\")"
+    );
+}
+
+#[test]
+fn svg_icons_and_json_action_scripts_stay_intact_inside_hybrid_views() {
+    assert_eq!(
+        markdown(
+            "<script type=\"application/json\" data-action-payload=\"true\">\
+             {\"venueId\":\"v1\",\"expr\":\"a < b & c\"}\
+             </script>\
+             <div class=\"venue-card\" style=\"padding:16px;border:1px solid #eee\">\
+             <h2>Sushi Zen</h2>\
+             <p><svg class=\"icon\" style=\"width:16px;height:16px\" viewBox=\"0 0 24 24\">\
+             \n  <use xlink:href=\"#location-icon\"></use>\n</svg> Jing'an District</p>\
+             <script type=\"application/ld+json\">{\"@type\":\"Restaurant\",\"name\":\"Sushi Zen\"}</script>\
+             </div>"
+        ),
+        "<script type=\"application/json\" data-action-payload=\"true\">\
+         {\"venueId\":\"v1\",\"expr\":\"a < b & c\"}\
+         </script>\n\n\
+         ## Sushi Zen\n\n\
+         <svg viewBox=\"0 0 24 24\"><use xlink:href=\"#location-icon\"></use></svg> Jing'an District\n\n\
+         <script type=\"application/ld+json\">{\"@type\":\"Restaurant\",\"name\":\"Sushi Zen\"}</script>"
+    );
+}
+
+#[test]
+fn semantic_shells_keep_data_attributes_and_compress_inner_rich_text() {
+    assert_eq!(
+        markdown(
+            "<div class=\"card\" style=\"padding:16px;border-radius:12px;display:flex;flex-direction:column;gap:8px\" \
+             data-xiaomi-card-click-actions='{\"type\":\"open\",\"venueId\":\"v1\"}'>\
+             <h2 style=\"margin:0;font-size:18px\">Sushi Zen</h2>\
+             <p style=\"margin:0;color:#333\">Rating <strong>4.8</strong> · \
+             <a href=\"https://maps.example.com/v1\" target=\"_blank\" rel=\"noopener\">Directions</a></p>\
+             <button type=\"button\" class=\"btn\" style=\"cursor:pointer\" data-action-type=\"open_map\">Open map</button>\
+             </div>"
+        ),
+        "<div data-xiaomi-card-click-actions='{\"type\":\"open\",\"venueId\":\"v1\"}'>\n\n\
+         ## Sushi Zen\n\n\
+         Rating **4.8** · [Directions](https://maps.example.com/v1)\n\n\
+         <button type=\"button\" data-action-type=\"open_map\">Open map</button>\n\n\
+         </div>"
+    );
+    // Multi-header tables and reversed lists keep coherent HTML shells when
+    // their cells or items carry compressible rich text.
+    assert_eq!(
+        markdown(
+            "<table><tr><th>Group</th></tr><tr><th>Name</th></tr>\
+             <tr><td><strong>Sushi Zen</strong> <a href=\"https://example.com/v1\">Menu</a></td></tr></table>"
+        ),
+        "<table>\n<tbody>\n<tr><th>Group</th></tr>\n<tr><th>Name</th></tr>\n<tr>\n<td>\n\n\
+         **Sushi Zen** [Menu](https://example.com/v1)\n\n\
+         </td>\n</tr>\n</tbody>\n</table>"
+    );
+    assert_eq!(
+        markdown(
+            "<ol reversed><li><strong>First</strong> choice</li><li>Second choice</li></ol>"
+        ),
+        "<ol reversed>\n<li>\n\n**First** choice\n\n</li>\n<li>Second choice</li>\n</ol>"
+    );
+    assert_eq!(
+        markdown("<table><tr><td><table><tr><td>nested</td></tr></table></td></tr></table>"),
+        "<table>\n<tbody>\n<tr>\n<td>\n\n|  |\n| --- |\n| nested |\n\n</td>\n</tr>\n</tbody>\n</table>"
+    );
+}
+
+#[test]
+fn flex_and_inline_block_siblings_and_referenced_ids_behave_safely() {
+    assert_eq!(
+        markdown(
+            "<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px\">\
+             <span>Sushi Zen</span><span>¥198/人</span></div>"
+        ),
+        "Sushi Zen ¥198/人"
+    );
+    assert_eq!(
+        markdown(
+            "<p><span style=\"display:inline-block;padding:2px 6px\">4.8★</span>\
+             <span style=\"display:inline-block;padding:2px 6px\">Japanese</span></p>"
+        ),
+        "4.8★ Japanese"
+    );
+    assert_eq!(
+        markdown(
+            "<p><a href=\"#sec-2\">Jump to details</a></p>\
+             <h2 id=\"sec-2\">Details</h2>\
+             <h3 id=\"unused-anchor\">Notes</h3>"
+        ),
+        "[Jump to details](#sec-2)\n\n<h2 id=\"sec-2\">Details</h2>\n\n### Notes"
+    );
+}
+
+#[test]
+fn atomic_inline_and_flex_item_zero_size_clipping_pass_through() {
+    for fragment in [
+        "<p>Visible</p><span style=\"display:inline-block;width:0;height:0;overflow:hidden\">X</span>",
+        "<p>Visible</p><span style=\"display:inline-flex;width:0;height:0;overflow:hidden\">X</span>",
+        "<p>Visible</p><span style=\"width:0;height:0;overflow:hidden;display:inline-block\">X</span>",
+        "<div style=\"display:flex\"><p>Visible</p><span style=\"width:0;height:0;overflow:hidden\">X</span></div>",
+        "<p>Visible</p><div style=\"display:inline;padding:100px\">X</div>",
+        "<p>Visible</p><svg style=\"width:0;height:0\"><text>X</text></svg>",
+    ] {
+        assert!(
+            HtmlExtractor.render_fragment(fragment).is_none(),
+            "rendered: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn verbatim_list_and_dl_items_preserve_nested_controls_svg_and_data_attrs() {
+    assert_eq!(
+        markdown(
+            "<p>Invoice summary</p>\
+             <ul class=\"checklist\"><li style=\"list-style-type:none\">\
+             <p><input type=\"checkbox\" checked> Paid</p></li></ul>"
+        ),
+        "Invoice summary\n\n<ul>\n<li style=\"list-style-type:none\">\
+         <p><input type=\"checkbox\" checked> Paid</p></li>\n</ul>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Invoice summary</p>\
+             <ul><li style=\"list-style-type:none\">\
+             <svg viewBox=\"0 0 16 16\"><path d=\"M0 0h16v16H0z\"></path></svg> Paid</li></ul>"
+        ),
+        "Invoice summary\n\n<ul><li style=\"list-style-type:none\">\
+         <svg viewBox=\"0 0 16 16\"><path d=\"M0 0h16v16H0z\"></path></svg> Paid</li></ul>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Invoice summary</p>\
+             <ul><li style=\"list-style-type:none\">\
+             <button type=\"button\" data-id=\"1\">Pay</button></li></ul>"
+        ),
+        "Invoice summary\n\n<ul><li style=\"list-style-type:none\">\
+         <button type=\"button\" data-id=\"1\">Pay</button></li></ul>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Invoice summary</p>\
+             <dl class=\"meta\"><dt style=\"text-decoration:line-through\">Legacy</dt>\
+             <dd style=\"white-space:pre\"><input type=\"checkbox\" checked> Paid  now</dd></dl>"
+        ),
+        "Invoice summary\n\n<dl>\n<dt style=\"text-decoration:line-through\">Legacy</dt>\n\
+         <dd style=\"white-space:pre\"><input type=\"checkbox\" checked> Paid  now</dd>\n</dl>"
+    );
+}
+
+#[test]
+fn atomic_elements_and_json_scripts_preserve_semantic_attributes() {
+    assert_eq!(
+        markdown("<p>Code: <bdo dir=\"rtl\">123ABC</bdo></p>"),
+        "Code: <bdo dir=\"rtl\">123ABC</bdo>"
+    );
+    assert_eq!(
+        markdown("<p>User: <bdi dir=\"rtl\">user_1</bdi></p>"),
+        "User: <bdi dir=\"rtl\">user_1</bdi>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Pick tier</p>\
+             <select name=\"tier\" size=\"4\"><option selected>Express</option></select>"
+        ),
+        "Pick tier\n\n<select name=\"tier\" size=\"4\"><option selected>Express</option></select>"
+    );
+    assert_eq!(
+        markdown(
+            "<script type=\"application/json\" id=\"d1\" class=\"c1\">{\"ok\":true}</script>\
+             <p>Summary</p>"
+        ),
+        "<script type=\"application/json\">{\"ok\":true}</script>\n\nSummary"
+    );
+    assert_eq!(
+        markdown(
+            "<script type=\"application/json\" id=\"card-state\">{\"ok\":true}</script>\
+             <p><a href=\"#card-state\">Summary</a></p>"
+        ),
+        "<script type=\"application/json\" id=\"card-state\">{\"ok\":true}</script>\n\n\
+         [Summary](#card-state)"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p>x<sub align=\"center\" bgcolor=\"#fff\" width=\"10\" \
+             tabindex=\"0\" translate=\"no\">xy</sub></p>"
+        ),
+        "Summary\n\nx<sub>xy</sub>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><form action=\"/pay\"><table cellpadding=\"2\" cellspacing=\"0\" \
+             border=\"1\" align=\"center\" bgcolor=\"#fff\"><tr><td>1</td></tr></table></form>"
+        ),
+        "Summary\n\n<form action=\"/pay\"><table><tbody><tr><td>1</td></tr></tbody></table></form>"
+    );
+    assert_eq!(
+        markdown("<p>Summary</p><p><bdo role=\"presentation\" dir=\"ltr\">xy</bdo></p>"),
+        "Summary\n\n<bdo dir=\"ltr\">xy</bdo>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><bdo dir=\"ltr\"><pre><code class=\"language-rust\">fn main() {}</code></pre></bdo>"
+        ),
+        "Summary\n\n<bdo dir=\"ltr\"><pre><code class=\"language-rust\">fn main() {}</code></pre></bdo>"
+    );
+    assert!(HtmlExtractor.render_fragment("<p dir=\"rtl\">123ABC def</p>").is_none());
+    assert_eq!(
+        markdown("<p>Summary</p><p dir=\"rtl\">123ABC def</p>"),
+        "Summary\n\n<p dir=\"rtl\">123ABC def</p>"
+    );
+    assert_eq!(
+        markdown("<p dir=\"rtl\"><strong>123ABC</strong> def</p>"),
+        "<p dir=\"rtl\">\n\n**123ABC** def\n\n</p>"
+    );
+    assert_eq!(
+        markdown("<p>Summary</p><form dir=\"rtl\"><p dir=\"ltr\">ABC 123 - المجموع</p></form>"),
+        "Summary\n\n<form dir=\"rtl\"><p dir=\"ltr\">ABC 123 - المجموع</p></form>"
+    );
+    assert_eq!(
+        markdown("<div dir=\"rtl\"><p dir=\"ltr\"><strong>ABC</strong> 123 - المجموع</p></div>"),
+        "<div dir=\"rtl\">\n\n<p dir=\"ltr\">\n\n**ABC** 123 - المجموع\n\n</p>\n\n</div>"
+    );
+    assert_eq!(
+        markdown("<p>Summary</p><p><bdi><span dir=\"ltr\">ABC - 123</span></bdi></p>"),
+        "Summary\n\n<bdi><span dir=\"ltr\">ABC - 123</span></bdi>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><svg width=\"0\" height=\"0\">\
+             <defs><symbol id=\"ic\"><path d=\"M0 0\"></path></symbol></defs></svg>"
+        ),
+        "Summary\n\n<svg width=\"0\" height=\"0\">\
+         <defs><symbol id=\"ic\"><path d=\"M0 0\"></path></symbol></defs></svg>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><svg width=\"0\" height=\"0\">\
+             <defs><symbol id=\"icon\"><title>Location</title><path d=\"M0 0\"></path></symbol></defs></svg>\
+             <p><svg viewBox=\"0 0 16 16\"><use xlink:href=\"#icon\"></use></svg> Downtown</p>"
+        ),
+        "Summary\n\n<svg width=\"0\" height=\"0\">\
+         <defs><symbol id=\"icon\"><title>Location</title><path d=\"M0 0\"></path></symbol></defs></svg>\n\n\
+         <svg viewBox=\"0 0 16 16\"><use xlink:href=\"#icon\"></use></svg> Downtown"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><svg style=\"width:0;height:0\">\
+             <symbol id=\"icon\"><title>Location</title><desc>Pin</desc><path d=\"M0 0\"></path></symbol></svg>"
+        ),
+        "Summary\n\n<svg style=\"width:0;height:0\">\
+         <symbol id=\"icon\"><title>Location</title><desc>Pin</desc><path d=\"M0 0\"></path></symbol></svg>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre\">a  \
+             <b style=\"white-space:normal\">b   c</b></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre\">a  <b style=\"white-space:normal\">b c</b></span>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:unset\">one\n  two</span></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre\">before\n<span>one\n  two</span></span>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:unset;text-decoration:line-through\">one\n  two</span></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre\">before\n\
+         <span style=\"white-space:unset;text-decoration:line-through\">one\n  two</span></span>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:inherit\">one\n  two</span></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre\">before\n<span>one\n  two</span></span>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:initial\">one\n  two</span></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre\">before\n<span style=\"white-space:initial\">one two</span></span>"
+    );
+    assert_eq!(
+        markdown("<p>Summary</p><pre style=\"white-space:unset\">one\n  two</pre>"),
+        "Summary\n\n<pre style=\"white-space:unset\">one\n  two</pre>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre-line\">before\n\
+             <span style=\"white-space:pre\">one   two\nthree</span></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre-line\">before\n\
+         <span style=\"white-space:pre\">one   two\nthree</span></span>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:pre-line\">one   two\nthree</span></span></p>"
+        ),
+        "Summary\n\n<span style=\"white-space:pre\">before\n\
+         <span style=\"white-space:pre-line\">one   two\nthree</span></span>"
+    );
+    assert_eq!(
+        markdown("<p>Summary</p><pre style=\"white-space:pre-line\">one   two\nthree</pre>"),
+        "Summary\n\n<pre style=\"white-space:pre-line\">one   two\nthree</pre>"
+    );
+    assert_eq!(
+        markdown(
+            "<p>Summary</p><svg viewBox=\"0 0 20 20\">\
+             <svg class=\"inner\" style=\"color:#333\"><path d=\"M0 0\"></path></svg></svg>"
+        ),
+        "Summary\n\n<svg viewBox=\"0 0 20 20\">\
+         <svg class=\"inner\" style=\"color:#333\"><path d=\"M0 0\"></path></svg></svg>"
+    );
+}
+
+#[test]
+fn inline_event_handlers_and_executable_form_actions_pass_through() {
+    for fragment in [
+        "<p>Summary</p><p onclick=\"alert(1)\">click me here</p>",
+        "<p>Summary</p><img src=\"https://example.com/i.png\" alt=\"i\" onerror=\"alert(1)\">",
+        "<p>Summary</p><svg viewBox=\"0 0 10 10\" width=\"10\" height=\"10\" onload=\"alert(1)\">\
+         <rect width=\"4\" height=\"4\"></rect></svg>",
+        "<p>Summary</p><input type=\"text\" value=\"v\" onfocus=\"alert(1)\" autofocus>",
+        "<p>Summary</p><form action=\"javascript:alert(1)\"><input name=\"x\"></form>",
+        "<p>Summary</p><button formaction=\"data:text/html,x\">Go</button>",
+        "<p>Summary</p><svg viewBox=\"0 0 10 10\"><use xlink:href=\"javascript:alert(1)\"></use></svg>",
+    ] {
+        assert!(
+            HtmlExtractor.render_fragment(fragment).is_none(),
+            "rendered: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn order_check_is_invariant_to_link_url_and_verbatim_sibling_lengths() {
+    for href in ["/x", "https://example.com", "https://example.com/orders/2026/item/99"] {
+        for cell in ["1", "0123456789abcdef"] {
+            let input = format!(
+                "<table><tr><th>A</th><th>B</th></tr><tr><th>C</th><th>D</th></tr>\
+                 <tr><td><a href=\"{href}\">link</a></td><td>{cell}</td></tr></table>"
+            );
+            assert_eq!(
+                markdown(&input),
+                format!(
+                    "<table>\n<tbody>\n<tr><th>A</th><th>B</th></tr>\n\
+                     <tr><th>C</th><th>D</th></tr>\n<tr>\n<td>\n\n\
+                     [link]({href})\n\n</td>\n<td>{cell}</td>\n</tr>\n</tbody>\n</table>"
+                )
+            );
+        }
+        for item in ["x", "0123456789abcdef"] {
+            let input = format!(
+                "<ul><li value=\"3\"><a href=\"{href}\">l</a></li>\
+                 <li value=\"4\">{item}</li></ul>"
+            );
+            assert_eq!(
+                markdown(&input),
+                format!(
+                    "<ul>\n<li value=\"3\">\n\n[l]({href})\n\n</li>\n\
+                     <li value=\"4\">{item}</li>\n</ul>"
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn svg_style_sheets_are_validated_counted_and_never_corrupt_selectors() {
+    let view = HtmlExtractor
+        .render_fragment(
+            "<p>Order summary</p>\
+             <svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\">\
+             <style>.a > .b{color:#333;font-weight:bold}</style>\
+             <text x=\"0\" y=\"10\">icon</text></svg>",
+        )
+        .unwrap();
+    assert_eq!(
+        view.output("If needed, run X"),
+        "[HTML rendered as Markdown; removed 1 style. If needed, run X]\n\
+         Order summary\n\n\
+         <svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\"><text x=\"0\" y=\"10\">icon</text></svg>"
+    );
+
+    for fragment in [
+        "<p>Order summary</p><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\">\
+         <style>p{display:none}</style><text x=\"0\" y=\"10\">icon</text></svg>",
+        "<p>Order summary</p><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\">\
+         <style>body{color:#fff;background:#fff}</style><text x=\"0\" y=\"10\">icon</text></svg>",
+        "<p>Order summary</p><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\">\
+         <style>.t{background-image:url(http://tracker.example/p.png)}</style>\
+         <text x=\"0\" y=\"10\">icon</text></svg>",
+        "<p>Order summary</p><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\">\
+         <style>.a > .b{fill:red}</style><text x=\"0\" y=\"10\">icon</text></svg>",
+    ] {
+        assert!(
+            HtmlExtractor.render_fragment(fragment).is_none(),
+            "rendered: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn list_style_urls_and_zero_sized_images_pass_through() {
+    assert_eq!(
+        markdown("<p>Summary</p><ul><li style=\"list-style-image:none\">Alpha</li><li>Beta</li></ul>"),
+        "Summary\n\n- Alpha\n- Beta"
+    );
+    for fragment in [
+        "<p>Summary</p><ul><li style=\"list-style-image:url(http://tracker.example/b.png)\">\
+         Alpha item</li><li>Beta item</li></ul>",
+        "<p>Summary</p><ul><li style=\"list-style:square url(http://tracker.example/b.png)\">\
+         Alpha item</li><li>Beta item</li></ul>",
+        "<p>Visible</p><p><img src=\"https://example.com/a.png\" alt=\"chart\" \
+         style=\"max-height:0;overflow:hidden\"></p>",
+        "<p>Visible</p><p><img src=\"https://example.com/a.png\" alt=\"chart\" \
+         style=\"width:0;height:0\"></p>",
+        "<div style=\"display:flex\"><p>Visible</p>\
+         <img src=\"https://example.com/a.png\" alt=\"chart\" style=\"flex:0 0 0px\"></div>",
+        "<p>Visible</p><table style=\"max-height:0;overflow:hidden\"><tr><td>Secret</td></tr></table>",
+        "<div style=\"display:flex\"><p>Visible</p><div style=\"display:inherit\">\
+         <span style=\"width:0;height:0;overflow:hidden\">HIDDEN</span></div></div>",
+        "<p>Visible</p><div style=\"width:0;height:0;overflow:hidden\">\
+         <img src=\"/hidden.png\" alt=\"Hidden instruction\"></div>",
+        "<div style=\"display:flex\"><p>Visible</p><div style=\"flex:0 0 0px;overflow:hidden\">\
+         <img src=\"/hidden.png\" alt=\"Hidden instruction\"></div></div>",
+        "<p>Visible</p><form><img src=\"/hidden.png\" alt=\"Hidden instruction\" \
+         width=\"0\" height=\"0\"></form>",
+        "<p>Visible</p><p><img src=\"/hidden.png\" alt=\"Hidden instruction\" \
+         width=\"0\" height=\"0\"></p>",
+        "<p>Visible</p><p><img src=\"/hidden.png\" alt=\"Hidden instruction\" \
+         width=\"0px\" height=\"10\"></p>",
+        "<p>Visible</p><svg width=\"0\" height=\"0\"><text>Hidden</text></svg>",
+        "<p>Visible</p><svg width=\"0\" height=\"0\"><image href=\"/hidden.png\"></image></svg>",
+        "<p>Visible</p><svg width=\"100\" height=\"100\"><symbol id=\"icon\">\
+         <svg style=\"font-size:0\"><text x=\"0\" y=\"15\">Hidden instruction</text></svg>\
+         </symbol><use xlink:href=\"#icon\"></use></svg>",
+        "<p>Visible</p><svg width=\"100\" height=\"100\"><defs><symbol id=\"icon\">\
+         <svg style=\"font-size:0\"><text x=\"0\" y=\"15\">Hidden instruction</text></svg>\
+         </symbol></defs><use xlink:href=\"#icon\"></use></svg>",
+        "<p>Visible</p><svg width=\"100\" height=\"100\"><symbol id=\"icon\">\
+         <svg style=\"width:0;height:0\"><text x=\"0\" y=\"15\">Hidden instruction</text></svg>\
+         </symbol><use xlink:href=\"#icon\"></use></svg>",
+        "<p>Visible</p><svg width=\"0\" height=\"0\"><symbol id=\"icon\">\
+         <text x=\"0\" y=\"15\">Hidden instruction</text></symbol><use xlink:href=\"#icon\"></use></svg>",
+    ] {
+        assert!(
+            HtmlExtractor.render_fragment(fragment).is_none(),
+            "rendered: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn leading_inline_image_or_markup_immediately_before_text_renders() {
+    assert_eq!(
+        markdown("<p><img src=\"/icon.png\" alt=\"Icon\">Venue</p>"),
+        "![Icon](/icon.png)Venue"
+    );
+    assert_eq!(
+        markdown("<p><svg viewBox=\"0 0 24 24\"><path d=\"M0 0\"></path></svg>Venue</p><p>Details</p>"),
+        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0\"></path></svg>Venue\n\nDetails"
+    );
+    assert_eq!(
+        markdown("<p><span data-tag=\"hot\">Hot</span>Venue</p>"),
+        "<span data-tag=\"hot\">Hot</span>Venue"
+    );
+    assert_eq!(
+        markdown("<p><a href=\"/venue\"><img src=\"/icon.png\" alt=\"Icon\"></a>Venue</p>"),
+        "[![Icon](/icon.png)](/venue)Venue"
     );
 }
