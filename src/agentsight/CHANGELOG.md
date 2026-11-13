@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.16.2
+
+### Fixes
+- Capture the first TLS call of warm agents such as Claude Code: ship static SSL offsets for Claude Code 2.1.301, 2.1.319 and 2.1.322, reuse offsets learned from earlier scans across restarts (stored as `ssl_offsets_learned.json` in the storage directory), and drain every finished scan result per tick.
+- Keep active SSE responses under memory pressure: reject new HTTP/1 flows and HTTP/2 streams at the byte budget instead of evicting the oldest retained flow. This fix reached `main` just before the 0.16.1 version commit, but the `sight/v0.16.1` tag and its packages do not contain it, so it first ships in 0.16.2.
+- Record Gemini prompts blocked by `SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT` or `IMAGE_SAFETY` as `safety_filter` interruptions, count Gemini tool prompt tokens as input, and preserve Gemini wire tool IDs.
+- Export tool results that Anthropic server tools return inline in the same response, and retain Codex tool completion times at the end of a rollout.
+- Replay changed system prompts in order in cost analysis instead of summing every snapshot, and count backtracks from argv-form Codex shell calls.
+- Invalidate cached causal analyses when a session gains a new round.
+
+### Docs
+- Correct the 0.16.1 note on ActPlane: policies still apply in a container's default PID namespace; only block policies without an active BPF LSM are rejected.
+
 ## 0.16.1
 
 ### Security
@@ -11,7 +24,7 @@
 
 ### Changed
 - The `agentsight` compatibility RPM recommends the matching `agentsight-plugins`, so a default `dnf install agentsight` also delivers the DSH plugin resources.
-- ActPlane refuses to apply policies outside the init PID namespace with a dedicated RPC error, and rejects block policies when the BPF LSM is not active, before mutating BPF state.
+- ActPlane rejects block policies when the BPF LSM is not active, before mutating BPF state.
 
 ### Fixes
 - Capture Claude Code builds again after Bun's 2026 BoringSSL rebuild reordered the SSL functions; reattach SSL probes on each new PID and retry SSL libraries that load late.
