@@ -20,7 +20,7 @@ Provider and either commits that snapshot or a safe withheld result. Later
 mutation invalidates the decision. Unknown result shapes and paths cannot be
 admitted as covered. Earlier same-process observers remain outside this boundary.
 
-The shared Node runtime should own only three operations: feature-probe
+The shared Node runtime owns three operations: feature-probe
 `node:module.registerHooks`, verify the exact loaded module SHA-256 and unique
 patch anchor, and remove its own launch-scoped `--import` from `NODE_OPTIONS`
 before tool and Provider children start. Each adapter retains its own patch
@@ -41,7 +41,7 @@ preload, final callback or extra per-tool process.
 | Agent | Published build | Observed sequence | Final-gate status |
 | --- | --- | --- | --- |
 | DeepSeek Harness | 0.2.1-rc.5 | `finalize/finish` -> exact-build preload -> top-level Session commit | Verified for the existing headless tests only |
-| OpenClaw | 2026.9.6 | sequential result middleware -> `after_tool_call` -> model request; a later middleware can change an earlier middleware's result | Unsupported; native final sink needs validation |
+| OpenClaw | 2026.9.6 | middleware -> `after_tool_call` -> context conversion -> provider payload hook -> HTTP request | Verified for the owned embedded Gateway and explicit OpenAI-completions path below |
 | Qoder SDK | SDK 1.0.56, Worker 1.1.78, Linux arm64 | `PostToolUse` -> `updatedToolOutput`/Read rendering/additional context -> Worker result delivery | Unsupported; the public Post callback is earlier than final rendering |
 
 The OpenClaw 2026.9.6 middleware runner awaits each handler and passes the
@@ -53,6 +53,50 @@ containing that marker. This is a red baseline for an early-middleware check.
 The `tool_result_persist` hook changed the persisted transcript in a probe,
 but that change was absent from the next model request; it is not a substitute
 for model-request capture.
+
+The verified OpenClaw path uses two launch-scoped checkpoints. The exact
+`agent-core-DG5aPUnb.mjs` return from `convertToLlm` checks source identities,
+text-only results and provenance of non-tool messages after context conversion.
+The exact `@openclaw/ai/dist/transports.mjs` OpenAI-completions branch checks
+the final HTTP payload after `onPayload` and `before_provider_request` handlers,
+immediately before `chat.completions.create`. It submits each actual tool
+message text to the existing `security.violation` Provider and replaces blocked
+or failed results with a safe text envelope. Changes to non-tool messages or
+tool metadata after serialization stop the model request. These two checkpoints
+prevent a context converter from copying tool output into a user message and
+prevent a later payload hook from bypassing the Provider.
+
+Admission checks the actual `openclaw.mjs` entry, Agent core, the built-in
+converter, session projection, call-ID normalizer, and the installed
+`@openclaw/ai@2026.9.6` transport and serializer bytes. Node verifies the two
+loaded patch targets again with exact SHA-256 and unique anchors. The native
+patch-target digests are `96221c65ea8e15d6499ca9f817e5d7629151b42c6d9742000791f2f48f2cebcd`
+for Agent core and `038e2c72e79a3e1c9d06e9c5f3a61a13acc297e1026696da24fee634a3bc4abc`
+for the transport. The entry digest is
+`4dd36d2ed0cb154456c4a09a951a2e8f2508a5dd6ff2fe0688d4e1c8f773fcb5`. The native
+result middleware only records session, run, call and tool name. OpenClaw
+registers the plugin twice at Gateway startup, so both registrations share the
+launch's correlation map. The pinned transport removes punctuation from some
+call IDs; AW accepts that mapping only when it uniquely matches one pending
+call in the same session and tool. Ambiguous and missing identities are withheld.
+An identical, previously checked payload can reuse its digest receipt; changed
+historical results are withheld. The active model API must be
+`openai-completions`; admission also requires an explicit primary model using
+that API and no configured fallback. A different runtime API stops before the
+model call.
+
+The native Gateway fixture runs allow, a later middleware injecting
+`AW_FINAL_GATE_SECRET_MARKER`, and Provider failure. The Provider sees the
+exact serialized tool text; the local model HTTP request receives only the
+withheld envelope for that result. An unchanged safe result reaches the model.
+The same Gateway path also passes with the real `agent-sec-core`
+`check_final_tool_output` Provider and a deterministic local PII scanner.
+The earlier `tool.before` denial still prevents its tool side effect. This
+proof covers the tested OpenAI-compatible serializer. A unit test also checks
+payload mutation after serialization; a native extension that uses
+`before_provider_request` has not yet been exercised. Other model APIs,
+reloadable policy, multimodal results, context projections that remove a tool
+result identity, nested agents and background delivery remain unsupported.
 
 The Qoder Worker calls `firePostToolUseEvent` before applying
 `getUpdatedToolOutput()`/`getUpdatedMCPToolOutput()`. The same return path can
@@ -72,11 +116,10 @@ These hashes identify inspected files, not verified final-gate profiles.
 
 ## Admission and scope
 
-OpenClaw and Qoder SDK currently omit `security.violation` from the adapter
-catalog. Required final policy therefore fails admission; ordinary `tool.after`
-and empty-policy launches retain their existing behavior. Keep that state until
-an exact build, an awaited final checkpoint, identity correlation, Provider
-failure withholding and native adopted-content test all pass. An unsupported
+Qoder SDK omits `security.violation` from the adapter catalog. OpenClaw admits
+it only for the verified 2026.9.6 embedded Gateway profile described above;
+other versions and configurations fail admission. Ordinary `tool.after` and
+empty-policy launches retain their existing behavior. An unsupported
 Node loader, module digest, unique anchor, SDK/Worker pair or delivery path
 must fail closed for a required gate. Multimodal, nested, background, direct
 tool-runtime, and third-party observer paths require separate evidence.
@@ -95,6 +138,9 @@ python3 src/aw/crates/aw-cli/tests/openclaw_gateway.py \
 
 The output includes `final-gate-baseline.json` with the observed middleware,
 Post and model-visible stages. `baseline_red` means the marker reached the
-model fixture; it does not count as a passing final gate. The native acceptance
-matrix pins the package and schedules this case. Qoder Worker source inspection
-alone does not count as model adoption evidence.
+model fixture. Add `--final-gate-enforce` to run the verified final gate, or
+also add `--final-gate-provider-error` to verify failure withholding. The
+native acceptance matrix pins the package and schedules all three cases.
+Pass `--sec-core-provider /absolute/path/to/aw-provider-sec-core` with
+`--final-gate-enforce` for the real Provider case.
+Qoder Worker source inspection alone does not count as model adoption evidence.

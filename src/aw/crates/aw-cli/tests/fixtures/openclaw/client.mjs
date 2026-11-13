@@ -9,11 +9,13 @@ const input = [];
 for await (const chunk of process.stdin) input.push(chunk);
 const frame = JSON.parse(Buffer.concat(input));
 const received = frame.aw_openclaw_completion ? JSON.parse(frame.native_input) : frame;
-const path = join(option('--binding'), 'calls.jsonl');
+const closing = args.includes('--close-event');
+const path = join(option('--binding'), closing ? 'cleanup.jsonl' : 'calls.jsonl');
 const record = phase => appendFileSync(path, JSON.stringify({
   phase, step, completion: frame.aw_openclaw_completion, pid: process.pid, event: option('--event'), onError: option('--on-error'), received,
 }) + '\n');
 record('start');
+if (closing) process.exit(0);
 if (step === 'error') {
   process.stderr.write('fixture callback failed\n');
   process.exit(3);
