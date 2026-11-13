@@ -199,7 +199,7 @@ fn restore_preserves_meta_dir_and_leaves_no_rollback_artefacts() {
     // Regression for B3: the old `delete all + move in` flow left the
     // mount empty for the duration of the move, and a crash there would
     // wipe user data. The new flow renames each top-level entry aside
-    // under `.anolisa/.<id>.rollback.*` and drops them only after the
+    // under `.anolisa/.<id>.rollback.*` and retains them in trash after the
     // staging swap completes. This test verifies the happy path leaves
     // no rollback leftovers under .anolisa/.
     let (_tmp, svc) = setup();
@@ -233,6 +233,191 @@ fn restore_preserves_meta_dir_and_leaves_no_rollback_artefacts() {
         "rollback artefacts not cleaned up: {:?}",
         leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn repeated_restore_preserves_every_displaced_tree() {
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "baseline", false).unwrap();
+    svc.write("notes/a.md", "baseline", false).unwrap();
+    let snapshot = svc.mem_snapshot(None).unwrap();
+    let mut expected = Vec::new();
+
+    for version in ["first", "second", "third"] {
+        svc.write("doc.md", version, true).unwrap();
+        svc.write("notes/a.md", version, true).unwrap();
+        svc.write("new.md", version, false).unwrap();
+        svc.mem_snapshot_restore(&snapshot.id).unwrap();
+        assert_eq!(svc.read("doc.md").unwrap(), "baseline");
+        assert_eq!(svc.read("notes/a.md").unwrap(), "baseline");
+        assert!(!svc.mount.root.join("new.md").exists());
+
+        expected.push(version.to_owned());
+        let mut retained = Vec::new();
+        for entry in std::fs::read_dir(svc.mount.meta_dir.join("trash")).unwrap() {
+            let path = entry.unwrap().path();
+            let content = std::fs::read_to_string(path.join("doc.md")).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(path.join("notes/a.md")).unwrap(),
+                content
+            );
+            assert_eq!(
+                std::fs::read_to_string(path.join("new.md")).unwrap(),
+                content
+            );
+            retained.push(content);
+        }
+        retained.sort();
+        assert_eq!(retained, expected);
+        let prefix = format!(".{}.rollback.", snapshot.id);
+        assert!(
+            std::fs::read_dir(&svc.mount.meta_dir)
+                .unwrap()
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&prefix)
+                })
+        );
+    }
+}
+
+#[test]
+fn restore_preserves_legacy_rollback_files_and_directories() {
+    // Each shape independently reproduces the old overwrite or ENOTEMPTY bug.
+    for directory in [false, true] {
+        let (_tmp, svc) = setup();
+        let live_path = if directory { "notes/a.md" } else { "doc.md" };
+        let leaf = if directory { "notes" } else { "doc.md" };
+        svc.write(live_path, "baseline", false).unwrap();
+        let snapshot = svc.mem_snapshot(None).unwrap();
+        svc.write(live_path, "current", true).unwrap();
+        let legacy = svc
+            .mount
+            .meta_dir
+            .join(format!(".{}.rollback.{leaf}", snapshot.id));
+        let saved_file = if directory {
+            std::fs::create_dir(&legacy).unwrap();
+            legacy.join("a.md")
+        } else {
+            legacy
+        };
+        std::fs::write(&saved_file, b"irreplaceable old data\0\xff").unwrap();
+
+        let result = svc.mem_snapshot_restore(&snapshot.id);
+        assert_eq!(
+            std::fs::read(&saved_file).unwrap(),
+            b"irreplaceable old data\0\xff",
+            "legacy data changed (directory={directory})"
+        );
+        result.unwrap();
+        assert_eq!(svc.read(live_path).unwrap(), "baseline");
+        let trash = std::fs::read_dir(svc.mount.meta_dir.join("trash"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read_to_string(trash.join(live_path)).unwrap(),
+            "current"
+        );
+    }
+}
+
+#[test]
+fn unavailable_trash_preserves_separate_rollbacks_and_allows_retry() {
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "baseline", false).unwrap();
+    svc.write("notes/a.md", "baseline", false).unwrap();
+    let snapshot = svc.mem_snapshot(None).unwrap();
+    let trash = svc.mount.meta_dir.join("trash");
+    std::fs::write(&trash, "obstacle").unwrap();
+
+    for version in ["first", "second"] {
+        svc.write("doc.md", version, true).unwrap();
+        svc.write("notes/a.md", version, true).unwrap();
+        svc.mem_snapshot_restore(&snapshot.id).unwrap();
+        assert_eq!(svc.read("doc.md").unwrap(), "baseline");
+        assert_eq!(svc.read("notes/a.md").unwrap(), "baseline");
+    }
+    assert_eq!(std::fs::read_to_string(&trash).unwrap(), "obstacle");
+    let prefix = format!(".{}.rollback.", snapshot.id);
+    let rollbacks: Vec<_> = std::fs::read_dir(&svc.mount.meta_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect();
+    assert_eq!(rollbacks.len(), 2);
+    let mut saved = Vec::new();
+    for path in &rollbacks {
+        let content = std::fs::read(path.join("doc.md")).unwrap();
+        assert_eq!(std::fs::read(path.join("notes/a.md")).unwrap(), content);
+        saved.push(content);
+    }
+    saved.sort();
+    assert_eq!(saved, [b"first".to_vec(), b"second".to_vec()]);
+
+    std::fs::remove_file(&trash).unwrap();
+    svc.write("doc.md", "third", true).unwrap();
+    svc.mem_snapshot_restore(&snapshot.id).unwrap();
+    assert_eq!(svc.read("doc.md").unwrap(), "baseline");
+    let mut after: Vec<_> = rollbacks
+        .iter()
+        .map(|path| std::fs::read(path.join("doc.md")).unwrap())
+        .collect();
+    after.sort();
+    assert_eq!(after, saved);
+    let retained = std::fs::read_dir(&trash)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        std::fs::read_to_string(retained.join("doc.md")).unwrap(),
+        "third"
+    );
+}
+
+#[test]
+fn unavailable_rollback_directory_leaves_live_files_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let (_tmp, svc) = setup();
+    svc.write("doc.md", "baseline", false).unwrap();
+    let snapshot = svc.mem_snapshot(None).unwrap();
+    svc.write("doc.md", "live", true).unwrap();
+    let permissions = std::fs::metadata(&svc.mount.meta_dir)
+        .unwrap()
+        .permissions();
+    std::fs::set_permissions(&svc.mount.meta_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = svc.mem_snapshot_restore(&snapshot.id);
+    std::fs::set_permissions(&svc.mount.meta_dir, permissions).unwrap();
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("rollback"), "{error}");
+    assert!(
+        error.contains(svc.mount.meta_dir.to_str().unwrap()),
+        "{error}"
+    );
+    assert_eq!(svc.read("doc.md").unwrap(), "live");
+    assert!(
+        !svc.mount
+            .meta_dir
+            .join(format!("snapshots/.{}.staging", snapshot.id))
+            .exists()
+    );
+    svc.mem_snapshot_restore(&snapshot.id).unwrap();
+    assert_eq!(svc.read("doc.md").unwrap(), "baseline");
 }
 
 #[test]
@@ -297,11 +482,9 @@ fn snapshot_restores_nested_readonly_directories() {
     svc.write("reference/nested/guide.md", "new contents", true)
         .unwrap();
     let first = svc.mem_snapshot_restore(&snapshot.id);
-    // A second snapshot avoids the independently tracked same-id trash
-    // collision while exercising an already read-only live directory.
     let result = first.and_then(|()| {
-        let second = svc.mem_snapshot(None)?;
-        svc.mem_snapshot_restore(&second.id)
+        svc.mem_snapshot_restore(&snapshot.id)?;
+        svc.mem_snapshot_restore(&snapshot.id)
     });
     let modes: Vec<_> = ["reference", "reference/nested", "reference/empty"]
         .into_iter()
@@ -364,6 +547,9 @@ fn restore_removes_readonly_staging_left_by_an_interrupted_attempt() {
 #[test]
 fn failed_restore_cleans_readonly_staging_and_can_be_retried() {
     use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
     let (_tmp, svc) = setup();
     svc.write("reference/doc.md", "saved", false).unwrap();
     let reference = svc.mount.root.join("reference");
@@ -371,14 +557,12 @@ fn failed_restore_cleans_readonly_staging_and_can_be_retried() {
     let snapshot = svc.mem_snapshot(None).unwrap();
     std::fs::set_permissions(&reference, std::fs::Permissions::from_mode(0o755)).unwrap();
     svc.write("reference/doc.md", "live", true).unwrap();
-    // A nonempty owned fixture blocks the first swap without changing live data.
-    let obstacle = svc
-        .mount
-        .meta_dir
-        .join(format!(".{}.rollback.reference", snapshot.id));
-    std::fs::create_dir(&obstacle).unwrap();
-    std::fs::write(obstacle.join("occupied"), "keep").unwrap();
-    assert!(svc.mem_snapshot_restore(&snapshot.id).is_err());
+    // The mount root must be writable to move live entries out of it.
+    let permissions = std::fs::metadata(&svc.mount.root).unwrap().permissions();
+    std::fs::set_permissions(&svc.mount.root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = svc.mem_snapshot_restore(&snapshot.id);
+    std::fs::set_permissions(&svc.mount.root, permissions).unwrap();
+    assert!(result.is_err());
     assert_eq!(svc.read("reference/doc.md").unwrap(), "live");
     let staging = svc
         .mount
@@ -389,7 +573,6 @@ fn failed_restore_cleans_readonly_staging_and_can_be_retried() {
         !staging.exists(),
         "failed restore left read-only staging behind"
     );
-    std::fs::remove_dir_all(obstacle).unwrap();
     svc.mem_snapshot_restore(&snapshot.id).unwrap();
     let mode = std::fs::metadata(&reference).unwrap().permissions().mode() & 0o777;
     std::fs::set_permissions(&reference, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -63,25 +63,63 @@ async fn concurrent_restores(same_snapshot: bool) {
         snap_b["id"].as_str().unwrap()
     };
 
-    let (result_a, result_b) = tokio::join!(
-        a.call("mem_snapshot_restore", json!({"id": id_a})),
-        b.call("mem_snapshot_restore", json!({"id": id_b})),
-    );
-    let success_a = result_a == format!("restored {id_a}");
-    let success_b = result_b == format!("restored {id_b}");
-    for (success, result) in [(success_a, &result_a), (success_b, &result_b)] {
+    let mut displaced = Vec::new();
+    for round in 0..if same_snapshot { 2 } else { 1 } {
+        if same_snapshot {
+            std::fs::write(root.join("shared.txt"), format!("round-{round}")).unwrap();
+            displaced.push(tree(&root));
+        }
+        let (result_a, result_b) = tokio::join!(
+            a.call("mem_snapshot_restore", json!({"id": id_a})),
+            b.call("mem_snapshot_restore", json!({"id": id_b})),
+        );
+        let success_a = result_a == format!("restored {id_a}");
+        let success_b = result_b == format!("restored {id_b}");
+        for (success, result) in [(success_a, &result_a), (success_b, &result_b)] {
+            assert!(
+                success || result.contains("another snapshot restore or reclaim is in progress"),
+                "unexpected restore result: {result}"
+            );
+        }
+        assert!(success_a || success_b, "both restores failed");
+        let actual = tree(&root);
         assert!(
-            success || result.contains("another snapshot restore or reclaim is in progress"),
-            "unexpected restore result: {result}"
+            ((success_a || (same_snapshot && success_b)) && actual == tree_a)
+                || (!same_snapshot && success_b && actual == tree_b),
+            "successful restores left an incomplete or mixed tree: {result_a}; {result_b}"
+        );
+        if same_snapshot && success_a && success_b {
+            // Both may succeed sequentially if the first finishes before the second locks.
+            displaced.push(tree_a.clone());
+        }
+    }
+    if same_snapshot {
+        std::fs::write(root.join("shared.txt"), "single restore").unwrap();
+        displaced.push(tree(&root));
+        assert_eq!(
+            a.call("mem_snapshot_restore", json!({"id": id_a})).await,
+            format!("restored {id_a}")
+        );
+        assert_eq!(tree(&root), tree_a);
+        let mut retained: Vec<_> = std::fs::read_dir(root.join(".anolisa/trash"))
+            .unwrap()
+            .map(|entry| tree(&entry.unwrap().path()))
+            .collect();
+        retained.sort();
+        displaced.sort();
+        assert_eq!(retained, displaced);
+        assert!(
+            std::fs::read_dir(root.join(".anolisa"))
+                .unwrap()
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!(".{id_a}.rollback."))
+                })
         );
     }
-    assert!(success_a || success_b, "both restores failed");
-    let actual = tree(&root);
-    assert!(
-        ((success_a || (same_snapshot && success_b)) && actual == tree_a)
-            || (!same_snapshot && success_b && actual == tree_b),
-        "successful restores left an incomplete or mixed tree: {result_a}; {result_b}"
-    );
     a.cleanup().await;
     b.cleanup().await;
 }
