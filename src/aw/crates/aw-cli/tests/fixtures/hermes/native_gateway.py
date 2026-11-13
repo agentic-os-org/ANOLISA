@@ -56,9 +56,6 @@ class GatewayTests(NativeFixture):
                     retire_busy["once"] = False
                     return {"retired": False}
                 return {"retired": True}
-            if method == "plugin.aw-native-hooks.acknowledge_retire":
-                self.assertEqual(set(params), {"target_session_id", "launch_path", "token", "timeout"})
-                return {"acknowledged": True}
             self.assertEqual(method, "plugin.aw-native-hooks.prime")
             self.assertEqual(set(params), {"session_id", "launch_path", "token"})
             if fail_prime["once"]:
@@ -72,6 +69,8 @@ class GatewayTests(NativeFixture):
             agent = SimpleNamespace(session_id="session", connection=SimpleNamespace(call=rpc))
             with self.assertRaisesRegex(OSError, "lost registration reply"):
                 GatewayAgent.run_conversation(agent, "lost registration")
+            self.assertEqual(json.loads(launch.with_name("hermes-sessions.json").read_text()),
+                             ["session"])
             self.assertEqual(GatewayAgent.run_conversation(agent, "hello"), "native")
             outcome["value"] = {"failed": True, "failure_reason": "gateway_connection"}
             self.assertEqual(GatewayAgent.run_conversation(agent, "disconnected"), outcome["value"])
@@ -91,6 +90,8 @@ class GatewayTests(NativeFixture):
               patch("hermes_cli.version_info.get_version_info", return_value=SimpleNamespace(commit="a" * 40)),
               patch.object(GatewayAgent, "run_conversation", original_run)):
             guard.main()
+        self.assertEqual(json.loads(launch.with_name("hermes-retired.json").read_text())
+                         ["token"], "fixture-token")
         self.assertEqual(calls, [
             ("plugin.aw-native-hooks.prime", "session"),
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "hello"),
@@ -99,7 +100,6 @@ class GatewayTests(NativeFixture):
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "adopted terminal"),
             ("plugin.aw-native-hooks.retire", "session"),
             ("plugin.aw-native-hooks.retire", "session"),
-            ("plugin.aw-native-hooks.acknowledge_retire", "session"),
         ])
 
     def bind_gateway(self, steps, *, replace_result=False, skill_check=False,
@@ -128,6 +128,10 @@ class GatewayTests(NativeFixture):
         spec.loader.exec_module(plugin)
         hooks, rpc, cleanups = {}, {}, []
         manager = self.manager()
+        activate = turn_run is None and not prime_only
+        if activate:
+            async def turn_run(_authority, _ref, _live, _row):
+                raise RuntimeError("fixture admission remains unknown")
         if turn_run is not None:
             from gateway.session_authority import SessionAuthority
             turn_patch = patch.object(SessionAuthority, "_execute_claimed", turn_run)
@@ -152,11 +156,13 @@ class GatewayTests(NativeFixture):
         self.addCleanup(setattr, middleware, "run_tool_execution_middleware", original)
         params = {"session_id": "session", "launch_path": str(launch),
                   "token": "fixture-token"}
-        if prime_only:
-            receipt = rpc["prime"](params, session_id="session")
-        else:
-            receipt = rpc["bind"](
-                {**params, "submission_id": "fixture-submission"}, session_id="session")
+        receipt = rpc["prime"](params, session_id="session")
+        if activate:
+            from gateway.session_authority import SessionAuthority
+            with self.assertRaisesRegex(RuntimeError, "fixture admission remains unknown"):
+                asyncio.run(SessionAuthority._execute_claimed(
+                    SimpleNamespace(), SimpleNamespace(session_id="session"), None,
+                    {"request_id": "fixture-submission"}))
         self.assertEqual(receipt["hooks"], len(steps))
         self.gateway_rpc, self.gateway_manager, self.gateway_receipt = rpc, manager, receipt
         return hooks, middleware
@@ -329,10 +335,6 @@ class GatewayTests(NativeFixture):
             self.assertEqual(plugins._dispatch_pre_tool_call_hooks(
                 "terminal", {"command": "echo second"}, **second), (None, None))
         self.assertEqual(len(self.trace.read_text().splitlines()), 2)
-        self.assertEqual(self.gateway_rpc["finish"](
-            {"session_id": "session", "token": "fixture-token",
-             "lease": self.gateway_receipt["lease"], "unadmitted": True},
-            session_id="session"), {"finished": True})
         with self.assertRaisesRegex(RuntimeError, "registered session"):
             self.gateway_manager.unload()
 
@@ -357,16 +359,13 @@ class GatewayTests(NativeFixture):
                 SimpleNamespace(), SimpleNamespace(session_id="session"), None,
                 {"request_id": "fixture-submission"}))
 
-        with self.assertRaisesRegex(RuntimeError, "differs from the bound submission"):
-            asyncio.run(SessionAuthority._execute_claimed(
-                SimpleNamespace(), SimpleNamespace(session_id="session"), None,
-                {"request_id": "other-submission"}))
-        with self.assertRaisesRegex(RuntimeError, "active turn"):
-            self.gateway_manager.unload()
-
         with ThreadPoolExecutor(max_workers=1) as pool:
             pending = pool.submit(execute)
             self.assertTrue(entered.wait(5))
+            with self.assertRaisesRegex(RuntimeError, "differs from the active admission"):
+                asyncio.run(SessionAuthority._execute_claimed(
+                    SimpleNamespace(), SimpleNamespace(session_id="session"), None,
+                    {"request_id": "other-submission"}))
             with self.assertRaisesRegex(RuntimeError, "active turn"):
                 self.gateway_manager.unload()
             ids = dict(session_id="session", conversation_id="session",
@@ -377,10 +376,6 @@ class GatewayTests(NativeFixture):
                     "terminal", {"command": "echo checked"}, **ids), (None, None))
             release.set()
             self.assertEqual(pending.result(timeout=5), ("response", "completed"))
-        self.assertEqual(self.gateway_rpc["finish"](
-            {"session_id": "session", "token": "fixture-token",
-             "lease": self.gateway_receipt["lease"], "unadmitted": True},
-            session_id="session"), {"finished": True})
         with self.assertRaisesRegex(RuntimeError, "registered session"):
             self.gateway_manager.unload()
 
@@ -454,15 +449,16 @@ class GatewayTests(NativeFixture):
               patch("gateway.session_authorities.active_authority", return_value=authority),
               patch("hermes_state_runtime.list_session_admissions", side_effect=lambda *_a, **_kw: pending)):
             retire = self.gateway_rpc["retire"]
+            self.assertEqual(retire({**params, "target_session_id": "unregistered"}),
+                             {"retired": True})
+            with self.assertRaisesRegex(ValueError, "launch identity differs"):
+                retire({**params, "token": "wrong-token"})
             self.assertEqual(retire(params), {"retired": False})
             row["ended_at"] = "closed"
             self.assertEqual(retire(params), {"retired": False})
             pending.clear()
             self.assertEqual(retire(params), {"retired": True})
             self.assertEqual(retire(params), {"retired": True})
-            self.assertEqual(self.gateway_rpc["acknowledge_retire"](params),
-                             {"acknowledged": True})
-            launch.unlink()
             replacement = self.root / "replacement-launch.json"
             config = {"schema": "aw-hermes/v1alpha1", "revision": "a" * 40,
                       "profile": str(self.home), "cwd": str(Path.cwd()),
@@ -479,6 +475,7 @@ class GatewayTests(NativeFixture):
             with self.assertRaisesRegex(RuntimeError, "registered session"):
                 self.gateway_manager.unload()
             row["ended_at"] = None
+            self.assertEqual(retire(params), {"retired": True})
             self.assertEqual(retire({**params, "launch_path": str(replacement),
                                      "token": "replacement-token"}), {"retired": False})
             row["ended_at"] = "closed"
@@ -499,40 +496,27 @@ class GatewayTests(NativeFixture):
         with self.assertRaisesRegex(RuntimeError, "active turn"):
             self.gateway_manager.unload()
 
-    def test_bind_and_targeted_unload_share_lock_order(self):
+    def test_prime_and_targeted_unload_share_lock_order(self):
         import threading
-        self.bind_gateway([("tool.before", "observe")])
-        self.gateway_rpc["finish"](
-            {"session_id": "session", "token": "fixture-token",
-             "lease": self.gateway_receipt["lease"], "unadmitted": True},
-            session_id="session")
+        self.bind_gateway([("tool.before", "observe")], prime_only=True)
         launch = __import__("os").environ["AW_HERMES_LAUNCH"]
         barrier = threading.Barrier(2)
 
-        def bind():
+        def prime():
             barrier.wait(timeout=5)
-            try:
-                self.gateway_rpc["bind"](
-                    {"session_id": "session", "launch_path": launch, "token": "fixture-token",
-                     "submission_id": "fixture-submission-2"},
-                    session_id="session")
-                return "bound"
-            except ValueError:
-                return "unloaded"
+            return self.gateway_rpc["prime"](
+                {"session_id": "session", "launch_path": launch, "token": "fixture-token"},
+                session_id="session")["adapter"]
 
         def unload():
             barrier.wait(timeout=5)
-            try:
+            with self.assertRaisesRegex(RuntimeError, "registered session"):
                 self.gateway_manager.unload()
-                return "unloaded"
-            except RuntimeError:
-                return "active"
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = [pool.submit(bind), pool.submit(unload)]
-            outcomes = [result.result(timeout=5) for result in results]
-        self.assertEqual(outcomes[0], "bound")
-        self.assertIn(outcomes[1], ("active", "unloaded"))
+            results = [pool.submit(prime), pool.submit(unload)]
+            self.assertEqual(results[0].result(timeout=5), "hermes")
+            results[1].result(timeout=5)
 
     def test_schema_coercion_cannot_change_checked_input(self):
         hooks, _ = self.bind_gateway([("tool.before", "observe")])

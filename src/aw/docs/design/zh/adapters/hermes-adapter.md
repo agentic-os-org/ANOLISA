@@ -216,12 +216,17 @@ Desktop 进程热加载插件。AW 只更新本地文件，不复制或重写 pr
 ## Hook 语义
 
 进程内路径将每个准入的 AW step 注册为原生 Hook 回调。`0.23.1` 中，CLI
-在原生会话处理前通过插件 RPC 登记 Gateway 会话。Gateway 在认领执行时按实际提交身份
-绑定每个已准入轮次，包括排队消息和后台通知；准入前失败不会创建轮次 lease。Gateway 插件在对应原生 Hook
-回调中运行准入的步骤。
+在原生会话处理前通过插件 RPC 登记 Gateway 会话。Gateway 为会话保存不可变的
+launch 快照，在原生 admission 认领时使用真实 request ID 或 admission ID 建立
+唯一活动绑定。排队消息、adopted 轮次和后台通知共用此边界。原生执行返回时释放
+绑定，包括 `settled_unknown`；发生异常时保留绑定，直到原生 admission 账本
+确认终态。Gateway 插件在对应原生 Hook 回调中运行准入的步骤。
 Gateway 在 AW 会话保持登记期间拒绝卸载插件，避免排队轮次在两轮之间失去回调。
-CLI 关闭会话后，等待排队及执行中的准入轮次全部结算，再注销 Gateway 登记。
-Gateway 确认注销前，AW 保留 launch 文件和服务实例。之后同一会话可由新的 AW
+CLI 关闭会话后，`retire` 等待 queued、started 和 unknown admission 全部结算。
+同一 launch 的 prime 和 retire 可重试；旧 launch 的 retire 不会删除新登记。
+CLI 在发送 prime 前记录待对账会话，因此首次回执丢失仍会执行注销。CLI 写入
+私有注销回执后，父 AW 进程才释放服务实例和 launch 文件。信号或 drain 故障导致
+回执缺失时，AW 报告并保留两项资源，供运维对账。注销后，同一会话可由新的 AW
 启动重新登记，插件也可卸载。
 工具批次的串行或并行仍由 Hermes 调度。已有配置中的 Hook 继续执行；AW 不导入或
 重排其配置。已验证基线的原生 Hook 配置没有逐 Hook 的环境变量对象。
