@@ -64,6 +64,13 @@ pub const EXTRA_IS_ERROR: &str = "is_error";
 /// prior system instructions. Unmarked system steps remain additive messages.
 pub const EXTRA_SYSTEM_PROMPT_SNAPSHOT: &str = "system_prompt_snapshot";
 
+/// Marks the start of a complete request's non-system context in [`Step::extra`].
+/// Clear accumulated user, assistant and tool-result history before this step;
+/// system instructions follow their separate snapshot convention. Replayed
+/// messages carry [`Step::is_copied_context`] and do not represent new executions.
+/// Without this marker, documents retain incremental conversation semantics.
+pub const EXTRA_REQUEST_CONTEXT_SNAPSHOT: &str = "request_context_snapshot";
+
 /// The outcome a tool-result envelope declares, when it declares one.
 ///
 /// Providers disagree about how to spell the out-of-band failure flag: Anthropic

@@ -117,6 +117,9 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
     let mut user_intervened = false;
 
     for step in &traj.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         let step_end = step.end_ts();
         if step.is_agent() {
             let start = step

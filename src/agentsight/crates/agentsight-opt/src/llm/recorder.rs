@@ -351,8 +351,17 @@ impl TrajectoryRecorder {
             });
         }
 
-        // User messages (non-system) as user steps.
-        for msg in call.messages.iter().filter(|m| m.role != "system") {
+        // Repair requests replay earlier input and assistant answers as context.
+        let input_start = call
+            .messages
+            .iter()
+            .position(|message| message.role != "system");
+        for (index, msg) in call
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role != "system")
+        {
             *step_id += 1;
             let source = if msg.role == "assistant" {
                 StepSource::Agent
@@ -374,15 +383,29 @@ impl TrajectoryRecorder {
                 tool_calls: None,
                 observation: None,
                 metrics: None,
-                extra: None,
+                extra: (Some(index) == input_start).then(|| {
+                    HashMap::from([(
+                        agentsight_atif::EXTRA_REQUEST_CONTEXT_SNAPSHOT.into(),
+                        serde_json::Value::Bool(true),
+                    )])
+                }),
                 llm_call_count: None,
-                is_copied_context: None,
+                is_copied_context: (msg.role == "assistant" || index + 1 < call.messages.len())
+                    .then_some(true),
             });
         }
 
         // Agent response step.
         *step_id += 1;
         let mut extra = HashMap::new();
+        // A complete request replaces accumulated history even when it has
+        // no non-system input message to carry the snapshot boundary.
+        if input_start.is_none() {
+            extra.insert(
+                agentsight_atif::EXTRA_REQUEST_CONTEXT_SNAPSHOT.into(),
+                serde_json::Value::Bool(true),
+            );
+        }
         extra.insert(
             "start_timestamp".to_string(),
             serde_json::Value::String(call.start_ts.clone()),

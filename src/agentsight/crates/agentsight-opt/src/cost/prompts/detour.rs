@@ -91,7 +91,7 @@ fn render_final_outcome(trajectory: &AtifTrajectory) -> String {
         .steps
         .iter()
         .rev()
-        .find(|s| s.source == "agent" && s.message.as_deref().is_some_and(|m| !m.trim().is_empty()))
+        .find(|s| s.is_agent() && s.message.as_deref().is_some_and(|m| !m.trim().is_empty()))
         .and_then(|s| s.message.as_deref())
         .map(|m| crate::atif::truncate_chars(m, FINAL_OUTCOME_CHARS))
         .unwrap_or_else(|| "（本轨迹没有可用的最终产出文本）".to_string())
@@ -104,6 +104,9 @@ fn render_artifact_edits(trajectory: &AtifTrajectory) -> String {
     let mut turn: usize = 0;
     let mut shown = 0usize;
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         if step.source != "agent" {
             continue;
         }
