@@ -47,8 +47,8 @@ def _strip_yaml_comment(value: str) -> str:
                     position += 2
                     continue
                 quote = None
-        elif character == "#" and (position == 0 or value[position - 1].isspace()):
-            return value[:position].rstrip()
+        elif character == "#" and (position == 0 or value[position - 1] in " \t"):
+            return value[:position].rstrip(" \t")
         position += 1
     return value
 
