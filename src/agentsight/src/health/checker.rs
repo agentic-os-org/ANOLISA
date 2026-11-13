@@ -293,6 +293,9 @@ impl HealthChecker {
     ///     All sessions for that pid are returned and each gets its own event.
     ///   - Deduplication key is (agent_name, session_id, conversation_id): at most one
     ///     agent_crash event is written per unique (agent, session, conversation) triple.
+    ///   - An OOM-killed group records the dmesg-confirmed victim's pid instead of the
+    ///     group representative, so startup recovery's per-kill dedup matches the row
+    ///     even when the victim is a sibling process.
     ///
     /// Split out of `check_once` so the crash-vs-normal-shutdown decision can
     /// be unit-tested by injecting offline entries without scanning /proc.
@@ -323,9 +326,10 @@ impl HealthChecker {
 
                 for (agent_name, group) in &by_agent {
                     let pids: Vec<i32> = group.iter().map(|o| o.pid as i32).collect();
-                    // Use the representative offline entry for metadata (pid shown in detail).
+                    // Use the representative offline entry for metadata.
                     // When multiple pids exist (Cosh), use the largest pid (worker) as it is
-                    // most likely the one that carried LLM traffic.
+                    // most likely the one that carried LLM traffic. An OOM crash row
+                    // overrides this with the dmesg-confirmed victim's pid.
                     let rep = group.iter().max_by_key(|o| o.pid).unwrap();
 
                     // ── Branch A: pending (in-flight) LLM calls ──────────────────────────
@@ -374,13 +378,18 @@ impl HealthChecker {
                             continue;
                         }
 
-                        // Check if any of the crashed PIDs were OOM-killed
-                        let is_oom = pids.iter().any(|&p| was_pid_oom_killed(p));
-                        if is_oom {
+                        // Record the pid dmesg actually attributes the kill to,
+                        // not the group representative: the startup recovery
+                        // dedups recovered kills against this row by that pid.
+                        // A multi-process agent (Cosh parent + worker) can lose
+                        // a sibling, and the representative is the largest pid.
+                        let oom_pid = pids.iter().copied().find(|&p| was_pid_oom_killed(p));
+                        if let Some(pid) = oom_pid {
                             log::info!(
-                                "Agent {agent_name} (pids={pids:?}) was OOM-killed (confirmed via dmesg)"
+                                "Agent {agent_name} (pids={pids:?}) was OOM-killed (pid={pid}, confirmed via dmesg)"
                             );
                         }
+                        let crash_pid = oom_pid.unwrap_or(rep.pid as i32);
 
                         let mut by_conv: HashMap<
                             (Option<String>, Option<String>),
@@ -429,20 +438,25 @@ impl HealthChecker {
                             }
                             let call_ids: Vec<&str> =
                                 calls.iter().map(|(c, _)| c.as_str()).collect();
+                            let crash_entry = group
+                                .iter()
+                                .find(|o| o.pid as i32 == crash_pid)
+                                .copied()
+                                .unwrap_or(*rep);
                             let mut detail = serde_json::json!({
-                                "pid": rep.pid,
+                                "pid": crash_pid,
                                 "agent_name": agent_name,
-                                "exe_path": rep.exe_path.clone(),
+                                "exe_path": crash_entry.exe_path.clone(),
                                 "call_ids": call_ids,
                             });
-                            if is_oom {
+                            if oom_pid.is_some() {
                                 detail["oom"] = serde_json::json!(true);
                                 detail["source"] = serde_json::json!("healthchecker+dmesg");
                             }
                             // Attach the trace-recorded exit status when
                             // available; omitted (not fabricated) when trace
                             // did not observe this pid's exit.
-                            if let Some(status) = exit_status_by_pid.get(&(rep.pid as i32)) {
+                            if let Some(status) = exit_status_by_pid.get(&crash_pid) {
                                 detail["exit_code"] = serde_json::json!(status.code);
                                 detail["signal"] = serde_json::json!(status.signal);
                                 detail["core_dump"] = serde_json::json!(status.core_dump);
@@ -453,7 +467,7 @@ impl HealthChecker {
                                 None,
                                 conversation_id.clone(),
                                 None,
-                                Some(rep.pid as i32),
+                                Some(crash_pid),
                                 Some(agent_name.clone()),
                                 now_ns,
                                 Some(detail),
@@ -461,18 +475,18 @@ impl HealthChecker {
                             if let Err(e) = istore.insert(&event) {
                                 log::warn!(
                                     "Failed to record agent_crash for pid={}: {}",
-                                    rep.pid,
+                                    crash_pid,
                                     e
                                 );
                             } else {
                                 log::info!(
                                     "Recorded agent_crash for {} (pid={}, session={:?}, conversation={:?}, {} call(s), oom={})",
                                     agent_name,
-                                    rep.pid,
+                                    crash_pid,
                                     session_id,
                                     conversation_id,
                                     calls.len(),
-                                    is_oom
+                                    oom_pid.is_some()
                                 );
                             }
                         }
@@ -1928,6 +1942,141 @@ printf '[%s] Out of memory: Killed process 4100011 (cosh-core) total-vm:1024kB\n
         assert!(
             !agents.iter().any(|agent| agent.pid == quiet_pid as u32),
             "a pid dmesg does not report is still a normal exit and must leave the store"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// In a multi-process group the OOM victim can be a sibling of the
+    /// representative pid (Cosh: parent + worker, representative = worker).
+    /// The crash row must name the dmesg victim: startup recovery dedups the
+    /// kill by that pid, so naming the representative lets a later restart
+    /// insert a second row for the same kill.
+    const FAKE_DMESG_SIBLING_OOM: &str = r#"#!/bin/sh
+printf '[%s] Out of memory: Killed process 4100016 (cosh-core) total-vm:1024kB\n' "$(date '+%a %b %e %T %Y')"
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_oom_killed_sibling_is_recorded_under_the_victim_pid() {
+        const CHILD: &str = "AGENTSIGHT_HEALTH_OOM_SIBLING_CHILD";
+        let fake_dir = std::env::temp_dir().join(format!(
+            "agentsight-fake-dmesg-oom-sibling-{}",
+            std::process::id()
+        ));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG_SIBLING_OOM).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "health::checker::tests::an_oom_killed_sibling_is_recorded_under_the_victim_pid",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LC_ALL", "C")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // The fake `dmesg` names only the parent. Both pids go offline in the
+        // same scan, and the worker (largest pid) is the representative.
+        let parent = 4_100_016_i32;
+        let worker = 4_100_017_i32;
+        let dir = unique_tmp_dir("oom-sibling");
+        let genai_store = Arc::new(
+            GenAISqliteStore::new_with_path(
+                &dir.join("genai_events.db"),
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .expect("genai store"),
+        );
+        let istore = Arc::new(
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                .expect("interruption store"),
+        );
+        genai_store
+            .insert_pending(&crate::storage::sqlite::genai::PendingCallInfo {
+                call_id: "hc-call-oom-sibling".to_string(),
+                trace_id: None,
+                conversation_id: Some("conv-oom-sibling".to_string()),
+                session_id: Some("sess-oom-sibling".to_string()),
+                start_timestamp_ns: 1_000_000_000,
+                pid: worker,
+                process_name: "test".to_string(),
+                agent_name: Some("cosh-core".to_string()),
+                http_method: Some("POST".to_string()),
+                http_path: Some("/v1/chat/completions".to_string()),
+                input_messages: None,
+                system_instructions: None,
+                user_query: None,
+                is_sse: false,
+                model: Some("gpt-4".to_string()),
+                provider: Some("openai".to_string()),
+                call_kind: "main".to_string(),
+                pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+                pending_match_key: None,
+            })
+            .expect("insert_pending");
+
+        let store = Arc::new(RwLock::new(HealthStore::new()));
+        let checker = HealthChecker::new(Arc::clone(&store), Duration::from_secs(30))
+            .with_interruption_store(Arc::clone(&istore))
+            .with_genai_store(Arc::clone(&genai_store));
+        for pid in [parent, worker] {
+            store
+                .write()
+                .unwrap()
+                .update(pid as u32, offline_status(pid as u32));
+        }
+
+        checker.record_offline_agent_crashes(&[
+            offline_status(parent as u32),
+            offline_status(worker as u32),
+        ]);
+
+        let events = list_crash_events(&istore);
+        assert_eq!(events.len(), 1, "the group must record one crash");
+        assert_eq!(
+            events[0].pid,
+            Some(parent as i64),
+            "an OOM row must name the dmesg victim, not the group representative"
+        );
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_deref().expect("detail json"))
+                .expect("parse detail");
+        assert_eq!(detail["pid"], parent);
+        assert_eq!(detail["oom"], true);
+        assert_eq!(detail["source"], "healthchecker+dmesg");
+        assert!(
+            istore.oom_event_exists_for_kill(parent, events[0].occurred_at_ns, 300),
+            "startup recovery must find this kill by the victim pid"
+        );
+        assert!(
+            !istore.oom_event_exists_for_kill(worker, events[0].occurred_at_ns, 300),
+            "the representative pid must not masquerade as the killed process"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
