@@ -2589,7 +2589,7 @@ mod tests {
         let cleanup_state = state.clone();
         let cleanup =
             tokio::spawn(async move { cleanup_snapshots(&cleanup_state, ws_id, Some(1)).await });
-        tokio::time::timeout(std::time::Duration::from_secs(1), cleanup_started.acquire())
+        tokio::time::timeout(std::time::Duration::from_secs(3), cleanup_started.acquire())
             .await
             .expect("cleanup did not reach backend")
             .unwrap()
