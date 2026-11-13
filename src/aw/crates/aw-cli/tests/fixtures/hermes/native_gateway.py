@@ -90,14 +90,6 @@ class GatewayTests(NativeFixture):
               patch("hermes_cli.version_info.get_version_info", return_value=SimpleNamespace(commit="a" * 40)),
               patch.object(GatewayAgent, "run_conversation", original_run)):
             guard.main()
-            retire_path = self.plugin_path / "retire.py"
-            spec = importlib.util.spec_from_file_location("aw_hermes_gateway_retire", retire_path)
-            retire = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(retire)
-            sys.argv = [str(retire_path), str(launch), "session"]
-            with self.assertRaisesRegex(SystemExit, "retirement is pending"):
-                retire.main()
-            retire.main()
         self.assertFalse(launch.with_name("hermes-retired.json").exists())
         self.assertEqual(calls, [
             ("plugin.aw-native-hooks.prime", "session"),
@@ -105,8 +97,6 @@ class GatewayTests(NativeFixture):
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "disconnected"),
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "not sent"),
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "adopted terminal"),
-            ("plugin.aw-native-hooks.retire", "session"),
-            ("plugin.aw-native-hooks.retire", "session"),
         ])
 
     def bind_gateway(self, steps, *, replace_result=False, skill_check=False,

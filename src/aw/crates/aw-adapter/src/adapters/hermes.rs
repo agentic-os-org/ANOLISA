@@ -409,10 +409,6 @@ impl PreparedLaunch for Prepared {
             "hermes-entrypoint.py",
             include_bytes!("../../native/hermes/launch.py"),
         )?;
-        context.files.write(
-            "hermes-retire.py",
-            include_bytes!("../../native/hermes/retire.py"),
-        )?;
         command.args.splice(
             0..0,
             [
