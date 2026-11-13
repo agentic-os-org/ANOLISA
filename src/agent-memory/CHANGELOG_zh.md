@@ -7,6 +7,12 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.16] - 2026-11-13
+
+### 修复
+
+- `mem_snapshot_restore` 为每次成功恢复独立保留恢复前的文件树，包括同一秒内重复恢复同一快照。已有恢复目录不会被覆盖，旧版 rollback 残留也不再阻塞新恢复。trash 创建或移动失败时，旧数据保留在本次操作的 rollback 目录中，并报告路径；无法分配 rollback 目录时，恢复会在移动 live 文件前失败。快照归档、MCP 参数和成功响应保持不变。保留的 trash 和 rollback 数据需要手动清理，降级时应保持这些目录完整（#10007）。
+
 ## [0.2.15] - 2026-11-12
 
 ### 修复

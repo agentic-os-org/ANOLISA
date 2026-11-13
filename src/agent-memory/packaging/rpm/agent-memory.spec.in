@@ -226,6 +226,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Nov 13 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.16-1
+- Preserve separate backups across repeated snapshot restores
+- Retain recovery data on failures and tolerate legacy rollback leftovers
+
 * Thu Nov 12 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.15-1
 - Validate overwrite imports and persist private backups before clearing memories
 - Coordinate snapshot restores and reclamation across processes
