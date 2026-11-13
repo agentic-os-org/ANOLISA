@@ -102,13 +102,13 @@ anolisa install os-skills --backend raw
 The GitHub Release and Preview workflows build Linux x86_64 and ARM64 raw
 archives from the same source commit. Each target provides a `.tar.gz` archive,
 its SHA256 checksum, a CycloneDX SBOM, and the SBOM checksum. The package
-installs the tracked skill directories under `{datadir}/skills`; no executable
-is compiled. CI checks the tag and source version for official releases.
+installs the skill directories listed in [the release catalog](packaging/released-skills.txt)
+under `{datadir}/skills`. CI checks the tag and source version for official releases.
 The local release pipeline still uses its existing configuration.
 
 ### Extension
 
-Install all skills as a single extension:
+Install all released skills as a single extension:
 
 ```
 /extensions install https://github.com/alibaba/ANOLISA?path=src/os-skills
@@ -158,6 +158,23 @@ Copy any skill directory to one of the skill search paths:
 Keep script regression tests in `tests/` within this component. See the
 [contribution guide](../../CONTRIBUTING.md#skill-regression-tests-and-path-ownership)
 for dependencies, test commands, and component ownership.
+
+### Incubation and default delivery
+
+A reviewed skill can enter incubation in its normal category directory. The
+release catalog controls default source installs, packages, and COSH extensions.
+Trial users can copy the chosen skill from a reviewed source revision using the
+manual installation instructions above.
+
+Source installation and release-catalog maintenance require Python 3.6 or newer
+with its standard library. See the [source installation guide](../../docs/user-guide/en/os-skills/index.md#installation)
+for selecting the installer interpreter.
+
+When maintainers approve default delivery, add the directory to
+[`packaging/released-skills.txt`](packaging/released-skills.txt) and run
+`python3 src/os-skills/packaging/cosh_manifests.py --write` from the repository
+root. Include any applicable adapter registrations in `component.toml`.
+CI verifies that the generated COSH manifests match the catalog.
 
 ## License
 

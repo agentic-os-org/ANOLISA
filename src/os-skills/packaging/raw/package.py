@@ -9,11 +9,15 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
 import uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from release_catalog import check_payload, read_catalog, release_manifest
 
 
 def sha256(data: bytes) -> str:
@@ -21,7 +25,9 @@ def sha256(data: bytes) -> str:
 
 
 def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> Path:
-    source_contract = (source / "component.toml").read_text()
+    released = read_catalog(source)
+    check_payload(source, released)
+    source_contract = release_manifest((source / "component.toml").read_text(), released)
     manifest = tomllib.loads(source_contract)
     if manifest["component"]["name"] != "os-skills" or manifest["component"]["version"] != version:
         raise ValueError("component.toml identity does not match the requested release")
@@ -56,18 +62,17 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
         ["git", "ls-files", "-z", "--", "."], cwd=source, check=True, capture_output=True
     )
     tracked = sorted(Path(os.fsdecode(name)) for name in result.stdout.split(b"\0") if name)
-    skills = {path.parent.name: path.parent for path in tracked if path.name == "SKILL.md"}
-    if len(skills) != sum(path.name == "SKILL.md" for path in tracked) or not skills:
-        raise ValueError("skill names are missing or duplicated")
+    if any(directory / "SKILL.md" not in tracked for directory in released):
+        raise ValueError("every released SKILL.md must be tracked")
     files = {".anolisa/component.toml": contract.encode()}
-    for name, directory in skills.items():
+    for directory in released:
         for path in tracked:
             if not path.is_relative_to(directory):
                 continue
             source_file = source / path
             if not source_file.is_file() or source_file.is_symlink():
                 raise ValueError(f"skill payload must be a regular file: {path}")
-            destination = f"share/anolisa/skills/{name}/{path.relative_to(directory)}"
+            destination = f"share/anolisa/skills/{directory.name}/{path.relative_to(directory)}"
             if destination in files:
                 raise ValueError(f"duplicate package path: {destination}")
             files[destination] = source_file.read_bytes()

@@ -1,5 +1,13 @@
 {
   "name": "anolisa-skills-ai",
   "version": "0.6.1",
-  "skills": "."
+  "skills": [
+    "install-claude-code",
+    "install-hermes",
+    "install-openclaw",
+    "install-qwenpaw",
+    "install-tokenless",
+    "qwenpaw-usage",
+    "setup-mcp"
+  ]
 }

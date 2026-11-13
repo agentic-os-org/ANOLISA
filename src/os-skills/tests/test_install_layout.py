@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,7 +22,12 @@ class InstallLayoutTests(unittest.TestCase):
         self.source = self.root / "source"
         self.source.mkdir()
         shutil.copyfile(ROOT / "Makefile", self.source / "Makefile")
-        (self.source / "component.toml").write_text("fixture contract\n")
+        (self.source / "component.toml").write_text('[component]\nname = "os-skills"\n')
+        packaging = self.source / "packaging"
+        packaging.mkdir()
+        shutil.copyfile(ROOT / "packaging/release_catalog.py", packaging / "release_catalog.py")
+        self.catalog = packaging / "released-skills.txt"
+        self.catalog.write_text("category/example\n")
         skill = self.source / "category/example"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: example\n---\nExample\n")
@@ -112,6 +118,48 @@ class InstallLayoutTests(unittest.TestCase):
             self.installed("/usr/local/share/anolisa/components/os-skills/component.toml").is_file()
         )
         self.assertFalse(self.installed("/usr/share").exists())
+
+    def test_install_rejects_an_unavailable_interpreter_before_writing(self) -> None:
+        result = self.make(PYTHON3=self.tools / "missing-python")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires Python 3.6 or newer", result.stderr)
+        self.assertIn("PYTHON3=/path/to/python3", result.stderr)
+        self.assertFalse(self.stage.exists())
+
+    def test_install_rejects_an_unsupported_interpreter_before_writing(self) -> None:
+        interpreter = self.tools / "old-python"
+        wrapper = "#!{}\nimport sys\nsys.version_info = (3, {{}})\nexec(sys.argv[2])\n".format(
+            sys.executable
+        )
+        interpreter.write_text(wrapper.format(5))
+        interpreter.chmod(0o755)
+        result = self.make(PYTHON3=interpreter)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires Python 3.6 or newer", result.stderr)
+        self.assertFalse(self.stage.exists())
+        interpreter.write_text(wrapper.format(6))
+        result = self.make("check-python", PYTHON3=interpreter)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.stage.exists())
+
+    def test_default_install_excludes_an_unreleased_skill_and_its_registration(
+        self,
+    ) -> None:
+        trial = self.source / "category/trial"
+        trial.mkdir()
+        (trial / "SKILL.md").write_text("---\nname: trial\n---\n")
+        manifest = (
+            '[component]\nname = "os-skills"\n\n[[adapters]]\nframework = "hermes"\n'
+            '[[adapters.hermes.skills]]\nname = "example"\nsource = "{datadir}/skills/example/"\n'
+            '[[adapters.hermes.skills]]\nname = "trial"\nsource = "{datadir}/skills/trial/"\n'
+        )
+        (self.source / "component.toml").write_text(manifest)
+        skill = self.assert_install("/usr/local/share/anolisa/skills")
+        self.assertFalse((skill.parent / "trial").exists())
+        self.assertNotIn("trial", self.manifest().read_text())
+        installed = self.manifest().with_name("component.toml").read_text()
+        self.assertIn('name = "example"', installed)
+        self.assertNotIn("trial", installed)
 
     def test_user_reinstall_takes_over_an_existing_cosh_collection(self) -> None:
         directory = self.home / ".copilot-shell/skills"
@@ -244,6 +292,7 @@ class InstallLayoutTests(unittest.TestCase):
         replacement = self.source / "category/replacement"
         replacement.mkdir(parents=True)
         (replacement / "SKILL.md").write_text("---\nname: replacement\n---\n")
+        self.catalog.write_text("category/replacement\n")
         result = self.make(SKILLS_DIR=directory)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((installed / "replacement/SKILL.md").is_file())
@@ -451,6 +500,7 @@ class InstallLayoutTests(unittest.TestCase):
         second = self.source / "category/second"
         second.mkdir()
         (second / "SKILL.md").write_text("---\nname: second\n---\n")
+        self.catalog.write_text("category/example\ncategory/second\n")
         (self.tools / "mv").write_text(
             "#!/bin/sh\n"
             'case "$*" in *install-manifest.tmp*) exit 1;; esac\n'
@@ -503,6 +553,7 @@ class InstallLayoutTests(unittest.TestCase):
         second = self.source / "category/second"
         second.mkdir()
         (second / "SKILL.md").write_text("---\nname: second\n---\n")
+        self.catalog.write_text("category/example\ncategory/second\n")
         (self.tools / "mv").write_text(
             "#!/bin/sh\n"
             '/bin/mv "$@" || exit\n'
@@ -568,6 +619,7 @@ class InstallLayoutTests(unittest.TestCase):
         second = self.source / "category/second"
         second.mkdir()
         (second / "SKILL.md").write_text("---\nname: second\n---\n")
+        self.catalog.write_text("category/example\ncategory/second\n")
         (self.tools / "cp").write_text(
             "#!/bin/sh\n"
             "for last; do :; done\n"
@@ -588,16 +640,18 @@ class InstallLayoutTests(unittest.TestCase):
         odd = self.source / "category/my+skill"
         odd.mkdir()
         (odd / "SKILL.md").write_text("---\nname: my+skill\n---\n")
+        self.catalog.write_text("category/example\ncategory/my+skill\n")
         directory = self.root / "custom skills"
         result = self.make(SKILLS_DIR=directory)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unsupported skill directory name", result.stderr)
+        self.assertIn("invalid released Skill directory", result.stderr)
         self.assertFalse((self.installed(directory) / "my+skill").exists())
 
     def test_receipt_is_sorted_and_unique(self) -> None:
         second = self.source / "category/second"
         second.mkdir()
         (second / "SKILL.md").write_text("---\nname: second\n---\n")
+        self.catalog.write_text("category/example\ncategory/second\n")
         directory = self.root / "custom skills"
         self.assert_install(directory, SKILLS_DIR=directory)
         self.assert_install(directory, SKILLS_DIR=directory)

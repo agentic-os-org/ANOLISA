@@ -1,5 +1,10 @@
 {
   "name": "anolisa-skills-others",
   "version": "0.6.2",
-  "skills": "."
+  "skills": [
+    "anolisa-guide",
+    "anolisa-register",
+    "clawhub-skill-mng",
+    "cosh-guide"
+  ]
 }

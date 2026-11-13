@@ -30,9 +30,8 @@ install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/os-skills
 install -p -m 0644 component.toml \
     %{buildroot}%{_datadir}/anolisa/components/os-skills/component.toml
 
-# Find each skill directory (identified by containing SKILL.md) and copy it
-# flattened into the target skills directory.
-find . -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
+# Source0 stages released skills as category/name or skills/name.
+find . -mindepth 3 -maxdepth 3 -type f -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
     skill_dir=$(dirname "$skillmd")
     cp -rp "$skill_dir" %{buildroot}%{_datadir}/anolisa/skills/
 done

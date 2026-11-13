@@ -20,11 +20,16 @@ OS Skills covers three main areas:
 anolisa install os-skills
 ```
 
-From a source checkout, developers can install the collection for cosh:
+Source installation requires Python 3.6 or newer and GNU Make. The release
+catalog selects the default collection; the installer uses only the Python
+standard library. From a source checkout, install the collection for cosh:
 
 ```bash
 make -C src/os-skills install
 ```
+
+If `python3` is unavailable or too old, pass `PYTHON3=/path/to/python3` to the
+same command. Installation checks the interpreter before changing files.
 
 For a regular user, this keeps the existing `~/.copilot-shell/skills/`
 directory; root installs to `/usr/local/share/anolisa/skills/`.

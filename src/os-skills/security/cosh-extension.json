@@ -1,5 +1,7 @@
 {
   "name": "anolisa-skills-security",
   "version": "0.2.1",
-  "skills": "."
+  "skills": [
+    "alinux-cve-query"
+  ]
 }
