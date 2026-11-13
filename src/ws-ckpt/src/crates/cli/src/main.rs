@@ -1239,13 +1239,6 @@ fn snapshot_item_json(item: &SnapshotListItem) -> Result<serde_json::Value> {
     }
 }
 
-fn list_item_workspace(item: &SnapshotListItem) -> &str {
-    match item {
-        SnapshotListItem::Full(entry) => &entry.workspace,
-        SnapshotListItem::Summary(summary) => &summary.workspace,
-    }
-}
-
 fn render_snapshot_list(
     snapshots: Vec<SnapshotListItem>,
     next_cursor: Option<String>,
@@ -1268,10 +1261,18 @@ fn render_snapshot_list(
         return Ok(());
     }
 
+    write_snapshot_table(&mut io::stdout().lock(), &snapshots, next_cursor.as_deref())
+}
+
+fn write_snapshot_table(
+    writer: &mut impl Write,
+    snapshots: &[SnapshotListItem],
+    next_cursor: Option<&str>,
+) -> Result<()> {
     if snapshots.is_empty() {
-        println!("No snapshots found.");
+        writeln!(writer, "No snapshots found.")?;
         if let Some(cursor) = next_cursor {
-            println!("Next cursor: {cursor}");
+            writeln!(writer, "Next cursor: {cursor}")?;
         }
         return Ok(());
     }
@@ -1290,63 +1291,68 @@ fn render_snapshot_list(
     let hdr_date_owned = format!("CREATED (UTC{local_offset})");
     let hdr_date = hdr_date_owned.as_str();
     let hdr_msg = "MESSAGE";
-    let id_len = |item: &SnapshotListItem| match item {
-        SnapshotListItem::Full(entry) => {
-            entry.id.len() + usize::from(entry.meta.missing) * " [MISSING]".len()
-        }
-        SnapshotListItem::Summary(summary) => {
-            summary.id.len()
-                + usize::from(summary.missing) * " [MISSING]".len()
-                + " [SUMMARY]".len()
-        }
-    };
-    let w_ws = snapshots
+    let rows: Vec<_> = snapshots
         .iter()
-        .map(|item| list_item_workspace(item).len())
+        .map(|item| {
+            let (workspace, id, created_at, pinned, message) = match item {
+                SnapshotListItem::Full(entry) => (
+                    entry.workspace.as_str(),
+                    if entry.meta.missing {
+                        format!("{} [MISSING]", entry.id)
+                    } else {
+                        entry.id.clone()
+                    },
+                    entry.meta.created_at,
+                    entry.meta.pinned,
+                    entry.meta.message.as_deref().unwrap_or("-").to_string(),
+                ),
+                SnapshotListItem::Summary(summary) => (
+                    summary.workspace.as_str(),
+                    format!(
+                        "{}{} [SUMMARY]",
+                        summary.id,
+                        if summary.missing { " [MISSING]" } else { "" }
+                    ),
+                    summary.created_at,
+                    summary.pinned,
+                    format!("details omitted: {}", summary.omitted_fields.join(", ")),
+                ),
+            };
+            (
+                escape_diff_text(workspace),
+                escape_diff_text(&id),
+                created_at,
+                pinned,
+                escape_diff_text(&message),
+            )
+        })
+        .collect();
+    let w_ws = rows
+        .iter()
+        .map(|row| row.0.chars().count())
         .max()
         .unwrap_or(0)
         .max(hdr_ws.len());
-    let w_snap = snapshots
+    let w_snap = rows
         .iter()
-        .map(id_len)
+        .map(|row| row.1.chars().count())
         .max()
         .unwrap_or(0)
         .max(hdr_snap.len());
     let w_date = 19_usize.max(hdr_date.len());
-    println!(
+    writeln!(
+        writer,
         "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
         hdr_ws, hdr_snap, hdr_date, hdr_msg,
-    );
-    println!(
+    )?;
+    writeln!(
+        writer,
         "{}",
         "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
-    );
-    for item in &snapshots {
-        let (workspace, id, created_at, pinned, message) = match item {
-            SnapshotListItem::Full(entry) => (
-                entry.workspace.as_str(),
-                if entry.meta.missing {
-                    format!("{} [MISSING]", entry.id)
-                } else {
-                    entry.id.clone()
-                },
-                entry.meta.created_at,
-                entry.meta.pinned,
-                entry.meta.message.as_deref().unwrap_or("-").to_string(),
-            ),
-            SnapshotListItem::Summary(summary) => (
-                summary.workspace.as_str(),
-                format!(
-                    "{}{} [SUMMARY]",
-                    summary.id,
-                    if summary.missing { " [MISSING]" } else { "" }
-                ),
-                summary.created_at,
-                summary.pinned,
-                format!("details omitted: {}", summary.omitted_fields.join(", ")),
-            ),
-        };
-        println!(
+    )?;
+    for (workspace, id, created_at, pinned, message) in &rows {
+        writeln!(
+            writer,
             "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
             workspace,
             id,
@@ -1355,11 +1361,14 @@ fn render_snapshot_list(
                 .format("%Y-%m-%d %H:%M:%S"),
             pinned,
             message,
-        );
+        )?;
     }
-    println!("\nTotal: {} snapshot(s)", snapshots.len());
+    writeln!(writer, "\nTotal: {} snapshot(s)", snapshots.len())?;
     if let Some(cursor) = next_cursor {
-        println!("More snapshots are available. Next cursor: {cursor}");
+        writeln!(
+            writer,
+            "More snapshots are available. Next cursor: {cursor}"
+        )?;
     }
     Ok(())
 }
@@ -3694,6 +3703,112 @@ mod tests {
                 ..
             } if cursor == "next"
         ));
+    }
+
+    fn control_snapshot_items() -> Vec<SnapshotListItem> {
+        let created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        vec![
+            SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                id: "evil\nINJECTED-ROW\t\u{1b}[31m\u{85}".into(),
+                workspace: "/tmp/工作区\nforged\tpath\\n".into(),
+                meta: ws_ckpt_common::SnapshotMeta {
+                    created_at,
+                    pinned: false,
+                    missing: true,
+                    message: Some("note\r\nforged\t\u{7f}\\n".into()),
+                    metadata: None,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            }),
+            SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+                id: "tab\there".into(),
+                workspace: "/tmp/short".into(),
+                created_at,
+                pinned: true,
+                missing: true,
+                omitted_fields: vec!["message\nforged".into()],
+            }),
+            SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                id: "normal".into(),
+                workspace: "/tmp/normal".into(),
+                meta: ws_ckpt_common::SnapshotMeta {
+                    created_at,
+                    pinned: false,
+                    missing: false,
+                    message: None,
+                    metadata: None,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            }),
+        ]
+    }
+
+    #[test]
+    fn list_table_escapes_controls_and_aligns_escaped_columns() {
+        let mut output = Vec::new();
+        write_snapshot_table(&mut output, &control_snapshot_items(), Some("next-page")).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.chars().any(|c| c.is_control() && c != '\n'));
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 8, "{output}");
+        assert!(lines[2].contains(r"/tmp/工作区\nforged\tpath\\n"));
+        assert!(lines[2].contains(r"evil\nINJECTED-ROW\t\u{1b}[31m\u{85} [MISSING]"));
+        assert!(lines[2].ends_with(r"note\r\nforged\t\u{7f}\\n"));
+        assert!(lines[3].contains(r"tab\there [MISSING] [SUMMARY]"));
+        assert!(lines[3].ends_with(r"details omitted: message\nforged"));
+        assert!(lines[4].ends_with("false  -"));
+        assert_eq!(lines[6], "Total: 3 snapshot(s)");
+        assert_eq!(
+            lines[7],
+            "More snapshots are available. Next cursor: next-page"
+        );
+
+        let snapshot_column = lines[0].find("SNAPSHOT").unwrap();
+        let date_column = lines[0].find("CREATED").unwrap();
+        for (row, id) in lines[2..5].iter().zip([r"evil\n", r"tab\there", "normal"]) {
+            let snapshot_text: String = row.chars().skip(snapshot_column).collect();
+            assert!(snapshot_text.starts_with(id), "{row}");
+            let date_start = row
+                .find(
+                    &chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                        .unwrap()
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                )
+                .unwrap();
+            assert_eq!(row[..date_start].chars().count(), date_column);
+        }
+    }
+
+    #[test]
+    fn list_json_preserves_control_fields_in_full_and_summary_entries() {
+        for explicit_page in [false, true] {
+            let _ = take_json_output();
+            let snapshots = control_snapshot_items();
+            let expected: Vec<_> = snapshots
+                .iter()
+                .map(|item| snapshot_item_json(item).unwrap())
+                .collect();
+            render_snapshot_list(snapshots, Some("next".into()), "json", explicit_page).unwrap();
+            let output = take_json_output().unwrap();
+            let entries = if explicit_page {
+                assert_eq!(output["next_cursor"], "next");
+                &output["snapshots"]
+            } else {
+                &output
+            };
+            assert_eq!(entries, &serde_json::Value::Array(expected));
+            assert_eq!(entries[0]["id"], "evil\nINJECTED-ROW\t\u{1b}[31m\u{85}");
+            assert_eq!(entries[0]["workspace"], "/tmp/工作区\nforged\tpath\\n");
+            assert_eq!(entries[0]["meta"]["message"], "note\r\nforged\t\u{7f}\\n");
+            assert_eq!(entries[1]["id"], "tab\there");
+            let encoded = serde_json::to_string(&output).unwrap();
+            assert!(!encoded.contains('\n'));
+            assert!(encoded.contains(r"evil\nINJECTED-ROW\t"));
+        }
     }
 
     #[test]
