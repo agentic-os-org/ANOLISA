@@ -165,76 +165,93 @@ Local rendering and original recovery have been verified on finite samples.
 ### HTML inside JSON values
 
 The same switch also covers HTML carried inside JSON results, such as an API record
-whose `content` or `body` field holds rich text. Field names play no part: a string
-value is considered when it is at least 256 characters long, starts with a supported
-tag, a comment, or `<!doctype html`, and ends with `>`. Results from printed local
-files (`file_read`) keep their HTML verbatim, as above. A text replacement slot is not
-required, because the result stays JSON. An available Stash and a supported recovery
-method are required.
+whose `content` or `body` field holds rich text or an UI card. Field names play no part:
+a string value is considered when it is at least 256 characters long, starts with a
+supported HTML5 or SVG tag, a comment, or `<!doctype html`, and ends with `>`. Results
+from printed local files (`file_read`) keep their HTML verbatim, as above. A text
+replacement slot is not required, because the result stays JSON. An available Stash and
+a supported recovery method are required.
 
 Only the value changes. Field names, other values, JSON types, exact number literals,
 and the position of the value in its record are kept. The new value starts with a line
 such as `[HTML rendered as Markdown; removed 1 style. If needed, run in shell: tokenless
-retrieve <hash>]`, followed by the Markdown. The instruction retrieves that one value
-exactly as received. Serialized JSON inside a string is never parsed or turned into an
-object.
+retrieve <hash>]`, followed by the hybrid Markdown view. The instruction retrieves that
+one value exactly as received. Serialized JSON inside a string is never parsed or turned
+into an object.
 
-Unlike a page, a value is rendered whole and nothing visible is removed. Only style
-sheets and comments are removed and counted in the first line, and cosmetic styling
-is not printed. Line breaks from `br` and block elements are kept, also inside code.
-Button labels stay as separate text, images without alt text and links without text
-keep their targets, and a link or image tooltip (`title`) becomes its Markdown title.
-A value passes through unchanged when the view could change what a reader sees or
-lose a fact. Styling cannot be printed, so a value is rewritten only when no text
-the view would show is hidden or illegible on screen:
+Unlike a page, a value is rendered whole and nothing visible is removed. Only cosmetic
+style sheets and comments are removed and counted in the first line, and cosmetic inline
+styling (including non-reordering flex/grid layout, spacing, shadows, outlines, and
+presentational attributes) is dropped. Line breaks from `br` and block elements are
+kept, also inside code. Plain button labels and adjacent flex or `inline-block` items
+stay separated as distinct words, images without alt text and links without text keep
+their targets, a link or image tooltip (`title`) becomes its Markdown title, and `id`
+or `name` anchors referenced within the fragment (such as `#section` links or `for`,
+`headers`, and `aria-*` references) are retained while unused anchors drop.
 
-- Form fields and their state (`input`, `select`, `textarea`, `form`, `label`).
-- Scripts, templates, media, frames, SVG, MathML, and elements outside HTML.
-- Page chrome (`nav`, `header`, `footer`, `aside`, or a navigation, banner,
-  contentinfo, or complementary role).
-- `del`, `ins`, `s`, `sub`, `sup`, `q`, `time`, `data`, `bdo`, `base`, and `link`.
-- Styles in a `style` attribute or a `<style>` sheet of the value that do more than
-  change colors, fonts, alignment, borders, sizes, or spacing. This covers
-  strike-through, raised or lowered text, hidden or generated content, list markers,
-  preserved line breaks, symbol fonts such as Wingdings, negative or very wide letter
-  or word spacing, and properties, values, or functions such as `calc()` that the
-  check cannot read. Selectors are not matched, so a `<style>` rule must pass for any
-  element it could reach. The `hidden` attribute also passes through.
+Elements or attributes whose meaning Markdown cannot express stay in place as compact
+HTML around compressed rich-text subtrees instead of forcing the whole field back to raw
+HTML:
+
+- Inline `<svg>` icons and graphics (including namespaced attributes such as
+  `xlink:href`, with cosmetic outer `style`/`class` stripped) and valid JSON data blocks
+  in `<script type="application/json">` or `<script type="application/ld+json">` without
+  `src`.
+- Semantic containers (`nav`, `header`, `footer`, `aside`, `hgroup`, `search`, or
+  containers carrying `data-*`, `aria-*`, non-presentational `role`, `cite`, or a
+  referenced `id`), which keep their HTML open and close tags while compressing eligible
+  rich text inside them.
+- Non-GFM tables (multiple header rows, mid-table header rows, nested tables, or
+  multi-line cells) and lists whose numbering or item state Markdown would alter
+  (`reversed`, `type`, `li[value]`, non-plain `start`, empty numbered items, or
+  `data-*`/`aria-*` task items), which keep coherent HTML table or list tags and
+  compress rich text inside cells or items when present.
+- Form controls and state (`input`, `select`, `textarea`, `form`, `label`, and `button`
+  elements carrying `name`, `value`, `disabled`, or `data-*`/`aria-*`), media (`audio`,
+  `video`, `picture`, `canvas`), local phrasing tags (`del`, `ins`, `s`, `sub`, `sup`,
+  `q`, `time`, `data`, `abbr` with `title`, `bdi`, `bdo`, `ruby`), non-empty
+  `aria-hidden` icon ligatures, inline `line-through`, `sub`/`super` or bounded
+  `vertical-align`, preserved `white-space`, and `javascript:`, `data:`, or
+  unbalanced-bracket links and images.
+
+A value still passes through unchanged as a whole when global safety cannot be verified,
+when the view could reveal hidden text or obscure legible text, or when no subtree
+converts to Markdown:
+
+- Executable or external `<script>` elements, inline event handlers (`on*`),
+  `javascript:` or `data:` form actions, `<template>`, frames and embedded objects
+  (`iframe`, `frame`, `object`, `embed`, `portal`, `fencedframe`), MathML, custom
+  elements or XML tags outside HTML/SVG, `<base>`, and `<link>`.
+- Metadata the view would drop: a `meta` other than a character set, content type,
+  compatibility mode, viewport, or mail formatting hint (so a description or refresh
+  passes through), and a `title` outside the head or after the first.
+- Content a browser shows only after the reader acts: the body of a closed `details`, or
+  a `details` without a `summary` or grouped by `name`.
+- `<style>` rules that go beyond cosmetic colors, fonts, alignment, borders, sizes, or
+  spacing (selectors are not matched, so a sheet rule cannot be localized to one
+  element), the `hidden` attribute, hidden or generated content, non-zero flex/grid
+  `order`, `flex-basis: 0` clipping, symbol fonts such as Wingdings, negative or very
+  wide letter or word spacing, and CSS escapes, vendor prefixes, custom properties, or
+  functions such as `var()` that the check cannot read.
 - Text that its styling makes hard or impossible to see. Colors, sizes, and line
   heights are followed through the value's inline styles, presentational attributes
   such as `bgcolor` or a `font` element's `color`, its `<style>` sheets and column
-  backgrounds, and a browser's defaults for links, marks, and buttons. Any text with a
-  contrast ratio below 1.5 against a color it may sit on (white on white, or text the
-  color of the page) passes the value through, as does text over a background image or
-  gradient, smaller than 6 pixels, or with lines closer than half its font size. So do
-  a fixed width or height that text could overflow onto other content, and an inline
-  element's vertical padding or border taller than 8 pixels, or a text decoration with
-  a set thickness, either of which can paint over neighboring lines. The page behind
-  the value is taken to be a browser's default: white, with black 16-pixel text.
-  Stylesheets outside the value, such as those of the application that displays it,
-  its dark mode, or fonts it loads, are unknown and not considered. Margins or padding
-  may move text right or down, where a page scrolls to it; whether the displaying
-  application clips it there is also unknown.
-- Attributes the view cannot show, such as `data-*` values, `aria-*` labels and
-  states, a tooltip on elements other than links and images, `abbr` on table
-  headers, a quote's `cite`, a download file name, or a button's value or state.
-  Text inside an `aria-hidden` element also passes through, because it may be an
-  icon ligature.
-- Metadata the view would drop: a `meta` other than a character set, content type,
-  compatibility mode, viewport, or mail formatting hint (so a description or a
-  refresh passes through), and a `title` outside the head or after the first.
-- Content a browser shows only after the reader acts: the body of a closed
-  `details`. A `details` without a `summary`, or grouped by `name`, also passes
-  through.
-- Ordered lists whose numbers the view could not reproduce: reversed or lettered
-  lists, a `start` other than a plain non-negative number, items with an explicit
-  `value`, empty items, or content between items.
-- Tables nested in a cell, cells containing line breaks, or a row of headers anywhere
-  but the top, such as a second header row or a section label, since a Markdown table
-  has one header row.
-- `javascript:` or `data:` targets, any text or target that would not appear in the
-  view in the order a browser draws it, or text a browser shows apart that the view
-  would run together.
+  backgrounds, and a browser's defaults for links, marks, buttons, and form fields
+  (skipping non-rendered `<script>`, `<style>`, and SVG metadata/definition nodes). Any
+  text with a contrast ratio below 1.5 against a color it may sit on (white on white, or
+  text the color of the page) passes the value through, as does text over a background
+  image or gradient, smaller than 6 pixels, or with lines closer than half its font
+  size. So do a fixed width or height that text could overflow onto other content, and
+  an inline element's vertical padding or border taller than 8 pixels, or a text
+  decoration with a set thickness, either of which can paint over neighboring lines. The
+  page behind the value is taken to be a browser's default: white, with black 16-pixel
+  text. Stylesheets outside the value, such as those of the application that displays
+  it, its dark mode, or fonts it loads, are unknown and not considered. Margins or
+  padding may move text right or down, where a page scrolls to it; whether the
+  displaying application clips it there is also unknown.
+- Any visible text, retained HTML tag, or link/image target that would not appear in the
+  view in browser source order, or text a browser shows apart that the view would run
+  together.
 
 Each rewritten value must save at least 16 estimated tokens in its JSON-escaped form,
 including its first line, and the rewritten document must be smaller than the compact

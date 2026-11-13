@@ -1,22 +1,23 @@
-//! CSS a fragment view may drop.
+//! CSS classification for HTML fragment views.
 //!
-//! A Markdown view prints no styling, which is faithful only while the
-//! styling changes how text looks rather than what it says or whether it
-//! is seen. Each declaration is therefore checked against an allowlist of
-//! cosmetic properties, and anything else rejects the fragment: struck
-//! prices, raised exponents, hidden or generated text, list markers,
-//! preserved line breaks, symbol fonts that draw letters as pictures, boxes
-//! whose text can overflow onto other content, inline boxes tall enough to
-//! paint over neighbouring lines, and every property or spelling the check
-//! cannot read, including escapes, vendor and custom properties, and
-//! functions other than colours and images, such as `calc()` or `var()`,
-//! which can compute or substitute any value. Colours and sizes pass here
-//! when they can be read; whether the text they produce is legible is
-//! decided by [`super::legibility`], which follows them through the
-//! fragment's cascade. Selectors are not matched, so a `<style>` sheet must be
-//! cosmetic for any element it could reach. Stylesheets outside the
-//! fragment are unknown to every reader of the value and are not
-//! considered.
+//! Markdown views drop styling on converted subtrees while hybrid fragment
+//! views may retain local HTML elements with their inline `style` attribute.
+//! Declarations are therefore classified into three tiers:
+//! - [`CssVerdict::Cosmetic`]: visual styling and normal-flow card layout that
+//!   can be stripped without changing meaning, order or visibility.
+//! - [`CssVerdict::LocalSemantic`]: local meaning or formatting on the styled
+//!   element itself (such as `line-through`, `super`/`sub`, preserved
+//!   whitespace, list markers, flex reversal or SVG paint), which stays
+//!   faithful when that element and its `style` attribute remain HTML.
+//! - [`CssVerdict::Hazard`]: hidden or off-screen text, narrow fixed boxes
+//!   whose text can overflow onto neighbours, tall inline borders/padding,
+//!   cross-parent `order`, symbol fonts, escapes, or functions other than
+//!   colours and images (`calc()`, `var()`). Any hazard rejects the fragment.
+//!
+//! Colours and font sizes pass here when readable; [`super::legibility`]
+//! decides through the cascade whether every visible text stays legible.
+//! Selectors are not matched, so a `<style>` sheet must be [`CssVerdict::Cosmetic`]
+//! for every element it could reach.
 
 use super::color;
 use super::starts_with_ignore_ascii_case;
@@ -103,39 +104,195 @@ pub(super) struct Declaration {
     pub(super) important: bool,
 }
 
+/// How an inline `style` attribute affects a fragment view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CssVerdict {
+    /// Only changes visual styling or normal-flow layout; safe to strip.
+    Cosmetic,
+    /// Carries local meaning or formatting on the element itself; safe when
+    /// the element and its `style` attribute remain HTML.
+    LocalSemantic,
+    /// May hide text, paint over neighbours, reorder across parent/child, or
+    /// call unreadable CSS syntax; rejects the fragment.
+    Hazard,
+}
+
+/// Classification and box-layout summary for an inline `style` attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InlineStyle {
+    pub(super) verdict: CssVerdict,
+    /// Direct child elements are flex or grid items laid out as separate boxes.
+    pub(super) flex_or_grid: bool,
+    /// Element itself is an inline-level box laid out apart from adjacent text.
+    pub(super) atomic_inline: bool,
+}
+
+impl Default for InlineStyle {
+    fn default() -> Self {
+        Self {
+            verdict: CssVerdict::Cosmetic,
+            flex_or_grid: false,
+            atomic_inline: false,
+        }
+    }
+}
+
+/// CSS `white-space` collapsing mode (ignoring cosmetic line-wrap differences).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum WsMode {
+    /// `normal` / `nowrap`: collapses both segment breaks and space/tab runs.
+    #[default]
+    Collapse,
+    /// `pre-line`: preserves segment breaks, collapses space/tab runs.
+    PreserveLines,
+    /// `pre` / `pre-wrap` / `break-spaces`: preserves segment breaks and spaces/tabs.
+    PreserveAll,
+}
+
+impl WsMode {
+    pub(super) fn preserves_newlines(self) -> bool {
+        !matches!(self, Self::Collapse)
+    }
+}
+
 /// What an inline `style` attribute styles; the closures run only when a
 /// declaration needs them.
 pub(super) struct Styled<'a> {
-    /// A non-replaced inline element: width and height do not apply to it,
-    /// and its vertical padding and borders do not move its line.
+    /// A non-replaced inline element: width and height do not apply to it
+    /// unless `display` or a flex/grid parent changes its box type, and its
+    /// vertical padding and borders do not move its line.
     pub(super) inline: bool,
-    /// A table part or image, which grows to fit its content whatever size
-    /// it is given.
+    /// A table part, which grows to fit its content unless `display` or a
+    /// flex/grid parent overrides its box type.
     pub(super) grows: bool,
-    /// Whether the element's text, descendants included, has any visible
-    /// character.
-    pub(super) has_text: &'a dyn Fn() -> bool,
+    /// A replaced image carrying a target or alt text, whose painted content
+    /// shrinks to invisible when sized to zero.
+    pub(super) replaced_media: bool,
+    /// Direct child of a flex or grid container, which CSS blockifies even
+    /// when `display: inline` is written explicitly.
+    pub(super) flex_or_grid_item: bool,
+    /// An element in the SVG namespace, which stays verbatim HTML and clips
+    /// graphics to its own viewport.
+    pub(super) svg: bool,
+    /// Whether an SVG element or its direct rendered subtree instantiates
+    /// `<use>` references.
+    pub(super) svg_renders_use: bool,
+    /// Effective `white-space` collapsing mode inherited from the parent element.
+    pub(super) ancestor_ws: WsMode,
+    /// Collapsing mode of this element without an inline `white-space` override
+    /// (`PreserveAll` on `<pre>` / `<textarea>`, otherwise `ancestor_ws`).
+    pub(super) default_ws: WsMode,
+    /// Whether the element or any descendant draws visible text, replaced
+    /// media, or interactive controls.
+    pub(super) has_content: &'a dyn Fn() -> bool,
     /// Whether that text has line breaks, tabs or space runs that
     /// preserving whitespace would show.
     pub(super) keeps_whitespace: &'a dyn Fn() -> bool,
 }
 
-/// Whether an inline `style` attribute only changes how its element looks.
-pub(super) fn inline_is_cosmetic(block: &str, styled: &Styled<'_>) -> bool {
-    declarations(block).is_some_and(|declarations| {
-        declarations
+#[derive(Clone, Copy)]
+struct EffectiveBox {
+    /// Guaranteed to remain a non-replaced inline box (`width`, `height`,
+    /// `max-width` and `max-height` do not apply).
+    definitely_inline: bool,
+    /// May remain or become a non-replaced inline box (vertical `padding` and
+    /// `border` are capped at [`MAX_INLINE_EXTENT_PX`]).
+    may_be_inline: bool,
+    /// Guaranteed to grow to fit its content (`table`, `table-row` or
+    /// `table-cell`, when not overridden).
+    grows: bool,
+    /// Whether `overflow` clips overflowing content (`hidden`, `clip`, or an
+    /// inherited parent clip).
+    clips_overflow: bool,
+}
+
+impl EffectiveBox {
+    fn for_inline(styled: &Styled<'_>, ordered: &[&Declaration]) -> Self {
+        let last_display = ordered
             .iter()
-            .all(|declaration| is_cosmetic(declaration, Some(styled)))
-    })
+            .rev()
+            .find(|declaration| declaration.property == "display")
+            .map(|declaration| declaration.value.as_str());
+        let clips_overflow = ordered.iter().any(|declaration| {
+            matches!(
+                declaration.property.as_str(),
+                "overflow" | "overflow-x" | "overflow-y"
+            ) && tokens(&declaration.value)
+                .iter()
+                .any(|&part| matches!(part, "hidden" | "clip" | "inherit"))
+        });
+        match last_display {
+            None => Self {
+                definitely_inline: styled.inline && !styled.flex_or_grid_item,
+                may_be_inline: styled.inline && !styled.flex_or_grid_item,
+                grows: styled.grows && !styled.flex_or_grid_item,
+                clips_overflow,
+            },
+            Some("inline" | "initial" | "unset") => Self {
+                definitely_inline: styled.inline && !styled.flex_or_grid_item,
+                may_be_inline: !styled.svg && !styled.flex_or_grid_item,
+                grows: false,
+                clips_overflow,
+            },
+            Some("table" | "table-row" | "table-cell") => Self {
+                definitely_inline: false,
+                may_be_inline: false,
+                grows: !styled.svg && !styled.flex_or_grid_item,
+                clips_overflow,
+            },
+            Some(_) => Self {
+                definitely_inline: false,
+                may_be_inline: false,
+                grows: false,
+                clips_overflow,
+            },
+        }
+    }
+}
+
+/// Classifies an inline `style` attribute and records any flex/grid or atomic
+/// inline box layout it establishes.
+pub(super) fn classify_inline(block: &str, styled: &Styled<'_>) -> InlineStyle {
+    let Some(declarations) = declarations(block) else {
+        return InlineStyle {
+            verdict: CssVerdict::Hazard,
+            ..InlineStyle::default()
+        };
+    };
+    let mut result = InlineStyle::default();
+    let ordered: Vec<&Declaration> = declarations
+        .iter()
+        .filter(|declaration| !declaration.important)
+        .chain(
+            declarations
+                .iter()
+                .filter(|declaration| declaration.important),
+        )
+        .collect();
+    let box_model = EffectiveBox::for_inline(styled, &ordered);
+    for declaration in ordered {
+        match classify_declaration(declaration, Some(styled), Some(box_model), &mut result) {
+            CssVerdict::Cosmetic => {}
+            CssVerdict::LocalSemantic => result.verdict = CssVerdict::LocalSemantic,
+            CssVerdict::Hazard => {
+                return InlineStyle {
+                    verdict: CssVerdict::Hazard,
+                    ..InlineStyle::default()
+                };
+            }
+        }
+    }
+    result
 }
 
 /// Whether a `<style>` sheet only changes how text looks, whatever element
 /// each rule reaches. See [`sheet_declarations`] for the rules it reads.
 pub(super) fn sheet_is_cosmetic(sheet: &str) -> bool {
+    let mut ignored = InlineStyle::default();
     sheet_declarations(sheet).is_some_and(|declarations| {
-        declarations
-            .iter()
-            .all(|declaration| is_cosmetic(declaration, None))
+        declarations.iter().all(|declaration| {
+            classify_declaration(declaration, None, None, &mut ignored) == CssVerdict::Cosmetic
+        })
     })
 }
 
@@ -210,72 +367,294 @@ fn declaration(text: &str) -> Option<Declaration> {
     })
 }
 
-/// Whether one declaration is cosmetic. `styled` describes the element it
-/// styles, or is `None` in a sheet, where any element may be styled.
-fn is_cosmetic(declaration: &Declaration, styled: Option<&Styled<'_>>) -> bool {
+/// Classifies one declaration. `styled` describes the element it styles, or
+/// is `None` in a `<style>` sheet, where any element may be reached.
+fn classify_declaration(
+    declaration: &Declaration,
+    styled: Option<&Styled<'_>>,
+    box_model: Option<EffectiveBox>,
+    layout: &mut InlineStyle,
+) -> CssVerdict {
     let Declaration {
         property, value, ..
     } = declaration;
-    // An escape or a function can spell any value, so neither is read.
+    // An escape or an unknown function can spell any value, so neither is read.
     if property.contains('\\') || value.contains('\\') || !calls_known_functions(value) {
-        return false;
+        return CssVerdict::Hazard;
     }
     let value = value.as_str();
+    let cosmetic_if = |ok: bool| {
+        if ok {
+            CssVerdict::Cosmetic
+        } else {
+            CssVerdict::Hazard
+        }
+    };
     match property.as_str() {
-        "color" | "background-color" => color_value(value),
-        "background" => background(value).is_some(),
-        "font" => font(value).is_some_and(|font| !has_symbol_font(&font.family)),
-        "font-family" => !has_symbol_font(value),
-        "font-size" => font_size(value).is_some(),
-        "line-height" => line_height(value).is_some(),
+        "color" | "background-color" => cosmetic_if(color_value(value)),
+        "background" => cosmetic_if(background(value).is_some()),
+        "font" => cosmetic_if(font(value).is_some_and(|font| !has_symbol_font(&font.family))),
+        "font-family" => cosmetic_if(!has_symbol_font(value)),
+        "font-size" => cosmetic_if(font_size(value).is_some()),
+        "line-height" => cosmetic_if(line_height(value).is_some()),
         // Negative spacing stacks glyphs onto each other, and wide spacing
         // scatters them.
-        "letter-spacing" | "word-spacing" => {
+        "letter-spacing" | "word-spacing" => cosmetic_if(
             is_global(value)
                 || value == "normal"
-                || length(value).is_some_and(|px| (0.0..=MAX_SPACING_PX).contains(&px))
-        }
-        "text-decoration" => tokens(value).iter().all(|token| {
-            is_global(token)
-                || DECORATION_LINES.contains(token)
-                || DECORATION_STYLES.contains(token)
-                || color::parse(token).is_some()
-        }),
-        "text-decoration-line" => tokens(value)
-            .iter()
-            .all(|token| is_global(token) || DECORATION_LINES.contains(token)),
-        // Raised or lowered text reads as an exponent or index once flattened.
-        "vertical-align" => matches!(
-            value,
-            "baseline" | "top" | "middle" | "bottom" | "text-top" | "text-bottom"
+                || length(value).is_some_and(|px| (0.0..=MAX_SPACING_PX).contains(&px)),
         ),
-        // Preserved whitespace is invisible only while there is none to keep.
+        "text-decoration" => {
+            let parts = tokens(value);
+            if !parts.iter().all(|token| {
+                is_global(token)
+                    || *token == "line-through"
+                    || DECORATION_LINES.contains(token)
+                    || DECORATION_STYLES.contains(token)
+                    || color::parse(token).is_some()
+            }) {
+                return CssVerdict::Hazard;
+            }
+            if parts.contains(&"line-through") {
+                return if styled.is_some() {
+                    CssVerdict::LocalSemantic
+                } else {
+                    CssVerdict::Hazard
+                };
+            }
+            CssVerdict::Cosmetic
+        }
+        "text-decoration-line" => {
+            let parts = tokens(value);
+            if !parts.iter().all(|token| {
+                is_global(token) || *token == "line-through" || DECORATION_LINES.contains(token)
+            }) {
+                return CssVerdict::Hazard;
+            }
+            if parts.contains(&"line-through") {
+                return if styled.is_some() {
+                    CssVerdict::LocalSemantic
+                } else {
+                    CssVerdict::Hazard
+                };
+            }
+            CssVerdict::Cosmetic
+        }
+        // Raised or lowered text reads as an exponent or index once flattened.
+        "vertical-align" => {
+            if is_global(value)
+                || matches!(
+                    value,
+                    "baseline" | "top" | "middle" | "bottom" | "text-top" | "text-bottom"
+                )
+            {
+                CssVerdict::Cosmetic
+            } else if styled.is_some()
+                && (matches!(value, "sub" | "super")
+                    || length(value).is_some_and(|px| (-32.0..=32.0).contains(&px))
+                    || dimension(value)
+                        .is_some_and(|(n, unit)| unit == "%" && (-200.0..=200.0).contains(&n)))
+            {
+                CssVerdict::LocalSemantic
+            } else {
+                CssVerdict::Hazard
+            }
+        }
+        // `white-space` is an inherited CSS property, so `unset` behaves like
+        // `inherit` (taking `ancestor_ws`), whereas `initial` resets to
+        // `normal`. `pre-line` preserves segment breaks while collapsing space
+        // runs, so switching between `Collapse`, `PreserveLines`, and
+        // `PreserveAll` in any direction is locally semantic.
         "white-space" => {
-            matches!(value, "normal" | "nowrap")
-                || styled.is_some_and(|styled| !(styled.keeps_whitespace)())
+            let effective = match value {
+                "inherit" | "unset" => styled.map(|s| s.ancestor_ws),
+                "normal" | "nowrap" | "initial" => Some(WsMode::Collapse),
+                "pre-line" => match styled {
+                    Some(_) => Some(WsMode::PreserveLines),
+                    None => return CssVerdict::Hazard,
+                },
+                "pre" | "pre-wrap" | "break-spaces" => match styled {
+                    Some(_) => Some(WsMode::PreserveAll),
+                    None => return CssVerdict::Hazard,
+                },
+                _ => return CssVerdict::Hazard,
+            };
+            if let Some((styled, effective_ws)) = styled.zip(effective)
+                && effective_ws != styled.default_ws
+                && (styled.keeps_whitespace)()
+            {
+                CssVerdict::LocalSemantic
+            } else {
+                CssVerdict::Cosmetic
+            }
         }
         // A negative margin can move text out of view, above or left of
         // where a page scrolls. Each value must read as a size of at least
         // zero: a sign test alone would miss `0-9999px`, which a browser
         // reads as two values.
-        _ if property == "margin" || property.starts_with("margin-") => {
-            tokens(value).iter().all(|&token| {
-                token == "auto"
-                    || is_global(token)
-                    || dimension(token).is_some_and(|(number, unit)| {
-                        number >= 0.0 && (unit == "%" || length(token).is_some())
-                    })
-            })
-        }
+        _ if property == "margin" || property.starts_with("margin-") => cosmetic_if(
+            tokens(value)
+                .iter()
+                .all(|&token| token == "auto" || is_global(token) || is_non_negative_size(token)),
+        ),
         // Text overflowing a box it does not fit lands on whatever is drawn
-        // next to it, or under a later image.
+        // next to it, or under a later image; with `overflow: hidden` an
+        // atomic inline or block box of zero/narrow size hides text outright.
         "width" | "height" | "max-width" | "max-height" => {
-            matches!(value, "auto" | "none" | "100%" | "initial" | "unset")
-                || styled
-                    .is_some_and(|styled| styled.inline || styled.grows || !(styled.has_text)())
+            if matches!(value, "auto" | "none" | "100%" | "initial" | "unset") {
+                CssVerdict::Cosmetic
+            } else if let Some((styled, box_model)) = styled.zip(box_model)
+                && (matches!(value, "fit-content" | "max-content" | "min-content")
+                    || is_non_negative_size(value))
+            {
+                let is_zero = dimension(value).is_some_and(|(n, _)| n == 0.0);
+                if styled.replaced_media {
+                    if is_zero {
+                        CssVerdict::Hazard
+                    } else {
+                        CssVerdict::Cosmetic
+                    }
+                } else if box_model.definitely_inline {
+                    CssVerdict::Cosmetic
+                } else if box_model.grows {
+                    if is_zero && box_model.clips_overflow && (styled.has_content)() {
+                        CssVerdict::Hazard
+                    } else {
+                        CssVerdict::Cosmetic
+                    }
+                } else if !(styled.has_content)() {
+                    if styled.svg && is_zero {
+                        if styled.svg_renders_use {
+                            CssVerdict::Hazard
+                        } else {
+                            CssVerdict::LocalSemantic
+                        }
+                    } else {
+                        CssVerdict::Cosmetic
+                    }
+                } else if styled.svg && dimension(value).is_some_and(|(n, _)| n > 0.0) {
+                    CssVerdict::LocalSemantic
+                } else {
+                    CssVerdict::Hazard
+                }
+            } else {
+                CssVerdict::Hazard
+            }
         }
-        _ if property.starts_with("padding") || property.starts_with("border") => {
-            box_edge_is_cosmetic(property, value, styled.is_none_or(|styled| styled.inline))
+        _ if property.starts_with("padding") || property.starts_with("border") => cosmetic_if(
+            box_edge_is_cosmetic(property, value, box_model.is_none_or(|b| b.may_be_inline)),
+        ),
+        "display" => match styled {
+            Some(styled) => classify_display(value, styled, layout),
+            None => CssVerdict::Hazard,
+        },
+        "flex-direction" if styled.is_some() => match value {
+            "row" | "column" => CssVerdict::Cosmetic,
+            "row-reverse" | "column-reverse" => CssVerdict::LocalSemantic,
+            _ if is_global(value) => CssVerdict::Cosmetic,
+            _ => CssVerdict::Hazard,
+        },
+        "flex-wrap" if styled.is_some() => match value {
+            "nowrap" | "wrap" => CssVerdict::Cosmetic,
+            "wrap-reverse" => CssVerdict::LocalSemantic,
+            _ if is_global(value) => CssVerdict::Cosmetic,
+            _ => CssVerdict::Hazard,
+        },
+        "flex-flow" if styled.is_some() => {
+            let parts = tokens(value);
+            if parts.is_empty() || parts.len() > 2 {
+                return CssVerdict::Hazard;
+            }
+            if parts.len() == 1 && is_global(parts[0]) {
+                return CssVerdict::Cosmetic;
+            }
+            let mut reverse = false;
+            for &part in &parts {
+                match part {
+                    "row" | "column" | "nowrap" | "wrap" => {}
+                    "row-reverse" | "column-reverse" | "wrap-reverse" => reverse = true,
+                    _ => return CssVerdict::Hazard,
+                }
+            }
+            if reverse {
+                CssVerdict::LocalSemantic
+            } else {
+                CssVerdict::Cosmetic
+            }
+        }
+        "flex-grow" | "flex-shrink" if styled.is_some() => {
+            cosmetic_if(is_global(value) || number(value).is_some_and(|n| n >= 0.0))
+        }
+        "flex-basis" if styled.is_some() => cosmetic_if(match styled.zip(box_model) {
+            Some((styled, box_model)) => flex_basis_is_safe(value, false, box_model.grows, styled),
+            None => false,
+        }),
+        "flex" if styled.is_some() => cosmetic_if(match styled.zip(box_model) {
+            Some((styled, box_model)) => flex_shorthand_is_safe(value, box_model.grows, styled),
+            None => false,
+        }),
+        // Non-zero `order` depends on the parent's flex/grid container, so
+        // stripping the parent's `display: flex` would drop the reordering.
+        "order" if styled.is_some() => {
+            cosmetic_if(matches!(value, "initial" | "unset") || number(value) == Some(0.0))
+        }
+        "gap" | "row-gap" | "column-gap" | "grid-gap" | "grid-row-gap" | "grid-column-gap"
+            if styled.is_some() =>
+        {
+            let parts = tokens(value);
+            cosmetic_if(
+                is_global(value)
+                    || (!parts.is_empty()
+                        && parts.len() <= 2
+                        && parts
+                            .iter()
+                            .all(|&part| part == "normal" || is_non_negative_size(part))),
+            )
+        }
+        "align-items" | "align-self" | "align-content" | "justify-content" | "justify-items"
+        | "justify-self" | "place-items" | "place-content" | "place-self"
+            if styled.is_some() =>
+        {
+            let parts = tokens(value);
+            cosmetic_if(
+                is_global(value)
+                    || (!parts.is_empty()
+                        && parts.len() <= 3
+                        && parts.iter().all(|&p| is_alignment(p))),
+            )
+        }
+        "overflow" | "overflow-x" | "overflow-y" if styled.is_some() => {
+            let parts = tokens(value);
+            cosmetic_if(
+                is_global(value)
+                    || (!parts.is_empty()
+                        && parts.len() <= 2
+                        && parts.iter().all(|&part| {
+                            matches!(part, "visible" | "hidden" | "clip" | "scroll" | "auto")
+                        })),
+            )
+        }
+        "text-overflow" => cosmetic_if(is_global(value) || matches!(value, "clip" | "ellipsis")),
+        "list-style-image" => cosmetic_if(is_global(value) || value == "none"),
+        "list-style" | "list-style-type" | "list-style-position" if styled.is_some() => {
+            if calls_any_function(value) {
+                CssVerdict::Hazard
+            } else {
+                CssVerdict::LocalSemantic
+            }
+        }
+        "box-shadow" => cosmetic_if(box_shadow_is_cosmetic(value)),
+        "outline" | "outline-width" | "outline-style" | "outline-color" | "outline-offset" => {
+            cosmetic_if(outline_is_cosmetic(property, value))
+        }
+        "cursor" | "pointer-events" | "user-select" => CssVerdict::Cosmetic,
+        "fill" | "stroke" | "stop-color" | "flood-color" | "lighting-color" | "fill-opacity"
+        | "stroke-opacity" | "stop-opacity" | "flood-opacity" | "stroke-width"
+        | "stroke-linecap" | "stroke-linejoin" | "stroke-miterlimit" | "stroke-dasharray"
+        | "stroke-dashoffset" | "fill-rule" | "clip-rule" | "vector-effect"
+            if styled.is_some_and(|styled| styled.svg) =>
+        {
+            CssVerdict::LocalSemantic
         }
         "background-image"
         | "background-position"
@@ -298,7 +677,200 @@ fn is_cosmetic(declaration: &Declaration, styled: Option<&Styled<'_>>) -> bool {
         | "box-sizing"
         | "word-break"
         | "word-wrap"
-        | "overflow-wrap" => true,
+        | "overflow-wrap" => CssVerdict::Cosmetic,
+        _ => CssVerdict::Hazard,
+    }
+}
+
+fn classify_display(value: &str, styled: &Styled<'_>, layout: &mut InlineStyle) -> CssVerdict {
+    if styled.svg {
+        return match value {
+            "inline" | "initial" | "unset" | "block" => {
+                layout.atomic_inline = false;
+                CssVerdict::Cosmetic
+            }
+            "inline-block" | "flex" | "inline-flex" => {
+                layout.atomic_inline = matches!(value, "inline-block" | "inline-flex");
+                CssVerdict::Cosmetic
+            }
+            _ => CssVerdict::Hazard,
+        };
+    }
+    if styled.inline {
+        match value {
+            "inline" | "initial" | "unset" => {
+                layout.flex_or_grid = false;
+                layout.atomic_inline = false;
+                CssVerdict::Cosmetic
+            }
+            "inline-block" => {
+                layout.flex_or_grid = false;
+                layout.atomic_inline = true;
+                CssVerdict::Cosmetic
+            }
+            "inline-flex" | "inline-grid" => {
+                layout.flex_or_grid = true;
+                layout.atomic_inline = true;
+                CssVerdict::Cosmetic
+            }
+            "block" | "flow-root" | "flex" | "grid" | "list-item" | "table" | "table-row"
+            | "table-cell" => {
+                layout.flex_or_grid = matches!(value, "flex" | "grid");
+                layout.atomic_inline = true;
+                CssVerdict::LocalSemantic
+            }
+            _ => CssVerdict::Hazard,
+        }
+    } else {
+        match value {
+            "block" | "flow-root" => {
+                layout.flex_or_grid = false;
+                layout.atomic_inline = false;
+                CssVerdict::Cosmetic
+            }
+            "flex" | "grid" => {
+                layout.flex_or_grid = true;
+                layout.atomic_inline = false;
+                CssVerdict::Cosmetic
+            }
+            "inline-flex" | "inline-grid" => {
+                layout.flex_or_grid = true;
+                layout.atomic_inline = true;
+                CssVerdict::Cosmetic
+            }
+            "inline-block" => {
+                layout.flex_or_grid = false;
+                layout.atomic_inline = true;
+                CssVerdict::Cosmetic
+            }
+            "inline" | "initial" | "unset" => {
+                layout.flex_or_grid = false;
+                layout.atomic_inline = false;
+                CssVerdict::LocalSemantic
+            }
+            _ => CssVerdict::Hazard,
+        }
+    }
+}
+
+fn is_non_negative_size(token: &str) -> bool {
+    dimension(token)
+        .is_some_and(|(number, unit)| number >= 0.0 && (unit == "%" || length(token).is_some()))
+}
+
+fn flex_basis_is_safe(token: &str, grows: bool, box_grows: bool, styled: &Styled<'_>) -> bool {
+    if matches!(token, "initial" | "unset" | "auto" | "content" | "100%") {
+        return true;
+    }
+    let valid = matches!(token, "fit-content" | "max-content" | "min-content")
+        || is_non_negative_size(token);
+    if styled.replaced_media {
+        return valid
+            && (grows
+                || matches!(token, "fit-content" | "max-content" | "min-content")
+                || dimension(token).is_some_and(|(n, _)| n > 0.0));
+    }
+    valid && (grows || box_grows || !(styled.has_content)())
+}
+
+fn flex_shorthand_is_safe(value: &str, box_grows: bool, styled: &Styled<'_>) -> bool {
+    if matches!(value, "initial" | "unset" | "auto" | "none") {
+        return true;
+    }
+    let parts = tokens(value);
+    match parts.as_slice() {
+        [only] => match number(only) {
+            Some(grow) => {
+                grow > 0.0
+                    || (grow == 0.0
+                        && !styled.replaced_media
+                        && (box_grows || !(styled.has_content)()))
+            }
+            None => flex_basis_is_safe(only, false, box_grows, styled),
+        },
+        [first, second] => {
+            let Some(grow) = number(first).filter(|&n| n >= 0.0) else {
+                return false;
+            };
+            match number(second) {
+                Some(shrink) => {
+                    shrink >= 0.0
+                        && (grow > 0.0
+                            || (!styled.replaced_media && (box_grows || !(styled.has_content)())))
+                }
+                None => flex_basis_is_safe(second, grow > 0.0, box_grows, styled),
+            }
+        }
+        [first, second, third] => {
+            let Some(grow) = number(first).filter(|&n| n >= 0.0) else {
+                return false;
+            };
+            let Some(shrink) = number(second).filter(|&n| n >= 0.0) else {
+                return false;
+            };
+            let _ = shrink;
+            flex_basis_is_safe(third, grow > 0.0, box_grows, styled)
+        }
+        _ => false,
+    }
+}
+
+fn is_alignment(token: &str) -> bool {
+    matches!(
+        token,
+        "normal"
+            | "stretch"
+            | "center"
+            | "start"
+            | "end"
+            | "flex-start"
+            | "flex-end"
+            | "self-start"
+            | "self-end"
+            | "left"
+            | "right"
+            | "baseline"
+            | "first"
+            | "last"
+            | "space-between"
+            | "space-around"
+            | "space-evenly"
+            | "safe"
+            | "unsafe"
+    )
+}
+
+fn box_shadow_is_cosmetic(value: &str) -> bool {
+    if is_global(value) || value == "none" {
+        return true;
+    }
+    let Some(shadows) = split_top_level(value, ',') else {
+        return false;
+    };
+    shadows.iter().all(|shadow| {
+        let parts = tokens(shadow);
+        !parts.is_empty()
+            && parts.iter().all(|&part| {
+                part == "inset" || length(part).is_some() || color::parse(part).is_some()
+            })
+    })
+}
+
+fn outline_is_cosmetic(property: &str, value: &str) -> bool {
+    if is_global(value) || value == "none" || value == "auto" {
+        return true;
+    }
+    match property {
+        "outline-width" => edge_extent(value).is_some_and(|px| px >= 0.0),
+        "outline-style" => BORDER_STYLES.contains(&value),
+        "outline-color" => color::parse(value).is_some() || value == "invert",
+        "outline-offset" => length(value).is_some(),
+        "outline" => tokens(value).iter().all(|&part| {
+            part == "auto"
+                || BORDER_STYLES.contains(&part)
+                || color::parse(part).is_some()
+                || edge_extent(part).is_some_and(|px| px >= 0.0)
+        }),
         _ => false,
     }
 }
@@ -384,6 +956,26 @@ fn edge_extent(token: &str) -> Option<f64> {
         "thick" => Some(5.0),
         _ => length(token),
     }
+}
+
+/// Whether `value` calls any CSS function outside quoted strings.
+fn calls_any_function(value: &str) -> bool {
+    let mut index = 0;
+    while let Some(c) = value[index..].chars().next() {
+        match c {
+            '"' | '\'' => match string_end(&value[index..]) {
+                Some(end) => {
+                    index += end;
+                    continue;
+                }
+                None => return true,
+            },
+            '(' => return true,
+            _ => {}
+        }
+        index += c.len_utf8();
+    }
+    false
 }
 
 /// Whether every function `value` calls is one of [`KNOWN_FUNCTIONS`].
