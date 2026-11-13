@@ -1,22 +1,44 @@
 #!/bin/bash
 __fixture_case=$1 __fixture_assets=$2 __fixture_work=$3
+__fixture_registration_diagnostic() {
+ builtin printf 'HOOK_PREREQ_FAILED check=%s phase=%s prompt_count=%s registered=%s traps=%s source_us=%s spent_us=%s\n' \
+  "${1:-registration}" "${2:-registration}" "${#PROMPT_COMMAND[@]}" "${__cosh_bash_registered-unset}" \
+  "$(builtin trap -p ERR DEBUG RETURN)" \
+  "$((10#${__fixture_source_finished/./} - 10#${__fixture_source_started/./}))" \
+  "${__cosh_bash_spent_us-unset}" >&2
+}
 TERM=xterm
 PROMPT_COMMAND=('printf "\033]0;%s@%s:%s\007" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/\~}"')
+__fixture_source_started=$EPOCHREALTIME
 builtin source "$__fixture_assets/cosh-integration.bash"
+__fixture_source_finished=$EPOCHREALTIME
 if [[ $__fixture_case == hook_bad_tail ]]; then
  [[ ${#PROMPT_COMMAND[@]} == 1 && -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 97
  builtin printf '%s\n' HOOK_BAD_TAIL_OK
  exit
 fi
-[[ ${#PROMPT_COMMAND[@]} == 2 && -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 91
+if [[ $__fixture_case == hook_registration_timeout ]]; then
+ [[ ${#PROMPT_COMMAND[@]} == 1 && -z $(builtin trap -p ERR DEBUG RETURN) &&
+    -z $(builtin declare -F __cosh_hook_boot __cosh_hook_call) &&
+    ! ${__cosh_bash_registered+x} ]] || { __fixture_registration_diagnostic; exit 110; }
+ __fixture_registration_diagnostic
+ builtin printf '%s\n' HOOK_QUIET_RETREAT_OK
+ exit
+fi
+[[ ${#PROMPT_COMMAND[@]} == 2 && -z $(builtin trap -p ERR DEBUG RETURN) ]] || { __fixture_registration_diagnostic; exit 91; }
 __fixture_slot=
 for __fixture_index in "${!PROMPT_COMMAND[@]}"; do
     if [[ $__fixture_index != 0 ]]; then __fixture_slot=$__fixture_index; fi
 done
-[[ -n $__fixture_slot && ${PROMPT_COMMAND[$__fixture_slot]} == *boot* ]] || exit 92
+[[ -n $__fixture_slot && ${PROMPT_COMMAND[$__fixture_slot]} == *boot* ]] || { __fixture_registration_diagnostic; exit 92; }
 if [[ $__fixture_case != hook_environment_registered_* ]]; then
  builtin eval "${PROMPT_COMMAND[$__fixture_slot]}"
- [[ -n $(builtin trap -p ERR) && ${PROMPT_COMMAND[$__fixture_slot]} == *prompt* ]] || exit 93
+ if [[ -z $(builtin trap -p ERR) || ${PROMPT_COMMAND[$__fixture_slot]} != *prompt* ]]; then
+  __fixture_registration_diagnostic registration activation
+  builtin printf 'HOOK_ACTIVATION_FAILED active=%s trusted=%s slot=%s traps=%s\n' \
+   "${__cosh_hook_active-unset}" "${__cosh_hook_trusted-unset}" "$__fixture_slot" "$(builtin trap -p ERR)" >&2
+  exit 93
+ fi
 fi
 __fixture_owned=${PROMPT_COMMAND[$__fixture_slot]}
 if [[ $__fixture_case == hook_environment_* ]]; then

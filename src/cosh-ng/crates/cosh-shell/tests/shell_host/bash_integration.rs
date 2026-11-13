@@ -8,6 +8,40 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Makes the module copy's compatibility round trips independent of wall-clock
+/// deadlines and of the shared startup budget for the environment-conflict
+/// fixtures, so a slow registration no longer decides whether they reach the
+/// conflict they test. The production deadline, budget and quiet retreat stay
+/// covered against the unmodified module by
+/// `registration_deadline_quietly_retreats`.
+fn decouple_compat_timing(module: &str, helper: &str) -> String {
+    let mut body = module.to_string();
+    let call = format!(
+        "/usr/bin/timeout --kill-after=0.005 \"$timeout\" {helper} shell-integration \"$operation\""
+    );
+    let plain = format!("{helper} shell-integration \"$operation\"");
+    for (old, new) in [
+        (call.as_str(), plain.as_str()),
+        ("-n 8193 -t \"$timeout\" field", "-n 8193 field"),
+        (
+            "-z $field && $__cosh_hook_now -lt $__cosh_hook_deadline &&",
+            "-z $field &&",
+        ),
+        (
+            "available=$((__cosh_hook_now + 10000 - start))\n        __cosh_hook_used=$((__cosh_hook_used + available))\n        __cosh_bash_spent_us=$((__cosh_hook_startup_spent + available))",
+            "__cosh_hook_used=0\n        __cosh_bash_spent_us=0",
+        ),
+    ] {
+        assert_eq!(
+            body.matches(old).count(),
+            1,
+            "compat deadline marker moved: {old:?}"
+        );
+        body = body.replacen(old, new, 1);
+    }
+    body
+}
+
 fn run_fixture(case: &str, interactive: bool) -> String {
     let live = case.starts_with("hook_live_");
     let fault_live = case.starts_with("hook_live_fault_");
@@ -67,6 +101,15 @@ fn run_fixture(case: &str, interactive: bool) -> String {
             helper.to_str().unwrap(),
         );
         fs::write(assets.join(name), body).unwrap();
+    }
+    if case.starts_with("hook_environment_") {
+        let module = assets.join("cosh-integration.bash");
+        let body = fs::read_to_string(&module).unwrap();
+        fs::write(
+            &module,
+            decouple_compat_timing(&body, helper.to_str().unwrap()),
+        )
+        .unwrap();
     }
     if case == "hook_live_fault_printf_candidate" {
         let failed_output = assets.join("tests/hook-output-failure.bash");
@@ -141,6 +184,9 @@ fn run_fixture(case: &str, interactive: bool) -> String {
         .env("COSH_BASH_TEST_ASSETS", &assets)
         .env("COSH_BASH_TEST_CASE", case)
         .current_dir(&root);
+    if case.starts_with("hook_environment_") || case == "hook_registration_timeout" {
+        command.env("COSH_BASH_TEST_REGISTRATION_DELAY_MS", "60");
+    }
     if shadow {
         let parts = case
             .strip_prefix("hook_shadow_")
@@ -834,6 +880,19 @@ fn active_hook_relinquishes_new_environment_conflicts_without_helpers() {
             "{case}"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn registration_deadline_quietly_retreats() {
+    let output = run_fixture("hook_registration_timeout", true);
+    assert!(output.contains("HOOK_QUIET_RETREAT_OK"), "{output}");
+    assert!(
+        output.contains("check=registration phase=registration"),
+        "missing registration diagnostics: {output}"
+    );
+    assert!(output.contains("prompt_count=1"), "{output}");
+    assert!(output.contains("registered=unset"), "{output}");
 }
 
 #[cfg(target_os = "linux")]

@@ -17,5 +17,9 @@ if [[ $2 == advise ]]; then
  fi
  exit
 fi
+if [[ $2 == compat && ${__fixture_fields[2]-} == registration && ${COSH_BASH_TEST_REGISTRATION_DELAY_MS-0} != 0 ]]; then
+ [[ ${COSH_BASH_TEST_REGISTRATION_DELAY_MS} != *[!0123456789]* && ${#COSH_BASH_TEST_REGISTRATION_DELAY_MS} -le 3 ]] || exit 67
+ /usr/bin/sleep "$(builtin printf '0.%03d' "${COSH_BASH_TEST_REGISTRATION_DELAY_MS}")" || exit 67
+fi
 builtin printf '%s\0' 2 SHOW compatible "$__fixture_digest" "$__fixture_digest" '' "${COSH_BASH_TEST_WORKDIR}/runtime" ''
 if [[ ${COSH_BASH_TEST_CASE-} == hook_bad_tail ]]; then builtin printf x; fi
