@@ -25,6 +25,7 @@ pub const PREFERENCE_TRAJECTORY_MAX_ROWS: usize = 50;
 /// Rows with known turn timestamps are returned newest-first across documents.
 /// Unknown timestamps follow them in stable document/turn order. Collection
 /// time selects documents but does not date their historical user turns.
+/// Dated turns before the cutoff are excluded; undated turns remain eligible.
 ///
 /// # Errors
 /// Returns an error when the store query itself fails.
@@ -41,6 +42,10 @@ pub fn load_window_rows(
     for (session_id, atif_json) in &documents {
         rows.extend(rows_from_atif_json(session_id, atif_json, &mut next_id));
     }
+    rows.retain(|row| {
+        row.timestamp_ns
+            .is_none_or(|timestamp| timestamp >= since_ns)
+    });
     rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp_ns));
     Ok(rows)
 }
