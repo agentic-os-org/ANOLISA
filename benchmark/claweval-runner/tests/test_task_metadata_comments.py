@@ -108,6 +108,34 @@ class TaskMetadataCommentTests(unittest.TestCase):
         self.assertIn("    T001_demo\n", output)
         self.assertIn("Grand total: 1 tasks", output)
 
+    def test_nbsp_before_hash_remains_task_identity(self) -> None:
+        self.write_task("task_id: T001\u00a0#one\ndifficulty: hard # comment\n")
+        output = self.run_inventory("--prefix", "T", "--difficulty", "hard")
+        self.assertIn("    T001\u00a0#one\n", output)
+        self.assertIn("Grand total: 1 tasks", output)
+
+    def test_trailing_nbsp_before_space_comment_is_retained(self) -> None:
+        self.write_task("task_id: T001\u00a0 # comment\ndifficulty: hard\n")
+        output = self.run_inventory("--prefix", "T", "--difficulty", "hard")
+        self.assertIn("    T001\u00a0\n", output)
+        self.assertNotIn("# comment", output)
+        self.assertIn("Grand total: 1 tasks", output)
+
+    def test_trailing_nbsp_before_tab_comment_is_retained(self) -> None:
+        self.write_task("task_id: T001\u00a0\t# comment\ndifficulty: hard\n")
+        output = self.run_inventory("--prefix", "T", "--difficulty", "hard")
+        self.assertIn("    T001\u00a0\n", output)
+        self.assertNotIn("# comment", output)
+        self.assertIn("Grand total: 1 tasks", output)
+
+    def test_tab_delimited_comments_keep_plain_task_selection(self) -> None:
+        self.write_task(
+            "task_id: T001_demo\t# identity\ndifficulty: hard\t# difficulty\n"
+        )
+        output = self.run_inventory("--prefix", "T", "--difficulty", "hard")
+        self.assertIn("    T001_demo\n", output)
+        self.assertIn("Grand total: 1 tasks", output)
+
 
 if __name__ == "__main__":
     unittest.main()
