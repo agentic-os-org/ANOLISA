@@ -42,11 +42,13 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function createHooksDriver() {
   const slots = [];
+  const effectDeps = [];
   const driver = {
     slots,
     render(Component, props = {}) {
       driver._cursor = 0;
       driver._effects = [];
+      driver._effectCursor = 0;
       driver._callbacks = [];
       const element = Component(props);
       return { element, effects: driver._effects, callbacks: driver._callbacks };
@@ -72,8 +74,13 @@ function createHooksDriver() {
       driver._cursor += 1;
       return slot.value;
     },
-    useEffect(fn) {
-      driver._effects.push(fn);
+    useEffect(fn, deps) {
+      const index = driver._effectCursor++;
+      const previous = effectDeps[index];
+      if (!previous || !deps || deps.some((value, i) => !Object.is(value, previous[i]))) {
+        driver._effects.push(fn);
+      }
+      effectDeps[index] = deps;
     },
     useCallback(fn) {
       driver._callbacks.push(fn);
@@ -151,7 +158,9 @@ function renderViewerPage() {
   const driver = createHooksDriver();
   const urlParams = new URLSearchParams('');
   const setParams = (next) => {
-    for (const [k, v] of next.entries ? next.entries() : []) urlParams.set(k, v);
+    const replacement = new URLSearchParams(next);
+    for (const key of [...urlParams.keys()]) urlParams.delete(key);
+    for (const [key, value] of replacement) urlParams.set(key, value);
   };
   const moduleStubs = {
     'react-router-dom': { useSearchParams: () => [urlParams, setParams] },
@@ -194,6 +203,56 @@ function renderViewerPage() {
     handleFileImport: rendered.callbacks[4],
   };
 }
+
+test('mounted viewer follows URL target changes without reloading node navigation', async () => {
+  const viewer = renderViewerPage();
+  for (const effect of viewer.rendered.effects) effect();
+  viewer.urlParams.set('type', 'conversation');
+  viewer.urlParams.set('id', 'first');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 1);
+  viewer.urlParams.set('id', 'second');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 2);
+  viewer.calls.fetchAtifByConversation[1].resolve(atifDoc('second'));
+  await settle();
+  viewer.calls.fetchAtifByConversation[0].resolve(atifDoc('first'));
+  await settle();
+  assert.equal(viewer.driver.slots[4].value.session_id, 'second');
+  viewer.urlParams.set('node', 'child');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 2);
+});
+
+test('explicit loads and successful imports do not trigger duplicate URL requests', async () => {
+  const viewer = renderViewerPage();
+  for (const effect of viewer.rendered.effects) effect();
+  const pending = viewer.handleLoad('conversation', 'manual');
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 1);
+  viewer.calls.fetchAtifByConversation[0].resolve(atifDoc('manual'));
+  await pending;
+  viewer.handleFileImport({ target: { files: [{ name: 'local.json' }], value: 'local.json' } });
+  FakeFileReader.instances.at(-1).onload({ target: { result: JSON.stringify(atifDoc('local')) } });
+  for (const effect of viewer.render().effects) effect();
+  assert.equal(viewer.driver.slots[4].value.session_id, 'local');
+  assert.equal(viewer.calls.fetchAtifByConversation.length, 1);
+});
+
+test('clearing a URL target invalidates its pending response', async () => {
+  const viewer = renderViewerPage();
+  for (const effect of viewer.rendered.effects) effect();
+  viewer.urlParams.set('type', 'conversation');
+  viewer.urlParams.set('id', 'pending');
+  for (const effect of viewer.render().effects) effect();
+  viewer.urlParams.delete('type');
+  viewer.urlParams.delete('id');
+  for (const effect of viewer.render().effects) effect();
+  viewer.calls.fetchAtifByConversation[0].resolve(atifDoc('obsolete'));
+  await settle();
+  assert.equal(viewer.driver.slots[4].value, null);
+  assert.equal(viewer.driver.slots[5].value, false);
+});
 
 
 // TokenSavingsPage and AtifViewerPage render savings rates through the shared
@@ -258,6 +317,44 @@ const snapshotBatch = (doc, id) => ({
 });
 const loadedSnapshotBatch = (driver) => driver.slots.find((slot) => slot?.value?.scope?.ws_id === 'ws-1'
   && slot.value.step_snapshots)?.value;
+
+test('clearing the URL aborts pending snapshots and discards visible snapshot associations', async () => {
+  const ctx = renderViewerPage();
+  ctx.rendered.effects.forEach(effect => effect());
+  const load = async (id) => {
+    ctx.urlParams.set('type', 'session');
+    ctx.urlParams.set('id', id);
+    ctx.render().effects.forEach(effect => effect());
+    const doc = { ...atifDoc(id), steps: [{ step_id: 1, source: 'agent', message: id }] };
+    ctx.calls.fetchAtifBySession.at(-1).resolve(doc);
+    await settle();
+    return doc;
+  };
+  const clear = () => {
+    ctx.urlParams.delete('type');
+    ctx.urlParams.delete('id');
+    ctx.render().effects.forEach(effect => effect());
+  };
+
+  const pendingDoc = await load('pending-snapshots');
+  const pending = ctx.snapshotRequests.at(-1);
+  assert.equal(pending.signal.aborted, false);
+  clear();
+  assert.equal(pending.signal.aborted, true, 'navigation must cancel snapshot network work');
+  pending.resolve(snapshotBatch(pendingDoc, 'late-snapshot'));
+  await settle();
+  assert.equal(ctx.driver.slots[4].value, null);
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined, 'late snapshots must not restore a cleared target');
+
+  const visibleDoc = await load('visible-snapshots');
+  ctx.snapshotRequests.at(-1).resolve(snapshotBatch(visibleDoc, 'visible-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver)?.step_snapshots['1'][0].id, 'visible-snapshot');
+  clear();
+  assert.equal(ctx.driver.slots[4].value, null);
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined, 'clearing a target must release existing associations');
+  assert.equal(ctx.calls.fetchAtifBySession.length, 2, 'clearing targets must not issue replacement loads');
+});
 
 const completeRead = (reader, payload) =>
   reader.onload({ target: { result: payload } });
