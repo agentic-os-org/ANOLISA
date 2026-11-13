@@ -367,6 +367,9 @@ pub struct SslSniff {
     /// Resolved static offsets and whether to attach the handshake probes.
     /// Avoids repeating whole-binary scans for each newly discovered PID.
     static_attach_offsets: HashMap<FileKey, (StaticSslOffsets, bool)>,
+    /// Offsets learned by earlier scans, persisted across restarts so a
+    /// previously scanned binary attaches synchronously at discovery (#9762).
+    learned_offsets: LearnedOffsets,
     traced_files: HashSet<FileKey>,
     /// Maps pid -> files that were attached for this pid.
     /// Used to clean up traced_files when the process exits.
@@ -443,6 +446,7 @@ impl SslSniff {
             skel,
             attachments: HashMap::default(),
             static_attach_offsets: HashMap::default(),
+            learned_offsets: LearnedOffsets::load(crate::config::ssl_offsets_learned_path()),
             traced_files: HashSet::default(),
             pid_inodes: HashMap::default(),
             pid_identities: HashMap::default(),
@@ -712,13 +716,65 @@ impl SslSniff {
     /// Install completed scans and return identity-bearing admissions.
     pub(crate) fn poll_pending_scan_admissions(&mut self) -> Vec<SslAdmission> {
         let mut admitted = Vec::new();
-        for _ in 0..4 {
+        // Drain every completed scan, not a fixed quota: the result channel is
+        // bounded and the single scan worker blocks on send once it fills. A
+        // per-tick quota let results pile up under process churn, stalling the
+        // worker and delaying installs past short-lived agents' exit (#9762).
+        // Installing already-computed results is cheap, so drain to empty.
+        loop {
             let Some(scanned) = self.scans.try_recv() else {
                 break;
             };
             let file = scanned.key;
             let path = scanned.path();
-            if !self.pid_inodes.values().any(|files| files.contains(&file)) {
+            let has_owner = self.pid_inodes.values().any(|files| files.contains(&file));
+            if !has_owner {
+                // The originating process exited before its scan was installed.
+                // A verified offset set is inode-global, so keep it cached and
+                // attach the global uprobe anyway: the next process mapping this
+                // binary is then captured without re-racing the scan. Discarding
+                // here made every short-lived agent re-scan and lose its first
+                // call under load (#9762).
+                if let ExecutableScan::Offsets(offsets) = &scanned.outcome {
+                    if scanned.unchanged_at_attach() {
+                        self.static_attach_offsets
+                            .insert(file, (offsets.clone(), false));
+                        match attach_static_ssl_by_offset(&mut self.skel, &path, offsets, false, -1)
+                        {
+                            Ok(links) => {
+                                log::debug!(
+                                    "Installing static SSL offsets for inode {file:?} after its owner exited"
+                                );
+                                if self.attachments.contains_key(&file) {
+                                    self.stale_reattachs += 1;
+                                }
+                                self.record_attach(file, links);
+                                self.traced_files.insert(file);
+                                self.scan_retry_after.remove(&file);
+                                // The owner is gone, but the verified offsets
+                                // must outlive it: persist them so the next
+                                // process mapping this binary — even after a
+                                // service restart — attaches synchronously.
+                                self.learned_offsets.record(&path, offsets);
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "Attach asynchronously detected SSL inode {file:?}: {error:#}"
+                                );
+                                // Unmark for a later retry: a marked file with no
+                                // attachment is negatively cached and would never
+                                // be probed again.
+                                self.traced_files.remove(&file);
+                                self.scan_retry_after.remove(&file);
+                                if !self.attachments.contains_key(&file) {
+                                    self.static_attach_offsets.remove(&file);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+                log::debug!("Discarding scan result for inode {file:?} with no remaining owner");
                 self.traced_files.remove(&file);
                 self.scan_retry_after.remove(&file);
                 // No owner remains to route this through detach_process, so
@@ -756,6 +812,9 @@ impl SslSniff {
                             self.traced_files.insert(file);
                             self.scan_retry_after.remove(&file);
                             admitted.extend(self.take_ready_pids(file));
+                            // Persist after admission so learning never delays
+                            // routing the installed offsets to waiting pids.
+                            self.learned_offsets.record(&path, &offsets);
                         }
                         Err(error) => {
                             log::warn!(
@@ -1179,6 +1238,39 @@ impl SslSniff {
                                     path,
                                     &off,
                                     true,
+                                    -1,
+                                ) {
+                                    Ok(links) => AttachOutcome::Attached(links),
+                                    Err(e) => {
+                                        log::warn!(
+                                            "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
+                                        );
+                                        AttachOutcome::Failed
+                                    }
+                                };
+                            }
+                            // A previously learned offset set attaches
+                            // synchronously, exactly like the shipped table: a
+                            // warm agent's first TLS call can precede the
+                            // asynchronous scan of its binary (#9762). Learned
+                            // entries come from scans, so they attach with the
+                            // scan-install ABI (no handshake probes), not the
+                            // codex-table one.
+                            if let Some(off) = self.learned_offsets.lookup(path) {
+                                log::info!(
+                                    "[attach_process] pid={pid}: learned offset cache matched for {path} \
+                                     (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
+                                    off.ssl_write,
+                                    off.ssl_read,
+                                    off.ssl_do_handshake
+                                );
+                                self.static_attach_offsets
+                                    .insert(file, (off.clone(), false));
+                                return match attach_static_ssl_by_offset(
+                                    &mut self.skel,
+                                    path,
+                                    &off,
+                                    false,
                                     -1,
                                 ) {
                                     Ok(links) => AttachOutcome::Attached(links),
@@ -2485,7 +2577,7 @@ fn attach_cosh_tap(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<V
 
 // ─── Codex offset table (Tier 3) ────────────────────────────────────────────
 
-use super::codex_offsets::OffsetTable;
+use super::codex_offsets::{LearnedOffsets, OffsetTable};
 
 static CODEX_OFFSET_TABLE: std::sync::LazyLock<Option<OffsetTable>> =
     std::sync::LazyLock::new(|| {
@@ -2830,6 +2922,181 @@ mod tests {
                 Some(ExecutableScan::NoMarkers)
             ));
         });
+    }
+
+    fn fixture_file_key(path: &Path) -> FileKey {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).expect("stat fixture");
+        (stat_dev_to_key(meta.dev()), meta.ino())
+    }
+
+    /// Serializes tests that republish the process-wide learned-cache path.
+    static LEARNED_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Build an `SslSniff` whose learned-offset cache points at a per-test
+    /// temp directory. The caller must hold [`LEARNED_PATH_LOCK`]: the path
+    /// is process-global and read at construction time.
+    fn sniffer_with_isolated_learned_cache(
+        _guard: &std::sync::MutexGuard<'_, ()>,
+        dir: &tempfile::TempDir,
+    ) -> SslSniff {
+        crate::config::set_ssl_offsets_learned_path(dir.path().join("learned.json"));
+        SslSniff::new().expect("sslsniff BPF should load on this kernel")
+    }
+
+    /// Regression for #9762: one drain tick must install every completed scan,
+    /// not a fixed quota. The result channel is bounded and the single worker
+    /// blocks on send once it fills; a per-tick quota let results pile up under
+    /// process churn and stalled the worker. Reverting to a quota below the
+    /// fixture count makes this test fail.
+    #[test]
+    #[ignore] // constructs SslSniff: requires CAP_BPF + CAP_PERFMON (root)
+    fn scan_drain_installs_all_completed_results_in_one_tick() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: uprobe attach requires root");
+            return;
+        }
+        let guard = LEARNED_PATH_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let learned_dir = tempfile::tempdir().unwrap();
+        let mut sniffer = sniffer_with_isolated_learned_cache(&guard, &learned_dir);
+        let owner = std::process::id();
+        let image = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        // More fixtures than the historical per-tick quota of four.
+        let fixtures: Vec<_> = (0..6)
+            .map(|_| {
+                let file = tempfile::NamedTempFile::new().expect("fixture");
+                fs::write(file.path(), &image).expect("write fixture");
+                file
+            })
+            .collect();
+        let mut keys = Vec::new();
+        for file in &fixtures {
+            let key = fixture_file_key(file.path());
+            sniffer.traced_files.insert(key);
+            sniffer
+                .scans
+                .submit(file.path().to_str().unwrap(), key, ScanMode::KnownStatic)
+                .expect("submit scan");
+            keys.push(key);
+        }
+        sniffer.pid_inodes.insert(owner, keys);
+        // The worker scans 20 KiB fixtures in milliseconds; wait generously so
+        // every result is queued before the single drain tick under test.
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = sniffer.poll_pending_scan_admissions();
+        assert_eq!(
+            sniffer.attachments.len(),
+            fixtures.len(),
+            "one tick must install every completed scan"
+        );
+    }
+
+    /// Regression for #9762: when the originating process exits before its
+    /// scan result is installed, the verified offsets are inode-global and
+    /// must still be cached and attached, so the next process mapping the
+    /// binary is captured without re-racing the scan. Reverting to the
+    /// ownerless discard makes this test fail.
+    #[test]
+    #[ignore] // constructs SslSniff: requires CAP_BPF + CAP_PERFMON (root)
+    fn exited_owner_offsets_are_installed_and_cached() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: uprobe attach requires root");
+            return;
+        }
+        let guard = LEARNED_PATH_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let learned_dir = tempfile::tempdir().unwrap();
+        let mut sniffer = sniffer_with_isolated_learned_cache(&guard, &learned_dir);
+        let owner = std::process::id();
+        let image = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        let file = tempfile::NamedTempFile::new().expect("fixture");
+        fs::write(file.path(), &image).expect("write fixture");
+        let path = file.path().to_str().unwrap().to_owned();
+        let key = fixture_file_key(file.path());
+        sniffer.traced_files.insert(key);
+        sniffer
+            .scans
+            .submit(&path, key, ScanMode::KnownStatic)
+            .expect("submit scan");
+        sniffer.pid_inodes.insert(owner, vec![key]);
+        // The owner exits while the scan is still in flight.
+        sniffer.detach_process(owner);
+        std::thread::sleep(Duration::from_secs(1));
+        let admitted = sniffer.poll_pending_scan_admissions();
+        assert!(admitted.is_empty(), "no live owner remains to admit");
+        assert!(
+            sniffer.attachments.contains_key(&key),
+            "ownerless result must still install the global uprobe"
+        );
+        assert!(
+            sniffer.static_attach_offsets.contains_key(&key),
+            "verified offsets must stay cached for the next process"
+        );
+        assert!(sniffer.traced_files.contains(&key));
+        // The next process attaching this inode must reuse the cached offsets
+        // instead of queueing another whole-binary scan.
+        let outcome = sniffer.build_attach(owner as i32, key, &path, SslLibKind::Static, &path);
+        assert!(
+            matches!(outcome, AttachOutcome::Attached(_)),
+            "cached offsets must attach without a re-scan"
+        );
+        assert!(!sniffer.scans.is_pending(key), "no re-scan may be queued");
+    }
+
+    /// Regression for #9762: offsets learned in one service lifetime must
+    /// make the next lifetime attach synchronously at discovery — a warm
+    /// agent's first TLS call completes long before an asynchronous
+    /// whole-binary scan would install. Reverting the learned cache (or its
+    /// persistence) makes this test fail.
+    #[test]
+    #[ignore] // constructs SslSniff: requires CAP_BPF + CAP_PERFMON (root)
+    fn learned_offsets_survive_restart_and_attach_synchronously() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: uprobe attach requires root");
+            return;
+        }
+        let guard = LEARNED_PATH_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let learned_dir = tempfile::tempdir().unwrap();
+        let image = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        let file = tempfile::NamedTempFile::new().expect("fixture");
+        fs::write(file.path(), &image).expect("write fixture");
+        let path = file.path().to_str().unwrap().to_owned();
+        let key = fixture_file_key(file.path());
+        let owner = std::process::id();
+
+        {
+            let mut sniffer = sniffer_with_isolated_learned_cache(&guard, &learned_dir);
+            sniffer.traced_files.insert(key);
+            sniffer
+                .scans
+                .submit(&path, key, ScanMode::KnownStatic)
+                .expect("submit scan");
+            sniffer.pid_inodes.insert(owner, vec![key]);
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = sniffer.poll_pending_scan_admissions();
+            assert!(
+                sniffer.attachments.contains_key(&key),
+                "first lifetime must install the scanned offsets"
+            );
+        } // Dropping the sniffer detaches its links, simulating a service stop.
+
+        // "Restart": a fresh instance must attach from the persisted cache
+        // without queueing another whole-binary scan.
+        let mut restarted = sniffer_with_isolated_learned_cache(&guard, &learned_dir);
+        let outcome = restarted.build_attach(owner as i32, key, &path, SslLibKind::Static, &path);
+        assert!(
+            matches!(outcome, AttachOutcome::Attached(_)),
+            "learned cache must attach synchronously after a restart"
+        );
+        assert!(
+            !restarted.scans.is_pending(key),
+            "a cache hit must not queue another whole-binary scan"
+        );
     }
 
     #[test]
