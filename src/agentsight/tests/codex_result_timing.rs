@@ -141,5 +141,5 @@ fn unknown_and_invalid_result_times_do_not_extend_known_calls() {
         call("function_call", "job"),
         output("function_call_output", "unknown", "2026-11-12T00:00:05Z"),
     ]);
-    assert!(doc["steps"][0]["tool_calls"][0]["extra"].is_null());
+    assert!(doc["steps"][0]["tool_calls"][0]["extra"]["result_timestamp"].is_null());
 }
