@@ -59,7 +59,7 @@ def main() -> None:
     parser.add_argument("operation", choices=("normalize", "validate"))
     parser.add_argument("reports", nargs="+", type=Path)
     args = parser.parse_args()
-    component = Path(__file__).resolve().parents[2] / "src/agent-sec-core"
+    component = Path(__file__).resolve().parents[2]
     operation = normalize_report if args.operation == "normalize" else validate_report
     for report in args.reports:
         operation(report, component)

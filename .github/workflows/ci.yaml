@@ -155,8 +155,8 @@ jobs:
             KTUNER=true
           fi
 
-          # Run sec-core checks when their workflow or coverage tooling changes.
-          if echo "$CHANGED" | grep -Eq '^\.github/(workflows/ci\.yaml|scripts/(test_)?sec_core_coverage\.py)$'; then
+          # Run sec-core checks when their workflow changes.
+          if echo "$CHANGED" | grep -Eq '^\.github/workflows/ci\.yaml$'; then
             AGENT_SEC=true
           fi
 
@@ -362,7 +362,7 @@ jobs:
   # Step 4: Test agent-sec-core (Linux only)
   # =========================================================================
   test-agent-sec-core:
-    name: Test agent-sec-core
+    name: Test sec-core components
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
     runs-on: anolisa-k8s-general-ci-x64
@@ -394,7 +394,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-          workspaces: src/agent-sec-core/linux-sandbox
+          workspaces: src/agent-sec-core/agent-sec-cli
 
       - name: Install system dependencies
         run: |
@@ -493,27 +493,16 @@ jobs:
       - name: Rust format & lint check
         run: |
           cd src/agent-sec-core
-          make rust-fmt-check
-          make rust-lint
+          make rust-fmt-check-legacy
+          make rust-lint-legacy
           # cargo-llvm-cov cannot instrument doctests on stable, so the coverage
           # step below skips them; run the crate's public examples here instead.
           cd agent-sec-cli && cargo test --doc -p prompt-scanner
 
-      - name: Run AgentSecCore V2 Rust tests
-        run: |
-          cd src/agent-sec-core
-          make test-rust-v2
-          cd v2
-          skillsec_tests=$(cargo test --locked -p asc-capability-skill-sec --lib --no-run --message-format=json |
-            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
-          test -n "$skillsec_tests"
-          sudo "$skillsec_tests" service::tests::configuration_writeback_ --nocapture
-          cargo doc --workspace --no-deps --locked
-
       - name: Run Rust tests with coverage
         run: |
           cd src/agent-sec-core
-          make test-rust-coverage
+          make test-rust-legacy-coverage
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -555,10 +544,9 @@ jobs:
 
       - name: Normalize component coverage
         run: |
-          python3 .github/scripts/sec_core_coverage.py normalize \
+          python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py normalize \
             src/agent-sec-core/coverage.xml \
             src/agent-sec-core/rust-cli-coverage.xml \
-            src/agent-sec-core/rust-coverage.xml \
             src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
       - name: Upload component coverage
         uses: actions/upload-artifact@v4
@@ -567,22 +555,88 @@ jobs:
           path: |
             src/agent-sec-core/coverage.xml
             src/agent-sec-core/rust-cli-coverage.xml
-            src/agent-sec-core/rust-coverage.xml
             src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
+          if-no-files-found: error
+
+  test-agent-sec-v2:
+    name: Test sec-core V2
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agent_sec_core == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    environment: ${{ needs.detect-changes.outputs.cache_environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: llvm-tools-preview, rustfmt, clippy
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Configure trusted compiler cache writes
+        if: needs.detect-changes.outputs.cache_environment == 'ci-sccache-writer'
+        uses: ./.github/actions/setup-sccache
+        with:
+          writer-password: ${{ secrets.CI_SCCACHE_REDIS_WRITER_PASSWORD }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: sec-core-v2
+          workspaces: src/agent-sec-core/v2
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libssl-dev libseccomp-dev
+      - name: Check V2 formatting and Clippy
+        working-directory: src/agent-sec-core/v2
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run all V2 unit and integration tests with coverage
+        working-directory: src/agent-sec-core
+        run: |
+          test "$(id -u)" -ne 0
+          make test-rust-v2-coverage
+      - name: Verify SkillSec writeback as root
+        working-directory: src/agent-sec-core/v2
+        run: |
+          eval "$(CARGO_TARGET_DIR="$PWD/target/llvm-cov-target" cargo llvm-cov show-env --sh)"
+          skillsec_tests=$(cargo test --locked -p asc-capability-skill-sec --lib --no-run \
+            --target-dir "$CARGO_LLVM_COV_TARGET_DIR" --message-format=json |
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
+          test -n "$skillsec_tests"
+          sudo env LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" "$skillsec_tests" service::tests::configuration_writeback_ --nocapture
+          sudo chown "$(id -u):$(id -g)" "$CARGO_LLVM_COV_TARGET_DIR"/*.profraw
+      - name: Verify server identity without the test bypass
+        working-directory: src/agent-sec-core/v2
+        run: cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent -- --exact
+      - name: Run V2 doctests and build public API documentation
+        working-directory: src/agent-sec-core/v2
+        run: |
+          AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo test --workspace --locked --doc --features asc-daemon-client/testing
+          cargo doc --workspace --no-deps --locked
+      - name: Generate V2 coverage
+        working-directory: src/agent-sec-core/v2
+        run: cargo llvm-cov report --cobertura --output-path ../rust-v2-coverage.xml
+      - name: Normalize V2 coverage
+        run: python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py normalize src/agent-sec-core/rust-v2-coverage.xml
+      - name: Upload V2 coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-core-v2-coverage
+          path: src/agent-sec-core/rust-v2-coverage.xml
           if-no-files-found: error
 
   check-agent-sec-coverage:
     name: Check sec-core coverage
-    needs: [detect-changes, test-agent-sec-core, test-agent-sec-sandbox]
+    needs: [detect-changes, test-agent-sec-core, test-agent-sec-v2, test-agent-sec-sandbox]
     if: ${{ !cancelled() && needs.detect-changes.outputs.agent_sec_core == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Require successful test producers
         env:
           COMPONENT_RESULT: ${{ needs.test-agent-sec-core.result }}
+          V2_RESULT: ${{ needs.test-agent-sec-v2.result }}
           SANDBOX_RESULT: ${{ needs.test-agent-sec-sandbox.result }}
         run: |
           test "$COMPONENT_RESULT" = success
+          test "$V2_RESULT" = success
           test "$SANDBOX_RESULT" = success
       - uses: actions/checkout@v4
         with:
@@ -593,11 +647,16 @@ jobs:
       - name: Install diff-cover
         run: uv tool install diff-cover
       - name: Test coverage report handling
-        run: python3 -m unittest discover -s .github/scripts -p test_sec_core_coverage.py
+        run: python3 -m unittest discover -s src/agent-sec-core/tests/ci -p test_sec_core_coverage.py
       - name: Download component coverage
         uses: actions/download-artifact@v4
         with:
           name: sec-core-component-coverage
+          path: src/agent-sec-core
+      - name: Download V2 coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: sec-core-v2-coverage
           path: src/agent-sec-core
       - name: Download sandbox coverage
         uses: actions/download-artifact@v4
@@ -606,12 +665,12 @@ jobs:
           path: src/agent-sec-core
       - name: Require complete portable coverage reports
         run: |
-          python3 .github/scripts/sec_core_coverage.py validate \
+          python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py validate \
             src/agent-sec-core/coverage.xml \
             src/agent-sec-core/rust-cli-coverage.xml \
-            src/agent-sec-core/rust-coverage.xml \
             src/agent-sec-core/rust-sandbox-coverage.xml \
             src/agent-sec-core/rust-v2-coverage.xml \
+            src/agent-sec-core/rust-v2-sandbox-coverage.xml \
             src/agent-sec-core/openclaw-plugin/coverage/cobertura-coverage.xml
 
       - name: Generate Rust coverage summary
@@ -652,6 +711,7 @@ jobs:
           emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
           emit_rust_cov_row rust-sandbox-coverage.xml linux-sandbox
           emit_rust_cov_row rust-v2-coverage.xml v2
+          emit_rust_cov_row rust-v2-sandbox-coverage.xml v2-linux-e2e
 
       - name: Incremental coverage gate (PR only)
         if: github.event_name == 'pull_request'
@@ -743,9 +803,9 @@ jobs:
             exit 1
           fi
 
-  # Real isolation needs user namespaces on a VM, outside the Kubernetes test runner.
+  # Isolation, cgroups and trusted filesystem ancestors require a VM.
   test-agent-sec-sandbox:
-    name: Test sandbox isolation
+    name: Test sec-core Linux E2E
     needs: detect-changes
     if: needs.detect-changes.outputs.agent_sec_core == 'true'
     runs-on: ubuntu-24.04
@@ -763,15 +823,17 @@ jobs:
           node-version: '22.23.2'
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt, clippy
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: sec-core-sandbox
           workspaces: |
             src/agent-sec-core/v2
             src/agent-sec-core/linux-sandbox
+            src/cosh-ng
       - name: Install strict sandbox dependencies
         run: |
           sudo apt-get update
@@ -782,6 +844,11 @@ jobs:
           sudo install -m 0755 /tmp/asc-bubblewrap/build/bwrap /usr/bin/bwrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --version
+      - name: Check sandbox formatting and Clippy
+        working-directory: src/agent-sec-core/linux-sandbox
+        run: |
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
       - name: Verify non-root server rejection
         working-directory: src/agent-sec-core/v2
         run: |
@@ -794,32 +861,57 @@ jobs:
           ASC_SANDBOX_INTEGRATION: '1'
         run: |
           test "$(id -u)" -ne 0
+          cargo llvm-cov clean --workspace
           RUSTFLAGS="-C target-feature=+crt-static" cargo llvm-cov --locked --no-fail-fast --no-report --target x86_64-unknown-linux-gnu -- --skip bwrap_seccomp
           sudo env ASC_SANDBOX_INTEGRATION=1 LLVM_PROFILE_FILE="$PWD/target/llvm-cov-target/root-%p-%m.profraw" "$(find target/llvm-cov-target/x86_64-unknown-linux-gnu/debug/deps -maxdepth 1 -type f -executable -name 'all-*' | head -1)" suite::strict_runtime:: --nocapture
           sudo chown "$(id -u):$(id -g)" target/llvm-cov-target/*.profraw
           cargo llvm-cov report --target x86_64-unknown-linux-gnu --cobertura --output-path ../rust-sandbox-coverage.xml
-      - name: Build runnable CLI and helper
+      - name: Build and verify the static sandbox helper
         if: ${{ !cancelled() }}
         working-directory: src/agent-sec-core
         run: |
-          cargo build --locked --manifest-path v2/Cargo.toml -p asc-cli
           cargo rustc --locked --manifest-path linux-sandbox/Cargo.toml --bin linux-sandbox -- -C target-feature=+crt-static
           python3 ../../.github/actions/prebuilt-rust-common/verify-glibc.py --arch x86_64 --require-static linux-sandbox/target/debug/linux-sandbox
-          cp linux-sandbox/target/debug/linux-sandbox v2/target/debug/linux-sandbox
-          python3 tests/e2e/linux-sandbox/strict_cli.py v2/target/debug/agent-sec-cli
-          ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-rust-v2-sandbox-coverage
+      - name: Verify CLI isolation, permissions and root Hook routing
+        working-directory: src/agent-sec-core
+        run: ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-sandbox-cli-coverage
+      - name: Verify Cedar authorization and Cosh sandbox lifecycle
+        working-directory: src/agent-sec-core
+        run: ASC_SANDBOX_INTEGRATION=1 ASC_SANDBOX_HELPER="$PWD/linux-sandbox/target/debug/linux-sandbox" make test-authorized-sandbox-coverage
+      - name: Verify host cgroups and private credential files
+        working-directory: src/agent-sec-core/v2
+        run: |
+          # These fixtures self-skip on a container root cgroup or untrusted workspace.
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          cgroup = next(line[4:] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::/'))
+          assert cgroup and all(re.fullmatch(r'[A-Za-z0-9_.@-]+', part) and part not in ('.', '..') for part in cgroup.split('/')), cgroup
+          base = Path('crates/asc-credential-store').resolve()
+          for path in (base, *base.parents):
+              info = path.stat()
+              assert info.st_uid in (0, os.geteuid()) and info.st_mode & 0o7022 == 0, f'untrusted workspace ancestor: {path}'
+          PY
+          cargo llvm-cov --locked --no-report -p asc-gateway-runtime --lib -- processes::tests::scope_snapshot_survives_members_exiting_mid_enumeration --exact
+          cargo llvm-cov --locked --no-report -p asc-credential-store --lib -- tests::token_
+          cargo llvm-cov --locked --no-report -p asc-credential-store --lib -- tests::fake_file_is_create_new_private_and_validation_or_generation_failure_creates_nothing --exact
+      - name: Generate Linux V2 integration coverage
+        working-directory: src/agent-sec-core/v2
+        run: cargo llvm-cov report --cobertura --output-path ../rust-v2-sandbox-coverage.xml
       - name: Normalize sandbox coverage
         run: |
-          python3 .github/scripts/sec_core_coverage.py normalize \
+          python3 src/agent-sec-core/scripts/ci/sec_core_coverage.py normalize \
             src/agent-sec-core/rust-sandbox-coverage.xml \
-            src/agent-sec-core/rust-v2-coverage.xml
+            src/agent-sec-core/rust-v2-sandbox-coverage.xml
       - name: Upload sandbox coverage
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-coverage
           path: |
             src/agent-sec-core/rust-sandbox-coverage.xml
-            src/agent-sec-core/rust-v2-coverage.xml
+            src/agent-sec-core/rust-v2-sandbox-coverage.xml
           if-no-files-found: error
 
   # =========================================================================

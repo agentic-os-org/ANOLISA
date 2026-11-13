@@ -42,22 +42,28 @@ rust-code-pretty: ## Format Rust code with cargo fmt (agent-sec-cli + V2 + linux
 	cd linux-sandbox && cargo fmt
 
 .PHONY: rust-fmt-check
-rust-fmt-check: ## Check Rust formatting without modifying files
+rust-fmt-check: rust-fmt-check-legacy ## Check Rust formatting without modifying files
 	@echo "🔍 Checking Rust formatting..."
-	cd agent-sec-cli && cargo fmt --all -- --check
 	cd v2 && cargo fmt --all -- --check
 	cd linux-sandbox && cargo fmt -- --check
 
+.PHONY: rust-fmt-check-legacy
+rust-fmt-check-legacy: ## Check formatting in the legacy Rust workspace
+	cd agent-sec-cli && cargo fmt --all -- --check
+
 .PHONY: rust-lint
-rust-lint: ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
+rust-lint: rust-lint-legacy ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
 	@echo "🔍 Running cargo clippy..."
-	cd agent-sec-cli && { $(PYO3_PIN); cargo clippy --workspace --all-targets -- -D warnings; }
 	cd v2 && cargo clippy --workspace --all-targets --locked -- -D warnings
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		cd linux-sandbox && cargo clippy --all-targets -- -D warnings; \
 	else \
 		echo "  (linux-sandbox clippy skipped: requires Linux)"; \
 	fi
+
+.PHONY: rust-lint-legacy
+rust-lint-legacy: ## Run Clippy for the legacy Rust workspace
+	cd agent-sec-cli && { $(PYO3_PIN); cargo clippy --workspace --all-targets -- -D warnings; }
 
 # =============================================================================
 # TEST
@@ -191,6 +197,48 @@ test-rust-v2-sandbox-coverage: ## Cover all V2 workspace members, including sand
 		--features asc-daemon-client/testing \
 		-- --skip untrusted_server_is_rejected_before_request_bytes_are_sent
 ifeq ($(ASC_SANDBOX_INTEGRATION),1)
+	$(MAKE) test-authorized-sandbox-coverage
+endif
+	cd v2 && cargo llvm-cov report --cobertura --output-path ../rust-v2-coverage.xml
+
+.PHONY: test-rust-v2-coverage
+test-rust-v2-coverage: ## Cover every V2 crate; VM-only cases run in the Linux E2E job
+	cd v2 && cargo llvm-cov clean --workspace
+	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --workspace --locked --no-fail-fast \
+		--no-report --features asc-daemon-client/testing \
+		-- --skip untrusted_server_is_rejected_before_request_bytes_are_sent \
+		--skip sandbox_terminal_and_nonterminal_lifecycle \
+		--skip cedar_permissions_are_enforced_by_the_real_linux_helper \
+		--skip hook_rereads_cedar_for_each_authorization_request \
+		--skip scope_snapshot_survives_members_exiting_mid_enumeration \
+		--skip token_file_reads_private_bounded_values_trims_one_line_ending_and_never_echoes_errors \
+		--skip token_helpers_refuse_untrusted_paths_permissions_links_and_nonregular_files \
+		--skip fake_file_is_create_new_private_and_validation_or_generation_failure_creates_nothing
+
+.PHONY: test-sandbox-cli-coverage
+test-sandbox-cli-coverage: ## Run the VM-only CLI cases, including the root Hook case
+	@test "$(ASC_SANDBOX_INTEGRATION)" = 1
+	@test -x "$(ASC_SANDBOX_HELPER)"
+	cd v2 && cargo llvm-cov clean --workspace
+	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --locked --no-report \
+		-p asc-cli --features asc-daemon-client/testing --test sandbox --test sandbox_permissions \
+		-- --skip json_and_cedar_reach_the_direct_backend_without_a_daemon \
+		--skip hook_rereads_cedar_for_each_authorization_request
+	set -eu; cd v2; \
+		eval "$$(CARGO_TARGET_DIR="$$PWD/target/llvm-cov-target" cargo llvm-cov show-env --sh)"; \
+		binary=$$(cargo test --locked -p asc-cli --features asc-daemon-client/testing \
+			--target-dir "$$CARGO_LLVM_COV_TARGET_DIR" --test sandbox_permissions --no-run --message-format=json | \
+			jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable'); \
+		test -n "$$binary"; \
+		sudo env LLVM_PROFILE_FILE="$$LLVM_PROFILE_FILE" "$$binary" --exact hook_rereads_cedar_for_each_authorization_request; \
+		sudo chown "$$(id -u):$$(id -g)" "$$CARGO_LLVM_COV_TARGET_DIR"/*.profraw; \
+		cp "$(abspath $(ASC_SANDBOX_HELPER))" "$$CARGO_LLVM_COV_TARGET_DIR/debug/linux-sandbox"; \
+		python3 ../tests/e2e/linux-sandbox/strict_cli.py "$$CARGO_LLVM_COV_TARGET_DIR/debug/agent-sec-cli"
+
+.PHONY: test-authorized-sandbox-coverage
+test-authorized-sandbox-coverage: ## Add real authorization and Cosh samples to the V2 profiles
+	@test "$(ASC_SANDBOX_INTEGRATION)" = 1
+	@test -x "$(ASC_SANDBOX_HELPER)"
 	cargo build --locked --manifest-path ../cosh-ng/Cargo.toml -p cosh-core --bin cosh-core --target-dir ../cosh-ng/target
 	set -eu; cd v2; \
 		eval "$$(CARGO_TARGET_DIR="$$PWD/target/llvm-cov-target" cargo llvm-cov show-env --sh)"; \
@@ -201,8 +249,6 @@ ifeq ($(ASC_SANDBOX_INTEGRATION),1)
 		sudo env LLVM_PROFILE_FILE="$$LLVM_PROFILE_FILE" ASC_COSH_CORE="$(abspath ../cosh-ng/target/debug/cosh-core)" \
 			python3 ../tests/e2e/linux-sandbox/authorized_cli.py "$$bin/agent-sec-daemon" "$$bin/examples/authorized_sandbox" "$$bin/linux-sandbox"; \
 		sudo chown "$$(id -u):$$(id -g)" "$$CARGO_LLVM_COV_TARGET_DIR"/*.profraw
-endif
-	cd v2 && cargo llvm-cov report --cobertura --output-path ../rust-v2-coverage.xml
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
@@ -210,18 +256,20 @@ endif
 # Exclude `src/bin/`: build-time tools (sync_atr) that ship in no artifact, so
 # their main()/git/IO glue would skew the gate. Their logic is unit-tested.
 .PHONY: test-rust-coverage
-test-rust-coverage: ## Run Rust tests with coverage (agent-sec-cli crates; linux-sandbox on Linux only)
-	@echo "🧪 Running agent-sec-cli Rust tests with coverage..."
-	cd agent-sec-cli && cargo llvm-cov --cobertura \
-		--ignore-filename-regex '/src/bin/' \
-		--output-path ../rust-cli-coverage.xml \
-		-p prompt-scanner -p model-service
+test-rust-coverage: test-rust-legacy-coverage ## Cover legacy Rust and linux-sandbox on Linux
 	@echo "🧪 Running linux-sandbox Rust tests with coverage (Linux only)..."
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		cd linux-sandbox && cargo llvm-cov --cobertura --output-path ../rust-coverage.xml -- --skip bwrap_seccomp; \
 	else \
 		echo "  (linux-sandbox coverage skipped: requires Linux)"; \
 	fi
+
+.PHONY: test-rust-legacy-coverage
+test-rust-legacy-coverage: ## Cover the legacy Rust library crates
+	cd agent-sec-cli && cargo llvm-cov --cobertura \
+		--ignore-filename-regex '/src/bin/' \
+		--output-path ../rust-cli-coverage.xml \
+		-p prompt-scanner -p model-service
 
 .PHONY: test-openclaw-plugin
 test-openclaw-plugin: ## Run openclaw-plugin tests
