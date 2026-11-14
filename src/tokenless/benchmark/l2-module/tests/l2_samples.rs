@@ -28,6 +28,7 @@ fn l2_dir() -> PathBuf {
 
 #[test]
 fn json_samples_load_with_content_and_ground_truth() {
+    use tokenless_l2_bench::l2::tokenless_side;
     let samples = load_json_samples(&l2_dir()).expect("load json samples");
     assert_eq!(samples.len(), 3);
     for s in &samples {
@@ -39,10 +40,23 @@ fn json_samples_load_with_content_and_ground_truth() {
             "sample {} has no ground truth",
             s.id
         );
-        // json samples must carry valid wire-form JSON — the tokenless side
-        // parses them before compressing.
-        serde_json::from_str::<serde_json::Value>(&s.content)
-            .unwrap_or_else(|e| panic!("sample {} is not valid JSON: {e}", s.id));
+        // Route the asset check through the tokenless entry point, which parses
+        // the sample and enforces the no-string-top-level invariant, so a bad
+        // sample fails here at asset-check time instead of skewing a live run:
+        // bare JSON validity would accept a quoted top-level string that the
+        // compressor later unwraps onto a different base than the before-count.
+        let wire = tokenless_side::wire_before(Category::Json, &s.content)
+            .unwrap_or_else(|e| panic!("sample {} is rejected by the tokenless side: {e}", s.id));
+        // The sample's own content must already be compact wire form. The
+        // tokenless side counts wire form while headroom counts raw content, so
+        // a json sample authored with indentation or newlines (e.g. via
+        // content_lines) would put the two sides on different bytes and shift
+        // the retention baseline off the compressor's output shape.
+        assert_eq!(
+            wire, s.content,
+            "sample {} content is not compact wire form",
+            s.id
+        );
     }
     // The canonical fixture arrives via content_path and must resolve.
     assert!(samples.iter().any(|s| s.id == "tool_response_main"));
