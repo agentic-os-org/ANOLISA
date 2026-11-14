@@ -3359,6 +3359,17 @@ mod tests {
     }
 
     #[test]
+    fn static_ssl_offsets_rejects_write_before_read_beyond_adjacency() {
+        // The write-before-read fallback must still obey the same 4KB
+        // adjacency bound; a distant preceding match is not this handshake's
+        // SSL_write.
+        let img = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x800));
+        with_static_ssl_fixture("write-far-before", &img, |path| {
+            assert!(find_static_ssl_offsets(path).is_none());
+        });
+    }
+
+    #[test]
     fn static_ssl_offsets_still_resolves_past_one_scan_window() {
         // Guards Claude Code: its Bun single-file executable is the case the
         // byte-pattern path exists for, and it is far larger than one window.
