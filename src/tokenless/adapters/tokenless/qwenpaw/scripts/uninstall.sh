@@ -2,6 +2,15 @@
 # uninstall.sh — Remove the tokenless plugin from QwenPaw.
 set -euo pipefail
 
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this uninstaller with exit 1 -- the same status it otherwise reports for "not installed but installable",
+# so the crash would reach the caller as a verdict instead of as an error.
+# Resolve HOME once and derive every user-scope path from it; an empty value
+# leaves the destination unresolved and the script refuses to act on a path
+# under /.
+
+HOME_DIR="${HOME:-}"
+
 AGENT="${ANOLISA_TARGET:-qwenpaw}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 # Resolve the working directory like QwenPaw: QWENPAW_WORKING_DIR, else
@@ -9,18 +18,39 @@ COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 PLUGIN_ID="tokenless"
 QWENPAW_WORKING_DIR="${QWENPAW_WORKING_DIR:-${COPAW_WORKING_DIR:-}}"
 if [ -z "$QWENPAW_WORKING_DIR" ]; then
-    if [ -d "$HOME/.copaw" ]; then QWENPAW_WORKING_DIR="$HOME/.copaw"; other="$HOME/.qwenpaw"; else QWENPAW_WORKING_DIR="$HOME/.qwenpaw"; other="$HOME/.copaw"; fi
+    if [ -z "$HOME_DIR" ]; then
+        # Without a home there is no directory to derive the working
+        # directory from, and guessing one would put the plugin under /.
+        QWENPAW_WORKING_DIR=""
+        other=""
+    elif [ -d "$HOME_DIR/.copaw" ]; then
+        QWENPAW_WORKING_DIR="$HOME_DIR/.copaw"; other="$HOME_DIR/.qwenpaw"
+    else
+        QWENPAW_WORKING_DIR="$HOME_DIR/.qwenpaw"; other="$HOME_DIR/.copaw"
+    fi
     # ~/.copaw may have appeared or vanished since the plugin was installed:
     # prefer the default location that actually holds it.
-    if [ ! -d "$QWENPAW_WORKING_DIR/plugins/$PLUGIN_ID" ] && [ -d "$other/plugins/$PLUGIN_ID" ]; then
+    if [ -n "$other" ] && [ ! -d "$QWENPAW_WORKING_DIR/plugins/$PLUGIN_ID" ] \
+            && [ -d "$other/plugins/$PLUGIN_ID" ]; then
         QWENPAW_WORKING_DIR="$other"
     fi
 fi
 QWENPAW_BIN="${QWENPAW_BIN:-}"
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
-export PATH="${QWENPAW_HOME:-$HOME/.qwenpaw}/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+export PATH="${QWENPAW_HOME:-${HOME_DIR:+$HOME_DIR/.qwenpaw}}/bin:${USER_LOCAL_BIN}/usr/local/bin:$PATH"
 
 PLUGIN_DST="${QWENPAW_WORKING_DIR%/}/plugins/${PLUGIN_ID}"
+
+# The uninstaller removes the plugin directory from the QwenPaw working
+# directory, so that directory has to be known before anything is removed. A
+# path built from a missing HOME would sit under /, and an explicit
+# QWENPAW_WORKING_DIR or COPAW_WORKING_DIR still names a real directory.
+if [ -z "$QWENPAW_WORKING_DIR" ]; then
+    echo "[${COMPONENT}] ERROR: cannot resolve the QwenPaw working directory: HOME is unset and no override names it." >&2
+    echo "[${COMPONENT}] Set HOME, QWENPAW_WORKING_DIR or COPAW_WORKING_DIR to the directory to use, then retry." >&2
+    exit 1
+fi
 
 echo "[${COMPONENT}] Uninstalling ${AGENT} plugin..."
 
