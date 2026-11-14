@@ -19,6 +19,8 @@ mod qoder_version;
 mod registration_packages;
 #[path = "launcher/runtime_policy.rs"]
 mod runtime_policy;
+#[path = "launcher/runtime_policy_selector.rs"]
+mod runtime_policy_selector;
 #[path = "launcher/single_config.rs"]
 mod single_config;
 #[path = "launcher/support.rs"]

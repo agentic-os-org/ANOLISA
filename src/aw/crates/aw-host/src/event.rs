@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    sync::{atomic::AtomicBool, Mutex},
+    sync::{atomic::AtomicBool, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -29,6 +29,7 @@ pub struct Event<'a> {
     cancelled: &'a AtomicBool,
     claimed: Mutex<BTreeSet<String>>,
     callback: Mutex<Option<(Value, Vec<u8>)>>,
+    validated: OnceLock<()>,
 }
 
 impl Host {
@@ -147,6 +148,7 @@ impl Host {
             cancelled,
             claimed: Mutex::new(BTreeSet::new()),
             callback: Mutex::new(None),
+            validated: OnceLock::new(),
         })
     }
 }
@@ -328,7 +330,6 @@ impl Event<'_> {
         {
             return Err(Error::Invalid("step was already claimed for this event"));
         }
-        let transport = self.host.transport(provider, self.deadline, self.cancelled);
         let callback = self
             .callback
             .lock()
@@ -343,7 +344,14 @@ impl Event<'_> {
         let started = Instant::now();
         let validation = (|| -> Result<(), Failure> {
             check(self.deadline, self.cancelled)?;
-            self.host.protocol.validate_event(value)?;
+            if callback.is_none() {
+                if self.validated.get().is_none() {
+                    self.host.protocol.validate_event(&self.value)?;
+                    let _ = self.validated.set(());
+                }
+            } else {
+                self.host.protocol.validate_event(value)?;
+            }
             check(self.deadline, self.cancelled)?;
             Ok(())
         })();
@@ -353,6 +361,7 @@ impl Event<'_> {
         } else if !step.matches_tool(value) {
             (record, Ok(StepOutput::Skipped))
         } else {
+            let transport = self.host.transport(provider, self.deadline, self.cancelled);
             match &step.execution {
                 StepExecution::Native => {
                     let input = callback
