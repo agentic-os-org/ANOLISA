@@ -84,6 +84,8 @@ class Handler(BaseHTTPRequestHandler):
             }
         if MODE.startswith("bash-same-call"):
             tool_input = {"command":"git status"}
+        if BASH and os.environ.get("CLAUDE_FINAL_CASE"):
+            tool_input["command"] += '; test -z "${BUN_OPTIONS:-}${AW_CLAUDE_FINAL_CONFIG:-}" && touch preload-cleared'
         if PRETOOL:
             done = inference > 2
             tool_input = {"command": "git status"}

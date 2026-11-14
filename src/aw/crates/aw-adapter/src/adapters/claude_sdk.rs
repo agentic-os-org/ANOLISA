@@ -15,6 +15,7 @@ pub(crate) struct ClaudeSdk;
 struct Prepared {
     input: LaunchInput,
     version: String,
+    final_profile: Option<Value>,
 }
 
 impl Adapter for ClaudeSdk {
@@ -48,9 +49,17 @@ impl Adapter for ClaudeSdk {
                 .ok_or("Claude SDK probe must identify its bundled Claude Code CLI")?,
             "Claude Code",
         )?;
-        Ok(Box::new(Prepared { input, version }))
+        let final_profile = super::claude_final::profile(&input, &version, cli, cancelled)?;
+        Ok(Box::new(Prepared {
+            input,
+            version,
+            final_profile,
+        }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if event == "security.violation" {
+            return super::claude_final::normalize(binding, native);
+        }
         if event == "input.submit" {
             if native["hook_event_name"] != "AWInputSubmit"
                 || native["cwd"].as_str() != binding.cwd.to_str()
@@ -76,9 +85,18 @@ impl Adapter for ClaudeSdk {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::CLAUDE_SDK.capabilities(&self.version, "sdk-worker")
+        let mut capabilities =
+            super::super::adapter::catalog::CLAUDE_SDK.capabilities(&self.version, "sdk-worker");
+        if self.final_profile.is_some() {
+            capabilities.events.insert(
+                "security.violation".into(),
+                ["observe".into(), "block".into()].into(),
+            );
+        }
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        super::claude_final::validate(steps)?;
         super::sdk_tools::routes(&self.input.document, steps, "claude-sdk").map(|_| ())
     }
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
@@ -129,7 +147,14 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/claude-sdk/aw_transport.py"),
         )?;
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
-        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "resident_policy_reload": self.input.options.resident_policy_reload, "hooks": hooks}))?)?;
+        let final_profile = events
+            .contains_key("security.violation")
+            .then_some(self.final_profile.as_ref())
+            .flatten();
+        if final_profile.is_some() {
+            super::claude_final::configure(context)?;
+        }
+        let config = context.files.write("claude-sdk-hooks.json", &serde_json::to_vec(&json!({"executable": context.executable, "binding": context.binding_path, "ready_path": ready, "ready_token": token, "observation_enabled": observe, "resident_policy_reload": self.input.options.resident_policy_reload, "hooks": hooks, "final_profile": final_profile}))?)?;
         let mut command = self.input.command.clone();
         let mut paths = vec![context.files.directory().to_path_buf()];
         if let Some(existing) = command.environment.get(std::ffi::OsStr::new("PYTHONPATH")) {

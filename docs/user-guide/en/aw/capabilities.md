@@ -86,6 +86,11 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `security.violation` | Implemented for pinned DeepSeek Harness 0.2.1-rc.5; experimental for verified OpenClaw 2026.9.5–2026.9.7 Gateway builds with explicit OpenAI-completions; supports observe and block |
 | `coverage.changed` | Planned |
 
+Claude SDK conditionally admits final `security.violation` checks for exact
+Python SDK / bundled CLI builds. The private runtime gate checks serialized
+Anthropic tool results after Post callbacks; required policies reject unknown
+builds. See [Claude final-result limits](../../../developer-guide/en/aw/agents/claude-sdk.md#final-tool-result-security-boundary).
+
 OpenClaw final checking requires an exact build and a foreground, non-reloadable
 Gateway. The static grid above describes ordinary launches. The final check
 inspects the model request after native result and payload transformations;
