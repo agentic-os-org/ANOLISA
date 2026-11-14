@@ -345,11 +345,8 @@ pub(super) fn generate(
         .as_object_mut()
         .ok_or("Qoder hooks must be an object")?;
     for name in ["input.submit", "tool.before", "tool.after"] {
-        let selected = adapter::native_steps(
-            steps,
-            name,
-            name != "input.submit" && adapter::observation_enabled(document, target),
-        );
+        let observe = name != "input.submit" && adapter::observation_enabled(document, target);
+        let selected = adapter::native_steps(steps, name, observe);
         if selected.is_empty() {
             continue;
         }
@@ -373,6 +370,7 @@ pub(super) fn generate(
                 })
             })
             .collect();
+        // Selector misses still require event validation and their configured failure audit.
         let mut group = json!({"matcher": "*", "hooks": commands});
         if let Some(sequential) = spec["agents"][target]["qoder"].get("sequential") {
             group["sequential"] = sequential.clone();
@@ -525,5 +523,93 @@ mod tests {
         assert!(normalize(&context, "tool.before", &native).is_err());
         native.as_object_mut().unwrap().remove("error");
         assert!(normalize(&context, "tool.after", &native).is_err());
+    }
+
+    use aw_core::admission::{AdmittedStep, StepExecution};
+
+    fn qoder_step(event: &str, step_tools: Vec<&str>, on_error: &str) -> AdmittedStep {
+        AdmittedStep {
+            event: event.into(),
+            step_id: "scan-code".into(),
+            provider: "security".into(),
+            event_tools: vec!["*".into()],
+            step_tools: step_tools.into_iter().map(Into::into).collect(),
+            on_error: on_error.into(),
+            execution: StepExecution::Provider {
+                operation: "scan_code".into(),
+                effects: vec!["observe".into(), "block".into()],
+            },
+        }
+    }
+
+    #[test]
+    fn static_qoder_matcher_preserves_wildcard_for_validation_and_failure_audit() {
+        let doc = json!({
+            "spec": {
+                "execution": {"default_event_budget_ms": 2000},
+                "agents": {"qoder": {"adapter": "qoder"}},
+                "events": {}
+            }
+        });
+        let report_exact = [qoder_step(
+            "tool.before",
+            vec!["native:qoder:Bash"],
+            "report",
+        )];
+        let (settings, _) = generate(
+            json!({}),
+            &doc,
+            "qoder",
+            &report_exact,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+
+        let block_exact = [qoder_step(
+            "tool.before",
+            vec!["native:qoder:Bash"],
+            "block",
+        )];
+        let (block_settings, _) = generate(
+            json!({}),
+            &doc,
+            "qoder",
+            &block_exact,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(block_settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+
+        let mut observed_doc = doc.clone();
+        observed_doc["spec"]["agents"]["qoder"]["evidence"] = json!({"mode": "metadata_only"});
+        let (observed_settings, _) = generate(
+            json!({}),
+            &observed_doc,
+            "qoder",
+            &report_exact,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(observed_settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+
+        let wildcard = [qoder_step(
+            "tool.before",
+            vec!["execute_shell_command"],
+            "report",
+        )];
+        let (fallback_settings, _) = generate(
+            json!({}),
+            &doc,
+            "qoder",
+            &wildcard,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(fallback_settings["hooks"]["PreToolUse"][0]["matcher"], "*");
     }
 }

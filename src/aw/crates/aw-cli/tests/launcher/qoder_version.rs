@@ -1,5 +1,8 @@
 //! Qoder version and submission contracts using the native-host fixture.
 
+#[path = "qoder_matcher.rs"]
+mod qoder_matcher;
+
 use super::{hooks, Fixture, Service};
 use serde_json::{json, Value};
 use std::fs;
