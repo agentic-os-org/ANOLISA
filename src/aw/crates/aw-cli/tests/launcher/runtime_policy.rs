@@ -529,3 +529,59 @@ fn qoder_dynamic_hooks_preserve_permission_and_additional_context() {
     assert!(process.finish().status.success());
     service.released(&fixture);
 }
+
+#[test]
+fn qoder_failure_dispatch_releases_tools_even_without_policy_or_valid_result() {
+    let fixture = Fixture::new();
+    let host = fixture.root.join("reusable host");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/launcher/reload_host.py"),
+        &host,
+    )
+    .unwrap();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut baseline = fixture.document();
+    baseline["spec"]["agents"]["qoder"] =
+        json!({"adapter":"qoder","argv":[host],"qoder":{"sequential":true}});
+    let service = Service::start(&fixture, &baseline);
+    let mut launch = fixture.command();
+    launch
+        .args(["run", "--config"])
+        .arg(fixture.root.join("aw.json"))
+        .args(["--agent", "qoder", "--reloadable"])
+        .env("FAKE_RELOAD_ADAPTER", "qoder");
+    let process = Process::spawn(&fixture, launch);
+    wait(&fixture.root.join("native-ready"));
+    for (index, failure) in ["failure", "failure", "malformed"].into_iter().enumerate() {
+        if index == 1 {
+            let mut candidate = baseline.clone();
+            fixture.provider(&mut candidate);
+            let changed = update(&fixture, &candidate, &[]);
+            assert!(
+                changed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&changed.stderr)
+            );
+        }
+        command(
+            &fixture,
+            index,
+            json!({"action":"turn","failure":failure,"hold_after":true}),
+        );
+        wait(&fixture.root.join(format!("terminal-{index}")));
+        // Check before the idle notification can release request admission.
+        assert_eq!(active(&service)["tools"], 0);
+        assert_eq!(active(&service)["requests"], 1);
+        fs::write(fixture.root.join(format!("finish-{index}")), b"").unwrap();
+        let result = report(&fixture, index);
+        assert_eq!(
+            result["after"][0]["code"],
+            if failure == "malformed" { 2 } else { 0 },
+            "{result}"
+        );
+        assert_eq!(active(&service)["requests"], 0);
+    }
+    command(&fixture, 3, json!({"action":"stop"}));
+    assert!(process.finish().status.success());
+    service.released(&fixture);
+}
