@@ -271,7 +271,7 @@ pub(super) fn is_readonly_find(tokens: &[String]) -> bool {
     true
 }
 
-pub(super) fn is_readonly_ps(tokens: &[String]) -> bool {
+pub(crate) fn is_readonly_ps(tokens: &[String]) -> bool {
     let mut idx = 1;
     while idx < tokens.len() {
         let token = tokens[idx].as_str();
