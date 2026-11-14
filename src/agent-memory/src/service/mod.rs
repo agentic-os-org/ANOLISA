@@ -42,9 +42,6 @@ pub struct MemoryService {
     /// the same session log into duplicate facts. Claimed through
     /// [`ConsolidationGuard`], which also releases it on unwind.
     consolidating: AtomicBool,
-    /// Cached consent configuration for memory sovereignty checks.
-    pub consent_cache:
-        std::sync::Arc<std::sync::Mutex<Option<crate::tools::memory_sovereignty::ConsentConfig>>>,
 }
 
 impl MemoryService {
@@ -155,7 +152,6 @@ impl MemoryService {
             mount_strategy_name: strategy_name,
             audit_counter: AtomicUsize::new(0),
             consolidating: AtomicBool::new(false),
-            consent_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
