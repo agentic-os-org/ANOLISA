@@ -1249,6 +1249,14 @@
     "codex-replacement": {
       "target": "aw-cli/test/codex",
       "test": "native_replacement_returns_feedback_to_codex"
+    },
+    "claude-final-runtime": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "final_runtime_gate_checks_owned_bytes_and_native_identity"
+    },
+    "claude-final-factory": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "final_factory_rejects_uncovered_delivery_paths"
     }
   },
   "agents": {
@@ -1392,7 +1400,9 @@
         "scope-native-skips",
         "coverage-native-identity",
         "claude-submission",
-        "input-rewrite"
+        "input-rewrite",
+        "claude-final-runtime",
+        "claude-final-factory"
       ],
       "tokenless": [
         "final-replacement",

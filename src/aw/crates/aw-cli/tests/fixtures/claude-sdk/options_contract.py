@@ -61,6 +61,7 @@ class Contracts(unittest.TestCase):
                         env={"BUSINESS_CONFIG": "./config.json"},
                     )
                     bridge = object.__new__(Bridge)
+                    bridge.final = None
                     bridge.config = {"hooks": [{"event": "tool.before", "budget_ms": 1000,
                                                 "replace_result": False}]}
                     composed = bridge.options(options)

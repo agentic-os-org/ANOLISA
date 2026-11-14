@@ -23,7 +23,8 @@ ROOT = Path.cwd()
 MARKER = "AW_CLAUDE_FINAL_SECRET_MARKER"
 MODE = os.environ["CLAUDE_FINAL_CASE"]
 BASH = MODE.startswith("bash-")
-LATE = MODE.endswith("late")
+LATE = MODE.endswith(("late", "timeout", "error"))
+ENFORCE = "-gate-" in MODE
 TRACE = []
 
 
@@ -46,7 +47,7 @@ def fingerprint():
 async def run(server):
     fixture.BASH = BASH
     fixture.ORIGINAL = "PUBLIC_TOOL_RESULT"
-    completed = asyncio.Event()
+    completed = {}
     callback = Bridge.callback
 
     async def recorded(self, payload, call_id, context):
@@ -54,13 +55,13 @@ async def run(server):
         if payload["hook_event_name"] == "PostToolUse":
             TRACE.append({"phase": "aw_post_returned", "call_id": call_id,
                           "input": payload, "output": result})
-            completed.set()
+            completed.setdefault(call_id, asyncio.Event()).set()
         return result
 
     async def late(payload, call_id, context):
         # SDK callbacks run concurrently. Release the application Hook only
         # after the real AW callback has returned; do not rely on a sleep.
-        await asyncio.wait_for(completed.wait(), timeout=10)
+        await asyncio.wait_for(completed.setdefault(call_id, asyncio.Event()).wait(), timeout=10)
         value = ({**payload["tool_response"], "stdout": MARKER} if BASH else MARKER)
         result = {"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                          "updatedToolOutput": value}} if LATE else {}
@@ -89,6 +90,15 @@ async def run(server):
             await client.query("Use the fixture tool once and report its result.")
             async for message in client.receive_response():
                 messages.append({"type": type(message).__name__, "value": asdict(message)})
+            if ENFORCE:
+                status = json.loads(subprocess.check_output([os.environ["CLAUDE_TEST_AW"],
+                    "status", "--config", os.environ["CLAUDE_TEST_CONFIG"]], timeout=5))["result"]
+                assert status["bindings"] == 1 and status["events"] == 0, status
+                (ROOT / "active-status.json").write_text(json.dumps(status))
+            if MODE == "mcp-gate-multi-late":
+                await client.query("Report the previous result without calling another tool.")
+                async for message in client.receive_response():
+                    messages.append({"type": type(message).__name__, "value": asdict(message)})
     elapsed = (time.monotonic() - start) * 1000
     assert not Path(f"/proc/{pid}").exists(), pid
     assert baseline == fingerprint(), "installed SDK/CLI changed"
@@ -96,29 +106,36 @@ async def run(server):
     (ROOT / "requests.json").write_text(json.dumps(requests, indent=2))
     (ROOT / "messages.json").write_text(json.dumps(messages, indent=2))
     (ROOT / "trace.json").write_text(json.dumps(TRACE, indent=2))
-    assert len(requests) == 2, len(requests)
-    assert [row["phase"] for row in TRACE] == ["aw_post_returned", "application_post_returned"]
-    assert TRACE[0]["call_id"] == TRACE[1]["call_id"]
-    assert MARKER not in json.dumps(TRACE[0]), TRACE[0]
+    assert len(requests) == (4 if MODE == "mcp-gate-multi-late" else 2), len(requests)
+    assert [row["phase"] for row in TRACE] == ["aw_post_returned", "application_post_returned"] * (2 if MODE == "mcp-gate-multi-late" else 1)
+    for before, after in zip(TRACE[::2], TRACE[1::2]):
+        assert before["call_id"] == after["call_id"]
+        assert MARKER not in json.dumps(before), before
     results = [block for message in requests[1]["messages"]
                for block in message.get("content", [])
                if isinstance(block, dict) and block.get("type") == "tool_result"]
     assert len(results) == 1 and results[0]["tool_use_id"] == TRACE[0]["call_id"], results
-    assert (MARKER in json.dumps(results)) == LATE, results
+    leaked = LATE and not ENFORCE
+    assert (MARKER in json.dumps(results)) == leaked, results
+    if LATE and ENFORCE:
+        assert results[0]["content"] == "AW withheld the final tool result", results
     result_messages = [message["value"] for message in messages if message["type"] == "ResultMessage"]
-    assert len(result_messages) == 1 and not result_messages[0]["is_error"], result_messages
-    assert result_messages[0]["result"] == (MARKER if LATE else "PUBLIC_OK"), result_messages
+    assert len(result_messages) == (2 if MODE == "mcp-gate-multi-late" else 1), result_messages
+    assert all(not message["is_error"] for message in result_messages), result_messages
+    assert result_messages[0]["result"] == (MARKER if leaked else "PUBLIC_OK"), result_messages
     assert (ROOT / "effect").exists()
+    if BASH:
+        assert (ROOT / "preload-cleared").exists(), "runtime preload propagated to the tool"
     bundled = Path(claude_agent_sdk.__file__).parent / "_bundled/claude"
     (ROOT / "result.json").write_text(json.dumps({
         "case": MODE, "passed": True, "sdk": version("claude-agent-sdk"),
         "cli": subprocess.check_output([str(bundled), "--version"], text=True, timeout=5).strip(),
         "platform": platform.machine(), "python": platform.python_version(),
-        "sha256": baseline, "model_requests": len(requests), "model_received_marker": LATE,
+        "sha256": baseline, "model_requests": len(requests), "model_received_marker": leaked,
         "model_response": result_messages[0]["result"], "model_kind": "deterministic_local_http",
-        "aw_post_before_application": True, "installed_files_unchanged": True,
+        "aw_post_before_application": True, "events_closed_before_client_teardown": ENFORCE, "installed_files_unchanged": True,
         "tool_side_effect": True, "sdk_process_stopped": True, "elapsed_ms": elapsed,
-        "final_gate": "unsupported",
+        "final_gate": "verified" if ENFORCE else "disabled",
     }, indent=2))
 
 

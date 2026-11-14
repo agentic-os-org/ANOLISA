@@ -52,7 +52,7 @@ class Bridge:
             raise ValueError("AW configuration requires hooks")
         for hook in hooks:
             if (
-                hook.get("event") not in {"input.submit", "tool.before", "tool.after"}
+                hook.get("event") not in {"input.submit", "tool.before", "tool.after", "security.violation"}
                 or not isinstance(hook.get("step"), str)
                 or not hook["step"]
                 or hook.get("on_error") not in {"report", "block"}
@@ -61,6 +61,10 @@ class Bridge:
                 or not 1 <= hook["budget_ms"] <= 55000
             ):
                 raise ValueError("Invalid AW hook route")
+        self.final = None
+        if self.config.get("final_profile"):
+            from aw_final import FinalGate
+            self.final = FinalGate(self.config)
 
     async def _transport(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
@@ -163,6 +167,10 @@ class Bridge:
             raise ValueError("Unsupported Claude tool event")
         if tool_use_id is not None and payload.get("tool_use_id") != tool_use_id:
             return _deny("AW tool identity mismatch") if event == "tool.before" else {}
+        if self.final is not None and event == "tool.after":
+            self.final.record(payload)
+        if self.final is not None and event == "tool.before" and not self.final.supports_tool(payload):
+            return _deny("AW final gate does not cover this tool delivery path")
         for hook in self.config["hooks"]:
             if hook["event"] != event:
                 continue
@@ -208,7 +216,7 @@ class Bridge:
                 "AW Claude SDK requires its bundled CLI; cli_path overrides unsupported"
             )
         hooks = {event: list(matchers) for event, matchers in (options.hooks or {}).items()}
-        before = any(hook["event"] == "tool.before" for hook in self.config["hooks"])
+        before = self.final is not None or any(hook["event"] == "tool.before" for hook in self.config["hooks"])
         if before:
             if options.permission_prompt_tool_name is not None:
                 raise ValueError("AW tool.before does not support permission_prompt_tool_name")
@@ -256,7 +264,7 @@ class Bridge:
             ("tool.after", ["PostToolUse", "PostToolUseFailure"]),
         ):
             selected = [hook for hook in self.config["hooks"] if hook["event"] == event]
-            if selected:
+            if selected or self.final is not None:
                 timeout = sum(hook["budget_ms"] + 3000 for hook in selected) / 1000 + 1
                 for native in native_events:
                     hooks.setdefault(native, []).append(
@@ -280,10 +288,13 @@ class Bridge:
         bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
         if not bundled.is_file():
             raise ValueError("AW requires the SDK bundled CLI; PATH fallback unsupported")
-        return replace(options, hooks=hooks, cli_path=str(bundled), can_use_tool=permission)
+        composed = replace(options, hooks=hooks, cli_path=str(bundled), can_use_tool=permission)
+        return self.final.options(composed, bundled) if self.final is not None else composed
 
     def ready(self) -> None:
         """Publish only after the SDK initialize handshake accepted installed callbacks."""
+        if self.final is not None:
+            self.final.ready()
         path = Path(self.config["ready_path"])
         temporary = None
         try:

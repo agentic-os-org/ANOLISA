@@ -36,6 +36,23 @@ No public configuration field or Provider protocol is needed for this phase.
 `tool.after` replacement runs before the final check. Empty policy has no
 preload, final callback or extra per-tool process.
 
+## Bun runtime backend
+
+The shared `fetch-gate.mjs` backend snapshots serialized body bytes and headers
+before awaiting a semantic check. It interposes both global fetch and Bun pooled
+FetchSession sends, retains native session instances and cancellation, and never
+sends after an unsuccessful check. Node source rewriting continues to use
+`module-patch.mjs`; each backend serves its runtime's actual delivery boundary.
+
+Claude uses `BUN_OPTIONS=--preload=…` without editing its installed ELF. SDK/CLI
+fingerprints select the profile; the preload checks the running executable again
+through `/proc/self/exe` and verifies Bun 1.3.14 or 1.4.4. It removes its own launch
+environment before child tools start. Native Post records identity only; the
+serialized request supplies the final text. Digest receipts bind history to the
+same call and checked bytes. Registration readiness requires a preload receipt;
+security acceptance separately requires real HTTP and model-response evidence.
+See the [Claude factory limits](../../../../../docs/developer-guide/en/aw/agents/claude-sdk.md#final-tool-result-security-boundary).
+
 ## Published release evidence
 
 | Agent | Published build | Observed sequence | Final-gate status |

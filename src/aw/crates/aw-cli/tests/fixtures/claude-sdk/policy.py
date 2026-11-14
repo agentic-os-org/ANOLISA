@@ -42,6 +42,14 @@ def main() -> None:
         raise SystemExit(9)
     with (Path.cwd() / "policy-events.jsonl").open("a") as log:
         log.write(json.dumps(event) + "\n")
+    if event["name"] == "security.violation":
+        case = os.environ.get("CLAUDE_FINAL_CASE", "")
+        if case.endswith("timeout"):
+            time.sleep(5)
+        if case.endswith("error"):
+            raise SystemExit(9)
+        print(json.dumps("AW_CLAUDE_FINAL_SECRET_MARKER" in json.dumps(event["tool"]["result"])))
+        return
     if mode.startswith("bash-native-rewrite-"):
         blocked = event["name"] == "tool.before" and (
             "rewritten-effect" in event["tool"]["input"]["command"] or mode.endswith("-deny")

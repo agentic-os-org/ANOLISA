@@ -28,16 +28,21 @@ def run(aw, output, mode):
         work = case / "work"
         work.mkdir()
         environment = {**os.environ, "CLAUDE_CONFIG_DIR": str(case / "profile"),
-                       "CLAUDE_FINAL_CASE": mode, "CLAUDE_TEST_MODE": "allow",
+                       "CLAUDE_FINAL_CASE": mode,
+                       "CLAUDE_TEST_CONFIG": str(case / "aw.json"), "CLAUDE_TEST_AW": str(aw), "CLAUDE_TEST_MODE": "allow",
                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
         worker = FIXTURES / "claude-sdk/final_native.py"
         config = case / "aw.json"
         value = document(sys.executable, worker, case / "state", "allow")
         value["spec"]["daemon"]["startup"] = "external"
-        if mode == "required-final":
+        if mode == "required-final" or "-gate-" in mode:
             value["spec"]["events"]["security.violation"] = {
                 "enabled": True, "required": True, "steps": [{"id": "final",
                     "provider": "policy", "effects": ["observe", "block"], "on_error": "block"}]}
+            value["spec"]["events"]["security.violation"]["steps"].append({
+                "id": "final-tail", "provider": "policy", "effects": ["observe", "block"], "on_error": "block"})
+            if mode == "required-final":
+                value["spec"]["events"]["security.violation"]["steps"][0]["on_error"] = "report"
         save(config, value)
         processes = Processes(case, output, environment)
         result = None
@@ -49,10 +54,9 @@ def run(aw, output, mode):
             code = processes.wait(process, 90)
             if mode == "required-final":
                 log = (output / "worker.log").read_text()
-                assert code != 0 and "policy admission rejected" in log, log
-                assert "Adapter evidence lacks an enabled event" in log, log
+                assert code != 0 and "Claude final gate requires a structured policy with on_error: block" in log, log
                 assert not (work / "server.json").exists() and not (work / "effect").exists()
-                result = {"case": mode, "passed": True, "final_gate": "unsupported",
+                result = {"case": mode, "passed": True, "final_gate": "fail_closed",
                           "worker_started": False, "model_requests": 0}
             else:
                 assert code == 0, (output / "worker.log").read_text()
@@ -61,8 +65,14 @@ def run(aw, output, mode):
                 assert result["cli"] == RELEASES[result["sdk"]], result["cli"]
                 events = [json.loads(line) for line in (work / "policy-events.jsonl").read_text().splitlines()]
                 after = [event for event in events if event["name"] == "tool.after"]
-                assert len(after) == 1 and "AW_CLAUDE_FINAL_SECRET_MARKER" not in json.dumps(after)
+                assert len(after) == (2 if mode == "mcp-gate-multi-late" else 1) and "AW_CLAUDE_FINAL_SECRET_MARKER" not in json.dumps(after)
                 result["aw_post_observed_original"] = True
+                if "-gate-" in mode:
+                    checks = [event for event in events if event["name"] == "security.violation"]
+                    assert len(checks) == (2 if mode.endswith("safe") or mode == "mcp-gate-multi-late" else 1), checks
+                    assert {check["tool"]["call_id"] for check in checks} == {post["tool"]["call_id"] for post in after}
+                    assert ("AW_CLAUDE_FINAL_SECRET_MARKER" in json.dumps(checks)) == mode.endswith(("late", "timeout", "error"))
+                    result["final_gate"] = "verified"
             status = json.loads(subprocess.check_output(
                 [str(aw), "status", "--config", str(config)], timeout=10))["result"]
             assert status["bindings"] == status["events"] == 0, status
@@ -95,7 +105,9 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     own_children()
     results = [run(args.aw.resolve(), args.output.resolve() / mode, mode)
-               for mode in ["bash-safe", "bash-late", "mcp-safe", "mcp-late", "required-final"]]
+               for mode in ["bash-safe", "bash-late", "mcp-safe", "mcp-late", "required-final",
+                            "bash-gate-safe", "bash-gate-late", "mcp-gate-safe", "mcp-gate-late",
+                            "bash-gate-timeout", "mcp-gate-error", "mcp-gate-multi-late"]]
     save(args.output / "result.json", results)
     print(json.dumps(results, indent=2))
 
