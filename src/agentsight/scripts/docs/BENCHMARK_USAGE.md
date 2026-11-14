@@ -226,15 +226,21 @@ For existing binaries, use `--ab --baseline-bin PATH --candidate-bin PATH`.
 
 The terminal and `resource-report.txt` show average/peak RSS, their percentages of
 host RAM, average/P95/peak CPU, Load/Capture PASS or FAIL, and run status.
+The resource gate checks average CPU (25%) and average/peak RSS (265/300 MiB)
+only; P95 and peak CPU are diagnostic and do not affect the gate result.
 CPU includes all threads of the standalone AgentSight process: 100% means one
 logical CPU, and values can exceed 100%. The report records the host logical CPU
 count; mock-server and client processes are outside this scope.
 A/B shows RSS reductions in MiB and relative percent. CPU reductions use percentage
 points (`before - after`) and relative percent; negative values mean increased
 resource usage. A zero CPU baseline has no relative percentage. Host RAM share
-changes use percentage points. `resource-summary.json` records the measurements,
-version/tree IDs and binary hashes. Per-run CSV, capture reports and logs are under
-`run/`, or `before/` and `after/` in A/B mode.
+changes use percentage points. The A/B HTML reads the authoritative RSS/CPU
+statistics and `valid` flag from `resource-summary.json`; an invalid or
+unverified result is marked INVALID and does not show improvement verdicts.
+`resource-summary.json` records the measurements, version/tree IDs and binary
+hashes. Per-run CSV, capture reports, logs, and a
+self-contained `metrics-report.html` evaluation report are under `run/`, or
+`before/` and `after/` in A/B mode.
 
 The result is VALID only if the load passes, capture completeness and token
 accuracy are each at least 99.9%, the collector survives with valid resource

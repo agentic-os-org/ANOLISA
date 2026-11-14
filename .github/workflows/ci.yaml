@@ -296,7 +296,7 @@ jobs:
           retention-days: 1
 
   # =========================================================================
-  # Step 3: Test copilot-shell (cli + core in parallel)
+  # Step 4: Test copilot-shell (cli + core in parallel)
   # =========================================================================
   test-copilot-shell-cli:
     name: Test copilot-shell/cli
@@ -359,7 +359,7 @@ jobs:
           NO_COLOR=true npm run test:ci --workspace=@copilot-shell/core
 
   # =========================================================================
-  # Step 4: Test agent-sec-core (Linux only)
+  # Step 5: Test agent-sec-core (Linux only)
   # =========================================================================
   test-agent-sec-core:
     name: Test sec-core components
@@ -915,7 +915,7 @@ jobs:
           if-no-files-found: error
 
   # =========================================================================
-  # Step 5: Test agentsight (Linux only)
+  # Step 6: Test agentsight (Linux only)
   # =========================================================================
   test-agentsight:
     name: Test agentsight
@@ -1128,7 +1128,316 @@ jobs:
             "$RUNNER_TEMP/benchmark-venv/bin/python" -m pytest -q tests
 
   # =========================================================================
-  # Step 6: Test tokenless
+  # Step 7: Test AgentSight resources on a fixed kernel after the functional checks.
+  # =========================================================================
+  test-agentsight-resource:
+    name: Test agentsight resources
+    needs: [detect-changes, test-agentsight]
+    if: needs.detect-changes.outputs.agentsight == 'true'
+    runs-on: anolisa-agentsight-kernel66-x64
+    timeout-minutes: 60
+    # Serialize the whole resource job, not just the measurement step, across
+    # PRs that share this runner. The flock below remains a second layer for
+    # processes started outside this workflow.
+    concurrency:
+      group: ${{ github.repository }}-agentsight-resource-kernel66
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: src/agentsight
+    env:
+      RUSTUP_TOOLCHAIN: '1.89.0'
+      CARGO_BUILD_JOBS: '2'
+      # Define these at job level so always() steps never see an empty path and
+      # degrade the artifact glob to "/" after an early checkout failure.
+      RESOURCE_OUTPUT: /tmp/agentsight-resource-${{ github.run_id }}-${{ github.run_attempt }}
+      RESOURCE_DIAGNOSTICS: /tmp/agentsight-resource-log-tails-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure resource test paths
+        run: |
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/agentsight-resource-cache" >> "$GITHUB_ENV"
+          echo "PYTHON=$RUNNER_TEMP/agentsight-benchmark-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Verify eBPF runner
+        run: |
+          case "$(uname -r)" in
+            6.6.*) ;;
+            *) echo "Expected Linux 6.6.x for resource measurements" >&2; exit 1 ;;
+          esac
+          sudo -n true
+          sudo test -r /sys/kernel/btf/vmlinux
+
+          tracefs_failure() {
+            local tracefs_status="$1"
+            local tracefs_command="$2"
+            trap - ERR
+            set +e
+            mkdir -p "$RESOURCE_DIAGNOSTICS"
+            {
+              echo "::error::Tracefs preparation failed (exit $tracefs_status): $tracefs_command"
+              uname -a
+              findmnt -t tracefs,debugfs
+              cat /proc/self/mountinfo
+              cat /proc/self/cgroup
+              sudo -n grep -E '^(Cap(Eff|Bnd)|NoNewPrivs|Seccomp):' /proc/self/status
+              for tracefs_root in /sys/kernel/tracing /sys/kernel/debug/tracing; do
+                sudo -n ls -ld "$tracefs_root" "$tracefs_root/events" "$tracefs_root/events/syscalls"
+                sudo -n ls -l "$tracefs_root/events/syscalls/sys_exit_execve"
+                sudo -n grep -E 'syscalls:sys_(enter_execve|exit_execve|enter_write)|sched:sched_process_exit' \
+                  "$tracefs_root/available_events"
+              done
+              for tracefs_config in /proc/config.gz "/boot/config-$(uname -r)"; do
+                if sudo -n test -r "$tracefs_config"; then
+                  echo "Kernel config: $tracefs_config"
+                  if [[ "$tracefs_config" == *.gz ]]; then
+                    sudo -n gzip -dc "$tracefs_config"
+                  else
+                    sudo -n cat "$tracefs_config"
+                  fi | grep -E 'CONFIG_(FTRACE|HAVE_SYSCALL_TRACEPOINTS|BPF_SYSCALL|PERF_EVENTS)'
+                else
+                  echo "Kernel config unavailable: $tracefs_config"
+                fi
+              done
+            } 2>&1 | tee "$RESOURCE_DIAGNOSTICS/tracefs-environment.log"
+            exit "$tracefs_status"
+          }
+          trap 'tracefs_failure "$?" "$BASH_COMMAND"' ERR
+
+          if ! findmnt --mountpoint /sys/kernel/tracing \
+              --types tracefs --noheadings >/dev/null; then
+            sudo -n mkdir -p /sys/kernel/tracing
+            sudo -n mount -t tracefs nodev /sys/kernel/tracing
+          fi
+          for tracefs_event in syscalls/sys_enter_execve syscalls/sys_exit_execve \
+              syscalls/sys_enter_write sched/sched_process_exit; do
+            echo "Checking tracepoint: $tracefs_event"
+            sudo -n cat "/sys/kernel/tracing/events/$tracefs_event/id"
+          done
+          trap - ERR
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt
+
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: true
+          workspaces: src/agentsight
+          cache-directories: |
+            ${{ env.XDG_CACHE_HOME }}/agentsight-benchmark/target
+            ${{ env.XDG_CACHE_HOME }}/agentsight-benchmark/tiktoken
+
+      - name: Install resource test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-15 llvm-15 libbpf-dev libelf-dev elfutils libssl-dev zlib1g-dev pkg-config perl openssl curl util-linux
+          echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
+          uv venv --python 3.11.6 "$RUNNER_TEMP/agentsight-benchmark-venv"
+          uv pip install --python "$PYTHON" -r scripts/benchmark/requirements.txt
+
+      - name: Verify non-interactive benchmark privileges
+        run: |
+          sudo -n -- "$PYTHON" -c \
+            'import os; raise SystemExit(os.geteuid() != 0)'
+
+      - name: Record resource test environment
+        run: |
+          {
+            uname -a
+            lscpu
+            free -m
+            df -h "$RUNNER_TEMP"
+            rustc --version
+            clang --version
+            "$PYTHON" --version
+            openssl version
+            sudo grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' /proc/self/status
+            cat /proc/self/cgroup
+            for resource_file in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpuset.cpus.effective; do
+              if [[ -r "$resource_file" ]]; then
+                echo "$resource_file"
+                cat "$resource_file"
+              fi
+            done
+          } > "$RUNNER_TEMP/agentsight-resource-environment.txt"
+
+      - name: Test resource report and limit checks
+        run: |
+          "$PYTHON" -B -m pytest -q -p no:cacheprovider \
+            scripts/benchmark/tests/test_resource_limits.py \
+            scripts/benchmark/tests/test_resource_report.py \
+            scripts/benchmark/tests/test_resource_cpu_intervals.py
+
+      - name: Measure resource usage
+        run: |
+          # Serialize measurements on this host without canceling other PR jobs.
+          # The eBPF load (6.6) job in agentsight-runner-test.yml acquires the
+          # same lock around its kernel loading step.
+          exec 9>/tmp/anolisa-agentsight-resource.lock
+          flock --timeout 1800 9
+          resource_status=0
+          bash scripts/benchmark/single_run/resource_run.sh \
+            --candidate HEAD \
+            --agents 32 \
+            --connection-capacity 128 \
+            --payload-kb 1024 \
+            --tokens-per-second 100 \
+            --tokens-per-response 1000 \
+            --duration 300 \
+            --ring-buffer-mb 64 \
+            --cpu-budget-percent 25 \
+            --output-dir "$RESOURCE_OUTPUT" \
+            | tee "$RUNNER_TEMP/agentsight-resource-run.log" || resource_status=$?
+
+          # Keep the host lock while collecting diagnostics so other measurements stay isolated.
+          if (( resource_status != 0 )) && [[ -f "$RESOURCE_OUTPUT/run/worker-result.json" ]]; then
+            if ! sudo -n -- "$PYTHON" - "$RESOURCE_OUTPUT" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          output = Path(sys.argv[1])
+          directory = output / "run"
+          result = json.loads((directory / "worker-result.json").read_text())
+          if not result.get("error", "").startswith((
+              "AgentSight exited during startup (",
+              "AgentSight initialization timed out;",
+          )):
+              print("Skipping startup diagnostics: no AgentSight startup failure reported.")
+              sys.exit(0)
+
+          diagnostics = output / "startup-diagnostics"
+          diagnostics.mkdir()
+          config = json.loads((directory / "config.json").read_text())
+          config["verbose"] = 1
+          config.pop("log_path", None)
+          config.setdefault("storage", {})["base_path"] = str(diagnostics / "db")
+          config_path = diagnostics / "config.json"
+          config_path.write_text(json.dumps(config, indent=2) + "\n")
+          job = json.loads((directory / "job.json").read_text())
+          env = dict(
+              os.environ,
+              **job["env"],
+              RUST_LOG="info",
+              AGENTSIGHT_METRICS_FILE=str(diagnostics / "internal-metrics.prom"),
+          )
+          log_path = directory / "libbpf-startup.log"
+          print("Diagnosing AgentSight startup with verbose libbpf logging (20 s limit).", flush=True)
+          with log_path.open("wb") as log:
+              diagnostic = subprocess.run(
+                  [
+                      "timeout", "--signal=INT", "--kill-after=5s", "20s",
+                      job["binary"], "trace", "--verbose", "--config", str(config_path),
+                  ],
+                  env=env,
+                  stdout=log,
+                  stderr=subprocess.STDOUT,
+                  check=False,
+              )
+          (diagnostics / "result.json").write_text(
+              json.dumps({"returncode": diagnostic.returncode}, indent=2) + "\n"
+          )
+          print(f"Startup diagnostic exit code: {diagnostic.returncode}; log: {log_path}")
+          PY
+            then
+              echo "::warning::AgentSight startup diagnostics could not complete"
+            fi
+            if [[ -f "$RESOURCE_OUTPUT/run/libbpf-startup.log" ]]; then
+              tail -n 80 -- "$RESOURCE_OUTPUT/run/libbpf-startup.log"
+            fi
+          fi
+          exit "$resource_status"
+
+      - name: Warn on missing resource HTML report
+        if: success()
+        run: |
+          if [[ ! -s "$RESOURCE_OUTPUT/run/metrics-report.html" ]]; then
+            echo "::warning::resource HTML report missing; benchmark result remains valid"
+          fi
+
+      - name: Enforce resource limits and publish summary
+        if: always()
+        run: |
+          python3 -B scripts/benchmark/single_run/check_resource_limits.py \
+            --summary "$RESOURCE_OUTPUT/resource-summary.json"
+
+      - name: Collect failure log tails (2 MiB per file)
+        if: failure()
+        run: |
+          mkdir -p "$RESOURCE_DIAGNOSTICS/run"
+          if [[ -n "${RESOURCE_OUTPUT:-}" && -d "$RESOURCE_OUTPUT" ]]; then
+            for resource_log in "$RESOURCE_OUTPUT"/*.log; do
+              if [[ -f "$resource_log" ]]; then
+                tail -c 2097152 -- "$resource_log" > "$RESOURCE_DIAGNOSTICS/${resource_log##*/}"
+              fi
+            done
+            for resource_log in "$RESOURCE_OUTPUT"/run/*.log; do
+              if [[ -f "$resource_log" ]]; then
+                tail -c 2097152 -- "$resource_log" > "$RESOURCE_DIAGNOSTICS/run/${resource_log##*/}"
+              fi
+            done
+          fi
+          if [[ -f "$RUNNER_TEMP/agentsight-resource-run.log" ]]; then
+            tail -c 2097152 -- "$RUNNER_TEMP/agentsight-resource-run.log" \
+              > "$RESOURCE_DIAGNOSTICS/agentsight-resource-run.log"
+          fi
+
+      - name: Upload resource reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsight-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/agentsight-resource-environment.txt
+            ${{ env.RESOURCE_OUTPUT }}/resource-report.txt
+            ${{ env.RESOURCE_OUTPUT }}/resource-summary.json
+            ${{ env.RESOURCE_OUTPUT }}/settings.json
+            ${{ env.RESOURCE_OUTPUT }}/inputs.json
+            ${{ env.RESOURCE_OUTPUT }}/configuration.json
+            ${{ env.RESOURCE_OUTPUT }}/run-error.txt
+            ${{ env.RESOURCE_OUTPUT }}/run/benchmark-report.md
+            ${{ env.RESOURCE_OUTPUT }}/run/run-summary.json
+            ${{ env.RESOURCE_OUTPUT }}/run/report.json
+            ${{ env.RESOURCE_OUTPUT }}/run/agent-summary.json
+            ${{ env.RESOURCE_OUTPUT }}/run/worker-result.json
+            ${{ env.RESOURCE_OUTPUT }}/run/capture-readiness.json
+            ${{ env.RESOURCE_OUTPUT }}/run/safety-stop.json
+            ${{ env.RESOURCE_OUTPUT }}/run/metrics.csv
+            ${{ env.RESOURCE_OUTPUT }}/run/metrics-report.html
+            ${{ env.RESOURCE_OUTPUT }}/run/internal-metrics.prom
+            ${{ env.RESOURCE_OUTPUT }}/startup-diagnostics/config.json
+            ${{ env.RESOURCE_OUTPUT }}/startup-diagnostics/result.json
+            ${{ env.RESOURCE_DIAGNOSTICS }}/
+
+      - name: Clean resource results
+        if: always()
+        run: |
+          rm -rf -- "$RUNNER_TEMP/agentsight-benchmark-venv" \
+            "${RESOURCE_DIAGNOSTICS:-}"
+          rm -f -- "$RUNNER_TEMP/agentsight-resource-environment.txt" \
+            "$RUNNER_TEMP/agentsight-resource-run.log"
+          if [[ "${RESOURCE_OUTPUT:-}" == "/tmp/agentsight-resource-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]; then
+            sudo -n rm -rf -- "$RESOURCE_OUTPUT"
+          fi
+
+  # =========================================================================
+  # Step 8: Test tokenless
   # =========================================================================
   test-tokenless:
     name: Test tokenless
@@ -1306,7 +1615,7 @@ jobs:
           test -x ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/scripts/install.sh
 
   # =========================================================================
-  # Step 7: Test ws-ckpt
+  # Step 9: Test ws-ckpt
   # =========================================================================
   test-ws-ckpt:
     name: Test ws-ckpt
@@ -1399,7 +1708,7 @@ jobs:
 
 
   # =========================================================================
-  # Step 8: Test agent-memory (Linux-only Rust crate)
+  # Step 10: Test agent-memory (Linux-only Rust crate)
   # =========================================================================
   test-agent-memory:
     name: Test agent-memory
@@ -1477,7 +1786,7 @@ jobs:
         run: make -C src/agent-memory test-auto-capture
 
   # =========================================================================
-  # Step 9: Test anolisa (Rust workspace)
+  # Step 11: Test anolisa (Rust workspace)
   # =========================================================================
   test-anolisa:
     name: Test anolisa
@@ -1598,7 +1907,7 @@ jobs:
           retention-days: 14
 
   # =========================================================================
-  # Step 10: Test SkillFS (Rust workspace)
+  # Step 12: Test SkillFS (Rust workspace)
   # =========================================================================
   test-skillfs:
     name: Test SkillFS
@@ -1651,7 +1960,7 @@ jobs:
           scripts/test.sh
 
   # =========================================================================
-  # Step 11: Test cosh-ng (Rust workspace)
+  # Step 13: Test cosh-ng (Rust workspace)
   # =========================================================================
   # Integration uses three complete target shards and the historical
   # "Test cosh-ng" aggregate check. Fast checks and release build remain
@@ -1813,7 +2122,7 @@ jobs:
           cargo build --workspace --release --locked
 
   # =========================================================================
-  # Step 12: Test ktuner (deterministic kernel-tuning engine)
+  # Step 14: Test ktuner (deterministic kernel-tuning engine)
   # =========================================================================
   test-ktuner:
     name: Test ktuner
