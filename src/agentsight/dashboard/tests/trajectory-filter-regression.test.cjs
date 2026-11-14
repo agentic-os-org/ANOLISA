@@ -177,10 +177,13 @@ test('switching an embedded subagent resets filtering for its own rounds', () =>
   assert.deepEqual(keys(page), [0, 1, 2]);
 });
 
-test('importing another document starts at its root instead of an old URL node', () => {
+test('importing another document starts at its root instead of an old URL node', async () => {
   const previous = trajectory('previous');
   previous.subagent_trajectories = [trajectory('child')];
-  const page = loaded(previous);
+  const page = viewer();
+  page.load('previous');
+  page.requests[0].resolve(previous);
+  await new Promise((resolve) => setImmediate(resolve));
   page.visitParams('type=session&id=previous&highlight_call_id=old-call');
   let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
   graph.props.onSelect(graph.props.root.children[0]);
@@ -242,11 +245,11 @@ test('URL navigation still selects an embedded child after a successful import',
   const doc = trajectory('imported');
   doc.subagent_trajectories = [trajectory('child')];
   const page = loaded(doc);
-  page.visitParams('type=session&id=imported&node=child');
+  page.visitParams('node=child');
   page.nodes(() => false);
   let graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
   assert.deepEqual(graph.props.selectedPath, ['child']);
-  page.visitParams('type=session&id=imported');
+  page.visitParams('');
   page.nodes(() => false);
   graph = page.nodes((node) => node.props?.root && node.props.onSelect)[0];
   assert.deepEqual(Array.from(graph.props.selectedPath), []);
