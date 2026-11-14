@@ -188,7 +188,7 @@ def redacted_json_file(path: Path | str | None) -> dict[str, Any] | None:
     try:
         parsed: Any = json.loads(file_path.read_text(encoding="utf-8"))
         redacted = _redact_sensitive(parsed)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         logger.warning("INPUT_MANIFEST_JSON_REDACTION_FAILED file=%s", file_path)
         return None
     if not isinstance(redacted, dict):
