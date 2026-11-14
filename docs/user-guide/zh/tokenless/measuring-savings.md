@@ -71,6 +71,17 @@ tokenless stats summary --limit 1000
 
 `--limit` 必须为正整数。`--limit 0` 会在解析阶段以非零退出码被拒绝，行为与 `stats diff --limit` 一致。
 
+普通摘要（`--compare` 使用独立统计口径）基于窗口内成功解码的记录计算压缩节省量，
+并从节省总量中排除 dry-run 记录。只有窗口覆盖全部已存压缩记录时，才纳入完整历史的
+恢复成本和净节省量。否则，文本输出追加 `Summary window` 提示，JSON 省略可选的
+恢复成本及净节省字段，不会将未知成本当作零。
+
+JSON 新增 `summary_scope`：`records_selected` 是排除 dry-run 前成功解码的记录数；
+`records_total` 是同一数据库快照内全部已存压缩记录数；`complete` 表示两者相等。
+读取器跳过无法解码的记录也会使窗口不完整，即使查询上限已覆盖全部记录。若所有记录
+均能解码，将 `--limit` 提高到至少 `records_total` 可恢复完整历史口径；增大上限会
+将更多记录及其负载载入内存。
+
 ## 节省率字段定义
 
 Tokenless 的节省率统一遵循“节省量 ÷ 原始未压缩量”的定义，各字段的差别只在统计口径和负值处理。`tokenless stats` 输出的全部百分比字段定义如下：
