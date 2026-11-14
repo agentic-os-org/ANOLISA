@@ -12,6 +12,7 @@ use std::{path::Path, time::Duration};
 pub(super) fn invoke(
     request: &Value,
     config: &Config,
+    transport: crate::Transport,
     cli: &Path,
     socket: &Path,
     remaining: impl Fn() -> Result<Duration, &'static str>,
@@ -45,7 +46,11 @@ pub(super) fn invoke(
     let trace = trace_context::from_event(event);
     let scan = |text: &str| {
         let budget = remaining()?;
-        pii::call(cli, socket, text, source, &trace, budget).map_err(|error| error.code())
+        match transport {
+            crate::Transport::Cli => pii::call(cli, socket, text, source, &trace, budget),
+            crate::Transport::Daemon => pii::call_daemon(socket, text, source, &trace, budget),
+        }
+        .map_err(|error| error.code())
     };
     let verdict = scan_value(value, &scan)?;
     if enforcing && verdict == Verdict::Risk && action == "replace_result" {

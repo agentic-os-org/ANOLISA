@@ -137,13 +137,56 @@ pub fn call(
     }
     let result: ScanResult =
         serde_json::from_slice(&output.stdout).map_err(|_| "invalid_scan_result")?;
+    parse_result(result, source, text.len(), deadline)
+}
+
+/// Scans UTF-8 text directly over the bounded sec-core daemon Unix socket.
+///
+/// # Errors
+/// Reports transport, deadline, peer-authentication, backend, and incomplete-scan failures.
+pub fn call_daemon(
+    socket: &Path,
+    text: &str,
+    source: Source,
+    trace_context: &Value,
+    timeout: Duration,
+) -> Result<Verdict, Error> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or("invalid_budget")?;
+    let val = crate::daemon_client::call(
+        socket,
+        "action.pii_scan",
+        serde_json::json!({
+            "text": text,
+            "source": source.as_str(),
+            "includeLowConfidence": false,
+            "rawEvidence": false,
+            "redactOutput": false,
+            "maxBytes": null,
+            "inputTruncated": false,
+            "inputBytesScanned": null,
+        }),
+        trace_context,
+        timeout,
+    )?;
+    let result: ScanResult = serde_json::from_value(val).map_err(|_| "invalid_scan_result")?;
+    parse_result(result, source, text.len(), deadline)
+}
+
+fn parse_result(
+    result: ScanResult,
+    source: Source,
+    text_len: usize,
+    deadline: Instant,
+) -> Result<Verdict, Error> {
     if !result.ok {
         return Err("scan_error".into());
     }
     let summary = &result.summary;
     if summary["source"] != source.as_str()
         || summary["truncated"] != false
-        || summary["bytes_scanned"].as_u64() != Some(text.len() as u64)
+        || summary["bytes_scanned"].as_u64() != Some(text_len as u64)
         || summary
             .get("execution_status")
             .is_some_and(|s| s != "completed")

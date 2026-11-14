@@ -55,7 +55,13 @@ cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
 
-模板要求 `PROVIDERS_DIR`、`SEC_CORE_CLI` 和 `SOCKET`。原生包或 Makefile
+模板要求 `PROVIDERS_DIR`、`SEC_CORE_CLI` 和 `SOCKET`。如需在 `scan_code`、
+`scan_prompt`、`scan_user_input`、`scan_tool_input`、`scan_tool_output` 和
+`check_final_tool_output` 中跳过
+每次调用拉起 `agent-sec-cli` 子进程，可在 `aw-provider-sec-core` 的
+`transport.argv` 中加入 `"--transport", "daemon"`（保留 `--socket`；仅使用
+`check_skill` 时仍需 `--cli`，切回 `"--transport", "cli"` 即可回退）。详见
+[sec-core Provider 接入参考](../../../developer-guide/zh/aw/providers/sec-core.md)。原生包或 Makefile
 安装时，`PROVIDERS_DIR` 取实际 Provider 根目录，例如 `/usr/libexec/aw/providers`
 或 `/usr/local/libexec/aw/providers`。同时需要压缩时，安装 Tokenless 后端和
 桥接程序，选择 `sec-core-tokenless.json`，并按 [Tokenless](tokenless.md)提供
