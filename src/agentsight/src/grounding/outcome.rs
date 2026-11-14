@@ -543,21 +543,53 @@ fn is_probe(call: &ToolCall) -> bool {
 /// character turned `ls /nope 2>&1` into `["ls /nope 2>", "1"]`, and the stray
 /// `1` — whose head is not a probe command — made a probe whose non-zero exit
 /// *is* the answer get graded as a real failure.
+///
+/// Quotes make a separator literal: `pgrep -f "agent|worker"` is one command,
+/// and splitting at the quoted `|` gave the probe a second head that is not a
+/// probe command. Inside double quotes a backslash escapes the next byte;
+/// inside single quotes nothing does. Outside quotes a backslash escapes the
+/// next byte as well (`\;`, `\|`, `\"`).
 fn command_segments(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
     let mut start = 0;
     let mut i = 0;
+    let mut quote: Option<u8> = None;
     while i < bytes.len() {
-        let separator_len = match bytes[i] {
+        let byte = bytes[i];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' && delimiter == b'"' {
+                i += 2;
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        // Outside quotes a backslash escapes the next byte too, so `\;`, `\|`
+        // and `\"` are data. Without this, an over-escaped command such as
+        // `test -d \"$d\" || mkdir ...` opened a quote that never closed and
+        // swallowed the real chain into the first segment.
+        if byte == b'\\' {
+            i += 2;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            i += 1;
+            continue;
+        }
+        let separator_len = match byte {
             b'\n' | b';' | b'|' => 1,
             b'&' => match bytes.get(i + 1) {
                 // `&>` / `&>>` redirect stdout and stderr.
                 Some(b'>') => 0,
                 Some(b'&') => 2,
                 // `<&`/`>&` duplication, written `>&2` or `2>&1`: the `&`
-                // follows the `>` that opened the redirection.
-                _ if i > 0 && bytes[i - 1] == b'>' => 0,
+                // follows the `<` or `>` that opened the redirection.
+                _ if i > 0 && matches!(bytes[i - 1], b'>' | b'<') => 0,
                 _ => 1,
             },
             _ => 0,

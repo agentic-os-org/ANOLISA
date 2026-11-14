@@ -330,6 +330,68 @@ fn redirected_probe_is_still_expected() {
     }
 }
 
+#[test]
+fn a_quoted_separator_is_not_a_command_chain() {
+    // A separator inside quotes is data, not a chain. `pgrep -f
+    // "agent|worker"` is one probe command, but splitting at the quoted `|`
+    // produced a second segment whose head is not a probe, so the call was
+    // graded as a real failure and its answer left the evidence pool.
+    for command in [
+        r#"pgrep -f "agent|worker""#,
+        "pgrep -f 'agent|worker'",
+        r#"test -f "/tmp/a;b""#,
+        "test -f '/tmp/a;b'",
+        r#"pgrep -f "agent&&worker""#,
+        "test -f /missing <&0",
+        // An escaped separator outside quotes is data too.
+        r"pgrep -f agent\;worker",
+    ] {
+        let v = classify(&bash_call(command), "(exit code 1)");
+        assert_eq!(
+            v.status,
+            CallStatus::OkProbe,
+            "{command} graded as {} ({:?})",
+            v.matched_rule,
+            v.status
+        );
+        assert_eq!(v.matched_rule, "B3", "{command}");
+    }
+}
+
+#[test]
+fn a_chain_after_a_quoted_separator_is_still_a_chain() {
+    // Quoting only protects a separator inside the quotes; the `&&` after the
+    // closing quote still chains a second, non-probe command.
+    let v = classify(
+        &bash_call(r#"pgrep -f "agent|worker" && echo done"#),
+        "(exit code 1)",
+    );
+    assert_ne!(
+        v.status,
+        CallStatus::OkProbe,
+        "a real chain must not be read as a probe ({})",
+        v.matched_rule
+    );
+}
+
+#[test]
+fn an_escaped_quote_does_not_hide_a_chain() {
+    // An over-escaped command carries literal `\"` pairs. Reading the first
+    // one as an opening quote and the backslash before the second as an
+    // in-quote escape left the quote open and swallowed the real `|| mkdir`,
+    // so a failed chain was graded as a probe.
+    let v = classify(
+        &bash_call(r#"test -d \"$d\" || mkdir -p \"$d\""#),
+        "(exit code 1)",
+    );
+    assert_ne!(
+        v.status,
+        CallStatus::OkProbe,
+        "an escaped pair must not hide the chain ({})",
+        v.matched_rule
+    );
+}
+
 /// A shell call whose command is an argv array is still a shell call.
 ///
 /// `agentsight-trajectory-collector` maps a Codex rollout's
