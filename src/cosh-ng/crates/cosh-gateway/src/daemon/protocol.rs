@@ -304,6 +304,20 @@ pub enum GatewayDaemonError {
         /// Whether refreshing state and retrying may succeed.
         recoverable: bool,
     },
+    /// A governed provider failure with a stable wire-safe contract code.
+    ///
+    /// Unlike `Remote` (the client-side view of a daemon error response),
+    /// this variant is produced by the daemon itself from a `ContractError`
+    /// or a static coordinator code, and its fields go onto the wire as-is.
+    #[error("Gateway request failed [{code}]: {message}")]
+    Contract {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Bounded diagnostic safe for the wire.
+        message: String,
+        /// Whether refreshing state and retrying may succeed.
+        recoverable: bool,
+    },
     /// Local I/O failed.
     #[error("Gateway I/O failed: {0}")]
     Io(#[from] io::Error),
