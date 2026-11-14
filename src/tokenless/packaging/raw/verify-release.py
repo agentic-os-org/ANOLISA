@@ -200,9 +200,13 @@ def _verify_requirements_references(relative: str, expected: str, text: str) -> 
             f"ERROR: {relative} does not reference tokenless {expected}: "
             f"{wrong_wheels}"
         )
-    if not path_versions and not wheel_versions:
+    # A tag path on its own pins nothing installers can resolve: a file that
+    # names the release tag but carries no wheel URL satisfied every check above
+    # and would only fail later, inside `qwenpaw plugin install`. The wheel
+    # reference is what this gate exists to pin, so it alone decides this check.
+    if not wheel_versions:
         raise SystemExit(
-            f"ERROR: {relative} does not reference tokenless {expected}: "
+            f"ERROR: {relative} does not pin a tokenless {expected} wheel: "
             "no wheel URL"
         )
 
