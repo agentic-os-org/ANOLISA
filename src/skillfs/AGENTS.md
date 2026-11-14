@@ -10,7 +10,7 @@
 crates/
   skillfs-core/   parser / store / views / compiler / env / watcher
   skillfs-fuse/   FUSE filesystem layer
-  skillfs-cli/    `skillfs` binary (mount / classify / validate / list)
+  skillfs-cli/    `skillfs` binary (mount / stop / explain / classify / validate / list)
 docs/specs/       implementation specifications
 docs/skills/      the bundled agent skill (skillfs-mount)
 scripts/          build.sh, test.sh

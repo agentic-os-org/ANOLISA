@@ -53,7 +53,7 @@ mounted filesystem while ordinary skill files remain backed by the source tree.
 
 ## Scope
 
-- Public CLI commands are `mount`, `stop`, `classify`, `validate`, and `list`.
+- Public CLI commands are `mount`, `stop`, `explain`, `classify`, `validate`, and `list`.
 - Skill visibility is controlled by `skillfs-views.toml`.
 - FUSE write passthrough is supported while mounted, but only `SKILL.md`
   changes trigger store synchronization.
@@ -138,6 +138,9 @@ cargo run -p skillfs -- list /path/to/skills
 # Generate or inspect skillfs-views.toml.
 cargo run -p skillfs -- classify /path/to/skills
 
+# Explain source precedence and views without mounting.
+cargo run -p skillfs -- explain --config /path/to/skillfs-mount.toml
+
 # Mount the FUSE filesystem.
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint
 
@@ -168,6 +171,10 @@ To apply configuration changes, run `skillfs stop <MOUNTPOINT>` successfully,
 then start again with `--config ... --managed`.
 See the [configuration reference](../../docs/user-guide/en/skillfs/index.md#mount-configuration)
 for the TOML example, supported flags, and OpenClaw integration limits.
+
+`explain` inspects current configuration without mounting; it does not query a
+running managed worker. See the [diagnostic reference](../../docs/user-guide/en/skillfs/index.md#explain)
+for options, JSON fields, exit codes, and incomplete-result semantics.
 
 ### Managed Mount Mode
 
@@ -451,7 +458,7 @@ silently disabled adapter.
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
   skillfs-fuse/   FUSE filesystem and POSIX passthrough layer
-  skillfs-cli/    mount / stop / classify / validate / list
+  skillfs-cli/    mount / stop / explain / classify / validate / list
 container/        sidecar image: Dockerfile, entrypoint, preflight, mount probe
 deploy/kubernetes/  Kubernetes sidecar manifests and example skill source
 docs/specs/       implementation specifications
