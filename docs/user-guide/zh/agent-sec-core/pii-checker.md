@@ -42,7 +42,7 @@ V2 保留原有顶层结果字段，在 `summary` 中增加证据元数据：
 | `coverage.reasons` | 输入截断、规则无效、匹配受限或扫描失败的安全错误码 |
 | `input_sha256` | 检测器收到文本的 SHA-256，不代表未收到的原始内容 |
 | `scanned_input_sha256`、`scanned_bytes` | 实际扫描前缀的摘要及字节数 |
-| `scanner_version` | 检测语义版本；V2 当前为 `2.1.2` |
+| `scanner_version` | 检测语义版本；V2 当前为 `2.2.0` |
 | `ruleset_id` | scanner 版本及不可变内置/自定义规则配置的标识 |
 
 `bytes_scanned` 保留 V1 前缀计数，可能包含被 `scanned_bytes` 排除的不完整 UTF-8 尾部。
@@ -73,7 +73,7 @@ coverage `unavailable`，CLI 退出 `1`。单次正则调用受引擎回溯上�
 ## 检测语义版本
 
 `summary.scanner_version` 标识检测行为，独立于 AgentSecCore 包版本和 RPC schema。
-V2 的成功/失败扫描报告及审计结果均记录 `2.1.2`；内置 finding 的 engine 为 `regex_v2`，
+V2 的成功/失败扫描报告及审计结果均记录 `2.2.0`；内置 finding 的 engine 为 `regex_v2`，
 自定义 finding 为 `fancy_regex`。`ruleset_id` 包含此版本、内置模式及自定义配置，
 即使 YAML 内容不变，引擎行为变化仍可追溯。CI 的 commit SHA 标识被测构建，不是检测语义版本。
 
@@ -97,6 +97,9 @@ V2 的成功/失败扫描报告及审计结果均记录 `2.1.2`；内置 finding
 ASCII 句点后仍可能延续域名，因此 `alice@company.cn.中国` 等形式继续拒绝局部匹配。
 通用 secret-field 值仍支持 Unicode，不会在 CJK 字符处截断。此变更仅适用于 V2，
 保留的 Python V1 检测器不变。
+
+2.2.0 改为按官方环境变量赋值识别阿里云凭据，不再依赖 `LTAI` 值前缀；详见
+[阿里云凭据](#阿里云凭据)。AccessKey ID 改为 `warn`，裸 `LTAI...` 值不再单独归属阿里云。
 
 保留的 V1 语料验证不变行为，独立的正反例和资源限制用例定义 V2 变化。这些检查覆盖支持的格式，
 不代表对任意数据零误报漏报。短密钥、无标签密钥、11 类之外的格式和上下文歧义，
@@ -179,7 +182,8 @@ agent-sec-cli scan-pii --input ./agent-output.txt --format text
 |------|------|--------------|
 | 个人数据 | `email`、`phone_cn`、`credit_card`、`cn_id` | `warn` |
 | 凭据 | `private_key`、`bearer_token`、`api_key`、`jwt` | `deny` |
-| 阿里云凭据 | `aliyun_access_key_id`、`aliyun_access_key_secret` | `deny` |
+| 阿里云 AccessKey Secret | `aliyun_access_key_secret` | `deny` |
+| 阿里云 AccessKey ID | `aliyun_access_key_id` | `warn` |
 | 敏感字段 | `generic_secret_field` | `deny` |
 
 信用卡号、中国身份证号和 JWT candidate 在生成 finding 前会经过格式校验。周边安全关键词可能提高
@@ -188,6 +192,30 @@ agent-sec-cli scan-pii --input ./agent-output.txt --format text
 手机号 finding，`test-only 13812345678` 仍按测试上下文产生低置信度 finding。`.invalid` 标记
 保留子串匹配，邮箱和私钥 finding 仍不受这项上下文降分影响。低于默认 `0.5` 阈值的 finding
 会被忽略，除非使用 `--include-low-confidence`。
+
+### 阿里云凭据
+
+阿里云凭据按官方环境变量赋值识别，不再依赖值前缀。finding 要求 `NAME=value` 或
+`export NAME=value` 形状，且变量名精确、区分大小写匹配；值可为裸值或一对成对引号包裹。
+证据 span 仅覆盖值本身，因此脱敏副本仍能看出该凭据来自哪个变量。
+
+`ALIBABA_CLOUD_BEARER_TOKEN` 报告 `bearer_token`，`DASHSCOPE_API_KEY` 报告 `api_key`，
+STS token 报告 `generic_secret_field`，三者均为 `deny`。AccessKey ID 单独无法完成认证，
+因此仅 `warn`。每个 finding 另带 `metadata.provider=alibaba_cloud` 与
+`metadata.credential_kind`。secret 和 token 会完全遮蔽。超过八个字符的字母数字 AccessKey ID
+保留前后各四个字符，中间使用 `...[REDACTED]...`；较短或复合值会完全遮蔽。
+
+完整占位符与未展开引用不报告：`$NAME`、`${NAME}`、`%NAME%`、`$(cat /run/secret)`、
+`<your-key>`、`changeme`，以及仅由 `x` 或 `*` 组成的值。单引号中的 `$` 引用按字面值报告。
+其他命令替换（例如
+`$(printf secret123)`）会报告。
+仅包含 `test` 或 `example` 的真实值（例如
+`testValue1234567890`）仍会报告。没有厂商上下文的 `accessKeySecret` 保持
+`generic_secret_field` 与 `deny`。`ACCESS_KEY_ID` 等通用回退变量不带厂商上下文；裸
+`LTAI...` 值本身也不再归属阿里云。
+
+深层嵌套赋值的重扫有工作量上限。达到上限时扫描报告 `matching_failed`，覆盖状态为
+unavailable，不会将结果标记为完整。
 
 邮箱检测支持句末 ASCII 句号及连续句号组成的省略号；连续句号后必须是输入结束、空白或支持的
 句末标点、闭合分隔符。例如，`alice@company.co.uk.` 的 finding 仅包含 `alice@company.co.uk`，

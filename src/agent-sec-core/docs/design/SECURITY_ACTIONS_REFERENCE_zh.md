@@ -725,7 +725,7 @@ root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取�
 V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺 20 ms 中断单次匹配。
 100 条自定义发现之后首次省略命中会停止后续匹配。自定义规则直接采用 fancy-regex 原生语义；
 与 Python 不同本身不构成错误，invalid_regex 仅用于实际解析/编译/引擎限制或加载求值失败。
-检测语义版本 `scanner_version=2.1.2` 纳入规则标识，成功/失败报告及审计均保留；
+检测语义版本 `scanner_version=2.2.0` 纳入规则标识，成功/失败报告及审计均保留；
 内置 engine 为 regex_v2，自定义为 fancy_regex。2.0.0 修复空 claims JWT 的候选漏报，
 接受结构正确的大整数/深层 JSON；身份证统一 decimal 校验并支持全角 X，银行卡排除全零。
 2.0.1 与保留的 Python 检测器同步要求完整卡号表达式、支持网络的前缀/长度组合及 Luhn；
@@ -745,6 +745,15 @@ V2 使用 fancy-regex，回溯上限 1,000,000、循环预算 200 ms；不承诺
 覆盖汉字、假名和谚文；API key 的合法尾部符号不因相邻 CJK 被截断。其他 Unicode 连续词、
 邮箱句点/域名延续、通用字段值和上下文评分不变。六个变化的 V1 观察由兼容测试显式分类，
 `v1.json` 和保留的 Python 检测器不变；准确 span、脱敏及反例见 `tests/cjk_boundaries.rs`。
+
+2.2.0 按官方环境变量名识别阿里云凭据，移除 `LTAI` 值前缀规则。归属要求
+`NAME=value` / `export NAME=value` 形状及精确、区分大小写的名称，证据 span 仅覆盖值本身。
+AccessKey ID 为 `warn`，其余可单独认证的凭据为 `deny`；STS token、bearer token 与
+`DASHSCOPE_API_KEY` 分别保留 `generic_secret_field`、`bearer_token`、`api_key` 类型，
+并另带 `metadata.provider` 与 `metadata.credential_kind` 三元组。三项冻结预期被显式取代：
+无厂商上下文的 `accessKeySecret` 回退为 `generic_secret_field` 并改用全值脱敏，裸
+`LTAI5tQnKxExampleToken12` 与 U+1E4D0 相邻的两条用例不再产生 finding。完整范围、名称表与
+验证依据见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
 
 差分和限制由 capability 的 `tests/compatibility.rs`、`tests/custom_rules.rs`、冻结 234 个
 V1 合成用例及单测验证。完整差异、未来 Evidence 边界和回滚见

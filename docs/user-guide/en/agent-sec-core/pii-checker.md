@@ -46,7 +46,7 @@ V2 keeps the existing top-level result fields and adds evidence metadata under `
 | `coverage.reasons` | Safe codes for truncation, invalid rules, matching limits, or scan failure |
 | `input_sha256` | SHA-256 of text received by the detector; never a claim about omitted input |
 | `scanned_input_sha256`, `scanned_bytes` | Digest and byte length of the prefix actually scanned |
-| `scanner_version` | Detection semantics version; V2 currently reports `2.1.2` |
+| `scanner_version` | Detection semantics version; V2 currently reports `2.2.0` |
 | `ruleset_id` | Identity of the scanner version and immutable built-in/custom rule configuration |
 
 `bytes_scanned` retains the V1 prefix counter and can include an incomplete UTF-8 tail excluded
@@ -84,7 +84,7 @@ transport failure while the worker still finalizes its safe scan error and relea
 ## Detection semantics version
 
 `summary.scanner_version` identifies detection behavior independently of the AgentSecCore package
-version and RPC schema. V2 reports `2.1.2` in successful and failed scan reports and audit results;
+version and RPC schema. V2 reports `2.2.0` in successful and failed scan reports and audit results;
 built-in findings use engine `regex_v2`, custom findings use `fancy_regex`. `ruleset_id` includes
 this version plus the built-in patterns and custom configuration, so rule-engine changes remain
 traceable even when the YAML bytes are unchanged. A CI commit SHA identifies the tested build;
@@ -116,6 +116,11 @@ checks: the scanner does not extract `lise@company.cn` from `élise@company.cn`,
 period followed by another domain label, including `alice@company.cn.中国`, remains rejected.
 Generic secret-field values still support Unicode and are not trimmed at CJK characters.
 This change applies to V2; the retained Python V1 detector is unchanged.
+
+Version 2.2.0 attributes Alibaba Cloud credentials from documented environment-variable
+assignments instead of the `LTAI` value prefix; see
+[Alibaba Cloud credentials](#alibaba-cloud-credentials). An access key ID now warns, and a bare
+`LTAI...` value is no longer attributed to Alibaba Cloud on its own.
 
 The retained V1 corpus checks unchanged behavior; separate positive, negative and resource-limit
 cases define V2 changes. These checks cover the supported formats, not a guarantee of zero errors
@@ -208,7 +213,8 @@ adjustment.
 |----------|-------|------------------|
 | Personal data | `email`, `phone_cn`, `credit_card`, `cn_id` | `warn` |
 | Credentials | `private_key`, `bearer_token`, `api_key`, `jwt` | `deny` |
-| Alibaba Cloud credentials | `aliyun_access_key_id`, `aliyun_access_key_secret` | `deny` |
+| Alibaba Cloud access key secret | `aliyun_access_key_secret` | `deny` |
+| Alibaba Cloud access key id | `aliyun_access_key_id` | `warn` |
 | Secret fields | `generic_secret_field` | `deny` |
 
 Credit card, Chinese ID, and JWT candidates are validated before becoming findings. Surrounding
@@ -219,6 +225,33 @@ its phone finding, while `test-only 13812345678` remains a low-confidence fixtur
 The `.invalid` marker retains substring matching; email and private-key findings retain their
 existing exemptions from this context penalty. Findings below the default `0.5` threshold are
 omitted unless `--include-low-confidence` is set.
+
+### Alibaba Cloud credentials
+
+Alibaba Cloud credentials are reported from documented environment-variable assignments rather
+than from a value prefix. A finding requires the `NAME=value` or `export NAME=value` shape with an
+exact, case-sensitive name; the value may be bare or wrapped in one pair of quotes. The evidence
+span covers the value only, so a redacted copy still shows which variable held the credential.
+
+`ALIBABA_CLOUD_BEARER_TOKEN` reports `bearer_token`, `DASHSCOPE_API_KEY` reports `api_key`, and an
+STS token reports `generic_secret_field`; all three keep `deny`. An access key id only warns
+because it cannot authenticate on its own. Each finding also carries
+`metadata.provider=alibaba_cloud` and `metadata.credential_kind`. Secrets and tokens are masked
+in full. An alphanumeric access key ID longer than eight characters retains its first and last
+four characters, separated by `...[REDACTED]...`; shorter or compound values are fully masked.
+
+Complete placeholders and unresolved references are not reported: `$NAME`, `${NAME}`, `%NAME%`,
+`$(cat /run/secret)`, `<your-key>`, `changeme`, and runs of `x` or `*`. A `$` reference
+inside single quotes is treated as a literal value and reported. Other command
+substitutions, such as `$(printf secret123)`, are reported. A real value that merely contains
+`test` or `example`, such as `testValue1234567890`, is still reported. `accessKeySecret` without a
+documented provider name keeps `generic_secret_field` and `deny`. Generic fallbacks such as
+`ACCESS_KEY_ID` carry no provider context, and a bare `LTAI...` value is no longer attributed to
+Alibaba Cloud on its own.
+
+Deeply nested assignments are subject to a bounded rescan budget. If the
+budget is exhausted, the scan reports `matching_failed` with unavailable
+coverage instead of a complete result.
 
 Email detection accepts sentence-ending ASCII periods, including an ellipsis, when the period run
 is followed by end of input, whitespace, or a supported sentence/closing delimiter. For example,

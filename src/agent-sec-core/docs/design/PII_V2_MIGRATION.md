@@ -62,7 +62,7 @@ Builtin word and decimal classes are frozen to Python 3.11 / Unicode 14; exhaust
 scalar classification and case-folding fixtures protect the V1 boundary semantics.
 Elapsed time, additive V2 metadata and the explicitly upgraded engine identity are excluded from comparisons.
 
-Detection semantics are versioned as `summary.scanner_version=2.1.2`, included in `ruleset_id`
+Detection semantics are versioned as `summary.scanner_version=2.2.0`, included in `ruleset_id`
 and successful/failed reports and audit results. Built-in engine identity is `regex_v2`; custom
 identity is `fancy_regex`. This version is independent of the package version. Version 2.0.0 fixes
 empty-claims JWT detection, retains nonrecursive structural checks for large integers/deep JSON,
@@ -97,6 +97,57 @@ span previously cut at an internal hyphen, while retaining the original `v1.json
 provenance. `tests/cjk_boundaries.rs` defines spans, redaction and negative controls;
 the existing CLI/daemon suite covers text, stdin and file inputs and sanitized audit.
 Python V1 is an unchanged historical oracle; these changes apply only to the Rust V2 scanner.
+
+Version 2.2.0 reports Alibaba Cloud credentials from documented environment
+variable names instead of the `LTAI` value prefix. Attribution now requires the
+approved `NAME=value` / `export NAME=value` shape with an exact, case-sensitive
+name from `crates/asc-capability-pii-scan/src/aliyun.rs`; the table is the single
+source for the names and their roles, and `ALIASES` has a unit test against
+duplicates. Values may be bare or wrapped in one pair of quotes, but the evidence
+span and the redaction span cover the value only, so `redacted_text` keeps the
+variable name that identifies the credential.
+
+The table lists the 21 names approved on issue #2146. `ACCESS_KEY_ID`,
+`ACCESS_KEY_SECRET` and `SECURITY_TOKEN` are body-absent: the CLI accepts them as
+fallbacks, yet a generic spelling does not establish Alibaba Cloud ownership.
+Role ARN, OIDC token paths, profile, region, endpoint and header-name selectors
+are configuration rather than secrets and are out of scope. Two published names
+that the current tooling does not read, `ALIBABA_CLOUD_ACCESS_KEY` and
+`ALICLOUD_ACCESS_KEY_PAIR`, are also absent; the former is described only in the
+Terraform overview without a role.
+
+| Type | Severity | `metadata.credential_kind` | Mask |
+|------|----------|---------------------------|------|
+| `aliyun_access_key_id` | `warn` | `access_key_id` | Alphanumeric IDs longer than eight characters retain the first and last four with `...[REDACTED]...` between; other values are fully masked |
+| `aliyun_access_key_secret` | `deny` | `access_key_secret` | `[REDACTED_SECRET]` |
+| `generic_secret_field` | `deny` | `security_token` | `[REDACTED_TOKEN]` |
+| `bearer_token` | `deny` | `bearer_token` | `[REDACTED_TOKEN]` |
+| `api_key` | `deny` | `model_studio_api_key` | `[REDACTED_API_KEY]` |
+
+An access key identifier is not usable on its own, so it warns while every
+credential that can authenticate on its own denies. STS tokens keep the
+`generic_secret_field` type and bearer/model keys keep their prefix types, so
+consumers that branch on the existing type names continue to see a denial. The
+provider pair is additionally recorded as `metadata.provider=alibaba_cloud` plus
+`metadata.credential_kind`, and audit retains those two fields only for an
+approved `type + provider + kind` triple.
+
+Version 2.2.0 supersedes three frozen V1 expectations and removes the `LTAI`
+value-prefix rule `_ALIYUN_ACCESS_KEY_ID_RE`. `tests/compatibility.rs` re-asserts
+each historical value before replacing it:
+
+- A contextless `accessKeySecret` no longer reports `aliyun_access_key_secret`. It
+  keeps `generic_secret_field` and the denial, and now uses the whole-value mask
+  `[REDACTED_SECRET]` instead of retaining four leading and four trailing
+  characters.
+- A bare `id=LTAI5tQnKxExampleToken12` is no longer attributed to Alibaba Cloud,
+  so fixture case 3 returns four findings instead of five and still denies.
+- Fixture cases 198 and 199 place `LTAIabcdefghijklmnop` next to U+1E4D0, which is
+  unassigned in the frozen Unicode 14 word class. Both were positive only because
+  the retired prefix rule ignored word boundaries; both now pass.
+
+Unicode, false-positive and resource-boundary checks are retained. The frozen
+234-case corpus keeps its provenance and is not regenerated.
 
 The top-level V1 fields remain `ok`, `verdict`, `summary`, `findings`, `elapsed_ms`,
 and optional `redacted_text`. `summary` separates execution status from coverage:
@@ -216,7 +267,7 @@ and bounded shutdown; PII adds no second propagation or output pipeline.
 | Identity | UID/GID/PID from UDS peer; trace and `agent_name` never confer authority |
 | Trace | Top-level CLI `--trace-context`, V1 aliases/trim/256-character limits; shared Context/top-level carrier; opaque labels are not OTel IDs |
 | Rules | Versioned change from V1 per-user/next-scan reload to central/startup load |
-| Detection version | `scanner_version=2.1.2`; builtin quality changes and native custom syntax have separate cases |
+| Detection version | `scanner_version=2.2.0`; builtin quality changes and native custom syntax have separate cases |
 | Regex | Native fancy-regex; actual invalid syntax, YAML alias/multiple-document rejection, execution budgets/engine limits |
 | Runtime | Rust detector/client/daemon; retained V1 is an independent rollback oracle |
 

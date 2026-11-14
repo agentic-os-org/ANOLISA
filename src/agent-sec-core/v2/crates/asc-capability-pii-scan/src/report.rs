@@ -26,6 +26,10 @@ pub(crate) struct Findings {
 }
 
 impl Findings {
+    pub(crate) fn is_compact(&self) -> bool {
+        self.compact
+    }
+
     pub(crate) fn verdict(&self) -> Verdict {
         if self.by_severity.contains_key("deny") {
             Verdict::Deny
@@ -71,7 +75,12 @@ impl Findings {
             category: candidate.category.to_owned(),
             severity: candidate.severity,
             confidence: (candidate.confidence * 1000.0).round_ties_even() / 1000.0,
-            evidence_redacted: redact::value(candidate.value, candidate.kind, candidate.category),
+            evidence_redacted: redact::value(
+                candidate.value,
+                candidate.kind,
+                candidate.category,
+                candidate.mask,
+            ),
             span: candidate.span,
             metadata: candidate.metadata,
             raw_evidence: (raw && !self.compact).then(|| candidate.value.to_owned()),
@@ -194,6 +203,7 @@ mod tests {
                 },
                 bytes: 0..input.len(),
                 metadata: BTreeMap::new(),
+                mask: None,
             };
             redactor.push(&candidate);
             findings.push(candidate, true);

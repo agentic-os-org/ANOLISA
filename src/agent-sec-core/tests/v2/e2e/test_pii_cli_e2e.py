@@ -136,7 +136,7 @@ def test_negative_context_words_and_sanitized_audit(
         "--raw-evidence",
         "--redact-output",
     )
-    assert report["summary"]["scanner_version"] == "2.1.2"
+    assert report["summary"]["scanner_version"] == "2.2.0"
     if confidence is None:
         assert report["findings"] == []
         assert report["verdict"] == "pass"
@@ -192,7 +192,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
         }
         assert report["ok"] and report["verdict"] == "deny"
         assert report["summary"]["source"] == source
-        assert report["summary"]["scanner_version"] == "2.1.2"
+        assert report["summary"]["scanner_version"] == "2.2.0"
         assert report["summary"]["coverage"] == {"status": "complete", "reasons": []}
         assert not report["summary"].get("findings_truncated", False)
         assert not report["summary"].get("redacted_text_omitted", False)
@@ -212,7 +212,7 @@ def test_input_modes_unicode_redaction_and_one_event_per_scan(
     for event in events:
         assert event["result"] == "succeeded"
         assert event["details"]["request"]["text_length"] == len(text)
-        assert event["details"]["result"]["summary"]["scanner_version"] == "2.1.2"
+        assert event["details"]["result"]["summary"]["scanner_version"] == "2.2.0"
         assert event["details"]["result"]["summary"]["source"] == source
     audit = json.dumps(events)
     for forbidden in [

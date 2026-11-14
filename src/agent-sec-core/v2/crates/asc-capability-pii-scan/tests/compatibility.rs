@@ -19,7 +19,7 @@ fn frozen_v1_builtin_responses_match() {
         let result = scanner
             .scan(case["text"].as_str().unwrap(), &options)
             .unwrap();
-        assert_eq!(result.summary.scanner_version, "2.1.2");
+        assert_eq!(result.summary.scanner_version, "2.2.0");
         assert!(
             result
                 .findings
@@ -46,19 +46,57 @@ fn frozen_v1_builtin_responses_match() {
             assert_eq!(expected["findings"][0]["confidence"], 0.51);
             expected["findings"][0]["confidence"] = serde_json::json!(0.86);
         }
+        // Version 2.2.0 supersedes three frozen expectations. Each replacement
+        // below first re-asserts the historical value it replaces, so the
+        // migration stays auditable instead of silently accepting new output.
         if case["text"]
             .as_str()
             .unwrap()
             .ends_with("\nid=LTAI5tQnKxExampleToken12")
         {
-            for (index, kind, old, new) in [
-                (3, "aliyun_access_key_secret", 0.59, 0.94),
-                (4, "aliyun_access_key_id", 0.69, 1.0),
-            ] {
-                assert_eq!(expected["findings"][index]["type"], kind);
-                assert_eq!(expected["findings"][index]["confidence"], old);
-                expected["findings"][index]["confidence"] = serde_json::json!(new);
-            }
+            // Index 3: a contextless `accessKeySecret` no longer claims Alibaba
+            // Cloud ownership. The generic type keeps the denial and now uses a
+            // whole-value mask. The scored confidence rises from 0.59 to 0.94
+            // because the retained negative-context penalty no longer applies.
+            let secret = &expected["findings"][3];
+            assert_eq!(secret["type"], "aliyun_access_key_secret");
+            assert_eq!(secret["confidence"], 0.59);
+            assert_eq!(secret["metadata"]["field"], "accessKeySecret");
+            expected["findings"][3]["type"] = serde_json::json!("generic_secret_field");
+            expected["findings"][3]["confidence"] = serde_json::json!(0.94);
+            expected["findings"][3]["evidence_redacted"] = serde_json::json!("[REDACTED_SECRET]");
+            // Index 4: the retired value-prefix rule no longer reports a bare
+            // `id=LTAI…`. The remaining four findings still produce a denial.
+            let bare_id = expected["findings"].as_array().unwrap()[4].clone();
+            assert_eq!(bare_id["type"], "aliyun_access_key_id");
+            assert_eq!(bare_id["confidence"], 0.69);
+            expected["findings"].as_array_mut().unwrap().remove(4);
+            expected["summary"]["total"] = serde_json::json!(4);
+            expected["summary"]["by_type"] = serde_json::json!({
+                "api_key": 1,
+                "bearer_token": 1,
+                "generic_secret_field": 1,
+                "jwt": 1,
+            });
+            expected["summary"]["by_category"] = serde_json::json!({"credential": 4});
+            expected["summary"]["by_severity"] = serde_json::json!({"deny": 4});
+            assert_eq!(expected["verdict"], "deny");
+        }
+        // Cases 198 and 199 place `LTAIabcdefghijklmnop` next to a character that
+        // is unassigned in the frozen Unicode 14 word class. Both were positive
+        // only because the retired prefix rule ignored word boundaries.
+        if matches!(
+            case["text"].as_str().unwrap(),
+            "\u{1e4d0}LTAIabcdefghijklmnop" | "LTAIabcdefghijklmnop\u{1e4d0}"
+        ) {
+            assert_eq!(expected["findings"][0]["type"], "aliyun_access_key_id");
+            assert_eq!(expected["findings"][0]["confidence"], 0.92);
+            expected["findings"] = serde_json::json!([]);
+            expected["summary"]["total"] = serde_json::json!(0);
+            expected["summary"]["by_type"] = serde_json::json!({});
+            expected["summary"]["by_category"] = serde_json::json!({});
+            expected["summary"]["by_severity"] = serde_json::json!({});
+            expected["verdict"] = serde_json::json!("pass");
         }
         upgrade_cjk_expectation(case["text"].as_str().unwrap(), &mut expected);
         // Engine provenance is intentionally versioned; all remaining fields match.
@@ -250,20 +288,26 @@ fn candidate_search_preserves_versioned_boundaries_and_redacted_spans() {
             "",
             Some("İabc...[REDACTED]...lmno"),
         ),
+        // A bare LTAI value is no longer a finding on its own: the bare-value
+        // rule was removed in favour of the official alias assignments, so
+        // this inherited positive becomes the bare negative.
+        ("aliyun_access_key_id", "\u{11f02}", key, "!", None),
         (
             "aliyun_access_key_id",
-            "\u{11f02}",
+            "ALIBABA_CLOUD_ACCESS_KEY_ID=",
             key,
-            "!",
+            "",
             Some("LTAI...[REDACTED]...ijkl"),
         ),
         ("aliyun_access_key_id", "_", key, "", None),
         (
+            // A bare `LTAI…` value is no longer attributed to Alibaba Cloud, so
+            // CJK adjacency no longer turns it into a finding.
             "aliyun_access_key_id",
             "",
             key,
             "中",
-            Some("LTAI...[REDACTED]...ijkl"),
+            None,
         ),
         ("cn_id", "中", id, "!", Some("１１０***********００２Ｘ")),
         ("cn_id", "９", id, "", None),
@@ -334,7 +378,7 @@ fn mixed_unicode_positions_and_overlapping_credentials_are_redacted() {
 fn scanner_version_reflects_detection_semantics() {
     // CJK token boundaries change findings and spans; version the report and
     // ruleset digest while retaining the previously added token prefixes.
-    assert_eq!(SCANNER_VERSION, "2.1.2");
+    assert_eq!(SCANNER_VERSION, "2.2.0");
     let report = PiiScanner::new()
         .unwrap()
         .scan(
@@ -342,7 +386,7 @@ fn scanner_version_reflects_detection_semantics() {
             &PiiScanOptions::default(),
         )
         .unwrap();
-    assert_eq!(report.summary.scanner_version, "2.1.2");
+    assert_eq!(report.summary.scanner_version, "2.2.0");
     assert!(report.findings.iter().any(|f| f.pii_type == "api_key"));
 }
 
