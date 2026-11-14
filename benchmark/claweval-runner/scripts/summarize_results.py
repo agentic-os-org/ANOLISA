@@ -75,7 +75,7 @@ def resolve_input(args) -> Path:
         if yaml is None:
             print("Error: pyyaml is required for --config. Install with: pip install pyyaml", file=sys.stderr)
             sys.exit(1)
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         defaults = cfg.get("defaults", {})
         trace_dir_name = defaults.get("trace_dir", "traces")
@@ -99,7 +99,7 @@ def resolve_input(args) -> Path:
 
 
 def load_data(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -117,7 +117,7 @@ def load_reports(report_dir: str | None) -> dict:
         return reports
     for rp in rd.glob("*.json"):
         try:
-            with open(rp) as f:
+            with open(rp, encoding="utf-8") as f:
                 report = json.load(f)
             trace_file = report.get("trace_file", "")
             if trace_file:
@@ -299,6 +299,9 @@ def main():
                         help="Output file path (default: stdout)")
     args = parser.parse_args()
 
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     input_file = resolve_input(args)
     print(f"Reading: {input_file}", file=sys.stderr)
 
@@ -329,7 +332,12 @@ def main():
         output += f"Trials: {total_trials} total, {passed_trials} passed ({trial_pct:.1f}%)\n"
 
     if args.output:
-        with open(args.output, "w", newline="" if args.format == "csv" else None) as f:
+        with open(
+            args.output,
+            "w",
+            encoding="utf-8",
+            newline="" if args.format == "csv" else None,
+        ) as f:
             f.write(output)
         print(f"Written to {args.output}")
     else:
