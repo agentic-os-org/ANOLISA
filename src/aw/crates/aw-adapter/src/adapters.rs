@@ -4,6 +4,7 @@ pub(super) mod agentscope;
 pub(super) mod claude_final;
 pub(super) mod claude_mcp;
 pub(super) mod claude_sdk;
+mod claude_typescript;
 pub(super) mod codex;
 pub(super) mod deepseek;
 pub(super) mod hermes;

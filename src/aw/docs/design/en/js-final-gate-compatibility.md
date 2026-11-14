@@ -129,6 +129,13 @@ payload mutation after serialization; a native extension that uses
 reloadable policy, multimodal results, context projections that remove a tool
 result identity, nested agents and background delivery remain unsupported.
 
+The TypeScript bridge requests an internal `aw hook --event-receipt true`
+response. The CLI acknowledges successful early closure or completion of the last
+step, including Provider failures. The bridge skips cleanup after that receipt;
+transport cancellation or a missing receipt triggers a separate bounded close by
+native identity. Cleanup failure rejects the callback. A lost acknowledgement
+leaves closure uncertain, so recovery may repeat an idempotent close.
+
 All three inspected Qoder Workers call `firePostToolUseEvent` before applying
 `getUpdatedToolOutput()`/`getUpdatedMCPToolOutput()`. The same return path can
 rewrite `llmContent` for Read and append Hook context. The shipped Worker is an

@@ -61,7 +61,7 @@ async function invoke(payload, signal) {
 const gate = createToolGate(() => JSON.parse(readFileSync(`${root}/claude-final-records.json`, 'utf8')), invoke);
 installFetchGate((url, init, input) => {
   const target = new URL(url);
-  if (target.origin === config.origin && target.pathname === '/v1/messages') return gate;
+  if (target.origin === config.origin && target.pathname === (config.messages_path ?? '/v1/messages')) return gate;
   if (target.origin !== config.origin && init?.body == null &&
       !(input instanceof Request && input.body !== null)) return undefined;
   // Alternate routes and opaque bodies cannot carry an unchecked model request.

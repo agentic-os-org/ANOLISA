@@ -17,8 +17,10 @@ class FinalGate:
         self.prefixes = ()
 
     def options(self, options, bundled):
-        if not isinstance(options.model, str) or not re.fullmatch(r"claude-[A-Za-z0-9._-]+", options.model) or getattr(options, "fallback_model", None):
-            raise ValueError("AW final gate requires an explicit Claude model without fallback")
+        if (not isinstance(options.model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]+", options.model)
+                or options.model in {"auto", "default", "sonnet", "opus", "haiku"}
+                or getattr(options, "fallback_model", None)):
+            raise ValueError("AW final gate requires an explicit model ID without fallback")
         if (os.environ.get("AW_CLAUDE_RESIDENT") == "1" or options.setting_sources != []
                 or options.settings is not None or options.resume or options.continue_conversation
                 or options.agents or options.plugins or not isinstance(options.tools, list)
@@ -40,9 +42,12 @@ class FinalGate:
                 raise ValueError("AW final gate SDK fingerprint changed after admission")
         base = env.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
         parsed = urlparse(base)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
-            raise ValueError("AW final gate requires an HTTP(S) Anthropic origin")
-        runtime = {**self.config, "origin": base, "cwd": str(Path(options.cwd or os.getcwd()).resolve())}
+        if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password
+                or not re.fullmatch(r"[A-Za-z0-9/_-]*", parsed.path) or parsed.query or parsed.fragment):
+            raise ValueError("AW final gate requires an HTTP(S) Messages base URL without credentials or query")
+        runtime = {**self.config, "origin": f"{parsed.scheme}://{parsed.netloc}",
+                   "messages_path": parsed.path + "/v1/messages",
+                   "cwd": str(Path(options.cwd or os.getcwd()).resolve())}
         (self.root / "claude-final-runtime.json").write_text(json.dumps(runtime))
         self._save()
         preload = self.root / "claude-final-preload.mjs"

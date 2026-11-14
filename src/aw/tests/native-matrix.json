@@ -419,7 +419,7 @@
         "mcp==1.26.0",
         "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. Final-result acceptance captures actual model HTTP after an application Post callback returns updatedToolOutput later than AW Post for Bash and SDK MCP. Exact SDK/CLI fingerprints admit a private Bun preload; global fetch and FetchSession fetch adopt only checked text or a withheld envelope. Safe controls, late mutation, policy timeout/error and rejection of fail-open policy are required. Scope is a fresh foreground Python client, empty setting_sources and direct Anthropic Messages; no hosted inference.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. Final-result acceptance captures actual model HTTP after an application Post callback returns updatedToolOutput later than AW Post for Bash and SDK MCP. Exact SDK/CLI fingerprints admit a private Bun preload; global fetch and FetchSession fetch adopt only checked text or a withheld envelope. Safe controls, late mutation, policy timeout/error and rejection of fail-open policy are required. Scope is a fresh foreground Python client or TypeScript 0.3.325 Query, empty settings sources and Anthropic Messages. The TypeScript suite checks the complete bundled SDK/CLI fingerprint on linux-x64, with Bash/MCP safe, late-mutation, timeout/error and fail-open rejection cases. Scheduled acceptance uses a deterministic endpoint; opt-in hosted Python acceptance captures unchanged request bytes through an authorized gateway.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -1509,9 +1509,81 @@
               }
             }
           ]
+        },
+        {
+          "name": "typescript-final-result",
+          "argv": [
+            "{python}",
+            "tests/claude_final_result.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/typescript-final-result",
+            "--node",
+            "node",
+            "--npm",
+            "{npm}",
+            "--expected-platform",
+            "x86_64",
+            "--cases",
+            "bash-safe",
+            "bash-late",
+            "mcp-safe",
+            "mcp-late",
+            "required-final",
+            "bash-gate-safe",
+            "bash-gate-late",
+            "mcp-gate-safe",
+            "mcp-gate-late",
+            "bash-gate-timeout",
+            "mcp-gate-error",
+            "ts-before-deny",
+            "ts-before-error",
+            "ts-before-matcher-error",
+            "ts-before-matcher-timeout",
+            "bash-history",
+            "bash-gate-history"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/typescript-final-result/result.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "bash-safe",
+                  "bash-late",
+                  "mcp-safe",
+                  "mcp-late",
+                  "required-final",
+                  "bash-gate-safe",
+                  "bash-gate-late",
+                  "mcp-gate-safe",
+                  "mcp-gate-late",
+                  "bash-gate-timeout",
+                  "mcp-gate-error",
+                  "ts-before-deny",
+                  "ts-before-error",
+                  "ts-before-matcher-error",
+                  "ts-before-matcher-timeout",
+                  "bash-history",
+                  "bash-gate-history"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings_released": true
+                }
+              }
+            }
+          ]
         }
       ],
-      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+      "npm_packages": [
+        "@anthropic-ai/claude-agent-sdk@0.3.325"
+      ]
     },
     "hermes": {
       "owner": "@kongche-jbw",
@@ -2348,7 +2420,7 @@
         "legacy": "crates/aw-cli/tests/fixtures/pi/legacy",
         "latest": "crates/aw-cli/tests/fixtures/pi/latest"
       },
-      "boundary": "Published Coding Agent/Core SDK 0.84.2, 1.3.0 and 1.5.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch. Strict output admits matching stable 0.84.2–1.5.2 pairs; the pinned baselines verify the Agent.processEvents boundary, suppressing partial tool updates target-wide and adopting safe final results before early listeners and HTTP model requests. Controlled scanner faults withhold the full result and allow the next prompt; cancellation and native callback faults retain task failure and cleanup. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
+      "boundary": "Published Coding Agent/Core SDK 0.84.2, 1.3.0 and 1.5.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch. Strict output admits matching stable 0.84.2\u20131.5.2 pairs; the pinned baselines verify the Agent.processEvents boundary, suppressing partial tool updates target-wide and adopting safe final results before early listeners and HTTP model requests. Controlled scanner faults withhold the full result and allow the next prompt; cancellation and native callback faults retain task failure and cleanup. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
       "cases": [
         {
           "name": "public-factory",
@@ -4547,9 +4619,16 @@
               "cases": {
                 "at": "",
                 "key": "case",
-                "names": ["late-mutation"],
-                "values": { "status": "passed", "sdk": "1.0.55", "worker": "1.1.75",
-                  "late_mutation_adopted": true, "model_echoed_late_marker": true }
+                "names": [
+                  "late-mutation"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.55",
+                  "worker": "1.1.75",
+                  "late_mutation_adopted": true,
+                  "model_echoed_late_marker": true
+                }
               }
             }
           ]
@@ -4576,9 +4655,16 @@
               "cases": {
                 "at": "",
                 "key": "case",
-                "names": ["late-mutation"],
-                "values": { "status": "passed", "sdk": "1.0.57", "worker": "1.1.81",
-                  "late_mutation_adopted": true, "model_echoed_late_marker": true }
+                "names": [
+                  "late-mutation"
+                ],
+                "values": {
+                  "status": "passed",
+                  "sdk": "1.0.57",
+                  "worker": "1.1.81",
+                  "late_mutation_adopted": true,
+                  "model_echoed_late_marker": true
+                }
               }
             }
           ]

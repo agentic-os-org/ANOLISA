@@ -34,6 +34,9 @@ impl Adapter for ClaudeSdk {
             .first()
             .and_then(|arg| arg.to_str())
             .ok_or("Claude SDK requires a Python worker script or -m module")?;
+        if first.ends_with(".mjs") || first.ends_with(".js") {
+            return super::claude_typescript::prepare(input, cancelled);
+        }
         if (first == "-m" && args.len() < 2) || (first != "-m" && !first.ends_with(".py")) {
             return Err("Claude SDK requires a Python worker script or -m module".into());
         }
