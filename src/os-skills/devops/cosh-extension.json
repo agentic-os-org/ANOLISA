@@ -1,5 +1,9 @@
 {
   "name": "anolisa-skills-devops",
   "version": "0.6.1",
-  "skills": "."
+  "skills": [
+    "kernel-dev",
+    "sysom-agentsight",
+    "sysom-diagnosis"
+  ]
 }

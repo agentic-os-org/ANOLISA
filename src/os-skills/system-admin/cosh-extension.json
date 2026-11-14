@@ -1,5 +1,10 @@
 {
   "name": "anolisa-skills-system-admin",
   "version": "0.6.2",
-  "skills": "."
+  "skills": [
+    "alinux-admin",
+    "backup-restore",
+    "ktuner",
+    "storage-resize"
+  ]
 }

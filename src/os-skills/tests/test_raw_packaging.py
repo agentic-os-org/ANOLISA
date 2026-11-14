@@ -41,7 +41,10 @@ class RawPackagingTests(unittest.TestCase):
         version = tomllib.loads((ROOT / "component.toml").read_text())["component"]["version"]
         tracked = subprocess.check_output(["git", "ls-files", "-z", "--", "."], cwd=ROOT)
         tracked_paths = [Path(name) for name in os.fsdecode(tracked).split("\0") if name]
-        skill_dirs = {path.parent for path in tracked_paths if path.name == "SKILL.md"}
+        skill_dirs = {
+            Path(line) for line in (ROOT / "packaging/released-skills.txt").read_text().splitlines()
+            if line and not line.startswith("#")
+        }
         expected = {
             f"share/anolisa/skills/{skill.name}/{path.relative_to(skill)}"
             for skill in skill_dirs
@@ -100,9 +103,17 @@ class RawPackagingTests(unittest.TestCase):
             skill = root / "ai/example"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text("tracked")
+            incubation = root / "ai/experimental"
+            incubation.mkdir()
+            (incubation / "SKILL.md").write_text("trial")
+            (root / "packaging").mkdir()
+            (root / "packaging/released-skills.txt").write_text("ai/example\n")
+            with (root / "component.toml").open("a") as manifest:
+                manifest.write('\n[[adapters.hermes.skills]]\nname = "experimental"\n'
+                               'source = "{datadir}/skills/experimental/"\n')
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             subprocess.run(
-                ["git", "-C", str(root), "add", "component.toml", "ai/example/SKILL.md"], check=True
+                ["git", "-C", str(root), "add", "component.toml", "packaging", "ai"], check=True
             )
             (skill / "cache.bin").write_bytes(b"untracked build output")
             output = root / "artifacts"
@@ -111,6 +122,10 @@ class RawPackagingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             with tarfile.open(output / f"os-skills-{fixture_version}-linux-x86_64.tar.gz") as package:
                 self.assertNotIn("./share/anolisa/skills/example/cache.bin", package.getnames())
+                self.assertIn("./share/anolisa/skills/example/SKILL.md", package.getnames())
+                self.assertFalse(any("/experimental" in name for name in package.getnames()))
+                contract = package.extractfile("./.anolisa/component.toml")
+                self.assertNotIn(b"experimental", contract.read())
             (skill / "SKILL.md").unlink()
             self.assertNotEqual(self.build(root, root / "bad").returncode, 0)
 

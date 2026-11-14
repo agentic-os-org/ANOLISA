@@ -1,5 +1,26 @@
 {
   "name": "anolisa-os-skills",
   "version": "0.7.0",
-  "skills": "."
+  "skills": [
+    "ai/install-claude-code",
+    "ai/install-hermes",
+    "ai/install-openclaw",
+    "ai/install-qwenpaw",
+    "ai/install-tokenless",
+    "ai/qwenpaw-usage",
+    "ai/setup-mcp",
+    "aliyun/aliyun-ecs",
+    "devops/kernel-dev",
+    "devops/sysom-agentsight",
+    "devops/sysom-diagnosis",
+    "others/anolisa-guide",
+    "others/anolisa-register",
+    "others/clawhub-skill-mng",
+    "others/cosh-guide",
+    "security/alinux-cve-query",
+    "system-admin/alinux-admin",
+    "system-admin/backup-restore",
+    "system-admin/ktuner",
+    "system-admin/storage-resize"
+  ]
 }

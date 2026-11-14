@@ -126,18 +126,40 @@ runs:
       env:
         GPG_PUBLIC_KEY: ${{ inputs.skill-sign-public-key }}
       run: |
-        mkdir -p /tmp/build/${ARCHIVE_NAME}
+        mkdir -p "/tmp/build/${ARCHIVE_NAME}" || exit 1
         if [ "${{ inputs.component }}" = "os-skills" ]; then
-          # Copy top-level files (LICENSE, README, etc.) into archive root.
-          find "${SRC_DIR}" -maxdepth 1 -not -type d -exec cp -p {} /tmp/build/${ARCHIVE_NAME}/ \;
+          archive_root="/tmp/build/${ARCHIVE_NAME}"
+          existing="$(find "$archive_root" -mindepth 1 -print -quit)" || exit 1
+          if [ -L "$archive_root" ] || [ -n "$existing" ]; then
+            echo "ERROR: os-skills archive staging directory must be empty: $archive_root" >&2
+            exit 1
+          fi
+          find "${SRC_DIR}" -maxdepth 1 -not -type d ! -name component.toml -exec cp -p {} "$archive_root/" \; || exit 1
 
-          # Flatten skill directories (identified by containing SKILL.md) into
-          # skills/ subdirectory, mirroring the RPM spec install logic.
-          mkdir -p /tmp/build/${ARCHIVE_NAME}/skills
-          find "${SRC_DIR}" -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
-            skill_dir=$(dirname "$skillmd")
-            cp -rp "$skill_dir" /tmp/build/${ARCHIVE_NAME}/skills/
-          done
+          # The same staged payload is signed and later installed by the RPM spec.
+          catalog="${SRC_DIR}/packaging/release_catalog.py"
+          python3 "$catalog" stage "$SRC_DIR" "$archive_root/skills" --layout flat || exit 1
+          python3 "$catalog" manifest "$SRC_DIR" "$archive_root/component.toml" || exit 1
+
+          # Keep source installs and COSH discovery working after flattening.
+          mkdir "$archive_root/packaging" || exit 1
+          cp "$catalog" "$archive_root/packaging/" || exit 1
+          (
+            cd "$archive_root" || exit 1
+            staged_paths="$(find skills -mindepth 1 -maxdepth 1 -type d)" || exit 1
+            printf '%s\n' "$staged_paths" | LC_ALL=C sort > packaging/released-skills.txt || exit 1
+            if [ -f cosh-extension.json ]; then
+              python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        manifest = Path("cosh-extension.json")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["skills"] = Path("packaging/released-skills.txt").read_text(encoding="utf-8").splitlines()
+        manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        PY
+            fi
+          ) || exit 1
 
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/

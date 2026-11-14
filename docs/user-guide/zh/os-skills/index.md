@@ -20,11 +20,15 @@ OS Skills 覆盖三大领域：
 anolisa install os-skills
 ```
 
-开发者也可以从源码检出目录安装供 cosh 使用的技能集合：
+源码安装需要 Python 3.6 或更新版本及 GNU Make。发布清单决定默认技能集合，
+安装器只使用 Python 标准库。从源码检出目录安装供 cosh 使用的技能集合：
 
 ```bash
 make -C src/os-skills install
 ```
+
+如果 `python3` 不存在或版本过旧，为同一命令添加 `PYTHON3=/path/to/python3`。
+安装器在修改文件前检查解释器版本。
 
 普通用户继续使用原有的 `~/.copilot-shell/skills/` 目录；root 默认安装到
 `/usr/local/share/anolisa/skills/`。系统资源的 `AWPRJ` 默认为 `anolisa`，可显式覆盖。
