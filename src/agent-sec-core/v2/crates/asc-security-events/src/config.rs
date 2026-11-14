@@ -133,6 +133,33 @@ pub fn daemon_security_event_paths() -> Result<(PathBuf, PathBuf), ConfigError> 
     ))
 }
 
+/// Returns the same paths as [`daemon_security_event_paths`] without
+/// preparing (creating, chmod'ing or ownership-checking) the data directory.
+///
+/// Read-only consumers — the state migrator's `plan` and `verify` — must
+/// resolve the same default destination as the daemon without leaving a
+/// freshly created directory behind, so they resolve the path decision only
+/// and leave the write side effects to the write commands.
+///
+/// # Errors
+///
+/// Fails when the configured or default directory is relative, or when a
+/// stream name cannot be validated.
+pub fn daemon_security_event_paths_readonly() -> Result<(PathBuf, PathBuf), ConfigError> {
+    let env = DaemonDataDirEnv::from_process();
+    let path = env.override_dir.as_deref().unwrap_or(&env.system_dir);
+    if !path.is_absolute() {
+        return Err(daemon_data_dir_error(
+            path,
+            io::Error::new(io::ErrorKind::InvalidInput, "path must be absolute"),
+        ));
+    }
+    Ok((
+        stream_log_path_in(path, DEFAULT_SECURITY_STREAM)?,
+        stream_db_path_in(path, DEFAULT_SECURITY_STREAM)?,
+    ))
+}
+
 /// Returns the fallback `JSONL` path (`$HOME/.agent-sec-core/security-events.jsonl`).
 ///
 /// v1 computes `FALLBACK_LOG_PATH` once at import time; exposing it as a

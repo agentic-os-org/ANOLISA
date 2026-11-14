@@ -5,6 +5,7 @@ resolver = "3"
 members = [
     "apps/asc-cli",
     "apps/asc-daemon",
+    "apps/asc-state-migrator",
     "crates/asc-action-runtime",
     "crates/asc-action-types",
     "crates/asc-capability-code-scan",
