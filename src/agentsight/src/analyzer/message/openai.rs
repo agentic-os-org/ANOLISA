@@ -888,6 +888,56 @@ impl OpenAIParser {
         (!refusal.is_empty()).then_some(refusal)
     }
 
+    /// Recover the complete output carried by a terminal `response.completed`
+    /// or `response.incomplete` event.
+    ///
+    /// Those events carry the whole final Response object, including its
+    /// `output[]`. A capture that attached after the deltas has no other copy
+    /// of the answer or of a tool call, so read the same fields the
+    /// per-event arms read. Deltas still win over any repeated text, and
+    /// `ResponsesToolCalls::observe` merges a terminal item into the call a
+    /// delta path already registered instead of duplicating it.
+    fn observe_terminal_output(
+        resp: &serde_json::Value,
+        calls: &mut ResponsesToolCalls,
+        saw_text_delta: bool,
+        saw_refusal_delta: bool,
+        closing_text: &mut Option<String>,
+        closing_refusal: &mut Option<String>,
+    ) {
+        let Some(output) = resp.get("output").and_then(|o| o.as_array()) else {
+            return;
+        };
+        for (index, item) in output.iter().enumerate() {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    let chunk = serde_json::json!({ "item": item });
+                    if !saw_text_delta
+                        && closing_text.is_none()
+                        && let Some(text) = Self::closing_message_item_text(&chunk)
+                    {
+                        *closing_text = Some(text);
+                    }
+                    if !saw_refusal_delta
+                        && closing_refusal.is_none()
+                        && let Some(refusal) = Self::closing_message_item_refusal(&chunk)
+                    {
+                        *closing_refusal = Some(refusal);
+                    }
+                }
+                Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+                    let event = serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": index,
+                        "item": item,
+                    });
+                    calls.observe(&event);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
         let mut saw_text_delta = false;
@@ -1002,6 +1052,14 @@ impl OpenAIParser {
                                 "total_tokens": u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                             })
                         });
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
                     }
                 }
                 // A capped stream terminates with response.incomplete
@@ -1039,6 +1097,14 @@ impl OpenAIParser {
                                 _ => {}
                             }
                         }
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
                     }
                 }
                 "response.created" => {
@@ -2429,6 +2495,139 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 2);
+    }
+
+    /// A capture that attached after the text deltas has the complete final
+    /// Response object in `response.completed.response.output`; the terminal
+    /// arm read only model/id/usage, so the answer was lost.
+    #[test]
+    fn test_responses_terminal_event_recovers_output_text() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_term", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.completed", "response": {
+                "id": "resp_term",
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_term",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Hello "},
+                        {"type": "output_text", "text": "world"}
+                    ]
+                }],
+                "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the terminal event must aggregate");
+        assert_eq!(
+            resp.choices[0]
+                .message
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .as_deref(),
+            Some("Hello world"),
+            "the terminal output is the only copy of the answer"
+        );
+        assert_eq!(resp.usage.unwrap().completion_tokens, 2);
+    }
+
+    /// The same terminal-only capture for a tool turn: `response.output`
+    /// carries the complete function_call item, but the terminal arm never
+    /// registered it, so the recorded assistant message had no tool call.
+    #[test]
+    fn test_responses_terminal_event_recovers_output_tool_call() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_term_tool", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.completed", "response": {
+                "id": "resp_term_tool",
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_term",
+                    "call_id": "call_term",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"/tmp/a\"}"
+                }]
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the terminal event must aggregate");
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the terminal function_call must be recovered");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], serde_json::json!("call_term"));
+        assert_eq!(calls[0]["function"]["name"], serde_json::json!("read_file"));
+        assert_eq!(
+            calls[0]["function"]["arguments"],
+            serde_json::json!("{\"path\":\"/tmp/a\"}")
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+    }
+
+    /// The capped/filtered terminal event is a separate arm from
+    /// `response.completed`; it carries the same complete `output[]`. A
+    /// delta-less capture must recover the answer, refusal and tool call
+    /// there as well, while the cap still determines the finish reason.
+    #[test]
+    fn test_responses_incomplete_terminal_event_recovers_output() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_incomplete", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_incomplete",
+                "model": "gpt-5",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {"type": "message", "id": "msg_text", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "partial answer"}]},
+                    {"type": "message", "id": "msg_refusal", "role": "assistant",
+                     "content": [{"type": "refusal", "refusal": "I can't continue"}]},
+                    {"type": "function_call", "id": "fc_incomplete", "call_id": "call_incomplete",
+                     "name": "read_file", "arguments": "{\"path\":\"/tmp/b\"}"}
+                ]
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the incomplete terminal event must aggregate");
+        assert_eq!(
+            resp.choices[0]
+                .message
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .as_deref(),
+            Some("partial answer")
+        );
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't continue")
+        );
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the incomplete terminal function_call must be recovered");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], serde_json::json!("call_incomplete"));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("length".to_string()),
+            "the output cap still wins over the recovered tool call"
+        );
     }
 
     /// The Responses protocol streams a refusal as its own events; the
