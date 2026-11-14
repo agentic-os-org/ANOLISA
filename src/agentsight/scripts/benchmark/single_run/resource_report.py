@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark_stats import numeric, percentile
+from check_resource_limits import LIMITS
 from collect_metrics import read_internal_metrics
 
 
@@ -140,6 +141,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     probe_drops = {key: max(values) if values else None for key, values in drop_samples.items()}
     events_dropped = any(value is not None and value > 0 for value in probe_drops.values())
     sent = capture.get("sent")
+    conflicts = capture.get("conflicts")
     quality = {}
     for key in ("completeness_ratio", "token_accuracy"):
         value = capture.get(key)
@@ -147,6 +149,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     capture_ok = (
         type(sent) is int
         and sent > 0
+        and type(conflicts) is int
+        and conflicts == 0
         and all(value is not None and 0.999 <= value <= 1 for value in quality.values())
         and not events_dropped
         and not invalid_counters.intersection(drop_samples)
@@ -182,9 +186,25 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and ffi_error is None
     )
     capture_counts = {}
-    for key in ("sent", "matched", "complete", "missing_count", "token_correct"):
+    for key in (
+        "sent",
+        "matched",
+        "complete",
+        "missing_count",
+        "token_correct",
+        "rejected",
+        "rejected_request_count",
+        "capacity_rejected_events",
+        "conflicts",
+        "unexplained_loss",
+        "admitted_completeness",
+    ):
         value = capture.get(key)
-        capture_counts[key] = value if type(value) is int and value >= 0 else None
+        if key == "admitted_completeness":
+            field_valid = type(value) in (int, float) and 0 <= value <= 1
+        else:
+            field_valid = type(value) is int and value >= 0
+        capture_counts[key] = value if field_valid else None
     if capture_counts["missing_count"] is None and isinstance(capture.get("missing_ids"), list):
         capture_counts["missing_count"] = len(capture["missing_ids"])
     return {
@@ -268,6 +288,11 @@ def report(output: Path, sources: dict[str, dict[str, Any]]) -> bool:
         "Main statistics cover the load window; response drain is reported separately.",
         "CPU average is time-weighted; CPU P95/peak are interval samples, RSS peak is sampled.",
         "Intervals crossing the load boundary are split proportionally by overlap.",
+        (
+            f"Resource gate: average CPU {LIMITS['cpu_average_pct'][1]}%, "
+            f"average/peak RSS {LIMITS['rss_average_mib'][1]}/"
+            f"{LIMITS['rss_peak_mib'][1]} MiB; P95/peak CPU are diagnostic."
+        ),
     ]
     settings = read_json(output / "settings.json")
     if settings:

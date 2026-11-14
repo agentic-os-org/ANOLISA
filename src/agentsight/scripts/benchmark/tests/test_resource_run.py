@@ -22,6 +22,7 @@ SINGLE_RUN = Path(__file__).parents[1] / "single_run"
 sys.path.insert(0, str(SINGLE_RUN))
 import resource_inputs
 import resource_report
+import resource_run
 
 FAKE_TRACE = """#!/usr/bin/env python3
 import json, os, signal, sqlite3, sys, time
@@ -275,6 +276,96 @@ def assert_reaped(output: Path) -> None:
         assert not Path(f"/proc/{pid}").exists(), f"agent {pid} survived"
 
 
+def test_metrics_report_skips_missing_csv_and_renders_existing(tmp_path: Path) -> None:
+    directory = tmp_path / "run"
+    directory.mkdir()
+    assert resource_run.render_metrics_report(directory, 128) == (None, None)
+    assert not (directory / "metrics-report.html").exists()
+
+    (directory / "metrics.csv").write_text(
+        "timestamp,monotonic_timestamp,rss_mb,cpu_pct\n0,0,100,10\n1,1,110,12\n"
+    )
+    (directory / "config.json").write_text(
+        json.dumps({"runtime_limits": {"connection_capacity": 128}})
+    )
+    report, error = resource_run.render_metrics_report(directory, 128)
+    assert error is None
+    assert report == directory / "metrics-report.html"
+    document = report.read_text()
+    assert "常驻内存" in document
+    assert "safety-stop 350 MiB" in document
+    assert "门禁均值 265 MiB" in document
+    assert "门禁峰值 300 MiB" in document
+    assert "资源门禁：平均 CPU 25%" in document
+    assert "P95/峰值 CPU 为诊断指标" in document
+    for label in (
+        "采集完整性",
+        "端到端完整率",
+        "主动拒绝",
+        "有效完整率",
+        "未解释丢失",
+        "冲突请求数",
+        "吞吐与延迟",
+        "稳定性",
+        "Fault 注入",
+        "资源泄漏",
+        "运行限制",
+        "RSS 斜率分析",
+        "有效 QPS",
+        "CPU 平均",
+    ):
+        assert label in document
+
+
+def test_metrics_report_displays_metric_backed_rejections(tmp_path: Path) -> None:
+    directory = tmp_path / "run"
+    directory.mkdir()
+    (directory / "metrics.csv").write_text(
+        "timestamp,monotonic_timestamp,rss_mb,cpu_pct\n0,0,100,10\n1,1,110,12\n"
+    )
+    (directory / "report.json").write_text(
+        json.dumps(
+            {
+                "sent": 384,
+                "complete": 378,
+                "rejected": 6,
+                "rejected_request_count": 0,
+                "capacity_rejected_events": 6,
+                "admitted_sent": 378,
+                "admitted_completeness": 1.0,
+                "unexplained_loss": 0,
+                "conflicts": 0,
+                "completeness_ratio": 378 / 384,
+                "token_accuracy": 378 / 384,
+            }
+        )
+    )
+
+    report, error = resource_run.render_metrics_report(directory, 128)
+
+    assert error is None
+    document = report.read_text()
+    assert "主动拒绝</td><td>6</td>" in document
+    assert "capacity_rejected（metrics）" in document
+    assert "计入请求级拒绝 0 条" in document
+    assert "0 条计入了请求级拒绝" in document
+    assert "有效完整率</td><td>100.0%</td>" in document
+    assert "未解释丢失</td><td>0</td>" in document
+
+
+def test_metrics_report_failure_is_returned_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "run"
+    directory.mkdir()
+    (directory / "metrics.csv").write_text("timestamp,rss_mb\n0,100\n")
+    # Point the helper at a harness copy that has no plot_metrics.py.
+    monkeypatch.setattr(resource_run, "HERE", tmp_path)
+    report, error = resource_run.render_metrics_report(directory, 128)
+    assert report is None
+    assert error and "plot_metrics.py" in error
+
+
 @pytest.mark.parametrize(
     "capacity,ring_buffer,configured_ring,cpu_budget,configured_cpu",
     [
@@ -381,6 +472,10 @@ def test_one_command_reports_real_rss_and_cleans_processes(
     )
     assert not summary["runs"]["run"]["probe_drops"]["ring_buffer_dropped"]
     assert (output / "resource-report.txt").read_text() in result.stdout
+    metrics_report = output / "run/metrics-report.html"
+    assert metrics_report.is_file()
+    assert "常驻内存" in metrics_report.read_text()
+    assert f"Metrics report: {metrics_report}" in result.stdout
     assert_reaped(output)
     reused = run(command(output, binary), environment)
     assert reused.returncode != 0 and "already exists" in reused.stderr
@@ -471,6 +566,9 @@ def test_delayed_capture_finishes_before_clients_exit(
     counts = summary["runs"]["run"]["capture_counts"]
     assert counts["complete"] == counts["sent"] == counts["token_correct"]
     assert counts["sent"] >= 4
+    assert counts["rejected"] == 0
+    assert counts["rejected_request_count"] == 0
+    assert counts["capacity_rejected_events"] is None
     assert "discarded capture" not in (output / "run/trace.log").read_text()
     assert_reaped(output)
 
@@ -571,7 +669,9 @@ def test_guard_record_invalidates_report_and_preserves_reason(
     )
     (directory / "agent-summary.json").write_text(json.dumps({"passed": True}))
     (directory / "report.json").write_text(
-        json.dumps({"sent": 1, "completeness_ratio": 1, "token_accuracy": 1})
+        json.dumps(
+            {"sent": 1, "completeness_ratio": 1, "token_accuracy": 1, "conflicts": 0}
+        )
     )
     (directory / "metrics.csv").write_text("process_alive,rss_mb\n1,100\n")
     (directory / "safety-stop.json").write_text(json.dumps(record))
@@ -667,6 +767,15 @@ def test_ab_prebuilt_binaries_report_reductions(
     assert max(float(row["timestamp"]) for row in before_samples) < min(
         float(row["timestamp"]) for row in after_samples
     )
+    for label in ("before", "after"):
+        assert (output / label / "metrics-report.html").is_file()
+    ab_report = output / "ab-comparison.html"
+    assert ab_report.is_file()
+    ab_document = ab_report.read_text()
+    assert "关键指标对比" in ab_document
+    assert "baseline" in ab_document and "optimized" in ab_document
+    assert 'data-validity="valid"' in ab_document
+    assert f"A/B report: {ab_report}" in result.stdout
     assert_reaped(output)
 
 
@@ -688,6 +797,11 @@ def test_ab_does_not_publish_improvement_when_one_capture_fails(
     assert summary["runs"]["after"]["capture"] == "PASS"
     assert not summary["valid"] and not summary["comparison"]
     assert "N/A (invalid)" in result.stdout
+    ab_document = (output / "ab-comparison.html").read_text()
+    assert 'data-validity="invalid"' in ab_document
+    assert "INVALID" in ab_document
+    assert 'class="delta-good"' not in ab_document
+    assert ">改善<" not in ab_document
     assert_reaped(output)
 
 

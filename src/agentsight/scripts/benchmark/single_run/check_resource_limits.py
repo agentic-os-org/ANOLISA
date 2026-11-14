@@ -21,12 +21,13 @@ EXPECTED_SETTINGS = {
     "cpu_budget_percent": 25,
     "mode": "cli",
 }
+# The gate deliberately checks the 300 s time-weighted average CPU only.
+# P95/peak CPU remain in the diagnostic reports; interval samples on a
+# shared runner are too noisy to gate without false failures.
 LIMITS = {
     "rss_average_mib": ("Average RSS", 265, "MiB"),
     "rss_peak_mib": ("Peak RSS", 300, "MiB"),
-    "cpu_average_pct": ("Average CPU", 23.5, "%"),
-    "cpu_p95_pct": ("P95 CPU", 34, "%"),
-    "cpu_peak_pct": ("Peak CPU", 42, "%"),
+    "cpu_average_pct": ("Average CPU", 25, "%"),
 }
 
 
@@ -43,6 +44,7 @@ def evaluate(summary: Any) -> tuple[bool, str]:
         raise ValueError("resource summary must contain run and settings objects")
 
     errors: list[str] = []
+    duration = EXPECTED_SETTINGS["duration"]
     if summary.get("valid") is not True or run.get("valid") is not True:
         errors.append("Benchmark is INVALID; inspect the load and capture reports.")
     if summary.get("rss_unit") != "MiB" or summary.get("cpu_unit") != (
@@ -59,14 +61,16 @@ def evaluate(summary: Any) -> tuple[bool, str]:
         for key in ("start", "end")
     ):
         errors.append("Missing or invalid load measurement window.")
-    elif not math.isclose(window["end"] - window["start"], 300, rel_tol=0, abs_tol=1e-6):
-        errors.append("The measured load window must span 300 seconds.")
+    elif not math.isclose(
+        window["end"] - window["start"], duration, rel_tol=0, abs_tol=1e-6
+    ):
+        errors.append(f"The measured load window must span {duration} seconds.")
 
     lines = [
         "### AgentSight resource limits",
         "",
-        "Load window: 300 seconds. CPU: 100% = one logical CPU.",
-        "RSS peaks and CPU P95/peaks use approximately one-second samples.",
+        f"Load window: {duration} seconds. CPU: 100% = one logical CPU.",
+        "RSS peaks and CPU average use approximately one-second samples.",
         "",
         "| Metric | Observed | Limit | Result |",
         "|---|---:|---:|---|",

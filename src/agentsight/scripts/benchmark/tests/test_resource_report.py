@@ -96,7 +96,12 @@ def artifacts(output: Path, label: str, cpu: float, rss: float) -> Path:
         },
         "agents/start.json": {"start": 10, "end": 12},
         "agent-summary.json": {"passed": True},
-        "report.json": {"sent": 1, "completeness_ratio": 1, "token_accuracy": 1},
+        "report.json": {
+            "sent": 1,
+            "completeness_ratio": 1,
+            "token_accuracy": 1,
+            "conflicts": 0,
+        },
     }
     for name, record in records.items():
         (directory / name).write_text(json.dumps(record))

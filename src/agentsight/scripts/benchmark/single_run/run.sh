@@ -211,12 +211,27 @@ start_validator() {
     [[ "$PROTOCOL" != "h2" && ( -n "$DB" || -n "$FFI_EVENTS" ) ]] || return 0
     local source_args=(--db "$DB")
     [[ -n "$FFI_EVENTS" ]] && source_args=(--ffi-events "$FFI_EVENTS")
+    local metrics_source=""
+    if [[ -n "$METRICS_FILE" ]]; then
+        metrics_source="$METRICS_FILE"
+    elif [[ -f "$OUTPUT_DIR/internal-metrics.prom" ]]; then
+        metrics_source="$OUTPUT_DIR/internal-metrics.prom"
+    fi
+    local metrics_args=()
+    [[ -n "$METRICS_FILE" ]] && metrics_args+=(--metrics-file "$METRICS_FILE")
+    if [[ -n "$metrics_source" && -f "$metrics_source" ]]; then
+        # AgentSight counters are process-cumulative; snapshot them before the
+        # load so the validator can attribute only this run's rejections.
+        cp -- "$metrics_source" "$OUTPUT_DIR/internal-metrics-baseline.prom"
+        metrics_args+=(--metrics-baseline "$OUTPUT_DIR/internal-metrics-baseline.prom")
+    fi
     "$PYTHON_BIN" "$SCRIPT_DIR/validate_results.py" \
         --load-results "$LOAD_RESULTS" "${source_args[@]}" \
         --prefix "bench-$RUN_ID-" --since-ns "$VALIDATION_SINCE_NS" \
         --expected-total-tokens "$EXPECTED_TOTAL_TOKENS" --wait-seconds "$VALIDATION_WAIT_SECONDS" \
         --completion-marker "$VALIDATION_MARKER" \
         --request-log "$REQUEST_LOG" \
+        ${metrics_args[@]+"${metrics_args[@]}"} \
         --output "$OUTPUT_DIR/report.json" \
         >"$OUTPUT_DIR/validation.log" 2>&1 &
     VALIDATOR_PID=$!

@@ -263,8 +263,15 @@ jobs:
         env:
           RUST_BACKTRACE: '1'
           RUST_LOG: debug
+          EXPECTED_KERNEL: ${{ matrix.kernel }}
         run: |
           set -euo pipefail
+          if [[ "$EXPECTED_KERNEL" == "6.6" ]]; then
+            # Share the resource measurement lock so kernel loading and the
+            # 300 s CPU/RSS window never overlap on this runner.
+            exec 9>/tmp/anolisa-agentsight-resource.lock
+            flock --timeout 1800 9
+          fi
           cd src/agentsight
           # The default clippy pass does not enable actplane, so lint the live
           # runtime test here. --no-deps keeps pre-existing vendored-crate lint
