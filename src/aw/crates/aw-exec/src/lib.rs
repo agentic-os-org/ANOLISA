@@ -1,6 +1,8 @@
 //! Bounded byte transport for one hook command, independent of Agent and Provider protocols.
 //! Callers retain scheduling, policy decisions and interpretation of native responses.
 
+pub mod uds;
+
 use std::{
     collections::BTreeMap,
     ffi::OsString,

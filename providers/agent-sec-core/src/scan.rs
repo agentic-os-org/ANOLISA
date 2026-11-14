@@ -88,6 +88,36 @@ pub(super) fn call(
     }
     let result: ScanResult =
         serde_json::from_slice(&output.stdout).map_err(|_| "invalid_scan_result")?;
+    parse_result(result)
+}
+
+pub(super) fn call_daemon(
+    socket: &Path,
+    code: &str,
+    language: Language,
+    trace_context: &Value,
+    timeout: Duration,
+) -> Result<Verdict, &'static str> {
+    if code.trim().is_empty() {
+        return Err("invalid_code_input");
+    }
+    let val = crate::daemon_client::call(
+        socket,
+        "action.code_scan",
+        serde_json::json!({
+            "code": code,
+            "language": language.as_str(),
+            "rules": null,
+            "mode": "regex",
+        }),
+        trace_context,
+        timeout,
+    )?;
+    let result: ScanResult = serde_json::from_value(val).map_err(|_| "invalid_scan_result")?;
+    parse_result(result)
+}
+
+fn parse_result(result: ScanResult) -> Result<Verdict, &'static str> {
     match (result.ok, result.verdict.as_str()) {
         (true, "pass") => Ok(Verdict::Pass),
         // CLI exit 0 means scanning succeeded; warn/deny still indicate risk.

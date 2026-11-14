@@ -90,10 +90,41 @@ pub(super) fn call(
     }
     let result: ScanResult =
         serde_json::from_slice(&output.stdout).map_err(|_| "invalid_prompt_result")?;
+    parse_result(result, scanned.len())
+}
+
+pub(super) fn call_daemon(
+    socket: &Path,
+    text: &str,
+    context: &Value,
+    budget: impl FnOnce() -> Result<Duration, &'static str>,
+) -> Result<Verdict, &'static str> {
+    let scanned =
+        text.trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch));
+    if scanned.is_empty() {
+        return Ok(Verdict::Pass);
+    }
+    let timeout = budget()?;
+    let val = crate::daemon_client::call(
+        socket,
+        "action.prompt_scan",
+        serde_json::json!({
+            "text": text,
+            "mode": "fast",
+            "source": "user_input",
+        }),
+        context,
+        timeout,
+    )?;
+    let result: ScanResult = serde_json::from_value(val).map_err(|_| "invalid_prompt_result")?;
+    parse_result(result, scanned.len())
+}
+
+fn parse_result(result: ScanResult, expected_bytes: usize) -> Result<Verdict, &'static str> {
     if result.schema_version != "1.0"
         || result.input_truncated
         || result.degraded
-        || result.input_bytes_scanned != scanned.len()
+        || result.input_bytes_scanned != expected_bytes
         || !result.layers_failed.is_empty()
         || !result
             .layer_results

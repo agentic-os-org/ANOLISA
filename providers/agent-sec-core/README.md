@@ -34,6 +34,13 @@ Maintained by @kongche-jbw under [CODEOWNERS](../../.github/CODEOWNERS).
 Bridge code uses [Apache-2.0](../../LICENSE); backend source is
 [agent-sec-core](../../src/agent-sec-core/README.md).
 
+Pass `--transport daemon` (default `cli`) on `aw-provider-sec-core` to execute
+`scan_code`, `scan_prompt`, `scan_user_input`, `scan_tool_input`,
+`scan_tool_output`, and `check_final_tool_output` directly over `--socket`
+without spawning `agent-sec-cli`
+(`--cli` is optional unless `check_skill` is used; switch back to `--transport cli`
+to roll back). See [Configuration and operation](../../docs/developer-guide/en/aw/providers/sec-core.md).
+
 Use [the tool PII example](examples/aw.tool-pii.yaml) for Qoder SDK or QwenPaw.
 `scan_tool_input` blocks sensitive arguments; `scan_tool_output` replaces a risky
 text slot with a fixed safety message. Required output checks use
@@ -49,6 +56,7 @@ Build and test from the repository root:
 make -C providers/agent-sec-core build
 make -C providers/agent-sec-core install PREFIX=/usr/local DESTDIR="$PWD/target/aw-root"
 cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
+cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml --features testing --test daemon_transport
 ```
 
 The Cargo package and binary remain `aw-provider-sec-core`. For independent archive

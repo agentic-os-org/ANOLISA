@@ -56,7 +56,14 @@ cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
 
-The template requires `PROVIDERS_DIR`, `SEC_CORE_CLI` and `SOCKET`.
+The template requires `PROVIDERS_DIR`, `SEC_CORE_CLI` and `SOCKET`. To bypass
+per-call `agent-sec-cli` subprocesses for `scan_code`, `scan_prompt`,
+`scan_user_input`, `scan_tool_input`, `scan_tool_output`, and
+`check_final_tool_output`, add
+`"--transport", "daemon"` to `aw-provider-sec-core`'s `transport.argv` (keep
+`--socket`; `--cli` is only required when `check_skill` is used, and switching
+back to `"--transport", "cli"` restores CLI execution). See the
+[sec-core Provider reference](../../../developer-guide/en/aw/providers/sec-core.md).
 For native or Makefile installations, set `PROVIDERS_DIR` to the actual installed
 Provider root, such as `/usr/libexec/aw/providers` or `/usr/local/libexec/aw/providers`. For compression too, install
 the Tokenless backend and bridge, then select `sec-core-tokenless.json` with the
