@@ -1794,16 +1794,18 @@ fn find_static_ssl_offsets_with(
         }
         return StaticSslScan::NoOffsets;
     }
-    // Pick the first match after SSL_read within ADJACENCY_THRESHOLD.
+    // Pick the closest match within ADJACENCY_THRESHOLD. A layout rebuild can
+    // place SSL_write before SSL_read (#10080), so adjacency applies on either
+    // side, matching the Bun2 resolver's rule.
     let wr_off = write_matches
         .iter()
-        .filter(|&&o| o > read_off && o - read_off < ADJACENCY_THRESHOLD)
+        .filter(|&&o| o.abs_diff(read_off) < ADJACENCY_THRESHOLD)
+        .min_by_key(|&&o| o.abs_diff(read_off))
         .copied()
-        .next()
         .or_else(|| {
             if verbose {
                 eprintln!(
-                    "Static SSL: SSL_write has {} matches but none within {}B after SSL_read ({:#x})",
+                    "Static SSL: SSL_write has {} matches but none within {}B of SSL_read ({:#x})",
                     write_matches.len(),
                     ADJACENCY_THRESHOLD,
                     read_off
@@ -3324,6 +3326,22 @@ mod tests {
         with_static_ssl_fixture("hs-ambiguous", &img, |path| {
             let off = find_static_ssl_offsets(path).expect("ambiguous matches must resolve");
             assert_eq!(off.ssl_do_handshake, 0x1800);
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_accepts_legacy_write_before_read() {
+        // Regression for Claude Code 2.1.323 (#10080): the legacy read and
+        // handshake prologues are present, but SSL_write sits 432B before
+        // SSL_read (0x2999020 vs 0x29991d0) instead of after it. The same 4KB
+        // adjacency window applies on either side of SSL_read.
+        let write = 0x2000 - 0x1b0;
+        let img = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(write));
+        with_static_ssl_fixture("write-before-read", &img, |path| {
+            let off = find_static_ssl_offsets(path).expect("write-before-read layout must resolve");
+            assert_eq!(off.ssl_write, write);
+            assert_eq!(off.ssl_read, 0x2000);
+            assert_eq!(off.ssl_do_handshake, 0x100);
         });
     }
 
