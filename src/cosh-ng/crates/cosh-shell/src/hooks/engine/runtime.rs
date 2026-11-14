@@ -58,8 +58,20 @@ fn redact(value: &str) -> String {
     crate::evidence::redact_sensitive_text(value).0
 }
 
+/// Hard cap on the raw bytes fetched for an output preview. The 50-line cap
+/// alone cannot bound the read: one huge line (a minified dump, base64 blob,
+/// or a process table row with megabytes of arguments) would otherwise drag
+/// the entire spilled output file into memory and into every hook payload.
+const HOOK_OUTPUT_PREVIEW_MAX_BYTES: u64 = 64 * 1024;
+
 fn read_preview(path: &str, max_lines: usize) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
+    use std::io::Read;
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(HOOK_OUTPUT_PREVIEW_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let content = String::from_utf8_lossy(&bytes);
     let preview: String = content
         .lines()
         .take(max_lines)
