@@ -10,7 +10,7 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::{ffi::OsStrExt, net::UnixStream},
+        unix::{ffi::OsStrExt, fs::FileTypeExt, net::UnixStream},
     },
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
@@ -293,6 +293,24 @@ pub(crate) fn connect(path: &Path, deadline: Instant) -> io::Result<UnixStream> 
             continue;
         }
         if error.kind() != io::ErrorKind::WouldBlock {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) && !path.ancestors().any(Path::is_symlink)
+            {
+                // Refusal also covers ordinary files; only missing or stale sockets
+                // represent an unavailable service. Preserve other path diagnostics.
+                let unavailable = match std::fs::symlink_metadata(path) {
+                    Ok(metadata) => metadata.file_type().is_socket(),
+                    Err(missing) => {
+                        missing.kind() == io::ErrorKind::NotFound
+                            && error.kind() == io::ErrorKind::NotFound
+                    }
+                };
+                if unavailable {
+                    return Err(io::Error::new(error.kind(), "service_unavailable"));
+                }
+            }
             return Err(error);
         }
         // Linux AF_UNIX uses EAGAIN for a full backlog, leaving this socket
@@ -422,6 +440,52 @@ mod tests {
         sender.write_all(&(bytes.len() as u32).to_be_bytes())?;
         sender.write_all(bytes)?;
         read(&mut receiver, Instant::now() + Duration::from_secs(1))
+    }
+
+    #[test]
+    fn unavailable_connections_remain_distinct_from_invalid_paths_and_permissions() {
+        use std::os::unix::{
+            fs::{symlink, PermissionsExt},
+            net::UnixListener,
+        };
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = directory.path().join("aw.sock");
+        let connect_error =
+            |path: &Path| connect(path, Instant::now() + Duration::from_secs(1)).unwrap_err();
+        let missing = connect_error(&socket);
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert_eq!(missing.to_string(), "service_unavailable");
+        drop(UnixListener::bind(&socket).unwrap());
+        let stale = connect_error(&socket);
+        assert_eq!(stale.kind(), io::ErrorKind::ConnectionRefused);
+        assert_eq!(stale.to_string(), "service_unavailable");
+        assert!(socket.exists());
+        std::fs::remove_file(&socket).unwrap();
+
+        std::fs::write(&socket, b"ordinary file").unwrap();
+        assert_ne!(connect_error(&socket).to_string(), "service_unavailable");
+        std::fs::remove_file(&socket).unwrap();
+        let missing_target = directory.path().join("missing");
+        symlink(&missing_target, &socket).unwrap();
+        assert_eq!(connect_error(&socket).raw_os_error(), Some(libc::ENOENT));
+        assert_eq!(
+            connect_error(&socket.join("child.sock")).raw_os_error(),
+            Some(libc::ENOENT)
+        );
+        std::fs::remove_file(&socket).unwrap();
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        if unsafe { libc::geteuid() } != 0 {
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            let denied = connect_error(&socket);
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
+        }
+        assert!(connect(&socket, Instant::now() + Duration::from_secs(1)).is_ok());
+        drop(listener);
     }
 
     #[test]
