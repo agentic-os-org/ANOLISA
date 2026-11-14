@@ -136,7 +136,10 @@ pub enum AnalysisResult {
 
 /// Short-lived parsed payloads shared by semantic analysis and delivery.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HttpContext {
+    /// Fingerprint prepared by an earlier snapshot of this immutable request body.
+    pub(crate) request_fingerprint: Option<[u8; 32]>,
     /// Whether HTTP persistence or raw delivery needs the serialized bodies.
     pub retain_raw: bool,
     /// HTTP metadata; full body strings are built only for raw export.
@@ -145,4 +148,25 @@ pub struct HttpContext {
     pub request: Option<serde_json::Value>,
     /// Response JSON or reduced SSE event array.
     pub response: Option<serde_json::Value>,
+}
+
+impl HttpContext {
+    /// Builds a context without a precomputed request fingerprint.
+    ///
+    /// External callers cannot compute the internal digest, so the fingerprint
+    /// cache starts cold.
+    pub fn new(
+        retain_raw: bool,
+        http: HttpRecord,
+        request: Option<serde_json::Value>,
+        response: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            request_fingerprint: None,
+            retain_raw,
+            http,
+            request,
+            response,
+        }
+    }
 }
