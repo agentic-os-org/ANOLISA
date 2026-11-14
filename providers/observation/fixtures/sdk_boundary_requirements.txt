@@ -1,0 +1,4 @@
+# Synthetic tool dispatch only; no model account or native Hook.
+langchain-core==1.7.6
+claude-agent-sdk==0.2.88
+mcp==1.26.0
