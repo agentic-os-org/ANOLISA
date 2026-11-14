@@ -87,6 +87,15 @@ struct RegistrationState {
     /// the idle "already quiet => Safe" shortcut stays disabled until this
     /// instant.
     settle_until: Mutex<Option<Instant>>,
+    /// Test-only: hold the barrier worker before it records its reply, so a
+    /// test can force the "reply lands between sampling and the readiness
+    /// check" interleaving.
+    #[cfg(test)]
+    reply_hold: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Test-only: runs inside the daemon gate after it samples, before it
+    /// re-arms the barrier.
+    #[cfg(test)]
+    gate_sample_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RegistrationState {
@@ -102,6 +111,46 @@ impl RegistrationState {
         self.settle();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    fn hold_reply(&self, rx: std::sync::mpsc::Receiver<()>) {
+        *self
+            .reply_hold
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(rx);
+    }
+
+    #[cfg(test)]
+    fn wait_for_held_reply(&self) {
+        let rx = self
+            .reply_hold
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        if let Some(rx) = rx {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+        }
+    }
+
+    #[cfg(test)]
+    fn set_gate_sample_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .gate_sample_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_gate_sample_hook(&self) {
+        let hook = self
+            .gate_sample_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// A registration walk just finished; queued events need time to drain
@@ -164,12 +213,13 @@ pub(crate) enum ObservationAttempt {
 /// (#8448). `still_current` must re-read the same evidence and reject a
 /// replaced watcher; `settling` only disables the idle shortcut, since
 /// events queued behind a just-finished walk can still be undelivered.
-pub(crate) async fn observe_once<F>(
+pub(crate) async fn observe_once<A, F>(
     activity: &AtomicU64,
-    settling: bool,
+    settling: A,
     still_current: F,
 ) -> ObservationAttempt
 where
+    A: Fn() -> bool,
     F: Fn() -> bool,
 {
     observe_once_with(
@@ -186,14 +236,15 @@ where
 /// passes [`activity_now_ms`] and `tokio::time::sleep`; tests pass a local
 /// manual clock so the window arithmetic is checked without depending on
 /// how the runtime schedules background tasks.
-async fn observe_once_with<F, N, S, W>(
+async fn observe_once_with<A, F, N, S, W>(
     activity: &AtomicU64,
-    settling: bool,
+    settling: A,
     still_current: F,
     now_ms: N,
     sleep: S,
 ) -> ObservationAttempt
 where
+    A: Fn() -> bool,
     F: Fn() -> bool,
     N: Fn() -> u64,
     S: FnOnce(Duration) -> W,
@@ -202,7 +253,10 @@ where
     if !still_current() {
         return ObservationAttempt::Unstable;
     }
-    if !settling && quiescent_after(activity.load(Ordering::Acquire), now_ms()) {
+    // Read the settle state here, at the shortcut itself: a barrier that
+    // replied after the caller sampled it must still keep the shortcut off
+    // (#9777 review).
+    if !settling() && quiescent_after(activity.load(Ordering::Acquire), now_ms()) {
         return if still_current() {
             ObservationAttempt::Quiet
         } else {
@@ -283,6 +337,10 @@ pub(crate) struct SharedWatcher {
     /// Instance-wide registration activity (ours and notify's auto-add);
     /// see [`RegistrationState`].
     registration: Arc<RegistrationState>,
+    /// The event-loop handle, published once the watcher exists. Held here so
+    /// a quiescence gate can re-arm the delivery barrier when its thread could
+    /// not be spawned.
+    control: Arc<OnceLock<Weak<Mutex<RecommendedWatcher>>>>,
     /// Cumulative inotify queue overflows (`IN_Q_OVERFLOW`) observed on
     /// this instance, exposed through the watcher-health IPC surface.
     queue_overflows: Arc<AtomicU64>,
@@ -397,6 +455,7 @@ impl SharedWatcher {
             routes,
             queue_overflows,
             registration,
+            control,
             coverage: RwLock::new(HashMap::new()),
             rollback_roots: Mutex::new(Vec::new()),
         })
@@ -422,6 +481,76 @@ impl SharedWatcher {
     /// waiting for its barrier reply.
     fn registration_quiet(&self) -> bool {
         !self.registration.busy() && self.registration.auto_add_settled()
+    }
+
+    /// Re-arm the delivery barrier for a walk whose barrier thread never
+    /// spawned.
+    ///
+    /// [`arm_registration_barrier`] clears `barrier_in_flight` when the spawn
+    /// fails, and only a later directory event arms it again, so quiescence
+    /// would report activity for an unbounded time. The gates call this before
+    /// failing closed, so recovery does not depend on unrelated activity
+    /// (#8494 review).
+    pub(crate) fn cover_pending_walk(&self) {
+        let next = self.registration.auto_add_seq.load(Ordering::Acquire);
+        if self.registration.auto_add_covered.load(Ordering::Acquire) >= next {
+            return;
+        }
+        arm_registration_barrier(&self.registration, &self.control, next);
+    }
+
+    /// Simulate a barrier whose thread could not be spawned: a walk is on the
+    /// books and nothing is in flight to cover it.
+    #[cfg(test)]
+    pub(crate) fn stall_barrier_for_test(&self) {
+        self.registration
+            .auto_add_seq
+            .fetch_add(1, Ordering::AcqRel);
+        self.registration
+            .barrier_in_flight
+            .store(false, Ordering::Release);
+    }
+
+    /// Current settle state of the shared instance.
+    ///
+    /// The quiescence gates read this at the moment they decide, not from a
+    /// snapshot taken before they re-armed the barrier: a reply that lands in
+    /// between must still keep the idle shortcut off (#9777 review).
+    pub(crate) fn delivery_settling(&self) -> bool {
+        self.registration_settling()
+    }
+
+    /// Test-only: hold the barrier worker before it records its reply.
+    #[cfg(test)]
+    pub(crate) fn hold_barrier_reply_for_test(&self, rx: std::sync::mpsc::Receiver<()>) {
+        self.registration.hold_reply(rx);
+    }
+
+    /// Test-only: block until the barrier has covered every pending walk.
+    #[cfg(test)]
+    pub(crate) fn wait_until_walk_covered_for_test(&self) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        while self.registration.auto_add_covered.load(Ordering::Acquire)
+            < self.registration.auto_add_seq.load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the barrier never covered the pending walk"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Test-only: run `hook` inside the daemon gate right after it samples.
+    #[cfg(test)]
+    pub(crate) fn set_gate_sample_hook_for_test(&self, hook: Box<dyn FnOnce() + Send>) {
+        self.registration.set_gate_sample_hook(hook);
+    }
+
+    /// Test-only: see [`Self::set_gate_sample_hook_for_test`].
+    #[cfg(test)]
+    pub(crate) fn run_gate_sample_hook_for_test(&self) {
+        self.registration.run_gate_sample_hook();
     }
 
     /// Cumulative `IN_Q_OVERFLOW` count on this instance.
@@ -1001,6 +1130,8 @@ fn arm_registration_barrier(
                         .unwrap_or_else(|err| err.into_inner())
                         .unwatch(Path::new(REGISTRATION_BARRIER_PATH));
                 }
+                #[cfg(test)]
+                registration.wait_for_held_reply();
                 registration.settle();
                 registration
                     .auto_add_covered
@@ -1215,19 +1346,14 @@ impl WorkspaceWatcher {
         self.shared.route_degraded(&self.workspace_path)
     }
 
-    /// Monotonic count of this route's coverage interruptions. A
-    /// quiescence observation snapshots it before its quiet period and
-    /// must treat a change as "the observation is void": coverage was
-    /// interrupted in between (possibly restored already), so the
-    /// watermark's silence proves nothing about the writes that happened
-    /// while no descriptor covered them.
     /// Evidence sampled before a quiescence observation.
     ///
     /// The watermark only proves silence when coverage and event delivery
     /// stayed continuous for the whole observation: `coverage_epoch` covers
-    /// this route, the registration counters cover the shared instance's
-    /// recursive walks (ours and notify's auto-add), which pause delivery for
-    /// every workspace (#8448).
+    /// this route (a change voids the window — writes may have landed while
+    /// no descriptor covered them), and the registration counters cover the
+    /// shared instance's recursive walks (ours and notify's auto-add), which
+    /// pause delivery for every workspace (#8448).
     pub(crate) fn quiescence_evidence(&self) -> QuiescenceEvidence {
         QuiescenceEvidence {
             coverage_epoch: self.shared.coverage_epoch(&self.workspace_path),
@@ -1267,6 +1393,10 @@ impl WorkspaceWatcher {
         if self.is_degraded() {
             return false;
         }
+        // A barrier that never spawned leaves its walk uncovered; re-arm it
+        // here so the gate recovers without waiting for another directory
+        // event (#8494 review).
+        self.shared.cover_pending_walk();
         // A registration walk pauses delivery for the shared instance, so the
         // watermark may stay stale only because its events are still queued.
         // A check must not start during one (#8448).
@@ -1274,9 +1404,11 @@ impl WorkspaceWatcher {
             return false;
         }
         let evidence = self.quiescence_evidence();
-        match observe_once(&self.last_activity_ms, self.delivery_settling(), || {
-            self.quiescence_evidence_is_current(evidence)
-        })
+        match observe_once(
+            &self.last_activity_ms,
+            || self.delivery_settling(),
+            || self.quiescence_evidence_is_current(evidence),
+        )
         .await
         {
             ObservationAttempt::Quiet => true,
@@ -1338,7 +1470,7 @@ mod tests {
         let waited = Cell::new(false);
         let attempt = observe_once_with(
             activity,
-            settling,
+            || settling,
             || true,
             || clock.get(),
             |window: Duration| {
@@ -1571,6 +1703,46 @@ mod tests {
             watcher.target_identity(),
             (live_meta.dev(), live_meta.ino()),
             "the watch must be pinned to the symlink target's inode"
+        );
+    }
+
+    #[tokio::test]
+    async fn quiescence_rearms_a_barrier_that_never_spawned() {
+        // #8494 review: when the barrier thread cannot be spawned, the walk it
+        // was meant to prove stays uncovered and only the next directory event
+        // re-arms it. The gate must recover on its own.
+        //
+        // #9777 review: hold the reply, so the refusal assertion cannot race
+        // the worker and the recovery is proved without a new directory event.
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        let (release, held) = std::sync::mpsc::channel();
+        watcher.shared().hold_barrier_reply_for_test(held);
+        watcher.shared().stall_barrier_for_test();
+        assert!(
+            delivery_paused(watcher.shared()),
+            "an uncovered walk must pause delivery"
+        );
+        assert!(
+            !watcher.check_quiescent().await,
+            "the check fails closed while the walk is uncovered and the reply is held"
+        );
+        assert!(
+            delivery_paused(watcher.shared()),
+            "the walk stays uncovered until the held reply lands"
+        );
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while delivery_paused(watcher.shared()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the gate never re-armed the stalled barrier"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            watcher.check_quiescent().await,
+            "quiescence must recover once the barrier covered the walk"
         );
     }
 
@@ -1909,7 +2081,7 @@ mod tests {
         let evidence = watcher.quiescence_evidence();
         let attempt = observe_once_with(
             &activity,
-            false,
+            || false,
             || watcher.quiescence_evidence_is_current(evidence),
             || clock.get(),
             |window| {
