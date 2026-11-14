@@ -151,6 +151,12 @@ The generator supports Qoder and OpenClaw entrypoints. Other Agents use the conf
 
 Validation checks configuration and offline update scope. It does not confirm native readiness or activate policy. Relative configuration paths are accepted here.
 
+Each configured target may select at most 64 enabled steps across all enabled events.
+Disabled events and steps, and steps excluded by the target's tool selectors, do not count.
+The check uses the service binding limit and runs without starting Agents or Providers.
+Exceeding it exits 1; JSON output reports `invalid_configuration`.
+The legacy `aw validate` alias applies the same limit.
+
 ### `aw config show`
 
 | Argument | Required / default | Meaning |

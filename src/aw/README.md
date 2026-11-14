@@ -31,6 +31,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
 In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
+Offline validation checks the service limit of 64 applicable enabled steps per target across all events.
 The local service remains reusable after the Agent exits. Inspect and stop it when finished.
 
 ```bash
