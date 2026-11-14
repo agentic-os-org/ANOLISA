@@ -116,8 +116,8 @@ class QoderSdkNativeTests(GateFixture):
             ) as reports:
                 if credential:
                     native_acceptance.main()
-                    self.assertEqual(observed, ["setup"] + ["native"] * 26)
-                    self.assertEqual(reports.call_count, 26)
+                    self.assertEqual(observed, ["setup"] + ["native"] * 31)
+                    self.assertEqual(reports.call_count, 31)
                 else:
                     with self.assertRaisesRegex(ValueError, "requires.*Secret"):
                         native_acceptance.main()
@@ -152,8 +152,24 @@ class QoderSdkNativeTests(GateFixture):
                 self.assertEqual((output / "result.json").exists(), valid)
                 if valid:
                     report = json.loads((output / "result.json").read_text())
+                    self.assertEqual(report["status"], "static_probe_only")
+                    self.assertEqual(report["final_gate"], "unsupported")
                     self.assertEqual(report["worker_target"], target)
                     self.assertEqual(report["worker_sha256"], hashlib.sha256(content).hexdigest())
             command[command.index("--worker-target") + 1] = "linux-x64" if target == "linux-arm64" else "linux-arm64"
             command[command.index("--worker-sha256") + 1] = hashlib.sha256(content).hexdigest()
             self.assertNotEqual(subprocess.run(command, capture_output=True, timeout=5).returncode, 0)
+
+    def test_static_probe_does_not_claim_final_delivery_acceptance(self) -> None:
+        cases = load(AW)["agents"]["qoder-sdk"]["cases"]
+        static = [case for case in cases if case["name"].startswith("worker-lifecycle")]
+        self.assertEqual(len(static), 3)
+        for case in static:
+            values = case["results"][0]["values"]
+            self.assertEqual(values["status"], "static_probe_only")
+            self.assertEqual(values["final_gate"], "not_exercised"
+                             if values["sdk_version"] == "1.0.57" else "unsupported")
+        final = next(case for case in cases if case["name"] == "final-1.0.57-gate-native-error")
+        values = final["results"][0]["cases"]["values"]
+        for key in ["delivered", "delivered_is_error", "model_echoed_checked_result"]:
+            self.assertIs(values[key], True)

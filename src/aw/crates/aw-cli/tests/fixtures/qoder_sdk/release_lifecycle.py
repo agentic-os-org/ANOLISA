@@ -37,7 +37,7 @@ def main() -> None:
 
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "result.json").write_text(json.dumps({
-        "status": "partial_unsupported",
+        "status": "static_probe_only",
         "sdk_version": args.sdk_version,
         "worker_version": args.worker_version,
         "sdk_sha256": sdk_digest,
@@ -45,8 +45,8 @@ def main() -> None:
         "worker_target": runtime_info["target"],
         "post_precedes_worker_rewrite": True,
         "model_calls": 0,
-        "final_gate": "unsupported",
-        "reason": "No captured model-visible Worker request or final sink",
+        "final_gate": "not_exercised" if args.sdk_version == "1.0.57" else "unsupported",
+        "reason": "Static bytes only; final delivery requires the separate native final cases",
     }, indent=2) + "\n")
 
 

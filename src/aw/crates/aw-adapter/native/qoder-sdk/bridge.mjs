@@ -11,6 +11,7 @@ import { Resident, bounded, validateHooks } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
 import { managedMcpServer } from "./mcp.mjs";
 import { Scope } from "./scope.mjs";
+import { finalLaunch, queryFinal } from "./final-launch.mjs";
 import { prewarm } from "./startup.mjs";
 import { nativeConfiguration } from "./native-configuration.mjs";
 import { pluginsAdmitted, runtimeOptions, sdkEntry, verifyNativeSettings } from "./native-options.mjs";
@@ -77,6 +78,7 @@ export async function createSdkMcpServer(options) {
 
 function compose(config, options) {
   const native = nativeConfiguration(config);
+  const final = queryFinal(config);
   config.skillState ??= {};
   if (options.transport != null || (!native && (!Array.isArray(options.settingSources) || options.settingSources.length ||
       options.settings != null || !pluginsAdmitted(options.plugins) ||
@@ -91,7 +93,10 @@ function compose(config, options) {
   const hooks = Object.fromEntries(Object.entries(options.hooks ?? {}).map(([event, groups]) =>
     [event, groups.map((group) => ({ ...group, hooks: group.hooks.map((callback) =>
       async (payload, id, context) => {
+        if (final) await final.wait(event, id);
         const result = await callback(copy(payload), id, context);
+        if (final && (result?.systemMessage || result?.hookSpecificOutput?.additionalContext))
+          throw new Error("AW Qoder final gate does not cover Hook context injection");
         if (!native && event === "PreToolUse" && result?.hookSpecificOutput?.updatedInput !== undefined)
           return deny("Tool argument rewriting is unsupported with AW");
         return result;
@@ -100,10 +105,12 @@ function compose(config, options) {
     ["input.submit", ["UserPromptSubmit"]],
     ["tool.before", ["PreToolUse"]], ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
   ]) {
+    if (final && event === "input.submit") continue;
     const routes = config.hooks.filter((hook) => hook.event === event);
-    if (!routes.length && !(native && event === "tool.before")) continue;
-    const callback = async (input, id, { signal }) => {
+    if (!routes.length && !(native && event === "tool.before") && !final) continue;
+    const body = async (input, id, { signal }) => {
       const payload = copy(input);
+      if (final && !final.record(payload)) return deny("AW final gate does not cover this tool path");
       noteSkillRead(payload, config.skillState.query);
       if (event === "input.submit") payload.aw_turn_id = randomUUID();
       const verifySkill = routes.some(hook => hook.skill_check === true) ?
@@ -127,6 +134,10 @@ function compose(config, options) {
       }
       return {};
     };
+    const callback = final ? async (input, id, context) => {
+      try { return await body(input, id, context); }
+      finally { final.complete(input.hook_event_name, id); }
+    } : body;
     for (const native of nativeEvents)
       (hooks[native] ??= []).push({ matcher: "*", hooks: [callback],
         timeout: routes.reduce((ms, hook) => ms + callbackTimeoutMs(hook), 1000) / 1000 });
@@ -159,6 +170,10 @@ function ready(config) {
 /** Return the native Query after its initialization handshake accepts AW callbacks. */
 export async function createQuery({ prompt, options }, initialization = {}) {
   let config = configuration();
+  const final = finalLaunch(config, prompt, options);
+  if (final) options = { ...options, tools: [...options.tools], settingSources: [],
+    ...(options.allowedTools ? { allowedTools: [...options.allowedTools] } : {}),
+    ...(options.env ? { env: { ...options.env } } : {}) };
   if (!nativeConfiguration(config) && config.native_policy?.declarative_plugins && !options.daemon)
     throw new Error("AW declarative profile requires a managed daemon");
   if (config.resident) {
@@ -180,7 +195,7 @@ export async function createQuery({ prompt, options }, initialization = {}) {
   config.skillEnvironment = owner?.environment ?? { ...process.env, ...(options.env ?? {}) };
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);
-  const query = sdk.query({ prompt: reload ? reload.input(prompt) : prompt,
+  const query = sdk.query({ prompt: final ? final.input() : reload ? reload.input(prompt) : prompt,
     options: reload ? reload.decorate(composed) : composed });
   config.skillState.query = bindSkillQuery(query, config.hooks.some(hook => hook.skill_check === true));
   try {
@@ -188,9 +203,13 @@ export async function createQuery({ prompt, options }, initialization = {}) {
       bounded(query.initializationResult(), initialization.initializeTimeoutMs));
     await verifyNativeSettings(config, query, bounded);
     const managed = reload ? await reload.attach(query, result) : query;
+    final?.verify();
     ready(config);
-    return managed;
+    final?.release();
+    return final ? Object.freeze({ [Symbol.asyncIterator]: () => managed[Symbol.asyncIterator](),
+      close: () => managed.close() }) : managed;
   } catch (error) {
+    final?.cancel();
     initialization.discard?.();
     if (reload?.admitted) await reload.close();
     else {

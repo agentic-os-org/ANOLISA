@@ -19,7 +19,7 @@ pub fn correlation_source(event: &Value) -> Option<&'static str> {
 pub fn supports_event_close(adapter: &str) -> bool {
     matches!(
         adapter,
-        "agentscope" | "claude-sdk" | "hermes" | "openclaw" | "pi"
+        "agentscope" | "claude-sdk" | "hermes" | "openclaw" | "pi" | "qoder-sdk"
     )
 }
 

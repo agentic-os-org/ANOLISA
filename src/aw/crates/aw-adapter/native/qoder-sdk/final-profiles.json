@@ -1,0 +1,36 @@
+[
+  {
+    "sdk_sha256": "313b5050df8014cba1356965be39e316cd9b3e6c79ca0cd35fa6ac1ce7b59334",
+    "worker_sha256": "a692bedb2b22709e68b0ce711e40e55d179d17213bc6f40247a210a327f96eeb",
+    "sdk": "1.0.57",
+    "worker": "1.1.81",
+    "target": "linux-arm64",
+    "patches": [
+      {
+        "anchor": "let d=Z7i(o,h,p,f,n);",
+        "replacement": "let d=Z7i(o,await globalThis[Symbol.for('aw.qoder.final-result')](h,t),p,f,n);"
+      },
+      {
+        "anchor": "function Amt(A,e=1){let{transport:t,fastFallback:i}=HYo(A);",
+        "replacement": "function Amt(A,e=1){let{transport:t,fastFallback:i}=HYo(A);if(!(t instanceof cIA))throw Error('AW Qoder final gate requires legacy transport');"
+      }
+    ]
+  },
+  {
+    "sdk_sha256": "313b5050df8014cba1356965be39e316cd9b3e6c79ca0cd35fa6ac1ce7b59334",
+    "worker_sha256": "a692bedb2b22709e68b0ce711e40e55d179d17213bc6f40247a210a327f96eeb",
+    "sdk": "1.0.57",
+    "worker": "1.1.81",
+    "target": "linux-x64",
+    "patches": [
+      {
+        "anchor": "let d=Z7i(o,h,p,f,n);",
+        "replacement": "let d=Z7i(o,await globalThis[Symbol.for('aw.qoder.final-result')](h,t),p,f,n);"
+      },
+      {
+        "anchor": "function Amt(A,e=1){let{transport:t,fastFallback:i}=HYo(A);",
+        "replacement": "function Amt(A,e=1){let{transport:t,fastFallback:i}=HYo(A);if(!(t instanceof cIA))throw Error('AW Qoder final gate requires legacy transport');"
+      }
+    ]
+  }
+]

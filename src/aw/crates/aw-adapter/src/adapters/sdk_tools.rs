@@ -21,11 +21,11 @@ pub(crate) fn routes(
         "tool.after",
         "security.violation",
     ] {
-        if event == "security.violation" && adapter != "claude-sdk" {
+        if event == "security.violation" && !matches!(adapter, "claude-sdk" | "qoder-sdk") {
             continue;
         }
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        let observe = adapter == "qoder-sdk" && event != "input.submit";
+        let observe = adapter == "qoder-sdk" && matches!(event, "tool.before" | "tool.after");
         if selected.is_empty() && !observe {
             continue;
         }

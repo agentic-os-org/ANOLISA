@@ -11,6 +11,7 @@ pub(super) mod hermes;
 pub(super) mod openclaw;
 mod openclaw_bundle;
 pub(super) mod pi;
+mod qoder_final;
 pub(super) mod qoder_sdk;
 pub(super) mod qwenpaw;
 pub(super) mod sdk_tools;

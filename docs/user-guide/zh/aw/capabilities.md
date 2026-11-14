@@ -53,6 +53,8 @@ Claude SDK 对精确匹配的 Python／TypeScript SDK／bundled CLI 构建开放
 结果；未知构建拒绝必需策略。范围见
 [Claude 最终结果限制](../../../developer-guide/zh/aw/agents/claude-sdk.md#最终工具结果安全边界)。
 
+Qoder SDK 1.0.57 / Worker 1.1.81 在 Linux arm64/x64 上支持单次前台 Bash Query 的必需最终结果检查，在原生请求编码前检查 Post Hook 后的文本；未覆盖的传输、额外上下文轮次和运行时构建均拒绝放行。参见[配置与范围](../../../developer-guide/zh/aw/agents/qoder-sdk.md#最终工具结果检查)。
+
 ## 16 个通用 Hook
 
 下表列出公共 Provider Hook 的实现状态，各 Adapter 的效果支持见上表。
@@ -76,7 +78,10 @@ Claude SDK 对精确匹配的 Python／TypeScript SDK／bundled CLI 构建开放
 | `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5；OpenClaw 2026.9.5–2026.9.7 已验证构建的显式 OpenAI-completions Gateway 路径提供实验性支持；支持观察和阻断 |
 | `coverage.changed` | 规划中 |
 
-OpenClaw 最终检查要求精确构建、前台 Gateway 和非 reloadable 模式。上方静态矩阵描述普通启动能力。最终检查在原生结果和请求改写完成后检查模型请求；未知构建或路径拒绝必需策略。接线限制见 [OpenClaw 指南](../../../developer-guide/zh/aw/agents/openclaw.md#工具结果最终检查)。Qoder SDK 1.0.55–1.0.57 的真实 Worker 测试证明后续 Post 回调可改变模型采用结果，其最终检查能力仍不支持。
+OpenClaw 最终检查要求精确构建、前台 Gateway 和非 reloadable 模式。上方静态矩阵描述普通启动能力。最终检查在原生结果和请求改写完成后检查模型请求；未知构建或路径拒绝必需策略。接线限制见 [OpenClaw 指南](../../../developer-guide/zh/aw/agents/openclaw.md#工具结果最终检查)。
+
+Qoder SDK 1.0.55／1.0.56 仍只有后置 Post 改写反例和普通 Hook 覆盖。已验证的
+1.0.57／Worker 1.1.81 前台 legacy Profile 在 Linux arm64/x64 提供上文所述最终检查。
 
 ## Skill 校验
 

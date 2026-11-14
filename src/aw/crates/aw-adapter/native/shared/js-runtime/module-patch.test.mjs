@@ -55,6 +55,27 @@ test("a verified patch reaches its exact module and rejects changed or ambiguous
     const selected = run();
     assert.equal(selected.status, 0, selected.stderr);
     assert.equal(JSON.parse(selected.stdout).result, "checked");
+    for (const [patches, expected] of [
+      [[{ anchor: 'export const', replacement: 'export let' },
+        { anchor: '"raw"', replacement: '"checked"' }], 'checked'],
+      [[{ anchor: 'export const', replacement: 'export let' },
+        { anchor: 'const result', replacement: 'let result' }], 'overlap'],
+      [[{ anchor: 'export const', replacement: 'export let' },
+        { anchor: 'missing', replacement: 'changed' }], 'build'],
+    ]) {
+      writeFileSync(preload, `import { installVerifiedPatch, removeOwnPreload } from ${JSON.stringify(helper)};
+        installVerifiedPatch({target:'/node_modules/fixture-agent/lib/index.mjs',
+          digest:'${digest}',patches:${JSON.stringify(patches)}});removeOwnPreload(import.meta.url);`);
+      const result = run();
+      if (expected === 'checked') {
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(JSON.parse(result.stdout).result, expected);
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, new RegExp(expected));
+      }
+    }
+
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

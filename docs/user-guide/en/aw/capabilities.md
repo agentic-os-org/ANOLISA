@@ -63,6 +63,8 @@ See [PII policy setup](security.md#check-tool-pii-with-qoder-sdk-or-qwenpaw) and
 
 Qoder SDK foreground `Read` text results support PII replacement of file content while preserving file metadata. Image and other non-text Read results require separate acceptance.
 
+Qoder SDK 1.0.57 / Worker 1.1.81 also supports a required final result gate for one foreground Bash Query on Linux arm64/x64. It checks post-Hook text before native request encoding; unsupported transports, extra context turns and runtime builds fail closed. See [setup and scope](../../../developer-guide/en/aw/agents/qoder-sdk.md#final-tool-result-gate).
+
 ## 16 common Hooks
 
 Public Provider Hook status; see the matrix above for effects supported by each Adapter.
@@ -96,8 +98,9 @@ Gateway. The static grid above describes ordinary launches. The final check
 inspects the model request after native result and payload transformations;
 unknown builds or paths reject the required policy. See the
 [OpenClaw integration limits](../../../developer-guide/en/aw/agents/openclaw.md#final-tool-result-checks).
-Qoder SDK 1.0.55–1.0.57 real Worker tests demonstrate that a later Post callback
-can change the model-visible result; its final-check capability remains unsupported.
+Qoder SDK 1.0.55/1.0.56 retain only the late-Post counterexample and ordinary
+Hook coverage. The verified 1.0.57 / Worker 1.1.81 foreground legacy profile
+provides final checking on Linux arm64/x64 as described above.
 
 ## Skill checks
 

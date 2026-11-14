@@ -176,7 +176,8 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         aw_adapter::reload::supported(&prepared.capabilities())?;
     }
     let resident_policy_reload = !args.flags.contains_key("--reloadable")
-        && matches!(name, "qoder-sdk" | "qwenpaw" | "agentscope");
+        && (matches!(name, "qwenpaw" | "agentscope")
+            || (name == "qoder-sdk" && capabilities.entrypoint == "sdk-worker"));
     if resident_policy_reload {
         aw_adapter::reload::resident_supported(&prepared.capabilities())?;
     }
