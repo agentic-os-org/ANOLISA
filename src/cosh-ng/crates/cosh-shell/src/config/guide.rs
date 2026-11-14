@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::private_state;
-mod cli;
+pub(crate) mod cli;
 mod context;
 pub(crate) use context::{load_failure_context, valid_context_id};
 mod runtime;
-pub(crate) use cli::run_cli;
+pub(crate) mod wizard;
+pub(crate) use cli::{run_cli, UserPaths};
 pub(crate) use runtime::{RuntimeSnapshot, RuntimeState};
+pub(crate) use wizard::{terminal_capable, wants_wizard};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const WEEK_MS: u64 = 7 * DAY_MS;
@@ -178,6 +180,18 @@ impl GuideStore {
         })
     }
 
+    /// Opens an existing store without creating directories; `None` when absent.
+    pub(crate) fn open_existing(root: impl AsRef<Path>) -> Result<Option<Self>, Error> {
+        let root = root.as_ref();
+        if !root.exists() {
+            return Ok(None);
+        }
+        private_state::validate_directory(root)?;
+        Ok(Some(Self {
+            root: root.to_path_buf(),
+        }))
+    }
+
     fn lock(&self) -> Result<private_state::LockGuard, Error> {
         Ok(private_state::LockGuard::try_acquire(
             &self.root.join("state.lock"),
@@ -186,6 +200,15 @@ impl GuideStore {
 
     pub(crate) fn load_preferences(&self) -> Result<Option<Preferences>, Error> {
         let _lock = self.lock()?;
+        self.read_preferences()
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Reads preferences without the write lock so status stays read-only.
+    pub(crate) fn peek_preferences(&self) -> Result<Option<Preferences>, Error> {
         self.read_preferences()
     }
 

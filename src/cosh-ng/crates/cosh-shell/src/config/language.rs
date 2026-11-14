@@ -126,6 +126,24 @@ pub(crate) fn read_guidance_language() -> std::io::Result<Language> {
     Ok(resolve_language_setting(setting))
 }
 
+/// Saved `ui.language` without environment overrides.
+///
+/// `Ok(None)` means no saved preference; `Err` means the config exists but
+/// could not be read, which callers must not report as a default.
+pub(crate) fn saved_language_setting() -> std::io::Result<Option<LanguageSetting>> {
+    let Some(path) = config_read_file_path() else {
+        return Ok(None);
+    };
+    let content = match super::load::read_config_text(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(language_setting_from_config_content(&content)
+        .as_deref()
+        .and_then(parse_language_setting))
+}
+
 pub(super) fn apply_language_value(config: &mut CoshConfig, value: &str) {
     if let Some(setting) = parse_language_setting(value) {
         config.language = setting.as_config_value().to_string();

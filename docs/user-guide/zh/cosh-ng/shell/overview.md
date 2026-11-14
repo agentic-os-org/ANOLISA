@@ -2,6 +2,27 @@
 
 [English](../../../en/cosh-ng/shell/overview.md)
 
+`cosh --help` 查看启动参数和公开命令入口，无交互终端时也可使用。
+它只读取界面语言偏好，不启动内部 Shell 或认证流程。
+内部 Bash 帮助使用 `cosh --shell bash --help`；增强集成的 Cosh 会话内使用 `/help` 查看现有会话命令参考。
+`cosh guide on|off|status` 仅控制使用引导提示，不是所有 AI 能力的总开关。
+
+## 配置向导与使用入门
+
+`cosh guide` 在交互终端打开全屏配置向导，集中管理五项设置：界面语言、AI 服务、
+提示与推荐（使用引导提示/命令分析方式/个性化提问推荐/推荐数据与隐私）、登录健康摘要、
+默认登录 Shell，另含独立的使用入门页。向导只保存偏好并复用现有 owner：
+AI 服务交接现有 `/auth`，默认登录 Shell 经前台 sudo 的私有有界协议修改，密码不进入向导。
+分析方式与推荐开关保存的是新会话默认值，环境覆盖（如 `COSH_RECOMMENDATIONS_ENABLED=0`）
+会如实显示“已保存但被覆盖”或拒绝开启，不误导当前会话。
+
+三个入口各司其职：`cosh --help` 是静态启动参数与公开命令索引；`cosh guide` 是交互式
+配置与入门；会话内 `/help` 是现有会话命令参考。受限终端（非 TTY、过小尺寸或受限 TERM）
+下 `cosh guide` 退化为打印静态说明，不进入交互。
+
+默认登录 Shell 修改需要 sudo 权限，且仅影响新登录；真实账号、VNC 与 RPM/发布验收
+另行验证，不以向导单测推断。
+
 `cosh` 默认启动 Enhanced Assisted 模式，并保持 Shell 原生提示符外观。
 Cosh 可能在 bash 或 zsh 执行前路由自然语言输入。在空提示符按 `Shift+Tab`
 可进入 Enhanced Shell-only。如果要求不加载 Cosh Hook、不观察也不提供洞察，

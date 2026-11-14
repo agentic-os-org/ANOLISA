@@ -2,6 +2,7 @@
 #[path = "agent_render/mod.rs"]
 pub(crate) mod agent_render;
 pub(crate) mod guidance;
+pub(crate) mod guide;
 mod question;
 #[path = "renderer.rs"]
 mod renderer;

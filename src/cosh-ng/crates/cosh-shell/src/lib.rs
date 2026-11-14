@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 // Shared renderer tests run once in the library; private runtime helpers stay in both targets.
 #[cfg(test)]
 macro_rules! library_tests {

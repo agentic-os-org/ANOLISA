@@ -2,9 +2,47 @@ use super::MessageId;
 
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
+        MessageId::CoshRootHelp => concat!(
+            "Cosh AI Shell\n\n",
+            "Usage: cosh [OPTIONS]\n",
+            "       cosh <COMMAND> [ARGS]\n\n",
+            "Launch options:\n",
+            "  --help                 Show this help without starting a shell\n",
+            "  --shell <bash|zsh|PATH> Select the inner shell\n",
+            "  -l, --login            Start a login session\n",
+            "  --isolated             Suppress supported shell startup files\n",
+            "  --ask <QUESTION>       Start with an AI question (requires a terminal)\n",
+            "  --context <EVENT_ID>   Load a saved failure event for --ask\n",
+            "  --resume [SESSION_ID]  Pick or resume an Agent session\n\n",
+            "Commands:\n",
+            "  cosh guide\n",
+            "      Open the setup wizard; static text on limited terminals\n",
+            "  cosh guide [on|off|status]\n",
+            "      Control usage guidance only, not all AI features\n",
+            "  cosh health banner [on|off|status]\n",
+            "      Control the login health summary\n",
+            "  cosh login status|set|restore [--user USER]\n",
+            "      Inspect or manage the default login shell on supported systems\n",
+            "  cosh agent --help\n",
+            "      Show Agent automation and integration commands\n\n",
+            "In a Cosh session:\n",
+            "  /help                  Session command reference\n",
+            "  /auth                  Configure and manage AI services\n",
+            "  /config language       Change the interface language\n",
+            "  /recommendations       Manage personalized questions and local data\n",
+            "  /mode analysis         Change analysis for the current session\n\n",
+            "Advanced integration:\n",
+            "  cosh shell-integration compat|advise\n",
+            "      Bash startup integration protocol (framed stdin/stdout)\n\n",
+            "Examples (run from your original terminal):\n",
+            "  cosh\n",
+            "  cosh --ask 'Explain disk usage'\n",
+            "  cosh --shell bash --help\n\n",
+            "Other shell arguments pass through to the inner shell.\n",
+        ),
         MessageId::HelpTitle => "Slash commands",
         MessageId::HelpFooter => {
-            "Mode: {mode}. Strategy: {strategy}. Shift+Enter / Alt+Enter insert a newline in the prompt; start prompts with ?? to compose multi-line."
+            "Mode: {mode}. Strategy: {strategy}. Shift+Enter / Alt+Enter insert a newline in the prompt; start prompts with ?? to compose multi-line. Run cosh guide for the configuration wizard and getting-started guide."
         }
         MessageId::PromptSoftNewlineTip => {
             "Tip: start with ?? to compose multi-line prompts (Shift+Enter for newline)."

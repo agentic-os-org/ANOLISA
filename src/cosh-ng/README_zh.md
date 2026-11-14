@@ -8,6 +8,11 @@ Assisted 模式，保留隐式自然语言路由、Skills、审批卡片和可�
 在启动时选择 Native 集成。自动化或其他 Agent 集成仍可使用结构化 JSON 和
 JSONL 接口。
 
+运行 `cosh --help` 查看启动参数与命令入口，无交互终端时也可使用。
+在增强集成的 Cosh 会话中，`/help` 保留现有会话命令参考。
+`cosh guide on|off|status` 仅控制使用引导提示，不是 AI 总开关。
+需要内部 Bash 帮助时使用 `cosh --shell bash --help`。
+
 镜像可以保留默认 Bash 并预装 Cosh。运行 `cosh` 进入 AI Shell，或运行
 `cosh --ask '你的问题'` 携带初始问题。可选的 Bash 启动接入由镜像的系统包负责，
 仅安装 Cosh RPM 不会启用。详见
