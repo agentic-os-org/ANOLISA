@@ -83,6 +83,58 @@ reason = "Command references shell command history"
 subsystem = "shell"
 arg = [{ key = { glob = "~/.bash_history" } }]
 
+# Standard per-user credential stores (AWS CLI, netrc, git
+# credential-store, docker, kubernetes, gnupg) — the same tier the
+# /etc/passwd guard uses. The glob `*` crosses `/` in this matcher, so
+# each pattern covers the ~, /home/<user>, and /root spellings at once.
+[[rules]]
+name = "shell-sensitive-aws-credentials"
+outcome = "Deny"
+reason = "Command references a credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.aws/credentials" } }]
+
+[[rules]]
+name = "shell-sensitive-netrc"
+outcome = "Deny"
+reason = "Command references a credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.netrc" } }]
+
+[[rules]]
+name = "shell-sensitive-git-credentials"
+outcome = "Deny"
+reason = "Command references a credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.git-credentials" } }]
+
+[[rules]]
+name = "shell-sensitive-docker-config"
+outcome = "Deny"
+reason = "Command references a credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.docker/config.json" } }]
+
+[[rules]]
+name = "shell-sensitive-kube-config"
+outcome = "Deny"
+reason = "Command references a credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.kube/config" } }]
+
+[[rules]]
+name = "shell-sensitive-gnupg"
+outcome = "Deny"
+reason = "Command references a credential file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.gnupg/*" } }]
+
 # Read-only single-token shell commands.
 [[rules]]
 name = "shell-allow-readonly-singletons"
