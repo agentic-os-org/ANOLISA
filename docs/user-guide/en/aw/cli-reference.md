@@ -238,11 +238,13 @@ The legacy native-connection form is listed under [compatibility](#compatibility
 | `PACKAGE...` | Optional | Exact package IDs to remove; omit to remove all recorded packages in the prefix |
 | `--prefix ABS_DIR` | Required | Registered installation directory |
 | `--dry-run` | Off | Preview removal and blockers without writes or confirmation |
+| `--keep-changed` | Off | Retain changed or missing selected payload paths while removing package records; dependencies, access errors and unsafe directories still block removal |
 | `--scope user\|system` | `user` | Package database scope; system writes require root |
 | `-y`, `--yes` | Off | Confirm removal; does not override ownership, integrity or busy-file checks |
 | Shared output options | Optional | [Output options](#output-options) |
 
 Interactive removal asks for confirmation. JSON or non-terminal removal requires `--yes`. External configuration and state are retained.
+Blocked human plans write problems to stderr and leave stdout empty; JSON retains the plan. See [operations](operations.md#upgrade-and-uninstall) for changed-file recovery and retained-path reports.
 
 ### `aw list`, `aw doctor` and `aw recover`
 

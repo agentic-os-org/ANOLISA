@@ -15,6 +15,7 @@ Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW core 和可选 Provider 扩展。
 当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
 先安装并登录所选 Agent，再用 `aw config init` 生成配置。
+本地 Provider 包文件被修改或缺失时，可用 `aw uninstall --keep-changed` 保留变化路径并清理包登记，操作见[运行维护](../../docs/user-guide/zh/aw/operations.md#升级与卸载)。
 
 下面以已安装、登录的 Qoder 为例。`AW_PREFIX` 是安装指南中选定的安装目录，
 `qodercli` 和 `aw` 应已加入 `PATH`。

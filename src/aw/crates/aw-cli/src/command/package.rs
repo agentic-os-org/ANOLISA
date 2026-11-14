@@ -46,6 +46,9 @@ pub(super) struct Uninstall {
     /// Package IDs to remove; omit to remove the entire installation
     #[arg(value_name = "PACKAGE")]
     pub packages: Vec<String>,
+    /// Retain changed or missing selected files while removing their package records
+    #[arg(long)]
+    pub keep_changed: bool,
     #[command(flatten)]
     pub prefix: Prefix,
     /// Show removal and blockers without changing files or asking for confirmation
