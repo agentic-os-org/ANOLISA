@@ -52,7 +52,8 @@ SDK／CLI 指纹选择 Profile；preload 通过 `/proc/self/exe` 再次核对正
 | --- | --- | --- | --- |
 | DeepSeek Harness | 0.2.1-rc.5 | `finalize/finish` → 精确构建 preload → 顶层 Session commit | 仅既有 headless 测试范围已验证 |
 | OpenClaw | 2026.9.5、2026.9.6、2026.9.7 | middleware → `after_tool_call` → 上下文转换 → Provider 请求 Hook → HTTP 请求 | 下述受控 Gateway 与显式 OpenAI-completions 路径已验证 |
-| Qoder SDK | SDK 1.0.55／Worker 1.1.75、1.0.56／1.1.78、1.0.57／1.1.81，Linux arm64 | `PostToolUse` → `updatedToolOutput`／Read 转换／附加上下文 → Worker 交付 | 三版真实 Worker 后置改写红灯通过；最终安全门暂不支持 |
+| Qoder SDK | SDK 1.0.55／Worker 1.1.75、1.0.56／1.1.78、1.0.57／1.1.81，Linux arm64 | `PostToolUse` → `updatedToolOutput`／Read 转换／附加上下文 → Worker 交付 | 三版后置改写反例通过；1.0.55／1.0.56 最终安全门暂不支持 |
+| Qoder SDK 最终 Profile | SDK 1.0.57／Worker 1.1.81，Linux arm64/x64 | Post 采用 → legacy JSON → 最终检查 → 原生请求编码 | 单个托管 daemon 前台 Bash Query 已验证 |
 
 受测 OpenClaw 的 middleware runner 逐个等待处理器，并把上一项结果传给
 下一项。内建 `tool_result` 扩展先运行这条链，随后执行已观察到的
@@ -112,15 +113,25 @@ bridge 收到确认后不再清理；传输取消或回执缺失时，按原生�
 均验证：AW `tool.after` 读取原始安全输出，随后应用 SDK `PostToolUse` 回调
 把结果改为 `AW_QODER_LATE_POST_SECRET`；Worker 发布的 `tool_result` 含该标记，
 托管模型的最终回答也准确复述该标记。该红灯证明公开 Post 回调不足以提供最终保证；
-本次未捕获托管模型的原始网络请求，且未安装 Qoder Worker 的可阻断最终接点。
-因此三个版本仍不开放 `security.violation`。版本矩阵逐版校验 SDK 与 Worker 字节、
+这些未启用安全门的反例保留为基线，1.0.55／1.0.56 仍不支持最终阻断。
+版本矩阵逐版校验 SDK 与 Worker 字节、
 SDK 解析器和真实后置改写采用。隔离环境中无凭据启动
 Worker 时，三版均被模型目录或认证门拒绝。
+
+1.0.57／1.1.81 最终 Profile 在两种 Linux 架构验证 SDK 与 Worker 源文件。
+它在 SDK 子进程启动点恢复 AW 自有 preload，然后对 legacy 传输选择和
+`prepareInferRequest` 的已序列化 JSON 输入做原子插桩。首个 prompt 等待运行时
+回执及原生 Hook 初始化。适配层通过 `security.violation` 检查最终文本，将调用
+绑定到原生 Post 身份，并保留已核对的错误状态。拒绝或 Provider 故障时暂扣文本。
+请求保留原始 system/user 上下文；额外轮次、上下文改写及其他传输会停止发送。
+该 Profile 支持托管 daemon 中的单个前台 Bash Query；MCP、后台、常驻／reload
+和压缩路径仍不支持。实际托管模型回复与 Provider 记录验证最终采用；网络正文
+经过原生编码，当前不宣称已捕获可读的线上请求体。
 
 本次检查的 OpenClaw 包要求 Node `>=24.16.0 <25 || >=26.1.0`，Gateway 探针使用
 Node 24.16.0。2026.9.6 的 middleware runner 摘要为
 `23deae7d2d70f52451eeb8bb64ab8bd9542d464cabecdd80db6b771dca0278db`。
-Qoder SDK 的 `dist/index.js` 摘要为
+Qoder SDK 1.0.56 的 `dist/index.js` 摘要为
 `e76eb037555c5b8e74c0cbe7df9071f343be8d081d4c27738cb73491bdf827c1`；
 Linux arm64 Worker 摘要为
 `dcab64392be3381ec82c3def0ca60667f1d8c5d834733f0fc6bb028e349f83c6`。
@@ -128,7 +139,8 @@ Linux arm64 Worker 摘要为
 
 ## Admission 与覆盖范围
 
-Qoder SDK 当前未在 Adapter catalog 声明 `security.violation`。OpenClaw 只对上文
+Qoder 对上述精确前台 legacy Profile 按条件准入 `security.violation`，静态 catalog
+描述普通启动能力。OpenClaw 只对上文
 已验证的 2026.9.5、2026.9.6、2026.9.7 受控 Gateway Profile 开放该能力；
 其他版本和配置拒绝
 admission。普通 `tool.after` 与空策略启动沿用既有行为。必需安全门遇到不支持的

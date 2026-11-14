@@ -352,3 +352,24 @@ fn skill_catalog_resolution_matches_native_names_and_rejects_ambiguity() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 17"));
 }
+
+#[test]
+fn final_legacy_gate_binds_plaintext_and_foreground_readiness() {
+    let f = Fixture::new();
+    let mut command = Command::new("node");
+    command.args(["--test", "--test-reporter=tap"]).arg(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native/qoder-sdk/final.test.mjs"),
+    );
+    command.arg(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/qoder_sdk/post-evidence.test.mjs"),
+    );
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(15));
+    let evidence = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{evidence}");
+    assert!(evidence.contains("# pass 3"), "{evidence}");
+}

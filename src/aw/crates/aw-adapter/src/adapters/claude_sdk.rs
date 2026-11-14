@@ -260,7 +260,7 @@ mod tests {
         }
         assert!(crate::callback::supports_event_close("claude-sdk"));
         assert!(crate::callback::supports_event_close("agentscope"));
-        assert!(!crate::callback::supports_event_close("qoder-sdk"));
+        assert!(crate::callback::supports_event_close("qoder-sdk"));
     }
     #[test]
     fn submissions_preserve_text_and_reject_unbound_identity() {

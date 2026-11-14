@@ -59,7 +59,8 @@ See the [Claude factory limits](../../../../../docs/developer-guide/en/aw/agents
 | --- | --- | --- | --- |
 | DeepSeek Harness | 0.2.1-rc.5 | `finalize/finish` -> exact-build preload -> top-level Session commit | Verified for the existing headless tests only |
 | OpenClaw | 2026.9.5, 2026.9.6, 2026.9.7 | middleware -> `after_tool_call` -> context conversion -> provider payload hook -> HTTP request | Verified for the owned embedded Gateway and explicit OpenAI-completions path below |
-| Qoder SDK | SDK 1.0.55/Worker 1.1.75, 1.0.56/1.1.78, 1.0.57/1.1.81, Linux arm64 | `PostToolUse` -> `updatedToolOutput`/Read rendering/additional context -> Worker result delivery | Real Worker late-mutation red case passed on all three; final gate unsupported |
+| Qoder SDK | SDK 1.0.55/Worker 1.1.75, 1.0.56/1.1.78, 1.0.57/1.1.81, Linux arm64 | `PostToolUse` -> `updatedToolOutput`/Read rendering/additional context -> Worker result delivery | Late-mutation counterexample on all three; 1.0.55/1.0.56 final gate unsupported |
+| Qoder SDK final profile | SDK 1.0.57 / Worker 1.1.81, Linux arm64/x64 | Post adoption -> legacy JSON -> final check -> native request encoding | Verified for one managed-daemon foreground Bash Query |
 
 The tested OpenClaw middleware runners await each handler and pass the
 previous result to the next. Its built-in `tool_result` extension applies that
@@ -143,18 +144,31 @@ obfuscated, separately versioned bundle. Isolated real Queries on all three
 SDK/Worker pairs demonstrated the ordering: AW `tool.after` observed
 the original safe output, then an SDK `PostToolUse` callback changed it to
 `AW_QODER_LATE_POST_SECRET`. The Worker-delivered `tool_result` contained the
-marker, and the hosted model repeated it in its final answer. The raw hosted
-model request was not captured and no blocking Worker checkpoint is installed.
-All three versions therefore retain unsupported final-gate status. The matrix
+marker, and the hosted model repeated it in its final answer. These ungated
+counterexamples remain the baseline; 1.0.55/1.0.56 final enforcement remains
+unsupported. The matrix
 checks exact SDK and Worker bytes, the SDK parser, and real late-mutation adoption
 for each version. Isolated
 Worker initialization without credentials was rejected by the model catalog
 or authentication gate on all three versions.
 
+The 1.0.57 / 1.1.81 final profile verifies SDK and Worker sources on both Linux
+architectures. It restores AW's own preload at the SDK child-launch boundary,
+then atomically instruments legacy transport selection and the serialized JSON
+input to `prepareInferRequest`. A runtime receipt and native Hook initialization
+hold the first prompt until readiness. The adapter checks final text through
+`security.violation`, binds the call to native Post identity, and preserves the
+verified error state. Denial or Provider failure withholds the text. The request
+retains its original system/user context; extra turns, context rewrites and
+alternative transports stop dispatch. This profile supports one foreground Bash
+Query with a managed daemon; MCP, background, resident/reload and compaction
+paths remain unsupported. Actual hosted model replies and Provider records
+verify adoption; the encoded network body has no plaintext capture claim.
+
 The inspected OpenClaw packages require Node `>=24.16.0 <25 || >=26.1.0`;
 these Gateway probes used Node 24.16.0. The 2026.9.6 middleware runner digest is
 `23deae7d2d70f52451eeb8bb64ab8bd9542d464cabecdd80db6b771dca0278db`.
-The inspected Qoder SDK `dist/index.js` digest is
+The inspected Qoder SDK 1.0.56 `dist/index.js` digest is
 `e76eb037555c5b8e74c0cbe7df9071f343be8d081d4c27738cb73491bdf827c1`;
 the Linux arm64 Worker digest is
 `dcab64392be3381ec82c3def0ca60667f1d8c5d834733f0fc6bb028e349f83c6`.
@@ -162,8 +176,9 @@ These hashes identify inspected files, not verified final-gate profiles.
 
 ## Admission and scope
 
-Qoder SDK omits `security.violation` from the adapter catalog. OpenClaw admits
-it only for the verified 2026.9.5, 2026.9.6 and 2026.9.7 embedded Gateway
+Qoder conditionally admits `security.violation` for the exact foreground legacy
+profile above; the static catalog describes ordinary launches. OpenClaw admits
+final checking only for the verified 2026.9.5, 2026.9.6 and 2026.9.7 embedded Gateway
 profiles described above;
 other versions and configurations fail admission. Ordinary `tool.after` and
 empty-policy launches retain their existing behavior. An unsupported
