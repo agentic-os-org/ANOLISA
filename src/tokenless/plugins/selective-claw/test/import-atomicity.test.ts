@@ -158,15 +158,25 @@ describe("message import batch integrity", () => {
   });
 
 
-  it.each(["assemble", "afterTurn"] as const)("does not open a transaction for an unchanged %s window", async (method) => {
+  it.each(["assemble", "afterTurn"] as const)("does not open an import transaction for an unchanged %s window", async (method) => {
     await engine.bootstrap({ sessionId: "s1", messages: batch });
     const exec = vi.spyOn(db, "exec");
     await engine[method]({ sessionId: "s1", messages: batch });
     const transactions = exec.mock.calls.map(([sql]) => sql).filter((sql) =>
       /^\s*(SAVEPOINT|RELEASE|ROLLBACK|BEGIN|COMMIT)\b/i.test(sql),
     );
-    expect(transactions).toEqual([]);
+    // Successful assembly still atomically publishes its recall mapping.
+    // An unchanged import must add no transaction-control statements.
+    expect(transactions).toEqual(method === "assemble"
+      ? ["SAVEPOINT recall_aliases", "RELEASE recall_aliases"]
+      : []);
     expect(engine.getStore().getMessageCount("s1")).toBe(batch.length);
+    // First assembly must publish missing aliases; replaying that published window is read-only.
+    exec.mockClear();
+    await engine[method]({ sessionId: "s1", messages: batch });
+    expect(exec.mock.calls.map(([sql]) => sql).filter((sql) =>
+      /^\s*(SAVEPOINT|RELEASE|ROLLBACK|BEGIN|COMMIT)\b/i.test(sql),
+    )).toEqual([]);
   });
 
   it("rolls back the batch when the final release fails a deferred constraint", async () => {
