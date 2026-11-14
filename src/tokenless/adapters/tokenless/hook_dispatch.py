@@ -13,6 +13,7 @@ _ADAPTERS = {
     "qoder-cli": "qoder",
     "qwenwork": "qwenwork",
     "opencode": "opencode",
+    "cmd": "cmd",
     "cosh-ng": "cosh-ng",
     "copilot-shell": "copilot-shell",
     "codex": "codex",

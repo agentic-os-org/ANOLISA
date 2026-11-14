@@ -50,7 +50,8 @@
       "run_in_terminal",
       "get_terminal_output",
       "execute_command",
-      "process"
+      "process",
+      "shell_command"
     ],
     "thresholds": {
       "truncate_strings_at": 65536,
@@ -95,6 +96,8 @@
     "search_replace": "Edit",
     "delete_file": "Write",
     "run_in_terminal": "Bash",
+    "shell_command": "Bash",
+    "powershell": "Bash",
     "get_terminal_output": "Bash",
     "notebook_read": "NotebookRead"
   }
