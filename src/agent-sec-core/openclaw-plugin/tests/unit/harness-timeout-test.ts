@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,8 @@ import { createPilotHarness } from "../e2e/pilot/harness.mjs";
 import { parseArgs } from "../e2e/pilot/args.mjs";
 
 const tempDirs: string[] = [];
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
@@ -23,38 +25,77 @@ describe("OpenClaw E2E harness", () => {
     });
   });
 
-  it("kills a timed-out command process group", { skip: process.platform === "win32" }, async () => {
-    const logsDir = await mkdtemp(join(tmpdir(), "openclaw-harness-timeout-"));
-    tempDirs.push(logsDir);
-    const childPidFile = join(logsDir, "child.pid");
-    const result = { logsDir, steps: [] };
-    const { runRequiredStep } = createPilotHarness({
-      defaultCommandTimeoutMs: 250,
-      pluginRoot: logsDir,
-      result,
-      startedProcesses: [],
-      startedServers: [],
-    });
-    const parentScript = `
+  for (const startupDelayMs of [0, 400]) {
+    it(
+      `kills a timed-out command process group after ${startupDelayMs}ms startup`,
+      { skip: process.platform === "win32" },
+      async (t) => {
+        const logsDir = await mkdtemp(join(tmpdir(), "openclaw-harness-timeout-"));
+        tempDirs.push(logsDir);
+        const childPidFile = join(logsDir, "child.pid");
+        const result = { logsDir, steps: [] };
+        const { runRequiredStep } = createPilotHarness({
+          defaultCommandTimeoutMs: 250,
+          pluginRoot: logsDir,
+          result,
+          startedProcesses: [],
+          startedServers: [],
+        });
+        const parentScript = `
 const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
-const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], {
+setTimeout(() => {
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 30000)"], {
   stdio: ["ignore", "inherit", "inherit"],
 });
 writeFileSync(process.argv[1], String(child.pid));
-setInterval(() => {}, 2000);
+setInterval(() => {}, 30000);
+}, ${startupDelayMs});
 `;
-    const startedAt = Date.now();
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const timedOut = assert.rejects(
+          runRequiredStep("timeout-process-tree", process.execPath, [
+            "-e",
+            parentScript,
+            childPidFile,
+          ]),
+          (error: any) => error?.name === "StepError" && error?.step?.timedOut === true,
+        );
 
-    await assert.rejects(
-      runRequiredStep("timeout-process-tree", process.execPath, ["-e", parentScript, childPidFile]),
-      (error: any) => error?.name === "StepError" && error?.step?.timedOut === true,
+        let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          // Child startup uses real time; advance the harness clock only once its
+          // descendant exists so scheduler delays cannot bypass the cleanup check.
+          await waitForPidFile(childPidFile);
+          t.mock.timers.tick(250);
+          await Promise.race([
+            timedOut,
+            new Promise<never>((_, reject) => {
+              cleanupDeadline = realSetTimeout(() => {
+                reject(new Error("timeout waited for the grandchild to exit naturally"));
+              }, 1_500);
+            }),
+          ]);
+        } finally {
+          realClearTimeout(cleanupDeadline);
+          // Exercise the harness escalation even if readiness or cleanup failed.
+          t.mock.timers.tick(5_250);
+          await timedOut;
+          t.mock.timers.reset();
+        }
+        await waitForProcessStop(Number(readFileSync(childPidFile, "utf8")));
+      },
     );
-
-    assert.ok(Date.now() - startedAt < 1_500, "timeout waited for the grandchild to exit naturally");
-    await waitForProcessStop(Number(readFileSync(childPidFile, "utf8")));
-  });
+  }
 });
+
+async function waitForPidFile(path: string): Promise<void> {
+  const deadline = performance.now() + 10_000;
+  while (!existsSync(path)) {
+    assert.ok(performance.now() < deadline, "command did not publish its child PID");
+    await new Promise((resolve) => realSetTimeout(resolve, 10));
+  }
+}
 
 async function waitForProcessStop(pid: number): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
