@@ -88,12 +88,34 @@ impl PostToolPipeline {
         // match; other domain compressors may drop rows or rewrite source text.
         // Compound commands have no per-command output boundaries. Protect the
         // complete result when any segment searches, even a quiet condition.
-        let protect_search_output = request.tool_name == "Grep"
-            || (request.content_origin == ContentOrigin::CommandOutput
-                && request
-                    .command
-                    .as_deref()
-                    .is_some_and(crate::entry::is_search_command));
+        // A compound command whose segments search is protected from the
+        // whole-content routes, but its non-search runs may still compress
+        // through the search-guarded mixed path below.
+        let search_command = request.content_origin == ContentOrigin::CommandOutput
+            && request
+                .command
+                .as_deref()
+                .is_some_and(crate::entry::is_search_command);
+        // Only a search feeding a genuine producer segment relaxes the
+        // guard: a pure search — however wrapped or filtered — keeps its
+        // complete-output protection on the search route. And only a
+        // *numbered* search relaxes it: the guarded route preserves
+        // `path:line:`-prefixed lines byte-for-byte, which bounds a
+        // numbered search's hits but says nothing about unnumbered ones,
+        // so a command with any unnumbered search segment keeps the
+        // whole-output protection.
+        let compound_search_output = request.content_origin == ContentOrigin::CommandOutput
+            && request.tool_name != "Grep"
+            && search_command
+            && request
+                .command
+                .as_deref()
+                .is_some_and(crate::entry::command_has_producer_segment)
+            && request
+                .command
+                .as_deref()
+                .is_some_and(crate::entry::every_search_is_numbered);
+        let protect_search_output = request.tool_name == "Grep" || search_command;
         // Data printed by a shell file read (`cat build.log`) compresses like
         // command output; a page printed that way is source the agent may edit,
         // so only HTML keeps it verbatim. Read tool results were excluded above.
@@ -122,6 +144,7 @@ impl PostToolPipeline {
             && request.capabilities.replace_with_text;
         let search_candidate = config.search_path_sharing_enabled
             && (protect_search_output
+                && (!compound_search_output || !config.mixed_content_enabled)
                 || (content_type == ContentType::SearchResults
                     && (request.content_origin == ContentOrigin::ApiResponse
                         || (request.content_origin == ContentOrigin::CommandOutput
@@ -135,22 +158,43 @@ impl PostToolPipeline {
         // CSV block has no verifiable boundary); bare regions are JSON only.
         // Search output stays out even when the search route itself is
         // switched off: path-sharing off means do-not-touch, not free rein.
+        // A compound command with a search segment reaches the mixed route
+        // as a search-guarded candidate instead: every line its search may
+        // have produced is preserved byte-for-byte, and only the runs the
+        // command's other segments produced are offered to the log domain.
         let mixed_candidate = config.mixed_content_enabled
-            && !protect_search_output
             && !diff_candidate
             && !html_candidate
             && !json_candidate
             && !build_log_candidate
             && !tabular_candidate
             && !search_candidate
+            && (!protect_search_output || compound_search_output)
             && request.capabilities.replace_with_text;
+        // One scan feeds both the eligibility gate and the guarded branch:
+        // the run segmentation is deterministic, so recomputing it would
+        // re-parse the whole content twice on the route that actually runs.
+        let guarded_segments = if mixed_candidate && compound_search_output {
+            let (segments, scanned) = mixed::search_guarded_runs(&request.content);
+            Some((segments, scanned))
+        } else {
+            None
+        };
         if !diff_candidate
             && !html_candidate
             && !json_candidate
             && !build_log_candidate
             && !tabular_candidate
             && !search_candidate
-            && (!mixed_candidate || !mixed::has_recognizable_regions(&request.content))
+            && (!mixed_candidate
+                || (compound_search_output
+                    && !guarded_segments.as_ref().is_some_and(|(segments, _)| {
+                        segments.iter().any(|segment| {
+                            matches!(segment, mixed::GuardedSegment::Run(run)
+                                if mixed::search_guarded_run_is_compressible(run))
+                        })
+                    }))
+                || (!compound_search_output && !mixed::has_recognizable_regions(&request.content)))
         {
             return passthrough(request, before_tokens, content_type);
         }
@@ -338,6 +382,74 @@ impl PostToolPipeline {
                 recoverability: outcome.recoverability,
                 stash_writes: outcome.stash_writes,
                 stash_errors: outcome.metrics.stash_errors,
+                unrecoverable_truncations: None,
+            }
+        } else if compound_search_output {
+            // Search-guarded compound output: the command's segments search,
+            // so every line a search hit could occupy is preserved
+            // byte-for-byte and only the runs between them reach the log
+            // domain. A run the compressor rejects (or that saves nothing)
+            // stays byte-for-byte; a rejected run's tentative Stash writes
+            // still reach the ledger, and a failed write surfaces as a
+            // stash error instead of a silent pass, matching every other
+            // domain's storage contract.
+            let mut output = String::with_capacity(request.content.len());
+            let mut operations: Vec<AppliedOperation> = Vec::new();
+            let mut recoverability = tokenless_compressors::Recoverability::Lossless;
+            let mut stash_writes = Vec::new();
+            let mut stash_errors = 0usize;
+            let mut changed = false;
+            // The eligibility gate already computed the run segmentation;
+            // reuse it rather than re-parsing the content.
+            let (segments, scanned) =
+                guarded_segments.expect("guarded segments computed for compound_search_output");
+            for segment in segments {
+                match segment {
+                    mixed::GuardedSegment::SearchHit(line) => output.push_str(line),
+                    mixed::GuardedSegment::Run(run) => {
+                        let outcome = mixed::compress_search_guarded_run(
+                            &run,
+                            attached_store,
+                            &request.capabilities.recovery,
+                        );
+                        match outcome {
+                            Some(outcome) => {
+                                stash_writes.extend(outcome.stash_writes);
+                                stash_errors += outcome.stash_errors;
+                                recoverability =
+                                    mixed::weakest(recoverability, outcome.recoverability);
+                                if let Some(compressed) = outcome.output {
+                                    changed = true;
+                                    operations.extend(outcome.operations);
+                                    output.push_str(&compressed);
+                                } else {
+                                    for line in run.lines {
+                                        output.push_str(line);
+                                    }
+                                }
+                            }
+                            None => {
+                                for line in run.lines {
+                                    output.push_str(line);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            output.push_str(&request.content[scanned..]);
+            if !changed && stash_writes.is_empty() && stash_errors == 0 {
+                // Nothing to report — but the candidate above is a rebuild,
+                // not the original, so the passthrough must hand back the
+                // complete untouched content rather than the rebuilt string.
+                return passthrough(request, before_tokens, content_type);
+            }
+            DomainCandidate {
+                output,
+                operations,
+                recoverability,
+                stash_writes,
+                stash_errors,
                 unrecoverable_truncations: None,
             }
         } else {

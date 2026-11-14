@@ -289,6 +289,25 @@ from other regions, before the runtime reports the storage error.
 
 Local region compression and reconstruction have been verified on finite samples.
 
+### Search-guarded compound output
+
+When the same mixed-content option is enabled and a shell command's output
+originates from a compound command whose segments search, the mixed route takes a
+search-guarded path instead of region recognition. It applies only when every search
+segment asks for numbered hits (`-n` or `--line-number`, including bundled short
+flags like `-Rn` and any transparent wrapper such as `nice -n 5`) and some other
+segment genuinely produces output; an unnumbered search, or a pure search behind
+presentation filters, keeps the search route's whole-output protection. Within the
+same 64 KiB detection window, every line matching the numbered `path:line:text` hit
+grammar — the same predicate the search-results domain enforces — is preserved
+byte-for-byte as a claimed search byte; the maximal runs between them are offered to
+the build-log domain as wholes (a run is never split at the 200-line scan bound, so
+one contiguous log compresses like the standalone route). Each run's recovery
+guarantee — `Retrievable` whenever progress reduction applied — flows to the wire
+rather than being asserted lossless. Content past the detection window is appended
+verbatim; the route never shrinks what it did not claim. The whole candidate still
+passes the pipeline's arbitration, and runs that save nothing survive byte-for-byte.
+
 ## Environment variables
 
 ### Common user variables

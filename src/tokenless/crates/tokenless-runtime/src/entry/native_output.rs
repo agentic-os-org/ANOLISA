@@ -69,7 +69,15 @@ pub(super) fn is_search(words: &[String]) -> bool {
     inner_command(words).is_some_and(|command| matches!(command, "grep" | "rg"))
 }
 
-fn inner_command(words: &[String]) -> Option<&str> {
+pub(super) fn inner_command(words: &[String]) -> Option<&str> {
+    inner_command_index(words)
+        .and_then(|index| words.get(index))
+        .map(|word| command_basename(word))
+}
+
+/// The index of the inner executable, computed through the same wrappers
+/// [`inner_command`] unwraps.
+fn inner_command_index(words: &[String]) -> Option<usize> {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         if is_environment_assignment(word)
@@ -102,7 +110,45 @@ fn inner_command(words: &[String]) -> Option<&str> {
             break;
         }
     }
-    words.get(index).map(|word| command_basename(word))
+    Some(index)
+}
+
+/// Whether the search executable's own arguments ask for numbered hits —
+/// `-n` / `--line-number`, including bundled short flags like `-Rn`. The scan
+/// starts at the inner executable so wrapper options with their own `n`
+/// (`nice -n 5`) are not mistaken for it, and it stops at `--` and at the
+/// pattern-taking options (`-e`, `-f`, `--regexp`, `--file`) so a pattern
+/// that merely looks like the flag does not count.
+pub(super) fn search_is_numbered(words: &[String]) -> bool {
+    let Some(index) = inner_command_index(words) else {
+        return false;
+    };
+    let mut skip_value = false;
+    for word in &words[index + 1..] {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if word == "--" {
+            break;
+        }
+        if matches!(word.as_str(), "-e" | "--regexp" | "-f" | "--file") {
+            skip_value = true;
+            continue;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            if long.split('=').next() == Some("line-number") {
+                return true;
+            }
+        } else if let Some(shorts) = word.strip_prefix('-')
+            && !shorts.is_empty()
+            && shorts.bytes().all(|c| c.is_ascii_alphabetic())
+            && shorts.contains('n')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn wrapper_inner_index(wrapper: &ProcessWrapper, words: &[String]) -> Option<usize> {

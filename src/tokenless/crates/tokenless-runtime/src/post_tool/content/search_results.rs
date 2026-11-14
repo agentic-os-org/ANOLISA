@@ -14,7 +14,11 @@ pub(super) fn is_search_results(scan: &str) -> bool {
     total >= 3 && hits * 10 >= total * 8
 }
 
-fn line_is_search_hit(line: &str) -> bool {
+/// The search-hit grammar: a path-like prefix (`/` or `.` present, so
+/// `12:30:00` timestamps do not match), then a line number, then a second
+/// colon. Single source of truth — the search-guarded mixed route claims
+/// bytes as search hits by exactly this predicate, so the two cannot drift.
+pub(crate) fn line_is_search_hit(line: &str) -> bool {
     let Some(colon) = line.find(':') else {
         return false;
     };

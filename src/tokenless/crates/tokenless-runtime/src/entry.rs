@@ -462,6 +462,53 @@ pub(crate) fn is_search_command(command: &str) -> bool {
     command_has_segment(command, native_output::is_search)
 }
 
+/// Whether every shell segment that searches asks for numbered hits
+/// (`-n` / `--line-number`). The search-guarded mixed route preserves
+/// `path:line:`-prefixed lines byte-for-byte, which only bounds the output
+/// of a numbered search; an unnumbered search's hits have no such prefix,
+/// so a compound command with any unnumbered search segment keeps #9370's
+/// whole-output protection instead.
+pub(crate) fn every_search_is_numbered(command: &str) -> bool {
+    command_has_segment(command, |words| {
+        native_output::is_search(words) && !native_output::search_is_numbered(words)
+    })
+    .then_some(())
+    .is_none()
+}
+
+/// Whether some shell segment of the command produces output that is not the
+/// search's own bytes: a genuine producer (`cargo build`, `xargs cat`), not a
+/// presentation filter (`sort`, `head`, `wc`) and not a no-op (`cd`). A pure
+/// search — however wrapped or filtered — keeps its complete-output
+/// protection; only a search feeding a producer can have its guard relaxed.
+pub(crate) fn command_has_producer_segment(command: &str) -> bool {
+    command_has_segment(command, |words| {
+        if native_output::is_search(words) {
+            return false;
+        }
+        native_output::inner_command(words).is_some_and(|inner| {
+            !matches!(
+                inner,
+                "sort"
+                    | "head"
+                    | "tail"
+                    | "uniq"
+                    | "wc"
+                    | "column"
+                    | "tee"
+                    | "tac"
+                    | "nl"
+                    | "pr"
+                    | "fmt"
+                    | "cat"
+                    | "cd"
+                    | "pushd"
+                    | "popd"
+            )
+        })
+    })
+}
+
 fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
