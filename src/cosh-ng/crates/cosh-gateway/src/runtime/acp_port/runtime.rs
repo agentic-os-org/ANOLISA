@@ -369,6 +369,9 @@ impl AcpAgentRuntime {
                     .active_turn
                     .take()
                     .ok_or(AgentRuntimePortError::Protocol)?;
+                if let Some(session_id) = self.provider_session.as_deref() {
+                    self.tools.release_turn(session_id, &turn_id);
+                }
                 self.permissions.clear();
                 self.state = PortState::SessionOpen;
                 Ok(Some(self.event(AgentRuntimeEvent::Completed {
