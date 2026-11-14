@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import pathlib
 import platform
@@ -260,7 +261,7 @@ class Runner:
         after = self.process_snapshot()
         residual_growth = any(after[key] > before[key] for key in ("processes", "rss_kib", "fds"))
         ordered = sorted(latencies)
-        p95_index = max(0, int(len(ordered) * 0.95) - 1)
+        p95_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
         metrics = {
             "cycles": cycles,
             "pty_cycles": pty_cycles,
