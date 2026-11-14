@@ -2,7 +2,9 @@
 
 use crate::{rejected, Result};
 use serde_json::{json, Value};
-use std::{fs, os::unix::fs::MetadataExt};
+use std::{fs, os::unix::fs::MetadataExt, sync::Arc};
+
+mod files;
 
 /// Same-user process identity pinned to PID, start time and PID namespace.
 #[derive(Clone)]
@@ -11,6 +13,7 @@ pub struct Process {
     start: String,
     uid: u32,
     namespace: String,
+    files: Option<Arc<files::Files>>,
 }
 
 impl Process {
@@ -43,11 +46,30 @@ impl Process {
             .to_string_lossy()
             .into_owned();
         Ok(Self {
+            files: None,
             pid,
             start,
             uid,
             namespace,
         })
+    }
+
+    /// Retain live procfs files for repeated checks, falling back when unavailable.
+    pub(super) fn watch(mut self) -> Result<Self> {
+        if let Ok(files) = files::Files::open(&self) {
+            // Recheck after opening so an exit/reuse race cannot bind another process.
+            self.check()?;
+            files.check(&self).map_err(|_| rejected("stale_process"))?;
+            self.files = Some(Arc::new(files));
+        } else {
+            self.check()?;
+        }
+        Ok(self)
+    }
+
+    /// Hold the exit notification open while the service polls it.
+    pub(crate) fn exit_notification(&self) -> Option<Arc<fs::File>> {
+        self.files.as_ref().map(|files| Arc::clone(&files.exit))
     }
 
     /// Require the exact start identity supplied by an independent client.
@@ -84,6 +106,9 @@ impl Process {
 
     /// Reject exit, PID reuse or namespace changes.
     pub fn check(&self) -> Result<()> {
+        if let Some(files) = &self.files {
+            return files.check(self).map_err(|_| rejected("stale_process"));
+        }
         let current = Self::read(self.pid).map_err(|_| rejected("stale_process"))?;
         if (current.start, current.uid, current.namespace)
             != (self.start.clone(), self.uid, self.namespace.clone())
@@ -131,29 +156,4 @@ impl Process {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registration_caller_rejects_a_reused_peer_identity() {
-        let owner = Process::read(std::process::id()).unwrap();
-        let mut peer = owner.clone();
-        owner.caller(&peer).unwrap();
-        peer.start.push('0');
-        assert!(owner.caller(&peer).is_err());
-    }
-
-    #[test]
-    fn start_time_and_namespace_changes_invalidate_process_association() {
-        let mut process = Process::read(std::process::id()).unwrap();
-        process.check().unwrap();
-        process.corroborate(std::process::id()).unwrap();
-        let start = process.start.clone();
-        process.start.push('0');
-        assert!(process.check().is_err());
-        process.start = start;
-        process.namespace.push_str("-changed");
-        assert!(process.check().is_err());
-        assert!(Process::read(0).is_err());
-    }
-}
+mod tests;

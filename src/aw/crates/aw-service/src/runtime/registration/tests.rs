@@ -4,6 +4,7 @@ use super::*;
 use crate::{Capabilities, Operation, RegistrationOwner};
 use std::{collections::BTreeMap, fs, path::Path};
 
+mod descriptors;
 mod native;
 
 struct Fixture {

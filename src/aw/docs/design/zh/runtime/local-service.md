@@ -25,6 +25,16 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 凭据。Provider 私有设置保留在 `spec.providers.<name>.config` 中，服务不内置
 安全引擎规则。
 
+
+接入循环同时监听服务 socket 和 owner 的 pidfd，按最近的确认、桥接有效期截止时间
+安排等待，并保留原有 5 ms 外部取消检查上限。owner 检查复用 procfs 目录描述符，
+继续核验实时 UID 和 PID namespace；pidfd 固定进程生命周期，免去每次重新打开、
+解析 `/proc/<pid>/stat`。建立监听时重新核验原身份；pidfd 不可用时沿用原 procfs
+检查。取消中的 owner 从监听集合移除，准备与清理继续排空，避免已退出进程的
+可读描述符反复唤醒服务。注册重放记录只保存进程身份；准备阶段、活跃 owner 和
+进行中的轮询持有监测描述符，清理在最后一个持有者结束后关闭描述符，重放记录
+继续保留至本次服务退出。
+
 ## 本地协议
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) 定义实验性协议

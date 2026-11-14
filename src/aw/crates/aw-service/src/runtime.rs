@@ -29,6 +29,7 @@ mod hooks;
 mod input;
 mod invocations;
 mod limits;
+mod maintenance;
 mod policy;
 pub(crate) mod process;
 mod registration;
