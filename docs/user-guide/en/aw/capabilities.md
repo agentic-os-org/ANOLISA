@@ -83,8 +83,21 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `model.before_request` | Planned |
 | `runtime.observed` | Planned |
 | `runtime.exited` | Planned |
-| `security.violation` | Implemented for the pinned DeepSeek Harness 0.2.1-rc.5 final tool result boundary; supports observe and block |
+| `security.violation` | Implemented for pinned DeepSeek Harness 0.2.1-rc.5; experimental for verified OpenClaw 2026.9.5–2026.9.7 Gateway builds with explicit OpenAI-completions; supports observe and block |
 | `coverage.changed` | Planned |
+
+Claude SDK conditionally admits final `security.violation` checks for exact
+Python SDK / bundled CLI builds. The private runtime gate checks serialized
+Anthropic tool results after Post callbacks; required policies reject unknown
+builds. See [Claude final-result limits](../../../developer-guide/en/aw/agents/claude-sdk.md#final-tool-result-security-boundary).
+
+OpenClaw final checking requires an exact build and a foreground, non-reloadable
+Gateway. The static grid above describes ordinary launches. The final check
+inspects the model request after native result and payload transformations;
+unknown builds or paths reject the required policy. See the
+[OpenClaw integration limits](../../../developer-guide/en/aw/agents/openclaw.md#final-tool-result-checks).
+Qoder SDK 1.0.55–1.0.57 real Worker tests demonstrate that a later Post callback
+can change the model-visible result; its final-check capability remains unsupported.
 
 ## Skill checks
 

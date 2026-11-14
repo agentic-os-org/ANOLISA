@@ -1,4 +1,4 @@
-"""Bound admitted strict Post cases against Qoder SDK 1.0.56 / Worker 1.1.78."""
+"""Bound admitted strict Post cases against released Qoder SDK/Worker pairs."""
 
 import argparse
 import json
@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--npm", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--case", choices=["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace"])
+parser.add_argument("--case", choices=["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace", "late-mutation"])
 args = parser.parse_args()
 own_children()
 fixture = Path(__file__).resolve().parent
@@ -27,12 +27,14 @@ evidence = args.output.resolve()
 evidence.mkdir(parents=True, exist_ok=False)
 sdk = args.npm.resolve() / "node_modules/@qoder-ai/qoder-agent-sdk"
 metadata = json.loads((sdk / "package.json").read_text())
-assert metadata["version"] == "1.0.56" and metadata["qoderCliVersion"] == "1.1.78"
+workers = {"1.0.55": "1.1.75", "1.0.56": "1.1.78", "1.0.57": "1.1.81"}
+assert workers.get(metadata["version"]) == metadata["qoderCliVersion"]
 worker = sdk / "dist/_worker/qoder-worker-runtime.obf.mjs"
-assert subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip() == "1.1.78"
+reported_worker = subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip()
+assert reported_worker == metadata["qoderCliVersion"]
 assert os.environ.get("QODER_PERSONAL_ACCESS_TOKEN"), "native Post acceptance requires a PAT"
 results = []
-for mode in [args.case] if args.case else ["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace"]:
+for mode in [args.case] if args.case else ["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace", "late-mutation"]:
     output = evidence / mode
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix="post-", dir=evidence.parent) as temporary:
@@ -42,7 +44,9 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
         (case / "work/node_modules").symlink_to(args.npm.resolve() / "node_modules", target_is_directory=True)
         shutil.copyfile(fixture / "post-native.mjs", case / "work/app.mjs")
         environment = {**os.environ, "HOME": str(case / "home"), "QODER_CONFIG_DIR": str(case / "home/.qoder"),
-                       "QODER_TEST_ROOT": str(case), "QODER_POST_CASE": mode, "XDG_RUNTIME_DIR": str(case)}
+                       "QODER_TEST_ROOT": str(case), "QODER_POST_CASE": mode, "XDG_RUNTIME_DIR": str(case),
+                       "QODER_TEST_SDK_VERSION": metadata["version"],
+                       "QODER_TEST_WORKER_VERSION": metadata["qoderCliVersion"]}
         config = case / "aw.json"
         save(config, {"apiVersion": "aw/v1alpha1", "kind": "AWConfiguration", "metadata": {"name": "qoder-post"},
              "spec": {"daemon": {"startup": "external", "endpoint": "auto", "state_dir": str(case / "state")},

@@ -105,6 +105,39 @@ The `claude-sdk` adapter supports this restricted foreground worker factory;
 `aw agent connect` does not provide persistent installation for it, and all `--native-*`
 overrides are unsupported.
 
+### Final tool-result security boundary
+
+`tool.after` observes the native Post result. An application callback can still
+return `updatedToolOutput` after AW finishes. A required `security.violation`
+policy adds a final check inside the bundled CLI, immediately before its HTTP
+runtime sends the serialized Anthropic Messages request.
+
+The conditional profile covers Python SDK 0.2.88 / CLI 2.1.161 and SDK 0.2.182 /
+CLI 2.1.325 on Linux arm64 and x86_64, with exact SDK and executable fingerprints.
+Use a fresh foreground `create_client` with `setting_sources=[]`, no settings,
+plugins, resume, custom agents or runtime/provider overrides, and a direct
+Anthropic HTTP(S) origin with an explicit `claude-*` model and no fallback.
+Requests with bodies on other routes are rejected, including token refresh and
+other model APIs. Set `tools=["Bash"]` or `tools=[]` and use only
+in-process SDK MCP servers. Background execution is disabled. Every final step requires `on_error: block`; structured
+Provider and Boolean policy steps are supported. Unknown builds fail required
+admission; unsupported factory options fail before a query is dispatched.
+
+The private Bun preload covers both global `fetch` and pooled
+`FetchSession.fetch`. It binds final text to the native session, call, tool name
+and input, invokes the existing AW Hook path, and sends an immutable checked
+body. Denial, policy errors, timeouts, missing identity and changed historical
+results withhold the tool content. Unsupported request envelopes stop the
+request. Tools retain side effects that already occurred. Ordinary Post-only
+launches have no final preload.
+
+The native acceptance runs safe and late-mutation cases for Bash and SDK MCP,
+plus policy timeout/error cases, and records both HTTP requests and deterministic
+local model replies. Hosted inference, TypeScript SDK, resident sessions,
+subagents, alternative model APIs and multimodal delivery are not certified.
+Application Hook context injection is rejected in this profile; other observers
+that receive results before the model boundary remain outside its scope.
+
 ### Enable Bash PreTool and PostTool optimization
 
 Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
@@ -128,6 +161,8 @@ the [managed MCP factory](../deployment/resident.md).
 
 Run pinned native tests through [contributing](../../../../../src/aw/CONTRIBUTING.md).
 See [resident deployment](../deployment/resident.md) for resident clients and managed MCP.
+
+Final history receipts retain only digests and a withholding flag, without copying tool text. Early denial, failure or cancellation closes the AW event through a separate bounded cleanup call before returning.
 
 ## Native startup and idle policy updates
 
@@ -219,7 +254,6 @@ monotonic sequence to reject replay. They can continue beyond 1,024 submissions
 without recreating the client. Foreground bindings retain a cumulative 1,024-claim
 limit shared with legacy tool events; create a fresh binding before that limit.
 Active input events and scanner calls are released after each check.
-
 
 ## Task observation
 

@@ -419,7 +419,7 @@
         "mcp==1.26.0",
         "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. Final-result acceptance captures actual model HTTP after an application Post callback returns updatedToolOutput later than AW Post for Bash and SDK MCP. Exact SDK/CLI fingerprints admit a private Bun preload; global fetch and FetchSession fetch adopt only checked text or a withheld envelope. Safe controls, late mutation, policy timeout/error and rejection of fail-open policy are required. Scope is a fresh foreground Python client, empty setting_sources and direct Anthropic Messages; no hosted inference.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -1469,6 +1469,46 @@
               }
             }
           ]
+        },
+        {
+          "name": "final-result-boundary",
+          "argv": [
+            "{python}",
+            "tests/claude_final_result.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result"
+          ],
+          "timeout_seconds": 480,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result/result.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "bash-safe",
+                  "bash-late",
+                  "mcp-safe",
+                  "mcp-late",
+                  "required-final",
+                  "bash-gate-safe",
+                  "bash-gate-late",
+                  "mcp-gate-safe",
+                  "mcp-gate-late",
+                  "bash-gate-timeout",
+                  "mcp-gate-error",
+                  "mcp-gate-multi-late"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings_released": true
+                }
+              }
+            }
+          ]
         }
       ],
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
@@ -1826,8 +1866,477 @@
               }
             }
           ]
+        },
+        {
+          "name": "final-result-order-baseline",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.6"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-gate",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_error": false,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-gate/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-error",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-error/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_error": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-error/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-sec-core",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-sec-core",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-sec-core/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_sec_core": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-sec-core/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-order-baseline-2026-9-5",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_5}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.5",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline-2026-9-5",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-5/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-5/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.5"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-gate-2026-9-5",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_5}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.5",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate-2026-9-5",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate-2026-9-5/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-gate-2026-9-5/final-boundaries.json",
+              "values": {
+                "version": "2026.9.5",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-order-baseline-2026-9-7",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_7}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.7",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-order-baseline-2026-9-7",
+            "--model-turn",
+            "--final-gate-order-probe"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-7/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "baseline_red",
+                "model_calls": 4,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-order-baseline-2026-9-7/final-gate-baseline.json",
+              "values": {
+                "status": "baseline_red",
+                "agent": "openclaw",
+                "version": "2026.9.7"
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-gate-2026-9-7",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_7}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.7",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-gate-2026-9-7",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-gate-2026-9-7/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-gate-2026-9-7/final-boundaries.json",
+              "values": {
+                "version": "2026.9.7",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-timeout-2026-9-5",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_5}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.5",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-timeout-2026-9-5",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-timeout"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-5/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_timeout": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-5/final-boundaries.json",
+              "values": {
+                "version": "2026.9.5",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-timeout-2026-9-6",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.6",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-timeout-2026-9-6",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-timeout"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-6/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_timeout": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-6/final-boundaries.json",
+              "values": {
+                "version": "2026.9.6",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "final-result-provider-timeout-2026-9-7",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/openclaw_gateway.py",
+            "--package",
+            "{npm_openclaw_2026_9_7}/node_modules/openclaw",
+            "--expected-version",
+            "2026.9.7",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/final-result-provider-timeout-2026-9-7",
+            "--model-turn",
+            "--final-gate-order-probe",
+            "--final-gate-enforce",
+            "--final-gate-provider-timeout"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-7/result.json",
+              "values": {
+                "status": "passed",
+                "proof/final_gate_order_probe": "final_gate_verified",
+                "proof/final_gate_provider_timeout": true,
+                "model_calls": 6,
+                "bindings_after_exit": 0,
+                "port_closed": true
+              }
+            },
+            {
+              "file": "fixtures/final-result-provider-timeout-2026-9-7/final-boundaries.json",
+              "values": {
+                "version": "2026.9.7",
+                "custom_stream_sends": 0,
+                "provider_stream_rejected": true,
+                "session_stream_rejected": true,
+                "native_history_red": true,
+                "unbound_history_rejected": true
+              }
+            }
+          ]
         }
-      ]
+      ],
+      "npm_variants": {
+        "npm_openclaw_2026_9_5": "openclaw@2026.9.5",
+        "npm_openclaw_2026_9_7": "openclaw@2026.9.7"
+      }
     },
     "pi": {
       "owner": "@kongche-jbw",
@@ -3869,7 +4378,7 @@
       "npm_packages": [
         "@qoder-ai/qoder-agent-sdk@1.0.56"
       ],
-      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 119-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: seven hosted Worker cases verify successful/error results, required failure, timeout, report and native text replacement behavior through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Acknowledged ordinary resident Queries own bounded observation and release source claims on close; Qoder SDK callback facts retain unverified source identity and unknown coverage. The explicit managed MCP factory rejects schema parsing that changes approved arguments; native-configuration SDK MCP checks parsed handler input. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. The installed Bridge declarative-profile lane verifies automatic settings acknowledgement before prompt release, native visibility and cleanup of two independent snapshots, daemon reuse and zero remaining AW scopes. The parser covers command consumer settlement, finite-input EOF gating, typed background identities and cancellation; failed cleanup retains ownership. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions. The installed Bridge native-command lane uses the real official Worker in seven daemon/direct cases: post-authorization wrapper execution, logical native rule/canUseTool/Post input, command-specific native denial in default and acceptEdits modes, timeout auto-background, consumer acknowledgement before finite EOF or close, ticket retirement and exact native-process cleanup. Ordinary resident Queries retain native settings and Hooks without modifying SDK/Worker files. Policy checks the public PreToolUse input snapshot; later native Hook/permission rewrites are accepted without a final-input recheck. Initialization rejects disabled and headless-fast Hooks. The 20 native-configuration parser cases cover this boundary; separate manual global Pilot evidence covers unmodified SDK 1.0.54 and 1.0.56 in daemon and direct Query modes. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. UserPromptSubmit parser cases cover native blocking without tool identities and original callback draining on cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded. Skill Ledger acceptance uses the real daemon and stock Skill tools, covering signed/unsigned, drift, damaged signatures, source conflicts, directory authorization failure, unavailable backend and timeout; refusal excludes Skill instructions from native/model delivery. Qoder SDK Read text results project /file/content; real PII replacement is verified for plain/newline/Tab credentials, with safe file metadata and subsequent assistant continuation. Normal Read and missing-file errors retain native behavior. Application-owned native-start acceptance initializes pinned direct and prewarmed Queries without startDaemon or aw run, rejects updates while reserved, accepts updates after close, reuses the same application PID, and verifies Worker exit and zero final bindings/events/assets. This lane submits no model prompt and requires a Qoder test PAT for native initialization. Two callback deadline cases use the real Worker Hook timer and CLI with a framed service fault fixture: a late specific veto or invocation expiry followed by a stalled correlated close must retain the denial, retry reason and cleanup diagnostic before native timeout. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval.",
+      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 119-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: eight hosted Worker cases verify successful/error results, required failure, timeout, report, native text replacement, and post-AW mutation adoption through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Acknowledged ordinary resident Queries own bounded observation and release source claims on close; Qoder SDK callback facts retain unverified source identity and unknown coverage. The explicit managed MCP factory rejects schema parsing that changes approved arguments; native-configuration SDK MCP checks parsed handler input. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. The installed Bridge declarative-profile lane verifies automatic settings acknowledgement before prompt release, native visibility and cleanup of two independent snapshots, daemon reuse and zero remaining AW scopes. The parser covers command consumer settlement, finite-input EOF gating, typed background identities and cancellation; failed cleanup retains ownership. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions. The installed Bridge native-command lane uses the real official Worker in seven daemon/direct cases: post-authorization wrapper execution, logical native rule/canUseTool/Post input, command-specific native denial in default and acceptEdits modes, timeout auto-background, consumer acknowledgement before finite EOF or close, ticket retirement and exact native-process cleanup. Ordinary resident Queries retain native settings and Hooks without modifying SDK/Worker files. Policy checks the public PreToolUse input snapshot; later native Hook/permission rewrites are accepted without a final-input recheck. Initialization rejects disabled and headless-fast Hooks. The 20 native-configuration parser cases cover this boundary; separate manual global Pilot evidence covers unmodified SDK 1.0.54 and 1.0.56 in daemon and direct Query modes. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. UserPromptSubmit parser cases cover native blocking without tool identities and original callback draining on cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded. Skill Ledger acceptance uses the real daemon and stock Skill tools, covering signed/unsigned, drift, damaged signatures, source conflicts, directory authorization failure, unavailable backend and timeout; refusal excludes Skill instructions from native/model delivery. Qoder SDK Read text results project /file/content; real PII replacement is verified for plain/newline/Tab credentials, with safe file metadata and subsequent assistant continuation. Normal Read and missing-file errors retain native behavior. Application-owned native-start acceptance initializes pinned direct and prewarmed Queries without startDaemon or aw run, rejects updates while reserved, accepts updates after close, reuses the same application PID, and verifies Worker exit and zero final bindings/events/assets. This lane submits no model prompt and requires a Qoder test PAT for native initialization. Two callback deadline cases use the real Worker Hook timer and CLI with a framed service fault fixture: a late specific veto or invocation expiry followed by a stalled correlated close must retain the denial, retry reason and cleanup diagnostic before native timeout. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. SDK 1.0.55/1.0.57 parser, Worker byte inspection and hosted late Post mutation adoption are release evidence; none has a blocking final gate or security.violation capability.",
       "cases": [
         {
           "name": "daemon-hooks",
@@ -4006,11 +4515,70 @@
                   "report",
                   "native-error",
                   "failure-error",
-                  "replace"
+                  "replace",
+                  "late-mutation"
                 ],
                 "values": {
                   "status": "passed"
                 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-post-1.0.55-late-mutation",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_55}",
+            "--output",
+            "{output}/strict-post-1.0.55-late-mutation",
+            "--case",
+            "late-mutation"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict-post-1.0.55-late-mutation/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": ["late-mutation"],
+                "values": { "status": "passed", "sdk": "1.0.55", "worker": "1.1.75",
+                  "late_mutation_adopted": true, "model_echoed_late_marker": true }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-post-1.0.57-late-mutation",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm_qoder_sdk_1_0_57}",
+            "--output",
+            "{output}/strict-post-1.0.57-late-mutation",
+            "--case",
+            "late-mutation"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict-post-1.0.57-late-mutation/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": ["late-mutation"],
+                "values": { "status": "passed", "sdk": "1.0.57", "worker": "1.1.81",
+                  "late_mutation_adopted": true, "model_echoed_late_marker": true }
               }
             }
           ]
@@ -4581,9 +5149,151 @@
           "timeout_seconds": 270,
           "report": "tap",
           "tests": 2
+        },
+        {
+          "name": "resident-parser-1-0-55",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm_qoder_sdk_1_0_55}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 120
+        },
+        {
+          "name": "resident-parser-1-0-57",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm_qoder_sdk_1_0_57}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 120
+        },
+        {
+          "name": "worker-lifecycle-1-0-55",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+            "--package",
+            "{npm_qoder_sdk_1_0_55}/node_modules/@qoder-ai/qoder-agent-sdk",
+            "--sdk-version",
+            "1.0.55",
+            "--worker-version",
+            "1.1.75",
+            "--sdk-sha256",
+            "e344a33c3b6b9512d72d28b32af2d67abca21ecef2826008c809668f69456e4c",
+            "--worker-target",
+            "linux-x64",
+            "--worker-sha256",
+            "fc3af4986e8082f1963e8f5fdd363a16f8ae721c3c4125fd12a81f629516a682",
+            "--output",
+            "{output}/worker-lifecycle-1-0-55"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/worker-lifecycle-1-0-55/result.json",
+              "values": {
+                "status": "partial_unsupported",
+                "sdk_version": "1.0.55",
+                "worker_version": "1.1.75",
+                "post_precedes_worker_rewrite": true,
+                "model_calls": 0,
+                "final_gate": "unsupported",
+                "worker_target": "linux-x64",
+                "worker_sha256": "fc3af4986e8082f1963e8f5fdd363a16f8ae721c3c4125fd12a81f629516a682"
+              }
+            }
+          ]
+        },
+        {
+          "name": "worker-lifecycle-1-0-56",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+            "--package",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk",
+            "--sdk-version",
+            "1.0.56",
+            "--worker-version",
+            "1.1.78",
+            "--sdk-sha256",
+            "e76eb037555c5b8e74c0cbe7df9071f343be8d081d4c27738cb73491bdf827c1",
+            "--worker-target",
+            "linux-x64",
+            "--worker-sha256",
+            "dcab64392be3381ec82c3def0ca60667f1d8c5d834733f0fc6bb028e349f83c6",
+            "--output",
+            "{output}/worker-lifecycle-1-0-56"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/worker-lifecycle-1-0-56/result.json",
+              "values": {
+                "status": "partial_unsupported",
+                "sdk_version": "1.0.56",
+                "worker_version": "1.1.78",
+                "post_precedes_worker_rewrite": true,
+                "model_calls": 0,
+                "final_gate": "unsupported",
+                "worker_target": "linux-x64",
+                "worker_sha256": "dcab64392be3381ec82c3def0ca60667f1d8c5d834733f0fc6bb028e349f83c6"
+              }
+            }
+          ]
+        },
+        {
+          "name": "worker-lifecycle-1-0-57",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+            "--package",
+            "{npm_qoder_sdk_1_0_57}/node_modules/@qoder-ai/qoder-agent-sdk",
+            "--sdk-version",
+            "1.0.57",
+            "--worker-version",
+            "1.1.81",
+            "--sdk-sha256",
+            "313b5050df8014cba1356965be39e316cd9b3e6c79ca0cd35fa6ac1ce7b59334",
+            "--worker-target",
+            "linux-x64",
+            "--worker-sha256",
+            "a692bedb2b22709e68b0ce711e40e55d179d17213bc6f40247a210a327f96eeb",
+            "--output",
+            "{output}/worker-lifecycle-1-0-57"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/worker-lifecycle-1-0-57/result.json",
+              "values": {
+                "status": "partial_unsupported",
+                "sdk_version": "1.0.57",
+                "worker_version": "1.1.81",
+                "post_precedes_worker_rewrite": true,
+                "model_calls": 0,
+                "final_gate": "unsupported",
+                "worker_target": "linux-x64",
+                "worker_sha256": "a692bedb2b22709e68b0ce711e40e55d179d17213bc6f40247a210a327f96eeb"
+              }
+            }
+          ]
         }
       ],
-      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+      "npm_variants": {
+        "npm_qoder_sdk_1_0_55": "@qoder-ai/qoder-agent-sdk@1.0.55",
+        "npm_qoder_sdk_1_0_57": "@qoder-ai/qoder-agent-sdk@1.0.57"
+      }
     },
     "deepseek-harness": {
       "owner": "@kongche-jbw",

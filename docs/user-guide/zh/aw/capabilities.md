@@ -48,6 +48,11 @@ Qoder SDK 前台 `Read` 的文本结果支持 PII 内容替换，并保留文件
 
 Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用后拒绝媒体、`input`/`context`/`before_provider_request` 扩展处理器、展开的斜杠命令及队列/其他输入入口。输入拒绝或 block 检查故障后，同一会话可在清理完成后继续 prompt；取消和清理失败会终止任务。直接回调改写用户消息或序列化 Provider 请求也会被拒绝。
 
+Claude SDK 对精确匹配的 Python SDK／bundled CLI 构建开放最终
+`security.violation` 检查。私有运行时 Gate 在 Post 回调完成后检查序列化工具
+结果；未知构建拒绝必需策略。范围见
+[Claude 最终结果限制](../../../developer-guide/zh/aw/agents/claude-sdk.md#最终工具结果安全边界)。
+
 ## 16 个通用 Hook
 
 下表列出公共 Provider Hook 的实现状态，各 Adapter 的效果支持见上表。
@@ -68,8 +73,10 @@ Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用
 | `model.before_request` | 规划中 |
 | `runtime.observed` | 规划中 |
 | `runtime.exited` | 规划中 |
-| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5 工具最终结果边界，支持观察和阻断 |
+| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5；OpenClaw 2026.9.5–2026.9.7 已验证构建的显式 OpenAI-completions Gateway 路径提供实验性支持；支持观察和阻断 |
 | `coverage.changed` | 规划中 |
+
+OpenClaw 最终检查要求精确构建、前台 Gateway 和非 reloadable 模式。上方静态矩阵描述普通启动能力。最终检查在原生结果和请求改写完成后检查模型请求；未知构建或路径拒绝必需策略。接线限制见 [OpenClaw 指南](../../../developer-guide/zh/aw/agents/openclaw.md#工具结果最终检查)。Qoder SDK 1.0.55–1.0.57 的真实 Worker 测试证明后续 Post 回调可改变模型采用结果，其最终检查能力仍不支持。
 
 ## Skill 校验
 

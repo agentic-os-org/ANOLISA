@@ -29,6 +29,18 @@ target/debug/aw run --config crates/aw-service/examples/aw.openclaw.yaml --agent
 在工具前后执行命令，不安装安全策略。受支持的适配器可复用同一份
 `aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
 
+## 工具结果最终检查
+
+当前开发实现对 OpenClaw 2026.9.5、2026.9.6、2026.9.7 精确构建提供实验性的 `security.violation` 观察与阻断，验证环境为 Node 24.16.0。使用受管前台 Gateway，显式将主模型 Provider 配置为 `openai-completions`，不配置模型 fallback，策略采用 `on_error: block`。启动器仅在配置最终事件时装配私有 preload，第三方安装文件保持完整。
+
+stream resolver 同样经过指纹校验与插桩，只允许原生
+`boundary-aware:openai-completions` 策略；Provider stream 覆盖和自定义会话
+stream 在发送前被拒绝。缺少原生工具身份的 `bashExecution`、自定义消息、分支
+及压缩摘要在转换前停止投影。会话结束或请求取消会终止活动回调、跳过后续 step，
+并显式关闭未完成的最终事件。
+
+最终检查读取结果 middleware、上下文转换及 payload Hook 之后的序列化文本；2026.9.7 还等待原生请求编码。策略拒绝、异常、超时或身份不符会暂扣工具文本，其他请求字段变化会停止模型请求。已经完成的工具副作用保留。未知构建、其他模型 API、reloadable、多模态、嵌套及后台交付不在此能力范围内。部署前针对实际安装包运行[原生验收夹具](../../../../../src/aw/docs/design/zh/js-final-gate-compatibility.md)。移除最终事件并重启受管 Gateway 可恢复普通 Hook 行为。
+
 ## 准备原生启动并更新策略
 
 OpenClaw 2026.9.6 的前台 Gateway 可以在专用目录安装一次启动桥接，随后在专用终端中设置启动环境，并重启一次 Gateway。Node 版本需要满足所安装 OpenClaw 的运行要求。`aw.yaml` 中的 Gateway 参数应与原生命令一致。
