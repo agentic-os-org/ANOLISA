@@ -196,12 +196,13 @@ pub(super) fn initialize(paths: &DatabasePaths, changes: &ChangeSet) -> Result<b
         .ok_or_else(|| Error::Invalid("database has no parent".into()))?;
     fs::ensure_tree(parent, mode)?;
     // Publish a complete empty database atomically. A crash cannot expose root+lock without data.
-    let stage = parent.join(format!(".local-database-init-{}", journal::new_id()?));
+    let stage_id = journal::new_id()?;
+    let stage = parent.join(format!(".local-database-init-{stage_id}"));
     fs::mkdir(&stage, mode)?;
     let _lock = fs::lock(&stage.join("lock"), true)?;
     fs::mkdir(&stage.join("transactions"), transactions_mode(paths))?;
-    let (file, _) = fs::write_bytes(&stage, &empty_database()?, 0o644)?;
-    fs::publish(&file, &stage.join("installed.json"))?;
+    let staged = fs::write_bytes(&stage, &stage_id, &empty_database()?, 0o644)?;
+    fs::publish(staged, &stage.join("installed.json"))?;
     fs::directory(&stage)?.sync_all()?;
     fs::move_noreplace(&stage, &paths.root)?;
     Ok(true)
@@ -346,29 +347,38 @@ pub(super) fn stage_source(
     let mut held = fs::regular(&source.source)?;
     let before = fs::verify(&source.source, &source.metadata)?;
     let workspace = entry.workspace();
-    let (file, identity) = fs::anonymous(&workspace, source.metadata.mode, |file| {
-        let count = std::io::copy(
-            &mut std::io::Read::take(&mut held, fs::MAX_FILE_BYTES + 1),
-            file,
-        )?;
-        require(
-            count <= fs::MAX_FILE_BYTES,
-            "bundle source grew while staging",
-        )
-    })?;
+    let staged = fs::anonymous(
+        &workspace,
+        &entry.transaction_id,
+        source.metadata.mode,
+        |file| {
+            let count = std::io::copy(
+                &mut std::io::Read::take(&mut held, fs::MAX_FILE_BYTES + 1),
+                file,
+            )?;
+            require(
+                count <= fs::MAX_FILE_BYTES,
+                "bundle source grew while staging",
+            )
+        },
+    )?;
+    #[cfg(test)]
+    journal::checkpoint("staged-source-unpublished");
     require(
-        identity.sha256 == source.metadata.sha256 && fs::same(&source.source, &before)?,
+        staged.identity.sha256 == source.metadata.sha256 && fs::same(&source.source, &before)?,
         "bundle source changed while staging",
     )?;
-    entry.actions[index].after = Some(identity);
+    entry.actions[index].after = Some(staged.identity.clone());
     entry.write()?;
-    fs::publish(&file, &workspace.join(&entry.actions[index].stage))
+    fs::publish(staged, &workspace.join(&entry.actions[index].stage))
 }
 
 pub(super) fn stage_bytes(entry: &mut Journal, index: usize, bytes: &[u8]) -> Result<()> {
     let workspace = entry.workspace();
-    let (file, identity) = fs::write_bytes(&workspace, bytes, 0o644)?;
-    entry.actions[index].after = Some(identity);
+    let staged = fs::write_bytes(&workspace, &entry.transaction_id, bytes, 0o644)?;
+    #[cfg(test)]
+    journal::checkpoint("staged-bytes-unpublished");
+    entry.actions[index].after = Some(staged.identity.clone());
     entry.write()?;
-    fs::publish(&file, &workspace.join(&entry.actions[index].stage))
+    fs::publish(staged, &workspace.join(&entry.actions[index].stage))
 }

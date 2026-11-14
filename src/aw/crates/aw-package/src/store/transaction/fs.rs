@@ -3,16 +3,21 @@
 use aw_exec::PackageLock;
 #[cfg(test)]
 mod faults;
+mod staging;
 #[cfg(test)]
-pub(super) use faults::fail_database_sync;
+pub(super) use faults::{
+    check_workspace, fail_database_sync, fail_enumeration, fail_enumeration_nth, fail_staging_sync,
+    fail_staging_write, fail_tmpfile, replace_workspace_after_check,
+};
+pub(super) use staging::{anonymous, publish, remove_staging, write_bytes};
 
 use crate::store::{require, Error, Payload, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    ffi::{CString, OsStr},
+    ffi::{CStr, CString, OsStr},
     fs::{File, Metadata},
-    io::{Read, Write},
+    io::Read,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -333,51 +338,6 @@ fn lock_flags(path: &Path, extra: i32) -> Result<PackageLock> {
     Ok(file)
 }
 
-pub(super) fn anonymous(
-    parent: &Path,
-    mode: u32,
-    write: impl FnOnce(&mut File) -> Result<()>,
-) -> Result<(File, Identity)> {
-    let directory = directory(parent)?;
-    let mut file = opened(
-        &directory,
-        OsStr::new("."),
-        libc::O_TMPFILE | libc::O_RDWR,
-        mode,
-    )
-    .map_err(|error| match error {
-        Error::Io(source) => Error::Filesystem {
-            operation: "openat(O_TMPFILE) for anonymous package staging",
-            path: parent.to_owned(),
-            source,
-        },
-        error => error,
-    })?;
-    write(&mut file)?;
-    // SAFETY: the file descriptor is live; mode contains only ordinary permission bits.
-    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    file.sync_all()?;
-    let metadata = file.metadata()?;
-    use std::io::{Seek, SeekFrom};
-    file.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    std::io::copy(&mut file, &mut hash)?;
-    Ok((
-        file,
-        from_metadata(&metadata, format!("{:x}", hash.finalize())),
-    ))
-}
-
-pub(super) fn publish(file: &File, destination: &Path) -> Result<()> {
-    let (parent, name) = parent(destination)?;
-    let name = cstring(name)?;
-    link_descriptor(file, &parent, &name)?;
-    parent.sync_all()?;
-    Ok(())
-}
-
 fn link_descriptor(file: &File, parent: &File, name: &CString) -> Result<()> {
     let descriptor = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
         .map_err(|_| Error::Invalid("invalid descriptor link".into()))?;
@@ -552,16 +512,88 @@ pub(super) fn entries(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
+/// Identify an open descriptor without resolving its path again.
+pub(super) fn identity_of(file: &File) -> Result<Identity> {
+    Ok(from_metadata(&file.metadata()?, String::new()))
+}
+
+/// Enumerate a directory through the descriptor that already passed the
+/// identity check, so a replacement at the same path cannot redirect cleanup.
+pub(super) fn entries_in(directory: &File, path: &Path) -> Result<Vec<PathBuf>> {
+    let held = from_metadata(&directory.metadata()?, String::new());
+    // SAFETY: dup duplicates the live descriptor and touches no filesystem state.
+    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: dup shares the directory offset with the original; rewind it so a
+    // repeated enumeration starts at the first entry.
+    if unsafe { libc::lseek(duplicate, 0, libc::SEEK_SET) } < 0 {
+        // SAFETY: the duplicate is owned by this function.
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: fdopendir takes ownership of the duplicate on success.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        // SAFETY: fdopendir did not take ownership of the duplicate on failure.
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut entries = Vec::new();
+    loop {
+        // Clear errno first: readdir returns null both at end-of-directory and
+        // on a read failure, and only errno tells the two apart.
+        // SAFETY: errno is a thread-local slot owned by the calling thread.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: readdir borrows the live stream for the duration of the call.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            // Raise the injected fault on the readdir boundary itself: set EIO
+            // just as a failing read would, so a plain `break` here would still
+            // return a partial entry list and fail the regression.
+            #[cfg(test)]
+            if faults::enumeration_failure(path, entries.len()) {
+                // SAFETY: errno is a thread-local slot owned by the calling thread.
+                unsafe { *libc::__errno_location() = libc::EIO };
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or(0) == 0 {
+                break;
+            }
+            // SAFETY: the stream is live and not used again.
+            unsafe { libc::closedir(stream) };
+            return Err(error.into());
+        }
+        // SAFETY: d_name is a NUL-terminated name inside the returned dirent.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        entries.push(path.join(OsStr::from_bytes(name.to_bytes())));
+        if entries.len() > 8192 {
+            // SAFETY: the stream is live and not used again.
+            unsafe { libc::closedir(stream) };
+            return Err(Error::Invalid(
+                "too many transaction directory entries".into(),
+            ));
+        }
+    }
+    // SAFETY: the stream is live and not used again.
+    if unsafe { libc::closedir(stream) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let after = identity_of(directory)?;
+    require(
+        held.dev == after.dev && held.ino == after.ino,
+        "transaction directory replaced",
+    )?;
+    Ok(entries)
+}
+
 pub(super) fn bytes_payload(bytes: &[u8], mode: u32) -> Payload {
     Payload {
         sha256: format!("{:x}", Sha256::digest(bytes)),
         mode,
     }
-}
-
-pub(super) fn write_bytes(parent: &Path, bytes: &[u8], mode: u32) -> Result<(File, Identity)> {
-    anonymous(parent, mode, |file| {
-        file.write_all(bytes)?;
-        Ok(())
-    })
 }
