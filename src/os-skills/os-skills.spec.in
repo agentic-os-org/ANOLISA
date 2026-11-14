@@ -24,6 +24,7 @@ workflows, kernel development, security auditing, and system administration.
 # Nothing to build - skills are static assets
 
 %install
+set -eu
 rm -rf %{buildroot}
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/skills
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/os-skills
@@ -31,11 +32,27 @@ install -p -m 0644 component.toml \
     %{buildroot}%{_datadir}/anolisa/components/os-skills/component.toml
 
 # Find each skill directory (identified by containing SKILL.md) and copy it
-# flattened into the target skills directory.
+# flattened into the target skills directory. A pipeline reports only the
+# status of its last command, so every copy fails the stage itself and names
+# the offender on stderr (stdout is discarded here). rpmbuild already runs the
+# stage under `sh -e`, but the recipe must not depend on the caller's errexit
+# to keep a partial skills tree out of a "successfully built" RPM.
 find . -name 'SKILL.md' | sort | while IFS= read -r skillmd; do
     skill_dir=$(dirname "$skillmd")
-    cp -rp "$skill_dir" %{buildroot}%{_datadir}/anolisa/skills/
+    cp -rp "$skill_dir" %{buildroot}%{_datadir}/anolisa/skills/ \
+        || { echo "ERROR: os-skills: failed to copy skill: $skill_dir" >&2; exit 1; }
 done
+
+# Every discovered skill has to be present in the tree: cp merges silently into
+# an existing directory of the same name, so two categories carrying a skill
+# with the same basename would lose one without any copy failing.
+expected_skills=$(find . -name 'SKILL.md' | wc -l)
+installed_skills=$(find %{buildroot}%{_datadir}/anolisa/skills \
+    -mindepth 1 -maxdepth 1 -type d | wc -l)
+if [ "$installed_skills" -ne "$expected_skills" ]; then
+    echo "ERROR: os-skills: found $expected_skills skills but installed $installed_skills" >&2
+    exit 1
+fi
 
 # Set permissions
 find %{buildroot}%{_datadir}/anolisa/skills -type d -exec chmod 0755 {} +
