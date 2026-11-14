@@ -8,6 +8,9 @@
 
 use std::path::Path;
 
+mod checkpoint;
+#[cfg(test)]
+mod checkpoint_tests;
 pub mod sqlite;
 mod unified;
 
