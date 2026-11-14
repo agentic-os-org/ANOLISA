@@ -83,6 +83,9 @@ pub struct AtifStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     pub source: String,
+    /// Historical request context, not a newly executed interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_copied_context: Option<bool>,
     #[serde(
         default,
         deserialize_with = "de_step_message",
@@ -241,6 +244,7 @@ impl AtifTrajectory {
     pub fn origin_ts(&self) -> Option<DateTime<Utc>> {
         self.steps
             .iter()
+            .filter(|step| step.is_copied_context != Some(true))
             .flat_map(|s| [s.start_ts(), s.end_ts()])
             .flatten()
             .min()
@@ -250,6 +254,7 @@ impl AtifTrajectory {
     pub fn last_ts(&self) -> Option<DateTime<Utc>> {
         self.steps
             .iter()
+            .filter(|step| step.is_copied_context != Some(true))
             .flat_map(|s| {
                 [s.start_ts(), s.end_ts()].into_iter().flatten().chain(
                     s.calls()
@@ -281,12 +286,14 @@ impl AtifStep {
         (self.is_agent() && timestamp >= self.tool_start_ts(call)?).then_some(timestamp)
     }
 
+    /// Whether this step records agent execution rather than copied history.
     pub fn is_agent(&self) -> bool {
-        self.source == "agent"
+        self.source == "agent" && self.is_copied_context != Some(true)
     }
 
+    /// Whether this step records user input rather than copied history.
     pub fn is_user(&self) -> bool {
-        self.source == "user"
+        self.source == "user" && self.is_copied_context != Some(true)
     }
 
     pub fn is_system(&self) -> bool {
@@ -426,6 +433,9 @@ pub fn render_trimmed(traj: &AtifTrajectory) -> String {
     let mut out = String::new();
     for step in &traj.steps {
         let ts = step.timestamp.as_deref().unwrap_or("-");
+        if step.is_copied_context == Some(true) {
+            out.push_str("[copied request context; not a new execution]\n");
+        }
         match step.source.as_str() {
             "system" => {
                 let msg = step.message.as_deref().unwrap_or("");

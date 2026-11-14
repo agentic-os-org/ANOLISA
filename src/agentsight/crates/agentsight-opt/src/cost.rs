@@ -149,9 +149,11 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                     // Summaries are for display: different long paths or
                     // arguments can share the same truncated prefix.
                     let sig = call.command_summary(usize::MAX);
-                    *tool_sig_counts
-                        .entry((call.function_name.clone(), sig))
-                        .or_insert(0) += 1;
+                    if step.is_agent() {
+                        *tool_sig_counts
+                            .entry((call.function_name.clone(), sig))
+                            .or_insert(0) += 1;
+                    }
                 }
             }
             "user" => {
@@ -169,7 +171,7 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
         for result in step.results() {
             let chars = result.content.as_deref().unwrap_or("").chars().count();
             tool_result_chars += chars;
-            if step.source == "agent" {
+            if step.is_agent() {
                 agent_result_chars += chars;
             }
             total_chars += chars;
@@ -360,6 +362,9 @@ pub(crate) struct UsageBlock {
 }
 
 fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
+    if step.is_copied_context == Some(true) {
+        return None;
+    }
     let m = step.metrics.as_ref()?;
     let prompt = m.prompt_tokens.map(u64::from);
     let completion = m.completion_tokens.map(u64::from);
@@ -385,7 +390,7 @@ fn empty_agent_stats(traj: &AtifTrajectory) -> (usize, usize) {
     let mut total = 0usize;
     let mut empty = 0usize;
     for step in &traj.steps {
-        if step.source.as_str() != "agent" {
+        if !step.is_agent() {
             continue;
         }
         total += 1;
@@ -518,8 +523,8 @@ impl CallBuilder {
     }
 }
 
-/// Walk ATIF steps and compute the replay breakdown. Each agent step is one
-/// LLM call; its observation (tool results) becomes replayed tool history for
+/// Walk ATIF steps and compute the replay breakdown. Each non-copied agent
+/// step is one LLM call; its observation becomes replayed tool history for
 /// the following steps.
 fn compute_llm_calls(traj: &AtifTrajectory) -> Vec<LlmCall> {
     let origin = traj.origin_ts().unwrap_or_default();
@@ -528,6 +533,18 @@ fn compute_llm_calls(traj: &AtifTrajectory) -> Vec<LlmCall> {
     let mut system_chars = 0usize;
 
     for step in &traj.steps {
+        if step
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get(agentsight_atif::EXTRA_REQUEST_CONTEXT_SNAPSHOT))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            b.hist_user = 0;
+            b.hist_assistant = 0;
+            b.hist_tool = 0;
+            b.hist_trimmable = 0;
+        }
         match step.source.as_str() {
             "system" => {
                 // Only producer-declared snapshots replace earlier messages.
@@ -582,21 +599,27 @@ fn compute_llm_calls(traj: &AtifTrajectory) -> Vec<LlmCall> {
                     });
 
                 let turn_ts = step.end_ts().unwrap_or(origin);
-                b.finalize(
-                    turn_ts,
-                    turn_output,
-                    label,
-                    TurnMeta {
-                        actions,
-                        user_turn,
-                        all_calls_errored,
-                        has_tool,
-                    },
-                    parse_usage(step),
-                );
+                if step.is_copied_context == Some(true) {
+                    b.hist_assistant += turn_output;
+                } else {
+                    b.finalize(
+                        turn_ts,
+                        turn_output,
+                        label,
+                        TurnMeta {
+                            actions,
+                            user_turn,
+                            all_calls_errored,
+                            has_tool,
+                        },
+                        parse_usage(step),
+                    );
+                }
             }
             "user" => {
-                user_turn += 1;
+                if step.is_user() {
+                    user_turn += 1;
+                }
                 b.hist_user += estimate_tokens(step.message.as_deref().unwrap_or(""));
             }
             _ => {}
@@ -1068,6 +1091,9 @@ pub(crate) fn build_turn_ledger(
     let mut turn: usize = 0;
 
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         match step.source.as_str() {
             "agent" => {
                 let tokens = cost
@@ -1247,6 +1273,9 @@ pub(crate) fn extract_waste_candidates_from(
 
     let mut turn_idx: i64 = -1;
     for step in &trajectory.steps {
+        if step.is_copied_context == Some(true) {
+            continue;
+        }
         match step.source.as_str() {
             "agent" => {
                 turn_idx += 1;

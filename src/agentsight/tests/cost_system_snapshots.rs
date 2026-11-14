@@ -160,12 +160,16 @@ fn recorded_prompt_replacement_preserves_measured_usage_calibration() {
     let doc = recorder.to_atif();
     let parsed = AtifTrajectory::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
     let cost = compute_cost(&parsed).unwrap();
+    // These complete requests contain no previous answer. Calibration must
+    // assign the measured input to the current prompt, not inherited history.
+    assert_eq!(cost.calls.len(), 2);
+    assert!(cost.calls.iter().all(|call| call.assistant_messages == 0));
     assert_eq!(
         cost.calls
             .iter()
             .map(|call| call.system_prompt)
             .collect::<Vec<_>>(),
-        vec![100, 200]
+        vec![100, 210]
     );
     assert_eq!(
         cost.calls
