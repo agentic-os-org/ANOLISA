@@ -165,7 +165,14 @@ _cosh_arguments_have_no_unquoted_expansion() {
         ;;
       ' '|$'\t') [[ -z "$quote" ]] && after_first_word=1 ;;
       '*'|'?'|'~'|'{'|'}'|'['|']')
-        (( after_first_word == 1 )) && [[ -z "$quote" ]] && return 1
+        # Command position only. In the command position the shell expands the
+        # character before the line reaches the classifier, so the literal line
+        # cannot be judged and the shell keeps the line. After the first word
+        # the same characters are ordinary punctuation of a Han sentence: the
+        # line is not expanded here yet, and `_cosh_classify_missing` can still
+        # refuse a line that reads as a command. #1990 fixed the `$` carrier,
+        # which never reached this set; this covers the rest.
+        (( after_first_word == 0 )) && [[ -z "$quote" ]] && return 1
         ;;
     esac
   done
