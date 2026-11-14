@@ -15,7 +15,13 @@
 // reservation is offsetof(struct probe_SSL_data_t, buf) + <tier>.
 // MAX_BUF_SIZE is the TOP tier and equals the pre-existing capture cap, so a
 // single SSL call up to 4 MiB is still captured whole (no #763 regression).
-#define SSL_TIER_SMALL  (16 * 1024)        // 16 KiB
+// The 1 KiB floor matters: a single SSE delta (the dominant event type for
+// chat streaming) is only ~200 B, so with a 16 KiB floor a 64 MiB ring holds
+// ~4k records (~1.3 s at 3.2k events/s) and overflows when the userspace
+// consumer stalls for seconds. Larger reads select the next tier up, so the
+// small tier never truncates a record.
+#define SSL_TIER_TINY   (1 * 1024)         // 1 KiB: one SSE delta / small TLS record
+#define SSL_TIER_SMALL  (16 * 1024)        // 16 KiB: one full TLS record
 #define SSL_TIER_MEDIUM (128 * 1024)       // 128 KiB
 #define SSL_TIER_LARGE  (512 * 1024)       // 512 KiB
 #define SSL_TIER_XLARGE (1088 * 1024)      // 1 MiB payload plus JSON/header headroom
@@ -62,6 +68,7 @@ typedef u64 __be64;
 // for all — the userspace decodes the header once and slices buf by buf_size.
 // probe_SSL_data_t is the largest (4 MiB) variant and the canonical type the
 // userspace uses for the shared header offsets.
+struct probe_SSL_data_tiny   { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_TINY]; };
 struct probe_SSL_data_small  { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_SMALL]; };
 struct probe_SSL_data_medium { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_MEDIUM]; };
 struct probe_SSL_data_large  { SSL_DATA_HEADER_FIELDS u8 buf[SSL_TIER_LARGE]; };
