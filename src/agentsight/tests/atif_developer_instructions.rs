@@ -181,16 +181,15 @@ fn interrupted_body(body: Value, path: &str, parts_columns: bool) -> Captured {
         is_handshake: false,
         ssl_ptr: 1,
     });
-    let request = ParsedRequest {
-        method: "POST".into(),
-        path: path.into(),
-        version: 11,
-        headers: HashMap::new(),
-        body_offset: 0,
-        body_len: source.buf.len(),
-        source_event: source,
-        reassembled_body: None,
-    };
+    let request = ParsedRequest::new(
+        "POST".into(),
+        path.into(),
+        11,
+        HashMap::new(),
+        0,
+        source.buf.len(),
+        source,
+    );
     let cache = HashMap::from([(PID, "SyntheticAgent".to_string())]);
     let info = GenAIBuilder::new()
         .build_pending_from_request(

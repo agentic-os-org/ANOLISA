@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking changes
+- `ParsedRequest` and `HttpContext` are now `#[non_exhaustive]` and must be constructed with `ParsedRequest::new` and `HttpContext::new`; external struct literals and exhaustive destructuring no longer compile.
+
 ## 0.16.1
 
 ### Security
