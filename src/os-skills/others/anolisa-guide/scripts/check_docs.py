@@ -18,7 +18,6 @@ check_docs.py - ANOLISA 文档时效性检查和选择脚本
     静态文档（新鲜） > 缓存文档（新鲜） > 缓存文档（更新后） > 静态文档（兜底）
 """
 
-import os
 import sys
 import subprocess
 from datetime import datetime, timedelta
@@ -122,6 +121,13 @@ def check_venv() -> bool:
         return False
 
 
+def _failure_detail(result, tail: int = 5) -> str:
+    """子进程失败原因：优先 stderr，为空时取 stdout 末尾若干行。"""
+    return (result.stderr.strip()
+            or " | ".join(result.stdout.strip().splitlines()[-tail:])
+            or "无输出")
+
+
 def ensure_venv() -> Path | None:
     """确保虚拟环境存在，不存在则自动创建"""
     if check_venv():
@@ -149,7 +155,9 @@ def ensure_venv() -> Path | None:
             print("[虚拟环境] 创建成功，后续可直接复用")
             return get_venv_python()
         else:
-            print(f"[失败] {result.stderr}")
+            # setup_env.py / crawl_docs.py 的进度与失败原因都打印在
+            # stdout 上，stderr 常常为空 —— _failure_detail 负责取到原因。
+            print(f"[失败] {_failure_detail(result)}")
             return None
             
     except Exception as e:
@@ -183,10 +191,12 @@ def run_crawl(output_dir: Path) -> bool:
         )
         
         if result.returncode == 0:
-            print("[成功] 文档已更新")
+            # 退出码 0 不代表文档可用：crawl_docs.py 即使全部页面爬取
+            # 失败也以 0 退出（只写 crawl_summary.json）。是否真正成功
+            # 由 main() 用 check_freshness() 校验后决定。
             return True
         else:
-            print(f"[失败] {result.stderr}")
+            print(f"[失败] {_failure_detail(result)}")
             return False
             
     except subprocess.TimeoutExpired:
@@ -199,50 +209,63 @@ def run_crawl(output_dir: Path) -> bool:
 
 def main():
     """主函数：检查并选择文档目录（优先静态文档）"""
-    
+
     # 1. 优先检查静态文档
     if STATIC_DIR.exists():
         fresh, msg = check_freshness(STATIC_DIR)
-        
+
         if fresh:
             # 静态文档新鲜，直接使用
             print(f"[使用静态] {msg}")
             print(STATIC_DIR)
             return 0
-        
-        # 静态文档过期，进入更新流程
-        print(f"[静态过期] {msg}")
-    
-    # 2. 检查用户缓存目录
+
+        # 静态文档不可用（过期/不完整/时间戳不可解析），进入更新流程
+        print(f"[静态不可用] {msg}")
+
+    # 2. 检查用户缓存目录（新鲜则直接使用）
     if CACHE_DIR.exists():
         fresh, msg = check_freshness(CACHE_DIR)
-        
+
         if fresh:
-            # 缓存文档新鲜，使用缓存
             print(f"[使用缓存] {msg}")
             print(CACHE_DIR)
             return 0
-        
-        # 缓存过期，更新缓存
-        print(f"[缓存过期] {msg}")
+
+        print(f"[缓存不可用] {msg}")
+
+    # 3. 尝试（重新）爬取一次 —— 刚刚失败的爬取立即重试必然再次失败，
+    #    因此无论缓存目录是否已存在，都只爬一次，然后进入静态兜底。
+    print("[更新缓存] 正在准备文档...")
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # 缓存目录不可写（只读 HOME、磁盘满）时不能让脚本带着堆栈崩溃：
+        # 静态文档兜底依然可用。
+        print(f"[错误] 无法创建缓存目录: {e}")
+    else:
         if run_crawl(CACHE_DIR):
-            print(CACHE_DIR)
-            return 0
-    
-    # 3. 需要创建缓存并更新
-    print("[创建缓存] 正在准备文档...")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    if run_crawl(CACHE_DIR):
-        print(CACHE_DIR)
-        return 0
-    
+            # crawl_docs.py 即使 13 页全部爬取失败也以退出码 0 结束：
+            # main() 丢弃 crawl_all_docs() 返回的摘要，get_page_content()
+            # 吞掉所有异常，最后只写一份 crawl_summary.json。因此不能
+            # 只信任退出码 —— 用本模块已依赖的 check_freshness() 对爬取
+            # 结果重新校验，不完整/过期的"成功"爬取一律转入静态兜底。
+            fresh, msg = check_freshness(CACHE_DIR)
+            if fresh:
+                print("[成功] 文档已更新")
+                print(CACHE_DIR)
+                return 0
+            print(f"[缓存不可用] 爬取后校验未通过: {msg}")
+        elif STATIC_DIR.exists():
+            # 只有静态兜底真实存在时才宣告转入，避免无法兑现的承诺。
+            print("[爬取失败] 转入静态文档兜底")
+
     # 4. 爬取失败，使用静态文档兜底
     if STATIC_DIR.exists():
         print("[兜底] 使用静态文档")
         print(STATIC_DIR)
         return 0
-    
+
     # 5. 完全失败
     print("[错误] 无法获取文档")
     return 1
