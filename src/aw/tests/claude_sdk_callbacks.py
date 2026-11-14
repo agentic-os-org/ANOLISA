@@ -105,6 +105,7 @@ async def check_callback_payloads(output: Path) -> None:
             ("PostToolUse", "report"),
         ):
             bridge = object.__new__(Bridge)
+            bridge.final = None
             bridge.config = {
                 "executable": str(executable),
                 "binding": "test",
@@ -173,6 +174,7 @@ async def check_preserved_callbacks() -> None:
             return PermissionResultAllow(updated_input=tool_input)
 
         bridge = object.__new__(Bridge)
+        bridge.final = None
         bridge.config = {
             "hooks": [
                 {"event": event, "budget_ms": 1000, "replace_result": event == "tool.after"}

@@ -24,6 +24,7 @@ from aw_resident import ResidentBridge
 class Contracts(unittest.IsolatedAsyncioTestCase):
     def bridge(self):
         bridge = object.__new__(ResidentBridge)
+        bridge.final = None
         bridge.config = {"hooks": [{"event": "tool.after", "step": "compression",
             "on_error": "report", "replace_result": True}]}
         bridge.scope = SimpleNamespace(check=lambda **kwargs: None, failed=False,

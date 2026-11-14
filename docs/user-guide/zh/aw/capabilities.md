@@ -48,6 +48,11 @@ Qoder SDK 前台 `Read` 的文本结果支持 PII 内容替换，并保留文件
 
 Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用后拒绝媒体、`input`/`context`/`before_provider_request` 扩展处理器、展开的斜杠命令及队列/其他输入入口。输入拒绝或 block 检查故障后，同一会话可在清理完成后继续 prompt；取消和清理失败会终止任务。直接回调改写用户消息或序列化 Provider 请求也会被拒绝。
 
+Claude SDK 对精确匹配的 Python SDK／bundled CLI 构建开放最终
+`security.violation` 检查。私有运行时 Gate 在 Post 回调完成后检查序列化工具
+结果；未知构建拒绝必需策略。范围见
+[Claude 最终结果限制](../../../developer-guide/zh/aw/agents/claude-sdk.md#最终工具结果安全边界)。
+
 ## 16 个通用 Hook
 
 下表列出公共 Provider Hook 的实现状态，各 Adapter 的效果支持见上表。

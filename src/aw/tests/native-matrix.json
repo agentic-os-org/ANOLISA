@@ -419,7 +419,7 @@
         "mcp==1.26.0",
         "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. Final-result red acceptance captures actual model HTTP after the application Post callback returns updatedToolOutput later than AW Post for Bash and SDK MCP; safe controls and required security.violation admission rejection preserve unsupported status. No final-result blocking checkpoint or hosted inference is certified.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests. Native startup retains configured-Hook observation with unverified source identity and unknown coverage; each acknowledged task owns and drains its own observation state. Same-call replace_input is covered by the shared service regression; native adopter cases verify revised arguments without granting approval. Final-result acceptance captures actual model HTTP after an application Post callback returns updatedToolOutput later than AW Post for Bash and SDK MCP. Exact SDK/CLI fingerprints admit a private Bun preload; global fetch and FetchSession fetch adopt only checked text or a withheld envelope. Safe controls, late mutation, policy timeout/error and rejection of fail-open policy are required. Scope is a fresh foreground Python client, empty setting_sources and direct Anthropic Messages; no hosted inference.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -1493,11 +1493,17 @@
                   "bash-late",
                   "mcp-safe",
                   "mcp-late",
-                  "required-final"
+                  "required-final",
+                  "bash-gate-safe",
+                  "bash-gate-late",
+                  "mcp-gate-safe",
+                  "mcp-gate-late",
+                  "bash-gate-timeout",
+                  "mcp-gate-error",
+                  "mcp-gate-multi-late"
                 ],
                 "values": {
                   "passed": true,
-                  "final_gate": "unsupported",
                   "bindings_released": true
                 }
               }
