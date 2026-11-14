@@ -28,6 +28,16 @@ Core execution/adoption receipts. Provider-private settings remain in
 `spec.providers.<name>.config`; no security-engine rules are embedded in the
 service.
 
+
+The accept loop polls owner pidfds alongside its socket. Its wait is bounded by
+pending confirmation and bridge-validity deadlines and the existing 5 ms
+external-cancellation interval. Owner checks retain a procfs directory descriptor
+and verify live UID and PID namespace; the pidfd pins process lifetime without
+reopening and parsing `/proc/<pid>/stat` on every check. Opening a watch revalidates
+the original identity. If pidfd setup is unavailable, checks use the existing
+procfs path. Cancelled owners leave the poll set while preparation and cleanup
+drain, preventing repeated wakeups from an already-readable exit descriptor.
+
 ## Local protocol
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) defines the experimental
