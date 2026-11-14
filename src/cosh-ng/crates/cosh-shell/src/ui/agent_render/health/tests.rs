@@ -486,6 +486,7 @@ fn assert_plain_health_card_status_appears_once_at_compact_and_wide_widths() {
     }
 }
 
+library_tests! {
 fn matrix_abnormal_report() -> HealthScanReport {
     let mut report = p6_resource_report(None);
     report.findings.push(HealthFinding {
@@ -657,6 +658,7 @@ fn health_acceptance_matrix_keeps_one_complete_status_across_terminal_modes() {
             }
         }
     }
+}
 }
 
 fn assert_health_card_keeps_status_for_findings_with_and_without_resource_facts() {
