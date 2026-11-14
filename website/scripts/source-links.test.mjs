@@ -70,3 +70,48 @@ test('migrated component entry links resolve in the repository Markdown', async 
   assert.ok(checked > 0, 'Expected incoming links to migrated component entries');
   assert.deepEqual(errors, []);
 });
+
+test('a quoted greater-than in an earlier HTML attribute does not hide a real anchor', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'source-anchor-quotes-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  for (const quote of ['"', "'"]) {
+    const markdown = `<span title=${quote}left > right${quote} id="details">Details</span>\n`;
+    const target = path.join(root, 'target.md');
+    await writeFile(target, markdown, 'utf8');
+    assert.equal(await checkMarkdownSourceLink(root, 'entry.md', 'target.md#details'), undefined);
+    assert.equal(await readFile(target, 'utf8'), markdown);
+  }
+});
+
+test('id and name text inside another quoted attribute cannot satisfy a fragment', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'source-anchor-values-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  for (const attribute of ['id', 'name']) {
+    const markdown = `<span title=" ${attribute}=ghost " id="real">Details</span>\n`;
+    const target = path.join(root, 'target.md');
+    await writeFile(target, markdown, 'utf8');
+    assert.equal(await checkMarkdownSourceLink(root, 'entry.md', 'target.md#real'), undefined);
+    assert.match(
+      await checkMarkdownSourceLink(root, 'entry.md', 'target.md#ghost'),
+      /missing GitHub source fragment/,
+    );
+    assert.equal(await readFile(target, 'utf8'), markdown);
+  }
+});
+
+test('ordinary heading, ID and named HTML anchors retain their values', () => {
+  assert.deepEqual(
+    [...githubSourceAnchors('## Ordinary heading\n\n<span id="details"></span>\n'
+      + "<a name='legacy'></a>\n<SPAN ID=upper></SPAN>\n")],
+    ['ordinary-heading', 'details', 'legacy', 'upper'],
+  );
+});
+
+test('HTML comments and code examples do not introduce source anchors', () => {
+  assert.deepEqual(
+    [...githubSourceAnchors('<!-- <span id="commented"></span> -->\n\n'
+      + '```html\n<span title="left > right" id="example"></span>\n```\n\n'
+      + '<span title="ordinary" id="real"></span>\n')],
+    ['real'],
+  );
+});
