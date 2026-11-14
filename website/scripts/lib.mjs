@@ -41,8 +41,18 @@ export function toPosix(filePath) {
 }
 
 export function titleFromMarkdown(markdown, fallback) {
-  const heading = markdown.match(/^#\s+(.+)$/m)?.[1];
-  return heading?.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim() || fallback;
+  let inFence = false;
+  for (const line of markdown.split('\n')) {
+    if (/^\s*(```+|~~~+)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence) {
+      const heading = line.match(/^#\s+(.+)$/)?.[1];
+      if (heading) return heading.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim();
+    }
+  }
+  return fallback;
 }
 
 export function kebabCase(value) {

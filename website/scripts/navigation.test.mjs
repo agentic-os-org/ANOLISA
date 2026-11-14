@@ -9,6 +9,7 @@ import {
 } from './navigation.mjs';
 import {loadDocumentRedirects, publicDocumentPath} from './document-routes.mjs';
 import redirectPlugin from '../plugins/document-redirects.mjs';
+import {titleFromMarkdown} from './lib.mjs';
 
 test('navigation requires bilingual sources and descriptions and prevents duplicate component entries', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'manual-navigation-'));
@@ -40,6 +41,11 @@ test('navigation requires bilingual sources and descriptions and prevents duplic
   configuration.groups[0].items.push(configuration.groups[0].items[0]);
   await save();
   await assert.rejects(loadNavigation(root), /duplicate document path aw\/index.md/);
+});
+
+test('title extraction ignores ATX headings inside fenced code', () => {
+  assert.equal(titleFromMarkdown('```md\n# Example\n```\n', 'fallback'), 'fallback');
+  assert.equal(titleFromMarkdown('```md\n# Example\n```\n# Guide\n', 'fallback'), 'Guide');
 });
 
 test('regrouping components changes navigation without changing document routes or identities', () => {
