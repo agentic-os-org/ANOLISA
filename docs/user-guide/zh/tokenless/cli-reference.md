@@ -122,6 +122,8 @@ jq -n \
   旁路，不会使 PostTool 操作失败。
 - Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
+- 只是形似 JSON 的内容（NDJSON 流、拼接在一起的两个文档、`[INFO] … [ok]` 日志）按其真实分类
+  透传。JSON 域负责解析，因此解析被拒只是路由结论，而不是操作失败。
 - 已识别的成功构建/测试/包安装输出使用 `BuildLogCompressor`。`terminal_cleanup` 清理 SGR
   颜色。现有 `build_log_reduction` 统一表示 pnpm 布局压紧与常规进度缩减，包括两者组合的结果。
   仅布局时为语义 `lossless`，不写 Stash，`recovery.kind = none` 时仍可采用；
