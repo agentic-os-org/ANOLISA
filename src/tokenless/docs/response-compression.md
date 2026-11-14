@@ -148,6 +148,9 @@ Stash 写入与可恢复性按各区域结果合并，取最弱可恢复性。
 `protect_search_output` 为真的请求（Grep 工具输出与已识别的 Shell `grep`/`rg` 命令输出）
 不进入该路由，关闭搜索路径共享也不例外；`replace_with_text` 为假的请求同样不进入。
 
+RTK 为什么留在 PreTool（而不是迁移为 PostTool 输出过滤）、以及下游风险分类器需要遵守的包装形态契约，见
+[RTK Hook 接入位置评估](design/rtk-hook-placement_zh.md)。
+
 ## 四、集成路径
 
 ### 路径 1：OpenClaw 插件（实时工具结果 middleware）
