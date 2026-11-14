@@ -60,6 +60,15 @@ fn render_raw_inline_event_view<W: Write>(
         &mut terminal_output,
     )?;
     RuntimeDispatcher::apply_actions(actions, inline_state);
+    if inline_state.guide_auth_handoff
+        && view
+            .events()
+            .iter()
+            .any(|event| event.kind == ShellEventKind::ShellReady)
+    {
+        inline_state.guide_auth_handoff = false;
+        crate::auth::runtime::trigger_auth_from_slash(adapter, inline_state, &mut terminal_output)?;
+    }
     if let Some(id) = inline_state
         .approvals
         .pending_capture_invalidations

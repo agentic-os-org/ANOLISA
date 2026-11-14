@@ -6,6 +6,324 @@ use ratatui::text::Span;
 use std::time::Instant;
 
 #[test]
+fn installed_cosh_help_is_readonly_localized_and_independent_of_shell() {
+    for (name, saved, override_language, expected) in [
+        ("empty", None, None, "Launch options"),
+        ("saved", Some("zh-CN"), None, "启动选项"),
+        ("override", Some("zh-CN"), Some("en-US"), "Launch options"),
+        ("unsafe", None, None, "Launch options"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let config_dir = home.join(".copilot-shell");
+        let config_path = config_dir.join("config.toml");
+        let original = saved.map(|language| format!("[ui]\nlanguage = \"{language}\"\n"));
+        if let Some(content) = &original {
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(&config_path, content).unwrap();
+        } else if name == "unsafe" {
+            fs::create_dir_all(&config_dir).unwrap();
+            nix::unistd::mkfifo(
+                &config_path,
+                nix::sys::stat::Mode::from_bits_truncate(0o600),
+            )
+            .unwrap();
+        }
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+        command
+            .arg0("cosh")
+            .arg("--help")
+            .env_clear()
+            .env("HOME", &home)
+            .env("LANG", "en_US.UTF-8")
+            .env("TERM", "dumb")
+            .env(
+                "COSH_SHELL_DEFAULT_SHELL",
+                root.path().join("missing-shell"),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(language) = override_language {
+            command.env("COSH_SHELL_LANG", language);
+        }
+        let child = command.spawn().unwrap();
+        let output = crate::support::raw_cli::wait_for_raw_cli_output(child);
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert!(output.stderr.is_empty(), "{name}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        for entry in [expected, "Usage: cosh", "--ask", "cosh guide", "/help"] {
+            assert!(text.contains(entry), "{name}: missing {entry}: {text}");
+        }
+        for internal in ["\x1b", "interactive-demo", "--__", "host-demo"] {
+            assert!(!text.contains(internal), "{name}: {text}");
+        }
+        if let Some(content) = original {
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), content);
+        }
+        if name == "empty" {
+            assert!(!home.exists(), "help created user state");
+        } else {
+            assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(&config_dir).unwrap().count(), 1);
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn interactive_guide_initializes_private_diagnostic_log() {
+    verify_guide_exit(None);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn guide_sigterm_restores_the_terminal_and_screen() {
+    verify_guide_exit(Some(nix::libc::SIGTERM));
+}
+
+#[cfg(target_os = "linux")]
+fn verify_guide_exit(signal: Option<i32>) {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::ExitStatusExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let size = nix::libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut master = fs::File::from(pty.master);
+    let slave = fs::File::from(pty.slave);
+    let original_termios = nix::sys::termios::tcgetattr(&slave).unwrap();
+    let original_flags = unsafe { nix::libc::fcntl(slave.as_raw_fd(), nix::libc::F_GETFL) };
+    assert!(original_flags >= 0);
+    let flags = unsafe { nix::libc::fcntl(master.as_raw_fd(), nix::libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe {
+            nix::libc::fcntl(
+                master.as_raw_fd(),
+                nix::libc::F_SETFL,
+                flags | nix::libc::O_NONBLOCK,
+            )
+        },
+        0
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+    command
+        .arg0("cosh")
+        .arg("guide")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.path())
+        .env("TERM", "xterm-256color")
+        .env("COSH_SHELL_LANG", "en-US")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() < 0
+                || nix::libc::ioctl(nix::libc::STDIN_FILENO, nix::libc::TIOCSCTTY as _, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        match master.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => raw.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+        if String::from_utf8_lossy(&raw).contains("Cosh setup and getting started") {
+            ready = true;
+            break;
+        }
+    }
+    if ready {
+        if let Some(signal) = signal {
+            let _ = unsafe { nix::libc::kill(child.id() as i32, signal) };
+        } else {
+            let _ = master.write_all(b"q");
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut status = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(count) = master.read(&mut buffer) {
+            raw.extend_from_slice(&buffer[..count]);
+        }
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if status.is_some() {
+        for _ in 0..32 {
+            match master.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => raw.extend_from_slice(&buffer[..count]),
+            }
+        }
+    }
+    let restored_termios = nix::sys::termios::tcgetattr(&slave).unwrap();
+    let restored_flags = unsafe { nix::libc::fcntl(slave.as_raw_fd(), nix::libc::F_GETFL) };
+    drop(master);
+    if status.is_none() {
+        let _ = child.kill();
+        assert!(
+            child
+                .wait_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_some(),
+            "guide could not be reaped after forced termination"
+        );
+    }
+    child.wait().unwrap();
+    assert!(
+        ready,
+        "guide did not become ready: {}",
+        String::from_utf8_lossy(&raw)
+    );
+    let status = status.expect("guide did not exit before the deadline");
+    if let Some(signal) = signal {
+        assert_eq!(status.signal(), Some(signal));
+    } else {
+        assert!(status.success(), "{status}");
+    }
+    assert_eq!(restored_termios, original_termios);
+    assert_eq!(restored_flags, original_flags);
+    let output = String::from_utf8_lossy(&raw);
+    let enter = output
+        .rfind("\x1b[?1049h")
+        .expect("guide did not enter the alternate screen");
+    let leave = output
+        .rfind("\x1b[?1049l")
+        .expect("guide did not leave the alternate screen");
+    let hide = output
+        .rfind("\x1b[?25l")
+        .expect("guide did not hide the cursor");
+    let show = output
+        .rfind("\x1b[?25h")
+        .expect("guide did not show the cursor");
+    assert!(leave > enter, "alternate screen was not restored");
+    assert!(show > hide, "cursor was not restored");
+    let log_dir = root.path().join(".copilot-shell/logs");
+    let log = fs::read_dir(&log_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("cosh-shell.log.")
+        })
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        log.contains("guide wizard starting"),
+        "interactive guide left no startup log: {log}"
+    );
+    assert_eq!(
+        fs::metadata(log_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[test]
+fn guide_management_uses_environment_language_while_plain_uses_saved_language() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let config_dir = home.join(".copilot-shell");
+    fs::create_dir(&config_dir).unwrap();
+    fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = config_dir.join("config.toml");
+    let saved = "[ui]\nlanguage = 'zh-CN'\n";
+    fs::write(&path, saved).unwrap();
+    for override_language in [
+        None,
+        Some("en-US"),
+        Some("zh-CN"),
+        Some("auto"),
+        Some("invalid"),
+    ] {
+        for action in ["on", "off", "status", "--plain"] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+            command
+                .arg0("cosh")
+                .args(["guide", action])
+                .env_clear()
+                .env("HOME", &home)
+                .env("LC_ALL", "en_US.UTF-8")
+                .env("TERM", "dumb")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(language) = override_language {
+                command.env("COSH_SHELL_LANG", language);
+            }
+            let output = crate::support::raw_cli::wait_for_raw_cli_output(command.spawn().unwrap());
+            assert!(
+                output.status.success(),
+                "{action}/{override_language:?}: {output:?}"
+            );
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let text = String::from_utf8(output.stdout).unwrap();
+            let chinese = override_language == Some("zh-CN")
+                || (action == "--plain" && matches!(override_language, None | Some("invalid")));
+            let expected = match (action == "--plain", chinese) {
+                (true, true) => "Cosh 配置与入门",
+                (true, false) => "Cosh setup and getting started",
+                (false, true) => "AI 使用提示",
+                (false, false) => "AI tips",
+            };
+            assert!(
+                text.starts_with(expected),
+                "{action}/{override_language:?}: {text}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        }
+    }
+}
+
+#[test]
+fn static_guide_paths_do_not_initialize_logging() {
+    for args in [vec!["guide"], vec!["guide", "--plain"]] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let output = Command::new(env!("CARGO_BIN_EXE_cosh-shell"))
+            .arg0("cosh")
+            .args(args)
+            .env_clear()
+            .env("HOME", &home)
+            .env("TERM", "dumb")
+            .env("COSH_SHELL_LANG", "en-US")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!home.exists(), "static guide created user state");
+    }
+}
+
+#[test]
 fn help_flag_writes_to_stdout_not_stderr() {
     // POSIX/GNU convention: --help output goes to stdout, not stderr.
     let binary = env!("CARGO_BIN_EXE_cosh-shell");

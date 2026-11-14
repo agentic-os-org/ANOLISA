@@ -18,6 +18,14 @@ impl RuntimeState {
         Self::open_checked(base, is_local)
     }
 
+    /// Opens an existing runtime directory without creating state.
+    pub(crate) fn open_existing(base: &Path) -> Result<Option<Self>, Error> {
+        if !base.join("cosh-guide").exists() {
+            return Ok(None);
+        }
+        Self::open(base).map(Some)
+    }
+
     fn open_checked(
         base: &Path,
         is_local: impl Fn(&std::fs::File) -> Result<bool, Error>,

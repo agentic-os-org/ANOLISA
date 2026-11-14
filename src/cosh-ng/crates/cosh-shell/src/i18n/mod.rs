@@ -388,6 +388,30 @@ mod tests {
         );
         assert_eq!(
             MessageId::LoginRecoveryMissing as usize + 1,
+            MessageId::CoshRootHelp as usize
+        );
+        assert_eq!(
+            MessageId::CoshRootHelp as usize + 1,
+            MessageId::GuideWizardTitle as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiHandoffFailed as usize + 1,
+            MessageId::GuideWizardTipsAnalysis as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardCancel as usize + 1,
+            MessageId::GuideWizardLoginSet as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardConfigUnreadable as usize + 1,
+            MessageId::GuideWizardDataClearConfirm as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardDataClearConfirm as usize + 1,
+            MessageId::GuideWizardLoginHandoffFailed as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardLoginHandoffFailed as usize + 1,
             MessageId::ALL.len()
         );
     }

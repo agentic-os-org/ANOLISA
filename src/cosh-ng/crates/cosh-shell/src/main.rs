@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 // Shared renderer tests run once in the library; private runtime helpers stay in both targets.
 #[cfg(test)]
 macro_rules! library_tests {
@@ -145,6 +147,7 @@ fn main() {
             std::io::stdout().is_terminal(),
             std::io::stderr().is_terminal(),
         ) {
+            Invocation::Help => runtime::help::run_cli(),
             Invocation::ExecShell(plan) => {
                 if !cosh_entry
                     && matches!(subcommand, Some("--" | "raw"))
@@ -156,7 +159,16 @@ fn main() {
                 }
             }
             Invocation::Tui(entry) => run_tui(entry),
-            Invocation::Guide(args) => config::guide::run_cli(&args),
+            Invocation::Guide(args) => {
+                if config::guide::wants_wizard(&args) && config::guide::terminal_capable() {
+                    let guide_config = config::load_guidance_config();
+                    runtime::logging::init_logging(&guide_config.log_level);
+                    tracing::info!("guide wizard starting");
+                    runtime::guide::run_interactive()
+                } else {
+                    config::guide::run_cli(&args)
+                }
+            }
             Invocation::Login(args) => runtime::login::run_cli(&args),
             Invocation::ShellIntegration(operation) => {
                 runtime::shell_integration::run_cli(operation)
@@ -165,6 +177,7 @@ fn main() {
             Invocation::LoginShellPlanWorker => runtime::login::probe::run_worker(),
             Invocation::LoginInvitationWorker => runtime::login::invitation::run_worker(),
             Invocation::LoginEditor => runtime::login::editor::run_editor(),
+            Invocation::LoginGuideWorker(path) => runtime::login::guide_protocol::run_worker(&path),
             Invocation::LoginLifecycle(args) => runtime::login::lifecycle::run_cli(&args),
             Invocation::Health(args) => runtime::health_banner::run_cli(&args),
             Invocation::UsageError(error) => {

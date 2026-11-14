@@ -16,6 +16,25 @@ fn private_compatibility_worker_is_an_exact_early_dispatch_leaf() {
     assert!(matches!(
         classify(
             "cosh",
+            &[
+                crate::runtime::login::guide_protocol::WORKER_FLAG,
+                "/tmp/request.json"
+            ],
+            (false, false, false)
+        ),
+        Invocation::LoginGuideWorker(_)
+    ));
+    assert!(matches!(
+        classify(
+            "cosh",
+            &[crate::runtime::login::guide_protocol::WORKER_FLAG],
+            ALL_TTY
+        ),
+        Invocation::UsageError(_)
+    ));
+    assert!(matches!(
+        classify(
+            "cosh",
             &["shell-integration", "--__compat-worker-v2"],
             (false, false, false)
         ),
@@ -34,6 +53,7 @@ fn private_compatibility_worker_is_an_exact_early_dispatch_leaf() {
 fn exec_args(invocation: Invocation) -> Vec<OsString> {
     match invocation {
         Invocation::ExecShell(plan) => plan.args,
+        Invocation::Help => panic!("unexpected root help"),
         Invocation::Tui(entry) => panic!("expected ExecShell, got Tui({entry:?})"),
         Invocation::UsageError(error) => panic!("unexpected usage error: {error}"),
         Invocation::Guide(args) => panic!("unexpected guide command: {args:?}"),
@@ -41,6 +61,7 @@ fn exec_args(invocation: Invocation) -> Vec<OsString> {
         Invocation::LoginShellPlanWorker => panic!("unexpected login shell plan worker"),
         Invocation::LoginInvitationWorker => panic!("unexpected login invitation worker"),
         Invocation::LoginEditor => panic!("unexpected login editor"),
+        Invocation::LoginGuideWorker(path) => panic!("unexpected login guide worker: {path}"),
         Invocation::LoginLifecycle(args) => panic!("unexpected lifecycle: {args:?}"),
         Invocation::Health(args) => panic!("unexpected health command: {args:?}"),
         Invocation::Login(args) => panic!("unexpected login command: {args:?}"),

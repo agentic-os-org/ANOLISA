@@ -29,7 +29,7 @@ mod help_tests;
 mod hook_status;
 #[cfg(test)]
 mod hook_status_tests;
-mod markdown;
+pub(crate) mod markdown;
 mod notice;
 mod question;
 mod recommendation;
@@ -58,7 +58,7 @@ pub(crate) use health::primary_health_prompt_suggestion;
 pub use health::HealthBannerModel;
 pub(crate) use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
 pub(crate) use hook_status::{AgentHooksView, HookEntryView, HookEventGroup, HookStatusPanelModel};
-use markdown::MarkdownRenderModel;
+pub(crate) use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
 pub use question::{
     QuestionAnswerPanelModel, QuestionCursorPlacement, QuestionInputFeedback, QuestionPanelModel,

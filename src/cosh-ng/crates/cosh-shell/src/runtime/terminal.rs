@@ -3,8 +3,36 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use nix::libc;
 
+mod guide_screen;
+
 static mut ORIGINAL_TERMIOS: Option<libc::termios> = None;
 static ORIGINAL_FILE_STATUS_FLAGS: AtomicI32 = AtomicI32::new(-1);
+static GUIDE_SCREEN: guide_screen::GuideScreenRecovery = guide_screen::GuideScreenRecovery::new();
+
+// Signal-driven exit bypasses `Screen::drop`, so the full-screen guide would
+// otherwise leave the tty in the alternate screen with a hidden cursor. Only
+// armed while this process actually owns the alternate screen, so the inline
+// shell never leaves a parent terminal's alternate screen.
+const LEAVE_ALT_SHOW_CURSOR: &[u8] = b"\x1b[?1049l\x1b[?25h";
+
+pub(crate) fn guide_screen_event(event: crate::ui::guide::ScreenEvent) -> bool {
+    match GUIDE_SCREEN.update(event) {
+        guide_screen::ScreenUpdate::Continue => true,
+        guide_screen::ScreenUpdate::Stopped => false,
+        guide_screen::ScreenUpdate::WaitForExit => wait_for_signal_exit(),
+        guide_screen::ScreenUpdate::Exit(signal) => {
+            finish_signal_exit(signal);
+            wait_for_signal_exit()
+        }
+    }
+}
+
+fn wait_for_signal_exit() -> ! {
+    // Returning to main could exit before the other thread restores the tty.
+    loop {
+        unsafe { libc::pause() };
+    }
+}
 
 pub(crate) struct CrLfWriter<'a, W: Write> {
     inner: &'a mut W,
@@ -72,10 +100,24 @@ fn restore_terminal() {
         if original_flags >= 0 {
             libc::fcntl(libc::STDIN_FILENO, libc::F_SETFL, original_flags);
         }
+        if GUIDE_SCREEN.take_active() && libc::isatty(libc::STDOUT_FILENO) == 1 {
+            libc::write(
+                libc::STDOUT_FILENO,
+                LEAVE_ALT_SHOW_CURSOR.as_ptr().cast(),
+                LEAVE_ALT_SHOW_CURSOR.len(),
+            );
+        }
     }
 }
 
 extern "C" fn restore_and_exit(sig: libc::c_int) {
+    if GUIDE_SCREEN.defer_signal(sig) {
+        return;
+    }
+    finish_signal_exit(sig);
+}
+
+fn finish_signal_exit(sig: libc::c_int) {
     restore_terminal();
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
