@@ -1,0 +1,249 @@
+[
+  {
+    "file": "commons_warm.txt",
+    "environment": {
+      "repository": "apache/commons-cli",
+      "commit": "698b238276c0e22e97e4aec703a0b00201d29666",
+      "image": "maven:3.9.9-eclipse-temurin-21",
+      "image_id": "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+      "version": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 21.0.7, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": false
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--mount",
+        "type=bind,src=/tmp/tokenless-maven-9966-commons/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+        "mvn",
+        "-Dmaven.repo.local=/work/cache",
+        "clean",
+        "package"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "260b0c1f6442adca3c727b71df4b9703ffa31c902ba86ae6a8262175b563059e",
+        "stderr": "aabddef279842c855e30710a6063bf83c68084535d622308cfd82a1ce7946871",
+        "observed": "9356ce23ba6779528453e1827a065044cd3433ab9ae56ab35de9d7244691272f"
+      }
+    },
+    "stream": "observed",
+    "sha256": "9356ce23ba6779528453e1827a065044cd3433ab9ae56ab35de9d7244691272f"
+  },
+  {
+    "file": "slf4j_warm.txt",
+    "environment": {
+      "repository": "qos-ch/slf4j",
+      "commit": "c233ea1932228a7fc580823289f896e97ba8a74d",
+      "image": "maven:3.9.9-eclipse-temurin-21",
+      "image_id": "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+      "version": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 21.0.7, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": false
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--mount",
+        "type=bind,src=/tmp/tokenless-maven-9966-slf4j/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+        "mvn",
+        "-Dmaven.repo.local=/work/cache",
+        "-pl",
+        "slf4j-api,slf4j-simple",
+        "-am",
+        "clean",
+        "package"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "e7db94bf0fcb646c7386e13a79f47a415274276fad2c26549fccad4529d02681",
+        "stderr": "6357be8cd03654296fccf4f7bbd82c2ae3b4b04cb23c4f088e57414a6501c4a9",
+        "observed": "4277aa39d4d1b89465abfe17cd9b20050dbd287fd4ffe5a4679de2ebad0a4513"
+      }
+    },
+    "stream": "observed",
+    "sha256": "4277aa39d4d1b89465abfe17cd9b20050dbd287fd4ffe5a4679de2ebad0a4513"
+  },
+  {
+    "file": "downloads_batch.txt",
+    "environment": {
+      "repository": "jhy/jsoup",
+      "commit": "7c56eb26c8cc772c5c3d0e052dc076a128173c85",
+      "image": "maven:3.9.9-eclipse-temurin-21",
+      "image_id": "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+      "version": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 21.0.7, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": true
+    },
+    "capture_exit_code": 1,
+    "stream": "stdout",
+    "lines": [
+      7,
+      46
+    ],
+    "sha256": "8892cdc8c2a3cf5142fa6165eb864e0cda571bcd28a8ff1a21b8b3a59b1d6f56",
+    "note": "Unmodified download excerpt from the initial build whose Jetty tests failed on the host CPU count."
+  },
+  {
+    "file": "gson_default.txt",
+    "environment": {
+      "repository": "google/gson",
+      "commit": "828a97be0f8d58108b140b77df8dc76b657f4a87",
+      "image": "maven:3.9.9-eclipse-temurin-17",
+      "image_id": "sha256:f58d59b6273e785ac0a4477f6e9b5ba1d7731c75b906c0f7b34076f1851318cc",
+      "version": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 17.0.15, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": false
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--mount",
+        "type=bind,src=/tmp/tokenless-maven-9966-gson/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:f58d59b6273e785ac0a4477f6e9b5ba1d7731c75b906c0f7b34076f1851318cc",
+        "mvn",
+        "-Dmaven.repo.local=/work/cache",
+        "-pl",
+        "gson,extras",
+        "-am",
+        "clean",
+        "package"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "6332d8deade184ed6f3955b7f1f529f38b6ec0b8c7f0d31b2d229384506935d1",
+        "stderr": "08cf2d0d896db567a0d76370d12b2e77b394266bb08a10cdde1f2102bc91b8f9",
+        "observed": "480a286d1013485f2f39913709dc91525d960b2b13572255c24cb2320ab92401"
+      }
+    },
+    "stream": "observed",
+    "sha256": "480a286d1013485f2f39913709dc91525d960b2b13572255c24cb2320ab92401"
+  },
+  {
+    "file": "jsoup_batch.txt",
+    "environment": {
+      "repository": "jhy/jsoup",
+      "commit": "7c56eb26c8cc772c5c3d0e052dc076a128173c85",
+      "image": "maven:3.9.9-eclipse-temurin-21",
+      "image_id": "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+      "version": "Picked up JAVA_TOOL_OPTIONS: -XX:ActiveProcessorCount=2\nApache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 21.0.7, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": true
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "JAVA_TOOL_OPTIONS=-XX:ActiveProcessorCount=2",
+        "--mount",
+        "type=bind,src=/tmp/tokenless-maven-9966-jsoup-batch-v3/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+        "mvn",
+        "-Dmaven.repo.local=/work/cache",
+        "--batch-mode",
+        "clean",
+        "package"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "dc3b586dfc3198fcafe730d5d7e100739e58d8e5e510793b87848f2d2d30455c",
+        "stderr": "a7ad91548c464b3fe6a7af74170d1592839805af07c60773f5007019ac02892c",
+        "observed": "40b2940482a084c878ce43ec06a6fb30c2ce6a55c4e8d343bcf4329604b1c2dd"
+      }
+    },
+    "stream": "observed",
+    "sha256": "40b2940482a084c878ce43ec06a6fb30c2ce6a55c4e8d343bcf4329604b1c2dd"
+  },
+  {
+    "file": "jsoup_failure.txt",
+    "environment": {
+      "repository": "jhy/jsoup",
+      "commit": "7c56eb26c8cc772c5c3d0e052dc076a128173c85",
+      "image": "maven:3.9.9-eclipse-temurin-21",
+      "image_id": "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+      "version": "Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 21.0.7, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": true
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--mount",
+        "type=bind,src=/tmp/tokenless-maven-9966-jsoup-batch/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+        "mvn",
+        "-Dmaven.repo.local=/work/cache",
+        "--batch-mode",
+        "clean",
+        "package"
+      ],
+      "exit_code": 1,
+      "sha256": {
+        "stdout": "a4fb15cb1f6ed089b2c921885677b29fe5dc01feccdc3c029eab2ce0688b959a",
+        "stderr": "9a9540a29dec64f22c4ab0d4f628c56c69cb6d95d5782ac0a16f77ef39b8964a",
+        "observed": "741b902fd6ae439b6136ac337f54bab3ee93b4bb998f53ef4dee71415d0e769c"
+      }
+    },
+    "stream": "observed",
+    "sha256": "741b902fd6ae439b6136ac337f54bab3ee93b4bb998f53ef4dee71415d0e769c"
+  },
+  {
+    "file": "jsoup_default.txt",
+    "environment": {
+      "repository": "jhy/jsoup",
+      "commit": "7c56eb26c8cc772c5c3d0e052dc076a128173c85",
+      "image": "maven:3.9.9-eclipse-temurin-21",
+      "image_id": "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+      "version": "Picked up JAVA_TOOL_OPTIONS: -XX:ActiveProcessorCount=2\nApache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)\nMaven home: /usr/share/maven\nJava version: 21.0.7, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk\nDefault locale: en_US, platform encoding: UTF-8\nOS name: \"linux\", version: \"7.0.0-38-generic\", arch: \"amd64\", family: \"unix\"\n",
+      "batch": false
+    },
+    "capture": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--cpus",
+        "2",
+        "--env",
+        "JAVA_TOOL_OPTIONS=-XX:ActiveProcessorCount=2",
+        "--mount",
+        "type=bind,src=/tmp/tokenless-maven-9966-jsoup-default-v2/work,dst=/work",
+        "--workdir",
+        "/work/source",
+        "sha256:3a4ab3276a087bf276f79cae96b1af04f53731bec53fb2e651aca79e4b10211e",
+        "mvn",
+        "-Dmaven.repo.local=/work/cache",
+        "clean",
+        "package"
+      ],
+      "exit_code": 0,
+      "sha256": {
+        "stdout": "ce0f2e95ea0648a1f2e6a7f91138bdc5582eb2833e24eb2ce562906a54374289",
+        "stderr": "f842f7da0c40ad4b4bd2ee8881a128af2d8ee03d2dd3456db82feb6212199521",
+        "observed": "32f978476d5a03d5eda1fd74c4a23f77d772f42514851d6e917c96c4f133a3cb"
+      }
+    },
+    "stream": "observed",
+    "sha256": "32f978476d5a03d5eda1fd74c4a23f77d772f42514851d6e917c96c4f133a3cb"
+  }
+]

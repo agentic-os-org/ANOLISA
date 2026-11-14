@@ -3,6 +3,48 @@
 // stays a build log; a diff full of error lines stays a diff).
 
 #[test]
+fn isolated_maven_download_does_not_override_other_content_routes() {
+    let download = "Downloaded from central: https://repo.maven.apache.org/maven2/org/example/sample/1.0/sample-1.0.pom (22 kB at 34 kB/s)\n";
+    for (before, after, expected) in [
+        ("Transfer example:\n".to_owned(), "", ContentType::PlainText),
+        ("# Transfer example\n```text\n".to_owned(), "```\n", ContentType::PlainText),
+        (format!("name,count\n{}", "sample,42\n".repeat(400)), "", ContentType::Tabular),
+        ("use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(), "", ContentType::SourceCode),
+    ] {
+        assert_eq!(detect(&format!("{before}{after}")), expected);
+        assert_eq!(detect(&format!("{before}{download}{after}")), expected);
+    }
+}
+
+#[test]
+fn maven_examples_do_not_override_the_enclosing_document() {
+    let download = "Downloaded from central: https://repo.maven.apache.org/maven2/org/example/sample/1.0/sample-1.0.pom (22 kB at 34 kB/s)\n";
+    let phase = "[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n";
+    for prefix in ["", "[INFO] "] {
+        for count in [2, 30, 400] {
+            let transfers = format!("{prefix}{download}").repeat(count);
+            for body in [transfers.clone(), format!("{phase}{transfers}"), format!("$ mvn verify\n{phase}{transfers}exit code: 0\n")] {
+                for (before, after, expected) in [
+                    ("Transfer example:\n".to_owned(), "", ContentType::PlainText),
+                    ("+ /usr/bin/cat README.md\n".to_owned(), "", ContentType::PlainText),
+                    ("+ env cat README.md\n".to_owned(), "", ContentType::PlainText),
+                    ("WARNING: Quoted Maven log below:\n".to_owned(), "", ContentType::PlainText),
+                    ("[INFO] Scanning for projects...\n```text\n".to_owned(), "```\n", ContentType::PlainText),
+                    ("# Maven example\n```text\n".to_owned(), "```\n", ContentType::PlainText),
+                    ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+                    (format!("name,count\n{}", "sample,42\n".repeat(400)), "", ContentType::Tabular),
+                    ("use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(), "", ContentType::SourceCode),
+                ] {
+                    let input = format!("{before}{body}{after}");
+                    assert_eq!(detect(&input), expected, "prefix={prefix:?}, count={count}, before={before:?}");
+                }
+            }
+            assert!(!tokenless_compressors::BuildLogCompressor::detect(&transfers));
+        }
+    }
+}
+
+#[test]
 fn detects_json() {
     assert_eq!(
         detect(r#"[{"id": 1, "state": "open"}, {"id": 2, "state": "closed"}]"#),
@@ -362,4 +404,14 @@ fn wire_values_are_stable_and_unique() {
     wires.sort_unstable();
     wires.dedup();
     assert_eq!(wires.len(), all.len());
+}
+
+#[test]
+fn detects_maven_with_and_without_downloads() {
+    for content in [
+        include_str!("../../../../tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt"),
+        include_str!("../../../../tokenless-compressors/tests/fixtures/build_logs/maven/commons_warm.txt"),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
 }

@@ -5283,3 +5283,119 @@ fn mode_mismatch_notice_survives_an_unwritable_stderr() {
         },
     );
 }
+
+#[test]
+fn maven_post_tool_retains_recovery_when_no_layout_can_be_planned() {
+    let routine = (0..60)
+        .map(|index| format!("[INFO] Compiling module {index} of the project with a fairly long descriptive line\n"))
+        .collect::<String>();
+    let transfers = (0..20)
+        .map(|index| {
+            format!(
+                "Downloading from central: https://repo.maven.apache.org/maven2/org/example/mod-{index}/1.0/mod-{index}-1.0.jar\n\
+                 Progress (1): 4.0/20 kB\rProgress (1): 20 kB\r                    \rDownloaded from central: https://repo.maven.apache.org/maven2/org/example/mod-{index}/1.0/mod-{index}-1.0.jar (20 kB at 50 kB/s)\n"
+            )
+        })
+        .collect::<String>();
+    for input in [
+        format!(
+            "$ mvn -q verify\n{routine}[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\nDownloaded from central: https://repo.maven.apache.org/maven2/org/example/sample/1.0/sample-1.0.pom (22 kB at 34 kB/s)\nexit code: 0\n"
+        ),
+        format!(
+            "$ mvn verify\n[INFO] ----------------< org.example:sample >----------------\n[INFO] Building Sample 1.0\n[INFO]   from pom.xml\n[INFO] ----------------[ jar ]----------------\n[INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n{transfers}exit code: 0\n"
+        ),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let request = build_log_request(&input, "success", "maven-recovery");
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+        let compressed = result["output"].as_str().unwrap();
+        let marker = compressed
+            .split_inclusive('\n')
+            .find(|line| line.contains("lines omitted."))
+            .unwrap();
+        let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+        let payload = store
+            .retrieve(result["stash_keys"][0].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(compressed.replacen(marker, &payload, 1), input);
+    }
+}
+
+#[test]
+fn maven_post_tool_preserves_v2_lossless_contract_without_stash() {
+    let input =
+        include_str!("../../tokenless-compressors/tests/fixtures/build_logs/maven/jsoup_batch.txt");
+    for recovery in [
+        serde_json::json!({"kind":"none"}),
+        serde_json::json!({"kind":"shell"}),
+        serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "maven")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery;
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains("tokenless retrieve")
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let database = fixture.data_dir.join("stash.db");
+        if database.exists() {
+            assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+        }
+    }
+}

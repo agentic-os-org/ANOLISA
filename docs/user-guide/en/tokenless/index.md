@@ -399,7 +399,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm and Maven layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Rewrites with RTK and submits shell input that runs through `tokenless rtk` when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
@@ -554,6 +554,77 @@ and layout are eligible, with no Stash writes. Overall output must still be smal
 status, origin and adapter size gates still apply. This is not universal pnpm-version
 or script-output coverage, nor evidence of whole-task billing savings. The existing
 Protocol v2 [CLI contract](cli-reference.md#compress) remains unchanged.
+
+### Maven build output
+
+Source builds with Maven BuildLog support compact recognized native Maven output
+through the existing PostTool content route. Default and `--batch-mode` logs are
+recognized independently of the command string and dependency-cache state. The
+existing `build_log_reduction` operation reports `lossless`; this structural
+compaction needs no recovery capability and never writes to Stash.
+
+Detection requires related Maven records in a bounded sample: a plugin phase
+followed by a recognized record, a complete module/test banner, or a build
+outcome with its timing footer. The visible beginning within the head sample
+budget must look like a log, optionally after a `$ ` prompt, a Maven `set -x`
+trace (`mvn`, `mvnw`, `mvnDebug` or `mvnd`), a JVM option or known
+HotSpot/access warning, a `mvn --show-version` header, or `[mvnd] ` startup
+output; line-level timestamps are not stripped. Markdown-fenced lines cannot
+supply Maven evidence, evidence windows never cross fences or sample gaps, and
+tail-only evidence across a sample gap declines if a head fence stays open or a
+tail fence appears; once unfenced strong evidence is present in the head, later
+fences in build output do not disqualify the log. If the beginning falls outside
+the sample budget, Maven detection declines. Downloads alone and isolated
+scanning/outcome markers do not establish Maven context. Maven-style transfers
+and CR redraws also do not count as Cargo or standalone Generic progress
+evidence. Download-only fragments remain unchanged; within confirmed Maven
+output they retain the compaction described below. CR-containing evidence is
+excluded from structural detection, so CRLF-only output uses the other content
+detectors, and Maven structural compaction currently supports LF records only.
+This content heuristic cannot establish which process produced text that is
+otherwise identical to a native log, and it intentionally drops reductions
+previously obtained by treating Maven download-only fragments as Cargo or
+Generic progress.
+
+If no Maven edits can be planned, command/exit-anchored logs can still use the
+existing Generic progress reduction when Stash and Shell/Tool recovery are
+available, including strictly validated Maven transfer and CR redraw records
+that remain inside an active Maven scope before any diagnostic, malformed record
+or unknown text. Malformed CR redraws are never admitted as Generic progress.
+That fallback reports `retrievable` and retains recovery instructions; without
+recovery it preserves the original text after SGR cleanup. A selected Maven
+layout stays lossless and is not combined with Generic omissions.
+
+A compact block starts with `Maven templates` and a JSON header containing literal
+strings and a row count. Each following line contains a zero-based template index
+and TAB-separated fields. Reconstruct each original line by interleaving that
+row's fields with its template literals, then appending LF. Rows retain their
+original order and duplicates. This preserves module/plugin formatting, INFO
+prefixes, test class and method names, counts, skips, durations and Reactor results.
+Consecutive complete download records can also share repository and ordinary
+HTTP(S) URL directory prefixes; every action, URL and completion receipt remains
+present, including the batch-mode `[INFO] ` prefix. Downloads are never paired,
+sorted or deduplicated. Reconstruction is byte-exact after existing SGR cleanup;
+even decorative padding remains represented.
+
+Only complete, recognized records are eligible. Each block is limited to 256
+records and 64 KiB; an oversized block stays whole. At most 256 edits are applied
+per result; once reached, completed edits are retained and the suffix stays intact.
+Any record exceeding 64 KiB suppresses Maven edits for that result. CR-containing
+records remain byte-for-byte unchanged after SGR cleanup, and compact blocks
+never cross them. Strictly validated transfer redraws keep the current scope open without being compressed. Warnings,
+exceptions, malformed records and unknown text close it; only a complete plugin
+phase, module banner or three-line test banner can reopen it. Download-looking
+text and blank lines cannot reopen an opaque scope. URLs with credentials, queries,
+fragments or percent escapes are outside the initial download grammar and stay
+unchanged. Already compacted results are left alone.
+
+Each block and the complete candidate must save both characters and estimated
+tokens. Runtime and adapter size, status, source and replacement guards still
+apply: Tool Errors keep their original output. Maven commands retain their current
+PreTool RTK behavior; this feature does not add a command-rewriting exemption or
+invoke RTK from PostTool. Local corpus and adapter replay results are not evidence
+of live-Agent, whole-task or billing savings.
 
 ### CSV/TSV compaction preserves complete tables
 
