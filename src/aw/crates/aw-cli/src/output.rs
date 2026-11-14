@@ -176,7 +176,7 @@ mod mutation;
 pub(crate) enum ValidationError {
     Io(std::io::Error),
     Configuration(aw_config::Error),
-    Projection(aw_core::admission::AdmissionError),
+    Projection(projection::Error),
 }
 
 struct Failure {
@@ -373,7 +373,12 @@ pub(crate) fn complete_validation(
             ),
             ValidationError::Projection(error) => (
                 ErrorCode::InvalidConfiguration,
-                "Configuration projection failed",
+                match error {
+                    projection::Error::StepLimit { .. } => {
+                        "Configured target exceeds the service step limit"
+                    }
+                    projection::Error::Admission(_) => "Configuration projection failed",
+                },
                 error.to_string(),
             ),
         };
