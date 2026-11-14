@@ -175,12 +175,18 @@ aliyun ecs DescribeInstances --RegionId cn-hangzhou --PageSize 10 --PageNumber 1
 ### 输出格式
 
 ```bash
-# JSON格式输出
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --output json
+# JSON格式输出（默认，无需额外参数）
+aliyun ecs DescribeInstances --RegionId cn-hangzhou
 
-# 表格格式输出
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --output table
+# 表格格式输出：--output 用于筛选字段并渲染表格，cols 必填，rows 用 JMESPath 指定数据数组
+aliyun ecs DescribeInstances --RegionId cn-hangzhou \
+    --output cols=InstanceId,Status rows=Instances.Instance[]
 ```
+
+> **注意**：`--output` 不接受 `json`、`table` 这类取值，写成 `--output json` 会在发起请求前直接失败：
+> `ERROR: bad flag format --output with field cols= required`。
+> 支持的字段：`cols`（必填，逗号分隔的字段名，同时作为表头）、`rows`（可选，JMESPath 数组表达式，
+> 嵌套响应通常需要指定）、`num=true`（可选，额外输出从 0 开始的序号列）。
 
 ## 执行前检查
 
