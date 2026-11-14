@@ -1,12 +1,67 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// How long `receive` waits for a message the test knows must arrive.
+///
+/// The five-second bound flaked on a loaded CI runner
+/// (`quota::clear_and_commit_share_the_snapshot_lock_and_freed_space_is_retried`,
+/// issue #10010): the quota fixture stages ~100 MiB of session files and
+/// coordinates three processes, so scheduling and I/O delay on a busy runner
+/// can exceed five seconds without any lock or progress failure. The helper
+/// only ever waits for messages the protocol guarantees, so a longer bound
+/// costs nothing on the happy path and turns a load flake back into either a
+/// pass or a genuine failure with diagnostics.
+const RECEIVE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Bounded tail of the child's stderr, kept for the receive-timeout diagnostic.
+///
+/// `start` used to send the child's stderr to `/dev/null`, so a runtime that
+/// stalled or crashed took its reason to the grave: the deadline panic could
+/// not distinguish an initialization, first-result, or retry-result timeout,
+/// nor a crash from a lock wait. A small bounded tail restores that evidence
+/// without changing any test's semantics.
+struct StderrTail(Arc<Mutex<String>>);
+
+impl StderrTail {
+    fn capture(child: &mut Child) -> Self {
+        let stderr = child.stderr.take().expect("child stderr is piped");
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&buffer);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                let mut tail = sink.lock().unwrap();
+                tail.push_str(&line);
+                tail.push('\n');
+                // Keep the tail bounded: a chatty runtime must not grow the
+                // buffer without limit over a long test.
+                let excess = tail.len().saturating_sub(4096);
+                if excess > 0 {
+                    tail.drain(..excess);
+                }
+            }
+        });
+        Self(buffer)
+    }
+
+    fn text(&self) -> String {
+        self.0.lock().unwrap().clone()
+    }
+}
 
 pub(super) struct RuntimeProcess {
     pub(super) child: Child,
     pub(super) lines: Receiver<Value>,
+    stderr: StderrTail,
+    /// Counts of the message types already read from this process. The
+    /// timeout diagnostic prints this history, so a stall can be located to
+    /// the phase that produced (or failed to produce) the last message.
+    consumed: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl RuntimeProcess {
@@ -17,7 +72,7 @@ impl RuntimeProcess {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("start runtime");
         writeln!(child.stdin.as_mut().unwrap(), "{}", json!({"type":"control_request", "request_id":"init", "request":{"subtype":"initialize"}})).expect("initialize protocol");
@@ -25,26 +80,56 @@ impl RuntimeProcess {
     }
 
     pub(super) fn from_child(mut child: Child) -> Self {
+        let stderr = StderrTail::capture(&mut child);
         let stdout = child.stdout.take().unwrap();
         let (sender, lines) = mpsc::channel();
+        let consumed = Arc::new(Mutex::new(BTreeMap::new()));
+        let consumed_events = Arc::clone(&consumed);
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
-                let value = serde_json::from_str(&line.unwrap()).unwrap();
+                let value = match serde_json::from_str::<Value>(&line.unwrap()) {
+                    Ok(value) => value,
+                    Err(error) => panic!("runtime emitted invalid JSONL: {error}"),
+                };
+                if let Some(kind) = value["type"].as_str() {
+                    *consumed_events
+                        .lock()
+                        .unwrap()
+                        .entry(kind.to_owned())
+                        .or_default() += 1;
+                }
                 if sender.send(value).is_err() {
                     break;
                 }
             }
         });
-        Self { child, lines }
+        Self {
+            child,
+            lines,
+            stderr,
+            consumed,
+        }
     }
 
     pub(super) fn receive(&self, kind: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let started = Instant::now();
         loop {
+            let deadline = started + RECEIVE_DEADLINE;
             let value = self
                 .lines
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .expect("runtime must respond within five seconds");
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "runtime did not send a {kind:?} message within {}s\n\
+                         awaited from: {:?} ago\n\
+                         messages consumed so far: {:?}\n\
+                         child stderr tail:\n{}",
+                        RECEIVE_DEADLINE.as_secs(),
+                        started.elapsed(),
+                        self.consumed.lock().unwrap(),
+                        self.stderr.text(),
+                    )
+                });
             if value["type"] == kind {
                 return value;
             }
@@ -155,7 +240,7 @@ fn first_commit_holds_the_live_lease_while_waiting_for_the_user_budget_lock() {
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     writeln!(
@@ -486,7 +571,7 @@ fn first_commit_sync_failures_preserve_only_published_controls() {
             .env("COSH_TEST_COMMIT_FSYNC_PHASE", phase)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         writeln!(child.stdin.as_mut().unwrap(), "{}", json!({"type":"control_request", "request_id":"init", "request":{"subtype":"initialize"}})).unwrap();
