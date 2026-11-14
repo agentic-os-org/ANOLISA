@@ -18,7 +18,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | Blocks the first call and suggests Core's rewrite | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
-| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | Passthrough in the V1 plugin |
+| OpenCode | `opencode` | Hard-disabled | Replaces shell-family input | Replaces tool output | Pipeline-selected for replaceable text | Passthrough in both plugin generations |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
 
@@ -26,7 +26,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 Cosh-NG uses the adapter value `cosh` and the existing `.copilot-shell` extension directory.
 
-Schema compression is active in QwenPaw and the AgentScope SDK integration, which supply a static recovery tool and current model-call marker authorization. Cosh-NG's `BeforeModel` hook and OpenCode's V1 `tool.definition` hook call the Common Hook without that recovery capability, so Core preserves their schemas. Qwen Code skips the declared, unsupported `BeforeModel` event at registration.
+Schema compression is active in QwenPaw and the AgentScope SDK integration, which supply a static recovery tool and current model-call marker authorization. Cosh-NG's `BeforeModel` hook and OpenCode's `tool.definition` (V1) and `session` `context` (V2) hooks call the Common Hook without that recovery capability, so Core preserves their schemas. Qwen Code skips the declared, unsupported `BeforeModel` event at registration.
 
 ### Compression coverage and protocol limits
 
@@ -45,7 +45,7 @@ by default. The global compression switch selects dry-run and does not disable R
 | Claude Code | Response replacement requires 2.1.121 or later. Structured outputs retain their types; only text slots can use TOON, table/search views, HTML pages, or Diff. HTML inside JSON string values can be rendered in either, because the result stays JSON. No model-tool-schema replacement hook is registered. |
 | OpenClaw | Static `tokenless_retrieve` enables recoverable PostTool compression when the tool factory receives a conversation UUID. Keep this tool allowed by the host tool policy. Without the tool API or UUID, only lossless candidates apply. Prompt hooks expose messages but cannot replace tool schemas. Multi-block and multimodal results pass through. |
 | Cosh-NG / legacy Copilot Shell | Cosh-NG can replace supported results, but the Common BeforeModel hook cannot publish an executable static recovery tool. Legacy Copilot Shell cannot replace PostTool results. |
-| OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
+| OpenCode plugin | V1 `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions. V2 registers the declarations of the outgoing model request through its `session` `context` hook, but that request declares no marker-authorized recovery path either, so Schema stays unchanged on both generations. |
 | Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH use block-and-suggest for RTK; DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
 | QwenWork workspace Shell or plugin-private CLI | On macOS, a complete private recovery bridge rewrites Marker commands to the plugin binary with matching state and attribution. Without that bridge, including Windows private runtimes, only lossless candidates are eligible. |
 | QwenPaw / AgentScope | All current Core domains are connected, including Schema and static retrieval. Intermediate stream chunks and non-text blocks remain unchanged. Custom AgentScope tools require an explicit content-origin contract. |
@@ -104,7 +104,7 @@ output contract.
 
 The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
 transformations are lossy, so Core passes the tools through unchanged, including OpenCode's V1
-per-tool definition path. The direct `compress-schema` command remains available.
+per-tool definition path and its V2 request-declaration path. The direct `compress-schema` command remains available.
 
 OpenClaw, Hermes, and DeepSeek Harness delegate their PostTool decisions to Core. The standalone
 `compress-response` command remains the explicit JSON cleanup interface.
@@ -624,6 +624,34 @@ records the profile names, so disable does not accept another `--profile`.
 Schema compression uses the host's model-facing JSON Schema while preserving its runtime
 parameter validator. Hosts that expose only a runtime validator skip schema compression;
 response compression and command rewriting remain available.
+
+One `plugin.js` serves both host generations. OpenCode 2 loads its default definition
+(`id` + `setup`), and OpenCode 1.3.4 and newer load the same export's `server()` entrypoint.
+OpenCode 1.0.0 through 1.3.3 are not supported: their plugin loader calls every module export as
+a plugin function, which the object default export OpenCode 2 requires cannot satisfy. The two
+loader contracts are mutually exclusive, so the supported range starts at 1.3.4, the first
+release that reads an object default export. On a host below that floor the bundled installer
+removes a registration left over from when the release was still supported, so replacing the
+adapter source in place cannot hand the old host a module it fails to initialize; `detect.sh`
+names that stale registration. An npm package upgrade runs that reconciliation automatically,
+in a mode that clears a stale registration but never creates one. Command rewriting and shell failure evidence match
+the shell tool family the shared hooks classify — OpenCode 1 names its built-in shell tool
+`bash`, OpenCode 2 names it `shell` — instead of a single host spelling.
+
+The bundled installer recognizes a managed link by its target alone; it does not read or write
+ANOLISA receipts. It therefore also removes a registration created by `anolisa adapter enable`,
+which would leave that receipt claiming a link that is gone. To keep the link and its receipt
+together it hands the removal to `anolisa adapter disable tokenless opencode` when that CLI is
+reachable — the command is idempotent and clears both — and otherwise removes the link itself and
+reports that the receipt still needs clearing by hand. An `anolisa update` runs none of these
+scripts, so on that path the registration survives the bundle replacement until
+`anolisa adapter disable tokenless opencode` is run.
+
+OpenCode 2 registers the same three paths as the `tool` hooks `execute.before` and
+`execute.after` plus the `session` hook `context`, which carries the tool declarations of the
+outgoing model request. Because that request declares no marker-authorized recovery path, Core
+currently returns the declarations unchanged; the registration takes effect as soon as such a
+path is declared.
 
 OpenCode discovers global local plugins at startup. For an ANOLISA-managed installation, use:
 

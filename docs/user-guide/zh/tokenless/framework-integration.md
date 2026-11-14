@@ -19,7 +19,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
-| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | V1 插件透传 |
+| OpenCode | `opencode` | 已硬关闭 | 替换 Shell 工具族输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | 两代插件均透传 |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
 
@@ -27,7 +27,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 
 Cosh-NG 使用的 Adapter 值为 `cosh`，扩展仍使用现有的 `.copilot-shell` 目录。
 
-QwenPaw 和 AgentScope SDK 集成提供静态恢复工具及当前模型调用的 Marker 授权，因此 Schema 压缩实际生效。Cosh-NG 的 `BeforeModel` 和 OpenCode V1 的 `tool.definition` 调用 Common Hook 时没有声明这一恢复能力，Core 会保留原始 Schema。Qwen Code 则在注册时跳过尚不支持的 `BeforeModel` 事件。
+QwenPaw 和 AgentScope SDK 集成提供静态恢复工具及当前模型调用的 Marker 授权，因此 Schema 压缩实际生效。Cosh-NG 的 `BeforeModel`、OpenCode V1 的 `tool.definition` 与 OpenCode V2 的 `session` 域 `context` 调用 Common Hook 时没有声明这一恢复能力，Core 会保留原始 Schema。Qwen Code 则在注册时跳过尚不支持的 `BeforeModel` 事件。
 
 ### 压缩覆盖与协议限制
 
@@ -45,7 +45,7 @@ HTML 和 Diff 裁剪。内容来源、可恢复性和收益门禁仍然生效，
 | Claude Code | 响应替换要求 2.1.121 及以上版本。结构化输出保留原类型，只有文本槽才能使用 TOON、表格／搜索视图、HTML 页面或 Diff。JSON 字符串值中的 HTML 在两种槽位中都可转写，因为结果仍是 JSON。未注册模型工具 Schema 替换 Hook。 |
 | OpenClaw | 工具工厂收到会话 UUID 时，静态 `tokenless_retrieve` 支持可恢复的 PostTool 压缩。宿主工具策略须允许该工具。缺少工具注册 API 或 UUID 时只接受无损候选。Prompt Hook 能读取消息，但不能替换工具 Schema。多块和多模态结果透传。 |
 | Cosh-NG／旧版 Copilot Shell | Cosh-NG 能替换受支持的结果，但 Common BeforeModel Hook 无法发布可执行的静态恢复工具。旧版 Copilot Shell 不能替换 PostTool 结果。 |
-| OpenCode V1 插件 | `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，且不覆盖 MCP 定义，因此 Schema 保持原样。OpenCode V2 插件 API 需要单独迁移，当前 V1 Adapter 不支持；这不表示 V2 协议无法支持 Schema 压缩。 |
+| OpenCode 插件 | V1 的 `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，且不覆盖 MCP 定义；V2 通过 `session` 域的 `context` Hook 注册本次请求实际发出的工具声明，但该请求同样没有声明 Marker 授权的恢复路径，因此两代宿主的 Schema 都保持原样。 |
 | Qoder、千问办公、Hermes、DSH | 当前集成接口没有同时提供可修改的模型工具 Schema 列表和静态恢复授权。Hermes、DSH 的 RTK 使用阻止后建议重试；DSH 在 pre-execute 前已冻结并审计参数，禁止直接修改。 |
 | 千问办公工作区 Shell 或插件私有 CLI | macOS 的完整恢复桥接会把 Marker 命令改写为插件私有二进制，并携带匹配的状态和归属信息。缺少桥接时（包括 Windows 私有运行时）仅接受无损候选。 |
 | QwenPaw／AgentScope | 已接入全部现有 Core 领域，包括 Schema 和静态恢复。中间流式 Chunk 与非文本块保持不变；AgentScope 自定义工具需要明确的内容来源契约。 |
@@ -94,7 +94,7 @@ Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显
 序列化为其要求的字符串替换值；OpenCode 继续保留字符串输出契约。
 
 Common BeforeModel Hook 同样没有 Marker 授权恢复路径。当前 Schema 变换均为有损，因此 Core
-原样返回 Tools，OpenCode V1 的逐工具定义路径也如此。直接 `compress-schema` 命令仍可使用。
+原样返回 Tools，OpenCode V1 的逐工具定义路径与 V2 的请求声明路径也如此。直接 `compress-schema` 命令仍可使用。
 
 OpenClaw、Hermes 与 DeepSeek Harness 已把 PostTool 决策委托给 Core。独立
 `compress-response` 命令继续作为显式 JSON 清理入口。
@@ -552,6 +552,27 @@ receipt 已经记录 profile 名称，因此 disable 不再接受 `--profile`。
 
 Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
 仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
+
+同一个 `plugin.js` 同时服务两代宿主：OpenCode 2 读取其 default 定义（`id` + `setup`），
+OpenCode 1.3.4 及更新版本读取同一导出对象的 `server()` 入口。OpenCode 1.0.0 至 1.3.3 不在支持范围内：
+这些版本的插件加载器会把模块的每个导出都当作插件函数调用，而 OpenCode 2 要求 default 导出是
+对象，两个加载契约互斥，因此受支持范围从首个能读取对象形 default 导出的 1.3.4 起算。
+低于该下限时，随包安装脚本会移除「该版本尚在支持范围内时」留下的注册链接，避免就地
+替换适配器源码后，旧宿主加载到一个它无法初始化的模块；`detect.sh` 会指名这条残留注册。
+npm 包升级会自动执行这项 reconcile，且运行在「只清理、绝不新建注册」的模式下。命令重写
+和 Shell 失败证据按共享 Hook 归类的 Shell 工具族匹配（OpenCode 1 的内建 Shell Tool 叫 `bash`，
+OpenCode 2 叫 `shell`），而不是只认某一代宿主的拼写。
+
+随包安装脚本只按链接目标识别受管链接，它不读取也不写入 ANOLISA receipt。因此它同样会删除由
+`anolisa adapter enable` 建立的注册，而那会让 receipt 继续声明一条已不存在的链接。为了让链接与 receipt
+一起收敛，脚本会在 `anolisa` CLI 可用时把删除动作交给 `anolisa adapter disable tokenless opencode`
+（该命令幂等，会同时清掉两者）；CLI 不可用时则自行删除链接，并明确提示 receipt 仍需手工清理。
+`anolisa update` 不会执行这些脚本，因此走该路径时，注册会在 bundle 被替换后继续存在，
+直到执行 `anolisa adapter disable tokenless opencode`。
+
+OpenCode 2 将同样三条路径注册为 `tool` 域的 `execute.before` / `execute.after` Hook，
+以及 `session` 域的 `context` Hook；后者携带本次请求实际发出的工具声明。由于该请求没有声明
+Marker 授权的恢复路径，Core 目前原样返回工具声明，一旦声明了恢复路径该注册即刻生效。
 
 OpenCode 启动时会自动加载配置目录下的 Plugin。通过 ANOLISA 管理安装时，使用：
 

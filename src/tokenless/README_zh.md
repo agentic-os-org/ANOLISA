@@ -107,7 +107,7 @@ SDK、QwenPaw 和 AgentScope 继承与 CLI 相同的压缩环境开关，显式 
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
-- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON + Marker 命令恢复；V1 插件缺少静态恢复授权，Schema 透传
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON + Marker 命令恢复；两代插件都缺少静态恢复授权，Schema 透传
 - **DeepSeek Harness 插件** — 通过 DSH 工具生命周期接入 RTK 重试建议、响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
@@ -339,13 +339,35 @@ Session，再传入启用 Tokenless 的 Session。
 ### OpenCode 安装
 
 V1 `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，
-Common Hook 因此保留原始 Schema。响应压缩和命令重写仍然可用；OpenCode V2 插件 API 需要单独迁移。
+Common Hook 因此保留原始 Schema。响应压缩和命令重写仍然可用。
 
-OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
-RTK 命令重写和响应/TOON 压缩；`tool.definition` 保持工具 Schema 原样。
+同一个 `plugin.js` 同时服务两代宿主：OpenCode 2 读取其 default 定义（`id` + `setup`），
+OpenCode 1.3.4 及更新版本读取同一导出对象的 `server()` 入口。OpenCode 1.0.0 至 1.3.3 不在支持范围内：
+这些版本的插件加载器会把模块的每个导出都当作插件函数调用，而 OpenCode 2 要求 default 导出是
+对象，两个加载契约互斥，因此受支持范围从首个能读取对象形 default 导出的 1.3.4 起算。
+低于该下限时，随包安装脚本会移除「该版本尚在支持范围内时」留下的注册链接，避免就地
+替换适配器源码后，旧宿主加载到一个它无法初始化的模块；`detect.sh` 会指名这条残留注册。
+npm 包升级会自动执行这项 reconcile，且运行在「只清理、绝不新建注册」的模式下。命令重写
+和 Shell 失败证据按共享 Hook 归类的 Shell 工具族匹配（OpenCode 1 的内建 Shell Tool 叫 `bash`，
+OpenCode 2 叫 `shell`），而不是只认某一代宿主的拼写。
+
+随包安装脚本只按链接目标识别受管链接，它不读取也不写入 ANOLISA receipt。因此它同样会删除由
+`anolisa adapter enable` 建立的注册，而那会让 receipt 继续声明一条已不存在的链接。为了让链接与 receipt
+一起收敛，脚本会在 `anolisa` CLI 可用时把删除动作交给 `anolisa adapter disable tokenless opencode`
+（该命令幂等，会同时清掉两者）；CLI 不可用时则自行删除链接，并明确提示 receipt 仍需手工清理。
+`anolisa update` 不会执行这些脚本，因此走该路径时，注册会在 bundle 被替换后继续存在，
+直到执行 `anolisa adapter disable tokenless opencode`。
+
+OpenCode 适配器注册已硬关闭的 Tool Ready、RTK 命令重写和响应/TOON 压缩：OpenCode 1 使用
+`tool.execute.before/after` 原生插件事件和 `tool.definition`，OpenCode 2 使用 `tool` 域的
+`execute.before` / `execute.after` Hook 和 `session` 域的 `context` Hook；两代宿主的工具 Schema
+都保持原样。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
 响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
+
+Schema 路径在两代宿主上都会注册。由于共享的 BeforeModel 请求没有声明 Marker 授权的恢复路径，
+Core 目前原样返回工具声明；一旦声明了恢复路径，该注册即刻生效。
 
 通过 ANOLISA 启用已安装的插件，然后重启 OpenCode：
 
