@@ -11,6 +11,11 @@ Regression tests for two defects:
    dict.update / AttributeError from .items()) instead of the clean
    `ERROR: ...` diagnostics this validator uses everywhere else — notable
    because merge() exists precisely to handle pasted external JSON.
+3. A config whose *root* is not a JSON object (`[...]`, `"text"`, `5`,
+   `null`, `true`) crashed the same way, because the value guard covered
+   `mcpServers` but the root was assumed to be a mapping. Both `--check` and
+   `--merge` were affected, and `--merge` takes pasted JSON, so any pasted
+   array reached it.
 """
 
 import json
@@ -121,6 +126,49 @@ class TestMergeShapeGuards(unittest.TestCase):
             merged = json.load(f)
         self.assertEqual(merged["mcpServers"]["a"], {"command": "npx"})
         self.assertEqual(merged["mcp"], {"k": "v"})
+
+
+
+class TestRootShape(unittest.TestCase):
+    """A root that is not a JSON object must get a diagnostic, not a traceback."""
+
+    NON_OBJECT_ROOTS = ['[{"mcpServers": {}}]', '"text"', "5", "null", "true"]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.config = os.path.join(self._tmp.name, "cosh.json")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def assert_clean_diagnostic(self, result):
+        output = result.stdout + result.stderr
+        self.assertNotIn("Traceback", output, output)
+        self.assertIn("ERROR:", output)
+        self.assertEqual(result.returncode, 1)
+
+    def test_check_rejects_non_object_root(self):
+        """修复前：根为 list/null 等时抛 AttributeError traceback。"""
+        for root in self.NON_OBJECT_ROOTS:
+            with self.subTest(root=root):
+                with open(self.config, "w", encoding="utf-8") as f:
+                    f.write(root)
+                self.assert_clean_diagnostic(run("--check", self.config))
+
+    def test_merge_rejects_non_object_root(self):
+        """修复前：粘贴一个根为数组的 JSON 给 --merge 同样 traceback。"""
+        for root in self.NON_OBJECT_ROOTS:
+            with self.subTest(root=root):
+                self.assert_clean_diagnostic(run(root, "--merge", self.config))
+                self.assertFalse(os.path.exists(self.config),
+                                 "a rejected input must not write the config")
+
+    def test_merge_accepts_object_root(self):
+        """守卫只拒绝非对象根，不误伤正常输入。"""
+        result = run('{"mcpServers": {"ok": {"command": "run"}}}', "--merge", self.config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.config, "r", encoding="utf-8") as f:
+            self.assertIn("ok", json.load(f)["mcpServers"])
 
 
 if __name__ == "__main__":
