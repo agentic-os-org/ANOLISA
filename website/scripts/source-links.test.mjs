@@ -34,6 +34,43 @@ test('GitHub anchors include formatted headings and explicit HTML anchors, exclu
     + '```md\n[example](missing.md)\n```\n'), [{url: 'zh/index.md', line: 1}]);
 });
 
+test('reference links keep the first normalized definition', async (t) => {
+  for (const reference of ['[Start][entry]', '[entry][]', '[entry]']) {
+    for (const label of ['entry', 'ENTRY', ' entry ']) {
+      await t.test(`${reference} with duplicate ${label}`, () => {
+        const markdown = `${reference}\n\n[entry]: first.md\n[${label}]: second.md\n`;
+        assert.deepEqual(markdownSourceLinks(markdown), [{url: 'first.md', line: 1}]);
+      });
+    }
+  }
+});
+
+test('reference links check the destination rendered by Markdown', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'source-links-first-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  await writeFile(path.join(root, 'valid.md'), '# Valid\n');
+  for (const [first, second, expectedError] of [
+    ['missing.md', 'valid.md', 'entry.md: missing Markdown target missing.md'],
+    ['valid.md', 'missing.md', undefined],
+    ['missing.md', 'https://example.com/', 'entry.md: missing Markdown target missing.md'],
+  ]) {
+    await t.test(`${first} before ${second}`, async () => {
+      const links = markdownSourceLinks(`[Read][ref]\n\n[ref]: ${first}\n[ref]: ${second}\n`);
+      assert.equal(links.length, 1);
+      assert.equal(await checkMarkdownSourceLink(root, 'entry.md', links[0].url), expectedError);
+    });
+  }
+});
+
+test('reference definitions leave inline links and distinct labels intact', () => {
+  assert.deepEqual(markdownSourceLinks('[Inline](inline.md) [One][a] [Two][b]\n\n'
+    + '[a]: first.md\n[a]: ignored.md\n[b]: other.md\n'), [
+    {url: 'inline.md', line: 1},
+    {url: 'first.md', line: 1},
+    {url: 'other.md', line: 1},
+  ]);
+});
+
 test('migrated component entry links resolve in the repository Markdown', async () => {
   const entries = new Set();
   for (const locale of ['en', 'zh']) {
