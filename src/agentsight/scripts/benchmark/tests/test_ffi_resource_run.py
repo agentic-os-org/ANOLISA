@@ -249,6 +249,7 @@ def test_native_ffi_host_reuses_load_capture_and_resource_reporting(
     assert measured["source"]["sha256"] == resource_inputs.digest(output / "run/agentsight")
     assert (output / "run/libagentsight.so").read_bytes() == library.read_bytes()
     assert "Scope: minimal C FFI host" in result.stdout
+    assert (output / "run/metrics-report.html").is_file()
     assert_reaped(output)
 
 
@@ -412,11 +413,60 @@ def test_v2_metadata_only_receipt_is_matched_as_incomplete_without_body(
     path = tmp_path / "ffi-events.log"
     path.write_text("J\t" + json.dumps(call) + "\n")
     captured, _ = validate_results.load_ffi_captured(path, expected={request_id})
-    assert captured == {request_id: [("error", None)]}
+    assert captured == {request_id: [("incomplete:lru_evicted", None)]}
     report = validate_results.make_report({request_id}, {request_id}, captured, 1012)
     assert report["matched"] == 1
     assert report["missing_ids"] == []
     assert report["complete"] == report["token_correct"] == 0
+
+
+def test_v2_capacity_rejected_receipt_attributes_rejection(tmp_path: Path) -> None:
+    request_id = "bench-run-0-1"
+    call = {
+        "request": {"messages": []},
+        "metadata": {
+            "request_id": request_id,
+            "incomplete": "true",
+            "abandon_reason": "capacity_rejected",
+            "status_code": "200",
+        },
+        "token_usage": {"total_tokens": 1012},
+    }
+    path = tmp_path / "ffi-events.log"
+    path.write_text("J\t" + json.dumps(call) + "\n")
+    captured, _ = validate_results.load_ffi_captured(path, expected={request_id})
+    assert captured == {request_id: [("rejected:capacity_rejected", 1012)]}
+    report = validate_results.make_report({request_id}, {request_id}, captured, 1012)
+    assert report["rejected"] == 1
+    assert report["unexplained_loss"] == 0
+    assert report["conflicts"] == 0
+
+
+def test_v2_capacity_rejected_receipt_conflicts_with_complete(tmp_path: Path) -> None:
+    request_id = "bench-run-0-2"
+    rejected = {
+        "request": {"messages": []},
+        "metadata": {
+            "request_id": request_id,
+            "incomplete": "true",
+            "abandon_reason": "capacity_rejected",
+            "status_code": "200",
+        },
+        "token_usage": {"total_tokens": 1012},
+    }
+    complete = {
+        "request": {"messages": []},
+        "metadata": {"request_id": request_id, "status_code": "200"},
+        "token_usage": {"total_tokens": 1012},
+    }
+    path = tmp_path / "ffi-events.log"
+    path.write_text(
+        "J\t" + json.dumps(rejected) + "\n" + "J\t" + json.dumps(complete) + "\n"
+    )
+    captured, _ = validate_results.load_ffi_captured(path, expected={request_id})
+    report = validate_results.make_report({request_id}, {request_id}, captured, 1012)
+    assert report["conflicts"] == 1
+    assert not validate_results._validation_passed(report, 0.999)
 
 
 def test_v2_metadata_request_id_respects_prefix_and_expected_filter(tmp_path: Path) -> None:
