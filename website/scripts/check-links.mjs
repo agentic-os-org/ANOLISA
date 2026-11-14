@@ -50,7 +50,7 @@ for (const htmlFile of htmlFiles) {
       errors.push(`${path.relative(buildDir, htmlFile)}: deprecated Copilot Shell link ${href}`);
       continue;
     }
-    if (/^(?:https?:|mailto:|tel:|javascript:)/.test(href)) continue;
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(href)) continue;
     const parsed = new URL(href, `${siteUrl}${currentPath}`);
     const target = parsed.pathname === currentPath
       ? htmlFile
