@@ -367,9 +367,12 @@ pub enum TopGrouping {
 /// One aggregated row of the live `top` view.
 #[derive(Debug, serde::Serialize)]
 pub struct TopRow {
-    /// Agent process ID, or `None` when the grouped calls carried no PID.
+    /// Agent process ID of the row's most recent call, or `None` when that call
+    /// carried none. Populated under both groupings.
     pub pid: Option<i64>,
-    /// Session ID, or `None` when grouping by process or the calls carried none.
+    /// Session ID of the row's most recent call, or `None` when that call
+    /// carried none. Populated under both groupings: a process row still
+    /// reports the session its latest call belongs to.
     pub session_id: Option<String>,
     /// Display name: stored agent name, else process name, else the grouping key.
     pub label: String,
@@ -418,10 +421,20 @@ pub struct TopWindowSummary {
 /// Grouping key of one `top` row.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum TopKey {
-    /// Fallback for calls whose grouping column is NULL or blank.
+    /// Fallback for calls whose grouping column is NULL or blank; the agent
+    /// label as folded by [`fallback_agent_key`].
     Agent(String),
     Pid(i64),
     Session(String),
+}
+
+/// Builds the [`TopKey::Agent`] fallback key: the agent label, case-folded so
+/// "Qoder" and "qoder" stay one group exactly as they do in
+/// [`GenAISqliteStore::get_latency_metrics`]. Only the key is folded — the row
+/// label still comes from the most recent call, so the table keeps the spelling
+/// the agent reported.
+fn fallback_agent_key(agent_label: Option<&str>) -> String {
+    agent_label.unwrap_or_default().to_lowercase()
 }
 
 /// One recorded call attributed to a `top` group.
@@ -620,9 +633,10 @@ impl GenAISqliteStore {
     ///
     /// Metrics use the same per-call derivation as [`Self::get_latency_metrics`]
     /// and are reported as p50/p95/p99 over the window. Calls whose grouping
-    /// column is NULL or blank are bucketed by agent label, so unattributed
-    /// traffic stays visible instead of merging into one anonymous row; `pid`
-    /// and `session_id` on each row come from its most recent call.
+    /// column is NULL or blank are bucketed by agent label, case-folded exactly
+    /// as [`Self::get_latency_metrics`] groups agents, so unattributed traffic
+    /// stays visible instead of merging into one anonymous row; `pid` and
+    /// `session_id` on each row come from its most recent call.
     ///
     /// Rows come back in grouping-key order; callers sort them for display.
     ///
@@ -684,11 +698,11 @@ impl GenAISqliteStore {
                 key: match grouping {
                     TopGrouping::Process => match pid {
                         Some(pid) => TopKey::Pid(pid),
-                        None => TopKey::Agent(agent_label.clone().unwrap_or_default()),
+                        None => TopKey::Agent(fallback_agent_key(agent_label.as_deref())),
                     },
                     TopGrouping::Session => match &session_id {
                         Some(session) => TopKey::Session(session.clone()),
-                        None => TopKey::Agent(agent_label.clone().unwrap_or_default()),
+                        None => TopKey::Agent(fallback_agent_key(agent_label.as_deref())),
                     },
                 },
                 pid,
@@ -699,7 +713,10 @@ impl GenAISqliteStore {
                 start,
                 seen: end.filter(|end| *end > start).unwrap_or(start),
                 input_tokens,
-                output_tokens: output_tokens.unwrap_or_default().max(0),
+                // Summed as stored, like [`Self::get_top_window_summary`] and
+                // every other token view: clamping here would let a bad negative
+                // sample make the rows disagree with the header total.
+                output_tokens: output_tokens.unwrap_or_default(),
                 is_sse: is_sse == Some(1),
                 latency: call_latency(start, end, first, output_tokens),
             })
@@ -1303,6 +1320,84 @@ mod top_tests {
             "only the trimmed s-1 is a session"
         );
         assert_eq!(summary.call_count, 5);
+        finish(store, path);
+    }
+
+    /// Two spellings of one unattributed agent are one row, and the row keeps
+    /// the spelling its most recent call reported.
+    #[test]
+    fn folds_agent_fallback_rows_case_insensitively() {
+        let calls = vec![
+            Call {
+                agent_name: Some("Qoder"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(1_200_000_000),
+                output_tokens: 5,
+                ..Default::default()
+            },
+            Call {
+                agent_name: Some("qoder"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(2_400_000_000),
+                output_tokens: 7,
+                ..Default::default()
+            },
+            Call {
+                process_name: Some("Mystery"),
+                start_ns: 3_000_000_000,
+                end_ns: Some(3_100_000_000),
+                output_tokens: 3,
+                ..Default::default()
+            },
+        ];
+        let (store, path) = store_with("fold", &calls);
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 2, "one agent per label, not per spelling");
+        assert_eq!(rows[0].label, "Mystery");
+        assert_eq!(rows[1].label, "qoder");
+        assert_eq!(rows[1].call_count, 2);
+        assert_eq!(rows[1].output_tokens, 12);
+        assert_eq!(rows[1].total_tokens, 12);
+        finish(store, path);
+    }
+
+    /// Row token sums and the window header must agree even on a sample the
+    /// collector should never have written.
+    #[test]
+    fn keeps_row_and_window_token_totals_symmetric() {
+        let calls = vec![
+            Call {
+                pid: Some(111),
+                session_id: Some("s-1"),
+                agent_name: Some("claude-code"),
+                start_ns: 1_000_000_000,
+                end_ns: Some(1_500_000_000),
+                input_tokens: 100,
+                output_tokens: 20,
+                ..Default::default()
+            },
+            Call {
+                pid: Some(222),
+                session_id: Some("s-2"),
+                agent_name: Some("qoder"),
+                start_ns: 2_000_000_000,
+                end_ns: Some(2_200_000_000),
+                output_tokens: -5,
+                ..Default::default()
+            },
+        ];
+        let (store, path) = store_with("symmetry", &calls);
+        let rows = store
+            .get_top_rows(0, 10_000_000_000, TopGrouping::Process, None, None)
+            .unwrap();
+        let summary = store
+            .get_top_window_summary(0, 10_000_000_000, None, None)
+            .unwrap();
+        let row_sum: i64 = rows.iter().map(|row| row.output_tokens).sum();
+        assert_eq!(row_sum, 15, "the negative sample is summed as stored");
+        assert_eq!(row_sum, summary.output_tokens);
         finish(store, path);
     }
 
