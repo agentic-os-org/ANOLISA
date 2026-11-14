@@ -444,7 +444,7 @@ input tokens, output tokens, and output tokens per second across the window.
 
 | Column | Meaning |
 |---|---|
-| `PID` / `SESSION` | The grouping key: the agent process, or the recorded session ID with `--session`. A call whose session ID is missing or blank groups under its agent name, and its row shows the PID instead of a session ID. A session ID longer than the column keeps its first and last characters, because UUIDs share a prefix; `--json` reports it in full. |
+| `PID` / `SESSION` | The grouping key: the agent process, or the recorded session ID with `--session`. A call whose session ID is missing or blank groups under its agent name, and its row shows the PID instead of a session ID; that name is matched case-insensitively, so `Qoder` and `qoder` share one row. A session ID longer than the column keeps its first and last characters, because UUIDs share a prefix; `--json` reports it in full. |
 | `AGENT` | Agent name recorded for the group. |
 | `MODEL` | Most recent model recorded for the group. |
 | `REQS` / `SSE` | Completed calls in the window, and how many of them were streamed. |
@@ -477,8 +477,9 @@ sudo agentsight top --window 0
 ```
 
 `--sort` accepts `tps` (default), `ttft`, `tpot`, `reqs`, `in`, `out`, `total`, `agent`, `pid`,
-`session` and `last`; the metric columns compare p50. `--asc` reverses the order. `--delay` has a
-0.1 second floor.
+`session` and `last`; the metric columns compare p50. `--asc` reverses the order. `--delay` is
+clamped to 0.1-86400 seconds, and `nan` or `inf` falls back to the 2 second default; the
+interactive footer prints the interval the view actually sleeps for.
 
 On a terminal the view redraws in place until Ctrl+C. When stdout is a pipe or a file it prints one
 refresh and no control codes, which makes `--batch` explicit rather than required; `-n/--iterations`

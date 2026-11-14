@@ -1,7 +1,7 @@
 //! CLI subcommand modules for agentsight binary
 //!
 //! Linux-only subcommands: token, audit, discover, interruption,
-//! metrics, skill-metrics, summary, dashboard
+//! metrics, skill-metrics, summary, dashboard, top
 //! Cross-platform: serve, trace (branches internally on OS)
 
 #[cfg(target_os = "linux")]
