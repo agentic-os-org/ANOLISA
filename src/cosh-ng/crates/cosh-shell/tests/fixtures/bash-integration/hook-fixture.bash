@@ -2,11 +2,26 @@
 __fixture_case=$1 __fixture_assets=$2 __fixture_work=$3
 TERM=xterm
 PROMPT_COMMAND=('printf "\033]0;%s@%s:%s\007" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/\~}"')
+__fixture_native=${PROMPT_COMMAND[0]}
 builtin source "$__fixture_assets/cosh-integration.bash"
 if [[ $__fixture_case == hook_bad_tail ]]; then
  [[ ${#PROMPT_COMMAND[@]} == 1 && -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 97
  builtin printf '%s\n' HOOK_BAD_TAIL_OK
  exit
+fi
+if [[ $__fixture_case == hook_guide_off_registration ]]; then
+ # The module has no DISABLE-specific branch: every non-SHOW compat verdict,
+ # malformed or well formed, takes the same fail-closed cleanup. The SHOW
+ # registration cases prove the same eight-field shape installs; this case
+ # pins the well-formed DISABLE verdict to the shared fail-closed contract.
+ [[ ${#PROMPT_COMMAND[@]} == 1 && ${PROMPT_COMMAND[0]} == "$__fixture_native" &&
+    -z ${__cosh_bash_registered+x} &&
+    -z $(builtin compgen -A function __cosh_hook_) && -z $(builtin compgen -A variable __cosh_hook_) &&
+    -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 110
+ builtin mapfile -t __fixture_calls <"$__fixture_work/hook.calls"
+ [[ ${#__fixture_calls[@]} == 1 ]] || exit 111
+ builtin printf '%s\n' HOOK_GUIDE_OFF_REGISTRATION_OK
+ exit 0
 fi
 [[ ${#PROMPT_COMMAND[@]} == 2 && -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 91
 __fixture_slot=
