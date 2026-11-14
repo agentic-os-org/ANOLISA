@@ -42,6 +42,7 @@ class GatewayTests(NativeFixture):
         calls = []
         outcome = {"value": "native"}
         fail_prime = {"once": True}
+        zero_hooks = {"once": True}
         retire_busy = {"once": True}
 
         def original_run(agent, query):
@@ -61,6 +62,10 @@ class GatewayTests(NativeFixture):
             if fail_prime["once"]:
                 fail_prime["once"] = False
                 raise OSError("lost registration reply")
+            if zero_hooks["once"]:
+                zero_hooks["once"] = False
+                return {"adapter": "hermes", "token": "fixture-token", "hooks": 0,
+                        "gateway_pid": 123}
             return {"adapter": "hermes", "token": "fixture-token", "hooks": 1,
                     "gateway_pid": 123}
 
@@ -71,6 +76,8 @@ class GatewayTests(NativeFixture):
                 GatewayAgent.run_conversation(agent, "lost registration")
             self.assertEqual(json.loads(launch.with_name("hermes-sessions.json").read_text()),
                              ["session"])
+            with self.assertRaisesRegex(RuntimeError, "did not register the AW callbacks"):
+                GatewayAgent.run_conversation(agent, "zero callbacks")
             self.assertEqual(GatewayAgent.run_conversation(agent, "hello"), "native")
             outcome["value"] = {"failed": True, "failure_reason": "gateway_connection"}
             self.assertEqual(GatewayAgent.run_conversation(agent, "disconnected"), outcome["value"])
@@ -93,6 +100,7 @@ class GatewayTests(NativeFixture):
         self.assertFalse(launch.with_name("hermes-retired.json").exists())
         self.assertEqual(calls, [
             ("plugin.aw-native-hooks.prime", "session"),
+            ("plugin.aw-native-hooks.prime", "session"),
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "hello"),
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "disconnected"),
             ("plugin.aw-native-hooks.prime", "session"), ("turn", "not sent"),
@@ -100,7 +108,7 @@ class GatewayTests(NativeFixture):
         ])
 
     def bind_gateway(self, steps, *, replace_result=False, skill_check=False,
-                     turn_run=None, prime_only=False):
+                     turn_run=None, prime_only=False, missing_hook=None):
         try:
             from hermes_cli.gateway_agent import GatewayAgent  # noqa: F401
         except ImportError:
@@ -134,8 +142,13 @@ class GatewayTests(NativeFixture):
             turn_patch = patch.object(SessionAuthority, "_execute_claimed", turn_run)
             turn_patch.start()
             self.addCleanup(turn_patch.stop)
+        def register_hook(name, callback):
+            hooks.setdefault(name, callback)
+            if missing_hook not in (name, "*"):
+                manager._hooks.setdefault(name, []).append(callback)
+
         ctx = SimpleNamespace(
-            register_hook=lambda name, callback: hooks.setdefault(name, callback),
+            register_hook=register_hook,
             register_rpc=lambda name, callback: rpc.setdefault(name, callback),
             on_unload=cleanups.append,
             session_cwd=lambda: str(Path.cwd()),
@@ -153,6 +166,10 @@ class GatewayTests(NativeFixture):
         self.addCleanup(setattr, middleware, "run_tool_execution_middleware", original)
         params = {"session_id": "session", "launch_path": str(launch),
                   "token": "fixture-token"}
+        if missing_hook:
+            with self.assertRaisesRegex(ValueError, "callbacks are not active"):
+                rpc["prime"](params, session_id="session")
+            return hooks, middleware
         receipt = rpc["prime"](params, session_id="session")
         if activate:
             from gateway.session_authority import SessionAuthority

@@ -1707,7 +1707,7 @@
         "url": "https://github.com/NousResearch/hermes-agent.git",
         "revision": "3b421578588243f920886e6fe79a6faa87ea026e"
       },
-      "boundary": "Official Hermes v0.23.1 CLI/Gateway hooks on a pinned source checkout. Native contract covers server-owned admission binding, automatic and manually resolved unknown admission settlement, idempotent drained session retirement, adopted queued turns, compaction lineage, registered-session reload rejection, JSON argument freezing, deferred Tool Search dispatch, denial, and model-bound text replacement. The older in-process baseline runs in the separate hermes job.",
+      "boundary": "Official Hermes v0.23.1 CLI/Gateway hooks on a pinned source checkout. Native contract covers active Gateway Hook registration, server-owned admission binding, automatic and manually resolved unknown admission settlement, idempotent drained session retirement, adopted queued turns, compaction lineage, registered-session reload rejection, JSON argument freezing, deferred Tool Search dispatch, denial, and model-bound text replacement. The live CLI/Gateway case checks both model-visible replacement and tool denial. The older in-process baseline runs in the separate hermes job.",
       "cases": [
         {
           "name": "gateway-contract",
@@ -1722,7 +1722,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 75
+          "tests": 78
         },
         {
           "name": "gateway-live",
@@ -1746,7 +1746,10 @@
                 "status": "passed",
                 "model_saw_replacement": true,
                 "model_saw_original": false,
-                "pre_events": 1,
+                "denied_marker_absent": true,
+                "denied_policy_blocks": 1,
+                "gateway_confirmation_logged": true,
+                "pre_events": 2,
                 "after_events": 1,
                 "instance_released": true,
                 "gateway_stopped": true

@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import sys
@@ -21,6 +22,7 @@ parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 requests = []
+deny_marker = None
 
 
 class Model(BaseHTTPRequestHandler):
@@ -38,10 +40,13 @@ class Model(BaseHTTPRequestHandler):
         if results:
             delta, finish = {"role": "assistant", "content": "Complete"}, "stop"
         else:
+            denied = any("AW_DENY_TEST" in json.dumps(message)
+                         for message in request.get("messages", []) if message.get("role") == "user")
+            command = (f"printf AW_DENY_TEST > {shlex.quote(str(deny_marker))}" if denied
+                       else "printf HERMES_TOOL_OK")
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": "call-gateway-fixture", "type": "function",
-                "function": {"name": "terminal", "arguments": json.dumps(
-                    {"command": "printf HERMES_TOOL_OK"})},
+                "function": {"name": "terminal", "arguments": json.dumps({"command": command})},
             }]}
             finish = "tool_calls"
         chunks = [
@@ -85,6 +90,7 @@ def run(argv: list[str], cwd: Path, env: dict[str, str], log: Path,
 
 
 def main() -> None:
+    global deny_marker
     server = ThreadingHTTPServer(("127.0.0.1", 0), Model)
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -97,6 +103,7 @@ def main() -> None:
                                           ("profile", "home", "work", "state"))
             for path in (profile, home, work):
                 path.mkdir(mode=0o700)
+            deny_marker = work / "denied-marker"
             native = {
                 "model": {"provider": "custom", "default": "aw-gateway-fixture",
                           "key_env": "OPENAI_API_KEY",
@@ -185,6 +192,9 @@ def main() -> None:
             checked([base[0], "run", *base[1:], "--", "--oneshot", "--quiet",
                      "--max-turns", "4", "--run-budget", "60", "--toolsets", "terminal",
                      "--query", "Use the terminal tool once."], "chat", 180)
+            checked([base[0], "run", *base[1:], "--", "--oneshot", "--quiet",
+                     "--max-turns", "4", "--run-budget", "60", "--toolsets", "terminal",
+                     "--query", "Use the terminal tool once for AW_DENY_TEST."], "chat-denied", 180)
             (args.output / "model-requests.json").write_text(json.dumps(requests, indent=2))
             for journal in state.rglob("*.jsonl"):
                 (args.output / journal.name).write_bytes(journal.read_bytes())
@@ -192,6 +202,10 @@ def main() -> None:
                 (args.output / ("hermes-" + log.name)).write_bytes(log.read_bytes())
             events = [json.loads(line) for line in (root / "provider.jsonl").read_text().splitlines()]
             result_text = json.dumps(requests)
+            chat_logs = [(args.output / name).read_text() for name in ("chat.log", "chat-denied.log")]
+            policy_blocks = sum(
+                json.loads(line).get("record", {}).get("policy_block") is True
+                for journal in state.rglob("*.jsonl") for line in journal.read_text().splitlines())
             checked([str(args.hermes), "gateway", "stop"], "gateway-stop", 30)
             checked([base[0], "status", "--config", str(config_path)], "status")
             status = json.loads((args.output / "status.log").read_text())
@@ -200,13 +214,20 @@ def main() -> None:
             report = {"status": "passed", "model_saw_replacement":
                       "MODEL_VISIBLE_REPLACEMENT" in result_text,
                       "model_saw_original": "HERMES_TOOL_OK" in result_text,
+                      "denied_marker_absent": not deny_marker.exists(),
+                      "denied_policy_blocks": policy_blocks,
+                      "gateway_confirmation_logged": all(
+                          "AW hermes CLI plugin ready" in log
+                          and "AW hermes Gateway callbacks active" in log for log in chat_logs),
                       "pre_events": sum(event["name"] == "tool.before" for event in events),
                       "after_events": sum(event["name"] == "tool.after" for event in events),
                       "instance_released": status["result"]["bindings"] == 0,
                       "gateway_stopped": True}
             assert report == {"status": "passed", "model_saw_replacement": True,
-                              "model_saw_original": False, "pre_events": 1,
-                              "after_events": 1, "instance_released": True,
+                              "model_saw_original": False, "denied_marker_absent": True,
+                              "denied_policy_blocks": 1,
+                              "gateway_confirmation_logged": True,
+                              "pre_events": 2, "after_events": 1, "instance_released": True,
                               "gateway_stopped": True}, report
             (args.output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
             print(json.dumps(report))

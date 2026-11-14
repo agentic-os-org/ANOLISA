@@ -13,6 +13,19 @@ from native_support import NativeFixture
 class GatewayLifecycleTests(NativeFixture):
     bind_gateway = GatewayTests.bind_gateway
 
+    def test_gateway_prime_rejects_zero_native_hooks(self):
+        self.bind_gateway([("tool.before", "block"), ("tool.after", "observe")],
+                          prime_only=True, missing_hook="*")
+
+    def test_gateway_prime_rejects_missing_native_hook(self):
+        self.bind_gateway([("tool.before", "block"), ("tool.after", "observe")],
+                          prime_only=True, missing_hook="pre_tool_call")
+
+    def test_empty_policy_still_registers_gateway_bridge(self):
+        hooks, _ = self.bind_gateway([], prime_only=True)
+        self.assertEqual(self.gateway_receipt["hooks"], 0)
+        self.assertIn(hooks["pre_tool_call"], self.gateway_manager._hooks["pre_tool_call"])
+
     def setUp(self):
         super().setUp()
         from hermes_logging import _reset_queued_handlers

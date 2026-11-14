@@ -230,6 +230,7 @@ def main() -> None:
                             or receipt.get("hooks") != len(launch["hooks"])
                             or not isinstance(receipt.get("gateway_pid"), int)):
                         raise RuntimeError("Hermes Gateway did not register the AW callbacks")
+                    print("AW hermes Gateway callbacks active", file=sys.stderr)
                     return original_run(agent, *args, **kwargs)
 
                 gateway_restore = (GatewayAgent, original_run)

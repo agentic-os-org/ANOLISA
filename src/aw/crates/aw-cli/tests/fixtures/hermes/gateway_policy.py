@@ -19,9 +19,10 @@ elif request["method"] == "invoke":
     with (root / "provider.jsonl").open("a") as stream:
         stream.write(json.dumps(event) + "\n")
     reply["input_digest"] = request["input_digest"]
-    reply["effects"] = (
-        [{"type": "replace_result", "text": "MODEL_VISIBLE_REPLACEMENT"}]
-        if event["name"] == "tool.after" and "result_projection" in event["tool"]
-        else []
-    )
+    if event["name"] == "tool.before" and "AW_DENY_TEST" in json.dumps(event["tool"]["input"]):
+        reply["effects"] = [{"type": "block", "reason_code": "gateway_denial_fixture"}]
+    elif event["name"] == "tool.after" and "result_projection" in event["tool"]:
+        reply["effects"] = [{"type": "replace_result", "text": "MODEL_VISIBLE_REPLACEMENT"}]
+    else:
+        reply["effects"] = []
 print(json.dumps(reply))
