@@ -200,7 +200,7 @@ class BatchParallelTests(unittest.TestCase):
     def test_mixed_failures_do_not_hide_later_successes(self) -> None:
         self.reset({"s1": "exit", "s2": "array", "s3": "json"})
         result = self.cli("--jobs", "3")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(
             [item["fixture"] for item in self.documents(result.stdout)], ["s0", "s4", "s5"]
         )
@@ -209,7 +209,7 @@ class BatchParallelTests(unittest.TestCase):
 
     def test_missing_binary_is_counted_per_file(self) -> None:
         result = self.cli("--jobs", "3", binary=str(self.root / "missing"))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertIn("Done: 0 analyzed, 0 skipped, 6 failed", result.stderr)
 
