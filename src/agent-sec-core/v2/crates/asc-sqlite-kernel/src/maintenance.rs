@@ -5,11 +5,10 @@
 //! rule are all preserved.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustix::fs::{FlockOperation, Mode, OFlags, flock};
+use rustix::fs::{FlockOperation, Mode, OFlags, fchmod, flock, fstat};
 
 use crate::error::KernelError;
 use crate::sink::MaintenanceOutcome;
@@ -133,24 +132,47 @@ fn maintenance_due(marker_path: &Path, interval_seconds: f64, now: f64) -> bool 
 }
 
 fn read_last_maintenance(marker_path: &Path) -> Option<f64> {
-    fs::read_to_string(marker_path)
-        .ok()?
-        .trim()
-        .parse::<f64>()
-        .ok()
+    use std::io::Read as _;
+    // Open the marker itself: a replaced marker must read as absent so the
+    // gate fails open (v1 semantics: a corrupt marker is treated as absent).
+    // `NOFOLLOW` refuses a symlink with `ELOOP`; `NONBLOCK` keeps a FIFO at
+    // the marker path from blocking the open, and the `fstat` regular-file
+    // check rejects it (and any other non-regular entry) before any read.
+    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let fd = rustix::fs::open(marker_path, flags, Mode::RUSR).ok()?;
+    let file = std::fs::File::from(fd);
+    let stat = fstat(&file).ok()?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return None;
+    }
+    let mut text = String::new();
+    let mut reader = &file;
+    reader.read_to_string(&mut text).ok()?;
+    text.trim().parse::<f64>().ok()
 }
 
 /// Writes the marker atomically via a pid-suffixed temp file, as v1 does.
 fn mark_complete(marker_path: &Path, now: f64) -> Result<(), KernelError> {
+    use std::io::Write as _;
     let file_name = marker_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp_path = marker_path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
 
-    fs::write(&tmp_path, format!("{now:.6}\n"))
-        .map_err(|err| KernelError::io("write", &tmp_path, err))?;
-    let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+    // Open the temp file itself - `NOFOLLOW` refuses a pre-planted symlink -
+    // with `TRUNC` (not `EXCL`) so a crash residue regular file self-heals
+    // instead of wedging every later completion after a pid reuse.
+    let mode = Mode::RUSR | Mode::WUSR;
+    let flags =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let fd = rustix::fs::open(&tmp_path, flags, mode)
+        .map_err(|err| KernelError::io("open", &tmp_path, err.into()))?;
+    let file = std::fs::File::from(fd);
+    // `fchmod` on the descriptor: a pre-existing regular file may carry a
+    // stale group/other-readable mode that must not survive the swap in.
+    fchmod(&file, mode).map_err(|err| KernelError::io("fchmod", &tmp_path, err.into()))?;
+    writeln!(&file, "{now:.6}").map_err(|err| KernelError::io("write", &tmp_path, err))?;
     fs::rename(&tmp_path, marker_path).map_err(|err| KernelError::io("rename", &tmp_path, err))?;
     Ok(())
 }
@@ -170,7 +192,7 @@ enum LockError {
 /// [`LockError::Contended`]; any open or `flock` failure other than
 /// `EWOULDBLOCK` is [`LockError::Failed`].
 fn try_acquire_lock_detailed(lock_path: &Path) -> Result<std::fs::File, LockError> {
-    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC;
+    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW;
     let fd = rustix::fs::open(lock_path, flags, Mode::RUSR | Mode::WUSR).map_err(|error| {
         LockError::Failed(KernelError::io(
             "open",
@@ -203,6 +225,7 @@ fn try_acquire_lock(lock_path: &Path) -> Option<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use tempfile::TempDir;
@@ -445,6 +468,142 @@ mod tests {
     fn the_default_interval_is_one_day() {
         assert!(
             (DEFAULT_SQLITE_MAINTENANCE_INTERVAL_SECONDS - 24.0 * 60.0 * 60.0).abs() < f64::EPSILON
+        );
+    }
+
+    // ---- MA6s RED probes: replaced/unconventional marker & lock entries ----
+
+    #[test]
+    fn a_symlinked_marker_fails_open_and_self_heals() {
+        // Pre-fix: read_to_string follows the link, last_run=500 keeps the
+        // gate shut (retention suppressed by whoever controls the target).
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        let target = dir.path().join("marker-target");
+        fs::write(&target, "500\n").expect("seed the suppressor");
+        std::os::unix::fs::symlink(&target, maintenance_marker_path(&db)).expect("plant link");
+
+        assert!(
+            run_sqlite_maintenance_if_due(&db, Some(3600.0), Some(1000.0), always_ok),
+            "a replaced marker must fail open, not stay suppressed"
+        );
+        assert!(
+            fs::symlink_metadata(maintenance_marker_path(&db))
+                .expect("marker stat")
+                .is_file(),
+            "the completion rename must replace the link itself"
+        );
+        assert_eq!(fs::read_to_string(&target).expect("target"), "500\n");
+    }
+
+    #[test]
+    fn a_fifo_marker_cannot_wedge_the_maintenance_phase() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        // rustix::fs::mkfifoat is not compiled on apple targets; the
+        // mkfifo(1) fixture follows the asc-capability-skill-sec tests.
+        let status = std::process::Command::new("mkfifo")
+            .arg(maintenance_marker_path(&db))
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo fixture failed: {status}");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let db_thread = db.clone();
+        let leaked = std::thread::spawn(move || {
+            // Pre-fix this blocks in the open/read forever; do NOT join.
+            let ran =
+                run_sqlite_maintenance_if_due(&db_thread, Some(3600.0), Some(1000.0), always_ok);
+            let _ = tx.send(ran);
+        });
+        let ran = rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("a FIFO marker must not wedge the maintenance phase");
+        assert!(
+            ran,
+            "non-regular marker fails open and the rename self-heals"
+        );
+        assert!(
+            fs::symlink_metadata(maintenance_marker_path(&db))
+                .expect("marker stat")
+                .is_file(),
+            "the completion rename must replace the FIFO entry"
+        );
+        drop(leaked);
+    }
+
+    #[test]
+    fn a_preplanted_symlinked_tmp_fails_and_leaves_the_foreign_file_alone() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        let foreign = dir.path().join("foreign");
+        fs::write(&foreign, "foreign bytes\n").expect("seed");
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o644)).expect("mode");
+        let marker = maintenance_marker_path(&db);
+        let tmp = marker.with_file_name(format!(
+            "{}.{}.tmp",
+            marker.file_name().unwrap().to_string_lossy(),
+            std::process::id()
+        ));
+        std::os::unix::fs::symlink(&foreign, &tmp).expect("plant tmp link");
+
+        let ran = run_sqlite_maintenance_if_due(&db, Some(3600.0), Some(1000.0), always_ok);
+        assert!(!ran, "mark_complete must fail on a symlinked tmp");
+        assert_eq!(
+            fs::read_to_string(&foreign).expect("foreign"),
+            "foreign bytes\n"
+        );
+        assert_eq!(
+            fs::metadata(&foreign)
+                .expect("foreign meta")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "the foreign file's mode must be untouched"
+        );
+        assert!(!marker.exists(), "the gate must not advance");
+        assert!(
+            fs::symlink_metadata(&tmp)
+                .expect("tmp stat")
+                .file_type()
+                .is_symlink(),
+            "the planted link itself must remain"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_lock_path_fails_without_touching_the_foreign_file() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = dir.path().join("events.db");
+        let foreign = dir.path().join("lock-foreign");
+        fs::write(&foreign, "do not touch\n").expect("seed");
+        let lock = maintenance_lock_path(&db);
+        std::os::unix::fs::symlink(&foreign, &lock).expect("plant lock link");
+
+        let ran = Cell::new(false);
+        let result = run_sqlite_maintenance_if_due(&db, Some(3600.0), Some(1000.0), || {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(
+            !result,
+            "a replaced lock path must fail, not lock a foreign file"
+        );
+        assert!(
+            !ran.get(),
+            "maintenance must not run through a replaced lock"
+        );
+        assert_eq!(
+            fs::read_to_string(&foreign).expect("foreign"),
+            "do not touch\n"
+        );
+        assert!(
+            fs::symlink_metadata(&lock)
+                .expect("lock stat")
+                .file_type()
+                .is_symlink(),
+            "the link itself must remain"
         );
     }
 }
