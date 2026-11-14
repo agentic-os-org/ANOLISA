@@ -1085,6 +1085,17 @@ impl<'a> Renderer<'a> {
     fn list(&mut self, id: usize, in_sectioning: bool) -> String {
         let list = &self.nodes[id];
         let ordered = list.is_element("ol");
+        // CommonMark ordered lists only render decimal numbers. A list with a
+        // non-decimal `type` (a/A/i/I) is still rendered, but marked lossy so
+        // the caller knows the markers no longer match the source page.
+        if ordered
+            && matches!(
+                list.attr("type").unwrap_or("").trim(),
+                "a" | "A" | "i" | "I"
+            )
+        {
+            self.lossy = true;
+        }
         // A reversed list counts down, by default to 1 at its last item.
         let step: i64 = if list.attr("reversed").is_some() {
             -1
