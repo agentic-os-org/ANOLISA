@@ -8,6 +8,16 @@ if [[ $__fixture_case == hook_bad_tail ]]; then
  builtin printf '%s\n' HOOK_BAD_TAIL_OK
  exit
 fi
+if [[ $__fixture_case == hook_registration_timeout ]]; then
+ [[ ${#PROMPT_COMMAND[@]} == 1 && -z $(builtin trap -p ERR DEBUG RETURN) &&
+    ! ${__cosh_bash_registered+x} ]] || exit 96
+ # A declined registration keeps its one traced helper call; the trace file
+ # is absent only if the helper never started, which is also a failure here.
+ builtin mapfile -t __fixture_calls <"$__fixture_work/hook.calls" || exit 96
+ [[ ${#__fixture_calls[@]} == 1 && ${__fixture_calls[0]} == 'shell-integration compat' ]] || exit 96
+ builtin printf '%s\n' HOOK_REGISTRATION_DECLINED
+ exit 0
+fi
 [[ ${#PROMPT_COMMAND[@]} == 2 && -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 91
 __fixture_slot=
 for __fixture_index in "${!PROMPT_COMMAND[@]}"; do
