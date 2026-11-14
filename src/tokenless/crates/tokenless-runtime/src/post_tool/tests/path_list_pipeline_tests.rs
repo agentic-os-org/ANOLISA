@@ -1,3 +1,50 @@
+// Decode the documented wire format independently of the compressor's verifier.
+fn restore_path_list_view(view: &str) -> (String, usize) {
+    let (header, body) = view.split_once('\n').unwrap();
+    let (metadata, paths): (Value, Vec<String>) = if header.starts_with("[Path list;") {
+        let data: Value = serde_json::from_str(body).unwrap();
+        let paths = data["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| path.as_str().unwrap().to_owned())
+            .collect();
+        (data, paths)
+    } else {
+        assert_eq!(
+            header,
+            "[Paths grouped by directory; all received paths retained; full path = base + Dir + entry]"
+        );
+        let (metadata, records) = body.split_once('\n').unwrap();
+        let mut directory = None;
+        let mut paths = Vec::new();
+        for record in records.lines() {
+            if let Some(value) = record.strip_prefix("Dir=") {
+                directory = Some(serde_json::from_str::<String>(value).unwrap());
+            } else {
+                let name = if record.starts_with('"') {
+                    serde_json::from_str::<String>(record).unwrap()
+                } else {
+                    record.to_owned()
+                };
+                paths.push(format!("{}{name}", directory.as_ref().unwrap()));
+            }
+        }
+        (serde_json::from_str(metadata).unwrap(), paths)
+    };
+    let base = metadata["base"].as_str().unwrap();
+    let ending = metadata["line_ending"].as_str().unwrap();
+    let mut restored = paths
+        .iter()
+        .map(|path| format!("{base}{path}"))
+        .collect::<Vec<_>>()
+        .join(ending);
+    if metadata["trailing_newline"].as_bool().unwrap() {
+        restored.push_str(ending);
+    }
+    (restored, paths.len())
+}
+
 fn path_list_input() -> String {
     (0..60)
         .map(|i| format!("/workspace/project with spaces/long_directory/records/file {i}.json\n"))
@@ -23,13 +70,8 @@ fn path_lists_route_by_content_and_origin_without_a_command_name() {
             assert_eq!(run.response.recoverability, Recoverability::Lossless);
             assert!(run.response.stash_keys.is_empty());
             assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
-            let (_, encoded) = run.response.output.split_once('\n').unwrap();
-            let data: Value = serde_json::from_str(encoded).unwrap();
-            let paths = data["paths"].as_array().unwrap();
-            assert_eq!(paths.len(), 60);
-            let restored: String = paths.iter().map(|path| {
-                format!("{}{}{}", data["base"].as_str().unwrap(), path.as_str().unwrap(), data["line_ending"].as_str().unwrap())
-            }).collect();
+            let (restored, count) = restore_path_list_view(&run.response.output);
+            assert_eq!(count, 60);
             assert_eq!(restored, input);
         }
     }
@@ -130,16 +172,8 @@ fn path_lists_cross_the_detection_byte_limit_without_losing_records() {
             let run = PostToolPipeline::run(&req, &build_log_config(), None);
             assert_eq!(run.response.disposition, Disposition::Applied);
             assert_eq!(run.response.content_type, Some(ContentType::SearchResults));
-            let (_, encoded) = run.response.output.split_once('\n').unwrap();
-            let data: Value = serde_json::from_str(encoded).unwrap();
-            let paths = data["paths"].as_array().unwrap();
-            assert_eq!(paths.len(), 121);
-            let mut restored = paths.iter().map(|path| {
-                format!("{}{}", data["base"].as_str().unwrap(), path.as_str().unwrap())
-            }).collect::<Vec<_>>().join(data["line_ending"].as_str().unwrap());
-            if data["trailing_newline"].as_bool().unwrap() {
-                restored.push_str(data["line_ending"].as_str().unwrap());
-            }
+            let (restored, count) = restore_path_list_view(&run.response.output);
+            assert_eq!(count, 121);
             assert_eq!(restored, input);
 
             req.content.push_str(&format!("not a path{ending}"));
