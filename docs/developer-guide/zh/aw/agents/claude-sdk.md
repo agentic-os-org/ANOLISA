@@ -87,6 +87,19 @@ QwenPaw，Claude 尚无对应解析合同。共享配置前请核对 [Provider �
 当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
 
+### 最终工具结果安全边界
+
+`tool.after` 观察原生 Post Hook 提供的结果。应用 Post 回调可以在 AW 完成后返回
+`updatedToolOutput`，bundled CLI 随后将替换内容放入模型请求。SDK 0.2.88／CLI
+2.1.161 和 SDK 0.2.182／CLI 2.1.325 的本地 HTTP 验收在 Bash、进程内 SDK MCP
+工具上复现了这一行为。安全输出对照和后置注入的合成标记均通过实际请求体与确定性
+模型回复核实。
+
+Adapter 尚无经过验证的最终结果阻断检查点。必需的 `security.violation` 策略会在
+worker 启动前被拒绝。本项验收覆盖前台 Python 工厂；未覆盖常驻会话、TypeScript
+SDK、多模态结果、子 Agent 或托管模型推理。SDK 回调分发器将 Hook 回复交给 bundled
+可执行文件，其内部模型传输位于共享 Node Loader 的作用范围之外。
+
 ### 启用 Bash PreTool 与 PostTool 优化
 
 使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
