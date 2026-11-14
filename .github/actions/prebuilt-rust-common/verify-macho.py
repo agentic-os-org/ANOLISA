@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import sys
 from pathlib import Path
@@ -21,6 +22,9 @@ LC_BUILD_VERSION = 0x32
 PLATFORM_MACOS = 1
 
 
+_VERSION_PART = re.compile(r"[0-9]+")
+
+
 class MachOError(RuntimeError):
     """The input is not the expected deployable Mach-O executable."""
 
@@ -32,13 +36,16 @@ def decode_version(value: int) -> tuple[int, int, int]:
 
 def parse_version(value: str) -> tuple[int, int, int]:
     """Parse an X[.Y[.Z]] version supplied by the release profile."""
-    try:
-        parts = tuple(int(part) for part in value.split("."))
-    except ValueError as error:
-        raise MachOError(f"invalid version: {value}") from error
-    if not 1 <= len(parts) <= 3 or any(part < 0 or part > 255 for part in parts):
+    parts = value.split(".")
+    # `int()` also accepts digit separators, surrounding whitespace, a leading
+    # sign and non-ASCII decimal digits, so it would turn a typo such as
+    # `2_17.3` into a different deployment target instead of rejecting it.
+    if not 1 <= len(parts) <= 3 or any(not _VERSION_PART.fullmatch(p) for p in parts):
         raise MachOError(f"invalid version: {value}")
-    return (*parts, *(0 for _ in range(3 - len(parts))))
+    numbers = tuple(int(part) for part in parts)
+    if any(number > 255 for number in numbers):
+        raise MachOError(f"invalid version: {value}")
+    return (*numbers, *(0 for _ in range(3 - len(numbers))))
 
 
 def c_string(data: bytes, offset: int, end: int) -> str:

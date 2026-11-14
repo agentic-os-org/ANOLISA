@@ -62,5 +62,34 @@ class MachOTests(unittest.TestCase):
                 )
 
 
+class ParseVersionTests(unittest.TestCase):
+    """`--min` accepts a dotted decimal version and nothing that merely parses."""
+
+    def test_accepts_dotted_decimal(self) -> None:
+        for value, expected in (
+            ("11", (11, 0, 0)),
+            ("11.0", (11, 0, 0)),
+            ("11.0.0", (11, 0, 0)),
+            ("14.2.1", (14, 2, 1)),
+            ("255.255.255", (255, 255, 255)),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(macho.parse_version(value), expected)
+
+    def test_rejects_values_int_would_accept(self) -> None:
+        # `int()` accepts each of these, which silently produced a different
+        # deployment target: `2_17.3` became (217, 3, 0) rather than failing.
+        for value in ("1_1", "2_17.3", "+11", "-11", " 11", "11 ", "\t11", "١١"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(macho.MachOError, "invalid version"):
+                    macho.parse_version(value)
+
+    def test_rejects_wrong_shape_or_range(self) -> None:
+        for value in ("", ".", "11.", ".11", "11..0", "11.0.0.0", "256", "11.256"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(macho.MachOError, "invalid version"):
+                    macho.parse_version(value)
+
+
 if __name__ == "__main__":
     unittest.main()
