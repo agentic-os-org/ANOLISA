@@ -235,6 +235,45 @@ fn version_ge_patch_comparison() {
     assert!(!version_ge("1.0.0", "1.0.1"));
 }
 
+#[test]
+fn version_regex_matches_two_component_versions() {
+    // jq, GNU Make, gzip, and an rtk reporting "0.36" all print major.minor
+    // with no patch group; the extraction must not degrade them to "0.0.0".
+    // Platform-independent: this exercises only the regex, no filesystem.
+    assert_eq!(VERSION_RE.find("jq-1.6").map(|m| m.as_str()), Some("1.6"));
+    assert_eq!(
+        VERSION_RE.find("GNU Make 4.3\n").map(|m| m.as_str()),
+        Some("4.3")
+    );
+    assert_eq!(VERSION_RE.find("gzip 1.10").map(|m| m.as_str()), Some("1.10"));
+    assert_eq!(VERSION_RE.find("rtk 0.36").map(|m| m.as_str()), Some("0.36"));
+    // Three-component versions keep matching, with tool prefixes and
+    // trailing architecture noise intact.
+    assert_eq!(
+        VERSION_RE
+            .find("curl 8.1.2 (x86_64-linux-gnu)")
+            .map(|m| m.as_str()),
+        Some("8.1.2")
+    );
+    assert_eq!(
+        VERSION_RE
+            .find("GNU bash, version 5.2.21(1)-release")
+            .map(|m| m.as_str()),
+        Some("5.2.21")
+    );
+}
+
+#[test]
+fn installed_version_from_handles_two_component_and_missing_versions() {
+    assert_eq!(installed_version_from("jq-1.6"), "1.6");
+    assert_eq!(installed_version_from("GNU Make 4.3\n"), "4.3");
+    assert_eq!(
+        installed_version_from("curl 8.1.2 (x86_64-linux-gnu)\n"),
+        "8.1.2"
+    );
+    assert_eq!(installed_version_from("no version here"), "0.0.0");
+}
+
 // Legacy readiness checks require Unix tools or filesystem layouts.
 #[cfg(unix)]
 #[test]
