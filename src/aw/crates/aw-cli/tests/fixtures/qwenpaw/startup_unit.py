@@ -152,6 +152,104 @@ LAUNCH = importlib.util.module_from_spec(LAUNCH_SPEC)
 LAUNCH_SPEC.loader.exec_module(LAUNCH)
 
 
+class PathTests(unittest.TestCase):
+    def normalized(self):
+        original = lambda path: os.path.normcase(os.path.realpath(str(path)))
+        isolation = types.ModuleType("qwenpaw.plugins.module_isolation")
+        isolation._norm = original
+        plugins = types.ModuleType("qwenpaw.plugins")
+        plugins.module_isolation = isolation
+        return original, isolation, {
+            "qwenpaw": types.ModuleType("qwenpaw"),
+            "qwenpaw.plugins": plugins,
+            "qwenpaw.plugins.module_isolation": isolation,
+        }
+
+    def test_only_the_verified_version_uses_native_path_resolution(self):
+        original, isolation, modules = self.normalized()
+        with patch.dict(sys.modules, modules):
+            for version in (None, "2.2.2.post1", "2.1.1b3+local"):
+                LAUNCH.accelerate_paths(version)
+                self.assertIs(isolation._norm, original)
+            LAUNCH.accelerate_paths("2.1.1b3")
+            self.assertIsNot(isolation._norm, original)
+
+    def test_repeated_path_acceleration_keeps_one_wrapper(self):
+        _, isolation, modules = self.normalized()
+        with patch.dict(sys.modules, modules):
+            first = LAUNCH.accelerate_paths("2.1.1b3")
+            self.assertIs(LAUNCH.accelerate_paths("2.1.1b3"), first)
+            self.assertIs(isolation._norm, first)
+
+    def test_unavailable_acceleration_preserves_native_resolution(self):
+        import ctypes
+        original, isolation, modules = self.normalized()
+        with patch.dict(sys.modules, modules):
+            with patch.dict(sys.modules, {"ctypes": None}):
+                self.assertIsNone(LAUNCH.accelerate_paths("2.1.1b3"))
+            self.assertIs(isolation._norm, original)
+            with patch.object(ctypes, "CDLL", side_effect=OSError("unavailable")):
+                self.assertIsNone(LAUNCH.accelerate_paths("2.1.1b3"))
+            self.assertIs(isolation._norm, original)
+            with patch.object(ctypes, "CDLL", return_value=types.SimpleNamespace()):
+                self.assertIsNone(LAUNCH.accelerate_paths("2.1.1b3"))
+            self.assertIs(isolation._norm, original)
+            isolation._norm = None
+            self.assertIsNone(LAUNCH.accelerate_paths("2.1.1b3"))
+            self.assertIsNone(isolation._norm)
+
+    def test_native_resolution_errors_remain_visible(self):
+        _, isolation, modules = self.normalized()
+        def fail(path):
+            raise RuntimeError("native resolution failed")
+        isolation._norm = fail
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, modules):
+            LAUNCH.accelerate_paths("2.1.1b3")
+            with self.assertRaisesRegex(RuntimeError, "native resolution failed"):
+                isolation._norm(Path(directory) / "missing")
+
+    def test_existing_missing_and_invalid_paths_keep_native_semantics(self):
+        original, isolation, modules = self.normalized()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, modules):
+            root = Path(directory)
+            (root / "folder").mkdir()
+            (root / "folder/file").touch()
+            (root / "link").symlink_to("folder")
+            (root / "broken").symlink_to("absent")
+            (root / "loop").symlink_to("loop")
+            undecodable = root / os.fsdecode(b"name-\xff")
+            undecodable.touch()
+            LAUNCH.accelerate_paths("2.1.1b3")
+            paths = [root, root / "link/file", root / "link/../folder/file",
+                     root / "absent/child", root / "broken/child", root / "loop",
+                     root / "folder/file/child", root / "中文", undecodable,
+                     "", ".", "..", "//" + str(root).lstrip("/"), "bad\0path"]
+            for path in paths:
+                with self.subTest(path=path):
+                    try:
+                        expected = original(path)
+                    except ValueError:
+                        with self.assertRaises(ValueError):
+                            isolation._norm(path)
+                    else:
+                        self.assertEqual(isolation._norm(path), expected)
+
+    def test_symlink_changes_are_observed_without_a_cache(self):
+        original, isolation, modules = self.normalized()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, modules):
+            root = Path(directory)
+            (root / "first").mkdir()
+            (root / "second").mkdir()
+            link = root / "link"
+            link.symlink_to("first")
+            LAUNCH.accelerate_paths("2.1.1b3")
+            self.assertEqual(isolation._norm(link), str(root / "first"))
+            link.unlink()
+            link.symlink_to("second")
+            self.assertEqual(isolation._norm(link), original(link))
+            self.assertEqual(isolation._norm(link), str(root / "second"))
+
+
 class ManagedTests(unittest.IsolatedAsyncioTestCase):
     def fixture(self, root, failure=False):
         from contextlib import asynccontextmanager

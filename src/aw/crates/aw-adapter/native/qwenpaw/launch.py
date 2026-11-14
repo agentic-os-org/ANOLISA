@@ -52,6 +52,7 @@ def install(source, config):
     from qwenpaw.plugins.loader import PluginLoader
     from qwenpaw.runtime.builder import AgentBuilder
 
+    accelerate_paths(config.get("native_version"))
     load = PluginLoader.load_all_plugins
 
     module = None
@@ -118,6 +119,46 @@ def install(source, config):
 
     AgentBuilder.build = protected_build
     PluginLoader.load_all_plugins = load_managed
+
+
+def accelerate_paths(version):
+    """Keep native plugin cleanup while resolving existing paths in libc."""
+    # shortcut: verified 2.1.1b3 isolation seam; review before extending versions.
+    if version != "2.1.1b3":
+        return
+    from qwenpaw.plugins import module_isolation
+
+    original = getattr(module_isolation, "_norm", None)
+    if not callable(original):
+        return
+    if getattr(original, "_aw_native_paths", False):
+        return original
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None)
+        libc.realpath.argtypes = (ctypes.c_char_p, ctypes.c_void_p)
+        libc.realpath.restype = ctypes.c_void_p
+        libc.free.argtypes = (ctypes.c_void_p,)
+        libc.free.restype = None
+    except (ImportError, OSError, AttributeError):
+        # Optional acceleration must not add a native runtime requirement.
+        return
+
+    def normalize(path):
+        value = str(path)
+        if "\0" in value:
+            return original(value)
+        resolved = libc.realpath(os.fsencode(value), None)
+        if resolved is None:
+            return original(value)
+        try:
+            return os.path.normcase(os.fsdecode(ctypes.string_at(resolved)))
+        finally:
+            libc.free(resolved)
+
+    normalize._aw_native_paths = True
+    module_isolation._norm = normalize
+    return normalize
 
 
 def load_runtime(source, config):
