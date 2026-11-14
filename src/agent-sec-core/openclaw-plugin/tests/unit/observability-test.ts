@@ -614,6 +614,65 @@ describe("observability", () => {
     assertMetricsAllowedByAgentSecSchema(payload);
   });
 
+  it("deduplicates the same logical tool call across candidate sources", () => {
+    const sharedCall = {
+      type: "function",
+      toolCallId: "call_1",
+      function: { name: "exec", arguments: "{\"command\":\"ls\"}" },
+    };
+    const payload = buildOpenClawObservabilityRecord(
+      "llm_output",
+      {
+        provider: "dashscope",
+        model: "qwen3.6-plus",
+        sessionId: "session-dedup",
+        runId: "run-dedup",
+        assistantTexts: [],
+        tool_calls: [sharedCall],
+        lastAssistant: {
+          role: "assistant",
+          stopReason: "toolUse",
+          tool_calls: [sharedCall],
+        },
+      },
+      { sessionId: "session-dedup", runId: "run-dedup" },
+    );
+
+    assert.ok(payload);
+    assert.equal(payload.metrics.tool_calls_count, 1);
+    assert.equal(payload.metrics.tool_calls.length, 1);
+    assertMetricsAllowedByAgentSecSchema(payload);
+  });
+
+  it("keeps distinct tool calls with distinct ids", () => {
+    const payload = buildOpenClawObservabilityRecord(
+      "llm_output",
+      {
+        provider: "dashscope",
+        model: "qwen3.6-plus",
+        sessionId: "session-multi",
+        runId: "run-multi",
+        assistantTexts: [],
+        tool_calls: [
+          {
+            type: "function",
+            toolCallId: "call_a",
+            function: { name: "exec", arguments: "{}" },
+          },
+          {
+            type: "function",
+            toolCallId: "call_b",
+            function: { name: "read", arguments: "{}" },
+          },
+        ],
+      },
+      { sessionId: "session-multi", runId: "run-multi" },
+    );
+
+    assert.ok(payload);
+    assert.equal(payload.metrics.tool_calls_count, 2);
+  });
+
   it("builds after_tool_call metrics accepted by agent-sec-cli", () => {
     const payload = buildOpenClawObservabilityRecord(
       "after_tool_call",
