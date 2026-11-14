@@ -117,6 +117,11 @@ write also releases the created instance. `aw run` observes termination while
 waiting for this reply; the reusable client exposes `call_cancellable` for callers
 with their own cancellation flag. Preparation side effects are not rolled back.
 
+Binding, task-scope and policy preparation wake the connection monitor when the
+worker finishes, including failure. A private socket pair carries completion;
+the same poll observes peer disconnects and retains the bounded shutdown and
+deadline checks. Completed work does not wait for the next cancellation poll.
+
 For raw native commands, `invoke_step.native_environment` can carry the complete
 callback environment using the same byte-preserving encoding. It replaces, rather
 than merges with, the bound environment;
