@@ -30,7 +30,7 @@ pub struct TopCommand {
     #[structopt(long)]
     pub db: Option<String>,
 
-    /// Seconds between refreshes (minimum 0.1)
+    /// Seconds between refreshes (clamped to 0.1-86400)
     #[structopt(short = "d", long, default_value = "2")]
     pub delay: f64,
 
@@ -110,11 +110,14 @@ impl TopCommand {
         (now_ns.saturating_sub(span_ns).max(0), now_ns)
     }
 
-    /// Delay between refreshes, clamped so a fractional `--delay` cannot turn
-    /// the view into a busy loop re-reading SQLite.
+    /// Delay between refreshes, clamped to 0.1..=86_400 seconds. The floor keeps
+    /// a fractional `--delay` from turning the view into a busy loop re-reading
+    /// SQLite; the ceiling keeps `Duration::from_secs_f64` total, since it
+    /// panics on a value too large to represent. A non-finite `--delay` falls
+    /// back to the 2 second default.
     fn refresh_interval(&self) -> Duration {
         Duration::from_secs_f64(if self.delay.is_finite() {
-            self.delay.max(0.1)
+            self.delay.clamp(0.1, 86_400.0)
         } else {
             2.0
         })
@@ -199,9 +202,12 @@ impl TopCommand {
         print_header(self, &summary, end_ns);
         print_table(&rows, self.session);
         if interactive {
+            // Printed from the helper the sleep itself uses, so the footer can
+            // never disagree with the real interval: NaN, infinity and values
+            // outside the clamp range all render as what the view will do.
             println!(
                 "\nPress Ctrl+C to stop. Refresh every {:.1}s.",
-                self.delay.max(0.1)
+                self.refresh_interval().as_secs_f64()
             );
         }
         Ok(())
@@ -524,6 +530,12 @@ mod tests {
         assert_eq!(command.refresh_interval(), Duration::from_secs(2));
         command.delay = 5.0;
         assert_eq!(command.refresh_interval(), Duration::from_secs(5));
+        // A finite value beyond Duration's range would panic inside
+        // from_secs_f64; the ceiling keeps the view alive instead.
+        command.delay = 1e20;
+        assert_eq!(command.refresh_interval(), Duration::from_secs(86_400));
+        command.delay = f64::INFINITY;
+        assert_eq!(command.refresh_interval(), Duration::from_secs(2));
     }
 
     #[test]

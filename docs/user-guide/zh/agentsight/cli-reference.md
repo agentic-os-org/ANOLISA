@@ -424,7 +424,7 @@ Press Ctrl+C to stop. Refresh every 2.0s.
 
 | 列 | 含义 |
 |---|---|
-| `PID` / `SESSION` | 分组键：Agent 进程，或加 `--session` 后记录的会话 ID。会话 ID 缺失或为空的调用按 Agent 名归组，该行显示 PID 而不是会话 ID。超出列宽的会话 ID 保留首尾字符，因为 UUID 的前缀往往相同；`--json` 输出完整值。 |
+| `PID` / `SESSION` | 分组键：Agent 进程，或加 `--session` 后记录的会话 ID。会话 ID 缺失或为空的调用按 Agent 名归组，该行显示 PID 而不是会话 ID；该 Agent 名按大小写不敏感匹配，因此 `Qoder` 与 `qoder` 归为同一行。超出列宽的会话 ID 保留首尾字符，因为 UUID 的前缀往往相同；`--json` 输出完整值。 |
 | `AGENT` | 该组记录的 Agent 名称。 |
 | `MODEL` | 该组最近一次调用记录的模型。 |
 | `REQS` / `SSE` | 窗口内已完成的调用数，以及其中流式（SSE）的数量。 |
@@ -456,7 +456,8 @@ sudo agentsight top --window 0
 ```
 
 `--sort` 支持 `tps`（默认）、`ttft`、`tpot`、`reqs`、`in`、`out`、`total`、`agent`、`pid`、
-`session`、`last`；指标列比较 p50。`--asc` 反转排序方向。`--delay` 的下限是 0.1 秒。
+`session`、`last`；指标列比较 p50。`--asc` 反转排序方向。`--delay` 会被钳制到 0.1-86400 秒，`nan`
+或 `inf` 回退到默认的 2 秒；交互模式的页脚显示的是实际睡眠的间隔。
 
 在终端里视图会原地重绘，直到 Ctrl+C。当 stdout 是管道或文件时，只输出一次刷新且不含控制字符，因此
 `--batch` 只是显式声明而非必需；`-n/--iterations` 在两种模式下都能限定刷新次数。`--json` 每次刷新
