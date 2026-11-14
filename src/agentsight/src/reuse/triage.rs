@@ -39,7 +39,9 @@ pub const DEFAULT_MAX_AGENT_LEN: usize = 2_000;
 /// - `triage-4` no deterministic finding accuses at all; `bad` needs a model
 ///   review or a person. See `super::summarize`.
 /// - `triage-5` a single recorded step still counts its answer and tool work.
-const TRIAGE_RULES_VERSION: &str = "triage-5";
+/// - `triage-6` only user-authored steps count as user turns; injected
+///   transcripts such as `/clear` no longer disqualify the useless gate.
+const TRIAGE_RULES_VERSION: &str = "triage-6";
 
 /// Thresholds for [`classify`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +96,18 @@ impl TriageMetrics {
         };
         for step in &trajectory.steps {
             match step.source {
-                StepSource::User => metrics.n_user_turns += 1,
+                StepSource::User => {
+                    // The collector records injected transcripts (a `/clear`
+                    // command, system reminders) as user steps. Only a step
+                    // with user-authored text is a turn; counting the rest
+                    // made a one-question session look like a followed-up
+                    // topic and bypassed the useless gate.
+                    if !agentsight_trajectory_collector::strip_system_context(&step.message)
+                        .is_empty()
+                    {
+                        metrics.n_user_turns += 1;
+                    }
+                }
                 StepSource::Agent => {
                     metrics.max_agent_len = metrics.max_agent_len.max(step.message.chars().count());
                 }
@@ -406,7 +419,7 @@ mod tests {
         let a = TriageConfig::default();
         let b = TriageConfig { max_agent_len: 900 };
         assert_ne!(a.version(), b.version());
-        assert!(a.version().starts_with("triage-5/"));
+        assert!(a.version().starts_with("triage-6/"));
     }
 
     #[test]
@@ -444,6 +457,29 @@ mod tests {
         }"#;
         let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
         assert_eq!(TriageMetrics::measure(&trajectory).max_agent_len, 3);
+    }
+
+    #[test]
+    fn measure_ignores_system_injected_user_steps() {
+        // A one-question/one-answer session followed by a `/clear` transcript
+        // is still one user-authored turn. Counting the injected step as a
+        // follow-up bypassed the `useless` gate and admitted a trivial session
+        // into reuse retrieval.
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "test"},
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "1+1?"},
+                {"step_id": 2, "source": "agent", "message": "2"},
+                {"step_id": 3, "source": "user",
+                 "message": "<command-message>clear</command-message>"}
+            ]
+        }"#;
+        let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
+        let m = TriageMetrics::measure(&trajectory);
+        assert_eq!(m.n_user_turns, 1);
+        let out = classify(&m, &clean(), &TriageConfig::default());
+        assert_eq!(out.label, TrajectoryLabel::Useless);
     }
 
     #[test]
