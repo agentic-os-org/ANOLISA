@@ -173,14 +173,15 @@ def extract_trial_hash(trace_field: str) -> str:
     return parts[1] if len(parts) == 2 else ""
 
 
-def fmt(val):
+def fmt(val: object) -> str:
     """Format a numeric value, keeping reasonable precision."""
     if val is None:
         return "N/A"
     if isinstance(val, bool):
         return "Y" if val else "N"
     if isinstance(val, float):
-        if val == int(val) and abs(val) < 1e6:
+        # Nonfinite values remain printable through the existing float formatter.
+        if abs(val) < 1e6 and val == int(val):
             return str(int(val))
         return f"{val:.2f}"
     return str(val)
