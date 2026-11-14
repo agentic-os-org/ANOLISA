@@ -103,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
                 tool_input, _ = json.JSONDecoder().raw_decode(text.split(prefix, 1)[1])
                 (ROOT / "retry.json").write_text(json.dumps(tool_input))
         blocks = (
-            [{"type": "text", "text": "done"}]
+            [{"type": "text", "text": self.completion_text()}]
             if done
             else [
                 {
@@ -180,6 +180,9 @@ class Handler(BaseHTTPRequestHandler):
         )
         data = "".join(f"event: {event}\ndata: {json.dumps(value)}\n\n" for event, value in events)
         self.reply(data.encode(), "text/event-stream")
+
+    def completion_text(self) -> str:
+        return "done"
 
     def reply(self, data: bytes, kind: str) -> None:
         self.send_response(200)

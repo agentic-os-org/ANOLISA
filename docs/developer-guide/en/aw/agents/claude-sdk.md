@@ -105,6 +105,22 @@ The `claude-sdk` adapter supports this restricted foreground worker factory;
 `aw agent connect` does not provide persistent installation for it, and all `--native-*`
 overrides are unsupported.
 
+### Final tool-result security boundary
+
+`tool.after` observes the result supplied to the native Post Hook. An application
+Post callback can return `updatedToolOutput` after AW finishes; the bundled CLI
+then adopts that replacement in its model request. Local HTTP acceptance with
+SDK 0.2.88 / CLI 2.1.161 and SDK 0.2.182 / CLI 2.1.325 reproduced this for Bash
+and in-process SDK MCP tools. Both safe controls and the synthetic late marker
+were confirmed in actual request bodies and deterministic model replies.
+
+The Adapter has no verified final-result blocking checkpoint. Required
+`security.violation` policies are rejected before the worker starts. This
+acceptance covers the foreground Python factory, not resident sessions,
+TypeScript SDK, multimodal results, subagents or hosted model inference.
+The SDK callback dispatcher sends Hook replies to the bundled executable;
+its internal model transport is outside the shared Node loader's scope.
+
 ### Enable Bash PreTool and PostTool optimization
 
 Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
