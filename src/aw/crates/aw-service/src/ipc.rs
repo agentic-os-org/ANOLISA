@@ -391,7 +391,9 @@ fn check_integer_range(bytes: &[u8]) -> io::Result<()> {
                     index += 1;
                 }
                 let token = &bytes[start..index];
-                if !token.iter().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                let digits = token.strip_prefix(b"-").unwrap_or(token);
+                // Leave malformed tokens and floating-point syntax to the JSON parser.
+                if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
                     let token =
                         std::str::from_utf8(token).map_err(|_| invalid("invalid numeric token"))?;
                     let fits = if token.starts_with('-') {
@@ -445,6 +447,31 @@ mod tests {
                 receive(bytes).unwrap_err().kind(),
                 io::ErrorKind::InvalidData
             );
+        }
+    }
+
+    #[test]
+    fn malformed_numbers_report_json_errors_without_weakening_integer_bounds() {
+        for bytes in [b"not-json".as_slice(), b"-", b"a-b", b"--1", br#"{"n":-}"#] {
+            assert_eq!(
+                receive(bytes).unwrap_err().to_string(),
+                "expected bounded JSON without duplicate fields"
+            );
+        }
+        for bytes in [b"18446744073709551616".as_slice(), b"-9223372036854775809"] {
+            assert_eq!(
+                receive(bytes).unwrap_err().to_string(),
+                "integer is outside the supported range"
+            );
+        }
+        for bytes in [
+            b"18446744073709551615".as_slice(),
+            b"-9223372036854775808",
+            b"-0",
+            b"-1.25",
+            b"1e-2",
+        ] {
+            assert!(receive(bytes).is_ok());
         }
     }
 

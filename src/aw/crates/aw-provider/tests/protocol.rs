@@ -385,6 +385,31 @@ fn protocol_event_vocabulary_matches_configuration() {
 }
 
 #[test]
+fn malformed_number_tokens_report_json_syntax_errors() {
+    let protocol = Protocol::new().unwrap();
+    let describe = protocol
+        .parse_request(&bytes(&request("describe")))
+        .unwrap();
+    for input in ["not-json", "-", "a-b", "--1", r#"{"n":-}"#] {
+        for error in [
+            protocol.parse_request(input.as_bytes()).err().unwrap(),
+            protocol
+                .check_response(&describe, input.as_bytes())
+                .err()
+                .unwrap(),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    Error::Invalid("expected one bounded, unambiguous JSON value")
+                ),
+                "{input}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn integer_tokens_cannot_silently_become_rounded_floats() {
     let protocol = Protocol::new().unwrap();
     let prefix = format!(
