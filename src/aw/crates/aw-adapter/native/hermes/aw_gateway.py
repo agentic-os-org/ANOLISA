@@ -181,6 +181,13 @@ def register(ctx: Any, load: Any) -> None:
         with discovery if discovery is not None else nullcontext(), _lock:
             if not _alive:
                 raise ValueError("AW Hermes Gateway plugin was unloaded")
+            # Policy step count alone cannot prove these Gateway callbacks are live.
+            registered = getattr(manager, "_hooks", None)
+            if not isinstance(registered, dict) or any(
+                    not manager.has_hook(name)
+                    or not any(active is callback for active in registered.get(name, ()))
+                    for name, callback in bridge_hooks):
+                raise ValueError("AW Hermes Gateway callbacks are not active in the native registry")
             known = _known.get(session_id)
             if known is not None and (known[0] != path or known[1] != launch):
                 raise ValueError("Hermes session already belongs to another AW launch")
@@ -304,10 +311,10 @@ def register(ctx: Any, load: Any) -> None:
                     with _lock:
                         _checked.pop(key, None)
 
-    ctx.register_hook("pre_tool_call", pre)
-    ctx.register_hook("post_tool_call", post)
-    ctx.register_hook("transform_tool_result", transform)
-    ctx.register_hook("post_compaction", compact)
+    bridge_hooks = (("pre_tool_call", pre), ("post_tool_call", post),
+                    ("transform_tool_result", transform), ("post_compaction", compact))
+    for name, callback in bridge_hooks:
+        ctx.register_hook(name, callback)
     ctx.register_rpc("prime", prime)
     register_retirement(ctx, _known, _active, _release, _lock, load)
     ctx.on_unload(_unload)

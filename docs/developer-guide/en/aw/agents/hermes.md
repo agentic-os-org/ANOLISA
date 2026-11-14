@@ -26,7 +26,9 @@ target/debug/aw run --config /absolute/aw.hermes.yaml --agent hermes \
 ```
 
 connect backs up configuration, installs the AW plugin and reports `backup` and `displaced` paths. Retain both files.
-Use the same profile for launch. Wait for Hook readiness, then [validate native behavior](../validation.md).
+Use the same profile for launch. The CLI first reports `AW hermes CLI plugin ready`;
+for Gateway-backed chat, wait for `AW hermes Gateway callbacks active` before
+[validating native behavior](../validation.md).
 
 ## Deployment constraints
 
@@ -44,6 +46,8 @@ Forced plugin reload during an AW-bound Gateway turn or in-process tool executio
 The Gateway creates a binding when it claims an admitted turn and releases it when native execution returns, including automatic unknown settlement. A manually resolved unknown admission releases its binding at the next claim or retirement. On CLI exit, AW waits for queued, started and unknown admissions to settle and for the session to close before releasing its launch files and service instance. If a signal or drain failure prevents retirement, AW reports the retained instance and launch directory. Keep the AW service and Hermes Gateway available while resolving the admissions; the private `hermes-sessions.json` in that directory lists sessions requiring reconciliation. A forced process kill cannot complete the handshake.
 For `0.23.1`, restart an already running Gateway after connecting or upgrading the plugin.
 The CLI refuses to submit a turn if its Gateway cannot confirm the AW session binding.
+The Gateway checks that its four bridge callbacks are active in the native Hook registry
+before confirming, including when the policy has zero tool steps.
 `transform_tool_result` replaces a tool result before the model receives it. Hermes
 retains the original result if that callback fails or times out; policies that must
 withhold content should deny the tool in `tool.before`.

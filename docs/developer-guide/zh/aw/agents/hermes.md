@@ -23,7 +23,8 @@ target/debug/aw run --config /absolute/aw.hermes.yaml --agent hermes \
 ```
 
 connect 备份配置后安装 AW 插件，报告 `backup` 和 `displaced` 路径。保留这两份文件。
-运行时使用同一 profile，等待 Hook 就绪后按[原生验收](../validation.md)验证工具。
+运行时使用同一 profile。CLI 先报告 `AW hermes CLI plugin ready`；Gateway chat
+在报告 `AW hermes Gateway callbacks active` 后，再按[原生验收](../validation.md)验证工具。
 
 ## 部署约束
 
@@ -41,6 +42,7 @@ AW 绑定的 Gateway 轮次内及进程内工具执行期间，强制插件重�
 Gateway 在认领已准入轮次时建立绑定，原生执行返回后释放，包括自动 unknown 结算。人工处理的 unknown admission 在下一次认领或注销时释放绑定。CLI 退出时，AW 等待 queued、started 和 unknown admission 全部结算且会话关闭，再释放 launch 文件和服务实例。信号或 drain 故障阻止注销时，AW 报告并保留实例与 launch 目录。处理 admission 期间保持 AW 服务和 Hermes Gateway 可用；目录中的私有 `hermes-sessions.json` 列出待对账会话。进程强杀无法完成握手。
 对于 `0.23.1`，连接或升级插件后重启已运行的 Gateway；Gateway 未确认 AW 会话绑定时，
 CLI 会拒绝提交轮次。`transform_tool_result` 在模型收到工具结果前执行替换。
+Gateway 确认绑定前会检查原生 Hook 注册表中的四个桥接回调；空策略也执行此检查。
 该回调失败或超时后，Hermes 会保留原始结果；必须阻止内容进入模型时，在
 `tool.before` 拒绝工具调用。
 
