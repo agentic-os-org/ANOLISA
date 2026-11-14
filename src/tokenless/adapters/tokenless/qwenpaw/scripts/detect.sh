@@ -11,20 +11,47 @@ set -euo pipefail
 AGENT="${ANOLISA_TARGET:-qwenpaw}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this detector with exit 1 -- the same status it otherwise reports for "not
+# installed but installable", so the crash would reach the caller as a verdict
+# instead of as an error. Resolve HOME once and derive every user-scope path
+# from it; an empty value falls back to a sentinel path that cannot exist, so
+# the probes below answer "not initialized" instead of guessing a location
+# under /. The report says the path is synthetic rather than presenting it as
+# a real working directory.
+#
+# The sentinel is not /nonexistent: that is the conventional home of the
+# nobody system account on Debian-family images, so it can exist and hold
+# state. This path is under the adapter's own tree instead, where nothing
+# installs a QwenPaw working directory.
+SYNTHETIC_HOME_DIR="$ADAPTER_DIR/.no-home"
+HOME_DIR="${HOME:-}"
+if [ -z "$HOME_DIR" ]; then
+    HOME_DIR="$SYNTHETIC_HOME_DIR"
+fi
+
 # Resolve the working directory like QwenPaw: QWENPAW_WORKING_DIR, else
 # COPAW_WORKING_DIR, else a legacy ~/.copaw, else ~/.qwenpaw.
 PLUGIN_ID="tokenless"
 QWENPAW_WORKING_DIR="${QWENPAW_WORKING_DIR:-${COPAW_WORKING_DIR:-}}"
+# Only a working directory that was derived from HOME is synthetic. One that
+# came from an explicit override names a path the caller chose, and the
+# probe below really does look at it, so it must not be reported as
+# synthetic.
+SYNTHETIC_HOME=0
 if [ -z "$QWENPAW_WORKING_DIR" ]; then
-    if [ -d "$HOME/.copaw" ]; then QWENPAW_WORKING_DIR="$HOME/.copaw"; other="$HOME/.qwenpaw"; else QWENPAW_WORKING_DIR="$HOME/.qwenpaw"; other="$HOME/.copaw"; fi
+    if [ -d "$HOME_DIR/.copaw" ]; then QWENPAW_WORKING_DIR="$HOME_DIR/.copaw"; other="$HOME_DIR/.qwenpaw"; else QWENPAW_WORKING_DIR="$HOME_DIR/.qwenpaw"; other="$HOME_DIR/.copaw"; fi
     # ~/.copaw may have appeared or vanished since the plugin was installed:
     # prefer the default location that actually holds it.
     if [ ! -d "$QWENPAW_WORKING_DIR/plugins/$PLUGIN_ID" ] && [ -d "$other/plugins/$PLUGIN_ID" ]; then
         QWENPAW_WORKING_DIR="$other"
     fi
+    if [ -z "${HOME:-}" ]; then
+        SYNTHETIC_HOME=1
+    fi
 fi
 QWENPAW_BIN="${QWENPAW_BIN:-}"
-export PATH="${QWENPAW_HOME:-$HOME/.qwenpaw}/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+export PATH="${QWENPAW_HOME:-$HOME_DIR/.qwenpaw}/bin:$HOME_DIR/.local/bin:/usr/local/bin:$PATH"
 
 PLUGIN_SRC="$ADAPTER_DIR/qwenpaw"
 
@@ -134,7 +161,12 @@ fi
 if [ -d "$QWENPAW_WORKING_DIR" ]; then
     field "qwenpaw working dir" "present (${QWENPAW_WORKING_DIR})"
 else
-    field "qwenpaw working dir" "not initialized (${QWENPAW_WORKING_DIR})"
+    if [ "$SYNTHETIC_HOME" = "1" ]; then
+        field "qwenpaw working dir" "not initialized (${QWENPAW_WORKING_DIR}, synthetic: HOME is unset)"
+        echo "[${COMPONENT}] ${AGENT}: HOME is unset, so ${QWENPAW_WORKING_DIR} is a synthetic path and was not probed" >&2
+    else
+        field "qwenpaw working dir" "not initialized (${QWENPAW_WORKING_DIR})"
+    fi
     note_install_missing "qwenpaw working dir"
 fi
 
