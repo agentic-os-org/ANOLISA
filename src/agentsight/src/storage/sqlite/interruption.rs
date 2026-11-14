@@ -195,6 +195,33 @@ impl InterruptionStore {
             > 0
     }
 
+    /// Whether an OOM-sourced `agent_crash` for `pid` was recorded for the
+    /// kill at `kill_ns`, allowing up to `window_secs` of detection lag.
+    ///
+    /// The serve-mode HealthChecker stamps its crash at *detection* time,
+    /// which follows the dmesg kill second by at most the attribution window,
+    /// while recovery itself stamps the row at the kill second. Anchoring the
+    /// window at the kill instant matches both writers permanently. A window
+    /// anchored at "now" instead forgets the row once it ages out, so a later
+    /// restart re-inserts the same historical kill.
+    pub fn oom_event_exists_for_kill(&self, pid: i32, kill_ns: i64, window_secs: u64) -> bool {
+        let window_ns = i64::try_from(window_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000_000_000);
+        let upper_ns = kill_ns.saturating_add(window_ns);
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT COUNT(*) FROM interruption_events
+             WHERE interruption_type='agent_crash' AND pid=?1
+               AND occurred_at_ns >= ?2 AND occurred_at_ns <= ?3
+               AND detail LIKE '%\"oom\":true%'",
+            params![pid, kill_ns, upper_ns],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
     /// Return the maximum occurred_at_ns of OOM-sourced agent_crash events.
     /// Returns 0 if no such events exist.
     pub fn latest_oom_event_ns(&self) -> i64 {
@@ -1702,6 +1729,35 @@ mod tests {
         assert!(!store.oom_event_exists(9999, 8_000_000_000));
         assert!(!store.oom_event_exists(1111, 7_000_000_000));
         assert_eq!(store.latest_oom_event_ns(), 7_000_000_000);
+    }
+
+    /// A HealthChecker-recorded crash is stamped at detection time, not at
+    /// the dmesg kill second. The window anchored at the kill must match it
+    /// permanently, and must not match a different pid or a row beyond the
+    /// window.
+    #[test]
+    fn oom_event_exists_for_kill_matches_a_detection_time_row() {
+        let store = temp_store();
+        // A fixed instant in the past: the check must not depend on "now",
+        // or the row would stop matching once it aged out of the window.
+        let kill_ns = 1_776_420_000_000_000_000i64; // 2026-04-17T10:00:00Z
+        let mut event = make_event("conv-oom-recent", InterruptionType::AgentCrash);
+        event.interruption_id = "int-oom-recent".to_string();
+        event.pid = Some(9999);
+        event.occurred_at_ns = kill_ns + 30_000_000_000;
+        event.detail = Some(r#"{"oom":true,"source":"healthchecker+dmesg"}"#.to_string());
+        store.insert(&event).unwrap();
+
+        assert!(store.oom_event_exists_for_kill(9999, kill_ns, 300));
+        assert!(
+            !store.oom_event_exists(9999, kill_ns),
+            "the dmesg kill second is not the detection timestamp"
+        );
+        assert!(
+            !store.oom_event_exists_for_kill(9999, kill_ns, 29),
+            "a row beyond the window does not cover the kill"
+        );
+        assert!(!store.oom_event_exists_for_kill(1111, kill_ns, 300));
     }
 
     #[test]
