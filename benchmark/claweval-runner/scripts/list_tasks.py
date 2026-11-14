@@ -32,6 +32,27 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = REPO_ROOT / "claw-eval" / "tasks"
 
 
+def _strip_yaml_comment(value: str) -> str:
+    """Remove scalar comments without interpreting hashes inside quoted values."""
+    quote = value[0] if value[:1] in ('"', "'") else None
+    position = 1 if quote else 0
+    while position < len(value):
+        character = value[position]
+        if quote:
+            if quote == '"' and character == "\\":
+                position += 2
+                continue
+            if character == quote:
+                if quote == "'" and value[position + 1 : position + 2] == "'":
+                    position += 2
+                    continue
+                quote = None
+        elif character == "#" and (position == 0 or value[position - 1] in " \t"):
+            return value[:position].rstrip(" \t")
+        position += 1
+    return value
+
+
 def _load_yaml_simple(path: Path) -> dict:
     """Minimal YAML parser for flat task.yaml files (no external deps)."""
     import re
@@ -45,11 +66,15 @@ def _load_yaml_simple(path: Path) -> dict:
             # Stop at nested structures (prompt:, tools:, services:, etc.)
             if re.match(r"^\w", line) and ":" in line:
                 key, _, value = line.partition(":")
-                value = value.strip()
+                key = key.strip()
+                if key in ("task_id", "task_name", "difficulty", "category"):
+                    value = _strip_yaml_comment(value.strip(" \t"))
+                else:
+                    value = value.strip()
                 # Strip quotes
                 if value and value[0] in ('"', "'"):
                     value = value.strip("\"'")
-                result[key.strip()] = value
+                result[key] = value
             elif not line.startswith(" ") and not line.startswith("\t"):
                 # Top-level key with nested value (e.g. "prompt:")
                 key = line.rstrip(":")
