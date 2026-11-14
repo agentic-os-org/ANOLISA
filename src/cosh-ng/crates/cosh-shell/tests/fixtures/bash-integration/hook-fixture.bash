@@ -10,7 +10,12 @@ if [[ $__fixture_case == hook_bad_tail ]]; then
  exit
 fi
 if [[ $__fixture_case == hook_guide_off_registration ]]; then
+ # The module has no DISABLE-specific branch: every non-SHOW compat verdict,
+ # malformed or well formed, takes the same fail-closed cleanup. The SHOW
+ # registration cases prove the same eight-field shape installs; this case
+ # pins the well-formed DISABLE verdict to the shared fail-closed contract.
  [[ ${#PROMPT_COMMAND[@]} == 1 && ${PROMPT_COMMAND[0]} == "$__fixture_native" &&
+    -z ${__cosh_bash_registered+x} &&
     -z $(builtin compgen -A function __cosh_hook_) && -z $(builtin compgen -A variable __cosh_hook_) &&
     -z $(builtin trap -p ERR DEBUG RETURN) ]] || exit 110
  builtin mapfile -t __fixture_calls <"$__fixture_work/hook.calls"

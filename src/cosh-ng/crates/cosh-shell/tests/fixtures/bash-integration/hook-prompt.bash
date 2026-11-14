@@ -1,4 +1,15 @@
 #!/bin/bash
+# retirement keeps the native prompt entry and every recorded sentinel except
+# event_command, which retreat clears
+__disabled_state() {
+    [[ $__cosh_hook_active == -1 && ! ${PROMPT_COMMAND[$__cosh_hook_slot]+x} ]] || exit 91
+    [[ ${#PROMPT_COMMAND[@]} == 1 && ${PROMPT_COMMAND[0]} == "$__native_before" ]] || exit 92
+    [[ -z ${__cosh_hook_event_command-} && $__cosh_hook_event_status == 77 &&
+       $__cosh_hook_event_cwd == sentinel_cwd && $__cosh_hook_event_time == sentinel_time &&
+       $__cosh_hook_event_pipe_count == 77 && $__cosh_hook_event_subshell == 77 &&
+       $__cosh_hook_event_functions == 77 && $__cosh_hook_event_sources == 77 &&
+       $__cosh_hook_event_flags == sentinel_flags ]] || exit 93
+}
 case $1 in
 setup)
     TERM=xterm-256color
@@ -12,6 +23,7 @@ setup)
 retreat)
     [[ $__cosh_hook_active == 1 &&
        ${PROMPT_COMMAND[$__cosh_hook_slot]-} == "$__cosh_hook_entry" ]] || exit 83
+    __native_before=${PROMPT_COMMAND[0]}
     case $COSH_PROMPT_MODE in
         overwrite) PROMPT_COMMAND[$__cosh_hook_slot]='builtin printf USER_PROMPT_MARKER' ;;
         delete) builtin unset "PROMPT_COMMAND[$__cosh_hook_slot]" ;;
@@ -37,8 +49,8 @@ retreat)
 check)
     __event_after=$(builtin declare -p ${!__cosh_hook_event_@})
     if [[ $COSH_PROMPT_MODE == disabled ]]; then
-        [[ $__cosh_hook_active == -1 && ! ${PROMPT_COMMAND[$__cosh_hook_slot]+x} &&
-           -z $(builtin trap -p ERR) && $__cosh_hook_event_status == 77 ]] || exit 89
+        __disabled_state
+        [[ -z $(builtin trap -p ERR) ]] || exit 89
     else
         [[ $__event_after == "$__event_before" ]] || {
             builtin printf 'EVENT_CHANGED:%s\n' "$__event_after"
@@ -67,9 +79,8 @@ configure)
 finish)
     if [[ $COSH_PROMPT_CODE == retreat ]]; then
         if [[ $COSH_PROMPT_MODE == disabled ]]; then
-            [[ $__cosh_hook_active == -1 && ! ${PROMPT_COMMAND[$__cosh_hook_slot]+x} &&
-               $(builtin trap -p ERR) == "$__user_err_before" &&
-               $__cosh_hook_event_status == 77 ]] || exit 86
+            __disabled_state
+            [[ $(builtin trap -p ERR) == "$__user_err_before" ]] || exit 86
         else
             [[ $(builtin declare -p PROMPT_COMMAND) == "$__prompt_before" &&
                "$__cosh_hook_active:$__cosh_hook_trusted:$__cosh_hook_slot:$__cosh_hook_entry" == "$__state_before" &&
