@@ -305,6 +305,7 @@ Local region compression and reconstruction have been verified on finite samples
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | On by default; `0` disables; explicit SDK options take precedence |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering, including HTML inside JSON values | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` | Enable mixed-content region compression | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
+| `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | Switch search-path sharing for numbered API search records, recognized native shell searches, and pure path lists from commands or APIs; every received path and byte is retained | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 
 ### Adapter and diagnostic variables
 
@@ -325,9 +326,9 @@ Tool Ready is hard-disabled in this build. Its specification and repair-script o
 
 Database path priority is:
 
-- Stats: `TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
-- Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
-- RTK receipts: `TOKENLESS_DATA_DIR/rtk-outcomes.db` > `~/.tokenless/rtk-outcomes.db`
+- Stats: `TOKENLESS_STATS_DB` > `DSH_TOKENLESS_STATS_DB` (only while `DSH_SHELL=1`) > `TOKENLESS_DATA_DIR/stats.db` > `DSH_TOKENLESS_DATA_DIR/stats.db` (only while `DSH_SHELL=1`) > `~/.tokenless/stats.db`
+- Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `DSH_TOKENLESS_STASH_DB` (only while `DSH_SHELL=1`) > `TOKENLESS_DATA_DIR/stash.db` > `DSH_TOKENLESS_DATA_DIR/stash.db` (only while `DSH_SHELL=1`) > `~/.tokenless/stash.db`
+- RTK receipts: `TOKENLESS_DATA_DIR/rtk-outcomes.db` > `DSH_TOKENLESS_DATA_DIR/rtk-outcomes.db` (only while `DSH_SHELL=1`) > `~/.tokenless/rtk-outcomes.db`
 
 RTK receipts are independent of the statistics switch. They store the original and exact executed commands,
 agent/session/tool identifiers, execution generation and output-change flags, not tool-output
@@ -343,11 +344,28 @@ DeepSeek Harness is an exception to the default database location because its
 sandbox removes inherited `TOKENLESS_*` variables and may not expose the home
 directory. Its adapter uses `.tokenless` in the session workspace unless
 `TOKENLESS_DATA_DIR` is set, and publishes managed shell aliases for that
-directory plus `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB`. The default
+directory plus the inherited `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB`
+values, under the `DSH_TOKENLESS_*` names below. The default
 workspace directory contains a `.gitignore` with `*`, so complete tool text,
 Stash payloads, and SQLite sidecars are not staged by `git add -A`. Custom paths
 are not modified; make them accessible to the DSH shell sandbox and exclude
 them from source control or backups as required by your data policy.
+
+The DSH sandbox sets a sentinel variable, and the adapter publishes
+overrides for the managed shell environment within the sandbox:
+
+| Variable | Purpose | Constraint |
+|----------|---------|------------|
+| `DSH_SHELL` | Sentinel set by the DeepSeek Harness sandbox; the `DSH_TOKENLESS_*` overrides below take effect only while its value is `1` | Set by the DSH host, not published by the adapter |
+| `DSH_TOKENLESS_DATA_DIR` | Override the data directory the managed shell environment uses | Only takes effect while `DSH_SHELL=1`; any accessible absolute directory except filesystem root; no parent traversal |
+| `DSH_TOKENLESS_STATS_DB` | Override the statistics database the managed shell environment uses | Only takes effect while `DSH_SHELL=1`; must be under the real user home or selected data directory |
+| `DSH_TOKENLESS_STASH_DB` | Override the Stash database the managed shell environment uses | Only takes effect while `DSH_SHELL=1`; must be under the real user home or selected data directory |
+
+The DSH sandbox strips inherited `TOKENLESS_*` variables, so the adapter
+publishes the `DSH_TOKENLESS_*` overrides into the managed shell
+environment; the Tokenless CLI reads them on every invocation, and only
+while `DSH_SHELL=1`. `DSH_SHELL` itself comes from the DSH host and is not
+published by the adapter.
 
 ## Local and external data
 
@@ -450,7 +468,7 @@ This clears records from the statistics database resolved in the current environ
 env | grep -E '^TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-The statistics path resolves in this order: `TOKENLESS_STATS_DB`, `TOKENLESS_DATA_DIR/stats.db`, then `~/.tokenless/stats.db`. The Stash path resolves in this order: command-line `--stash-db`, `TOKENLESS_STASH_DB`, `TOKENLESS_DATA_DIR/stash.db`, then `~/.tokenless/stash.db`. Write the final values as verified absolute paths; do not expand untrusted environment values directly into a removal command.
+The statistics path resolves in this order: `TOKENLESS_STATS_DB`, `DSH_TOKENLESS_STATS_DB` (only while `DSH_SHELL=1`), `TOKENLESS_DATA_DIR/stats.db`, `DSH_TOKENLESS_DATA_DIR/stats.db` (only while `DSH_SHELL=1`), then `~/.tokenless/stats.db`. The Stash path resolves in this order: command-line `--stash-db`, `TOKENLESS_STASH_DB`, `DSH_TOKENLESS_STASH_DB` (only while `DSH_SHELL=1`), `TOKENLESS_DATA_DIR/stash.db`, `DSH_TOKENLESS_DATA_DIR/stash.db` (only while `DSH_SHELL=1`), then `~/.tokenless/stash.db`. Write the final values as verified absolute paths; do not expand untrusted environment values directly into a removal command.
 
 The following command works for default and custom paths. Replace and print both paths first, then confirm that they are the Tokenless databases to remove:
 

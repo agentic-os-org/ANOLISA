@@ -241,6 +241,7 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认开启；`0` 关闭；显式 SDK 参数优先 |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关，包括 JSON 值中的 HTML | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` | 混合内容区域压缩开关 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
+| `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | 带行号的 API 搜索记录、已识别的原生 Shell 搜索，以及命令或 API 的纯路径列表的搜索路径共享开关；保留每条收到的路径与字节 | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
 
@@ -261,9 +262,9 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 
 数据库路径优先级如下：
 
-- 统计库：`TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
-- stash 库：`--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
-- RTK 回执：`TOKENLESS_DATA_DIR/rtk-outcomes.db` > `~/.tokenless/rtk-outcomes.db`
+- 统计库：`TOKENLESS_STATS_DB` > `DSH_TOKENLESS_STATS_DB`（仅在 `DSH_SHELL=1` 时生效）> `TOKENLESS_DATA_DIR/stats.db` > `DSH_TOKENLESS_DATA_DIR/stats.db`（仅在 `DSH_SHELL=1` 时生效）> `~/.tokenless/stats.db`
+- stash 库：`--stash-db` > `TOKENLESS_STASH_DB` > `DSH_TOKENLESS_STASH_DB`（仅在 `DSH_SHELL=1` 时生效）> `TOKENLESS_DATA_DIR/stash.db` > `DSH_TOKENLESS_DATA_DIR/stash.db`（仅在 `DSH_SHELL=1` 时生效）> `~/.tokenless/stash.db`
+- RTK 回执：`TOKENLESS_DATA_DIR/rtk-outcomes.db` > `DSH_TOKENLESS_DATA_DIR/rtk-outcomes.db`（仅在 `DSH_SHELL=1` 时生效）> `~/.tokenless/rtk-outcomes.db`
 
 RTK 回执独立于统计开关，保存原命令和实际执行的完整命令、Agent/会话/工具调用标识、执行批次及输出改变标记，
 不保存工具输出正文。PostTool 命令与注册的执行命令完全匹配时消费一次后删除；未消费回执一天后过期，在后续改写时
@@ -275,10 +276,23 @@ RTK 回执独立于统计开关，保存原命令和实际执行的完整命令�
 
 DeepSeek Harness 是默认数据库位置的例外：它的沙箱会移除继承的 `TOKENLESS_*` 变量，并且
 可能无法访问 home 目录。未设置 `TOKENLESS_DATA_DIR` 时，Adapter 使用会话工作区下的
-`.tokenless`，并为该目录以及 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 发布受控 Shell
-别名。默认工作区目录包含内容为 `*` 的 `.gitignore`，因此完整工具文本、Stash Payload 和
+`.tokenless`，并为该目录以及继承的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 值
+按下方 `DSH_TOKENLESS_*` 名称发布受控 Shell 别名。默认工作区目录包含内容为 `*` 的 `.gitignore`，因此完整工具文本、Stash Payload 和
 SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路径；应确保 DSH Shell
 沙箱可以访问它们，并按数据策略将其排除在源码管理或备份之外。
+
+DSH 沙箱会设置一个哨兵变量，Adapter 也会为沙箱内受控的 Shell 环境发布覆盖项：
+
+| 变量 | 用途 | 约束 |
+|------|------|------|
+| `DSH_SHELL` | DeepSeek Harness 沙箱设置的哨兵变量；仅当其值为 `1` 时，下面的 `DSH_TOKENLESS_*` 覆盖才会生效 | 由 DSH 宿主设置，并非由 Adapter 发布 |
+| `DSH_TOKENLESS_DATA_DIR` | 覆盖受控 Shell 环境使用的数据目录 | 仅在 `DSH_SHELL=1` 时生效；可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
+| `DSH_TOKENLESS_STATS_DB` | 覆盖受控 Shell 环境使用的统计数据库 | 仅在 `DSH_SHELL=1` 时生效；必须位于真实用户 home 或选定的数据目录下 |
+| `DSH_TOKENLESS_STASH_DB` | 覆盖受控 Shell 环境使用的 Stash 数据库 | 仅在 `DSH_SHELL=1` 时生效；必须位于真实用户 home 或选定的数据目录下 |
+
+DSH 沙箱会剥离继承的 `TOKENLESS_*` 变量，因此 Adapter 向受控 Shell 环境发布
+`DSH_TOKENLESS_*`；Tokenless CLI 在每次调用时读取它们，且仅在 `DSH_SHELL=1` 期间生效。
+`DSH_SHELL` 本身来自 DSH 宿主，不由 Adapter 发布。
 
 ## 本地与外部数据
 
@@ -379,7 +393,7 @@ tokenless stats clear --yes
 env | grep -E '^TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-统计库按 `TOKENLESS_STATS_DB`、`TOKENLESS_DATA_DIR/stats.db`、`~/.tokenless/stats.db` 的顺序解析；Stash 按命令行 `--stash-db`、`TOKENLESS_STASH_DB`、`TOKENLESS_DATA_DIR/stash.db`、`~/.tokenless/stash.db` 的顺序解析。把最终路径写成经过确认的绝对路径，不要把未经验证的环境变量直接展开到删除命令中。
+统计库按 `TOKENLESS_STATS_DB`、`DSH_TOKENLESS_STATS_DB`（仅在 `DSH_SHELL=1` 时生效）、`TOKENLESS_DATA_DIR/stats.db`、`DSH_TOKENLESS_DATA_DIR/stats.db`（仅在 `DSH_SHELL=1` 时生效）、`~/.tokenless/stats.db` 的顺序解析；Stash 按命令行 `--stash-db`、`TOKENLESS_STASH_DB`、`DSH_TOKENLESS_STASH_DB`（仅在 `DSH_SHELL=1` 时生效）、`TOKENLESS_DATA_DIR/stash.db`、`DSH_TOKENLESS_DATA_DIR/stash.db`（仅在 `DSH_SHELL=1` 时生效）、`~/.tokenless/stash.db` 的顺序解析。把最终路径写成经过确认的绝对路径，不要把未经验证的环境变量直接展开到删除命令中。
 
 下面的命令同时适用于默认路径和自定义路径。先替换并再次打印两个路径，确认它们都是需要删除的 Tokenless 数据库：
 
