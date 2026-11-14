@@ -242,6 +242,19 @@ impl LoopDetector {
         // Look at the last N text-bearing calls
         let tail = &text_bearing[text_bearing.len().saturating_sub(threshold)..];
 
+        // Rule 3's token-burn predicate is a strict refinement of this one:
+        // the same similar-output window plus strictly growing input tokens.
+        // Rule 2 is evaluated first, so without leaving that case to rule 3
+        // it would shadow `token_burn_no_progress` permanently. A one-element
+        // window has no pair to grow, so keep it on rule 2.
+        if tail.len() > 1
+            && tail
+                .windows(2)
+                .all(|w| w[1].input_tokens > w[0].input_tokens)
+        {
+            return None;
+        }
+
         // Compare each pair against the first one
         let reference = &tail[0].output_text_snippet;
         let all_similar = tail[1..].iter().all(|c| {
@@ -285,7 +298,9 @@ impl LoopDetector {
             .filter(|c| !c.output_text_snippet.trim().is_empty())
             .collect();
 
-        if text_bearing.len() < threshold {
+        // "Growing input" needs at least two calls. With a one-call threshold
+        // the pair check would be vacuously true and report growth zero.
+        if text_bearing.len() < threshold || text_bearing.len() < 2 {
             return None;
         }
 
@@ -665,17 +680,58 @@ mod tests {
             make_call(
                 vec![],
                 "The quick brown fox jumps over the lazy dog repeatedly",
-                200,
+                100,
             ),
             make_call(
                 vec![],
                 "The quick brown fox jumps over the lazy dog repeatedly",
-                300,
+                100,
             ),
         ];
         let result = detector.detect("conv-1", None, None, None, 1000, Some(&calls));
         assert!(result.is_some());
         let event = result.unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["rule"], "output_similarity_loop");
+    }
+
+    #[test]
+    fn test_token_burn_rule_is_not_shadowed_by_output_similarity() {
+        // Rule 3's predicate is rule 2 plus strictly growing input tokens.
+        // Rule 2 used to be evaluated first without that distinction, so it
+        // always matched this shape and `token_burn_no_progress` could never
+        // be reported.
+        let detector = LoopDetector::default();
+        let output = "I will try to help you with this task using the available tools";
+        let calls = vec![
+            make_call(vec![], output, 1000),
+            make_call(vec![], output, 2000),
+            make_call(vec![], output, 3000),
+        ];
+        let event = detector
+            .detect("conv-1", None, None, None, 1000, Some(&calls))
+            .expect("growing input with similar output is a token-burn loop");
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["rule"], "token_burn_no_progress");
+        assert_eq!(detail["input_growth"], 2000);
+    }
+
+    #[test]
+    fn a_single_call_threshold_keeps_the_output_similarity_rule() {
+        // Threshold 1 means "one text call is enough". A one-element window
+        // has no pair to grow, so it must not be deferred to the token-burn
+        // rule (which would report input_growth = 0 as a growing context).
+        let detector = LoopDetector::new(LoopDetectorConfig {
+            tool_sequence_repeat_threshold: 5,
+            similar_output_repeat_threshold: 1,
+            ..Default::default()
+        });
+        let calls = vec![make_call(vec![], "the same answer", 100)];
+        let event = detector
+            .detect("conv-1", None, None, None, 1000, Some(&calls))
+            .expect("a one-call threshold triggers rule 2");
         let detail: serde_json::Value =
             serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         assert_eq!(detail["rule"], "output_similarity_loop");
@@ -754,11 +810,9 @@ mod tests {
         let event = result.unwrap();
         let detail: serde_json::Value =
             serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
-        // Rule 2 fires first (output similarity) since tool_sequence threshold is raised
-        assert!(
-            detail["rule"] == "output_similarity_loop"
-                || detail["rule"] == "token_burn_no_progress"
-        );
+        // Growing input tokens plus the same answer: the more specific
+        // token-burn rule must be reported, not shadowed by rule 2.
+        assert_eq!(detail["rule"], "token_burn_no_progress");
     }
 
     #[test]
@@ -809,12 +863,9 @@ mod tests {
         let event = result.unwrap();
         let detail: serde_json::Value =
             serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
-        // Should detect either output_similarity_loop (Rule 2) or token_burn (Rule 3)
-        // Rule 2 also filters text-bearing calls, so it may fire first
-        assert!(
-            detail["rule"] == "output_similarity_loop"
-                || detail["rule"] == "token_burn_no_progress"
-        );
+        // The text-bearing window grows while the answer repeats: the
+        // token-burn rule is the specific match and must be reported.
+        assert_eq!(detail["rule"], "token_burn_no_progress");
     }
 
     #[test]
