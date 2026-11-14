@@ -25,6 +25,14 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 凭据。Provider 私有设置保留在 `spec.providers.<name>.config` 中，服务不内置
 安全引擎规则。
 
+
+接入循环同时监听服务 socket 和 owner 的 pidfd，按最近的确认、桥接有效期截止时间
+安排等待，并保留原有 5 ms 外部取消检查上限。owner 检查复用 procfs 目录描述符，
+继续核验实时 UID 和 PID namespace；pidfd 固定进程生命周期，免去每次重新打开、
+解析 `/proc/<pid>/stat`。建立监听时重新核验原身份；pidfd 不可用时沿用原 procfs
+检查。取消中的 owner 从监听集合移除，准备与清理继续排空，避免已退出进程的
+可读描述符反复唤醒服务。
+
 ## 本地协议
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) 定义实验性协议
@@ -120,6 +128,10 @@ Rust 客户端通过 `Error::Attempt` 暴露该记录键。
 绑定槽位；绑定响应写入失败也会释放刚创建的实例。`aw run` 等待该响应时会响应终止
 信号；可复用客户端提供 `call_cancellable`，供调用方传入自己的取消标志。
 准备阶段已经产生的副作用不回滚。
+
+绑定、任务 Scope 和策略准备线程结束时，通过私有 socket pair 唤醒连接监视线程，
+失败也采用相同通知。一次 poll 同时观察客户端断连，并保留服务停止与期限检查的
+时间上限；已完成的工作可以立即返回，无需等到下一次取消轮询。
 
 原生命令可通过 `invoke_step.native_environment` 传入完整回调环境，使用相同的字节保留
 编码替换绑定环境，

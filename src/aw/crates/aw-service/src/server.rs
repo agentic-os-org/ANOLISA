@@ -20,7 +20,7 @@ use std::{
 };
 
 const CONTROL_RESERVE: usize = 16;
-const IDLE_WAIT_MS: i32 = 5;
+mod wait;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
@@ -137,26 +137,7 @@ impl Server {
                         );
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        let mut listener = libc::pollfd {
-                            fd: self.endpoint.listener().as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        // Wake for a connection while retaining the maintenance bound.
-                        // SAFETY: the listener and pollfd remain valid for this call.
-                        let ready = unsafe { libc::poll(&mut listener, 1, IDLE_WAIT_MS) };
-                        if ready < 0 {
-                            let error = io::Error::last_os_error();
-                            if error.kind() != io::ErrorKind::Interrupted {
-                                return Err(error.into());
-                            }
-                        } else if ready > 0 && listener.revents & libc::POLLIN == 0 {
-                            return Err(io::Error::other(format!(
-                                "listener poll returned unexpected events: {}",
-                                listener.revents
-                            ))
-                            .into());
-                        }
+                        wait::idle(self.endpoint.listener().as_raw_fd(), &self.runtime)?;
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) => return Err(error.into()),
@@ -301,38 +282,53 @@ fn prepare_connected(
 ) -> Result<serde_json::Value> {
     let cancelled = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
+        let (completed, completion) = UnixStream::pair()?;
+        let preparation_cancelled = Arc::clone(&cancelled);
         let worker = thread::Builder::new()
             .name("aw-prepare".into())
-            .spawn_scoped(scope, || {
+            .spawn_scoped(scope, move || {
+                // Closing this endpoint wakes the monitor on success, error or panic.
+                let _completion = completion;
                 if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
-                    runtime.update_policy(&request, (peer.uid, peer.pid), &cancelled)
+                    runtime.update_policy(&request, (peer.uid, peer.pid), &preparation_cancelled)
                 } else if let Operation::Registration { command } = request.operation {
                     runtime.registration(
                         command,
                         process.ok_or_else(|| rejected("registration_peer_mismatch"))?,
                         deadline,
-                        &cancelled,
+                        &preparation_cancelled,
                     )
                 } else {
                     runtime.authorize_registration_peer(&request.operation, process)?;
-                    runtime.handle(request.operation, deadline, &cancelled)
+                    runtime.handle(request.operation, deadline, &preparation_cancelled)
                 }
             })?;
         while !worker.is_finished() {
-            let mut peer = libc::pollfd {
-                fd: stream.as_raw_fd(),
-                events: libc::POLLRDHUP,
-                revents: 0,
-            };
-            // SAFETY: poll borrows one live socket descriptor and never consumes its data.
-            let result = unsafe { libc::poll(&mut peer, 1, 20) };
+            let mut sockets = [
+                libc::pollfd {
+                    fd: stream.as_raw_fd(),
+                    events: libc::POLLRDHUP,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: completed.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: both socket descriptors remain live throughout poll.
+            let result = unsafe { libc::poll(sockets.as_mut_ptr(), 2, 20) };
             if runtime.stopped.load(Ordering::Acquire)
                 || Instant::now() >= deadline
-                || peer.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
+                || sockets[0].revents
+                    & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
                     != 0
                 || (result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted)
             {
                 cancelled.store(true, Ordering::Release);
+                break;
+            }
+            if sockets[1].revents != 0 {
                 break;
             }
         }

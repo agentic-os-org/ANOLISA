@@ -564,3 +564,39 @@ fn expired_bridge_cannot_renew_or_reclaim_live_owner() {
         .check_scope_cleanup(&task.instance_id)
         .unwrap();
 }
+
+#[test]
+fn maintenance_tracks_handoff_deadlines_and_omits_cancelled_exit_notifications() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    {
+        let mut owners = fixture.runtime.owners.lock().unwrap();
+        owners.get_mut(&task.instance_id).unwrap().acknowledge_by = Some(deadline);
+    }
+    let pending = fixture.runtime.maintenance().unwrap();
+    assert_eq!(pending.deadline, Some(deadline));
+    assert_eq!(pending.exits.len(), 2);
+    {
+        let owners = fixture.runtime.owners.lock().unwrap();
+        owners[&task.instance_id]
+            .cancelled
+            .store(true, Ordering::Release);
+    }
+    let draining = fixture.runtime.maintenance().unwrap();
+    assert!(draining.deadline.is_none());
+    assert_eq!(draining.exits.len(), 1);
+    fixture.runtime.maintain(false).unwrap();
+    assert!(!fixture
+        .runtime
+        .owners
+        .lock()
+        .unwrap()
+        .contains_key(&task.instance_id));
+    assert!(!fixture
+        .runtime
+        .instances
+        .lock()
+        .unwrap()
+        .contains_key(&task.instance_id));
+}

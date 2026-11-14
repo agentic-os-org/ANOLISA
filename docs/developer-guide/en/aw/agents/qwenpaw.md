@@ -97,6 +97,14 @@ installation guard. AW module imports begin in
 the native plugin initialization phase, before Agent loading. Initialization
 failure stops the App; a missing or mismatched receipt blocks Agent construction.
 
+For QwenPaw 2.1.1b3, managed startup uses libc `realpath` for existing paths
+in the native plugin isolation sweeps. Missing or unresolved paths retain native
+normalization. Resolution is uncached, so plugin reloads observe changed symlinks;
+module eviction and import isolation remain owned by QwenPaw. Other versions
+keep their native path implementation. Repeated installation reuses the same
+wrapper. If ctypes or the required libc symbols are unavailable, startup keeps
+the native normalizer; errors during native path resolution still propagate.
+
 ## Separate HTTP startup and first protected work
 
 Measure launch-to-HTTP, HTTP-to-Agent-ready and first-Hook latency separately.

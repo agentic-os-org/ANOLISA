@@ -80,7 +80,7 @@ impl Runtime {
     }
 
     pub(super) fn associate_process(&self, id: &str, pid: u32) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let mut instances = self
             .instances
             .lock()

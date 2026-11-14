@@ -3,7 +3,7 @@
 import ast
 import importlib.util
 import json
-from pathlib import Path
+import os
 import sys
 
 ENTRY = """import sys
@@ -39,12 +39,12 @@ if ast.dump(tree) not in {
 def installed_version():
     # Match the original console's import path, cwd and interpreter environment.
     if not sys.flags.safe_path:
-        sys.path[0] = str(Path(sys.argv[1]).resolve().parent)
+        sys.path[0] = os.path.dirname(os.path.realpath(sys.argv[1]))
     spec = importlib.util.find_spec("qwenpaw")
     if spec is None or spec.origin is None or spec.submodule_search_locations is None:
         raise ValueError("QwenPaw package is unavailable")
-    path = Path(spec.origin).parent / "__version__.py"
-    with path.open("rb") as stream:
+    path = os.path.join(os.path.dirname(spec.origin), "__version__.py")
+    with open(path, "rb") as stream:
         source = stream.read(4097)
     if len(source) > 4096:
         raise ValueError("QwenPaw version file exceeds its limit")

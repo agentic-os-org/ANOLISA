@@ -28,6 +28,16 @@ Core execution/adoption receipts. Provider-private settings remain in
 `spec.providers.<name>.config`; no security-engine rules are embedded in the
 service.
 
+
+The accept loop polls owner pidfds alongside its socket. Its wait is bounded by
+pending confirmation and bridge-validity deadlines and the existing 5 ms
+external-cancellation interval. Owner checks retain a procfs directory descriptor
+and verify live UID and PID namespace; the pidfd pins process lifetime without
+reopening and parsing `/proc/<pid>/stat` on every check. Opening a watch revalidates
+the original identity. If pidfd setup is unavailable, checks use the existing
+procfs path. Cancelled owners leave the poll set while preparation and cleanup
+drain, preventing repeated wakeups from an already-readable exit descriptor.
+
 ## Local protocol
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) defines the experimental
@@ -116,6 +126,11 @@ the Provider work and releases its slot after cleanup. A failed binding response
 write also releases the created instance. `aw run` observes termination while
 waiting for this reply; the reusable client exposes `call_cancellable` for callers
 with their own cancellation flag. Preparation side effects are not rolled back.
+
+Binding, task-scope and policy preparation wake the connection monitor when the
+worker finishes, including failure. A private socket pair carries completion;
+the same poll observes peer disconnects and retains the bounded shutdown and
+deadline checks. Completed work does not wait for the next cancellation poll.
 
 For raw native commands, `invoke_step.native_environment` can carry the complete
 callback environment using the same byte-preserving encoding. It replaces, rather

@@ -256,7 +256,7 @@ impl Runtime {
         {
             return Err(rejected("registration_adapter_unsupported"));
         }
-        let process = Process::read(key.owner.pid)?;
+        let process = Process::read(key.owner.pid)?.watch()?;
         process.registration_owner(&key.owner)?;
         process.caller(peer)?;
         let map_key = Self::registration_key(&key)?;
