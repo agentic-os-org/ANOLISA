@@ -63,13 +63,18 @@ _QWENWORK_RECOVERY: dict[str, str] | None = None
 def _prepare_qwenwork_recovery(
     plugin_root: str, payload: dict
 ) -> dict[str, str] | None:
-    if sys.platform != "darwin" or not os.path.isabs(plugin_root):
+    if not os.path.isabs(plugin_root):
         return None
     root = Path(plugin_root)
-    binary = root / "bin/tokenless"
+    binary = root / "bin/tokenless.exe" if os.name == "nt" else root / "bin/tokenless"
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return None
-    required = (root / "hooks/run-hook.sh", root / "hooks/shared/rewrite_hook.py")
+    # run-hook.sh is the POSIX launcher; the Windows installer rewrites the
+    # registered hook commands to invoke Python directly under PowerShell,
+    # so only the shared rewrite script is required on both platforms.
+    required = [root / "hooks/shared/rewrite_hook.py"]
+    if os.name != "nt":
+        required.append(root / "hooks/run-hook.sh")
     if not all(path.is_file() and os.access(path, os.R_OK) for path in required):
         return None
     session_id = payload.get("session_id")
@@ -84,16 +89,27 @@ def _prepare_qwenwork_recovery(
         covered = set()
         for group in hooks:
             if any(
+                # Match by basename: the Windows installer rewrites each hook
+                # command into the PowerShell form
+                # `& '<python>' -X utf8 -B "${env:QODER_PLUGIN_ROOT}/hooks/shared/rewrite_hook.py"`,
+                # whose token split never yields a bare `rewrite_hook.py`.
                 hook.get("type") == "command"
-                and "rewrite_hook.py" in shlex.split(hook.get("command", ""))
+                and any(
+                    os.path.basename(token) == "rewrite_hook.py"
+                    for token in shlex.split(hook.get("command", ""))
+                )
                 for hook in group.get("hooks", [])
             ):
                 covered.update(
                     tool
-                    for tool in {"Bash", *_QWENWORK_WORKSPACE_SHELLS}
+                    for tool in {"Bash", "PowerShell", *_QWENWORK_WORKSPACE_SHELLS}
                     if re.fullmatch(group.get("matcher", ".*"), tool)
                 )
-        if covered != {"Bash", *_QWENWORK_WORKSPACE_SHELLS}:
+        # `Bash` is the required anchor: every host emits it (the POSIX
+        # source matcher covers only Bash and the workspace shells; the
+        # Windows installer additionally appends `|PowerShell`, an optional
+        # extra this rewrite fully supports).
+        if not {"Bash", *_QWENWORK_WORKSPACE_SHELLS} <= covered:
             return None
     except (
         OSError,
@@ -117,19 +133,85 @@ def _prepare_qwenwork_recovery(
     }
 
 
-def _qwenwork_retrieve_command(key: str) -> str | None:
+_QWENWORK_RETRIEVE_ENV = (
+    "TOKENLESS_AGENT_ID",
+    "TOKENLESS_SESSION_ID",
+    "TOKENLESS_TOOL_USE_ID",
+    "TOKENLESS_DATA_DIR",
+    "TOKENLESS_STASH_DB",
+    "DSH_TOKENLESS_STASH_DB",
+)
+
+
+def _powershell_quote(value: str) -> str:
+    """Single-quote a value for PowerShell; only '' escapes a quote."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+_MANAGED_TOOL_HOOKS = "managed-tool-hooks-v1"
+
+
+def _is_powershell_event(tool_name: str) -> bool:
+    """Whether this host event runs its shell commands in PowerShell.
+
+    The same signal the RTK rewrite uses (the Core rewrites
+    ``tool_name == "PowerShell"`` events into the anchored PowerShell form):
+    either the event is already a PowerShell tool, or the manifest-declared
+    managed engine compatibility flag renames the host's ``Bash`` event to
+    PowerShell before the rewrite dispatch. Non-string tool names fail open
+    (this hook must never crash the host's PreToolUse).
+    """
+    return (
+        isinstance(tool_name, str)
+        and (
+            tool_name.lower() == "powershell"
+            or (
+                tool_name == "Bash"
+                and os.name == "nt"
+                and os.environ.get("QWENWORK_PLUGIN_HOOK_COMPATIBILITY")
+                == _MANAGED_TOOL_HOOKS
+            )
+        )
+    )
+
+
+def _qwenwork_retrieve_command(key: str, tool_name: str) -> str | None:
     if _QWENWORK_RECOVERY is None:
         return None
     runtime = _QWENWORK_RECOVERY
+    if _is_powershell_event(tool_name):
+        # Same shape as the Core's anchored PowerShell rewrite
+        # (anchor_powershell_rtk): the shell process may outlive one tool
+        # call, so the overrides are set inside try and the previous
+        # process-scope values are restored in finally, with the exit status
+        # carried out of the script block. An empty value still deletes the
+        # variable (`$env:NAME = ''`), which is harmless: the CLI filters
+        # empty overrides, and the save/restore returns the shell to its
+        # previous state either way.
+        values = [(name, runtime[name]) for name in _QWENWORK_RETRIEVE_ENV]
+        saves = " ".join(
+            f"$tokenlessOld{index} = [Environment]::GetEnvironmentVariable('{name}', 'Process');"
+            for index, (name, _) in enumerate(values)
+        )
+        assignments = " ".join(
+            f"$env:{name} = {_powershell_quote(value)};" for name, value in values
+        )
+        restores = " ".join(
+            f"[Environment]::SetEnvironmentVariable('{name}', $tokenlessOld{index}, 'Process');"
+            for index, (name, _) in enumerate(values)
+        )
+        return (
+            f"& {{ [CmdletBinding()] param(); {saves} try {{ {assignments} "
+            f"& {_powershell_quote(runtime['binary'])} retrieve {key}\n"
+            f"}} finally {{ $tokenlessOk = $?; $tokenlessExit = $LASTEXITCODE; {restores} "
+            "$global:LASTEXITCODE = $tokenlessExit } "
+            "if (-not $tokenlessOk) { $ErrorActionPreference = 'Ignore'; "
+            "$PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new("
+            "[Exception]::new('Command failed'), 'TokenlessCommandFailed', "
+            "[System.Management.Automation.ErrorCategory]::NotSpecified, $null)) } }"
+        )
     arguments = ["/usr/bin/env"]
-    for name in (
-        "TOKENLESS_AGENT_ID",
-        "TOKENLESS_SESSION_ID",
-        "TOKENLESS_TOOL_USE_ID",
-        "TOKENLESS_DATA_DIR",
-        "TOKENLESS_STASH_DB",
-        "DSH_TOKENLESS_STASH_DB",
-    ):
+    for name in _QWENWORK_RETRIEVE_ENV:
         arguments.append(f"{name}={runtime[name]}")
     arguments.extend((runtime["binary"], "retrieve", key))
     return " ".join(shlex.quote(argument) for argument in arguments)
@@ -141,7 +223,9 @@ def rewrite_qwenwork_retrieve(tool_name: str, arguments: dict) -> dict | None:
     if tool_name not in SHELL_TOOLS or not isinstance(command, str):
         return None
     key = _bare_retrieve_hash(command)
-    rewritten = _qwenwork_retrieve_command(key) if key is not None else None
+    rewritten = (
+        _qwenwork_retrieve_command(key, tool_name) if key is not None else None
+    )
     return {**arguments, "command": rewritten} if rewritten is not None else None
 
 
@@ -156,6 +240,13 @@ def is_retrieve_result(tool_name: str, arguments: object) -> bool:
         return True
     if _QWENWORK_RECOVERY is None:
         return False
+    # The PowerShell form wraps the command in a try/finally script block, so
+    # the key is not the last argument; recognize by exact equality against
+    # the generated command for each hash present in the script. Exact
+    # equality keeps pipelines and user-supplied wrappers unrecognized.
+    for candidate in set(re.findall(r"(?<![0-9a-f])[0-9a-f]{24}(?![0-9a-f])", command)):
+        if command == _qwenwork_retrieve_command(candidate, tool_name):
+            return True
     try:
         arguments = shlex.split(command)
     except ValueError:
@@ -164,7 +255,7 @@ def is_retrieve_result(tool_name: str, arguments: object) -> bool:
         return False
     # Only our exact command is recovery; pipelines and user-supplied wrappers
     # must not inherit the exemption from response compression.
-    return command == _qwenwork_retrieve_command(arguments[-1])
+    return command == _qwenwork_retrieve_command(arguments[-1], tool_name)
 
 
 def prepare_hook_input(input_data: dict) -> dict:
@@ -232,14 +323,12 @@ def tool_call_id(data: dict) -> str:
 
 
 def pre_tool_input(data: dict) -> tuple[str, dict | None]:
-    name = data.get("tool_name", "")
+    raw = data.get("tool_name")
+    name = raw if isinstance(raw, str) else ""
     recovery_input = rewrite_qwenwork_retrieve(name, data.get("tool_input", {}))
-    if (
-        os.name == "nt"
-        and name == "Bash"
-        and os.environ.get("QWENWORK_PLUGIN_HOOK_COMPATIBILITY")
-        == "managed-tool-hooks-v1"
-    ):
+    if _is_powershell_event(name):
+        # The manifest-declared managed engine runs its "Bash" events in
+        # PowerShell; the Core keys its rewrite shell off the event name.
         return "PowerShell", recovery_input
     return name, recovery_input
 

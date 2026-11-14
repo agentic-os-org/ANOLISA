@@ -47,7 +47,7 @@ by default. The global compression switch selects dry-run and does not disable R
 | Cosh-NG / legacy Copilot Shell | Cosh-NG can replace supported results, but the Common BeforeModel hook cannot publish an executable static recovery tool. Legacy Copilot Shell cannot replace PostTool results. |
 | OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
 | Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH use block-and-suggest for RTK; DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
-| QwenWork workspace Shell or plugin-private CLI | On macOS, a complete private recovery bridge rewrites Marker commands to the plugin binary with matching state and attribution. Without that bridge, including Windows private runtimes, only lossless candidates are eligible. |
+| QwenWork workspace Shell or plugin-private CLI | On macOS and Windows, a complete private recovery bridge rewrites Marker commands to the plugin binary with matching state and attribution (on Windows, the installer rewrites hook commands to the PowerShell form and the binary is `bin/tokenless.exe`). Without that bridge, only lossless candidates are eligible. |
 | QwenPaw / AgentScope | All current Core domains are connected, including Schema and static retrieval. Intermediate stream chunks and non-text blocks remain unchanged. Custom AgentScope tools require an explicit content-origin contract. |
 
 OpenClaw recovery is authorized by markers in the current history and newly delivered results,
@@ -69,7 +69,8 @@ PostTool leaves the entire JSON response unchanged when its parser cannot preser
 The Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode adapters each send one
 `post_tool` request to `tokenless compress`. When the host can replace the result and bare
 `tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
-with the existing shell tool. QwenWork can also use its verified macOS private recovery bridge.
+with the existing shell tool. QwenWork can also use its verified macOS and Windows private
+recovery bridges.
 Otherwise Core accepts only lossless candidates. Every non-`applied`
 disposition keeps the original. The hook currently routes:
 
@@ -230,10 +231,12 @@ change sandbox permissions or transfer records across that boundary.
 
 If a standalone installation includes `bin/` inside the plugin, the adapter uses
 those binaries.
-On macOS, a complete PreTool bridge rewrites standalone `tokenless retrieve` commands
-to the private binary with the same state directory, Stash selection, session and call
-attribution. Exact recovery results bypass compression. If the bridge is unavailable,
-these private runtime paths accept only lossless compression.
+On macOS and Windows, a complete PreTool bridge rewrites standalone `tokenless retrieve`
+commands to the private binary with the same state directory, Stash selection, session and call
+attribution; the Windows bridge emits the PowerShell form (`$env:` assignments and
+`& '<tokenless.exe>' retrieve <HASH>`) for PowerShell events. Exact recovery results bypass
+compression. If the bridge is unavailable, these private runtime paths accept only lossless
+compression.
 
 Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
 Python 3.9+, and the Tokenless binary. RTK is required for command rewriting but
