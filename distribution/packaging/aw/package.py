@@ -166,14 +166,18 @@ def _provider(
     }
     (root / "package.json").write_text(json.dumps(description, indent=2))
     copy_file(TEMPLATES / f"{role}.json", root / "templates" / f"{role}.json", cancel, 0o644)
-    copy_file(
-        TEMPLATES / "sec-core-tokenless.json",
-        root / "templates/sec-core-tokenless.json",
-        cancel,
-        0o644,
-    )
-    for name in ("tokenless-openclaw", "sec-core-tokenless-openclaw"):
-        copy_file(TEMPLATES / f"{name}.json", root / "templates" / f"{name}.json", cancel, 0o644)
+    for template in (
+        "sec-core-tokenless",
+        "sec-core-tokenless-qoder",
+        "tokenless-openclaw",
+        "sec-core-tokenless-openclaw",
+    ):
+        copy_file(
+            TEMPLATES / f"{template}.json",
+            root / "templates" / f"{template}.json",
+            cancel,
+            0o644,
+        )
 
 
 def _readme(repo: Path, language: str) -> str:
