@@ -483,6 +483,29 @@ mod tests {
     }
 
     #[test]
+    fn measure_keeps_genuine_followup_turns() {
+        // Stripping injected context must not collapse a real follow-up: two
+        // user-authored turns still carry the topic forward, even when the
+        // second one starts with a system-reminder block.
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "test"},
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "first question"},
+                {"step_id": 2, "source": "agent", "message": "first answer"},
+                {"step_id": 3, "source": "user",
+                 "message": "<system-reminder>context</system-reminder>second question"},
+                {"step_id": 4, "source": "agent", "message": "second answer"}
+            ]
+        }"#;
+        let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
+        let m = TriageMetrics::measure(&trajectory);
+        assert_eq!(m.n_user_turns, 2);
+        let out = classify(&m, &clean(), &TriageConfig::default());
+        assert_eq!(out.label, TrajectoryLabel::Good);
+    }
+
+    #[test]
     fn content_parts_follow_the_calibration_message_length_contract() {
         // The calibration script must measure the same shared ATIF decoding:
         // compact Unicode JSON for content parts, not the number of parts.
