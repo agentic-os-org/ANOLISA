@@ -3161,6 +3161,49 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("tool_calls"));
     }
 
+    /// The capped/filtered terminal event is a separate arm; it carries the
+    /// same complete `output[]`. A drained delta-less capture must recover
+    /// text, refusal and the tool call there too, and the cap must still win
+    /// over the tool-call finish.
+    #[test]
+    fn test_responses_sse_incomplete_terminal_output_recovers_all_parts() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_incomplete","model":"gpt-5"}},
+            {"type":"response.incomplete","response":{
+                "id":"resp_incomplete","model":"gpt-5","status":"incomplete",
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "output":[
+                    {"type":"message","id":"msg_text","role":"assistant","content":[
+                        {"type":"output_text","text":"partial answer"}
+                    ]},
+                    {"type":"message","id":"msg_refusal","role":"assistant","content":[
+                        {"type":"refusal","refusal":"I can't continue"}
+                    ]},
+                    {"type":"function_call","id":"fc_incomplete","call_id":"call_incomplete",
+                     "name":"read_file","arguments":"{\"path\":\"/tmp/b\"}"}
+                ]
+            }}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the incomplete terminal output must yield parts");
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "partial answer"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::Text { content } if content == "I can't continue"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[2], MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("call_incomplete")
+                    && name == "read_file"
+                    && arguments.as_ref() == Some(&serde_json::json!({"path": "/tmp/b"}))),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("length"));
+    }
+
     #[test]
     fn test_responses_sse_scopes_reasoning_replay_to_the_item() {
         let body = r#"[
