@@ -185,6 +185,21 @@ class TestFailOpen:
         output = _run_hook("")
         assert output == {}
 
+    @pytest.mark.parametrize(
+        "payload",
+        ['["not", "an", "object"]', '"a string"', "42", "null"],
+    )
+    def test_non_object_payload_allows(self, payload):
+        """Valid JSON that is not an object must fail-open like invalid JSON.
+
+        The other hooks in this plugin already guard this input class; without
+        one here the hook dies on an AttributeError instead of letting Codex
+        treat empty stdout as allow.
+        """
+        proc = _run_hook_process(payload)
+        assert proc.stdout == ""
+        assert "Traceback" not in proc.stderr
+
     def test_empty_prompt_allows(self, mock_cli):
         env = mock_cli(output=_INJECTION_RESULT)
         output = _run_hook(
