@@ -113,10 +113,13 @@ policy adds a final check inside the bundled CLI, immediately before its HTTP
 runtime sends the serialized Anthropic Messages request.
 
 The conditional profile covers Python SDK 0.2.88 / CLI 2.1.161 and SDK 0.2.182 /
-CLI 2.1.325 on Linux arm64 and x86_64, with exact SDK and executable fingerprints.
+CLI 2.1.325, plus TypeScript SDK 0.3.325 / CLI 2.1.325 on Linux arm64 and
+x86_64, with exact SDK and executable fingerprints.
 Use a fresh foreground `create_client` with `setting_sources=[]`, no settings,
 plugins, resume, custom agents or runtime/provider overrides, and a direct
-Anthropic HTTP(S) origin with an explicit `claude-*` model and no fallback.
+Anthropic-compatible HTTP(S) base URL with an explicit model ID and no fallback.
+Gateway path prefixes such as `/apps/anthropic` are supported; model aliases
+(`auto`, `default`, `sonnet`, `opus`, `haiku`) are rejected.
 Requests with bodies on other routes are rejected, including token refresh and
 other model APIs. Set `tools=["Bash"]` or `tools=[]` and use only
 in-process SDK MCP servers. Background execution is disabled. Every final step requires `on_error: block`; structured
@@ -133,10 +136,45 @@ launches have no final preload.
 
 The native acceptance runs safe and late-mutation cases for Bash and SDK MCP,
 plus policy timeout/error cases, and records both HTTP requests and deterministic
-local model replies. Hosted inference, TypeScript SDK, resident sessions,
-subagents, alternative model APIs and multimodal delivery are not certified.
+local model replies. Opt-in Python SDK 0.2.182 acceptance also exercised Alibaba
+Cloud Token Plan with `qwen3.8-flash`: a capture proxy forwarded the exact
+inspected bytes, and the hosted model echoed the late marker only with the gate
+disabled. This verifies the Claude SDK transport using a Qwen model. Resident
+sessions, subagents, alternative model APIs and multimodal delivery are not certified.
 Application Hook context injection is rejected in this profile; other observers
 that receive results before the model boundary remain outside its scope.
+
+### TypeScript foreground Query
+
+Install `@anthropic-ai/claude-agent-sdk@0.3.325` alongside the application and use
+Node.js 22+ on Linux. Configure the same `claude-sdk` adapter with
+`argv: ["/absolute/path/to/node", "/absolute/path/to/worker.mjs"]`.
+The public factory composes native tool callbacks and waits for SDK initialization
+and runtime readiness before releasing the prompt:
+
+```javascript
+const { createQuery } = await import(process.env.AW_CLAUDE_SDK_BRIDGE);
+const query = await createQuery({
+  prompt: "Run printf hello once and report its result.",
+  options: {
+    model: "claude-sonnet-4-6", settingSources: [],
+    tools: ["Bash"], allowedTools: ["Bash"], maxTurns: 2,
+  },
+});
+try {
+  for await (const message of query) console.log(JSON.stringify(message));
+} finally {
+  query.close();
+}
+```
+
+This factory supports one foreground Query, `tool.before` observe/block,
+`tool.after` observe, and the conditional final check. It accepts `cwd`, `env`,
+`mcpServers` containing public SDK servers, and native tool `hooks`; application
+callbacks run after the AW callback. The returned object exposes iteration and
+`close()`. Input replacement, result compression, resident reload, native command
+steps and runtime reconfiguration are unavailable in this TypeScript profile.
+Unknown TypeScript SDK fingerprints are rejected even for Post-only launches.
 
 ### Enable Bash PreTool and PostTool optimization
 

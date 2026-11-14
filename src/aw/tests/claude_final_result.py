@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import platform
 import socket
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from native_cleanup import own_children, reap_children
 RELEASES = {"0.2.88": "2.1.161 (Claude Code)", "0.2.182": "2.1.325 (Claude Code)"}
 
 
-def run(aw, output, mode):
+def run(aw, output, mode, node=None):
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix="aw-cfg-") as temporary:
         case = Path(temporary)
@@ -34,7 +35,14 @@ def run(aw, output, mode):
         worker = FIXTURES / "claude-sdk/final_native.py"
         config = case / "aw.json"
         value = document(sys.executable, worker, case / "state", "allow")
+        if node:
+            name = "typescript-before.mjs" if mode.startswith("ts-before-") else "final_typescript.mjs"
+            value["spec"]["agents"]["claude"]["argv"] = [str(node), str(worker.with_name(name))]
         value["spec"]["daemon"]["startup"] = "external"
+        if mode.startswith("ts-before-"):
+            value["spec"]["execution"]["default_event_budget_ms"] = 1000
+            tail = dict(value["spec"]["events"]["tool.before"]["steps"][0], id="tail")
+            value["spec"]["events"]["tool.before"]["steps"].append(tail)
         if mode == "required-final" or "-gate-" in mode:
             value["spec"]["events"]["security.violation"] = {
                 "enabled": True, "required": True, "steps": [{"id": "final",
@@ -51,7 +59,7 @@ def run(aw, output, mode):
                                         "--state-dir", str(case / "state")])
             await_condition(lambda: (case / "state/aw.sock").exists(), 10, "AW readiness")
             process = processes.start("worker", [str(aw), "run", "--config", str(config), "--agent", "claude"])
-            code = processes.wait(process, 90)
+            code = processes.wait(process, 240 if os.environ.get("CLAUDE_HOSTED_SETTINGS") else 90)
             if mode == "required-final":
                 log = (output / "worker.log").read_text()
                 assert code != 0 and "Claude final gate requires a structured policy with on_error: block" in log, log
@@ -61,15 +69,18 @@ def run(aw, output, mode):
             else:
                 assert code == 0, (output / "worker.log").read_text()
                 result = json.loads((work / "result.json").read_text())
-                assert result["sdk"] in RELEASES, result["sdk"]
-                assert result["cli"] == RELEASES[result["sdk"]], result["cli"]
+                releases = {"0.3.325": "2.1.325 (Claude Code)"} if node else RELEASES
+                assert result["sdk"] in releases, result["sdk"]
+                assert result["cli"] == releases[result["sdk"]], result["cli"]
                 events = [json.loads(line) for line in (work / "policy-events.jsonl").read_text().splitlines()]
                 after = [event for event in events if event["name"] == "tool.after"]
-                assert len(after) == (2 if mode == "mcp-gate-multi-late" else 1) and "AW_CLAUDE_FINAL_SECRET_MARKER" not in json.dumps(after)
+                tool_count = 3 if mode.endswith("-history") else (2 if mode == "mcp-gate-multi-late" else 1)
+                assert len(after) == tool_count and "AW_CLAUDE_FINAL_SECRET_MARKER" not in json.dumps(after)
                 result["aw_post_observed_original"] = True
                 if "-gate-" in mode:
                     checks = [event for event in events if event["name"] == "security.violation"]
-                    assert len(checks) == (2 if mode.endswith("safe") or mode == "mcp-gate-multi-late" else 1), checks
+                    expected_checks = 6 if mode.endswith("-history") else (2 if mode.endswith("safe") or mode == "mcp-gate-multi-late" else 1)
+                    assert len(checks) == expected_checks, checks
                     assert {check["tool"]["call_id"] for check in checks} == {post["tool"]["call_id"] for post in after}
                     assert ("AW_CLAUDE_FINAL_SECRET_MARKER" in json.dumps(checks)) == mode.endswith(("late", "timeout", "error"))
                     result["final_gate"] = "verified"
@@ -101,13 +112,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--aw", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--hosted-settings", type=Path,
+                        help="Opt in to paid inference through the configured Anthropic gateway")
+    parser.add_argument("--cases", nargs="+")
+    parser.add_argument("--node", type=Path, help="Run the TypeScript SDK fixture with this Node executable")
+    parser.add_argument("--npm", type=Path, help="Prefix containing the pinned TypeScript SDK installation")
+    parser.add_argument("--expected-platform", choices=["aarch64", "x86_64"])
     args = parser.parse_args()
+    if args.expected_platform and platform.machine() != args.expected_platform:
+        parser.error("native platform differs from the scheduled target")
+    if args.node and args.hosted_settings:
+        parser.error("hosted capture currently uses the Python SDK fixture")
+    if args.npm:
+        os.environ["NODE_PATH"] = str(args.npm.resolve() / "node_modules")
     args.output.mkdir(parents=True, exist_ok=False)
+    if args.hosted_settings:
+        os.environ["CLAUDE_HOSTED_SETTINGS"] = str(args.hosted_settings.resolve(strict=True))
     own_children()
-    results = [run(args.aw.resolve(), args.output.resolve() / mode, mode)
-               for mode in ["bash-safe", "bash-late", "mcp-safe", "mcp-late", "required-final",
+    results = [run(args.aw.resolve(), args.output.resolve() / mode, mode, args.node)
+               for mode in (args.cases or ["bash-safe", "bash-late", "mcp-safe", "mcp-late", "required-final",
                             "bash-gate-safe", "bash-gate-late", "mcp-gate-safe", "mcp-gate-late",
-                            "bash-gate-timeout", "mcp-gate-error", "mcp-gate-multi-late"]]
+                            "bash-gate-timeout", "mcp-gate-error", "mcp-gate-multi-late"])]
     save(args.output / "result.json", results)
     print(json.dumps(results, indent=2))
 

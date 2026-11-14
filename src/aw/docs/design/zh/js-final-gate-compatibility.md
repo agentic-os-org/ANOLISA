@@ -101,6 +101,11 @@ stream 在发送前被拒绝。缺少原生工具身份的 `bashExecution`、自
 reloadable 策略、多模态、移除工具结果身份的上下文投影、嵌套 Agent 和后台交付
 尚未覆盖。
 
+TypeScript bridge 通过内部 `aw hook --event-receipt true` 获取事件回执。
+CLI 在提前关闭成功或末步完成后确认，Provider 失败同样返回完成状态。
+bridge 收到确认后不再清理；传输取消或回执缺失时，按原生身份执行独立有界关闭。
+清理失败会拒绝回调。确认丢失时关闭状态不确定，恢复可能重复一次幂等关闭。
+
 受检的三个 Qoder Worker 都在 `firePostToolUseEvent` 之后应用 `getUpdatedToolOutput()`／
 `getUpdatedMCPToolOutput()`；同一路径还可能改写 Read 的 `llmContent` 并附加 Hook
 上下文。Worker 是独立版本的混淆构建。三个版本的隔离真实 Query

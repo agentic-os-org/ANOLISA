@@ -87,7 +87,7 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `coverage.changed` | Planned |
 
 Claude SDK conditionally admits final `security.violation` checks for exact
-Python SDK / bundled CLI builds. The private runtime gate checks serialized
+Python/TypeScript SDK / bundled CLI builds. The private runtime gate checks serialized
 Anthropic tool results after Post callbacks; required policies reject unknown
 builds. See [Claude final-result limits](../../../developer-guide/en/aw/agents/claude-sdk.md#final-tool-result-security-boundary).
 

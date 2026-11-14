@@ -66,6 +66,19 @@ class Factory(unittest.TestCase):
             self.assertEqual(self.gate.supports_tool({"tool_name": name,
                 "tool_input": {"run_in_background": background}}), supported)
 
+    def test_compatible_model_ids_retain_explicit_selection(self):
+        self.compose(replace(Options(), model="qwen3.8-flash",
+                             env={"ANTHROPIC_BASE_URL": "https://model.test/apps/anthropic/"}))
+        runtime = json.loads((self.root / "claude-final-runtime.json").read_text())
+        self.assertEqual(runtime["origin"], "https://model.test")
+        self.assertEqual(runtime["messages_path"], "/apps/anthropic/v1/messages")
+        for model in ["auto", "default", "sonnet", "opus", "haiku", "model with spaces", "a/b"]:
+            with self.subTest(model=model), self.assertRaises(ValueError):
+                self.compose(replace(Options(), model=model))
+        for base in ["https://user:secret@model.test", "https://model.test/?q=x", "https://model.test/%2e"]:
+            with self.subTest(base=base), self.assertRaises(ValueError):
+                self.compose(replace(Options(), env={"ANTHROPIC_BASE_URL": base}))
+
     def test_duplicate_identity_and_missing_runtime_receipt_fail_closed(self):
         self.compose()
         native = {"tool_use_id": "call", "tool_name": "Bash", "tool_input": {},

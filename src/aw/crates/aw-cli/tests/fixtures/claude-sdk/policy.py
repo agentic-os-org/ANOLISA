@@ -42,6 +42,12 @@ def main() -> None:
         raise SystemExit(9)
     with (Path.cwd() / "policy-events.jsonl").open("a") as log:
         log.write(json.dumps(event) + "\n")
+    case = os.environ.get("CLAUDE_FINAL_CASE", "")
+    if case.startswith("ts-before-") and event["name"] == "tool.before" and event["tool"]["input"].get("command") == "touch denied-effect":
+        if case == "ts-before-error":
+            raise SystemExit(9)
+        print("true")
+        return
     if event["name"] == "security.violation":
         case = os.environ.get("CLAUDE_FINAL_CASE", "")
         if case.endswith("timeout"):
