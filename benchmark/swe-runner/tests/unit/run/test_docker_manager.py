@@ -89,6 +89,43 @@ class TestStart:
             # Fourth call: docker cp
             assert calls[3][0][0][:2] == ["docker", "cp"]
 
+def _mock_run(returncode: int = 0, stdout: str = "", stderr: str = ""):
+    return CommandResult(args=("docker",), stdout=stdout, stderr=stderr, returncode=returncode)
+
+
+class TestPullFailure:
+    def test_pull_failure_raises_instead_of_proceeding(self, tmp_path: Path):
+        """docker pull 失败必须抛错：静默继续会（1）把错误误归因于后续的
+        create/run；（2）本地存在同名旧 tag 时对过期环境静默跑测——
+        错误测试环境 → 错误 verdict，且全程无信号。
+        修复前：返回码被丢弃，函数正常返回。
+        """
+        from swe_runner.run.workspace.docker import pull_docker_image
+
+        with patch("swe_runner.run.workspace.docker.run_command") as mock_run:
+            mock_run.return_value = _mock_run(returncode=1, stderr="pull access denied")
+            with pytest.raises(RuntimeError, match="pull access denied"):
+                pull_docker_image("test-image:latest", pull_timeout=30)
+
+    def test_tag_failure_raises_with_pull_succeeded(self, tmp_path: Path):
+        """pull 成功但 tag 失败（镜像名拼写等）同样不得静默。"""
+        from swe_runner.run.workspace.docker import pull_docker_image
+
+        results = {
+            ("pull",): _mock_run(stdout="pulled"),
+            ("tag",): _mock_run(returncode=1, stderr="no such image"),
+        }
+
+        def fake_run(args, **kwargs):
+            key = (args[1],)
+            return results[key]
+
+        with patch("swe_runner.run.workspace.docker.run_command", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="no such image"):
+                pull_docker_image("local-name:latest", pull_registry="mirror.example.com")
+
+
+class TestRegistryPull:
     def test_start_pulls_from_registry_and_tags_local_name(self, tmp_path: Path):
         manager = DockerManager(
             image_name="swebench/sweb.eval.x86_64.test:latest",
