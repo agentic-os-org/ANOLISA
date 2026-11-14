@@ -66,7 +66,15 @@ def ensure_aware_datetime(
         return value
     if naive == "local":
         # For user input, a naive timestamp is local wall-clock time.
-        return value.astimezone()
+        try:
+            return value.astimezone()
+        except OverflowError as exc:
+            # Boundary datetimes (e.g. year 1 in a positive-offset zone) leave
+            # the representable range during conversion. Callers treat
+            # ValueError as bad input, so surface range failures the same way.
+            raise ValueError(
+                f"{field_name} out of range for timezone conversion: {exc}"
+            ) from exc
     if naive == "utc":
         return value.replace(tzinfo=timezone.utc)
     raise ValueError(f"{field_name} must include timezone information.")
@@ -79,15 +87,18 @@ def datetime_to_utc_iso(
     naive: NaiveTimestampPolicy = "local",
 ) -> str:
     """Convert a datetime to a UTC-aware ISO timestamp."""
-    return (
-        ensure_aware_datetime(
-            value,
-            field_name=field_name,
-            naive=naive,
-        )
-        .astimezone(timezone.utc)
-        .isoformat()
-    )
+    aware = ensure_aware_datetime(value, field_name=field_name, naive=naive)
+    try:
+        utc = aware.astimezone(timezone.utc)
+    except OverflowError as exc:
+        # An aware timestamp at the representable edge (year 1 with a
+        # positive offset, year 9999 with a negative one) underflows or
+        # overflows when shifted to UTC. Normalize to ValueError so request
+        # boundaries map it to a client error instead of a crash.
+        raise ValueError(
+            f"{field_name} out of range for timezone conversion: {exc}"
+        ) from exc
+    return utc.isoformat()
 
 
 def epoch_to_utc_iso(epoch: float) -> str:
