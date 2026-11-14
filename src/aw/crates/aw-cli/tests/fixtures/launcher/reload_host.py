@@ -45,6 +45,8 @@ if adapter == "qoder":
                    "scenario": scenario}
         if name == "PostToolUse":
             payload["tool_response"] = "native result"
+        if name == "PostToolUseFailure" and scenario != "malformed":
+            payload.update(error="native failure", is_interrupt=False)
         outputs = []
         for group in settings["hooks"].get(name, []):
             for hook in group["hooks"]:
@@ -116,7 +118,11 @@ async def main():
                 await wait(root / f"continue-{index}")
             before = qoder_event("PreToolUse", f"call-{index}", command.get("scenario", "allow"))
             executed = not any(item["code"] == 2 for item in before)
-            after = qoder_event("PostToolUse", f"call-{index}") if executed else []
+            terminal = "PostToolUseFailure" if command.get("failure") else "PostToolUse"
+            after = qoder_event(terminal, f"call-{index}", command.get("failure", "allow")) if executed else []
+            if command.get("hold_after"):
+                (root / f"terminal-{index}").touch()
+                await wait(root / f"finish-{index}")
             qoder_event("Notification")
             result = {"executed": executed, "before": before, "after": after}
         else:

@@ -44,8 +44,13 @@ pub(crate) fn generate(
         "PermissionDenied",
     ] {
         // Submission includes 2s admission, 59s dispatch and two 2s cleanup calls.
+        // Failure delivery includes 59s dispatch and 2s terminal cleanup.
         // Leave native delivery margin after all phases can finish.
-        let timeout = if native == "UserPromptSubmit" { 70 } else { 4 };
+        let timeout = match native {
+            "UserPromptSubmit" => 70,
+            "PostToolUseFailure" => 64,
+            _ => 4,
+        };
         let mut group = json!({"hooks":[{"type":"command","command":executable,
             "args":["bridge","--adapter","qoder","--binding",binding],"timeout":timeout}]});
         if native == "Notification" {
@@ -112,11 +117,14 @@ mod tests {
             settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"],
             70
         );
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"][0]["hooks"][0]["timeout"],
+            64
+        );
         for native in [
             "SessionStart",
             "SessionEnd",
             "Notification",
-            "PostToolUseFailure",
             "PermissionDenied",
         ] {
             assert_eq!(settings["hooks"][native][0]["hooks"][0]["timeout"], 4);

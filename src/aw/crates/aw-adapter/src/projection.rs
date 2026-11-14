@@ -130,8 +130,8 @@ fn decoded_result(adapter: &str, native: &Value) -> Value {
     value.clone()
 }
 
-// OpenClaw folds these details into isError only after model-bound middleware.
-fn openclaw_result_failed(value: &Value) -> bool {
+/// Recognize failure details before OpenClaw folds them into `isError`.
+pub(crate) fn openclaw_result_failed(value: &Value) -> bool {
     let details = &value["details"];
     let status = details["status"]
         .as_str()
