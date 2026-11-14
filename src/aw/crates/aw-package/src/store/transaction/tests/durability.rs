@@ -114,3 +114,51 @@ fn failed_commit_sync_keeps_rollback_material_if_the_old_database_returns() {
     drop(inventory);
     assert_eq!(fixture.recover().rolled_back, 0);
 }
+
+#[test]
+fn recovery_uninstall_rollback_restores_verified_files_and_retains_user_edits() {
+    let fixture = Fixture::new();
+    let changes = fixture.changes(true);
+    super::super::apply(&fixture.paths, &changes, &AtomicBool::new(false)).unwrap();
+    let kept = fixture.prefix.join("bin/existing-tool");
+    disk::write(&kept, b"user changes\n").unwrap();
+    let removal = crate::store::plan::uninstall_with_options(
+        &fixture.paths,
+        &fixture.prefix,
+        &[],
+        crate::store::plan::UninstallOptions { keep_changed: true },
+    )
+    .unwrap();
+    assert!(removal.ready(), "{:?}", removal.problems);
+    let fault = fs::fail_database_sync(&fixture.paths.installed());
+    let failure =
+        crate::store::plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(failure.report.recovery, RecoveryState::Incomplete);
+    let entry = pending(&fixture);
+    assert!(!fixture.prefix.join("bin/tool").exists());
+    assert_eq!(disk::read(&kept).unwrap(), b"user changes\n");
+    assert!(entry
+        .actions
+        .iter()
+        .all(|action| action.path != "bin/existing-tool"));
+    drop(fault);
+    fixture.record(
+        &fixture.paths.installed(),
+        entry.before_database.as_ref().unwrap(),
+        0o644,
+    );
+    let recovered = fixture.recover();
+    assert_eq!((recovered.committed, recovered.rolled_back), (0, 1));
+    assert!(recovered.conflicts.is_empty());
+    assert_eq!(
+        disk::read(fixture.prefix.join("bin/tool")).unwrap(),
+        b"new tool\n"
+    );
+    assert_eq!(disk::read(&kept).unwrap(), b"user changes\n");
+    assert_eq!(
+        Inventory::read(&fixture.paths, None).unwrap().installations[0]
+            .packages
+            .len(),
+        2
+    );
+}

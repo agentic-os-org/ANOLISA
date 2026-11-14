@@ -3,7 +3,7 @@
 use super::{
     capacity::{self, Limits},
     snapshot::{self, Snapshot},
-    Action, PackagePlan,
+    Action, FileChange, PackagePlan, PreservedFile, UninstallOptions,
 };
 use crate::store::{
     database::{self, DatabasePaths, RegistrationPointer},
@@ -16,15 +16,31 @@ use std::{
     path::Path,
 };
 
-pub(super) fn plan(paths: &DatabasePaths, prefix: &Path, ids: &[String]) -> Result<PackagePlan> {
-    plan_with_limits(paths, prefix, ids, Limits::default())
+pub(super) fn plan(
+    paths: &DatabasePaths,
+    prefix: &Path,
+    ids: &[String],
+    options: UninstallOptions,
+) -> Result<PackagePlan> {
+    plan_with_options(paths, prefix, ids, Limits::default(), options)
 }
 
+#[cfg(test)]
 pub(super) fn plan_with_limits(
     paths: &DatabasePaths,
     prefix: &Path,
     ids: &[String],
     limits: Limits,
+) -> Result<PackagePlan> {
+    plan_with_options(paths, prefix, ids, limits, UninstallOptions::default())
+}
+
+fn plan_with_options(
+    paths: &DatabasePaths,
+    prefix: &Path,
+    ids: &[String],
+    limits: Limits,
+    options: UninstallOptions,
 ) -> Result<PackagePlan> {
     let mut names = BTreeSet::new();
     for id in ids {
@@ -60,7 +76,40 @@ pub(super) fn plan_with_limits(
             );
         }
     }
-    let (verify, _) = snapshot::verify(&mut plan, &installation);
+    let verify = if options.keep_changed {
+        let mut remaining = installation.clone();
+        remaining
+            .packages
+            .retain(|package| !names.is_empty() && !names.contains(package.package_id.as_str()));
+        let (mut verify, used) = snapshot::verify(&mut plan, &remaining);
+        let mut budget = crate::store::open_bundle::MAX_PAYLOAD_BYTES - used;
+        for package in installation
+            .packages
+            .iter()
+            .filter(|package| names.is_empty() || names.contains(package.package_id.as_str()))
+        {
+            for (name, payload) in &package.files {
+                match crate::store::open_bundle::drift(&prefix.join(name), payload, &mut budget) {
+                    Ok(Some(reason)) => plan.preserved.push(PreservedFile {
+                        path: name.clone(),
+                        reason,
+                    }),
+                    Ok(None) => {
+                        verify.insert(name.clone(), payload.clone());
+                    }
+                    Err(error) => plan.problem(
+                        "file_changed",
+                        error.to_string(),
+                        Some(&package.package_id),
+                        Some(prefix.join(name)),
+                    ),
+                }
+            }
+        }
+        verify
+    } else {
+        snapshot::verify(&mut plan, &installation).0
+    };
     let removed = installation
         .packages
         .iter()
@@ -114,8 +163,17 @@ pub(super) fn plan_with_limits(
     let mut removes = BTreeMap::new();
     for package in &removed {
         plan.removed.push(snapshot::summary(package));
-        snapshot::files(&mut plan, Action::Uninstall, package);
-        removes.extend(package.files.clone());
+        for (name, payload) in &package.files {
+            if verify.contains_key(name) {
+                plan.files.push(FileChange {
+                    action: Action::Uninstall,
+                    path: name.clone(),
+                    sha256: payload.sha256.clone(),
+                    mode: payload.mode,
+                });
+                removes.insert(name.clone(), payload.clone());
+            }
+        }
     }
     installation.packages.retain(|package| {
         !removed

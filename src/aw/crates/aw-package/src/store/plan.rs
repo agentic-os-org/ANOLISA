@@ -26,6 +26,22 @@ pub enum Action {
     Uninstall,
 }
 
+/// Explicit recovery policy for removing damaged package records.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UninstallOptions {
+    /// Leave changed or missing selected payloads untouched and remove their ownership records.
+    pub keep_changed: bool,
+}
+
+/// A selected payload left untouched when removing its package registration.
+#[derive(Clone, Debug, Serialize)]
+pub struct PreservedFile {
+    /// Relative path below the installation prefix; the path may already be missing.
+    pub path: String,
+    /// Observed content, mode, type or missing-path difference.
+    pub reason: String,
+}
+
 /// Package and exact version displayed before an operation runs.
 #[derive(Clone, Debug, Serialize)]
 pub struct PackageSummary {
@@ -96,6 +112,9 @@ pub struct PackagePlan {
     pub removed: Vec<PackageSummary>,
     /// Files that would change; unknown files never enter this list.
     pub files: Vec<FileChange>,
+    /// Selected paths left untouched by explicit recovery, including missing paths.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preserved: Vec<PreservedFile>,
     /// Exact dependency decisions used by the plan.
     pub dependencies: Vec<DependencySummary>,
     /// Every observed precondition preventing this operation.
@@ -157,8 +176,23 @@ pub fn install_checked(
 ///
 /// # Errors
 /// Rejects malformed paths, duplicate IDs and inconsistent database records.
+#[cfg(test)]
 pub fn uninstall(paths: &DatabasePaths, prefix: &Path, ids: &[String]) -> Result<PackagePlan> {
-    uninstall::plan(paths, prefix, ids)
+    uninstall_with_options(paths, prefix, ids, UninstallOptions::default())
+}
+
+/// Plan removal with an explicit policy for changed selected payloads.
+/// Dependencies, unselected files, database integrity and privilege checks remain enforced.
+///
+/// # Errors
+/// Rejects malformed paths, duplicate IDs and inconsistent database records.
+pub fn uninstall_with_options(
+    paths: &DatabasePaths,
+    prefix: &Path,
+    ids: &[String],
+    options: UninstallOptions,
+) -> Result<PackagePlan> {
+    uninstall::plan(paths, prefix, ids, options)
 }
 
 /// Apply a library-created plan after reacquiring exclusive locks and rechecking all evidence.

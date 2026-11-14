@@ -44,7 +44,10 @@ pub(crate) enum Outcome {
         config: PathBuf,
         provider_template: String,
     },
-    Uninstalled,
+    Uninstalled {
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        preserved: Vec<aw_package::plan::PreservedFile>,
+    },
     ConfigurationEdited {
         changed: bool,
     },
@@ -258,8 +261,9 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             terminal::escape(&config.to_string_lossy()),
             terminal::escape(provider_template)
         ),
-        Outcome::Uninstalled => {
-            "Removed package files; external configuration and state retained".into()
+        Outcome::Uninstalled { .. } => {
+            "Removed package records and verified files; external configuration and state retained"
+                .into()
         }
         Outcome::ConfigurationEdited { changed: true } => "Updated configuration".into(),
         Outcome::ConfigurationEdited { changed: false } => "Configuration unchanged".into(),
@@ -280,6 +284,16 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
     };
     let colored = terminal::use_color(options.color, stdout.is_terminal());
     writeln!(stdout, "{}", terminal::styled(&summary, colored, false))?;
+    if let Outcome::Uninstalled { preserved } = outcome {
+        for file in preserved {
+            writeln!(
+                stdout,
+                "KEPT PATH {}: {}",
+                terminal::escape(&file.path),
+                terminal::escape(&file.reason)
+            )?;
+        }
+    }
     if let Outcome::ConfigurationChecked {
         projected_out_steps,
         ..
@@ -295,8 +309,8 @@ fn human_with(outcome: &Outcome, options: &Options) -> std::io::Result<()> {
             Outcome::Configured { .. } => {
                 "Configuration was created offline; no service reload was requested."
             }
-            Outcome::Uninstalled => {
-                "Owned package files were removed; external configuration and state were retained."
+            Outcome::Uninstalled { .. } => {
+                "Verified selected files were removed; retained paths are no longer package-owned."
             }
             Outcome::ConfigurationEdited { changed: true } => {
                 "A validated configuration was published; no runtime reload was requested."
@@ -589,7 +603,9 @@ mod tests {
             format: 1,
             command: "uninstall",
             result: ResultView::Succeeded {
-                result: &Outcome::Uninstalled,
+                result: &Outcome::Uninstalled {
+                    preserved: Vec::new(),
+                },
             },
             mutation: Some(mutation::Summary::from(&report)),
             warnings: mutation::warnings(&report),

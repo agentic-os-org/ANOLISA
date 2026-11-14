@@ -80,6 +80,7 @@ fn fixture(root: &std::path::Path) -> (DatabasePaths, ChangeSet, PackagePlan) {
         added: Vec::new(),
         removed: Vec::new(),
         files: Vec::new(),
+        preserved: Vec::new(),
         dependencies: Vec::new(),
         problems: Vec::new(),
         changes: Some(changes.clone()),

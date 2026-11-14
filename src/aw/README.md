@@ -15,6 +15,7 @@ Agents retain their models, interfaces and permissions. AW runs on Linux.
 Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
 AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
 Install and sign in to your Agent first, then generate configuration with `aw config init`.
+For changed or missing local Provider files, `aw uninstall --keep-changed` retains changed paths and clears package records; see [operations](../../docs/user-guide/en/aw/operations.md#upgrade-and-uninstall).
 
 The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
 selected in the guide; both `qodercli` and `aw` must be on `PATH`.
