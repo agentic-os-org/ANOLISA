@@ -1,3 +1,4 @@
+import { TokenBudgetExceededError } from "../index.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SelectiveContextEngine } from "../src/engine.js";
 import { executeExpandTurn } from "../src/recall-tool.js";
@@ -99,7 +100,25 @@ describe("Integration: gateway lifecycle simulation", () => {
   // ─── 2. 上下文裁剪（assemble） ───
 
   describe("2. context trimming (assemble)", () => {
-    it("reports overflow from a large summary and preserves structured fresh-tail messages", async () => {
+    it.each([Infinity, -Infinity, NaN, 0, -1, undefined])(
+      "normalizes unusable host budget %s to the default",
+      async (tokenBudget) => {
+        const messages = buildMessages(6);
+        const expected = await engine.assemble({
+          sessionId: SESSION,
+          messages,
+          tokenBudget: 128_000,
+        });
+        const result = await engine.assemble({
+          sessionId: SESSION,
+          messages,
+          tokenBudget,
+        });
+        expect(result).toEqual(expected);
+      },
+    );
+
+    it("omits an oversized summary while preserving structured fresh-tail messages", async () => {
       const messages = buildMessages(4);
       const toolResult: AgentMessage = {
         role: "toolResult",
@@ -114,21 +133,43 @@ describe("Integration: gateway lifecycle simulation", () => {
 
       try {
         await engine.afterTurn({ sessionId: SESSION, messages });
-        const result = await engine.assemble({ sessionId: SESSION, messages, tokenBudget: 500 });
+        const result = await engine.assemble({
+          sessionId: SESSION,
+          messages,
+          tokenBudget: 500,
+        });
 
-        expect(result.estimatedTokens).toBeGreaterThan(500);
+        expect(result.estimatedTokens).toBeLessThanOrEqual(500);
         expect(warning).toHaveBeenCalledWith(
-          `[selective-claw] assembled context (${result.estimatedTokens} tokens) exceeds budget (500)`,
+          expect.stringContaining("omitted turns 1-1"),
         );
-        expect(result.estimatedTokens).toBe(result.messages.reduce(
-          (total, message) => total + estimateTokens(JSON.stringify(message)),
-          0,
-        ));
+        expect(result.estimatedTokens).toBe(
+          result.messages.reduce(
+            (total, message) => total + estimateTokens(JSON.stringify(message)),
+            0,
+          ),
+        );
         const tail = messages.slice(2);
         for (let index = 0; index < tail.length; index++) {
-          expect(result.messages[index + 1]).toBe(tail[index]);
+          expect(result.messages.slice(-tail.length)[index]).toBe(tail[index]);
         }
         expect(result.messages[result.messages.length - 1]).toBe(toolResult);
+      } finally {
+        warning.mockRestore();
+      }
+    });
+
+    it("logs a structured rejection when compressed history has an oversized fresh tail", async () => {
+      const messages = buildMessages(5);
+      messages.at(-1)!.content = "large input ".repeat(300);
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await expect(
+          engine.assemble({ sessionId: SESSION, messages, tokenBudget: 20 }),
+        ).rejects.toBeInstanceOf(TokenBudgetExceededError);
+        expect(warning).toHaveBeenCalledWith(
+          expect.stringContaining("context assembly refused"),
+        );
       } finally {
         warning.mockRestore();
       }
