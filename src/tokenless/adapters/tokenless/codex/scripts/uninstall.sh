@@ -35,12 +35,43 @@ if [[ "${1:-}" == "--non-interactive" ]]; then
     INTERACTIVE=0
 fi
 
-PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
-BINDIR="$PREFIX/bin"
+# HOME normalization mirrors install.sh/_common.sh: `$HOME` may be unset
+# (systemd units, containers, CI sandboxes, cron) and `set -u` would abort
+# before anything is removed. Without a usable root the home-derived paths
+# below stay empty — "no root" means "never remove", not "remove from a
+# root-relative guess" — and every removal they gate is skipped with a
+# diagnostic instead.
+USER_HOME="${HOME:-}"
+case "$USER_HOME" in
+    /*) ;;
+    *) USER_HOME="" ;;
+esac
+
+# A relative XDG_DATA_HOME would turn the marketplace removal into a
+# CWD-relative `rm -rf`; only an absolute root counts.
+XDG_ROOT="${XDG_DATA_HOME:-}"
+case "$XDG_ROOT" in
+    /*) ;;
+    *) XDG_ROOT="" ;;
+esac
+
+PREFIX="${TOKENLESS_INSTALL_PREFIX:-${USER_HOME:+$USER_HOME/.local}}"
+BINDIR=""
+if [[ -n "$PREFIX" ]]; then BINDIR="$PREFIX/bin"; fi
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
 PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
-MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
+MARKETPLACE_ROOT="${XDG_ROOT:-${USER_HOME:+$USER_HOME/.local/share}}"
+MARKETPLACE_DIR=""
+if [[ -n "$MARKETPLACE_ROOT" ]]; then MARKETPLACE_DIR="${MARKETPLACE_ROOT}/anolisa/codex-marketplace"; fi
+# Where Codex persists its registrations, used only when it exists; empty
+# means "no usable location", never a root-relative guess.
+CODEX_CONFIG=""
+if [[ -n "${CODEX_HOME:-}" ]]; then
+    CODEX_CONFIG="${CODEX_HOME}/config.toml"
+elif [[ -n "$USER_HOME" ]]; then
+    CODEX_CONFIG="${USER_HOME}/.codex/config.toml"
+fi
 DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 DEREGISTER_ONLY=0
@@ -48,7 +79,10 @@ if [[ "${TOKENLESS_DEREGISTER_ONLY:-0}" == "1" ]]; then
     DEREGISTER_ONLY=1
 fi
 
-# Resolve codex binary via shared helper (see _common.sh).
+# Resolve codex binary via shared helper (see _common.sh). The expansions
+# above derive their own USER_HOME from the environment before this source
+# re-derives the same value; keep the block where it is so the local paths
+# are ready even if _common.sh's normalization ever changes.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./_common.sh
 source "$SCRIPT_DIR/_common.sh"
@@ -67,17 +101,24 @@ if [ "$DRY_RUN" = "1" ]; then
     if [ -n "$CODEX_BIN" ]; then
         echo "DRY-RUN: ${CODEX_BIN} plugin remove tokenless@${MARKETPLACE_NAME} (only when it is registered)"
         echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is registered)"
-        echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there and the registration is confirmed gone)"
+        if [[ -z "$MARKETPLACE_ROOT" ]]; then
+            echo "DRY-RUN: neither XDG_DATA_HOME nor HOME is set, so the marketplace directory location is unknown; the real run skips its removal"
+        else
+            echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there and the registration is confirmed gone)"
+        fi
     else
         # No CLI to ask, so the real path decides on config.toml alone; the same
         # read-only check decides here, or the preview would report a kept
         # directory while the run deletes it.
-        codex_config="${CODEX_HOME:-$HOME/.codex}/config.toml"
-        if [[ -f "$codex_config" ]] && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$codex_config" 2>/dev/null; then
-            echo "DRY-RUN: no codex CLI resolved and ${codex_config} still names tokenless, so the real run keeps"
+        if [[ -z "$CODEX_CONFIG" ]]; then
+            echo "DRY-RUN: no codex CLI resolved and neither CODEX_HOME nor HOME is set:"
+            echo "DRY-RUN: nothing was ever registered, and the real run skips the marketplace"
+            echo "DRY-RUN: directory and exits 0"
+        elif [[ -f "$CODEX_CONFIG" ]] && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$CODEX_CONFIG" 2>/dev/null; then
+            echo "DRY-RUN: no codex CLI resolved and ${CODEX_CONFIG} still names tokenless, so the real run keeps"
             echo "DRY-RUN: ${MARKETPLACE_DIR} and exits 1"
         else
-            echo "DRY-RUN: no codex CLI resolved and ${codex_config} records no tokenless registration:"
+            echo "DRY-RUN: no codex CLI resolved and ${CODEX_CONFIG} records no tokenless registration:"
             echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there), and the real run exits 0"
         fi
     fi
@@ -85,7 +126,11 @@ if [ "$DRY_RUN" = "1" ]; then
     # whenever TOKENLESS_DEREGISTER_ONLY is unset, whether or not the
     # registration could be confirmed, so it is previewed in every branch.
     if [ "$DEREGISTER_ONLY" = "0" ]; then
-        echo "DRY-RUN: rm -f ${BINDIR}/tokenless (only when it is there; interactive mode asks first; without a terminal it is kept)"
+        if [[ -z "$BINDIR" ]]; then
+            echo "DRY-RUN: no install prefix and no usable HOME, so the component binary location is unknown; the real run skips its removal"
+        else
+            echo "DRY-RUN: rm -f ${BINDIR}/tokenless (only when it is there; interactive mode asks first; without a terminal it is kept)"
+        fi
     fi
     exit 0
 fi
@@ -184,16 +229,20 @@ else
     # retry from, so "cannot confirm" is reported as a failure rather than as
     # "confirmed absent". Where Codex has no config at all it was never installed
     # here and nothing was ever registered, which really is a clean state.
-    CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-    if [[ -f "${CODEX_HOME_DIR}/config.toml" ]] \
-       && grep -Eq "tokenless|${MARKETPLACE_NAME}" "${CODEX_HOME_DIR}/config.toml" 2>/dev/null; then
-        echo "[tokenless] ERROR: codex CLI not found and ${CODEX_HOME_DIR}/config.toml still mentions" >&2
+    if [[ -z "$CODEX_CONFIG" ]]; then
+        # Neither CODEX_HOME nor HOME is set: a Codex install would have
+        # nowhere to persist its config, so nothing was ever registered here.
+        echo "[tokenless] codex CLI not found and neither CODEX_HOME nor HOME is set;"
+        echo "[tokenless] no Codex config to check, so nothing was ever registered."
+    elif [[ -f "$CODEX_CONFIG" ]] \
+       && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$CODEX_CONFIG" 2>/dev/null; then
+        echo "[tokenless] ERROR: codex CLI not found and ${CODEX_CONFIG} still mentions" >&2
         echo "[tokenless] ERROR: the tokenless plugin or the ${MARKETPLACE_NAME} marketplace, so the" >&2
         echo "[tokenless] ERROR: registration cannot be confirmed gone. Marketplace directory kept." >&2
         echo "[tokenless] Put codex back on PATH and run this script again." >&2
         DEREGISTER_FAILED=1
     else
-        echo "[tokenless] codex CLI not found and ${CODEX_HOME_DIR}/config.toml records no tokenless"
+        echo "[tokenless] codex CLI not found and ${CODEX_CONFIG} records no tokenless"
         echo "[tokenless] registration; nothing to deregister."
     fi
 fi
@@ -201,17 +250,25 @@ fi
 # 2. Remove marketplace symlink directory — but only once the registration that
 #    points into it is known to be gone. Deleting it first would leave a surviving
 #    marketplace entry aimed at a directory that no longer exists, and the failure
-#    is only reported at the end of this script.
+#    is only reported at the end of this script. With no usable root the
+#    directory is empty, so "no root" never removes anything by construction.
 if [[ $DEREGISTER_FAILED -eq 1 ]]; then
     echo "[tokenless] Keeping marketplace directory ${MARKETPLACE_DIR}: the Codex registration was not removed."
+elif [[ -z "$MARKETPLACE_DIR" ]]; then
+    # No usable root (no XDG_DATA_HOME, no HOME): the installed location is
+    # unknown, and a root-relative guess could point anywhere.
+    echo "[tokenless] neither XDG_DATA_HOME nor HOME is set — marketplace directory location unknown; skipping removal."
 elif [[ -d "$MARKETPLACE_DIR" ]]; then
     rm -rf "$MARKETPLACE_DIR"
     echo "[tokenless] Removed marketplace directory: $MARKETPLACE_DIR"
 fi
 
-# 3. Remove binary
+# 3. Remove binary — same invariant: an empty BINDIR means the location is
+#    unknown, so the binary (if any) is not this script's to find.
 if [[ $DEREGISTER_ONLY -eq 1 ]]; then
-    echo "[tokenless] Deregistration only: keeping $BINDIR/tokenless (its owner decides)."
+    echo "[tokenless] Deregistration only: keeping the component binary (its owner decides)."
+elif [[ -z "$BINDIR" ]]; then
+    echo "[tokenless] No install prefix and no usable HOME — component binary location unknown; skipping removal."
 elif [[ -f "$BINDIR/tokenless" ]]; then
     if [[ $INTERACTIVE -eq 1 ]]; then
         answer=""
