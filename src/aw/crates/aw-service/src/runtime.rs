@@ -35,7 +35,7 @@ mod registration;
 mod scopes;
 mod submissions;
 
-const MAX_STEPS: usize = 64;
+use crate::MAX_STEPS_PER_BINDING as MAX_STEPS;
 
 struct Instance {
     run: Option<crate::RunOutcome>,

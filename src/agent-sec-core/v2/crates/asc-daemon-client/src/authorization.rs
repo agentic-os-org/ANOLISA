@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use crate::ClientError;
 use asc_daemon_protocol::{
-    AuthorizationRequest, ClaimResponse, DaemonRequest, DaemonResponse, Decision, DecisionClaim,
-    ExecutionReceipt, ReceiptAck, method,
+    ClaimResponse, DaemonRequest, DaemonResponse, Decision, DecisionClaim, ExecutionReceipt,
+    OsAuthorizationRequest, ReceiptAck, method,
 };
 
 /// Requests a decision without executing a command.
@@ -15,7 +15,7 @@ use asc_daemon_protocol::{
 /// Returns encoding, transport or malformed response failures without retrying.
 pub fn authorization_evaluate(
     socket: &Path,
-    request: &AuthorizationRequest,
+    request: &OsAuthorizationRequest,
     timeout: Duration,
 ) -> Result<DaemonResponse<Decision>, ClientError> {
     call_typed(socket, method::AUTHORIZATION_EVALUATE, request, timeout)

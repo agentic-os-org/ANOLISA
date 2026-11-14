@@ -15,6 +15,7 @@ Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW core 和可选 Provider 扩展。
 当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
 先安装并登录所选 Agent，再用 `aw config init` 生成配置。
+本地 Provider 包文件被修改或缺失时，可用 `aw uninstall --keep-changed` 保留变化路径并清理包登记，操作见[运行维护](../../docs/user-guide/zh/aw/operations.md#升级与卸载)。
 
 下面以已安装、登录的 Qoder 为例。`AW_PREFIX` 是安装指南中选定的安装目录，
 `qodercli` 和 `aw` 应已加入 `PATH`。
@@ -31,6 +32,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
 进入 Qoder 后，请它用工具读取当前目录，并按原生提示处理权限确认。
+离线校验会检查服务上限：每个目标跨事件汇总后最多有 64 个适用的已启用步骤。
 退出 Agent 后，本地服务仍可复用。使用结束后查询并停止它。
 
 ```bash
@@ -65,6 +67,7 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -75,6 +78,13 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI 也可通过 `input.submit` 检查原生 `UserPromptSubmit` 文本，见 [Qoder 输入检查](../../docs/developer-guide/zh/aw/agents/qoder.md#检查用户提交)。
+
+Codex CLI 0.163.0 和 0.166.0 已通过同一份 `aw run` 配置验收 sec-core 检查，
+并可通过原生 Hook 替换普通模型请求中的 PostToolUse 文本。
+本地 app-server stdio 在受信客户端为每个新线程和轮次保持启动目录与 Codex 配置时，
+也通过了同等效果验收。
+Code Mode、策略前捕获与遥测、Hook 传输故障仍不受此能力保护；见
+[Codex 指南](../../docs/developer-guide/zh/aw/agents/codex.md)。
 
 Pi `runWorker` 工厂支持模型派发前的字面量用户文本检查，接入方式见 [Pi 输入检查指南](../../docs/developer-guide/zh/aw/agents/pi.md#检查用户输入)。
 
@@ -88,7 +98,7 @@ sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按�
 
 ## 支持范围
 
-当前接入 Qoder CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
+当前接入 Qoder CLI、Codex CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
 Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需要显式接入受管工厂。
 运行准入检查所需原生接口，[已验证基线](../../docs/developer-guide/zh/aw/native-agents.md)记录实际测试的框架版本。
 [Qoder SDK 接入](../../docs/developer-guide/zh/aw/agents/qoder-sdk.md)还支持预热、原样 SDK/Worker 下的原生配置、Pilot runtime launcher 授权、固定摘要的 Bash 消费者及声明式角色资产。

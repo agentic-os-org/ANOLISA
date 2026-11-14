@@ -10,6 +10,22 @@ use std::fs;
 use support::Consumer;
 
 #[test]
+fn codex_security_example_checks_unmapped_tools_before_pii() {
+    let document: serde_json::Value = serde_yaml_ng::from_str(include_str!(
+        "../../../src/aw/crates/aw-service/examples/aw.codex-security.yaml"
+    ))
+    .unwrap();
+    let before = &document["spec"]["events"]["tool.before"];
+    assert_eq!(before["required"], true);
+    assert_eq!(before["steps"][0]["operation"], "scan_code");
+    assert!(before["steps"][0].get("match").is_none());
+    assert_eq!(
+        document["spec"]["providers"]["security"]["config"]["unmapped_tool"],
+        "error"
+    );
+}
+
+#[test]
 fn templates_scan_declared_tools_and_leave_other_native_tools_unchecked() {
     for adapter in ["qoder", "openclaw", "qoder-sdk", "qwenpaw"] {
         let consumer = Consumer::new();

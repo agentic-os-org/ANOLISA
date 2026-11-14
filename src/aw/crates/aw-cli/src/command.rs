@@ -311,7 +311,7 @@ pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit
     if let Some(protocol) = arguments.first().filter(|name| {
         matches!(
             name.as_str(),
-            "hook" | "bridge" | "scope" | "qoder-bootstrap"
+            "hook" | "bridge" | "scope" | "qoder-bootstrap" | "codex-hook"
         )
     }) {
         // Native callbacks have fail-closed replies and exit codes even for

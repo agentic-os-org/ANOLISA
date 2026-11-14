@@ -15,6 +15,7 @@ Agents retain their models, interfaces and permissions. AW runs on Linux.
 Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
 AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
 Install and sign in to your Agent first, then generate configuration with `aw config init`.
+For changed or missing local Provider files, `aw uninstall --keep-changed` retains changed paths and clears package records; see [operations](../../docs/user-guide/en/aw/operations.md#upgrade-and-uninstall).
 
 The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
 selected in the guide; both `qodercli` and `aw` must be on `PATH`.
@@ -31,6 +32,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
 In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
+Offline validation checks the service limit of 64 applicable enabled steps per target across all events.
 The local service remains reusable after the Agent exits. Inspect and stop it when finished.
 
 ```bash
@@ -65,6 +67,7 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -75,6 +78,14 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
+
+Codex CLI 0.163.0 and 0.166.0 have been verified with one `aw run` configuration
+for sec-core checks and ordinary model-visible PostToolUse text replacement.
+Local app-server stdio also passes when its trusted client keeps the launch
+directory and Codex configuration for every new thread and turn.
+Code Mode, prior capture and telemetry, and Hook transport failures remain
+outside that protection; see the
+[Codex guide](../../docs/developer-guide/en/aw/agents/codex.md).
 
 Pi `runWorker` factories also support literal user text checks before model dispatch; see the [Pi submission guide](../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions).
 
@@ -89,7 +100,7 @@ injection scanning with separate risk and failure policies; see
 
 ## Supported entrypoints
 
-AW currently integrates Qoder CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
+AW currently integrates Qoder CLI, Codex CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
 Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
 SDK applications explicitly use managed factories. Runtime admission checks the required
 native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)

@@ -126,6 +126,7 @@ impl Snapshot {
             added: Vec::new(),
             removed: Vec::new(),
             files: Vec::new(),
+            preserved: Vec::new(),
             dependencies: Vec::new(),
             problems: Vec::new(),
             changes: None,

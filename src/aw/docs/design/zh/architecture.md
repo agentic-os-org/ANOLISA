@@ -231,6 +231,7 @@ Adapter 在原生调度前登记模型产生的身份，等待原生命令队列
 [策略更新契约](runtime/policy-reload.md#qoder-sdk-请求准入)。
 
 [常驻 SDK 生命周期](adapters/resident-sdk.md) 说明 Pi、Claude 和普通 Qoder SDK Query 的每客户端任务准入、回调路由、fail-close 与释放边界。
+[Codex CLI Adapter](adapters/codex-adapter.md) 通过原生命令 Hook 执行有序 AW 步骤，并在启动本地会话前检查原始输入边界。
 
 [Claude 受管 MCP handler](adapters/claude-mcp.md) 使用明确来源、任务所属调用身份和可靠成功状态，复用现有 Provider 链路采纳结果。
 

@@ -51,16 +51,52 @@ pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
             Some("denied") => Some("denied"),
             _ => None,
         },
-        "qoder-sdk" => match event["native"]["hook_event_name"].as_str() {
+        "qoder" | "qoder-sdk" | "claude-sdk" => match event["native"]["hook_event_name"].as_str() {
             Some("PostToolUseFailure") if result["is_interrupt"] == true => Some("interrupted"),
             Some("PostToolUseFailure") => Some("error"),
+            Some("PostToolUse") if result["interrupted"] == true => Some("interrupted"),
+            Some("PostToolUse")
+                if adapter == "qoder"
+                    && (result["signal"]
+                        .as_str()
+                        .is_some_and(|signal| !signal.is_empty())
+                        || result["signal"].as_i64().is_some_and(|signal| signal != 0)) =>
+            {
+                Some("interrupted")
+            }
+            Some("PostToolUse")
+                if adapter == "qoder"
+                    && result["exitCode"].as_i64().is_some_and(|code| code != 0) =>
+            {
+                Some("error")
+            }
             Some("PostToolUse") if result["isError"] == true || result["is_error"] == true => {
                 Some("error")
             }
-            Some("PostToolUse") => Some("success"),
+            // Both SDKs and Qoder reserve this seam for a returned tool result.
+            Some("PostToolUse")
+                if event["native"]
+                    .get("tool_response")
+                    .is_some_and(|result| !result.is_null()) =>
+            {
+                Some("success")
+            }
             _ => None,
         },
-        "qoder" | "pi" | "deepseek-harness" => match result["isError"].as_bool() {
+        "openclaw" if event["native"]["hook"] == "after_tool_call" => {
+            let native = &event["native"]["event"];
+            if native["error"].is_string()
+                || result["isError"] == true
+                || crate::projection::openclaw_result_failed(result)
+            {
+                Some("error")
+            } else if native.get("result").is_some_and(|result| !result.is_null()) {
+                Some("success")
+            } else {
+                None
+            }
+        }
+        "pi" | "deepseek-harness" => match result["isError"].as_bool() {
             Some(true) => Some("error"),
             Some(false) => Some("success"),
             _ => None,
@@ -189,6 +225,115 @@ pub fn ordered_after(adapter: &str, event: &Value, replacement: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_terminal_states_use_callback_seams_and_structured_outcomes() {
+        for adapter in ["qoder", "claude-sdk", "qoder-sdk"] {
+            for (hook, result, expected) in [
+                (
+                    "PostToolUse",
+                    json!({"kind":"bash","stdout":"ok","exitCode":0,"signal":null,"interrupted":false}),
+                    Some("success"),
+                ),
+                (
+                    "PostToolUse",
+                    json!({"content":[{"type":"text","text":"Error: plain output"}]}),
+                    Some("success"),
+                ),
+                ("PostToolUse", json!({"isError":true}), Some("error")),
+                ("PostToolUse", json!({"is_error":true}), Some("error")),
+                (
+                    "PostToolUse",
+                    json!({"interrupted":true}),
+                    Some("interrupted"),
+                ),
+                (
+                    "PostToolUseFailure",
+                    json!({"error":"failed","is_interrupt":false}),
+                    Some("error"),
+                ),
+                (
+                    "PostToolUseFailure",
+                    json!({"error":"cancelled","is_interrupt":true}),
+                    Some("interrupted"),
+                ),
+                ("unknown", json!({"isError":false}), None),
+            ] {
+                let event = json!({"name":"tool.after","tool":{"result":result},
+                    "native":{"hook_event_name":hook,"tool_response":result}});
+                assert_eq!(
+                    result_status(adapter, &event),
+                    expected,
+                    "{adapter}: {event}"
+                );
+            }
+            let mut missing = json!({"name":"tool.after","tool":{"result":null},"native":{"hook_event_name":"PostToolUse"}});
+            assert_eq!(result_status(adapter, &missing), None);
+            missing["native"]["tool_response"] = Value::Null;
+            assert_eq!(result_status(adapter, &missing), None);
+        }
+        for (result, expected) in [
+            (json!({"exitCode":7}), "error"),
+            (json!({"exitCode":0,"signal":"SIGTERM"}), "interrupted"),
+            (json!({"exitCode":0,"signal":15}), "interrupted"),
+        ] {
+            let event = json!({"name":"tool.after","tool":{"result":result},
+                "native":{"hook_event_name":"PostToolUse","tool_response":result}});
+            assert_eq!(result_status("qoder", &event), Some(expected));
+        }
+        for (native, expected) in [
+            (
+                json!({"result":{"content":[{"type":"text","text":"ok"}]}}),
+                Some("success"),
+            ),
+            (json!({"result":{"isError":true}}), Some("error")),
+            (
+                json!({"result":{"isError":false},"error":"native failure"}),
+                Some("error"),
+            ),
+            (json!({"error":"native failure"}), Some("error")),
+            (json!({}), None),
+            (json!({"result":null}), None),
+        ] {
+            let mut event = json!({"name":"tool.after","tool":{"result":native["result"]},
+                "native":{"hook":"after_tool_call","event":native}});
+            assert_eq!(result_status("openclaw", &event), expected);
+            event["name"] = json!("tool.before");
+            assert_eq!(result_status("openclaw", &event), None);
+        }
+    }
+
+    #[test]
+    fn openclaw_structured_outcomes_do_not_require_a_replaceable_text_slot() {
+        for (details, expected) in [
+            (json!({"status":"completed","exitCode":7}), "error"),
+            (json!({"ok":true,"exitCode":7}), "error"),
+            (json!({"status":"failed"}), "error"),
+            (json!({"status":" TIMED_OUT "}), "error"),
+            (json!({"timedOut":true}), "error"),
+            (json!({"ok":false}), "error"),
+            (json!({"success":false}), "error"),
+            (json!({"error":{"message":"failure"}}), "error"),
+            (json!({"status":"completed","exitCode":0}), "success"),
+            (json!({"status":"failed","ok":true}), "success"),
+            (json!({"status":"error","success":true}), "success"),
+            (json!({"error":false}), "success"),
+            (json!({"error":0}), "success"),
+            (json!({"error":""}), "success"),
+        ] {
+            for content in [
+                Value::Null,
+                json!([{ "type":"text", "text":"Error: literal tool output" }]),
+                json!([{ "type":"text", "text":"first" }, { "type":"text", "text":"second" }]),
+                json!([{ "type":"image", "data":"opaque" }]),
+            ] {
+                let result = json!({"content":content,"details":details,"isError":false});
+                let event = json!({"name":"tool.after","tool":{"result":result},
+                    "native":{"hook":"after_tool_call","event":{"result":result}}});
+                assert_eq!(result_status("openclaw", &event), Some(expected), "{event}");
+            }
+        }
+    }
+
     #[test]
     fn hermes_completion_only_normalizes_the_two_final_native_seams() {
         let original = json!({"hook_event_name":"post_tool_call","extra":{"result":"original","middleware_trace":["observer-only"]}});

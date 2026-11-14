@@ -23,6 +23,11 @@ target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qo
 
 已验证基线为 CLI 1.1.64。AW 记录已安装 CLI 输出的裸 SemVer 版本号。接线依赖 `--settings`、字面 `args` 命令 Hook、`PreToolUse`/`PostToolUse`、回调身份和退出码 2 阻断。
 
+`PostToolUse` 和 `PostToolUseFailure` 都进入 `tool.after`。公共审计的
+`resultStatus` 来自原生回调及其退出码、信号或中断字段，`resultDigest` 覆盖归一化结果。
+缺少结果元数据时，[审计导出](../reference/cli.md)保留 `projection_unavailable`，
+供消费方识别信息缺口。
+
 例如，将目标命名为 `qodercli`，并选择已安装的可执行文件：
 
 ```yaml

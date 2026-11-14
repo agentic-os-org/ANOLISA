@@ -626,23 +626,27 @@ when {{ {}.contains(resource.path) }};"#,
 #[cfg(target_os = "linux")]
 struct Client {
     pdp: asc_pdp_runtime::PdpRuntime,
-    requests: std::cell::RefCell<Vec<AuthorizationRequest>>,
+    requests: std::cell::RefCell<Vec<OsAuthorizationRequest>>,
 }
 
 #[cfg(target_os = "linux")]
 impl Client {
-    fn new(baseline: String) -> Self {
+    fn new(baseline: &str) -> Self {
         Self {
-            pdp: asc_pdp_runtime::PdpRuntime::from_snapshot(asc_pdp_runtime::PolicySnapshot {
-                version: "test-policy-1".into(),
-                baseline: asc_policy_types::cedar::CedarPolicySource {
-                    schema: asc_policy_cedar::schema::embedded_reference(),
-                    text: baseline,
+            pdp: asc_pdp_runtime::PdpRuntime::from_policy_set(
+                asc_policy_types::cedar::AuthorizationPolicySet {
+                    version: "test-policy-1".into(),
+                    policies: vec![asc_policy_types::cedar::AuthorizationPolicy {
+                        policy_id: asc_policy_types::identifiers::ResourceId::new("test-policy")
+                            .unwrap(),
+                        revision: asc_policy_types::identifiers::Revision::new(1).unwrap(),
+                        source: asc_policy_types::cedar::CedarPolicySource {
+                            schema: asc_policy_cedar::schema::embedded_reference(),
+                            text: baseline.replace("principal,", "principal is SecCore::Subject,"),
+                        },
+                    }],
                 },
-                task: None,
-                environment_permissions: resolve("permit(principal, action, resource);"),
-                ttl_seconds: 60,
-            })
+            )
             .unwrap(),
             requests: std::cell::RefCell::new(vec![]),
         }
@@ -653,7 +657,7 @@ impl Client {
 impl asc_pep_runtime::AuthorizationClient for Client {
     fn evaluate(
         &self,
-        request: &AuthorizationRequest,
+        request: &OsAuthorizationRequest,
     ) -> Result<Decision, asc_pep_runtime::PepError> {
         self.requests.borrow_mut().push(request.clone());
         let now = std::time::SystemTime::now()
@@ -696,7 +700,7 @@ when {{ resource.path == {} || resource.path like {} }};
         serde_json::to_string(private.to_str().unwrap()).unwrap(),
         serde_json::to_string(&format!("{}/*", private.display())).unwrap()
     );
-    let client = Client::new(baseline);
+    let client = Client::new(&baseline);
     let principal = AgentPrincipal {
         agent_type: Some("cosh".into()),
     };
@@ -708,7 +712,7 @@ when {{ resource.path == {} || resource.path like {} }};
         .unwrap();
     assert_eq!(decision.verdict, DecisionVerdict::Modify);
     assert!(allows(
-        &prepared.request.requested_permissions,
+        &prepared.request.context.requested_permissions,
         private.to_str().unwrap(),
         FileRight::Write
     ));
@@ -725,15 +729,15 @@ when {{ resource.path == {} || resource.path like {} }};
         .authorize(&principal, launch.clone(), &second, &client)
         .unwrap();
     assert!(!allows(
-        &next.request.requested_permissions,
+        &next.request.context.requested_permissions,
         dir.path().to_str().unwrap(),
         FileRight::Write
     ));
     assert_ne!(prepared.request.request_id, next.request.request_id);
     assert_eq!(client.requests.borrow().len(), 2);
     assert_ne!(
-        client.requests.borrow()[0].requested_permissions,
-        client.requests.borrow()[1].requested_permissions
+        client.requests.borrow()[0].context.requested_permissions,
+        client.requests.borrow()[1].context.requested_permissions
     );
     assert!(
         serde_json::to_value(&prepared.request)
@@ -773,7 +777,7 @@ forbid(principal, action == SecCore::Action::"file.read", resource)
 when {{ resource.path == {} }};"#,
         json!(alias.join("key"))
     );
-    let client = Client::new("permit(principal, action, resource);".into());
+    let client = Client::new("permit(principal, action, resource);");
     let principal = AgentPrincipal {
         agent_type: Some("cosh".into()),
     };
@@ -785,7 +789,7 @@ when {{ resource.path == {} }};"#,
         .unwrap();
     let requests = client.requests.borrow();
     assert_eq!(requests.len(), 1);
-    let permissions = &requests[0].requested_permissions;
+    let permissions = &requests[0].context.requested_permissions;
     assert!(!allows(
         permissions,
         target.join("key").to_str().unwrap(),
@@ -825,7 +829,7 @@ when {{ resource.path == {} }};"#,
     let requests = client.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert!(!allows(
-        &requests[1].requested_permissions,
+        &requests[1].context.requested_permissions,
         target.join("key").to_str().unwrap(),
         FileRight::Read
     ));
@@ -864,7 +868,7 @@ fn directory_exclusions_survive_pdp_compaction_and_check_hardlinked_descendants(
     };
     let launch = prepare_launch("/usr/bin/true", vec![], &cwd, BTreeMap::new()).unwrap();
     let mut runtime = PepRuntime::new(SandboxBackend::new(helper));
-    let client = Client::new("permit(principal, action, resource);".into());
+    let client = Client::new("permit(principal, action, resource);");
     for (action, right) in [
         ("file.read", FileRight::Read),
         ("file.write", FileRight::Write),
@@ -907,15 +911,15 @@ forbid(principal, action == SecCore::Action::"{action}", resource) when {{ {} }}
                     .authorize(&principal, launch.clone(), &json, &client)
                     .unwrap();
                 assert_eq!(
-                    prepared.request.requested_permissions,
-                    json_prepared.request.requested_permissions
+                    prepared.request.context.requested_permissions,
+                    json_prepared.request.context.requested_permissions
                 );
                 assert_eq!(
                     decision.effective_permissions,
                     json_decision.effective_permissions
                 );
                 for permissions in [
-                    &prepared.request.requested_permissions,
+                    &prepared.request.context.requested_permissions,
                     decision.effective_permissions.as_ref().unwrap(),
                 ] {
                     assert!(

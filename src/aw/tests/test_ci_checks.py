@@ -24,8 +24,8 @@ SPEC.loader.exec_module(gate)
 
 class GateFixture(unittest.TestCase):
     def setUp(self) -> None:
-        (AW / "target").mkdir(exist_ok=True)
-        temporary = tempfile.TemporaryDirectory(prefix="ci-check-", dir=AW / "target")
+        # Native integration fixtures use Unix sockets with a short SUN_LEN limit.
+        temporary = tempfile.TemporaryDirectory(prefix="aw-ci-", dir="/tmp")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
 

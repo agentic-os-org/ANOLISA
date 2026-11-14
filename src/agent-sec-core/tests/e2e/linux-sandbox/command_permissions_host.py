@@ -148,9 +148,11 @@ def trace_protocol(endpoint: Path, tap: Path, evidence: Path) -> Iterator[None]:
                     result, ("outcome", "policy", "caveats", "reasons")
                 )
             elif method == "authorization.evaluate":
-                row["request"] = pick(params, ("principal", "requested_permissions"))
+                context = params["context"]
+                row["request"] = pick(params, ("principal", "action", "resource"))
+                row["request"].update(pick(context, ("agent", "requested_permissions")))
                 row["request"]["launch"] = pick(
-                    params["launch"], ("program", "resolved_program", "args", "cwd")
+                    context["launch"], ("program", "resolved_program", "args", "cwd")
                 )
                 row["response"] = pick(
                     result,

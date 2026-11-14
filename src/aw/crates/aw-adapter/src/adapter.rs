@@ -178,7 +178,9 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
         return Err("block reason must be nonempty and bounded".into());
     }
     match adapter {
-        "qoder" | "qwenpaw" | "agentscope" => reply.stderr = format!("{text}\n").into_bytes(),
+        "qoder" | "qwenpaw" | "agentscope" | "codex" => {
+            reply.stderr = format!("{text}\n").into_bytes()
+        }
         "claude-sdk" | "qoder-sdk" => reply.stdout = serde_json::to_vec(text)?,
         "openclaw" | "hermes" | "pi" | "deepseek-harness" => {
             let mut value: Value = serde_json::from_slice(&reply.stdout)?;

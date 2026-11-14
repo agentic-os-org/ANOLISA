@@ -4,9 +4,11 @@
 
 ## 准备
 
-已验证基线为提交 `952c941e741e922a9be8fc403c8944c6e96318bb`。AW 记录实际检出的修订，
-其他具备原生 profile、插件和 shell-hook 接口的修订也可接入。已跟踪文件保持干净，
-保留安装路径与加载环境检查。安装 Python console script，使用绝对 Python shebang；入口为本地 `chat`。
+进程内基线为提交 `952c941e741e922a9be8fc403c8944c6e96318bb`。Hermes `0.23.1`
+的原生验收固定在提交 `3b421578588243f920886e6fe79a6faa87ea026e`。其 CLI chat 轮次在内部 Gateway 执行；AW 在提交每轮消息前，将 Gateway 插件绑定到
+当前会话。两个版本使用同一份 AW 配置。AW 记录实际检出的修订，其他具备所需原生接口
+的修订也可接入。已跟踪文件保持干净，保留安装路径与加载环境检查。
+安装 Python console script，使用绝对 Python shebang；入口为本地 `chat`。
 按[教程](../integration.md)构建 AW，复制[Hermes 配置](../../../../../src/aw/crates/aw-service/examples/aw.hermes.yaml)，把 argv 改为该安装的绝对路径。
 先用 Hermes 初始化 profile 和模型账号。
 
@@ -21,21 +23,28 @@ target/debug/aw run --config /absolute/aw.hermes.yaml --agent hermes \
 ```
 
 connect 备份配置后安装 AW 插件，报告 `backup` 和 `displaced` 路径。保留这两份文件。
-运行时使用同一 profile，等待 Hook 就绪后按[原生验收](../validation.md)验证工具。
+运行时使用同一 profile。CLI 先报告 `AW hermes CLI plugin ready`；Gateway chat
+在报告 `AW hermes Gateway callbacks active` 后，再按[原生验收](../validation.md)验证工具。
 
 ## 部署约束
 
 | 项目 | 要求 |
 | --- | --- |
-| 入口 | Python console script 的本地 chat；不支持 shell wrapper、`python -m`、TUI、Gateway、ACP 或会话/profile/worktree 切换 |
+| 入口 | Python console script 的本地 `chat --cli`，包括 `0.23.1` 的内部 Gateway；独立 Gateway 客户端、TUI、ACP 与会话/profile/worktree 切换不在此入口范围内 |
 | 路径 | 工作目录、profile、venv、checkout 和 AW 路径须为 UTF-8；profile 与 `.env` 归当前用户且不可被他人写入 |
 | Git 环境 | 取消 `GIT_DIR`、`GIT_COMMON_DIR`；HOME/XDG 和 Git 配置路径使用绝对路径；拒绝 filter 与 fsmonitor helper |
 | 原生选项 | safe mode 和 chat 帮助参数会在接入前被拒绝；直接用 `hermes chat --help` 查看帮助 |
-| 工具参数 | 启用 AW before 时禁止 Hook/middleware 改写输入，包含 `execute_code` 内部调用 |
+| 工具参数 | 接受经 AW 检查的 `replace_input`；其后原生 Hook 或 middleware 再次改写参数时，在执行前拒绝，包含 `execute_code` 内部调用 |
 | 预算 | 事件最多 55000 ms，并须满足原生回调期限 |
 
 before 阻断后，其他原生回调仍可运行；after 可观察失败或被阻断的尝试。
-配置 AW 回调时，工具执行中的强制插件重载会被拒绝。空策略仍须安装插件，运行时注册零个工具回调。
+AW 绑定的 Gateway 轮次内及进程内工具执行期间，强制插件重载会被拒绝。已提交的上下文压缩会延续该轮的 AW 绑定，保护后续工具调用。空策略仍须安装插件，运行时注册零个工具回调。
+Gateway 在认领已准入轮次时建立绑定，原生执行返回后释放，包括自动 unknown 结算。人工处理的 unknown admission 在下一次认领或注销时释放绑定。CLI 退出时，AW 等待 queued、started 和 unknown admission 全部结算且会话关闭，再释放 launch 文件和服务实例。信号或 drain 故障阻止注销时，AW 报告并保留实例与 launch 目录。处理 admission 期间保持 AW 服务和 Hermes Gateway 可用；目录中的私有 `hermes-sessions.json` 列出待对账会话。进程强杀无法完成握手。
+对于 `0.23.1`，连接或升级插件后重启已运行的 Gateway；Gateway 未确认 AW 会话绑定时，
+CLI 会拒绝提交轮次。`transform_tool_result` 在模型收到工具结果前执行替换。
+Gateway 确认绑定前会检查原生 Hook 注册表中的四个桥接回调；空策略也执行此检查。
+该回调失败或超时后，Hermes 会保留原始结果；必须阻止内容进入模型时，在
+`tool.before` 拒绝工具调用。
 
 ## 升级与清理
 
