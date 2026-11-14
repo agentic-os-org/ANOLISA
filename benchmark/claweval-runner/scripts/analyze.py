@@ -360,8 +360,8 @@ def extract_failure_info(report: dict) -> str:
             result = "; ".join(snippets[:2]) if snippets else "unknown"
         else:
             return "unknown"
-    # Replace commas with semicolons to avoid CSV parsing issues
-    return result.replace(",", ";").replace("，", "；")
+    # csv.writer quotes delimiters without changing the diagnostic text.
+    return result
 
 
 def extract_trial_hash(trace_field: str) -> str:
@@ -532,9 +532,6 @@ def build_structured_data(data: list, reports: dict, trace_name: str) -> dict:
                 fc = report.get("failure_classification", {})
                 cat = fc.get("category", "")
                 reason = fc.get("key_reason_zh", "")
-                # Replace commas for consistency
-                if reason:
-                    reason = reason.replace(",", ";").replace("，", "；")
                 if cat:
                     trial_entry["failure_category"] = cat
                     failure_dist[cat] = failure_dist.get(cat, 0) + 1
