@@ -150,7 +150,7 @@ impl Runtime {
     }
 
     pub(super) fn own_instance(&self, id: &str, pid: u32) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let instances = self
             .instances
             .lock()
@@ -189,7 +189,7 @@ impl Runtime {
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let id = self.identifier()?;
         let cancellation = Arc::new(AtomicBool::new(false));
         let (bytes, target, capabilities) = {
@@ -438,6 +438,15 @@ impl Runtime {
 }
 
 impl Owner {
+    /// Return a pending deadline; expired bridge leases are already fenced.
+    pub(in crate::runtime) fn maintenance_deadline(&self) -> Option<Instant> {
+        self.acknowledge_by
+            .into_iter()
+            .chain(self.validity.as_ref().map(|validity| validity.deadline))
+            .filter(|deadline| *deadline > Instant::now())
+            .min()
+    }
+
     pub(super) fn independent(
         process: Process,
         native: bool,

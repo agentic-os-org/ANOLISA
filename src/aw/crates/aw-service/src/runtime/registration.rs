@@ -287,6 +287,8 @@ impl Runtime {
             record
         };
         let result = (|| {
+            // Replay fences outlive owners; only active preparation and owners retain FDs.
+            let process = record.process.clone().watch()?;
             let bytes = config
                 .as_ref()
                 .map_or(self.bytes.as_slice(), |value| value.as_bytes());
@@ -327,7 +329,7 @@ impl Runtime {
                 .insert(
                     record.id.clone(),
                     Owner::independent(
-                        record.process.clone(),
+                        process.clone(),
                         native,
                         Arc::clone(&record.cancellation),
                         deadline,
@@ -340,7 +342,7 @@ impl Runtime {
                         if cancelled.load(Ordering::Acquire)
                             || self.stopped.load(Ordering::Acquire)
                             || Instant::now() >= deadline
-                            || record.process.check().is_err()
+                            || process.check().is_err()
                             || peer.check().is_err()
                         {
                             record.cancellation.store(true, Ordering::Release);
@@ -379,7 +381,7 @@ impl Runtime {
             let owner = owners
                 .get_mut(&record.id)
                 .ok_or_else(|| rejected("registration_cancelled"))?;
-            record.process.caller(peer)?;
+            process.caller(peer)?;
             if cancelled.load(Ordering::Acquire)
                 || record.cancellation.load(Ordering::Acquire)
                 || self.stopped.load(Ordering::Acquire)
@@ -390,7 +392,7 @@ impl Runtime {
             self.lifecycle_record(
                 "registration_prepared",
                 &record.id,
-                json!({"process":record.process.metadata(),"request_id":handle.key.request_id}),
+                json!({"process":process.metadata(),"request_id":handle.key.request_id}),
             )?;
             owner.acknowledge_by = Some(Instant::now() + CONFIRMATION_WINDOW);
             *record
