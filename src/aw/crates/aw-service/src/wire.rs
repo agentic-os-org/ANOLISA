@@ -111,6 +111,7 @@ pub enum RunOutcome {
         signal: Option<i32>,
     },
     /// Launch or native readiness failed; no successful completion is implied.
+    #[serde(deserialize_with = "empty_fields")]
     Failed,
 }
 
@@ -168,8 +169,10 @@ pub enum Operation {
         command: RegistrationCommand,
     },
     /// Discover identity and current bounded resource counts.
+    #[serde(deserialize_with = "empty_fields")]
     Status,
     /// Read at most 20 completed step metadata entries from this service start.
+    #[serde(deserialize_with = "empty_fields")]
     RecentExecutions,
     /// Pin context and perform real Provider discovery/private configuration checks.
     Bind {
@@ -425,7 +428,18 @@ pub enum Operation {
         key: String,
     },
     /// Request cancellation and graceful shutdown; process exit completes cleanup.
+    #[serde(deserialize_with = "empty_fields")]
     Stop,
+}
+
+// Serde's internally tagged unit visitor ignores unknown fields. Decode the
+// remaining map as an empty struct to enforce the same contract as other variants.
+fn empty_fields<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<(), D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+
+    Empty::deserialize(decoder).map(|_| ())
 }
 
 impl Operation {
@@ -454,4 +468,65 @@ pub struct Response {
     pub error: Option<String>,
     /// Evidence for a failed preparation when no successful binding was returned.
     pub audit_key: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fieldless_operations_reject_unknown_fields_at_every_entrypoint() {
+        for (method, operation) in [
+            ("status", Operation::Status),
+            ("recent_executions", Operation::RecentExecutions),
+            ("stop", Operation::Stop),
+        ] {
+            let expected = json!({"method": method});
+            assert_eq!(serde_json::to_value(operation).unwrap(), expected);
+            for extra in [None, Some(Value::Null), Some(json!({"nested": true}))] {
+                let mut value = expected.clone();
+                if let Some(extra) = &extra {
+                    value["unknown"] = extra.clone();
+                }
+                let bytes = serde_json::to_vec(&value).unwrap();
+                assert_eq!(Operation::from_json(&bytes).is_ok(), extra.is_none());
+                assert_eq!(
+                    serde_json::from_slice::<Operation>(&bytes).is_ok(),
+                    extra.is_none()
+                );
+                let request = json!({
+                    "api_version": VERSION,
+                    "identity": null,
+                    "deadline_ns": 1,
+                    "operation": value,
+                });
+                assert_eq!(
+                    crate::ipc::decode::<Request>(&serde_json::to_vec(&request).unwrap()).is_ok(),
+                    extra.is_none()
+                );
+            }
+        }
+        assert!(Operation::from_json(
+            br#"{"method":"own_instance","instance_id":"i","pid":1,"unknown":null}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn failed_run_outcome_rejects_unknown_fields() {
+        let expected = json!({"state": "failed"});
+        assert_eq!(serde_json::to_value(RunOutcome::Failed).unwrap(), expected);
+        for extra in [None, Some(Value::Null), Some(json!({"nested": true}))] {
+            let mut outcome = expected.clone();
+            if let Some(extra) = &extra {
+                outcome["unknown"] = extra.clone();
+            }
+            let value = json!({"method": "report_run", "instance_id": "i", "outcome": outcome});
+            assert_eq!(
+                Operation::from_json(&serde_json::to_vec(&value).unwrap()).is_ok(),
+                extra.is_none()
+            );
+        }
+    }
 }
