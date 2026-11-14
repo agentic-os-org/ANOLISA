@@ -2577,6 +2577,59 @@ mod tests {
         );
     }
 
+    /// The capped/filtered terminal event is a separate arm from
+    /// `response.completed`; it carries the same complete `output[]`. A
+    /// delta-less capture must recover the answer, refusal and tool call
+    /// there as well, while the cap still determines the finish reason.
+    #[test]
+    fn test_responses_incomplete_terminal_event_recovers_output() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_incomplete", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_incomplete",
+                "model": "gpt-5",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {"type": "message", "id": "msg_text", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "partial answer"}]},
+                    {"type": "message", "id": "msg_refusal", "role": "assistant",
+                     "content": [{"type": "refusal", "refusal": "I can't continue"}]},
+                    {"type": "function_call", "id": "fc_incomplete", "call_id": "call_incomplete",
+                     "name": "read_file", "arguments": "{\"path\":\"/tmp/b\"}"}
+                ]
+            }}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the incomplete terminal event must aggregate");
+        assert_eq!(
+            resp.choices[0]
+                .message
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .as_deref(),
+            Some("partial answer")
+        );
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't continue")
+        );
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the incomplete terminal function_call must be recovered");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], serde_json::json!("call_incomplete"));
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("length".to_string()),
+            "the output cap still wins over the recovered tool call"
+        );
+    }
+
     /// The Responses protocol streams a refusal as its own events; the
     /// aggregation listened for text/tool-call events only.
     #[test]
