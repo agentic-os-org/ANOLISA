@@ -245,10 +245,12 @@ impl LoopDetector {
         // Rule 3's token-burn predicate is a strict refinement of this one:
         // the same similar-output window plus strictly growing input tokens.
         // Rule 2 is evaluated first, so without leaving that case to rule 3
-        // it would shadow `token_burn_no_progress` permanently.
-        if tail
-            .windows(2)
-            .all(|w| w[1].input_tokens > w[0].input_tokens)
+        // it would shadow `token_burn_no_progress` permanently. A one-element
+        // window has no pair to grow, so keep it on rule 2.
+        if tail.len() > 1
+            && tail
+                .windows(2)
+                .all(|w| w[1].input_tokens > w[0].input_tokens)
         {
             return None;
         }
@@ -296,7 +298,9 @@ impl LoopDetector {
             .filter(|c| !c.output_text_snippet.trim().is_empty())
             .collect();
 
-        if text_bearing.len() < threshold {
+        // "Growing input" needs at least two calls. With a one-call threshold
+        // the pair check would be vacuously true and report growth zero.
+        if text_bearing.len() < threshold || text_bearing.len() < 2 {
             return None;
         }
 
@@ -712,6 +716,25 @@ mod tests {
             serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
         assert_eq!(detail["rule"], "token_burn_no_progress");
         assert_eq!(detail["input_growth"], 2000);
+    }
+
+    #[test]
+    fn a_single_call_threshold_keeps_the_output_similarity_rule() {
+        // Threshold 1 means "one text call is enough". A one-element window
+        // has no pair to grow, so it must not be deferred to the token-burn
+        // rule (which would report input_growth = 0 as a growing context).
+        let detector = LoopDetector::new(LoopDetectorConfig {
+            tool_sequence_repeat_threshold: 5,
+            similar_output_repeat_threshold: 1,
+            ..Default::default()
+        });
+        let calls = vec![make_call(vec![], "the same answer", 100)];
+        let event = detector
+            .detect("conv-1", None, None, None, 1000, Some(&calls))
+            .expect("a one-call threshold triggers rule 2");
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["rule"], "output_similarity_loop");
     }
 
     #[test]
