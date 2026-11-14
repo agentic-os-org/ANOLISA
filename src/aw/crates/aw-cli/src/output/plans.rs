@@ -10,7 +10,7 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
     let color = terminal::use_color(options.color, stdout.is_terminal());
     match outcome {
         Outcome::PackagePlanned { plan } => {
-            if !options.quiet {
+            if !options.quiet && plan.ready() {
                 let action = match plan.action {
                     Action::Install => "Install",
                     Action::Uninstall => "Removal",
@@ -44,6 +44,14 @@ pub(super) fn human(outcome: &Outcome, options: &Options) -> std::io::Result<()>
                         "{action} {:04o} {}",
                         file.mode,
                         terminal::escape(&file.path)
+                    )?;
+                }
+                for file in &plan.preserved {
+                    writeln!(
+                        stdout,
+                        "KEEP PATH {}: {}",
+                        terminal::escape(&file.path),
+                        terminal::escape(&file.reason)
                     )?;
                 }
                 for dependency in &plan.dependencies {

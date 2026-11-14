@@ -16,7 +16,8 @@ def load(root: Path) -> dict:
     """Reject unaccounted Agents, empty suites and unpinned native runtimes."""
     manifest = json.loads((root / "tests/native-matrix.json").read_text())
     registered = json.loads((root / "tests/regression-matrix.json").read_text())["agents"]
-    if manifest.get("version") != 1 or set(manifest["agents"]) != set(registered):
+    if (manifest.get("version") != 1
+            or set(manifest["agents"]) != set(registered) | {"hermes-0.23.1"}):
         raise ValueError("native acceptance must account for every registered Agent")
     for agent, row in manifest["agents"].items():
         if not row.get("owner"):
@@ -87,6 +88,11 @@ def load(root: Path) -> dict:
                 raise ValueError(f"{agent}: use exact Python dependency versions")
         if "source" in row:
             sha(row["source"]["revision"])
+        if row.get("source_install") and (
+            agent != "hermes-0.23.1"
+            or row["source_install"] != "frozen-no-build-isolation"
+        ):
+            raise ValueError(f"{agent}: unsupported native source install mode")
         if "npm_fixture" in row:
             for name in ("package.json", "package-lock.json"):
                 if not (root / row["npm_fixture"] / name).is_file():

@@ -17,6 +17,10 @@ from pathlib import Path
 
 from all_shell_host import run_all_shell_host
 from cosh_host import run_host
+from runner_permissions import (
+    make_fixture_executable,
+    verify_runner_permissions,
+)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -137,7 +141,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
     work, data = root / "work", root / "audit"
     work.mkdir(mode=0o700)
     data.mkdir(mode=0o700)
-    endpoint, config = root / "daemon.sock", root / "authorization.json"
+    endpoint = root / "daemon.sock"
     permissions = {
         "version": 1,
         "filesystem": {
@@ -145,7 +149,11 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
             "rules": [
                 {"effect": "allow", "path": "/", "rights": ["read"]},
                 {"effect": "allow", "path": str(work), "rights": ["read", "write"]},
-                {"effect": "allow", "path": "/tmp", "rights": ["read", "write"]},
+                {
+                    "effect": "allow",
+                    "path": "/tmp",  # noqa: S108 - Explicit sandbox permission boundary.
+                    "rights": ["read", "write"],
+                },
             ],
         },
         "execution": {"deny_paths": []},
@@ -221,6 +229,44 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
 
         try:
             process = start(daemon_command)
+            type_request = {
+                "request_id": "type-match",
+                "principal": {"type": "SecCore::Subject", "id": "request"},
+                "action": {"type": "SecCore::Action", "id": "process.spawn"},
+                "resource": {"type": "SecCore::Process", "id": "true"},
+                "context": {
+                    "execution_id": "type-match",
+                    "agent": {},
+                    "launch": {
+                        "program": "true",
+                        "resolved_program": "/usr/bin/true",
+                        "args": [],
+                        "cwd": str(work),
+                    },
+                    "requested_permissions": permissions,
+                },
+            }
+            empty = rpc(endpoint, "authorization.evaluate", type_request)
+            assert empty.get("result", {}).get("verdict") == "DENY", empty
+            for changed in (
+                dict(type_request, unexpected=True),
+                dict(
+                    type_request,
+                    action={"type": "SecCore::Action", "id": "tool.invoke"},
+                ),
+                dict(
+                    type_request,
+                    resource={"type": "SecCore::Process", "id": "different"},
+                ),
+            ):
+                rejected = rpc(endpoint, "authorization.evaluate", changed)
+                assert (
+                    rejected.get("error", {}).get("code") == "invalid_argument"
+                ), rejected
+            print(
+                "PASS default daemon authorization: empty PAP denies; unknown PARC inputs reject",
+                flush=True,
+            )
             created = rpc(
                 endpoint,
                 "policy.templates.create",
@@ -229,54 +275,12 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
             assert "result" in created, created
             current = created["result"]
             policy_id = current["policyId"]
-            stop(process)
-            write_json(
-                config,
-                {
-                    "environment_permissions": permissions,
-                    "ttl_seconds": 2,
-                },
-            )
-            writable = root / "writable"
-            writable.mkdir()
-            writable.chmod(0o777)
-            selected = writable / "selected.json"
-            selected.symlink_to(config)
-            linked_parent = root / "alias"
-            linked_parent.symlink_to(config.parent, target_is_directory=True)
-            for unsafe in (selected, linked_parent / config.name):
-                rejected = subprocess.run(
-                    daemon_command + ["--authorization-config", str(unsafe)],
-                    env=environment,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                    check=False,
-                )
-                assert (
-                    rejected.returncode == 1
-                    and "authorization config" in rejected.stderr
-                ), rejected
-            process = start(daemon_command + ["--authorization-config", str(config)])
-            type_request = {
-                "type": "os",
-                "request_id": "type-match",
-                "execution_id": "type-match",
-                "principal": {},
-                "launch": {
-                    "program": "true",
-                    "resolved_program": "/usr/bin/true",
-                    "args": [],
-                    "cwd": str(work),
-                },
-                "requested_permissions": permissions,
-            }
             for principal, expected in [
                 ({"agent_type": "codex"}, "ALLOW"),
                 ({"agent_type": "qoder"}, "DENY"),
                 ({}, "DENY"),
             ]:
-                type_request["principal"] = principal
+                type_request["context"]["agent"] = principal
                 evaluated = rpc(endpoint, "authorization.evaluate", type_request)
                 assert evaluated.get("result", {}).get("verdict") == expected, evaluated
                 reported = rpc(
@@ -285,7 +289,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                     {
                         "decision_id": evaluated["result"]["decision_id"],
                         "request_id": type_request["request_id"],
-                        "execution_id": type_request["execution_id"],
+                        "execution_id": type_request["context"]["execution_id"],
                         "approval": None,
                         "recorded_at": int(time.time()),
                         "result": {
@@ -422,6 +426,7 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 capture_output=True,
                 text=True,
                 timeout=20,
+                check=False,
             )
             assert result.returncode == 0, (result.stdout, result.stderr)
             receipt(data, json.loads(result.stdout), example_principal)
@@ -497,7 +502,8 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 ).exists(), "target started before approval"
                 # A second PDP evaluation would see this deny. The bound grant must continue locally.
                 publish("deny")
-                time.sleep(3)
+                # Exceed DECISION_TTL_SECONDS (60); an accepted grant must survive approval.
+                time.sleep(61)
                 assert not (
                     work / "approved"
                 ).exists(), "target started during approval wait"
@@ -543,6 +549,9 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 "AGENT_SEC_COSH_SANDBOX_ALL_SHELL": "1",
             }
             hook_env.pop("AGENT_SEC_COSH_SANDBOX_PERMISSIONS", None)
+            assert shutil.which("linux-sandbox", path=hook_env["PATH"]) == str(
+                legacy_bin / "linux-sandbox"
+            ), "legacy helper fixture is not executable; PATH would use the runner checkout"
 
             def fire_hook(
                 event: str, tool_command: str, env: dict | None = None
@@ -658,7 +667,8 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
             execute_hook(declined, 1)
 
             approved = prepare_hook("hook-approved", "ask")
-            time.sleep(3)
+            # Exceed DECISION_TTL_SECONDS (60) after the Hook has accepted the grant.
+            time.sleep(61)
             publish("deny")
             execute_hook(approved)
             assert (work / "hook-approved").read_text() == "complete"
@@ -809,6 +819,7 @@ def main() -> None:
     ]
     if args.isolation_root is not None:
         prepare_private_template(args.isolation_root)
+        verify_runner_permissions(args.isolation_root, binaries[2])
         run = args.isolation_root / "run"
         run.mkdir(mode=0o700)
         exercise(*binaries, run)
@@ -836,6 +847,12 @@ def prepare_private_template(root: Path) -> None:
     """Install test defaults and a private passwd home without changing host /etc."""
     assert os.readlink("/proc/self/ns/mnt") != (root / "parent-mountns").read_text()
     subprocess.run(["mount", "--make-rprivate", "/"], check=True)
+    print(
+        f"Fixture parent mount noexec: {bool(os.statvfs(root).f_flag & os.ST_NOEXEC)}",
+        flush=True,
+    )
+    # /run may be noexec; helper and fault-injection executables must remain runnable.
+    make_fixture_executable(root)
     upper, work = root / "etc-upper", root / "etc-work"
     upper.mkdir(mode=0o700)
     work.mkdir(mode=0o700)

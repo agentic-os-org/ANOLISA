@@ -25,6 +25,9 @@ pub use wire::{
     RunOutcome, REGISTRATION_VERSION, VERSION,
 };
 
+/// Maximum applicable enabled steps across all events in one service binding.
+pub const MAX_STEPS_PER_BINDING: usize = 64;
+
 /// Service boundary failure; remote messages contain only stable error codes.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

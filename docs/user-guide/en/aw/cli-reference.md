@@ -151,6 +151,12 @@ The generator supports Qoder and OpenClaw entrypoints. Other Agents use the conf
 
 Validation checks configuration and offline update scope. It does not confirm native readiness or activate policy. Relative configuration paths are accepted here.
 
+Each configured target may select at most 64 enabled steps across all enabled events.
+Disabled events and steps, and steps excluded by the target's tool selectors, do not count.
+The check uses the service binding limit and runs without starting Agents or Providers.
+Exceeding it exits 1; JSON output reports `invalid_configuration`.
+The legacy `aw validate` alias applies the same limit.
+
 ### `aw config show`
 
 | Argument | Required / default | Meaning |
@@ -238,11 +244,13 @@ The legacy native-connection form is listed under [compatibility](#compatibility
 | `PACKAGE...` | Optional | Exact package IDs to remove; omit to remove all recorded packages in the prefix |
 | `--prefix ABS_DIR` | Required | Registered installation directory |
 | `--dry-run` | Off | Preview removal and blockers without writes or confirmation |
+| `--keep-changed` | Off | Retain changed or missing selected payload paths while removing package records; dependencies, access errors and unsafe directories still block removal |
 | `--scope user\|system` | `user` | Package database scope; system writes require root |
 | `-y`, `--yes` | Off | Confirm removal; does not override ownership, integrity or busy-file checks |
 | Shared output options | Optional | [Output options](#output-options) |
 
 Interactive removal asks for confirmation. JSON or non-terminal removal requires `--yes`. External configuration and state are retained.
+Blocked human plans write problems to stderr and leave stdout empty; JSON retains the plan. See [operations](operations.md#upgrade-and-uninstall) for changed-file recovery and retained-path reports.
 
 ### `aw list`, `aw doctor` and `aw recover`
 

@@ -28,7 +28,7 @@ Provider 发现与准入，所选 Adapter 在绑定前执行原生准备检查�
 | `execution.guarantee` | 仅 `native_hook`，不提供 OS、final 或 protected 保证 |
 | `execution.default_event_budget_ms` | 必填正整数共享事件预算，各步骤不会获得重新开始的预算 |
 | `audit.enabled`、`audit.payload` | 本版本固定为 `true`、`metadata_only`；服务持久保存执行元数据 |
-| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk` 或 `agentscope` |
+| `agents.<id>.adapter` | `qwenpaw`、`qoder`、`qoder-sdk`、`openclaw`、`hermes`、`pi`、`claude-sdk`、`codex` 或 `agentscope` |
 | `agents.<id>.shutdown_grace_ms` | 外部信号退出宽限，1..120000 ms，默认 2000；见[生命周期](deployment/lifecycle.md) |
 | `daemon.limits` | 常驻服务的并发上限，字段及默认值见[容量配置](deployment/lifecycle.md#服务并发预算) |
 | `agents.<id>.argv` | 非空程序/参数数组；首项不可为空，不隐式调用 shell 或插值 |
@@ -139,7 +139,7 @@ stdin 未完整交付、非法或超限输出仍为错误，由 `on_error` 处�
 `replace_result`，以及这些点位的原生步骤。Adapter 提供经检查的交付边界时，
 `security.violation` 支持最终 `observe` 或 `block` 步骤。布尔/原生步骤不能请求结构化输入或结果替换。Qoder CLI 分别映射到 `PreToolUse` 和成功后的 `PostToolUse`，尚未
 接通失败工具。运行时仍拒绝其他已识别事件、guard 和更强执行保证。
-Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK 与显式 AgentScope 工厂均有启动 Adapter；
+Qoder、Qoder SDK、OpenClaw、QwenPaw、Hermes、Pi、Claude SDK、Codex CLI 与显式 AgentScope 工厂均有启动 Adapter；
 已验证基线、入口及 after 事件覆盖见[原生 Agent 接入参考](native-agents.md)。
 
 ## 事件、效果与工具选择

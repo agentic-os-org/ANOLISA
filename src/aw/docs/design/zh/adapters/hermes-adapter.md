@@ -6,7 +6,8 @@ Hermes 适配器通过框架原生 Plugin 和 shell Hook API，将已有本地 p
 接入 AW 服务，使用 Linux 上的 Python `chat` 入口。已验证基线为官方
 `NousResearch/hermes-agent` 提交 `952c941e741e922a9be8fc403c8944c6e96318bb`，
 其他修订需保留 profile、插件与 shell Hook 接口。
-Gateway、ACP、Desktop 和独立 TUI 入口尚未支持，使用 `.container-mode` 将 CLI
+Hermes `0.23.1` 的 CLI chat 使用内部 Gateway，通过会话绑定启用 AW 插件。
+独立 Gateway 客户端、ACP、Desktop 和独立 TUI 入口尚未支持，使用 `.container-mode` 将 CLI
 转入托管容器的 profile 也会被拒绝。
 AW 加入原生 `--cli`，防止环境或配置中的 TUI 偏好切换入口。只接受完整的受支持
 chat 参数，拒绝 profile 切换、worktree、恢复会话、禁用插件与原生长选项缩写。
@@ -205,8 +206,8 @@ Desktop 进程热加载插件。AW 只更新本地文件，不复制或重写 pr
 
 启动要求匹配的 AW 插件已经安装并启用。AW 保留选定的 `HERMES_HOME`，显式
 指定对应的原生 `--profile`，防止 sticky `active_profile` 改变目标目录，并
-保留启动工作目录。普通 Hermes 启动没有 AW 启动器的进程内会话绑定时，
-已安装插件不会注册任何回调。
+保留启动工作目录。普通 Hermes 启动没有 AW 启动器的会话绑定时，
+已安装插件不会产生 AW 效果。
 
 当 `providers` 和 `events` 为空时，AW 注册零个回调并正常启动。已有原生 Hook
 仍会执行；AW 记录会话生命周期，不表示执行了每工具策略检查或工具审计。
@@ -214,9 +215,21 @@ Desktop 进程热加载插件。AW 只更新本地文件，不复制或重写 pr
 
 ## Hook 语义
 
-每个准入的 AW step 对应独立的原生 shell Hook 回调，通过
-`PluginContext.register_hook` 注册。Hermes 按登记顺序串行执行回调，工具批次
-的串行或并行仍由 Hermes 调度。已有配置中的 Hook 继续执行；AW 不导入或
+进程内路径将每个准入的 AW step 注册为原生 Hook 回调。`0.23.1` 中，CLI
+在原生会话处理前通过插件 RPC 登记 Gateway 会话。Gateway 为会话保存不可变的
+launch 快照，在原生 admission 认领时使用真实 request ID 或 admission ID 建立
+唯一活动绑定。排队消息、adopted 轮次和后台通知共用此边界。原生执行返回时释放
+绑定，包括 `settled_unknown`；发生异常时保留绑定，直到原生 admission 账本
+确认终态。Gateway 插件在对应原生 Hook 回调中运行准入的步骤。
+Gateway 在 AW 会话保持登记期间拒绝卸载插件，避免排队轮次在两轮之间失去回调。
+原生 CLI 退出后，父 AW 进程读取私有会话清单，对每个会话向 Gateway 调用
+`retire`。注销会等待 queued、started 和 unknown admission 全部结算。同一
+launch 的 prime 和 retire 可重试；旧 launch 的 retire 不会删除新登记，同路径
+launch 快照变化也不能绕过 drain。CLI 在发送 prime 前记录待对账会话，因此首次
+回执丢失仍会执行注销。只有 Gateway 确认全部注销，AW 才释放服务实例和 launch
+文件。信号或 drain 故障导致无法确认时，AW 报告并保留两项资源，供运维对账。
+注销后，同一会话可由新的 AW 启动重新登记，插件也可卸载。
+工具批次的串行或并行仍由 Hermes 调度。已有配置中的 Hook 继续执行；AW 不导入或
 重排其配置。已验证基线的原生 Hook 配置没有逐 Hook 的环境变量对象。
 
 原生命令收到回调进程的实际环境，包括 profile 的 `.env` 变量，以及 Hermes
@@ -225,8 +238,9 @@ Desktop 进程热加载插件。AW 只更新本地文件，不复制或重写 pr
 
 | 原生事件 | AW 事件 | 可用行为 |
 | --- | --- | --- |
-| `pre_tool_call` | `tool.before` | 结构化 observe/block；原生命令保留 stdout 与退出状态语义 |
+| `pre_tool_call` | `tool.before` | observe、block 和受检输入替换；原生命令保留 stdout 与退出状态语义 |
 | `post_tool_call` | `tool.after` | 观察，包括被阻断、失败、取消及超时的工具结果 |
+| `transform_tool_result` | `tool.after` | post 回调后替换模型接收的结果 |
 
 原生载荷提供 `session_id`、`extra.api_request_id` 和 `extra.tool_call_id`。
 归一化 call ID 对请求与工具调用 ID 一起取哈希，允许模型在后续请求中复用同一
@@ -237,21 +251,13 @@ JSON 字符串。缺少原生 call ID 时不会生成替代值。
 Hermes 将原生 `action: block` 或退出码 2 解释为阻断。阻断不会使后续登记的
 before 回调停止执行。原生 `action: approve` 表示请求人工确认，不表示自动
 放行；结构化 AW `ask` 尚未支持。配置 AW before 回调时，启动器先执行原生
-指令归并，再阻断所有生效的参数改写并丢弃修改后的参数。原生回调均检查原始
-参数，随后才归并改写；直接执行改写结果会绕过 AW 检查。所有回调仍会执行，
-已有原生阻断理由保持不变。该 guard 不随插件重新发现而失效，在原生 main
-退出时恢复。同一启动作用域也包装原生 tool-execution middleware：在执行链之前
-冻结 JSON 参数，参数变化时返回原生工具错误，阻止真实 dispatch。该边界覆盖
-`execute_code` 内部的 `CellAuthority`/RPC 调用，它们的前置检查发生在执行
-middleware 之前。值相同的新字典仍可使用；嵌套原地修改及值类型变化会被拒绝。配置 AW before
-回调时，仅原生 JSON 值类型和字符串字典键可进入 dispatch；tuple 和整数键不能
-通过序列化内容相同绕过检查。
-整数必须处于 i64/u64 范围，浮点数必须有限，字符串值及键必须由 Unicode scalar
-组成；不支持的输入直接拒绝，不做转换。
-配置 AW before 回调时，顶层和嵌套调用均不支持执行 middleware 改写；共用一个
-原生执行边界，不重复运行策略回调。原生 after 回调仍观察工具错误。两个 guard
-均不随插件重载丢失，在 main 退出时恢复。空策略和仅 after 路由保留原生改写
-行为。Post 回调不能撤销工具或替换结果。
+指令归并；只有 AW 标记为已检查的修改参数才可采用。进程内路径检查原生归并后的
+实际参数；`0.23.1` Gateway 路径按会话、请求和工具调用保存受检参数。两个路径
+都会在工具执行处再次比较参数，原生 Hook 或 middleware 后续改写时返回工具错误。
+Gateway 的 registry 和 inline 工具在 schema 参数转换后也会检查受检输入。
+原生阻断继续生效。空策略和仅 after 路由保留原生改写
+行为。Post 回调不能撤销工具；`transform_tool_result` 可替换模型接收的结果，
+回调失败时 Hermes 保留原始结果。
 
 AW 事件期限与 Hermes 回调期限共同生效。原生命令期限及清理余量超过
 `plugins.hook_callback_timeout` 时，启动会拒绝该配置。自动补入的纯观测回调与配置中的

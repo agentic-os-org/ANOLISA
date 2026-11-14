@@ -25,7 +25,7 @@ Provider 的 ID 和版本独立于 AW core。已有 Provider 升级使用新 pre
 AW、Provider 和后端通过各自 Makefile 与发行脚本构建；RPM 安装和文件归属由原生包管理器负责。
 这些安装不需要 AW 包记录，通过显式 `transport.argv` 配置 Provider 即可。操作见[构建说明](../../../../../contribute/zh/aw/building.md)。
 
-计划列出文件、依赖和阻碍；受阻计划返回 1。执行时重新校验输入。每文件最多 1 GiB，每 prefix 已登记内容最多 4 GiB、32767 个文件；恢复记录也受容量限制。
+计划列出文件、依赖和阻碍；受阻计划返回 1。人类输出将阻碍写入 stderr，stdout 保持为空；JSON 沿用现有失败报告结构并保留完整计划。执行时重新校验输入。每文件最多 1 GiB，每 prefix 已登记内容最多 4 GiB、32767 个文件；恢复记录也受容量限制。
 文件系统需支持 `O_TMPFILE`、硬链接、原子重命名和目录持久同步。
 
 ## 数据库与文件归属
@@ -51,6 +51,10 @@ sudo aw recover --scope system --json
 
 数据库已提交时完成清理，未提交时恢复旧文件和记录。冲突文件与备份会保留并报告路径，处理前不要删除它们。
 `doctor` 检查归属文件，失败时 JSON 的 `result.report.issues` 列出问题；它不自动修复。
-卸载拒绝被修改、缺失、有反向依赖或仍被 AW 使用的文件。最后一个包移除后，空登记、位置文件和锁继续保留。
+默认卸载拒绝被修改、缺失、有反向依赖或仍被 AW 使用的文件。显式 `--keep-changed` 移除选中包的登记及通过校验的未变化文件，同时保持已变化或缺失的 payload 路径原样。内容、权限模式、类型和路径缺失差异可保留；I/O 读取权限错误、校验限额、不安全的 prefix 或数据库路径、剩余依赖仍阻止移除。未选中包的文件继续严格校验。
+
+使用 `aw uninstall --prefix "$AW_PREFIX" --scope user --keep-changed --dry-run` 预览，再将 `--dry-run` 换成 `--yes` 执行。JSON 预览的 `result.plan.preserved` 和成功结果的 `result.preserved` 列出保留的相对路径与观察到的原因，空列表省略。人类输出分别以 `KEEP PATH` 和 `KEPT PATH` 标识这些路径。即使规划后内容继续变化，这些路径也不会进入删除或回滚动作。
+
+最后一个包移除后，空登记、位置文件和锁继续保留。prefix 已缺失时，会重建目录及这些元数据文件。保留的 payload 转为用户管理，可能与重新安装冲突；先移动保留文件或使用新 prefix。`aw recover` 处理被中断的事务，payload 漂移使用 `--keep-changed` 处理。完整步骤见[运行维护](../../../../user-guide/zh/aw/operations.md#升级与卸载)。
 
 报告格式见[CLI 自动化](cli.md)。事务和锁顺序见[包管理设计](../../../../../src/aw/docs/design/zh/packaging/package-management.md)，构建与发行验收见[贡献指南](../../../../../src/aw/CONTRIBUTING_zh.md)。

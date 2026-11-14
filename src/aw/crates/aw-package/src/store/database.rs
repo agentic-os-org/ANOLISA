@@ -176,9 +176,12 @@ pub(crate) fn read_description(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 pub(crate) use json::decode;
+#[cfg(test)]
+pub(crate) use paths::regular as safe_file;
 pub(crate) use paths::{
     absolute as absolute_path, bytes as safe_bytes, directory as safe_directory,
-    lock as shared_file_lock, missing as is_missing, regular as safe_file, same as same_file,
+    lock as shared_file_lock, metadata as safe_metadata, missing as is_missing,
+    opened as safe_opened, same as same_file,
 };
 pub(crate) use registration::check_registered;
 pub(crate) use validation::database as validate_database;

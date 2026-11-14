@@ -215,31 +215,27 @@ Store Cedar policies through the existing `policy create/update` commands. The
 policy file is a raw Cedar file, as shown in the [Policy guide](policy-cli.md#cedar-policy-source).
 Each successful update is available to the next authorization request.
 
-Enable authorization with
-`agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`.
-This root-owned configuration sets runtime limits. It contains no policy IDs or Cedar source:
+The daemon enables authorization by default. No separate authorization file or
+startup switch is required. An empty applicable PAP policy set returns DENY.
+Requested permissions are restricted by Cedar; shared restrictions belong in
+PAP-managed policies.
 
-```json
-{
-  "environment_permissions": {
-    "version": 1,
-    "filesystem": {"default": "deny", "rules": [
-      {"effect": "allow", "path": "/", "rights": ["read"]}
-    ]},
-    "execution": {"deny_paths": []},
-    "network": {"mode": "off"}
-  },
-  "ttl_seconds": 60
-}
-```
+When upgrading, remove `--authorization-config` and its path from the daemon's
+startup command, including any systemd drop-in. The old argument is rejected.
+The old `environment_permissions` and `ttl_seconds` configuration is no longer read.
+Review and migrate required restrictions into Cedar before using the new daemon;
+there is no automatic conversion. Reload systemd after editing a unit and restart
+the daemon. Upgrade the daemon and its authorization clients together: authorization
+requests now carry principal, action, resource and context in a shared PARC envelope;
+the previous OS payload is rejected.
 
-Requests supply only the optional `principal.agent_type`, for example
-`{"principal":{"agent_type":"cosh"}}`. No Agent identity or UID registration is required.
-The type is a caller-supplied classification, not an authenticated identity; this
-stage does not isolate individual Agents by identity. `environment_permissions`
-caps each OS request. Configuration and its parent
-directories must be root-owned and not writable by group or other users; restart
-the daemon after changing runtime limits.
+Mount-level noexec remains an explicit request restriction in `execution.deny_paths`.
+Cedar `file.exec` forbids constrain the initial invocation; they do not replace noexec
+mounts for later descendants. Preserve needed noexec restrictions in permission requests.
+
+Requests carry the optional Agent classification in `context.agent.agent_type`.
+No Agent identity or UID registration is required. The type is caller-supplied,
+not authenticated; this stage does not isolate individual Agents by identity.
 
 PAP derives the request policy set from all current sources using exact
 `schema: {schemaId: "seccore.system", revision: 1}` references. Every statement in
@@ -271,13 +267,13 @@ deletion and eligibility changes take effect on the next request; an empty set
 replaces the cache and denies. Matching forbids override permits across the whole
 set. Scope/Binding deployment, pinned revisions and cleanup remain independent.
 
-The old `baseline_policy` and `task_policy` configuration keys are rejected. Their
+The old `baseline_policy` and `task_policy` configuration is no longer used. Its
 previous intersection semantics must be reviewed explicitly when adapting request
 policies: two permit sources in the new set combine grants. Express additional
 restrictions as forbids or constrain every applicable permit. Legacy deployment
 policies are not rewritten automatically.
 
-The PEP must accept a decision within `ttl_seconds`. Once accepted for that one
+The PEP must accept a decision within 60 seconds. Once accepted for that one
 invocation, approval waiting, installation and execution do not expire with that
 deadline. Policy updates affect subsequent requests; accepted decisions remain
 bound to their original command and permissions. Declined or failed invocations
@@ -430,10 +426,11 @@ invocation and network restrictions.
 The Hook sends the exact original command, including `sudo`, and canonical cwd
 to `intent propose-command --format json`, before sandbox wrapping. It sends no
 original user task. Upstream must prepare the task restrictions in PAP and verify
-that they enter the current request policy set described above. This revision
-rejects the former `task_policy` selector: eligible policies combine permits,
-so use explicit forbids or constrain all applicable permits to enforce a task
-boundary. Merely creating an ineligible policy does not constrain execution.
+that they enter the current request policy set described above. The daemon no longer
+reads the separate authorization configuration or its former `task_policy` selector.
+Eligible policies combine permits, so use explicit forbids or constrain all applicable
+permits to enforce a task boundary. Merely creating an ineligible policy does not
+constrain execution.
 
 The Hook checks JSON `outcome`, independently of the exit code:
 
@@ -452,8 +449,8 @@ panel can truncate long caveat lines; this integration does not guarantee that
 their full text is readable in that panel.
 
 Candidates are requests, never PAP writes. PDP determines `effective_permissions`
-from the active policy set and environment cap. The Cedar mapping limits above
-still apply: a nonexistent file literal fails preparation rather than implicitly
+from the active policy set, bounded by the requested permissions. The Cedar mapping
+limits above still apply: a nonexistent file literal fails preparation rather than implicitly
 granting write access to its parent directory.
 
 Intent generation has a 38-second CLI RPC budget inside a 40-second subprocess

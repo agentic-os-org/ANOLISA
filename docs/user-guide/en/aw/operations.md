@@ -57,7 +57,18 @@ Remove locally managed Provider extensions with:
 aw uninstall --prefix "$AW_EXTENSION_PREFIX" --yes
 ```
 
-Root-managed extensions require `sudo` and explicit `--scope system`. External configuration, audit and Agent data remain; the command does not remove the AW CLI, backends or their services. Resolve modified, missing or busy package files before retrying.
+Root-managed extensions require `sudo` and explicit `--scope system`. External configuration, audit and Agent data remain; the command does not remove the AW CLI, backends or their services. Stop any AW process holding package files before retrying.
+If `doctor` or uninstall reports modified or missing files, inspect the affected paths and preview removal with `--keep-changed`:
+
+```bash
+aw uninstall --prefix "$AW_EXTENSION_PREFIX" --keep-changed --dry-run
+aw uninstall --prefix "$AW_EXTENSION_PREFIX" --keep-changed --yes
+```
+
+This removes the selected package records and unchanged files. Changed content, modes, file types and symlinks stay untouched; missing paths are left missing. The preview lists `KEEP PATH` entries and successful removal lists `KEPT PATH` entries. Add package IDs after `uninstall` to select packages; without IDs, all packages at the prefix are selected. Remaining dependencies, access errors and unsafe installation directories still block removal.
+
+The empty registration and lock remain. If the entire prefix is missing, AW recreates these metadata files while clearing the package records. Preserved files become user-owned: move or remove any conflicting paths before reinstalling, or choose a new prefix.
+
 For `needs_recovery`, stop package writers and follow [package recovery](../../../developer-guide/en/aw/reference/packages.md).
 
 ## Data and troubleshooting

@@ -107,7 +107,9 @@ fn check_integer_range(bytes: &[u8]) -> Result<(), Error> {
                     index += 1;
                 }
                 let token = &bytes[start..index];
-                if !token.iter().any(|b| matches!(b, b'.' | b'e' | b'E')) {
+                let digits = token.strip_prefix(b"-").unwrap_or(token);
+                // Leave malformed tokens and floating-point syntax to the JSON parser.
+                if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
                     let text = std::str::from_utf8(token)
                         .map_err(|_| Error::Invalid("invalid numeric token"))?;
                     let fits = if text.starts_with('-') {

@@ -76,6 +76,28 @@ pub(super) fn invoke_bound(binding: HookBinding, bytes: Vec<u8>) -> Result<Exit>
     if matches!(phase, LifecyclePhase::Ready) {
         super::native::ready(&binding, &client, pid, deadline)?;
     }
+    if binding.adapter == "qoder" && native["hook_event_name"] == "PostToolUseFailure" {
+        let id = binding.binding.instance_id.clone();
+        let output = super::dispatch::invoke_bound(
+            aw_adapter::select("qoder")?,
+            binding,
+            "tool.after",
+            bytes,
+            Instant::now() + Duration::from_secs(59),
+        );
+        // Preserve terminal cleanup even when failure payload normalization or
+        // policy dispatch fails before the dispatcher's own cleanup boundary.
+        client.call(
+            Operation::BridgeLifecycle {
+                instance_id: id,
+                pid,
+                phase,
+                key,
+            },
+            Instant::now() + Duration::from_secs(2),
+        )?;
+        return super::hook::emit(output?);
+    }
     client.call(
         Operation::BridgeLifecycle {
             instance_id: binding.binding.instance_id.clone(),

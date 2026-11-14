@@ -9,7 +9,7 @@
 
 ![Sandbox 授权与执行流程](assets/linux-sandbox-policy-flow.svg)
 
-PAP 管理带版本的 Cedar 策略对象，保存源码和精确 schema 引用。PDP 每次授权从 PAP 读取当前有效策略集，以单一 Cedar PolicySet 求值，匹配的 forbid 优先于 permit，最终权限受环境上限约束。`policies.cedar` 仅可作为导入导出载体；运行时不接受策略快照文件作为授权来源。
+PAP 管理带版本的 Cedar 策略对象，保存源码和精确 schema 引用。PDP 每次授权从 PAP 读取当前有效策略集，以单一 Cedar PolicySet 求值，匹配的 forbid 优先于 permit，最终权限不得超出请求范围。`policies.cedar` 仅可作为导入导出载体；运行时不接受策略快照文件作为授权来源。
 
 PAP CREATE/UPDATE 接受 Cedar 源码并保存版本，所有语句均有显式 principal header 的源码进入请求授权集。此集合独立于 Scope 分配记录；启动前授权、五态决策和执行回执由 PDP/PEP 实现，不要求 PAP 接管执行流程，也不把执行回执混入后端规则部署状态。
 
@@ -29,7 +29,7 @@ PAP CREATE/UPDATE 接受 Cedar 源码并保存版本，所有语句均有显式 
 以下是上层 PEP 接入 PDP 的流程；纯执行 CLI 不参与该流程，入口见第 5 节。
 
 1. **准备请求。** PEP 按实际 PATH、cwd 和执行视图解析程序，保留原始程序名及完整有序参数；从固定配置生成 `requested_permissions: OsPermissionSet`，纳入运行依赖、临时目录等需求，准备路径事实和后端能力。
-2. **请求决策。** PDP 按请求类型映射 Cedar 查询与实体数据，依据已发布策略、请求范围及环境上限生成 `effective_permissions: OsPermissionSet`；必要运行依赖未获准则拒绝。
+2. **请求决策。** PDP 按 action 与对应 context 映射 Cedar 查询与实体数据，依据已发布策略和请求范围生成 `effective_permissions: OsPermissionSet`；必要运行依赖未获准则拒绝。
 3. **完成处理要求。** STEP_UP 由 PEP 调用 ask，用户确认后直接继续；DEFER 结束本次申请并回执。修改后由 PDP 完成最终授权，流程见第 4 节。
 4. **准备执行计划。** ALLOW/MODIFY 或已确认的 STEP_UP 经 PEP 核验后，adaptor 生成 `ExecutionSpec`；后端复核能力并固定对象；能准确实施才继续，否则返回具体的不支持原因。
 5. **安装并执行。** 仅接受 exact 映射；后端报告约束安装成功后才能执行目标。准备成功不等于已经安装。
@@ -78,7 +78,7 @@ authorization.claim(id, phase[, execution])  → 一次性 Hook 执行交接
 
 | 数据 | 必要内容 |
 |---|---|
-| request | `type=os`、`request_id`、`execution_id`、`principal`、`launch`（program、resolved_program、args、cwd）、`requested_permissions`。环境和对象身份留在执行侧 |
+| request | PARC 信封包含 `request_id`、`principal`、`action`、`resource`、`context`；三个实体引用均为 `{type, id}`。OS context 包含 `execution_id`、`agent`、`launch`（program、resolved_program、args、cwd）、`requested_permissions`。环境和对象身份留在执行侧 |
 | Decision | decision_id、五态及对应载荷、最终命令、仅限文件的路径约束（如有）、策略集版本、接收期限、warnings；ALLOW/MODIFY/STEP_UP 附 effective_permissions |
 | receipt | 决策引用、ask 确认结果、实施状态、是否启动、退出码/终止信号、时间及错误 |
 | Ack | PDP 已记录回执，不表示命令成功 |
@@ -98,7 +98,7 @@ Pull 从 evaluate 开始；Push 接收已绑定动作的 Decision，进入相同
 | Cedar 授权或条件 | 执行权限 |
 |---|---|
 | 文件读 / 写授权 | `rights` 中的 read / write；接入共享 schema 时对齐 `file.read / file.write` |
-| OS 申请权限或环境上限中的禁执行范围 | 合并其 `execution.deny_paths`，按 noexec 语义实施；不从 Cedar 调用规则推导 |
+| OS 申请权限中的禁执行范围 | 保留其 `execution.deny_paths`，按 noexec 语义实施；不从 Cedar 调用规则推导 |
 | `resource.path == "/work/result.txt"`（目标为文件） | `path=/work/result.txt`，仅该文件 |
 | `resource.path == "/work" \|\| resource.path like "/work/*"`（目标为目录） | `path=/work`，目录及后代，不含 `/work-other`；权限路径无需写 `*` |
 | permit / forbid | allow / deny，保留禁止范围及对应处理要求 |
@@ -125,7 +125,7 @@ Pull 从 evaluate 开始；Push 接收已绑定动作的 Decision，进入相同
 
 版本必须受支持，默认禁止未授权的文件访问，未知字段或冲突输入拒绝。首期 `rights` 仅含 read/write，W 包含 R；只读不承诺禁止执行。W 涵盖文件修改及目录内创建、删除、重命名。deny 优先于 allow，规则顺序或更深的路径不能越过明确禁止。`execution.deny_paths` 的实施边界见下节。
 
-PDP 只转换文件精确路径、约定的目录前缀及启动时可固定的条件，有效权限不得超出申请范围、当前策略集授权范围或 `environment_permissions` 的 OS 权限上限。目录内的禁止范围和 advice 必须保留；不能用目录的一次 Allow 或当前文件枚举推导整棵子树授权。仅匹配目录本身的授权不能扩大为递归权限。依赖未来调用程序、操作类型等无法在启动时固定的限制，不能用本次启动参数代替；后端不能准确实施时返回 unsupported。
+PDP 只转换文件精确路径、约定的目录前缀及启动时可固定的条件，有效权限不得超出申请范围、当前策略集授权范围。目录内的禁止范围和 advice 必须保留；不能用目录的一次 Allow 或当前文件枚举推导整棵子树授权。仅匹配目录本身的授权不能扩大为递归权限。依赖未来调用程序、操作类型等无法在启动时固定的限制，不能用本次启动参数代替；后端不能准确实施时返回 unsupported。
 
 PEP 解析路径并绑定执行环境，将对象事实随请求交给 PDP；Linux adaptor 在实施前核验实际对象。目录通路由后端提供，不另设 POSIX 遍历 ACL。权限不改变宿主 chmod，实际操作仍受宿主 DAC 等限制。
 
@@ -176,7 +176,7 @@ Cedar 接入以 [#9298](https://github.com/agentic-os-org/ANOLISA/pull/9298) 的
 
 两者保留，可覆盖同一次调用；`file.exec` 继续支持参数，不改为纯文件 X，也不与 `process.spawn` 互作别名。PEP 只准备一份最终调用，PDP 生成两个适用视角，调用方不能通过选择 action 避开另一侧禁止规则。程序解析结果必须用于实际启动；`bash -c` 仅代表本次 shell 调用，不声称已授权每条内部命令。
 
-同一次调用的两个视角由 PDP 组合：**任一明确 forbid 或求值错误即拒绝；否则至少一个视角命中 permit 才可继续，合并全部相关 advice。** 未匹配 permit 的单个视角不另作硬拒绝；两侧均无 permit 则默认拒绝。当前请求链路在 PAP 的单一 PolicySet 中合并 permit 授权，一条 permit 不能越过另一视角的 forbid。全局限制须通过适用的 forbid 或约束全部相关 permit 表达；baseline/task 分层交集仅适用于 legacy `from_snapshot`。文件、网络及必需依赖仍须分别获准，并受申请范围和 `environment_permissions` 上限约束。
+同一次调用的两个视角由 PDP 组合：**任一明确 forbid 或求值错误即拒绝；否则至少一个视角命中 permit 才可继续，合并全部相关 advice。** 未匹配 permit 的单个视角不另作硬拒绝；两侧均无 permit 则默认拒绝。当前请求链路在 PAP 的单一 PolicySet 中合并 permit 授权，一条 permit 不能越过另一视角的 forbid。全局限制须通过适用的 forbid 或约束全部相关 permit 表达。文件、网络及必需依赖仍须分别获准，并受申请范围约束。
 
 `process.spawn` 已纳入 revision 1 schema；`file.exec` 沿用共享前端的参数约定：排除 argv[0]，将后续参数投影为 `{index, value}`，index 0 对应 argv[1]。请求转换检查参数总数、索引唯一与连续，并保持与实际启动一致。
 
@@ -278,14 +278,20 @@ CLI sandbox run → 命令 + 输入权限 ───→ 共用 Linux adaptor
 CLI 收到结果 → 返回调用方（不调用 report）
 ```
 
-daemon 的 `--authorization-config <file>` 只配置 `environment_permissions` 和 `ttl_seconds`，
-不保存策略正文或策略 ID。请求的 principal 只含可选 `agent_type`；Cosh Hook 提供 `cosh`。
-当前不认证 Agent 身份或类型，不要求 UID 登记或进程 Binding。PDP 使用固定的
-`SecCore::Subject::"request"` 作为内部实体占位；策略通过 `principal is SecCore::Subject`
-及 `principal.agent_type` 条件匹配。个人主体 ID 的授权语义留待身份机制实现后细化。
+daemon 默认启用授权，不读取独立授权配置。决定接收期限固定为 60 秒。
+公共 `AuthorizationRequest<C>` 包含 request_id、principal、action、resource 和
+context；实体引用使用 `{type, id}`。OS consumer 使用 `OsAuthorizationRequest`，
+context 包含 execution_id、agent、launch 和 requested_permissions。
+OS 适配器要求 principal 为 `SecCore::Subject::"request"`、action 为
+`SecCore::Action::"process.spawn"`、resource 为与 launch.program 一致的 `SecCore::Process`。
+这表示一次 OS 启动授权；PDP 内部仍分别检查文件、进程与网络权限。
+context.agent 只含可选 agent_type；Cosh Hook 提供 cosh。当前不认证 Agent 身份或类型，
+不要求 UID 登记或进程 Binding。策略通过 `principal is SecCore::Subject` 及
+`principal.agent_type` 条件匹配。个人主体 ID 的授权语义留待身份机制实现后细化。
 内核 peer UID 继续用于 claim/report 的凭据归属校验，不参与策略主体选择。
-命令与权限申请由 PEP 准备，获准结果绑定到请求摘要，执行前仍核验真实目标。
-配置及祖先须由 root 管理且不可被组/其他用户写入，调整运行参数需重启。
+命令与权限申请由 PEP 准备，获准结果绑定到完整请求摘要，执行前仍核验真实目标。
+通用信封可承载其它 consumer 的 context；当前 daemon 的求值、决定与执行链路仍只支持 OS，
+未知 action、未知字段或不一致的实体引用会被拒绝。
 
 每次 evaluate 调用 PAP，在单个 SQLite 事务读取全部当前策略（上限 4096 条、16 MiB，
 超限整次失败，不截断），排除原生 JSON 与全部裸 principal header 的 Cedar 源码。
@@ -293,13 +299,14 @@ daemon 的 `--authorization-config <file>` 只配置 `environment_permissions` �
 只在条件中引用 principal 不算显式 header。PAP 保留策略 ID、revision、完整源码与精确
 schema 引用，并计算摘要；PDP 为语句 ID 添加源策略 ID 与 revision 前缀。
 缓存锁覆盖读取与加载，防止较旧快照覆盖新缓存。候选整体加载成功后才替换；失败清空缓存，
-空集替换旧缓存并默认拒绝。集合全局 forbid 优先，advice 与环境权限上限继续生效。
+空集替换旧缓存并默认拒绝。集合全局 forbid 优先，advice 继续生效。
 创建、更新、删除和资格变化在下一次请求刷新；不撤销已接收决定或改变 Scope 固定快照。
 
-旧 `baseline_policy`/`task_policy` 配置被拒绝，不能把旧的叠加限制自动变成 permit 并集。
-库内 `from_snapshot` 保留旧分层求值语义供显式旧调用方使用；新 consumer 只调用
-`from_policy_set`。调整旧请求策略须使用显式主体 header，并将额外限制表达为 forbid 或
-收紧全部适用 permit。Scope/Binding 的选择、发现、部署与清理，以及 AgentSight 翻译限制均不变。
+升级时移除启动命令中的 `--authorization-config`，该参数不再支持；旧配置文件不再读取。
+需要的环境约束须迁移为 PAP 中的 Cedar 策略，不自动转换。库内只保留 `from_policy_set`，
+删除 `PolicySnapshot` 与 `from_snapshot` 的旧分层接口。不能把旧的叠加限制自动变成 permit
+并集；调整旧请求策略须使用显式主体 header，并将额外限制表达为 forbid 或收紧全部适用
+permit。Scope/Binding 的选择、发现、部署与清理，以及 AgentSight 翻译限制均不变。
 
 `evaluate` 只返回授权结果，不在 daemon 中启动目标。PDP 在进程内依赖 `cedar-policy`，复用加载后的策略，单次求值固定同一版本。ask 在 PEP 侧等待，不占用 daemon RPC，确认后按已绑定的 STEP_UP 继续。
 
@@ -326,7 +333,7 @@ RPC、PAP 当前版本读取和安全事件回执均已接入代码。本次拆�
 | 验证面 | 对应实现和用例 |
 |---|---|
 | 独立执行 | `tests/e2e/linux-sandbox/strict_cli.py` 验证无 daemon 执行、文件/网络限制及 Python/Node 目标；后端 suite 覆盖 noexec、FD 和生命周期 |
-| 授权与审批 | `asc-pdp-runtime`、`asc-pep-runtime` 测试覆盖五态、两个调用视角、权限上限、advice、变换、补充事实、绑定、过期与重放 |
+| 授权与审批 | `asc-pdp-runtime`、`asc-pep-runtime` 测试覆盖五态、两个调用视角、请求权限边界、advice、变换、补充事实、绑定、过期与重放 |
 | 策略更新与回执 | PAP/SQLite、daemon 测试覆盖当前版本一致读取、更新/删除、调用方归属及写入失败不得 Ack |
 | 完整接入 | `asc-pep-runtime/examples/authorized_sandbox.rs` 展示应用接入；`tests/e2e/linux-sandbox/authorized_cli.py` 运行真实 daemon、PDP、helper 及两种日志 |
 
@@ -352,7 +359,7 @@ root 所有权及父目录安全属性必须有效；配置或依赖失败不降
 运行预设替代固定模板，其 cwd/tmp 许可和 Git 保护不自动继承。空候选仅申请运行预设；
 澄清、异常和超时阻断，无隐式放权。caveats 显示到原生通知/审批说明。候选按调用临时存放
 并在 prepare 后清理；不写 PAP，finish 无需候选文件或固定模板。
-当前 PAP 集合的参与条件及旧 task_policy 键移除见 Sandbox 指南；任务限制须实际参与
+当前 PAP 集合的参与条件及独立授权配置移除见 Sandbox 指南；任务限制须实际参与
 请求策略集并以 forbid 或受约束的 permit 表达，不能依赖旧的分层交集语义。
 安装约束与回归见 DPROC-V2-SANDBOX-TEMPLATE-1。Hook 准备最终决定，
 通过 `authorization.claim(accept)` 在期限内接收；Cosh 原生 ask 后，前台执行入口用

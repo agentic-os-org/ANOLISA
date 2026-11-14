@@ -122,8 +122,18 @@ pub(crate) const AGENTSCOPE: Profile = Profile {
     ],
 };
 
+pub(crate) const CODEX: Profile = Profile {
+    name: "codex",
+    adapter: &super::super::adapters::codex::Codex,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
+};
+
 pub(crate) const PROFILES: &[Profile] = &[
-    QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
+    QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE, CODEX,
 ];
 
 #[cfg(test)]

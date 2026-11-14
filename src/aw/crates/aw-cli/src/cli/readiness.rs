@@ -126,7 +126,11 @@ pub(super) fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
         }
         Some(_) => return Err("invalid native startup degradation reason".into()),
     };
-    eprintln!("AW {} native hooks ready{suffix}", ready.adapter);
+    if ready.adapter == "hermes" {
+        eprintln!("AW hermes CLI plugin ready{suffix}");
+    } else {
+        eprintln!("AW {} native hooks ready{suffix}", ready.adapter);
+    }
     Ok(true)
 }
 

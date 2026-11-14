@@ -19,8 +19,8 @@ Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- comm
 或 Cedar 源码；Cedar 会转换为进程树共用的粗粒度权限。`PermissionInput` 和 Cosh sandbox Hook
 使用相同输入生成每次 PDP 权限申请。权限格式、运行要求与隔离边界见
 [Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。应用可通过
-`asc-pep-runtime::PepRuntime` 接入策略授权，使用 PAP 当前符合条件的 Cedar 策略集及
-daemon `--authorization-config` 配置的运行上限。Policy 更新成功后，后续授权请求使用新版本。
+`asc-pep-runtime::PepRuntime` 接入策略授权，daemon 默认启用授权并读取 PAP 管理的
+Cedar 策略；适用策略集为空时拒绝请求。Policy 更新成功后，后续授权请求使用新版本。
 Cosh 通过 `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1` 接入这条流程，使用原生审批界面和
 已安装的默认权限模板。所有已接入的 `shell` / `run_shell_command` 调用，包括普通
 Python 脚本和含 `sudo` 的原始命令，均经过授权。开关默认关闭；配置、权限边界和失败

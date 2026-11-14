@@ -162,27 +162,20 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 通过现有 `policy create/update` 命令管理 Cedar 策略，策略文件为 Cedar 原文，见
 [Policy 指南](policy-cli.md#cedar-policy-源码)。更新成功后，下一次授权请求使用新版本。
 
-通过 `agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`
-启用授权。此 root 配置设置运行参数，不保存策略 ID 或 Cedar 正文：
+daemon 默认启用授权，无需独立授权文件或启动开关。PAP 中适用策略集为空时返回 DENY。
+申请权限受 Cedar 限制，共用约束通过 PAP 管理的策略表达。
 
-```json
-{
-  "environment_permissions": {
-    "version": 1,
-    "filesystem": {"default": "deny", "rules": [
-      {"effect": "allow", "path": "/", "rights": ["read"]}
-    ]},
-    "execution": {"deny_paths": []},
-    "network": {"mode": "off"}
-  },
-  "ttl_seconds": 60
-}
-```
+升级时，从 daemon 启动命令及 systemd drop-in 中移除 `--authorization-config` 和文件路径，
+旧参数会被拒绝。旧配置中的 `environment_permissions` 和 `ttl_seconds` 不再读取。
+使用新 daemon 前须核对并将必要约束迁移到 Cedar，不会自动转换。修改 unit 后重新加载
+systemd 并重启 daemon。daemon 和授权客户端须同步升级：授权请求改用包含 principal、action、
+resource 和 context 的公共 PARC 信封，旧 OS 载荷会被拒绝。
 
-请求主体只提供可选的 `principal.agent_type`，例如 `{"principal":{"agent_type":"cosh"}}`，
-无需登记 Agent 身份或 UID。类型由调用方提供，用于分类匹配，尚未认证；此阶段不按身份
-隔离单个 Agent。`environment_permissions` 限制每次 OS 请求的权限。
-配置及祖先目录须由 root 管理，不可被组或其他用户写入；调整运行参数后重启 daemon。
+挂载 noexec 仍由请求中的 `execution.deny_paths` 明确指定。Cedar 的 `file.exec` forbid
+约束本次启动，不能代替对子孙进程生效的 noexec 挂载；必要的 noexec 约束须保留在权限请求中。
+
+请求通过 `context.agent.agent_type` 提供可选 Agent 分类，不要求 Agent 身份或 UID 登记。
+类型由调用方自报，未经认证；本阶段不按身份隔离单个 Agent。
 
 PAP 从全部当前策略推导请求策略集，按精确的
 `schema: {schemaId: "seccore.system", revision: 1}` 引用校验。
@@ -207,11 +200,11 @@ principal 不算加入。单份存储策略混用裸 header 与显式约束会�
 不回退旧策略。创建、删除和 header 资格变化在下一次请求生效；空集替换缓存并拒绝请求。
 整个集合中匹配的 forbid 优先于 permit。Scope/Binding 的部署、固定版本和清理独立保持原状。
 
-旧配置项 `baseline_policy`、`task_policy` 会明确报错。调整旧请求策略时必须人工核对原来的
+旧配置项 `baseline_policy`、`task_policy` 不再使用。调整旧请求策略时必须人工核对原来的
 交集语义：新集合中的两份 permit 源码会合并授权。额外限制应表达为 forbid，或收紧所有
 适用的 permit。已有部署策略不会自动改写。
 
-PEP 须在 ttl_seconds 内一次性接收决定；接收后的审批等待、安装和运行不再因该期限失败。
+PEP 须在 60 秒内一次性接收决定；接收后的审批等待、安装和运行不再因该期限失败。
 策略更新影响后续请求，已接收决定仍绑定原命令和权限；拒绝或执行失败后不能复用决定。
 
 `authorization.evaluate` 返回 ALLOW、DENY、MODIFY、STEP_UP 或 DEFER，不执行命令。
@@ -324,9 +317,9 @@ cosh
 
 Hook 在 sandbox 包装之前，将包含 `sudo` 的原始命令及规范化 cwd 交给
 `intent propose-command --format json`，不传原始用户任务。上游须提前在 PAP 准备任务
-限制，并确认其实际进入上述当前请求策略集。本版本拒绝旧 `task_policy` 选择键：符合
-条件的策略会合并 permit，任务边界须使用显式 forbid 或约束所有适用的 permit；仅创建
-未进入该集合的策略不会限制执行。
+限制，并确认其实际进入上述当前请求策略集。daemon 不再读取独立授权配置及其中旧的
+`task_policy` 选择键。符合条件的策略会合并 permit，任务边界须使用显式 forbid 或约束
+所有适用的 permit；仅创建未进入该集合的策略不会限制执行。
 
 Hook 按 JSON 的 `outcome` 分支，不能仅凭退出码放行：
 
@@ -340,7 +333,7 @@ Hook 按 JSON 的 `outcome` 分支，不能仅凭退出码放行：
 Hook 响应完整保留 caveats；当前 Cosh 原生审批面板可能截短较长的 caveat 行，
 本接入不保证在该面板内可以读到完整文本。
 
-候选只是申请，不写入 PAP。PDP 根据当前策略集及环境上限决定 `effective_permissions`。
+候选只是申请，不写入 PAP。PDP 根据当前策略集决定 `effective_permissions`，结果受申请权限约束。
 仍受上述 Cedar 映射限制约束：不存在的文件字面量会导致权限准备失败，不会隐式转为
 父目录写权限。
 

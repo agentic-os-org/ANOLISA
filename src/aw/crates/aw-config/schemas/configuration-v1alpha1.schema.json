@@ -284,7 +284,8 @@
             "deepseek-harness",
             "hermes",
             "claude-sdk",
-            "qoder-sdk"
+            "qoder-sdk",
+            "codex"
           ]
         },
         "argv": {

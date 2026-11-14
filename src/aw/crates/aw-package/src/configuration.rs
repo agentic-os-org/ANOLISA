@@ -90,6 +90,10 @@ pub(crate) fn configure_using(
         !state.starts_with(config) && (!state.exists() || state.is_dir()),
         "state must be a directory distinct from the configuration file",
     )?;
+    require(
+        !config.starts_with(prefix) && !overlaps_reserved_prefix_path(state, prefix),
+        "configuration must be outside the prefix, and state must not overlap installed payloads or registration metadata",
+    )?;
     paths::parent(config)?;
     paths::parent(state)?;
     if state.exists() {
@@ -102,10 +106,6 @@ pub(crate) fn configure_using(
             ),
         )?;
     }
-    require(
-        !config.starts_with(prefix) && !overlaps_reserved_prefix_path(state, prefix),
-        "configuration must be outside the prefix, and state must not overlap installed payloads or registration metadata",
-    )?;
     socket_length("AW state", &state.join("aw.sock"))?;
     require(
         qoder.is_some() || openclaw.is_some(),

@@ -29,7 +29,8 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
-        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/launcher-tests");
+        // Unix socket paths must fit SUN_LEN even when the checkout is a deep worktree.
+        let parent = std::env::temp_dir().join("aw-launcher-tests");
         fs::create_dir_all(&parent).unwrap();
         let root = parent.join(format!(
             "{}-{}",
@@ -360,6 +361,9 @@ impl Service {
     }
     pub fn start_at(fixture: &Fixture, document: &Value, state: &Path) -> Self {
         fixture.save(document);
+        Self::start_saved(fixture, state)
+    }
+    pub fn start_saved(fixture: &Fixture, state: &Path) -> Self {
         let mut command = fixture.command();
         command
             .args(["serve", "--config"])

@@ -6,7 +6,7 @@ use super::*;
 fn same_call_rewrite_is_checked_before_native_adoption_for_supported_adapters() {
     for adapter in native::agents()
         .into_iter()
-        .filter(|adapter| adapter != "openclaw" && adapter != "deepseek-harness")
+        .filter(|adapter| !matches!(adapter.as_str(), "openclaw" | "deepseek-harness" | "codex"))
     {
         for verdict in [
             "allow",

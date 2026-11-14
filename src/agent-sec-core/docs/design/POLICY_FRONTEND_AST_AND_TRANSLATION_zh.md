@@ -591,10 +591,11 @@ Sandbox PDP 对 `Subject.agent_type`、主体条件、`process.spawn` 和 permit
 合并为一个 SDK `PolicySet` 后在进程内求值。每次一致读取全部当前策略，纳入所有语句均有
 显式 principal header 的 Cedar 源码；混用裸 header 与显式约束的源码整份拒绝。
 更新、删除和集合资格变化影响后续请求，Scope/Binding 快照仍保留原 revision。
-配置只包含 `environment_permissions` 和 `ttl_seconds`，分别设置 OS 权限上限和决定接收期限。
-旧配置项 `baseline_policy`、`task_policy` 会被拒绝。调整旧请求策略时须核对原来的交集语义：
+daemon 默认启用授权，无需独立配置文件；申请权限和 Cedar 共同确定有效权限，决定接收
+期限固定为 60 秒。升级时移除 `--authorization-config`，并将必要的环境约束迁移为 Cedar。
+旧 baseline/task 快照接口已删除。调整旧请求策略时须核对原来的交集语义：
 合并集合中的 permit 可以增加授权，整个集合中匹配的 forbid 优先于 permit。
-配置与迁移见 [Sandbox 使用指南](../../../../docs/user-guide/zh/agent-sec-core/sandbox.md)，
+迁移见 [Sandbox 使用指南](../../../../docs/user-guide/zh/agent-sec-core/sandbox.md)，
 决策与回执见 [Sandbox 授权设计](LINUX_SANDBOX_PEP_DESIGN_zh.md)。
 
 ### 8.6.1 HTTP 注入扩展

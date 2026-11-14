@@ -6,13 +6,14 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 
 ## Hook support matrix
 
-✓ Declared with contract coverage; × unsupported. Result replacement is limited to authorized text slots and preserves native envelopes and failure status.
+✓ Declared with contract coverage; × unsupported. Most Adapters replace authorized text slots while preserving native envelopes and failure status. Codex has a narrower model-text contract described below.
 
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
 | `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
@@ -23,11 +24,20 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
-Qoder CLI has no failed-tool Post callback integration. See each Agent page for result types and callback limits.
+Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 and
+0.166.0 have been verified for ordinary model-visible text replacement through
+PostToolUse with Code Mode disabled
+and no peer PostToolUse Hooks; this does not protect prior capture, telemetry or
+Hook failures. Local app-server stdio has the same verified effects when its
+trusted client keeps thread and turn cwd and configuration unchanged. See the
+[Codex guide](../../../developer-guide/en/aw/agents/codex.md). See each Agent
+page for result types and callback limits.
+Required Codex `tool.before` rejects other native PreToolUse Hooks because they
+can rewrite arguments after AW checks them. Optional checks cover original input.
 
 `input.submit` supports observation and blocking before model dispatch in ordinary
 resident Qoder SDK and QwenPaw launches, Claude SDK foreground/resident factories,
-Pi workers, AgentScope factory replies and DeepSeek Harness headless turns.
+Pi workers, AgentScope factory replies DeepSeek Harness and local Codex CLI headless turns.
 Submission policy uses complete text and session/turn identities.
 Claude accepts strings or a single async text message and closes rejected/cancelled
 inputs before reuse. Pi requires a `runWorker` factory and literal interactive text;
@@ -60,7 +70,7 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | Hook | Status |
 | --- | --- |
 | `session.start` | Planned |
-| `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories, Pi worker text input, AgentScope factory text replies and DeepSeek Harness headless text turns |
+| `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories, Pi worker text input, AgentScope factory text replies DeepSeek Harness headless text turns and local Codex CLI |
 | `tool.before` | Implemented |
 | `tool.after` | Implemented |
 | `permission.request` | Planned |

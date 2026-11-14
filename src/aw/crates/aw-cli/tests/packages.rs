@@ -451,3 +451,54 @@ fn package_help_uses_the_unified_frontend_name() {
     assert!(output.contains("Install a local Provider extension"));
     assert!(output.contains("Provider bundles with package.json"));
 }
+
+#[test]
+fn config_init_reports_prefix_overlap_before_parent_io() {
+    for exists in [false, true] {
+        for destination in ["config-inside", "state-reserved", "outside"] {
+            let f = Fixture::new();
+            if exists {
+                fs::create_dir(&f.prefix).unwrap();
+            }
+            let config = if destination == "config-inside" {
+                f.prefix.join("aw.yaml")
+            } else {
+                f.config.clone()
+            };
+            let state = if destination == "state-reserved" {
+                f.prefix.join("bin/state")
+            } else {
+                f.state.clone()
+            };
+            let mut command = f.command();
+            command
+                .args(["config", "init", "--prefix"])
+                .arg(&f.prefix)
+                .arg("--config")
+                .arg(&config)
+                .arg("--state-dir")
+                .arg(&state)
+                .args(["--qoder", "/bin/true"]);
+            let output = support::invoke(&command);
+            if destination != "outside" {
+                assert_eq!(output.status.code(), Some(1));
+                assert!(output.stdout.is_empty());
+                let diagnostic = String::from_utf8(output.stderr).unwrap();
+                assert!(
+                    diagnostic.contains("configuration must be outside the prefix"),
+                    "{diagnostic}"
+                );
+                assert!(!config.exists());
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(config.is_file());
+            }
+            assert_eq!(f.prefix.exists(), exists);
+            assert!(!state.exists());
+        }
+    }
+}

@@ -27,7 +27,7 @@ fn blocked(adapter: &str, output: &std::process::Output) -> bool {
         return true;
     }
     match adapter {
-        "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {
+        "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" | "codex" => {
             output.status.code() == Some(2)
         }
         _ => serde_json::from_slice::<Value>(&output.stdout).unwrap()["block"] == true,
@@ -139,6 +139,7 @@ print(json.dumps(reply))
                     "qoder-sdk"
                         | "pi"
                         | "deepseek-harness"
+                        | "codex"
                         | "claude-sdk"
                         | "agentscope"
                         | "qwenpaw"
