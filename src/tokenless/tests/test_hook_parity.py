@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "contract"))
 
 import corpus
+import path_list_view
 
 
 @unittest.skipUnless(
@@ -195,15 +196,7 @@ class PathListHooks(unittest.TestCase):
         return output.get("updatedToolOutput", output.get("updatedToolResponse"))
 
     def restore(self, view):
-        header, encoded = view.split("\n", 1)
-        self.assertEqual(
-            header, "[Path list; all received paths retained; full path = base + each paths entry]"
-        )
-        data = json.loads(encoded)
-        output = data["line_ending"].join(data["base"] + path for path in data["paths"])
-        if data["trailing_newline"]:
-            output += data["line_ending"]
-        return output
+        return path_list_view.restore(view)
 
     def test_content_routes_across_hosts_and_tool_names(self):
         source = self.paths()

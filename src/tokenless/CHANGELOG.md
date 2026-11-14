@@ -32,6 +32,10 @@ Releases from 0.7.2 onward follow
 - The optional Selective-Claw plugin rolls back failed bootstrap and reconciliation message-import batches when SQLite rollback remains available, so a partially imported prefix does not cause retries to skip the remaining history. Existing partial histories are not repaired, and cleanup failures are reported alongside the original error ([#9835](https://github.com/agentic-os-org/ANOLISA/pull/9835)).
 - Codex adapter installation handles an unset `HOME` without an unbound-variable abort or an unintended root-level marketplace path. It requires an explicit binary prefix or usable home and reports skipped marketplace registration when no usable root exists; dry-run previews retain their no-write behavior ([#8795](https://github.com/agentic-os-org/ANOLISA/pull/8795)).
 
+### Changed
+
+- Plain path lists eligible for search path sharing now also render a directory-grouped view that shares each directory among consecutive entries. Core emits the smaller of the common-prefix and grouped candidates, and only when it restores the input byte for byte and reduces both bytes and estimated tokens; lists without directory locality keep the previous view or pass through. Eligibility, routing, the `search_path_sharing` switch, statistics, and recoverability are unchanged ([#9721](https://github.com/agentic-os-org/ANOLISA/pull/9721)).
+
 ## [0.9.4] - 2026-11-06
 
 ### Changed
