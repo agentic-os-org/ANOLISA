@@ -93,6 +93,9 @@ if command -v gcc &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} $GCC_VERSION"
 else
     echo -e "  ${RED}✗${NC} gcc not found"
+    if [[ " ${MISSING[*]} " != *" gcc "* ]]; then
+        MISSING+=("gcc")
+    fi
 fi
 echo ""
 
