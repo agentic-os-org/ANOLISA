@@ -32,11 +32,17 @@ def decode_version(value: int) -> tuple[int, int, int]:
 
 def parse_version(value: str) -> tuple[int, int, int]:
     """Parse an X[.Y[.Z]] version supplied by the release profile."""
-    try:
-        parts = tuple(int(part) for part in value.split("."))
-    except ValueError as error:
-        raise MachOError(f"invalid version: {value}") from error
-    if not 1 <= len(parts) <= 3 or any(part < 0 or part > 255 for part in parts):
+    components = value.split(".")
+    # int() also accepts underscores, surrounding whitespace, a leading sign and
+    # non-ASCII decimal digits; require plain ASCII digits so a malformed release
+    # profile cannot silently select a different deployment target.
+    if not 1 <= len(components) <= 3 or any(
+        not component.isascii() or not component.isdecimal()
+        for component in components
+    ):
+        raise MachOError(f"invalid version: {value}")
+    parts = tuple(int(component) for component in components)
+    if any(part > 255 for part in parts):
         raise MachOError(f"invalid version: {value}")
     return (*parts, *(0 for _ in range(3 - len(parts))))
 

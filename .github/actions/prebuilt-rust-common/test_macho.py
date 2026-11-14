@@ -62,5 +62,19 @@ class MachOTests(unittest.TestCase):
                 )
 
 
+class ParseVersionTests(unittest.TestCase):
+    def test_valid_decimal_versions(self) -> None:
+        self.assertEqual(macho.parse_version("11"), (11, 0, 0))
+        self.assertEqual(macho.parse_version("11.0"), (11, 0, 0))
+        self.assertEqual(macho.parse_version("11.0.0"), (11, 0, 0))
+        self.assertEqual(macho.parse_version("14.2.1"), (14, 2, 1))
+        self.assertEqual(macho.parse_version("255.255.255"), (255, 255, 255))
+
+    def test_rejects_non_decimal_components(self) -> None:
+        for value in ("1_1", "2_17.3", "+11", " 11", "11 ", "\u0661\u0661"):
+            with self.subTest(value=value), self.assertRaises(macho.MachOError):
+                macho.parse_version(value)
+
+
 if __name__ == "__main__":
     unittest.main()
