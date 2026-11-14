@@ -232,6 +232,21 @@ for (const missing of ['anolisa', 'tokenless']) {
   });
 }
 
+test('accepts a wrapped bootstrap install command and emits the canonical form', async (t) => {
+  const {root} = await createFixture(t, false);
+  await writeFile(
+    path.join(root, 'docs/user-guide/en/getting-started/quickstart.md'),
+    '# Quickstart\n\ncurl -fsSL https://get.agentic-os.sh \\\n  | bash\n',
+  );
+  const result = generate(root);
+  assert.equal(result.status, 0, result.stderr);
+  const index = JSON.parse(await readFile(path.join(root, 'website/.generated/static/agents/repo-index.json'), 'utf8'));
+  assert.equal(index.install.cli, installCommand);
+  const anolisa = index.components.find((component) => component.id === 'anolisa');
+  assert.equal(anolisa.install, installCommand);
+  assert.equal(anolisa.install_method, 'bootstrap');
+});
+
 test('index schema accepts component roots without allowing arbitrary paths', async () => {
   const schema = JSON.parse(await readFile(path.join(scriptsDir, '../agent-index/schema.json'), 'utf8'));
   const pattern = new RegExp(schema.properties.components.items.properties.source_path.pattern);
