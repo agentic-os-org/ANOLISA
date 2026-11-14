@@ -72,7 +72,7 @@ test('publishes current guides and changelogs without Copilot Shell entry points
     files[`deprecated/copilot-shell/CHANGELOG${suffix}.md`] = '# Archived component history\n';
     files[`docs/user-guide/${locale}/index.md`] = '# User Guide\n\n<!-- navigation:start -->\n<!-- navigation:end -->\n\n[historical source evidence](https://github.com/alibaba/anolisa/blob/old-commit/src/copilot-shell/core.ts#L10)\n\n## Copilot Shell (cosh)\n\nHistorical integration details remain.\n';
     files[`docs/user-guide/${locale}/getting-started/quickstart.md`] = '# Quickstart\n\n[cosh-ng](../cosh-ng/index.md)\n';
-    files[`docs/user-guide/${locale}/getting-started/support.md`] = '# Support\n';
+    files[`docs/user-guide/${locale}/getting-started/support.md`] = '```sh\n# shell example\n```\n\n# Support\n';
     files[`docs/user-guide/${locale}/cosh-ng/index.md`] = `# cosh-ng\n\n## ${locale === 'zh' ? '快速上手' : 'Quick start'}\n`;
     files[`docs/user-guide/${locale}/cosh-ng/configuration.md`] = '# Configuration\n';
     files[`docs/user-guide/${locale}/tokenless/index.md`] = '# Tokenless\n';
@@ -228,6 +228,8 @@ groups:
     assert.ok(entry.includes(`## ${locale === 'zh' ? '快速上手' : 'Quick start'} {#quick-start}`));
     const quickstart = await readFile(path.join(output, 'user-guide/getting-started/quickstart.md'), 'utf8');
     assert.ok(quickstart.includes('[cosh-ng](/docs/user-guide/cosh-ng)'));
+    const support = await readFile(path.join(output, 'user-guide/getting-started/support.md'), 'utf8');
+    assert.match(support, /^title: "Support"$/m, 'Code comments must not become page titles');
     const aw = await readFile(path.join(output, 'user-guide/aw/installation.md'), 'utf8');
     assert.match(aw, /slug: "\/user-guide\/aw\/installation"/);
     assert.match(aw, /sidebar_position: 2\n/);
