@@ -23,6 +23,10 @@ test('GitHub source links reject MDX heading IDs in both languages', async (t) =
   }
   assert.match(await checkMarkdownSourceLink(root, 'entry.md', 'missing/index.md'),
     /missing Markdown target/);
+  assert.match(await checkMarkdownSourceLink(root, 'entry.md', 'en/index.md#%E0%A4'),
+    /invalid Markdown link encoding/);
+  assert.deepEqual(resolveMarkdownSourceLink(root, 'entry.md', 'en/%E0%A4/index.md'),
+    {invalid: true});
 });
 
 test('GitHub anchors include formatted headings and explicit HTML anchors, excluding code', () => {
