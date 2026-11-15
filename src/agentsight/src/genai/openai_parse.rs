@@ -1511,15 +1511,17 @@ impl GenAIBuilder {
                 "response.output_item.done" => {
                     // A capture that started mid-stream may open with a done
                     // item instead of an added one; the item router recovers
-                    // the complete call from it, so a function_call done item
+                    // the complete call from it, so any call-shaped done item
                     // proves this is a Responses stream with recoverable
-                    // content.
-                    if chunk
-                        .get("item")
-                        .and_then(|i| i.get("type"))
-                        .and_then(|t| t.as_str())
-                        == Some("function_call")
-                    {
+                    // content. A custom tool call or a Codex local shell call
+                    // is the same evidence as a function_call.
+                    if matches!(
+                        chunk
+                            .get("item")
+                            .and_then(|i| i.get("type"))
+                            .and_then(|t| t.as_str()),
+                        Some("function_call" | "custom_tool_call" | "local_shell_call")
+                    ) {
                         saw_responses_event = true;
                     }
                     // A finished `message` item carries the whole answer in
@@ -2892,6 +2894,37 @@ mod tests {
             "a call repeated by the stream must be recorded once: {parts:?}"
         );
         assert_eq!(finish.as_deref(), Some("STOP"));
+    }
+
+    /// A drained capture can attach after the deltas, leaving only the
+    /// complete `response.output_item.done` event. The item router already
+    /// records a `custom_tool_call` or `local_shell_call` from that event,
+    /// but the drain gate only recognised a `function_call` done item, so
+    /// the merger returned `None` and discarded the call it had observed.
+    #[test]
+    fn test_merge_responses_sse_chunks_keeps_a_done_item_call() {
+        let body = r#"[
+            {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}},
+            {"type":"response.output_item.done","output_index":1,"item":{"type":"local_shell_call","id":"lsc_1","call_id":"call_ls","action":{"type":"exec","command":["ls","-l"]}}}
+        ]"#;
+        let (parts, finish) =
+            GenAIBuilder::extract_parts_from_sse_body(body).expect("the calls must survive");
+        let calls: Vec<_> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall { id, name, .. } => Some((
+                    id.as_deref().expect("a done item carries the wire call id"),
+                    name.as_str(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![("call_patch", "apply_patch"), ("call_ls", "shell")],
+            "both calls are complete in the captured done items: {parts:?}"
+        );
+        assert_eq!(finish, None, "no terminal event was captured");
     }
 
     /// Gemini thinking models mark reasoning parts with `thought: true`;
