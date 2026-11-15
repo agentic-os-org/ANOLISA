@@ -72,6 +72,21 @@ def extract_tool_calls(content) -> list:
     return calls
 
 
+def declared_tool_failure(envelope: object) -> Optional[bool]:
+    """Match agentsight_atif's outcome precedence, including explicit success."""
+    if not isinstance(envelope, dict):
+        return None
+    status = envelope.get("status")
+    status_error = isinstance(status, str) and status.lower() == "error"
+    flag = envelope.get("is_error", envelope.get("isError"))
+    if isinstance(flag, bool):
+        return flag or status_error
+    success = envelope.get("success")
+    if isinstance(success, bool):
+        return not success or status_error
+    return True if status_error else None
+
+
 def extract_tool_results(content) -> list:
     """Extract tool_result blocks as ATIF observation results."""
     results = []
@@ -90,8 +105,14 @@ def extract_tool_results(content) -> list:
                 "source_call_id": block.get("tool_use_id"),
                 "content": str(result_content)[:2000],  # truncate
             }
-            if isinstance(block.get("is_error"), bool):
-                result["extra"] = {"is_error": block["is_error"]}
+            outcome = declared_tool_failure(block)
+            if outcome is None and isinstance(result_content, str):
+                try:
+                    outcome = declared_tool_failure(json.loads(result_content))
+                except (json.JSONDecodeError, RecursionError):
+                    pass
+            if outcome is not None:
+                result["extra"] = {"is_error": outcome}
             results.append(result)
     return results
 
