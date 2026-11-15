@@ -1,5 +1,10 @@
 # 更新日志
 
+## [未发布]
+
+### 不兼容变更
+- `ParsedRequest` 与 `HttpContext` 现在标记为 `#[non_exhaustive]`，必须通过 `ParsedRequest::new` 与 `HttpContext::new` 构造；外部 crate 的结构体字面量和穷举解构不再编译。
+
 ## 0.16.1
 
 ### 安全

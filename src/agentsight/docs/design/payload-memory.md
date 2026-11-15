@@ -79,6 +79,16 @@ IDs in the existing retroactive fix-up registry; a later file write repairs both
 and completed-event JSON. FFI and active non-SQLite exporters keep deferred delivery because an
 already delivered event cannot be repaired in those consumers.
 
+Raw completions and deferred GenAI calls share the configured pending byte and count bounds.
+Raw admission is limited to half of the shared byte allowance, so deferred delivery and SQLite
+local retries retain capacity; this matters for FFI and active non-SQLite exporters, where an
+already-delivered event cannot be repaired. The trade-off is earlier synchronous backpressure on
+event reception while CPU admission is busy. Hard-limit backpressure and oversized-task admission
+remain synchronous to preserve bounded ownership and FIFO delivery.
+The standalone loop ticks once per receive attempt; FFI polling keeps the same maintenance path.
+The `completion_backpressure` stage records synchronous admission and delivery when the raw queue
+reaches its reserved share or the hard shared limit.
+
 Registered sinks report their current activity; unknown exporters default to active. The default
 Logtail sink checks the same required-file and telemetry-sentinel gates for routing and writing.
 Dynamic sinks also re-read their current path so a paused exporter can resume without registration
@@ -96,6 +106,14 @@ SQLite completion serializes JSON before taking the connection lock. Capacity se
 `octet_length` on stored JSON columns to read their byte lengths without fetching and scanning whole
 payloads while holding that lock. Delivery remains synchronous; these changes shorten its critical
 sections rather than introducing another persistence queue.
+
+Pending-match fingerprints are cached as fixed-size digests on the parsed request and reused after
+idle or crash snapshots. Routing, source timestamp, encoding and body replacement invalidate the
+cache. Raw delivery hashes its retained serialized body; semantic delivery hashes parsed JSON
+through a streaming writer. Non-LLM records are rejected before this hashing work. Neither path
+retains an extra payload copy, and match-key bytes remain compatible. HTTP/2 stream completions do
+not carry the HTTP/1 request snapshot, so they keep the full-hash path in this change.
+
 Completed-event JSON reserves from the retained-payload estimate and releases excess serializer
 capacity. SQLite message columns borrow `RawValue` arrays from that JSON when the full message array
 is needed; incremental subsets retain their existing serialization and exact field content.
@@ -107,6 +125,13 @@ payload target, allowing one oversized row to make progress. Batches yield betwe
 write contention defers the remaining work. A passive checkpoint copies WAL frames before a
 non-waiting truncate attempt, and an incomplete checkpoint stops further capacity pruning.
 Separate age, pruning and checkpoint timings identify which maintenance phase is slow.
+Paced workers check WAL growth every 20 ms and request a passive checkpoint after 1 MiB of growth
+or 50 ms, including during resumable cleanup. Admission still depends on the shared CPU budget;
+these are scheduling targets, not a bound on WAL size or checkpoint duration. Capacity passes use
+SQLite's live page count, excluding freelist pages and reusable WAL space, and truncate at their
+entry and completion instead of after every deletion batch. Passive checkpoints between batches
+retain the reader-contention gate. Metrics record WAL bytes, total/copied/pending frames, checkpoint
+outcomes and separate passive/truncate durations. PASSIVE can copy the whole available WAL in one call.
 
 FFI delivery moves calls and records into boxed queue items. A byte reservation survives dequeue
 until callbacks return, and failed sends or receiver destruction refund it. Large JSON fields are

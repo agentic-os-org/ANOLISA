@@ -155,9 +155,9 @@ bash scripts/benchmark/single_run/resource_run.sh \
 
 `--baseline` 和 `--candidate` 也接受 commit hash、本地分支和 tag。候选版本默认是 `working-tree`；`HEAD` 不包含未提交改动。源码在临时 detached worktree 中编译，工作区快照使用独立 index，保留当前分支和暂存区。两个二进制都在测量前编译完成，随后使用同一份冻结的负载脚本、配置和负载参数依次运行，每轮重新启动采集，并使用独立数据库。已有两个二进制时，使用 `--ab --baseline-bin PATH --candidate-bin PATH`。
 
-终端和 `resource-report.txt` 会显示平均/峰值 RSS、对应整机内存占比、平均/P95/峰值 CPU、Load/Capture 的 PASS 或 FAIL，以及运行状态。CPU 统计 standalone AgentSight 进程的全部线程，100% 表示一个逻辑核，允许超过 100%；报告记录主机逻辑核数，不包含 mock 服务端和客户端进程。
+终端和 `resource-report.txt` 会显示平均/峰值 RSS、对应整机内存占比、平均/P95/峰值 CPU、Load/Capture 的 PASS 或 FAIL，以及运行状态。资源门禁只检查平均 CPU（25%）与平均/峰值 RSS（265/300 MiB）；P95 与峰值 CPU 仅作诊断，不参与门禁判定。CPU 统计 standalone AgentSight 进程的全部线程，100% 表示一个逻辑核，允许超过 100%；报告记录主机逻辑核数，不包含 mock 服务端和客户端进程。
 
-A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `before - after` 和相对百分比，负数表示资源占用增加。CPU 基线为零时不计算相对百分比。整机内存占比的变化使用百分点。`resource-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告和日志位于 `run/`，A/B 则位于 `before/`、`after/`。
+A/B 显示 RSS 减少的 MiB 和相对百分比；CPU 减少量使用百分点 `before - after` 和相对百分比，负数表示资源占用增加。CPU 基线为零时不计算相对百分比。整机内存占比的变化使用百分点。A/B HTML 从 `resource-summary.json` 读取权威 RSS/CPU 统计和 `valid` 标记；结果无效或未验证时页面标记为 INVALID，不输出改善判定。`resource-summary.json` 保存测量值、版本/tree ID 和二进制 hash。每轮的 CSV、采集报告、日志和自包含的 `metrics-report.html` 评估报告位于 `run/`，A/B 则位于 `before/`、`after/`。
 
 只有负载通过、采集完整率和 Token 正确率均达到 99.9%、采集进程存活并有有效资源样本，且可用的探针计数未发现丢事件时，结果才是 VALID。报告分别打印 Ring Buffer 和用户态通道丢事件数；计数覆盖全部探针类型，不能据此确定丢失事件的类型。即使全部请求的 usage 正确，发现丢事件仍判为 INVALID，不计算优化比例。计数不可用时显示 N/A，旧二进制继续使用请求级校验。CPU 样本缺失、无效或覆盖不足正式窗口的 95% 时，同样判为 INVALID，不计算任何优化比例。成功退出 0，无效或失败退出非零；Ctrl+C 退出 130 并保留部分产物。每次使用新的输出目录，默认位置是 `scripts/benchmark/results/resource-<UTC 时间戳>-<PID>/`。
 
