@@ -46,9 +46,15 @@ DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUIL
 
 .PHONY: delivery-validate-layout delivery-validate-install layout install test-packaging
 
-# The public uninstall must remove the skills selected by the public installer.
+# The public uninstall must use the same layout as the public installer.
 uninstall: SKILLDIR := $(DELIVERY_SKILLDIR)
 uninstall: EXTENSIONDIR := $(DELIVERY_EXTENSIONDIR)
+uninstall: SOURCE_SYSTEMD_SYSTEM_UNIT_DIR := $(DELIVERY_UNITDIR)
+uninstall: OPENCLAW_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/openclaw
+uninstall: HERMES_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/hermes
+uninstall: CODEX_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/codex
+uninstall: QODER_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/qoder
+uninstall: QWEN_CODE_EXTENSION_DIR := $(DELIVERY_ADAPTERDIR)/qwencode
 uninstall: GATEWAY_DATADIR := $(DELIVERY_DATADIR)/gateway
 uninstall: SYSTEMD_SYSTEM_UNIT_DIR := $(DELIVERY_UNITDIR)
 uninstall: uninstall-gateway

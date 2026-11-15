@@ -602,6 +602,72 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
 
+    def test_uninstall_removes_matching_units_and_adapters(self):
+        for prefix, namespace, overrides in (
+            ("/usr/local", "anolisa", ()),
+            ("/opt/sec-core", "suite", ()),
+            (
+                "/srv/sec-core",
+                "",
+                ("UNITDIR=/srv/units", "ADAPTERDIR=/srv/adapters"),
+            ),
+        ):
+            with self.subTest(prefix=prefix, namespace=namespace):
+                stage = self.base / (namespace or "standalone")
+                args = (
+                    f"DESTDIR={stage}",
+                    f"PREFIX={prefix}",
+                    f"AWPRJ={namespace}",
+                    *overrides,
+                )
+                layout = self.make("layout", *args)
+                self.assertEqual(layout.returncode, 0, layout.stderr)
+                paths = dict(line.split("=", 1) for line in layout.stdout.splitlines())
+                installed = self.make("install", *args)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                unit_dir = stage / paths["UNITDIR"].lstrip("/")
+                adapter_dir = stage / paths["ADAPTERDIR"].lstrip("/")
+                unit = unit_dir / "agent-sec-core.service"
+                adapters = [
+                    adapter_dir / name
+                    for name in ("codex", "hermes", "openclaw", "qoder", "qwencode")
+                ]
+                self.assertTrue(unit.is_file())
+                for adapter in adapters:
+                    self.assertTrue(adapter.is_dir())
+                retained = [
+                    stage / "etc/systemd/system/agent-sec-core.service",
+                    unit_dir / "unrelated.service",
+                    adapter_dir / "unrelated/plugin.json",
+                    stage / paths["CONFIGDIR"].lstrip("/") / "skillsec.json",
+                    stage
+                    / paths["CONFIGDIR"].lstrip("/")
+                    / "sandbox/permissions.json.template",
+                ]
+                # Legacy installation paths are not owned by this layout.
+                retained.extend(
+                    stage / prefix.lstrip("/") / "lib/anolisa/sec-core" / name / "keep"
+                    for name in (
+                        "codex-plugin",
+                        "hermes-plugin",
+                        "openclaw-plugin",
+                        "qoder-plugin",
+                        "qwen-code-extension",
+                    )
+                )
+                for path in retained:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("administrator or unrelated content\n")
+                removed = self.make("uninstall", *args)
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+                self.assertFalse(unit.exists())
+                for adapter in adapters:
+                    self.assertFalse(adapter.exists())
+                for path in retained:
+                    self.assertEqual(
+                        path.read_text(), "administrator or unrelated content\n"
+                    )
+
     def test_gateway_uninstall_withdraws_before_removal_and_retains_files_on_failure(
         self,
     ):
