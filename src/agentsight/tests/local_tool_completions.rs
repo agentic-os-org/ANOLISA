@@ -140,3 +140,19 @@ fn provider_echoes_keep_canonical_owners_and_ambiguous_echoes_change_neither_cal
     }
     assert!(ambiguous["steps"][0]["observation"].is_null());
 }
+
+#[test]
+fn an_explicit_null_tool_result_is_empty_text_not_the_word_null() {
+    let doc = convert(vec![
+        event("assistant", 1, json!([call("one")])),
+        event(
+            "user",
+            2,
+            json!([{"type":"tool_result","tool_use_id":"one","content":null}]),
+        ),
+    ]);
+    assert_eq!(
+        doc["steps"][0]["observation"]["results"][0]["content"], "",
+        "a null result means the producer recorded no output"
+    );
+}
