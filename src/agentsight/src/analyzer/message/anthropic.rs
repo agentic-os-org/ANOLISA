@@ -1259,6 +1259,64 @@ mod tests {
         assert_eq!(resp.usage.cache_read_input_tokens, Some(24576));
     }
 
+    /// A compatible gateway that spells "no usage snapshot" as an explicit
+    /// JSON null on `message_start` must not lose the event's identity. The
+    /// typed event required a usage struct, serde failed the whole event, and
+    /// the aggregated response fell back to an empty id and model even though
+    /// the stream carried both.
+    #[test]
+    fn test_aggregate_sse_null_message_start_usage_keeps_identity() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_null", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [], "usage": null}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.id, "msg_null",
+            "a null usage must not discard the message_start event"
+        );
+        assert_eq!(resp.model, "claude-sonnet-4-5");
+        assert_eq!(resp.usage.input_tokens, 0);
+        assert_eq!(resp.usage.output_tokens, 0);
+    }
+
+    /// A terminal `message_delta` whose `output_tokens` is an explicit null
+    /// carries the stop reason and any other counters it reports. Treating
+    /// the null as a type error dropped the entire event, so the call lost
+    /// `end_turn` and the counters beside it.
+    #[test]
+    fn test_aggregate_sse_null_output_tokens_keeps_stop_reason() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_delta_null", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"input_tokens": 1111, "output_tokens": null}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.stop_reason.as_deref(),
+            Some("end_turn"),
+            "a null output_tokens must not discard the message_delta event"
+        );
+        assert_eq!(resp.usage.input_tokens, 1111);
+        assert_eq!(resp.usage.output_tokens, 0);
+    }
+
     /// Anthropic-compatible gateways may emit several `message_delta` events
     /// (interim usage, or a second terminal usage-only delta after the one
     /// that carried `stop_reason`). The usage merge takes the max of each
