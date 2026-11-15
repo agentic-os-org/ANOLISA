@@ -4152,4 +4152,75 @@ mod tests {
             "the chunked body must survive a conflicting Content-Length"
         );
     }
+
+    /// The same conflicting headers on a split body: the first read has no
+    /// zero-size chunk, so the request must stay open and the continuation
+    /// must be framed by chunks rather than counted against Content-Length.
+    #[test]
+    fn test_chunked_request_with_content_length_waits_for_its_terminator() {
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let raw = b"POST /chat HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"messages\":[1]}\r\n";
+        let event = create_mock_ssl_event_with_buf(9104, 0xE201, raw.to_vec(), 1);
+        let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let body_len = raw.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "0".to_string());
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let request = ParsedRequest {
+            cached_fingerprint: Default::default(),
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 9104,
+            ssl_ptr: 0xE201,
+        };
+        assert!(
+            matches!(
+                aggregator.connections.peek(&conn_id),
+                Some(ConnectionState::RequestBodyPending {
+                    expected_body_len: None,
+                    ..
+                })
+            ),
+            "Content-Length must not complete a chunked body without its terminator"
+        );
+
+        let rest = SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid: 9104,
+            tid: 1,
+            uid: 0,
+            len: 5,
+            rw: 1,
+            comm: String::new(),
+            buf: b"0\r\n\r\n".to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0xE201,
+        };
+        aggregator.process_raw_body_data(&rest);
+
+        let Some(ConnectionState::RequestPending { request }) =
+            aggregator.connections.peek(&conn_id)
+        else {
+            panic!("the zero-size chunk completes the body");
+        };
+        assert_eq!(
+            request.json_body(),
+            Some(serde_json::json!({"messages": [1]})),
+            "the continuation must keep the chunked body"
+        );
+    }
 }
