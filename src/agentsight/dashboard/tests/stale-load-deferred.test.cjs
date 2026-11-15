@@ -1738,6 +1738,60 @@ test('interruption panel: resolved events are neither counted nor offered Resolv
   assert.equal(resolveButtons.length, 1, 'the unresolved row must offer Resolve');
 });
 
+// ─── InterruptionPanel: refresh after resolution ───
+
+test('a locale-triggered interruption refresh cannot resurrect a resolved event', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchSessionInterruptions']);
+  let t = (key) => key;
+  const driver = createHooksDriver();
+  const Panel = loadPageModule('src/components/InterruptionPanel.tsx', {
+    '../utils/apiClient': stubs,
+    '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US', interruptionTypeKey: () => null },
+    '../utils/datetime': { formatNs: String },
+  }, driver).InterruptionPanel;
+  const props = { sessionId: 'session' };
+  const first = { interruption_id: 'first', resolved: false, severity: 'high' };
+  const second = { interruption_id: 'second', resolved: false, severity: 'low' };
+  driver.render(Panel, props).effects[0]();
+  calls.fetchSessionInterruptions[0].resolve([first, second]);
+  await settle();
+  // Changing language changes t and starts another read while the existing
+  // rows still expose their Resolve actions.
+  t = (key) => `translated:${key}`;
+  const rendered = driver.render(Panel, props);
+  rendered.effects[0]();
+  const row = collectElements(rendered.element).find((node) => node.props?.event === first);
+  assert.ok(row, 'the loaded row is still actionable while refreshing');
+  row.props.onResolved(first); // called by the row only after resolve succeeds
+  assert.deepEqual(driver.slots[0].value.map((event) => event.interruption_id), ['second']);
+  calls.fetchSessionInterruptions[1].resolve([first, second]);
+  await settle();
+  const visible = collectElements(driver.render(Panel, props).element)
+    .filter((node) => node.props?.event).map((node) => node.props.event.interruption_id);
+  assert.deepEqual(visible, ['second'], 'the earlier read must not restore the resolved row');
+  assert.equal(driver.slots[1].value, false);
+});
+
+test('interruption refresh retains unresolved rows and newly arrived events', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchSessionInterruptions']);
+  const driver = createHooksDriver();
+  const Panel = loadPageModule('src/components/InterruptionPanel.tsx', {
+    '../utils/apiClient': stubs,
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US', interruptionTypeKey: () => null },
+    '../utils/datetime': { formatNs: String },
+  }, driver).InterruptionPanel;
+  const props = { sessionId: 'session' };
+  const first = { interruption_id: 'first', resolved: false };
+  const next = { interruption_id: 'new', resolved: false };
+  driver.render(Panel, props).effects[0]();
+  calls.fetchSessionInterruptions[0].resolve([first]);
+  await settle();
+  driver.render(Panel, props).effects[0]();
+  calls.fetchSessionInterruptions[1].resolve([first, next, { interruption_id: 'done', resolved: true }]);
+  await settle();
+  assert.deepEqual(driver.slots[0].value.map((event) => event.interruption_id), ['first', 'new']);
+});
+
 // ─── SystemAuditPage: process cycles ───
 
 function auditTreeFunctions() {
