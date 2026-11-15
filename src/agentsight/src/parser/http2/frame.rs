@@ -951,21 +951,96 @@ mod tests {
     /// `if-match` and `user-agent` as `vary`.
     #[test]
     fn stateless_static_table_matches_rfc7541_appendix_a() {
-        for (index, expected) in [
-            (32u8, "cookie"),
-            (33, "date"),
-            (57, "transfer-encoding"),
-            (58, "user-agent"),
-            (60, "via"),
-            (61, "www-authenticate"),
-        ] {
-            let headers = headers_frame(vec![0x80 | index]).decode_headers_stateless();
+        // Every entry of RFC 7541 Appendix A, in index order. The whole table
+        // is pinned here so a missing entry cannot shift the names that follow
+        // it, which is exactly how the hand-written copy lost `cookie`.
+        const TABLE: &[(usize, &str, &str)] = &[
+            (1, ":authority", ""),
+            (2, ":method", "GET"),
+            (3, ":method", "POST"),
+            (4, ":path", "/"),
+            (5, ":path", "/index.html"),
+            (6, ":scheme", "http"),
+            (7, ":scheme", "https"),
+            (8, ":status", "200"),
+            (9, ":status", "204"),
+            (10, ":status", "206"),
+            (11, ":status", "304"),
+            (12, ":status", "400"),
+            (13, ":status", "404"),
+            (14, ":status", "500"),
+            (15, "accept-charset", ""),
+            (16, "accept-encoding", "gzip, deflate"),
+            (17, "accept-language", ""),
+            (18, "accept-ranges", ""),
+            (19, "accept", ""),
+            (20, "access-control-allow-origin", ""),
+            (21, "age", ""),
+            (22, "allow", ""),
+            (23, "authorization", ""),
+            (24, "cache-control", ""),
+            (25, "content-disposition", ""),
+            (26, "content-encoding", ""),
+            (27, "content-language", ""),
+            (28, "content-length", ""),
+            (29, "content-location", ""),
+            (30, "content-range", ""),
+            (31, "content-type", ""),
+            (32, "cookie", ""),
+            (33, "date", ""),
+            (34, "etag", ""),
+            (35, "expect", ""),
+            (36, "expires", ""),
+            (37, "from", ""),
+            (38, "host", ""),
+            (39, "if-match", ""),
+            (40, "if-modified-since", ""),
+            (41, "if-none-match", ""),
+            (42, "if-range", ""),
+            (43, "if-unmodified-since", ""),
+            (44, "last-modified", ""),
+            (45, "link", ""),
+            (46, "location", ""),
+            (47, "max-forwards", ""),
+            (48, "proxy-authenticate", ""),
+            (49, "proxy-authorization", ""),
+            (50, "range", ""),
+            (51, "referer", ""),
+            (52, "refresh", ""),
+            (53, "retry-after", ""),
+            (54, "server", ""),
+            (55, "set-cookie", ""),
+            (56, "strict-transport-security", ""),
+            (57, "transfer-encoding", ""),
+            (58, "user-agent", ""),
+            (59, "vary", ""),
+            (60, "via", ""),
+            (61, "www-authenticate", ""),
+        ];
+
+        for &(index, name, value) in TABLE {
             assert_eq!(
-                headers,
-                vec![(expected.to_string(), Some(String::new()))],
-                "static index {index} must name {expected}"
+                ParsedHttp2Frame::get_static_table_entry(index),
+                Some((name, value)),
+                "static index {index} must be {name}: {value}"
             );
         }
+        assert_eq!(ParsedHttp2Frame::get_static_table_entry(0), None);
+        assert_eq!(
+            ParsedHttp2Frame::get_static_table_entry(62),
+            None,
+            "index 62 is the first dynamic-table entry"
+        );
+
+        // The decoder reads the same table through the indexed-field path.
+        assert_eq!(
+            headers_frame(vec![0xA0]).decode_headers_stateless(),
+            vec![("cookie".to_string(), Some(String::new()))]
+        );
+        assert_eq!(
+            headers_frame(vec![0xBD]).decode_headers_stateless(),
+            vec![("www-authenticate".to_string(), Some(String::new()))]
+        );
 
         // A literal header that takes its name from static index 58
         // (`user-agent`) must resolve the same entry.
