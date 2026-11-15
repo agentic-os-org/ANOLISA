@@ -228,8 +228,16 @@ def verify_runtime(path: Path, version: str, executable: str) -> NativeTarget:
             if name.startswith("anolisa_tokenless/_native")
             and name.endswith(".pyd" if target.os_name == "windows" else ".so")
         ]
-        if len(native_members) != 1:
-            fail(f"{path.name} must contain exactly one native extension")
+        importable_native_members = (
+            {"anolisa_tokenless/_native.pyd"}
+            if target.os_name == "windows"
+            else {"anolisa_tokenless/_native.abi3.so", "anolisa_tokenless/_native.so"}
+        )
+        if (
+            len(native_members) != 1
+            or native_members[0] not in importable_native_members
+        ):
+            fail(f"{path.name} must contain exactly one importable _native extension")
         if target.os_name == "windows":
             executable += ".exe"
         # _bin is also a Python package; any other file there is a stale binary.
@@ -239,7 +247,9 @@ def verify_runtime(path: Path, version: str, executable: str) -> NativeTarget:
             if name.startswith("anolisa_tokenless/_bin/") and not name.endswith(".py")
         ]
         if executable_members != [f"anolisa_tokenless/_bin/{executable}"]:
-            fail(f"{path.name} must embed exactly {executable}, found {executable_members}")
+            fail(
+                f"{path.name} must embed exactly {executable}, found {executable_members}"
+            )
         executable_info = archive.getinfo(executable_members[0])
         if not ((executable_info.external_attr >> 16) & 0o111):
             fail(f"{path.name} embeds a non-executable {executable} binary")
