@@ -536,6 +536,33 @@ esac
         assert_eq!(response.status(), expected);
         assert!(awtest::read_body(response).await.is_empty());
     }
+    for (uri, expected) in [
+        (
+            "/ws-ckpt/trajectory/missing/snapshots",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/ws-ckpt/bogus/fixture-session/snapshots",
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response =
+            awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+        assert_eq!(response.status(), expected, "{uri}");
+    }
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::get()
+            .uri("/ws-ckpt/trajectory/fixture-session/snapshots?cursor=not-base64")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = awtest::read_body_json(response).await;
+    assert_eq!(
+        body["error"], "invalid cursor",
+        "a malformed cursor must not expose the base64 decoder's internals"
+    );
     let first: Value = awtest::call_and_read_body_json(
         &app,
         awtest::TestRequest::get()
