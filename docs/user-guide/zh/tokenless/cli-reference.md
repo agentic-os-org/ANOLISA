@@ -517,6 +517,8 @@ tokenless stats disable
 tokenless stats clear --yes
 ```
 
+未指定 `--yes` 时，`stats clear` 需要在终端中显示提示并读取确认。自动化脚本须显式传入 `--yes`。
+
 双跑对比：
 
 ```bash

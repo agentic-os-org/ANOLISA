@@ -557,6 +557,8 @@ tokenless stats disable
 tokenless stats clear --yes
 ```
 
+Without `--yes`, `stats clear` requires terminal input and output for the confirmation. Automation must pass `--yes` explicitly.
+
 Dual-run comparison:
 
 ```bash
