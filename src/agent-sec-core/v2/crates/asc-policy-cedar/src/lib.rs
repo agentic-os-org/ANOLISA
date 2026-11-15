@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advice;
+pub mod authorization_view;
 pub mod default_policy;
 pub mod http;
 pub mod schema;

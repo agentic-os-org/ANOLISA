@@ -287,10 +287,8 @@ fn effective_set_tracks_membership_without_scope_assignments() {
     let empty = pap.authorization_policies().unwrap();
     pap.create_policy("native", &binding().policy.template)
         .unwrap();
-    let bare = runtime_cedar(
-        r#"permit(principal, action == SecCore::Action::"process.spawn", resource)
-        when { principal has agent_type && principal.agent_type == "codex" };"#,
-    );
+    let bare =
+        runtime_cedar(r#"forbid(principal, action == SecCore::Action::"network.use", resource);"#);
     let deployment = pap.create_policy("deployment", &bare).unwrap();
     assert_eq!(pap.authorization_policies().unwrap(), empty);
 
@@ -325,6 +323,32 @@ fn effective_set_tracks_membership_without_scope_assignments() {
     assert_eq!(enabled.policies[0].policy_id, deployment.policy_id);
     assert!(pap.list_scopes(100, 0).unwrap().items.is_empty());
     assert!(pap.list_bindings(100, 0).unwrap().items.is_empty());
+}
+
+#[test]
+fn deployment_shape_contributes_a_derived_launch_view() {
+    let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let pap = PapService::new(repository);
+    let unified = runtime_cedar(
+        r#"
+        permit(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+        when { resource.path == "/work" || resource.path like "/work/*" };
+
+        forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+        when { context.input.operation == SecCore::WriteOperation::"delete" };
+    "#,
+    );
+    let created = pap.create_policy("task", &unified).unwrap();
+    let set = pap.authorization_policies().unwrap();
+    assert_eq!(set.policies.len(), 1);
+    // Same identity: the derived view is never a second policy.
+    assert_eq!(set.policies[0].policy_id, created.policy_id);
+    assert_eq!(set.policies[0].revision, created.revision);
+    let text = &set.policies[0].source.text;
+    assert!(text.contains("principal is SecCore::Subject"));
+    assert!(!text.contains("forbid"));
+    assert!(!text.contains("context."));
+    assert!(text.contains("/work/*"));
 }
 
 #[test]

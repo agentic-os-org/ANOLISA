@@ -360,6 +360,13 @@ where
 
     /// Derives request policies independently of Scope and Binding assignments.
     ///
+    /// A policy is written once in the shape its other consumers read: bare
+    /// `principal` headers, with `context` conditions where an operation-level
+    /// restriction is needed. The sandbox and the enforcement path read that text
+    /// verbatim; this set carries the derived launch-time view of the same
+    /// `policyId` and revision instead of requiring a second published policy.
+    /// Revisions whose view grants nothing at launch are left out.
+    ///
     /// # Errors
     /// Rejects an inconsistent/unavailable read or any invalid Cedar member; never
     /// returns a partial set. Runtime-specific compatibility is checked by the PDP.
@@ -381,7 +388,21 @@ where
                             error.diagnostic()
                         ))
                     })?;
-                if eligible {
+                let view = if eligible {
+                    Some(source)
+                } else {
+                    let view = asc_policy_cedar::authorization_view::authorization_view(&source)
+                        .map_err(|error| {
+                            PapError::InvalidCedar(format!(
+                                "{} revision {}: {}",
+                                policy.policy_id,
+                                policy.revision.get(),
+                                error.diagnostic()
+                            ))
+                        })?;
+                    asc_policy_cedar::authorization_view::has_statements(&view).then_some(view)
+                };
+                if let Some(source) = view {
                     policies.push(AuthorizationPolicy {
                         policy_id: policy.policy_id,
                         revision: policy.revision,
