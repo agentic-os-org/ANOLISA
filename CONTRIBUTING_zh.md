@@ -37,7 +37,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 | agent-memory | `src/agent-memory/` | 仅 Linux | `memory` | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
 | os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 无需编译；运行[组件回归测试](#skill-回归测试与路径归属) |
 | anolisa | `distribution/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
-| SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
+| SkillFS | `src/skillfs/` | 仅 Linux | `skillfs` | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
 | ktuner | `src/ktuner/` | 仅 Linux | 不适用 | `ktuner` | `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` |
 
@@ -89,39 +89,55 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 ### 统一构建
 
-`scripts/build-all.sh` 是 Linux 便捷构建入口。重复使用 `--component`，选择需要的
-维护中组件：`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
+`scripts/build-all.sh` 是 Linux 便捷构建入口，需要 Bash 4.4 或更新版本。
+不指定组件或使用 `--all` 时，会构建 `cosh-ng`、`skillfs`、`ws-ckpt`、
+`tokenless`、`agentsight`、`agent-sec-core` V2 和 `aw`。
+需要 `agent-memory` 或 `os-skills` 时请显式选择；别名 `sight`、`sec-core`、
+`memory` 和 `skills` 仍可使用。脚本会为选中的后端自动选择匹配的 AW Provider。
 
-脚本不会构建 `anolisa`、`skillfs` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
+脚本不会构建 `anolisa` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
 
-不指定安装模式时，各组件按自己的安装规则选择用户主目录内的路径，这一步不需要提权。
-依赖引导仍可能为了安装系统包请求 `sudo`。使用 `--system` 或 `--usr` 会采用系统
-安装模式，通常需要 `sudo`。开发时建议指定组件并关闭安装。
+**默认采用系统安装模式**，即 `PREFIX=/usr/local`。依赖准备可能安装系统包，
+直接安装系统文件也可能需要 `sudo`。安装只复制文件，不激活服务或注册 adapter。
+开发时请显式选择组件，并使用 `--user --no-install` 避免安装文件。
+用户模式只有在显式指定 `--install-system-deps` 后才允许安装原生系统包；
+否则会在下载工具链之前报告缺少的原生包。
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh-ng
-./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --component sec-core --component tokenless
+./scripts/build-all.sh --component cosh-ng --user --check-deps
+./scripts/build-all.sh --component cosh-ng --user --no-install
+./scripts/build-all.sh --component sec-core --component tokenless --user --no-install
 ```
+
+只安装默认组件中支持用户安装的部分时，使用 `--all --user --supported-only`。
+脚本会报告跳过的组件，并在选择匹配的 Provider 之前过滤这些组件。
+用户安装若未启用此过滤器而选中了仅支持系统安装的组件，会被拒绝；
+`--user --no-install` 仍可编译完整的选择而不安装文件。
 
 主要选项如下。
 
 | 选项 | 作用 |
 | --- | --- |
-| `--no-install` | 安装依赖并构建，随后跳过安装。 |
-| `--install-mode <mode>` | 选择 `user` 或 `system`，默认是 `user`。 |
-| `--usr`、`--system` | 选择系统安装模式。 |
-| `--ignore-deps` | 跳过依赖准备和运行时校验；仅用于已配好依赖的主机。 |
-| `--deps-only` | 只安装依赖，不构建。 |
-| `--uninstall` | 删除已安装文件；与 `--component` 一起使用可限定组件。 |
-| `--dry-run` | 只打印动作，不修改文件或 systemd 状态。 |
+| `--no-install` | 准备依赖并构建，随后跳过文件安装；指定 `--destdir` 时仍会暂存文件。 |
+| `--install-mode <mode>` | 选择 `user` 或 `system`，默认是 `system`。 |
+| `--user`、`--system` | 显式选择用户或系统安装模式。 |
+| `--prefix <path>` | 设置目标前缀；系统模式默认为 `/usr/local`，用户模式默认为 `~/.local`。 |
+| `--destdir <path>` | 在绝对路径的打包根目录下暂存文件，即使同时指定 `--no-install`；跳过主机运行时预检。 |
+| `--install-system-deps` | 允许在用户模式下安装原生系统包。 |
+| `--supported-only` | 与 `--user` 一起使用，仅保留支持用户安装的组件。 |
+| `--ignore-deps` | 在已配好依赖的主机上跳过构建依赖准备和运行时校验；组件构建仍可能下载依赖。 |
+| `--deps-only` | 只准备构建依赖，不构建或安装。 |
+| `--check-deps` | 检查构建依赖，不修改主机。 |
+| `--dry-run` | 只打印计划，不下载或修改文件系统。 |
 | `--interactive`、`--non-interactive` | 打开引导流程，或明确选择自动化模式。 |
-| `--component <name>` | 构建或卸载一个受支持的组件，可以重复指定。 |
+| `--component <name>` | 选择要构建的组件，可以重复指定。 |
 
-开发时请明确选择组件，完整脚本接口见 `./scripts/build-all.sh --help`。
+`--usr` 已被拒绝；如需系统安装到该前缀，请使用 `--system --prefix /usr`。
+统一的 `--uninstall` 也已被拒绝；请按照各组件的卸载流程处理其安装布局和持久数据。
 
-`sight` 选项使用 Linux eBPF 构建。macOS 应在组件目录运行 `make build-mac`。
+完整脚本接口见 `./scripts/build-all.sh --help`。
+`sight` 选项使用 Linux eBPF 构建；macOS 应在组件目录运行 `make build-mac`。
 
 更完整的依赖和打包说明请阅读[从源码构建](docs/user-guide/zh/getting-started/building.md)
 （[English](docs/user-guide/en/getting-started/building.md)）。

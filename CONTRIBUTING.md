@@ -49,7 +49,7 @@ scopes are used in commit subjects and PR titles.
 | agent-memory | `src/agent-memory/` | Linux only | `memory` | `memory` | `make build`, `make fmt-check`, `make lint`, `make test`; use `make smoke` for MCP changes |
 | os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | No compilation; run the [component regression tests](#skill-regression-tests-and-path-ownership) |
 | anolisa | `distribution/anolisa/` | Linux and macOS arm64 | n/a | `anolisa` | `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
-| SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
+| SkillFS | `src/skillfs/` | Linux only | `skillfs` | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
 | ktuner | `src/ktuner/` | Linux only | n/a | `ktuner` | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
 
@@ -114,43 +114,61 @@ boundaries, explain the contract and test impact in the PR.
 
 ### Unified build
 
-`scripts/build-all.sh` is a Linux convenience entry point. Select the maintained
-components you need with repeated `--component` options: `skills`, `sec-core`,
-`tokenless`, `ws-ckpt`, `memory`, `cosh-ng`, and `sight`.
+`scripts/build-all.sh` is a Linux convenience entry point requiring Bash 4.4 or
+newer. With no component selection, or with `--all`, it builds `cosh-ng`,
+`skillfs`, `ws-ckpt`, `tokenless`, `agentsight`, `agent-sec-core` V2, and `aw`.
+Select `agent-memory` and `os-skills` explicitly when needed. The aliases
+`sight`, `sec-core`, `memory`, and `skills` remain accepted. Matching AW
+Providers are selected automatically for the chosen backends.
 
-The script does not build `anolisa`, `skillfs`, or `ktuner`. Use their
-component gates in the matrix above.
+The script does not build `anolisa` or `ktuner`. Use their component gates
+from the matrix above.
 
-With no install-mode flag, each component's install rules select paths within
-the user's home directory without elevated installation privileges. Dependency bootstrap
-may still request `sudo` for system packages. System installation uses
-`--system` or `--usr` and may require `sudo`. For development, prefer a
-targeted build with installation disabled.
+**The default profile is system installation**, with `PREFIX=/usr/local`.
+Dependency preparation can install system packages; direct system file
+installation can also require `sudo`. Installation copies files without
+activating services or registering adapters. Use explicit component selections
+and `--user --no-install` for development without file installation.
+User mode does not install native system packages unless
+`--install-system-deps` is explicitly supplied; otherwise it reports missing
+native packages before downloading toolchains.
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh-ng
-./scripts/build-all.sh --no-install --component sec-core
-./scripts/build-all.sh --no-install --component sec-core --component tokenless
+./scripts/build-all.sh --component cosh-ng --user --check-deps
+./scripts/build-all.sh --component cosh-ng --user --no-install
+./scripts/build-all.sh --component sec-core --component tokenless --user --no-install
 ```
+
+To install only the user-compatible subset of the default stack, use
+`--all --user --supported-only`. The script reports skipped components and
+filters them before selecting their matching Providers. User installation
+rejects selected system-only components without this filter; `--user --no-install`
+can still compile the full selection without installing files.
 
 The main options are:
 
 | Option | Effect |
 | --- | --- |
-| `--no-install` | Install dependencies and build, then skip installation. |
-| `--install-mode <mode>` | Select `user` or `system`; `user` is the default. |
-| `--usr`, `--system` | Select system installation mode. |
-| `--ignore-deps` | Skip dependency setup and runtime verification; use only on a pre-provisioned host. |
-| `--deps-only` | Install dependencies without building. |
-| `--uninstall` | Remove installed files; combine with `--component` to target a component. |
-| `--dry-run` | Print actions without changing files or systemd state. |
+| `--no-install` | Prepare dependencies and build, then skip file installation unless `--destdir` requests staging. |
+| `--install-mode <mode>` | Select `user` or `system`; `system` is the default. |
+| `--user`, `--system` | Select the user or system installation profile explicitly. |
+| `--prefix <path>` | Set the target prefix; defaults to `/usr/local` for system or `~/.local` for user mode. |
+| `--destdir <path>` | Stage files under an absolute package root, including with `--no-install`; skip host runtime preflight. |
+| `--install-system-deps` | Allow native system package installation in user mode. |
+| `--supported-only` | With `--user`, retain only components supporting user installation. |
+| `--ignore-deps` | Skip build dependency setup and runtime verification on a provisioned host; component builds may still download dependencies. |
+| `--deps-only` | Prepare build dependencies without building or installing. |
+| `--check-deps` | Check build dependencies without changing the host. |
+| `--dry-run` | Print the plan without downloads or filesystem changes. |
 | `--interactive`, `--non-interactive` | Open the guided flow or explicitly select automation mode. |
-| `--component <name>` | Build or uninstall one supported component; repeat for multiple components. |
+| `--component <name>` | Select a component to build; repeat for multiple components. |
 
-Use explicit component selections for development. See
-`./scripts/build-all.sh --help` for the complete script interface.
+`--usr` is rejected: use `--system --prefix /usr` for system scope with that
+prefix. Unified `--uninstall` is also rejected; follow the component-specific
+removal procedure for its installation layout and persistent data.
 
+See `./scripts/build-all.sh --help` for the complete script interface.
 The `sight` selection uses the Linux eBPF build. On macOS, build AgentSight
 locally with `make build-mac` instead.
 
