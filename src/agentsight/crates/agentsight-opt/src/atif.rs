@@ -219,11 +219,12 @@ where
 // ─── Parsing & helpers ───────────────────────────────────────────────────────
 
 impl AtifTrajectory {
-    /// Parse an ATIF JSON document.
+    /// Parse an ATIF JSON document, accepting one leading UTF-8 byte-order mark.
     ///
     /// # Errors
     /// Returns an error when the input is not valid ATIF JSON.
     pub fn from_json(json: &str) -> Result<Self> {
+        let json = json.strip_prefix('\u{feff}').unwrap_or(json);
         serde_json::from_str(json).context("failed to parse ATIF trajectory JSON")
     }
 
