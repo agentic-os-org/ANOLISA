@@ -39,7 +39,7 @@ cargo test --locked -p cosh-shell --test logic slash_registry
 ```bash
 cargo test --locked -p cosh-shell --test logic
 cargo test --locked -p cosh-shell --test protocol -- --test-threads=4
-cargo test --locked -p cosh-shell --test raw_cli <test-name> -- --exact
+cargo test --locked -p cosh-shell --test raw_cli animation::raw_cli_animation_mode_uses_transient_agent_status -- --exact
 cargo test --locked -p cosh-shell --test shell_host -- --test-threads=4
 ```
 
