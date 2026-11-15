@@ -117,7 +117,7 @@ index c3ba506d246d3139b8ee148d942db6ba4159b1b9..5afc700b0d50f7fb6e543ba2130b2208
 +    }
 +    Ok(())
 diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
-index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15d3647bfe 100644
+index 4397955eb60f319044a652073903fd2631e95e58..f7346241a78859789df322d095032d60c240ae14 100644
 --- a/bpf/src/lib.rs
 +++ b/bpf/src/lib.rs
 @@ -26,0 +27,10 @@ pub mod capability;
@@ -689,13 +689,16 @@ index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15
 @@ -4602 +5041 @@ mod tests {
 -        assert!(marker.contains("file_v6"));
 +        assert!(marker.contains("file_v7"));
-@@ -4638 +5077 @@ mod tests {
+@@ -4631,0 +5071,2 @@ mod tests {
++        assert!(lsm_link_expected("enforce_mmap_file", budget, true));
++        assert!(lsm_link_expected("enforce_file_mprotect", budget, true));
+@@ -4638 +5079 @@ mod tests {
 -        assert!(marker.contains("agent_file_guard_v8"));
 +        assert!(marker.contains("agent_file_guard_v9"));
-@@ -4690 +5129 @@ mod tests {
+@@ -4690 +5131 @@ mod tests {
 -        assert!(marker.contains("credential_exfiltration_v7"));
 +        assert!(marker.contains("credential_exfiltration_v8"));
-@@ -4710,8 +5149 @@ mod tests {
+@@ -4710,8 +5151 @@ mod tests {
 -        assert!(lsm_needed(
 -            "enforce_task_kill",
 -            false,
@@ -705,33 +708,37 @@ index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15
 -            false
 -        ));
 +        assert!(lsm_needed("enforce_task_kill", false, false, false, false));
-@@ -4723 +5154,0 @@ mod tests {
+@@ -4723 +5156,0 @@ mod tests {
 -            false,
-@@ -4731 +5161,0 @@ mod tests {
+@@ -4731 +5163,0 @@ mod tests {
 -            false,
-@@ -4739 +5168,0 @@ mod tests {
+@@ -4739 +5170,0 @@ mod tests {
 -            false,
-@@ -4742 +5171 @@ mod tests {
+@@ -4742,8 +5173,4 @@ mod tests {
 -        assert!(!lsm_needed(
-+        assert!(!lsm_needed_for_budget(
-@@ -4744,0 +5174 @@ mod tests {
-+            true,
-@@ -4747,2 +5177 @@ mod tests {
+-            "enforce_mmap_file",
+-            false,
+-            false,
+-            false,
 -            false,
 -            true
-+            HookBudget::for_pinned_reserve(HookReserve::agent_file_guard()),
-@@ -4755 +5183,0 @@ mod tests {
+-        ));
++        let file_flow_budget = HookBudget::for_pinned_reserve(HookReserve::runtime_file_delta());
++        for hook in ["enforce_mmap_file", "enforce_file_mprotect"] {
++            assert!(!lsm_link_expected(hook, file_flow_budget, true));
++        }
+@@ -4755 +5181,0 @@ mod tests {
 -            false,
-@@ -4758 +5186 @@ mod tests {
+@@ -4758 +5184 @@ mod tests {
 -        assert!(lsm_needed(
 +        assert!(lsm_needed_for_budget(
-@@ -4764 +5192,4 @@ mod tests {
+@@ -4764 +5190,4 @@ mod tests {
 -            true
 +            HookBudget::for_pinned_reserve(
 +                HookReserve::pinned_profile_value(Some("credential-exfiltration"))
 +                    .expect("credential profile"),
 +            ),
-@@ -5866,4 +6297,3 @@ os.execv({hit:?}, [{hit:?}])
+@@ -5866,4 +6295,3 @@ os.execv({hit:?}, [{hit:?}])
 -        assert!(
 -            proc_start_time(kernel_pid).is_some(),
 -            "the test requires an init-namespace procfs view"
@@ -739,14 +746,14 @@ index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15
 +        let kernel_start = target_identity::kernel_process_start_ticks(kernel_pid)
 +            .expect("resolve current kernel start time")
 +            .expect("current process must be visible");
-@@ -5877 +6307 @@ os.execv({hit:?}, [{hit:?}])
+@@ -5877 +6305 @@ os.execv({hit:?}, [{hit:?}])
 -            let pid = marker
 +            let (pid, start) = marker
-@@ -5880 +6309,0 @@ os.execv({hit:?}, [{hit:?}])
+@@ -5880 +6307,0 @@ os.execv({hit:?}, [{hit:?}])
 -                .map(|(pid, _)| pid)
-@@ -5882,0 +6312 @@ os.execv({hit:?}, [{hit:?}])
+@@ -5882,0 +6310 @@ os.execv({hit:?}, [{hit:?}])
 +            assert_eq!(start.parse::<u64>(), Ok(kernel_start));
-@@ -6032,0 +6463,8 @@ os.execv({hit:?}, [{hit:?}])
+@@ -6032,0 +6461,8 @@ os.execv({hit:?}, [{hit:?}])
 +            "te_policy_roots",
 +            "te_policy_dirs",
 +            "te_policy_stable",
@@ -755,7 +762,7 @@ index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15
 +            "te_policy_domains",
 +            "te_policy_slot_scratch",
 +            "te_policy_permission_scratch",
-@@ -6061,0 +6500,111 @@ os.execv({hit:?}, [{hit:?}])
+@@ -6061,0 +6498,111 @@ os.execv({hit:?}, [{hit:?}])
 +    #[test]
 +    fn pinned_engine_present_rejects_stale_layout_markers() {
 +        let root = std::env::temp_dir().join(format!(
@@ -867,7 +874,7 @@ index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15
 +        assert!(!paths.map(old).exists());
 +    }
 +
-@@ -6144,0 +6694,8 @@ os.execv({hit:?}, [{hit:?}])
+@@ -6144,0 +6692,8 @@ os.execv({hit:?}, [{hit:?}])
 +            "te_policy_roots",
 +            "te_policy_dirs",
 +            "te_policy_stable",
@@ -876,7 +883,7 @@ index 4397955eb60f319044a652073903fd2631e95e58..6e8c98460518cc4281db53802ccedb15
 +            "te_policy_domains",
 +            "te_policy_slot_scratch",
 +            "te_policy_permission_scratch",
-@@ -6187,0 +6745,8 @@ os.execv({hit:?}, [{hit:?}])
+@@ -6187,0 +6743,8 @@ os.execv({hit:?}, [{hit:?}])
 +            "te_policy_roots",
 +            "te_policy_dirs",
 +            "te_policy_stable",
