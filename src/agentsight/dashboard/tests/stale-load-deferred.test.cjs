@@ -165,6 +165,78 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+async function renderReuseReview(label = '', state = '') {
+  const driver = createHooksDriver();
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchReuseSessions', 'decideReuseLabel', 'runReuseJudgements',
+  ]);
+  const page = loadPageModule('src/pages/ReuseLabelsPage.tsx', {
+    '../i18n': { useI18n: () => ({ t: (key) => key }) },
+    '../utils/apiClient': stubs,
+    '../utils/setSelection': loadPageModule('src/utils/setSelection.ts', {}, driver),
+    '../types/reuse': { ASSIGNABLE_LABELS: ['good', 'bad', 'useless'] },
+  }, driver).ReuseLabelsPage;
+  driver.render(page);
+  assert.deepEqual(driver.slots[0].value, []);
+  driver.slots[1].setter(label);
+  driver.slots[2].setter(state);
+  driver.render(page).effects[0]();
+  const row = (id) => ({ session_id: id, effective_label: label || 'unknown',
+    confirm_state: state || 'unconfirmed', human_backed: false, auto_rules: [] });
+  const original = row('target');
+  calls.fetchReuseSessions[0].resolve({ sessions: [original, row('other')] });
+  await settle();
+  function button(text, id = 'target') {
+    const tree = driver.render(page).element;
+    const item = findElement(tree, (node) => node.type === 'li' && node.props.key === id);
+    const result = findElement(item, (node) => node.type === 'button' && elementText(node).join('') === text);
+    assert.ok(result, `visible action ${text}`);
+    return result;
+  }
+  return { driver, page, calls, original, button };
+}
+
+for (const scenario of [
+  { name: 'confirm-state filter', label: '', state: 'unconfirmed', action: 'reuse.confirm',
+    update: { confirm_state: 'confirmed', human_backed: true } },
+  { name: 'label filter', label: 'unknown', state: '', action: 'good',
+    update: { effective_label: 'good', confirm_state: 'overridden', human_backed: true } },
+]) {
+  test(`reuse decisions remove rows outside the ${scenario.name} and prune their selection`, async () => {
+    const { driver, calls, original, button } = await renderReuseReview(scenario.label, scenario.state);
+    driver.slots[3].setter(new Set(['target', 'other']));
+    const pending = button(scenario.action).props.onClick();
+    calls.decideReuseLabel[0].resolve({ ...original, ...scenario.update });
+    await pending;
+    assert.deepEqual(driver.slots[0].value.map((row) => row.session_id), ['other']);
+    assert.deepEqual([...driver.slots[3].value], ['other']);
+  });
+}
+
+test('reuse rejudging applies the current label filter to the refreshed row', async () => {
+  const { driver, calls, original, button } = await renderReuseReview('unknown');
+  driver.slots[3].setter(new Set(['target']));
+  const pending = button('reuse.rejudge').props.onClick();
+  calls.runReuseJudgements[0].resolve({ examined: 1, judged: 1 });
+  await settle();
+  calls.fetchReuseSessions[1].resolve({ sessions: [{ ...original, effective_label: 'good' }] });
+  await pending;
+  assert.deepEqual(driver.slots[0].value.map((row) => row.session_id), ['other']);
+  assert.equal(driver.slots[3].value.size, 0);
+});
+
+test('a reuse decision still matching the filters preserves order and selection', async () => {
+  const { driver, calls, original, button } = await renderReuseReview('unknown');
+  driver.slots[3].setter(new Set(['target']));
+  const pending = button('reuse.confirm').props.onClick();
+  const updated = { ...original, confirm_state: 'confirmed', human_backed: true };
+  calls.decideReuseLabel[0].resolve(updated);
+  await pending;
+  assert.deepEqual(driver.slots[0].value.map((row) => row.session_id), ['target', 'other']);
+  assert.equal(driver.slots[0].value[0], updated);
+  assert.deepEqual([...driver.slots[3].value], ['target']);
+});
+
 // Mirrors the shared helper's contract: the evidence link may only name a case
 // belonging to a visible (agent-filtered) violation row. The real derivation is
 // covered against the compiled module in apiClient-regression.
