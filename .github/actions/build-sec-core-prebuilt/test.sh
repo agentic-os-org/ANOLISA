@@ -54,4 +54,5 @@ python3 "$ACTION_DIR/test_artifacts.py"
 python3 "$ACTION_DIR/test_python_sbom.py"
 python3 "$ACTION_DIR/test_build_environment.py"
 python3 "$ACTION_DIR/../prebuilt-rust-common/test_verify_glibc.py"
+python3 "$ACTION_DIR/../prebuilt-rust-common/test_archive_payload.py"
 echo 'sec-core prebuilt action tests passed'
