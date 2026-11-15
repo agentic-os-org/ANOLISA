@@ -32,25 +32,77 @@ from pathlib import Path
 #: constant: §5.2 of the design requires it to be set from measured data.
 DEFAULT_MAX_AGENT_LEN = 2000
 
+#: XML-style tag pairs injected into user turns by IDEs/CLIs (Qoder slash
+#: commands, Claude Code local-command transcripts, system reminders). Keep in
+#: sync with `SYSTEM_TAG_PAIRS` in
+#: crates/agentsight-trajectory-collector/src/store.rs.
+SYSTEM_TAG_PAIRS = (
+    ("<system-reminder>", "</system-reminder>"),
+    ("<current_notes_content>", "</current_notes_content>"),
+    ("<command-message>", "</command-message>"),
+    ("<command-name>", "</command-name>"),
+    ("<command-args>", "</command-args>"),
+    ("<local-command-caveat>", "</local-command-caveat>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
+)
+
+
+def message_text(message: object) -> str:
+    """Flatten a step message the way the shared ATIF reader does."""
+    if message is None:
+        return ""
+    if isinstance(message, str):
+        return message
+    # agentsight_atif::de_message preserves structured messages as compact
+    # JSON text. Counting the input array measures parts instead of characters.
+    return json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+
 
 def message_length(message: object) -> int:
     """Measure the shared ATIF reader's string, null and content-part forms."""
-    if message is None:
-        return 0
-    if isinstance(message, str):
-        return len(message)
-    # agentsight_atif::de_message preserves structured messages as compact
-    # JSON text. Counting the input array measures parts instead of characters.
-    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+    return len(message_text(message))
+
+
+def strip_system_context(text: str) -> str:
+    """Remove system-injected tag blocks from a user message.
+
+    Mirrors `agentsight_trajectory_collector::strip_system_context`: the same
+    tag pairs, the same rule that an unterminated opening tag swallows the
+    rest of the message, and the same blank-run collapse before trimming.
+    """
+    for open_tag, close_tag in SYSTEM_TAG_PAIRS:
+        while True:
+            start = text.find(open_tag)
+            if start < 0:
+                break
+            end = text.find(close_tag, start)
+            if end < 0:
+                text = text[:start]
+                break
+            text = text[:start] + text[end + len(close_tag) :]
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text.strip()
 
 
 def measure(atif_json):
-    """Extract the structural triage inputs from one ATIF document."""
+    """Extract the structural triage inputs from one ATIF document.
+
+    Mirrors `TriageMetrics::measure` in src/reuse/triage.rs: a user step counts
+    as a turn only when user-authored text remains after injected context is
+    stripped.
+    """
     doc = json.loads(atif_json)
     steps = doc.get("steps") or []
     return {
         "n_steps": len(steps),
-        "n_user_turns": sum(1 for s in steps if s.get("source") == "user"),
+        "n_user_turns": sum(
+            1
+            for s in steps
+            if s.get("source") == "user"
+            and strip_system_context(message_text(s.get("message")))
+        ),
         "n_tool_calls": sum(len(s.get("tool_calls") or []) for s in steps),
         "max_agent_len": max(
             (
