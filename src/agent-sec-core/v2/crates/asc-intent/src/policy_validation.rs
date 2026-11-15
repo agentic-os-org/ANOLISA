@@ -96,6 +96,191 @@ pub fn prepare_policy(model_text: &str) -> Result<Artifact, PolicyError> {
     })
 }
 
+/// Lists the permits the launch-time authorization view cannot carry.
+///
+/// A task candidate is published once and read by the sandbox, the launch authorizer and the
+/// runtime protector. The authorizer sees no request context, so its derived view drops every
+/// permit that tests `context`; such a permit still projects into the sandbox but authorizes no
+/// launch, which fails the command instead of narrowing it. Forbids are not listed: the view drops
+/// them by design and the runtime protector reads them verbatim.
+///
+/// # Errors
+/// Rejects text that `prepare_policy` would also reject as unparsable or oversized.
+pub fn launch_view_gaps(text: &str) -> Result<Vec<String>, PolicyError> {
+    let mut gaps = Vec::new();
+    for (index, policy) in parse(text)?.policies().enumerate() {
+        if policy.effect() != cedar_policy::Effect::Permit {
+            continue;
+        }
+        let est = policy.to_json().map_err(|_| PolicyError::Encoding)?;
+        let mut fields = Vec::new();
+        if !context_fields(&est["conditions"], &mut fields) {
+            continue;
+        }
+        fields.sort();
+        fields.dedup();
+        let action = est["action"]["entity"]["id"]
+            .as_str()
+            .unwrap_or("any action");
+        let tested = if fields.is_empty() {
+            "context".to_owned()
+        } else {
+            fields
+                .iter()
+                .map(|field| format!("context.input.{field}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let label = match policy.annotation("id") {
+            Some(id) => format!("#{} @id({id:?})", index + 1),
+            None => format!("#{}", index + 1),
+        };
+        gaps.push(format!("permit {label} ({action}) tests {tested}"));
+    }
+    Ok(gaps)
+}
+
+/// Lists the forbids the runtime protector cannot lower because they carry annotations.
+///
+/// The protector reads the published revision verbatim and refuses a forbid with any
+/// annotation, `@id` included, so one annotated forbid fails the whole binding. Permits are not
+/// listed: the protector skips them, and an `@id` there stays a description.
+///
+/// # Errors
+/// Rejects text that `prepare_policy` would also reject as unparsable or oversized.
+pub fn annotated_forbids(text: &str) -> Result<Vec<String>, PolicyError> {
+    Ok(parse(text)?
+        .policies()
+        .enumerate()
+        .filter(|(_, policy)| {
+            policy.effect() == cedar_policy::Effect::Forbid && policy.annotations().next().is_some()
+        })
+        .map(|(index, policy)| {
+            let keys: Vec<_> = policy
+                .annotations()
+                .map(|(key, _)| format!("@{key}"))
+                .collect();
+            format!("forbid #{} carries {}", index + 1, keys.join(", "))
+        })
+        .collect())
+}
+
+/// Lists the point grants that name a link instead of the object behind it.
+///
+/// The launch authorizer compares canonical paths and the sandbox refuses to grant a point under
+/// a name whose canonical target differs, so a permit such as `resource.path == "/usr/bin/python3"`
+/// matches nothing where that entry is a symlink, and a launch whose request covers it fails with
+/// no authorized identity. Points the same action already grants as a subtree, including the
+/// `==` half of a directory pair, are skipped: a directory pair such as `/lib` is portable and at
+/// worst redundant. `resolve` maps a path to its canonical form, or `None` when it does not
+/// exist; it reads metadata only.
+///
+/// # Errors
+/// Rejects text that `prepare_policy` would also reject as unparsable or oversized.
+pub fn point_aliases(
+    text: &str,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, PolicyError> {
+    let mut permits = Vec::new();
+    let mut subtrees: Vec<(String, String)> = Vec::new();
+    for (index, policy) in parse(text)?.policies().enumerate() {
+        if policy.effect() != cedar_policy::Effect::Permit {
+            continue;
+        }
+        let est = policy.to_json().map_err(|_| PolicyError::Encoding)?;
+        let action = est["action"]["entity"]["id"]
+            .as_str()
+            .unwrap_or("any action")
+            .to_owned();
+        let mut points = Vec::new();
+        let mut trees = Vec::new();
+        path_literals(&est["conditions"], &mut points, &mut trees);
+        subtrees.extend(trees.into_iter().map(|tree| (action.clone(), tree)));
+        permits.push((index, action, points));
+    }
+    let mut aliases = Vec::new();
+    for (index, action, points) in permits {
+        for point in points {
+            let carried = subtrees.iter().any(|(granted, tree)| {
+                granted == &action
+                    && (tree == "/" || tree == &point || point.starts_with(&format!("{tree}/")))
+            });
+            if carried {
+                continue;
+            }
+            if let Some(target) = resolve(&point).filter(|target| target != &point) {
+                aliases.push(format!(
+                    "permit #{} ({action}) grants {point}, which resolves to {target}",
+                    index + 1
+                ));
+            }
+        }
+    }
+    Ok(aliases)
+}
+
+/// Collects `resource.path == "..."` literals and the subtrees of `like "<dir>/*"` patterns.
+fn path_literals(value: &Value, points: &mut Vec<String>, subtrees: &mut Vec<String>) {
+    let path = json!({".": {"left": {"Var": "resource"}, "attr": "path"}});
+    if let Some(binary) = value.get("==") {
+        for (side, other) in [("left", "right"), ("right", "left")] {
+            if binary[side] == path
+                && let Some(literal) = binary[other]["Value"].as_str()
+            {
+                points.push(literal.to_owned());
+            }
+        }
+    }
+    if let Some(like) = value.get("like")
+        && like["left"] == path
+        && let Ok((tree, true)) = pattern_scope(&like["pattern"])
+    {
+        subtrees.push(tree);
+    }
+    match value {
+        Value::Object(map) => {
+            for child in map.values() {
+                path_literals(child, points, subtrees);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                path_literals(child, points, subtrees);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Returns whether `value` reads `context`, collecting the `context.input` fields it names.
+fn context_fields(value: &Value, fields: &mut Vec<String>) -> bool {
+    let input = json!({".": {"left": {"Var": "context"}, "attr": "input"}});
+    if value["."]["left"] == input
+        && let Some(field) = value["."]["attr"].as_str()
+    {
+        fields.push(field.to_owned());
+        return true;
+    }
+    if value.get("Var").is_some_and(|var| var == "context") {
+        return true;
+    }
+    let mut found = false;
+    match value {
+        Value::Object(map) => {
+            for child in map.values() {
+                found |= context_fields(child, fields);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                found |= context_fields(child, fields);
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
 fn parse(text: &str) -> Result<PolicySet, PolicyError> {
     if text.len() > MAX_POLICY_BYTES {
         return Err(PolicyError::TooLarge);

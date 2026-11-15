@@ -210,7 +210,7 @@ necessary conditions, approvals and obligations to be reported rather than silen
 removed. `unresolved` is model-reported, not a complete gap or conflict detector.
 
 Requests use `asc.intent.request.v1`, drafts `asc.intent.draft.v1` with
-`cedar-policy@1`, and candidates `asc.intent.candidate.v1`. Candidates contain the
+`cedar-policy@3`, and candidates `asc.intent.candidate.v1`. Candidates contain the
 original `draft`, final `artifact`, TTL, hashes and `notes`.
 CLI rechecks provenance, versions, TTL and hashes, and rebuilds the expected artifact
 from `draft.policy` with its embedded schema. Upgrade CLI and daemon together;

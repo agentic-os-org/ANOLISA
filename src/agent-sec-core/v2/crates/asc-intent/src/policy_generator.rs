@@ -21,8 +21,9 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    Artifact, INTENT_BUDGET, IntentError, PolicyDraft, PolicyError, TaskInput,
-    generate_policy_draft, prepare_policy,
+    Artifact, INTENT_BUDGET, IntentError, PolicyDraft, PolicyError, TaskInput, annotated_forbids,
+    intent_extraction::generate_policy_draft_after, launch_view_gaps, point_aliases,
+    prepare_policy,
 };
 
 /// Maximum candidate TTL; it is not the lifetime of an issued grant.
@@ -31,6 +32,12 @@ pub const MAX_PROPOSAL_TTL: u32 = 1800;
 pub const MAX_CANDIDATE_BYTES: usize = 512 * 1024;
 /// Direct Cedar candidate protocol version.
 pub const CANDIDATE_VERSION: &str = "asc.intent.candidate.v1";
+/// Prefix of the note listing permits that the launch-time authorization view drops.
+pub const LAUNCH_VIEW_NOTE: &str = "LAUNCH VIEW:";
+/// Prefix of the note listing point grants that name a link on the generating host.
+pub const POINT_ALIAS_NOTE: &str = "POINT ALIAS:";
+/// Prefix of the note listing forbids that the runtime protector refuses to lower.
+pub const RUNTIME_VIEW_NOTE: &str = "RUNTIME VIEW:";
 
 /// Built from server identity and clock; matching fields in user JSON are never accepted.
 #[derive(Clone, Serialize)]
@@ -251,6 +258,18 @@ pub enum ProposalError {
 /// accepted. The draft keeps unresolved items; Strict validation does not prove that task and
 /// policy are semantically equivalent.
 ///
+/// A valid draft whose permits test `context` is retried once with that reason, because the
+/// launch authorizer reads the same revision without context and would grant those permits
+/// nothing. A forbid carrying annotations is retried the same way, because the runtime protector
+/// refuses it and fails the whole binding. The retry only replaces the first draft when it is
+/// valid and has neither; otherwise the first draft stays the candidate and the findings travel
+/// as `LAUNCH VIEW:` and `RUNTIME VIEW:` notes.
+///
+/// The exact paths the final permits name are then resolved on this host (metadata only; nothing
+/// is sent). A point grant on a link authorizes nothing, but it is not retried: the task asked
+/// for that name, and the repair is a wider grant only a reviewer may choose. It travels as a
+/// `POINT ALIAS:` note instead.
+///
 /// # Errors
 /// Returns no candidate when input, provider, Cedar syntax/types, budgets or the deadline fail.
 pub fn propose_task(
@@ -264,8 +283,8 @@ pub fn propose_task(
         .min(context.started + context.ttl)
         .min(Instant::now() + INTENT_BUDGET);
     check_deadline(deadline)?;
-    let draft = generate_policy_draft(provider, model, task, deadline)?;
-    let artifact = match prepare_policy(draft.policy()) {
+    let mut draft = generate_policy_draft_after(provider, model, task, deadline, None)?;
+    let mut artifact = match prepare_policy(draft.policy()) {
         Ok(artifact) => artifact,
         Err(
             error @ (PolicyError::InvalidPath
@@ -280,7 +299,48 @@ pub fn propose_task(
         }
         Err(error) => return Err(error.into()),
     };
+    let mut gaps = launch_view_gaps(&artifact.text)?;
+    let mut annotated = annotated_forbids(&artifact.text)?;
+    if !gaps.is_empty() || !annotated.is_empty() {
+        let mut reasons = Vec::new();
+        if !gaps.is_empty() {
+            reasons.push(format!(
+                "the launch authorizer reads no context, so these permits would grant nothing: \
+                 {}; express permits with resource attributes only and keep \
+                 context.input.operation for forbids",
+                gaps.join("; ")
+            ));
+        }
+        if !annotated.is_empty() {
+            reasons.push(format!(
+                "the runtime protector refuses annotated forbids and fails the whole binding: \
+                 {}; write forbids without annotations and describe them in comments",
+                annotated.join("; ")
+            ));
+        }
+        let rejection = reasons.join(". ");
+        // A failed or still-gapped retry must not cost the valid first draft.
+        if let Ok(retry) =
+            generate_policy_draft_after(provider, model, task, deadline, Some(&rejection))
+            && let Ok(repaired) = prepare_policy(retry.policy())
+            && launch_view_gaps(&repaired.text).is_ok_and(|left| left.is_empty())
+            && annotated_forbids(&repaired.text).is_ok_and(|left| left.is_empty())
+        {
+            draft = retry;
+            artifact = repaired;
+            gaps.clear();
+            annotated.clear();
+        }
+    }
     check_deadline(deadline)?;
+    let aliases = point_aliases(&artifact.text, &|path| {
+        std::fs::canonicalize(path)
+            .ok()?
+            .into_os_string()
+            .into_string()
+            .ok()
+    })?;
+    let notes = candidate_notes(&gaps, &annotated, &aliases);
     let payload = CandidateContent {
         format_version: CANDIDATE_VERSION,
         status: "CANDIDATE",
@@ -288,14 +348,7 @@ pub fn propose_task(
         context: context.clone(),
         artifact,
         draft,
-        notes: vec![
-            "CANDIDATE: not approved, not effective; not connected to enforcement.".into(),
-            "Cedar Strict validates syntax and types, not task completeness. Review the policy against the original task; unresolved is model-reported, not a completeness proof.".into(),
-            "Default deny without a matching permit; forbid takes precedence. A plain permit does not restrict other policies' allows.".into(),
-            "file.read is file-content read, not listing names only. There is no implicit workspace or directory grant.".into(),
-            "Enforcement must normalize paths, handle links and namespaces, and adjudicate both rename endpoints. Only the task text is sent to the model.".into(),
-            "Scope/Binding, approval, expiry revocation and execution remain downstream; executable access does not grant its sub-operations.".into(),
-        ],
+        notes,
     };
     let candidate_hash = canonical_hash(&payload)?;
     let candidate = CandidatePolicy {
@@ -313,6 +366,42 @@ pub fn propose_task(
     Ok(ProposalOutcome::Candidate {
         candidate: Box::new(candidate),
     })
+}
+
+/// Fixed review notes plus one note per finding a consumer of this revision would trip over.
+fn candidate_notes(gaps: &[String], annotated: &[String], aliases: &[String]) -> Vec<String> {
+    let mut notes: Vec<String> = vec![
+        "CANDIDATE: not approved, not effective; not connected to enforcement.".into(),
+        "Cedar Strict validates syntax and types, not task completeness. Review the policy against the original task; unresolved is model-reported, not a completeness proof.".into(),
+        "Default deny without a matching permit; forbid takes precedence. A plain permit does not restrict other policies' allows.".into(),
+        "file.read is file-content read, not listing names only. There is no implicit workspace or directory grant.".into(),
+        "Enforcement must normalize paths, handle links and namespaces, and adjudicate both rename endpoints. Only the task text is sent to the model.".into(),
+        "Scope/Binding, approval, expiry revocation and execution remain downstream; executable access does not grant its sub-operations.".into(),
+    ];
+    if !gaps.is_empty() {
+        notes.push(format!(
+            "{LAUNCH_VIEW_NOTE} the launch authorizer drops permits that test context, so they \
+             authorize no launch: {}.",
+            gaps.join("; ")
+        ));
+    }
+    if !annotated.is_empty() {
+        notes.push(format!(
+            "{RUNTIME_VIEW_NOTE} the runtime protector refuses annotated forbids, so a Scope on \
+             this revision fails with UNSUPPORTED_ANNOTATION: {}.",
+            annotated.join("; ")
+        ));
+    }
+    if !aliases.is_empty() {
+        notes.push(format!(
+            "{POINT_ALIAS_NOTE} the authorizer compares canonical paths and the sandbox refuses \
+             a point grant on a link, so on this host these grants match nothing and a launch \
+             whose request covers them fails: {}. Grant the target as a directory pair or keep \
+             the requirement unresolved.",
+            aliases.join("; ")
+        ));
+    }
+    notes
 }
 
 fn check_deadline(deadline: Instant) -> Result<(), ProposalError> {

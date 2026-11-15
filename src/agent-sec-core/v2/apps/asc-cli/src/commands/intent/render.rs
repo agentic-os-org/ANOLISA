@@ -3,8 +3,8 @@
 
 use asc_daemon_protocol::intent::{INTENT_RESULT_BYTES, IntentProposeResult};
 use asc_intent::{
-    Artifact, CANDIDATE_VERSION, DRAFT_VERSION, PROMPT_VERSION, prepare_policy,
-    validate_policy_response,
+    Artifact, CANDIDATE_VERSION, DRAFT_VERSION, LAUNCH_VIEW_NOTE, POINT_ALIAS_NOTE, PROMPT_VERSION,
+    RUNTIME_VIEW_NOTE, prepare_policy, validate_policy_response,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -116,6 +116,20 @@ pub(super) fn render(
                 "// CANDIDATE: not approved; not effective.\n// unresolved: {}",
                 terminal_json(&candidate["draft"]["unresolved"])?
             )?;
+            // The export is fed to `policy create` as is, so a revision that would authorize no
+            // launch says so in the file instead of only in the JSON notes.
+            for note in candidate["notes"]
+                .as_array()
+                .ok_or(IntentFailure::Response)?
+            {
+                let note = note.as_str().ok_or(IntentFailure::Response)?;
+                if [LAUNCH_VIEW_NOTE, RUNTIME_VIEW_NOTE, POINT_ALIAS_NOTE]
+                    .iter()
+                    .any(|prefix| note.starts_with(prefix))
+                {
+                    writeln!(out, "// {}", escape(note))?;
+                }
+            }
             // Cedar comments may carry ESC/OSC sequences that the parser ignores but a terminal
             // executes, including clipboard writes. Only a display surface is escaped; pipes and
             // files keep the export byte-for-byte.
