@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use libbpf_rs::{Iter, ObjectBuilder};
 
@@ -52,7 +54,6 @@ pub fn resolve_process_identity(
             "target PID must be positive",
         ));
     }
-    let namespace = fs::metadata(format!("/proc/{local_pid}/ns/pid"))?;
     let caller_namespace = fs::metadata("/proc/self/ns/pid")?;
     let proc_init_namespace = fs::metadata("/proc/1/ns/pid")?;
     if caller_namespace.dev() != proc_init_namespace.dev()
@@ -63,7 +64,22 @@ pub fn resolve_process_identity(
             "procfs PID 1 is not the caller's PID namespace init",
         ));
     }
-    let proc_init_start = read_procfs_start_time(1)?;
+    // Hold the proc directory open so status, namespace and stat all
+    // refer to the same process if the visible PID is reused.
+    let proc_dir = fs::File::open(format!("/proc/{local_pid}"))?;
+    let target = PathBuf::from(format!("/proc/self/fd/{}", proc_dir.as_raw_fd()));
+    let namespace = fs::metadata(target.join("ns/pid"))?;
+    let iterator_pid =
+        if namespace.dev() == caller_namespace.dev() && namespace.ino() == caller_namespace.ino() {
+            local_pid
+        } else {
+            // The BPF iterator records the innermost TGID, whereas this procfs
+            // exposes the target by its TGID in the caller's namespace.
+            let status = fs::read(target.join("status"))?;
+            leaf_tgid_from_status(&String::from_utf8_lossy(&status), local_pid)?
+        };
+
+    let proc_init_start = read_procfs_start_time(Path::new("/proc/1/stat"))?;
     let boottime_offset = read_boottime_offset()?;
     let clock_ticks = clock_ticks_per_second()?;
     let records = read_records()?;
@@ -77,13 +93,19 @@ pub fn resolve_process_identity(
     )?;
     let kernel_pid = select_kernel_pid(
         &records,
-        local_pid,
+        iterator_pid,
         namespace.ino(),
         expected_start_time,
         boottime_offset.value,
         clock_ticks,
         procfs_start_time_bias,
     )?;
+    if read_procfs_start_time(&target.join("stat"))? != expected_start_time {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("process {local_pid} is stale or has been reused"),
+        ));
+    }
     Ok(ProcessIdentity {
         kernel_pid,
         procfs_start_time_bias,
@@ -166,14 +188,41 @@ fn iterator_error(context: &str, error: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("{context}: {error}"))
 }
 
-fn read_procfs_start_time(pid: i32) -> io::Result<u64> {
-    let path = format!("/proc/{pid}/stat");
-    let bytes = fs::read(&path)?;
+fn leaf_tgid_from_status(status: &str, visible_tgid: i32) -> io::Result<i32> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("process {visible_tgid} has no valid NStgid mapping to its PID namespace"),
+        )
+    };
+    let fields = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NStgid:"))
+        .ok_or_else(invalid)?;
+    let mut ids = fields.split_ascii_whitespace().map(|field| {
+        field
+            .parse::<i32>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(invalid)
+    });
+    if ids.next().transpose()? != Some(visible_tgid) {
+        return Err(invalid());
+    }
+    let mut leaf = ids.next().ok_or_else(invalid)??;
+    for id in ids {
+        leaf = id?;
+    }
+    Ok(leaf)
+}
+
+fn read_procfs_start_time(path: &Path) -> io::Result<u64> {
+    let bytes = fs::read(path)?;
     let stat = String::from_utf8_lossy(&bytes);
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{path} has no valid field 22 start time"),
+            format!("{} has no valid field 22 start time", path.display()),
         )
     };
     stat.rsplit_once(") ")
@@ -661,6 +710,120 @@ mod tests {
         );
         assert!(parse_boottime_offset("boottime 0 1000000000\n").is_err());
         assert!(parse_boottime_offset("boottime malformed\n").is_err());
+    }
+
+    #[test]
+    fn reads_child_tgid_from_the_procfs_view() {
+        let status = "Name:\tsleep\nNStgid:\t46321\t29\t1\nNSpid:\t46322\t30\t2\n";
+        let leaf = leaf_tgid_from_status(status, 46321).expect("child namespace mapping");
+        assert_eq!(leaf, 1);
+
+        let records = [
+            record(46321, 1, 322, 2_000_000_000),
+            record(46999, 1, 323, 2_000_000_000),
+        ];
+        assert_eq!(
+            select_kernel_pid(&records, leaf, 322, 200, 0, 100, 0)
+                .expect("resolve target in its leaf namespace"),
+            46321
+        );
+        assert_eq!(
+            select_kernel_pid(&records, leaf, 322, 201, 0, 100, 0)
+                .expect_err("refuse reused start time")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn rejects_untrustworthy_tgid_mappings() {
+        for status in [
+            "NSpid:\t46321\t1",           // Thread IDs cannot supply a TGID mapping.
+            "NStgid:\t46322\t1",          // Wrong PID in the procfs view.
+            "NStgid:\t46321",             // No child namespace ID.
+            "NStgid:\t46321\t0\t1",       // Invalid intermediate namespace ID.
+            "NStgid:\t46321\t4294967295", // ID outside the accepted representation.
+        ] {
+            assert_eq!(
+                leaf_tgid_from_status(status, 46321)
+                    .expect_err("refuse malformed mapping")
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux PID namespaces and a live BPF task iterator"]
+    fn resolves_child_namespace_process_from_parent_procfs() {
+        struct ChildGuard(std::process::Child);
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let mut unshare = ChildGuard(
+            std::process::Command::new("unshare")
+                .args([
+                    "--pid",
+                    "--fork",
+                    "--kill-child=KILL",
+                    "--mount-proc",
+                    "sleep",
+                    "30",
+                ])
+                .spawn()
+                .expect("spawn child PID namespace"),
+        );
+        let unshare_pid = unshare.0.id();
+        let children = format!("/proc/{unshare_pid}/task/{unshare_pid}/children");
+        let caller_namespace = fs::metadata("/proc/self/ns/pid").expect("caller PID namespace");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let target_pid = loop {
+            assert!(
+                unshare
+                    .0
+                    .try_wait()
+                    .expect("inspect unshare process")
+                    .is_none(),
+                "unshare exited before starting its child"
+            );
+            if let Ok(children) = fs::read_to_string(&children) {
+                if let Some(pid) = children
+                    .split_ascii_whitespace()
+                    .next()
+                    .and_then(|id| id.parse::<i32>().ok())
+                {
+                    if let Ok(namespace) = fs::metadata(format!("/proc/{pid}/ns/pid")) {
+                        if namespace.ino() != caller_namespace.ino() {
+                            break pid;
+                        }
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child PID namespace did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        let start_time = target_start_time(target_pid);
+        let identity = resolve_process_identity(target_pid, start_time)
+            .expect("resolve the child namespace process through its parent-visible PID");
+        assert!(
+            identity.kernel_pid > 0,
+            "the target has a positive kernel TGID"
+        );
+        assert_eq!(
+            resolve_process_identity(target_pid, start_time + 1)
+                .expect_err("refuse a stale start time")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     fn target_start_time(local_pid: i32) -> u64 {
