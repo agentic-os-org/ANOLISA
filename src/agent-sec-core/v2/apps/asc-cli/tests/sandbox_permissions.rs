@@ -109,7 +109,10 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
         except Exception as error:
             errors.append(error)
     read = 'permit(principal, action == SecCore::Action::"file.read", resource);'
-    write = 'permit(principal, action == SecCore::Action::"file.write", resource);'
+    # The launch baseline grants the merged-/usr links as points, which the sandbox refuses under
+    # a writable ancestor, so the write grant names a subtree instead of every resource.
+    write = ('permit(principal, action == SecCore::Action::"file.write", resource is SecCore::File) '
+        'when { resource.path == "%s" || resource.path like "%s/*" };' % (root, root))
     original_json = {'version':1, 'filesystem':{'default':'deny','rules':[
         {'effect':'allow','path':'/','rights':['read']}]},
         'execution':{'deny_paths':[]}, 'network':{'mode':'off'}}

@@ -1,5 +1,6 @@
 //! JSON and Cedar inputs shared by direct execution and per-invocation permission providers.
 
+pub mod baseline;
 mod cedar;
 
 use asc_daemon_protocol::authorization::{
@@ -90,6 +91,12 @@ impl PermissionInput {
         candidate.text.push('\n');
         candidate.text.push_str(&runtime.text);
         Ok(Self(Input::Cedar(candidate)))
+    }
+
+    /// Reports whether this input is Cedar, the only shape a launch baseline can union with.
+    #[must_use]
+    pub fn is_cedar(&self) -> bool {
+        matches!(self.0, Input::Cedar(_))
     }
 
     /// Previews the source's lexical permission regions for a launch.

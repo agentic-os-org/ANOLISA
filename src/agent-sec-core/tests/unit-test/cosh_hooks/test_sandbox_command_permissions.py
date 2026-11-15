@@ -106,6 +106,23 @@ def test_candidate_uses_same_command_cwd_and_private_cleaned_file(
     assert all(not path.exists() for path in paths)
 
 
+def test_unset_preset_leaves_the_launch_baseline_to_the_cli(
+    dynamic: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(bridge.RUNTIME_ENV)
+    prepared = []
+
+    def run(args: list[str], **kwargs: Any) -> SimpleNamespace:
+        if "propose-command" in args:
+            return response(CANDIDATE)
+        prepared.append(args)
+        return response(authorized())
+
+    monkeypatch.setattr(bridge.subprocess, "run", run)
+    assert bridge.prepare_authorized(dynamic, "echo test")["decision"] == "allow"
+    assert len(prepared) == 1 and "--runtime-permissions" not in prepared[0]
+
+
 @pytest.mark.parametrize(
     "proposal,expected",
     [

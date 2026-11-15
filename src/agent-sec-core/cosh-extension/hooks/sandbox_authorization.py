@@ -146,8 +146,9 @@ def prepare_authorized(input_data: dict[str, Any], command: str) -> dict[str, An
         payload["tool_input"] = {"command": command}
         extra = []
         if source == "command":
+            # The CLI derives the launch baseline itself; a preset only adds to it.
             preset = os.environ.get(RUNTIME_ENV, "")
-            if not os.path.isabs(preset):
+            if preset and not os.path.isabs(preset):
                 raise ValueError(
                     f"{RUNTIME_ENV} must name an absolute Cedar runtime preset"
                 )
@@ -174,7 +175,7 @@ def prepare_authorized(input_data: dict[str, Any], command: str) -> dict[str, An
             temporary.write(proposal["policy"])
             temporary.flush()
             permissions = temporary.name
-            extra = ["--runtime-permissions", preset]
+            extra = ["--runtime-permissions", preset] if preset else []
         elif source != "fixed":
             raise ValueError(f"{SOURCE_ENV} must be fixed or command")
         remaining = deadline - time.monotonic()

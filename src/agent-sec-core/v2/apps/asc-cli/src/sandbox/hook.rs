@@ -10,8 +10,8 @@ use asc_daemon_protocol::authorization::{
     ExecutionSpec,
 };
 use asc_pep_runtime::{
-    ApprovalHandler, DaemonAuthorizationClient, PepError, PepRuntime, SandboxBackend,
-    prepare_launch,
+    ApprovalHandler, DaemonAuthorizationClient, PepError, PepRuntime, PermissionInput,
+    SandboxBackend, prepare_launch,
 };
 use clap::Subcommand;
 use serde::Deserialize;
@@ -29,7 +29,7 @@ pub enum HookCommand {
         /// Installed template or prepared JSON/Cedar request, including runtime dependencies.
         #[arg(long)]
         permissions: PathBuf,
-        /// Optional Cedar runtime preset, combined before invocation and path validation.
+        /// Optional extra Cedar runtime preset; a launch-derived baseline is always applied.
         #[arg(long)]
         runtime_permissions: Option<PathBuf>,
     },
@@ -163,13 +163,15 @@ fn prepare(
         &input.cwd,
         super::target_environment()?,
     )?;
-    let is_template = permissions.extension() == Some(OsStr::new("template"));
-    let mut permissions = if is_template {
-        let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
-        template::read(permissions, Path::new(&launch.cwd), tmpdir)?
-    } else {
-        read_permissions(permissions)?
-    };
+    let tmpdir = launch.env.get("TMPDIR").map(String::as_str);
+    let mut permissions = read_candidate(permissions, Path::new(&launch.cwd), tmpdir)?;
+    if permissions.is_cedar() {
+        // A command candidate never names the interpreter, the loader or the cwd, yet the
+        // daemon refuses a launch whose program and cwd are not readable. Those are launch
+        // facts, so the baseline is derived here instead of maintained per machine.
+        permissions =
+            permissions.with_runtime(asc_pep_runtime::permissions::baseline::input(&launch)?)?;
+    }
     if let Some(preset) = runtime_permissions {
         permissions = permissions.with_runtime(read_permissions(preset)?)?;
     }
@@ -237,6 +239,19 @@ fn prepare(
     serde_json::to_writer(std::io::stdout().lock(), &output)?;
     writeln!(std::io::stdout().lock())?;
     Ok(0)
+}
+
+/// Reads the request from an installed template, bound to this launch, or a prepared file.
+fn read_candidate(
+    permissions: &Path,
+    cwd: &Path,
+    tmpdir: Option<&str>,
+) -> Result<PermissionInput, SandboxError> {
+    if permissions.extension() == Some(OsStr::new("template")) {
+        template::read(permissions, cwd, tmpdir)
+    } else {
+        read_permissions(permissions)
+    }
 }
 
 fn shell_quote(value: &str) -> String {

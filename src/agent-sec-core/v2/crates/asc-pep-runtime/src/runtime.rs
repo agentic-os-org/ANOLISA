@@ -553,7 +553,9 @@ fn verify_ceiling(
     {
         let canonical = &rule.path;
         let directory = kinds.get(canonical.as_str()).ok_or_else(|| {
-            PepError::Authorization("permission path lacks an authorized identity".into())
+            PepError::Authorization(format!(
+                "permission path lacks an authorized identity: {canonical}"
+            ))
         })?;
         paths.insert(canonical.clone());
         if *directory {
