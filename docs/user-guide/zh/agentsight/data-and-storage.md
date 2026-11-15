@@ -95,8 +95,12 @@ GenAI 维护使用独立于采集投递与查询的连接。删除分成小批�
 采集写入或排队重试需要写锁时，维护不会再启动下一批删除，而是延后到后续调度轮次。
 
 开启定时维护时，trace 进程将 primary 和 GenAI 的 WAL checkpoint 交给该维护线程，避免在采集提交时触发。
-保留与容量检查之间约每秒执行一次 passive checkpoint；清理周期仍由 `check_interval_secs` 控制。
-SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动 WAL checkpoint。
+`runtime_limits.cpu_budget_percent=0` 时，保留与容量检查之间约每秒执行一次 passive checkpoint。
+启用非零 CPU 预算时，worker 每 20 ms 检查一次，并在 WAL 增长达到 1 MiB 或距上次 checkpoint 达到
+50 ms 时请求 passive checkpoint；清理轮次在有界操作之间让出执行权时也遵循该节奏。
+`check_interval_secs` 仍控制清理周期。容量清理只在一轮结束时尝试截断 WAL：达到 live page 目标，
+或已没有可淘汰记录时执行。SQLite 的同步持久性设置保持原值。关闭定时维护时，采集连接保留自动
+WAL checkpoint。
 
 开启 `runtime_limits.cpu_budget_percent` 后，primary 与 GenAI 清理会在有界操作之间让出执行权，
 并在后续调度继续。维护与采集投递共用 CPU 准入，既有保留和容量目标继续生效，但清理一轮可能耗时更长。
@@ -112,6 +116,9 @@ over_budget、failed 区分排队、锁冲突、写入成功、预算拒绝和�
 2. 如果按时间删除改变了数据库，必须成功完成 WAL checkpoint 后才能继续。
 3. 仅在物理占用（database、WAL 与 SHM）超过上限时触发容量淘汰。
 4. 按最旧且允许淘汰的记录清理，每轮 checkpoint，直到逻辑占用降至上限的 90%。
+
+90% 目标只统计 live page，不计 WAL 与 SHM，因此在下一次边界 checkpoint 截断 WAL 之前，物理占用
+可能超出 `max_db_size_mb` 约 WAL+SHM 的大小。
 
 总量分配排序同样计入 WAL 与 SHM，因此 WAL 较大的数据库可能在一轮中优先治理。该数据库会在淘汰前执行
 checkpoint，后续轮次再按新的物理占用重新分配。

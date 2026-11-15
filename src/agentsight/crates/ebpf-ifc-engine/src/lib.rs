@@ -5068,6 +5068,8 @@ mod tests {
         let budget = HookBudget::for_pinned_reserve(reserve);
         // The path_unlink LSM gate must be attached so deletions are blocked.
         assert!(lsm_link_expected("enforce_path_unlink", budget, true));
+        assert!(lsm_link_expected("enforce_mmap_file", budget, true));
+        assert!(lsm_link_expected("enforce_file_mprotect", budget, true));
         assert!(budget.suppress_dataflow_tracepoints);
     }
 
@@ -5168,14 +5170,10 @@ mod tests {
             false,
             false
         ));
-        assert!(!lsm_needed_for_budget(
-            "enforce_mmap_file",
-            false,
-            true,
-            false,
-            false,
-            HookBudget::for_pinned_reserve(HookReserve::agent_file_guard()),
-        ));
+        let file_flow_budget = HookBudget::for_pinned_reserve(HookReserve::runtime_file_delta());
+        for hook in ["enforce_mmap_file", "enforce_file_mprotect"] {
+            assert!(!lsm_link_expected(hook, file_flow_budget, true));
+        }
         assert!(lsm_needed(
             "enforce_file_permission",
             false,
