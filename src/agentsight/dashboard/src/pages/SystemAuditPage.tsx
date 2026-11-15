@@ -142,6 +142,25 @@ function buildProcessTree(evidence: SecurityEvidenceEvent[]): {
     if (node) node.labels = Array.from(set);
   }
 
+  // Historical evidence can reuse PIDs, forming cycles in this PID-only
+  // projection even though each recorded relationship was valid at the time.
+  // Break one display edge per cycle so every process remains reachable;
+  // the original parent identities stay available in the raw evidence.
+  const checked = new Set<number>();
+  for (const start of nodes.values()) {
+    const ancestors = new Set<number>();
+    let node: ProcessTreeNode | undefined = start;
+    while (node && !checked.has(node.pid)) {
+      checked.add(node.pid);
+      ancestors.add(node.pid);
+      if (node.ppid !== null && ancestors.has(node.ppid)) {
+        node.ppid = null;
+        break;
+      }
+      node = node.ppid === null ? undefined : nodes.get(node.ppid);
+    }
+  }
+
   const roots: ProcessTreeNode[] = [];
   for (const node of nodes.values()) {
     if (node.ppid !== null && nodes.has(node.ppid) && node.ppid !== node.pid) {

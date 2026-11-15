@@ -1649,6 +1649,63 @@ test('interruption panel: resolved events are neither counted nor offered Resolv
   assert.equal(resolveButtons.length, 1, 'the unresolved row must offer Resolve');
 });
 
+// ─── SystemAuditPage: process cycles ───
+
+function auditTreeFunctions() {
+  // Execute the production pure helpers without mounting the rest of the page.
+  const code = transpile('src/pages/SystemAuditPage.tsx');
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', `${code}\nmodule.exports.tree = { buildProcessTree, flattenProcessTree };`)(
+    () => ({}), module, module.exports,
+  );
+  return module.exports.tree;
+}
+
+test('audit process trees retain all evidence when PID reuse produces a parent cycle', () => {
+  const { buildProcessTree, flattenProcessTree } = auditTreeFunctions();
+  // PID 40 was a child of the original PID 30. After 30 exits and its PID is
+  // reused by a child of 40, a historical PID-only projection has a cycle.
+  const evidence = [
+    { identity: { pid: 40, ppid: 30 }, event_type: 'taint_transition', event: { label: 'secret' } },
+    { identity: { pid: 30, ppid: 40 }, event_type: 'file_action', event: {} },
+    { identity: { pid: 50, ppid: 30 }, event_type: 'network_action', event: {} },
+    { identity: { pid: 90, ppid: 1 }, event_type: 'file_action', event: {} },
+  ];
+  const original = JSON.stringify(evidence);
+  const tree = buildProcessTree(evidence);
+  const flattened = [];
+  flattenProcessTree(tree.roots, 0, flattened);
+  assert.deepEqual(flattened.map(({ node }) => node.pid).sort((a, b) => a - b), [1, 30, 40, 50, 90]);
+  assert.equal(flattened.length, tree.count, 'each counted process must be visible exactly once');
+  assert.deepEqual(flattened.find(({ node }) => node.pid === 40).node.labels, ['SECRET']);
+  assert.equal(JSON.stringify(evidence), original, 'raw evidence must retain the recorded parents');
+});
+
+test('audit process trees handle inherited parent cycles without losing descendants', () => {
+  const { buildProcessTree, flattenProcessTree } = auditTreeFunctions();
+  const evidence = [[30, 40], [40, 50], [50, 30], [50, 60]].map(([parent, child]) => ({
+    identity: { pid: child }, event_type: 'taint_transition',
+    event: { transition: 'inherit', source_pid: parent, target_pid: child, label: 'private' },
+  }));
+  const tree = buildProcessTree(evidence);
+  const flat = [];
+  flattenProcessTree(tree.roots, 0, flat);
+  assert.deepEqual(flat.map(({ node }) => node.pid).sort((a, b) => a - b), [30, 40, 50, 60]);
+  assert.equal(flat.length, tree.count);
+});
+
+test('audit process trees preserve ordinary parent chains and missing-parent roots', () => {
+  const { buildProcessTree, flattenProcessTree } = auditTreeFunctions();
+  const tree = buildProcessTree([
+    { identity: { pid: 20, ppid: 10 }, event_type: 'file_action', event: {} },
+    { identity: { pid: 30, ppid: 20 }, event_type: 'file_action', event: {} },
+  ]);
+  const flat = [];
+  flattenProcessTree(tree.roots, 0, flat);
+  assert.deepEqual(flat.map(({ node, depth }) => [node.pid, node.ppid, depth]),
+    [[10, null, 0], [20, 10, 1], [30, 20, 2]]);
+});
+
 // ─── SystemAuditPage: a list that shrinks under the current offset ───────────
 //
 // Every list on this page renders its pager only while `total > pageSize` (the
