@@ -175,6 +175,9 @@ pub(super) fn metadata_request(request: &mut ParsedRequest) {
     request.reassembled_body = None;
     request.body_offset = 0;
     request.body_len = 0;
+    // Metadata-only conversion rewrites body storage outside
+    // `set_reassembled_body`; drop any digest cached for the old bytes.
+    request.clear_fingerprint_cache();
 }
 
 /// Drop response bytes without decompressing or serializing partial content.

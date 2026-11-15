@@ -133,7 +133,9 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
 #define SSL_EMIT_TIERED(src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_)       \
     do {                                                                                   \
         u32 _l = (u32)(len_);                                                              \
-        if (_l <= SSL_TIER_SMALL)                                                          \
+        if (_l <= SSL_TIER_TINY)                                                           \
+            SSL_EMIT_ONE(probe_SSL_data_tiny, SSL_TIER_TINY, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);    \
+        else if (_l <= SSL_TIER_SMALL)                                                     \
             SSL_EMIT_ONE(probe_SSL_data_small, SSL_TIER_SMALL, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);   \
         else if (_l <= SSL_TIER_MEDIUM)                                                    \
             SSL_EMIT_ONE(probe_SSL_data_medium, SSL_TIER_MEDIUM, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_); \
