@@ -300,9 +300,18 @@ fn unescape_maps_path(raw: &str) -> String {
 
 /// Collects `root_pid` and every descendant via `/proc` parent links.
 fn process_tree(root_pid: i32) -> Vec<i32> {
+    walk_tree(root_pid, &children_snapshot())
+}
+
+/// Parent/child edges below `root_pid`, every parent listed before its children.
+pub(super) fn process_tree_edges(root_pid: i32) -> Vec<(i32, i32)> {
+    walk_edges(root_pid, &children_snapshot())
+}
+
+fn children_snapshot() -> HashMap<i32, Vec<i32>> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
     let Ok(proc_dir) = fs::read_dir("/proc") else {
-        return vec![root_pid];
+        return children;
     };
     for entry in proc_dir.flatten() {
         let name = entry.file_name();
@@ -314,7 +323,24 @@ fn process_tree(root_pid: i32) -> Vec<i32> {
         };
         children.entry(ppid).or_default().push(pid);
     }
-    walk_tree(root_pid, &children)
+    children
+}
+
+/// Breadth-first edges so a parent is always handled before its children;
+/// shares the visited-set guard of [`walk_tree`].
+fn walk_edges(root_pid: i32, children: &HashMap<i32, Vec<i32>>) -> Vec<(i32, i32)> {
+    let mut visited = std::collections::HashSet::from([root_pid]);
+    let mut edges = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root_pid]);
+    while let Some(pid) = queue.pop_front() {
+        for &kid in children.get(&pid).into_iter().flatten() {
+            if visited.insert(kid) {
+                edges.push((pid, kid));
+                queue.push_back(kid);
+            }
+        }
+    }
+    edges
 }
 
 /// Breadth-first descent over a parent/child snapshot. The visited set is
@@ -337,7 +363,7 @@ fn walk_tree(root_pid: i32, children: &HashMap<i32, Vec<i32>>) -> Vec<i32> {
     tree
 }
 
-fn parent_of(pid: i32) -> Option<i32> {
+pub(super) fn parent_of(pid: i32) -> Option<i32> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.rsplit_once(')')?.1;
     // Fields after comm: state, ppid, ...
@@ -447,6 +473,21 @@ mod tests {
     fn current_process_is_in_its_own_tree() {
         let pid = std::process::id() as i32;
         assert!(process_tree(pid).contains(&pid));
+    }
+
+    #[test]
+    fn walk_edges_lists_parents_first_and_terminates_on_cycles() {
+        let children: HashMap<i32, Vec<i32>> =
+            HashMap::from([(1, vec![2, 3]), (2, vec![4]), (4, vec![1, 2]), (3, vec![5])]);
+        let edges = walk_edges(1, &children);
+        assert_eq!(edges.len(), 4, "{edges:?}");
+        for (index, (parent, _)) in edges.iter().enumerate() {
+            assert!(
+                *parent == 1 || edges[..index].iter().any(|(_, kid)| kid == parent),
+                "{edges:?}"
+            );
+        }
+        assert!(walk_edges(9, &children).is_empty());
     }
 
     #[test]

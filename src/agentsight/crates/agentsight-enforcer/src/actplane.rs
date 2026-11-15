@@ -298,6 +298,73 @@ impl ActPlaneBackend {
         self.structured_delete_ready() && self.engine.supports_file_permission_guard()
     }
 
+    /// Bind the processes the root forked before this binding landed.
+    ///
+    /// The fork hook only carries the domain to children forked after the
+    /// root is seeded, but a session root such as an interactive shell forks
+    /// its workers right at startup, usually before discovery has applied the
+    /// binding. Without this sweep those workers, and everything they spawn,
+    /// would stay outside the policy for the whole session.
+    ///
+    /// Forks from an adopted parent inherit the domain in the kernel; a fork
+    /// from a parent not adopted yet can slip between the `/proc` snapshot and
+    /// the parent's adoption, so the sweep repeats until a pass adopts nothing.
+    fn adopt_preexisting_descendants(&self, request: &ApplyPolicy, kernel_pid: i32, id: u32) {
+        const PASSES: usize = 4;
+        // `/proc` speaks the enforcer's PID namespace while the maps are keyed
+        // by init-namespace TGIDs; only a shared namespace makes them agree.
+        if kernel_pid != request.root_pid {
+            log::warn!(
+                "binding {} domain {}: root pid {} is namespaced (kernel pid {kernel_pid}); pre-existing descendants are not adopted",
+                request.binding_id,
+                id,
+                request.root_pid
+            );
+            return;
+        }
+        let mut adopted = Vec::new();
+        let mut errors = Vec::new();
+        for _ in 0..PASSES {
+            let mut progressed = false;
+            for (parent, child) in preexisting_maps::process_tree_edges(kernel_pid) {
+                match self.engine.adopt_child(parent, child, id) {
+                    Ok(false) => {}
+                    // Re-check the link: a child that exited or whose pid was
+                    // reused after the snapshot must not keep the binding.
+                    Ok(true) if preexisting_maps::parent_of(child) == Some(parent) => {
+                        adopted.push(child);
+                        progressed = true;
+                    }
+                    Ok(true) => {
+                        if let Err(error) = self.engine.unbind_pid_from_domain(child, id) {
+                            errors.push(format!("drop stale pid {child}: {error}"));
+                        }
+                    }
+                    Err(error) => errors.push(format!("adopt pid {child}: {error}")),
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        if !adopted.is_empty() {
+            log::info!(
+                "binding {} domain {}: adopted {} pre-existing descendants {adopted:?}",
+                request.binding_id,
+                id,
+                adopted.len()
+            );
+        }
+        if !errors.is_empty() {
+            log::warn!(
+                "binding {} domain {}: pre-existing descendants remain outside the policy: {}",
+                request.binding_id,
+                id,
+                errors.join("; ")
+            );
+        }
+    }
+
     fn cleanup_binding(&self, id: u32, kernel_pid: i32) -> Vec<String> {
         let mut errors = Vec::new();
         if let Err(error) = self.engine.unbind_pid_from_domain(self.control_pid, id) {
@@ -523,6 +590,7 @@ impl ActPlaneBackend {
                 migration.summary()
             );
         }
+        self.adopt_preexisting_descendants(&request, kernel_pid, id);
 
         if let Some(compiled) = compiled.as_ref() {
             let control_state = CapState {

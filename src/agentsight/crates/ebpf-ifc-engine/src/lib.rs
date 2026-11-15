@@ -3285,6 +3285,72 @@ impl PinnedEngine {
         migrate_session_tree_domains(&mut proc, &roots, &mut tasks, root_pid, new_domain)
     }
 
+    /// Bind a process that already existed when its parent was bound, as if
+    /// the fork had happened afterwards.
+    ///
+    /// The fork tracepoint only covers children forked after the parent joined
+    /// `domain_id`, so a session root that forks its workers before the
+    /// binding lands would leave them outside every policy. This mirrors
+    /// `te_fork` for one pid: the parent's global and per-domain state and its
+    /// session root are copied first, and `cap_task` is written last so the
+    /// child never becomes active with a half-written state.
+    ///
+    /// Returns `Ok(false)` without touching any map when the child is already
+    /// bound (forked after the parent joined, or owned by another binding) or
+    /// when the parent is not bound to `domain_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a map cannot be opened or written; entries
+    /// written before the failure stay inert because `cap_task` is untouched.
+    pub fn adopt_child(&self, parent_pid: i32, child_pid: i32, domain_id: u32) -> io::Result<bool> {
+        if parent_pid <= 0 || child_pid <= 0 || domain_id == 0 {
+            return Err(err("parent pid, child pid and domain id must all be set"));
+        }
+        let mut tasks: HashMap<_, i32, u32> = pinned_hash_map(&self.paths, "cap_task")?;
+        if map_get_optional(&tasks, &child_pid, "lookup child cap_task")?.is_some()
+            || map_get_optional(&tasks, &parent_pid, "lookup parent cap_task")? != Some(domain_id)
+        {
+            return Ok(false);
+        }
+        let mut global: HashMap<_, i32, ProcState> = pinned_hash_map(&self.paths, "ts_proc")?;
+        if let Some(state) = map_get_optional(&global, &parent_pid, "lookup parent ts_proc")? {
+            global
+                .insert(child_pid, state, 0)
+                .map_err(|e| err(format!("adopt ts_proc: {e}")))?;
+        }
+        let mut proc: HashMap<_, PidDomainKey, ProcState> =
+            pinned_hash_map(&self.paths, "ts_proc_domains")?;
+        let parent_key = PidDomainKey {
+            pid: parent_pid,
+            domain_id,
+        };
+        let state = map_get_optional(&proc, &parent_key, "lookup parent ts_proc_domains")?
+            .unwrap_or(ProcState {
+                labels: 0,
+                lin_gates: 0,
+            });
+        proc.insert(
+            PidDomainKey {
+                pid: child_pid,
+                domain_id,
+            },
+            state,
+            0,
+        )
+        .map_err(|e| err(format!("adopt ts_proc_domains: {e}")))?;
+        let mut roots: HashMap<_, i32, i32> = pinned_hash_map(&self.paths, "ts_root")?;
+        let root =
+            map_get_optional(&roots, &parent_pid, "lookup parent ts_root")?.unwrap_or(parent_pid);
+        roots
+            .insert(child_pid, root, 0)
+            .map_err(|e| err(format!("adopt ts_root: {e}")))?;
+        tasks
+            .insert(child_pid, domain_id, 0)
+            .map_err(|e| err(format!("adopt cap_task: {e}")))?;
+        Ok(true)
+    }
+
     /// Consumes at most the records that could be queued in one ring-buffer snapshot.
     ///
     /// The caller must hold the lock from [`Self::try_lock_runtime`] continuously
