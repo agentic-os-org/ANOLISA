@@ -4632,6 +4632,45 @@ fn stats_clear_prompt_fails_without_clearing_when_the_consumer_stopped_reading()
     );
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn stats_clear_requires_explicit_yes_when_stdout_is_closed_at_startup() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let fixture = TempStatsDb::new().expect("seed a private statistics database");
+    let mut child = Command::new("sh")
+        .args(["-c", r#"exec "$1" stats clear 1>&-"#, "sh"])
+        .arg(fixture.command().get_program())
+        .env("TOKENLESS_STATS_DB", &fixture.path)
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(b"y\n");
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let recorder = StatsRecorder::new(&fixture.path).unwrap();
+    assert!(
+        recorder.record_by_id(fixture.record_id).unwrap().is_some(),
+        "an unseen prompt must preserve the seeded record (status: {}, stderr: {stderr})",
+        output.status
+    );
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("use --yes for automation"), "{stderr}");
+
+    let forced = fixture
+        .command()
+        .args(["stats", "clear", "--yes"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(forced.status.success(), "{forced:?}");
+    assert_eq!(recorder.count().unwrap(), 0);
+}
+
 /// A response above the 500-character TOON minimum, so `compress-toon`
 /// actually encodes it instead of taking the passthrough branch.
 #[cfg(target_os = "linux")]
