@@ -30,6 +30,15 @@ policy 只写静态可确定的部分；PATH 未解析、脚本内部行为、�
 
 程序启动与其文件、网络操作分别推导，不把列名或元数据读取扩大为内容读取。
 
+## 删除与重命名
+
+删除与重命名改变的是目录项：执行端完成 unlink、rename 需要**目标所在目录**的写权限，只写目标文件本身无法完成操作。
+
+- 删改字面文件 F（rm、unlink、mv、os.remove、os.rename 等）：写 F 的父目录。
+- 删除目录 D（rm -r、shutil.rmtree 等）：写 D 的父目录。
+- 目录必须成对写成 resource.path == "<目录>" 与 resource.path like "<目录>/*"；只写其中一条会被执行端以 point-only or descendants-only directory permissions 拒绝。
+- schema 没有独立的 delete、rename 动作，仍用 file.write 表达，并在 caveats 说明"删除/重命名以所在目录的写权限表达"。
+
 ## schema 约束
 
 仅用 schema 定义的类型、动作和字段；principal 未绑定，文件用 resource is SecCore::File 与 resource.path。== 与 != 只接具体绝对路径（如 == "/work/repo/report.csv"）；目录子树必须写 like "/work/repo/src/*"，不要写 == "/work/repo/src/*"。process.spawn 的 resource 是 SecCore::Process，其 program 是程序名（如 "git"），不是路径，不要写 resource.path。
