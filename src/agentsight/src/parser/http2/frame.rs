@@ -506,36 +506,36 @@ impl ParsedHttp2Frame {
             29 => Some(("content-location", "")),
             30 => Some(("content-range", "")),
             31 => Some(("content-type", "")),
-            32 => Some(("date", "")),
-            33 => Some(("etag", "")),
-            34 => Some(("expect", "")),
-            35 => Some(("expires", "")),
-            36 => Some(("from", "")),
-            37 => Some(("host", "")),
-            38 => Some(("if-match", "")),
-            39 => Some(("if-modified-since", "")),
-            40 => Some(("if-none-match", "")),
-            41 => Some(("if-range", "")),
-            42 => Some(("if-unmodified-since", "")),
-            43 => Some(("last-modified", "")),
-            44 => Some(("link", "")),
-            45 => Some(("location", "")),
-            46 => Some(("max-forwards", "")),
-            47 => Some(("proxy-authenticate", "")),
-            48 => Some(("proxy-authorization", "")),
-            49 => Some(("range", "")),
-            50 => Some(("referer", "")),
-            51 => Some(("refresh", "")),
-            52 => Some(("retry-after", "")),
-            53 => Some(("server", "")),
-            54 => Some(("set-cookie", "")),
-            55 => Some(("strict-transport-security", "")),
-            56 => Some(("transfer-encoding", "")),
-            57 => Some(("user-agent", "")),
-            58 => Some(("vary", "")),
-            59 => Some(("via", "")),
-            60 => Some(("www-authenticate", "")),
-            61 => Some(("x-forwarded-for", "")),
+            32 => Some(("cookie", "")),
+            33 => Some(("date", "")),
+            34 => Some(("etag", "")),
+            35 => Some(("expect", "")),
+            36 => Some(("expires", "")),
+            37 => Some(("from", "")),
+            38 => Some(("host", "")),
+            39 => Some(("if-match", "")),
+            40 => Some(("if-modified-since", "")),
+            41 => Some(("if-none-match", "")),
+            42 => Some(("if-range", "")),
+            43 => Some(("if-unmodified-since", "")),
+            44 => Some(("last-modified", "")),
+            45 => Some(("link", "")),
+            46 => Some(("location", "")),
+            47 => Some(("max-forwards", "")),
+            48 => Some(("proxy-authenticate", "")),
+            49 => Some(("proxy-authorization", "")),
+            50 => Some(("range", "")),
+            51 => Some(("referer", "")),
+            52 => Some(("refresh", "")),
+            53 => Some(("retry-after", "")),
+            54 => Some(("server", "")),
+            55 => Some(("set-cookie", "")),
+            56 => Some(("strict-transport-security", "")),
+            57 => Some(("transfer-encoding", "")),
+            58 => Some(("user-agent", "")),
+            59 => Some(("vary", "")),
+            60 => Some(("via", "")),
+            61 => Some(("www-authenticate", "")),
             _ => None,
         }
     }
@@ -941,6 +941,41 @@ mod tests {
         payload.extend(std::iter::repeat_n(0u8, 2));
         let frame = headers_frame_with_flags(0x2c, payload); // END_HEADERS | PADDED | PRIORITY
         assert_status_and_content_type(&frame.decode_headers_stateless());
+    }
+
+    /// RFC 7541 Appendix A defines 61 static entries and places `cookie` at
+    /// index 32. The stateless table omitted it, so every name from 32 upward
+    /// resolved to the next entry's name and index 61 invented
+    /// `x-forwarded-for`. Both the stateless decoder and its literal-name
+    /// lookup read this table, so a mid-connection capture showed `host` as
+    /// `if-match` and `user-agent` as `vary`.
+    #[test]
+    fn stateless_static_table_matches_rfc7541_appendix_a() {
+        for (index, expected) in [
+            (32u8, "cookie"),
+            (33, "date"),
+            (57, "transfer-encoding"),
+            (58, "user-agent"),
+            (60, "via"),
+            (61, "www-authenticate"),
+        ] {
+            let headers = headers_frame(vec![0x80 | index]).decode_headers_stateless();
+            assert_eq!(
+                headers,
+                vec![(expected.to_string(), Some(String::new()))],
+                "static index {index} must name {expected}"
+            );
+        }
+
+        // A literal header that takes its name from static index 58
+        // (`user-agent`) must resolve the same entry.
+        let mut payload = vec![0x40 | 58];
+        payload.push(1);
+        payload.push(b'x');
+        assert_eq!(
+            headers_frame(payload).decode_headers_stateless(),
+            vec![("user-agent".to_string(), Some("x".to_string()))]
+        );
     }
 
     /// A bare HEADERS block (no framing flags) must keep decoding exactly as
