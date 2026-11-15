@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from check_resource_limits import LIMITS
 from mock_llm_server import PREFLIGHT_TOTAL_TOKENS
 from resource_inputs import Inputs, arguments, ensure_python
 from resource_report import report
@@ -22,6 +23,10 @@ from validate_results import load_captured, load_ffi_captured
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[2]
+# Report safety-stop reference only; the CI gate lines come from check_resource_limits.
+REPORT_RSS_TARGET_MIB = 350.0
+RSS_AVERAGE_GATE_MIB = float(LIMITS["rss_average_mib"][1])
+RSS_PEAK_GATE_MIB = float(LIMITS["rss_peak_mib"][1])
 
 
 class Interrupted(Exception):
@@ -359,6 +364,87 @@ def worker(job_path: Path) -> int:
     return result["returncode"]
 
 
+def render_metrics_report(
+    directory: Path, connection_capacity: int
+) -> tuple[Path | None, str | None]:
+    """Render one run's HTML evaluation report.
+
+    Returns the report path on success or an error message on failure; a missing
+    metrics.csv is skipped. The report is auxiliary, so callers must not turn a
+    rendering failure into a failed benchmark.
+    """
+    metrics = directory / "metrics.csv"
+    if not metrics.is_file():
+        return None, None
+    report_path = directory / "metrics-report.html"
+    command = [
+        sys.executable,
+        "-B",
+        str(HERE / "plot_metrics.py"),
+        str(metrics),
+        "--output",
+        str(report_path),
+        "--rss-target-mb",
+        f"{REPORT_RSS_TARGET_MIB:g}",
+        "--rss-gate-mib",
+        f"{RSS_PEAK_GATE_MIB:g}",
+        "--rss-average-gate-mib",
+        f"{RSS_AVERAGE_GATE_MIB:g}",
+        "--connection-capacity",
+        str(connection_capacity),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except OSError as error:
+        return None, str(error)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        return None, detail or f"plot_metrics.py exited {result.returncode}"
+    return report_path, None
+
+
+def render_ab_comparison(output: Path) -> tuple[Path | None, str | None]:
+    """Render the before/after comparison page when both runs produced metrics."""
+    before = output / "before"
+    after = output / "after"
+    if not (before / "metrics.csv").is_file() or not (after / "metrics.csv").is_file():
+        return None, None
+    report_path = output / "ab-comparison.html"
+    command = [
+        sys.executable,
+        "-B",
+        str(HERE / "plot_ab_comparison.py"),
+        "--baseline-dir",
+        str(before),
+        "--optimized-dir",
+        str(after),
+        "--output",
+        str(report_path),
+        "--title",
+        "AgentSight A/B 对比 · before vs after",
+        "--resource-summary",
+        str(output / "resource-summary.json"),
+        "--rss-target-mb",
+        f"{REPORT_RSS_TARGET_MIB:g}",
+        "--rss-gate-mib",
+        f"{RSS_PEAK_GATE_MIB:g}",
+        "--rss-average-gate-mib",
+        f"{RSS_AVERAGE_GATE_MIB:g}",
+        "--warmup-seconds",
+        "300",
+        "--slope-window-seconds",
+        "900",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except OSError as error:
+        return None, str(error)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        return None, detail or f"plot_ab_comparison.py exited {result.returncode}"
+    return report_path, None
+
+
 def main() -> int:
     """Prepare all inputs before measuring, then report and reclaim owned worktrees."""
     args = arguments(COMPONENT)
@@ -554,6 +640,26 @@ def main() -> int:
             exit_code = exit_code or 1
         if not report(output, sources):
             exit_code = exit_code or 1
+        for label in sources:
+            report_path, error = render_metrics_report(
+                output / label, args.connection_capacity
+            )
+            if report_path is not None:
+                print(f"Metrics report: {report_path}", flush=True)
+            if error:
+                print(
+                    f"warning: cannot render metrics report for {label}: {error}",
+                    file=sys.stderr,
+                )
+        if "before" in sources and "after" in sources:
+            ab_path, error = render_ab_comparison(output)
+            if ab_path is not None:
+                print(f"A/B report: {ab_path}", flush=True)
+            if error:
+                print(
+                    f"warning: cannot render A/B report: {error}",
+                    file=sys.stderr,
+                )
     return exit_code
 
 

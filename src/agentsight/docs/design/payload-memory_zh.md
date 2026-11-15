@@ -62,6 +62,13 @@ SQLite 为唯一活跃 sink 时也跳过 payload 延迟等待：完成的 captur
 映射的调用只在已有的 retroactive fix-up registry 中保留 call ID；后续文件写入同时修正 session 列
 和完成事件 JSON。FFI 与活跃的非 SQLite exporter 继续延迟投递，因为已经发给这些消费者的事件无法修正。
 
+Raw completion 与延迟 GenAI 调用共用配置中的 pending 字节及数量上限。Raw 队列最多使用共享字节额度
+的一半，为延迟投递与 SQLite 本地重试保留容量；FFI 与活跃的非 SQLite exporter 已投递的事件无法
+修正，因此需要这项保留。代价是等待 CPU 准入时会更早对事件接收施加同步背压。真正达到共享硬上限，
+以及单个超大任务等待准入时，仍同步施加背压，保留有界所有权与 FIFO 投递。
+Standalone 循环每次接收尝试只执行一次 tick，FFI 轮询沿用同一维护入口。
+`completion_backpressure` 阶段记录 Raw 队列达到保留份额或共享硬上限时同步准入及投递的耗时。
+
 已注册的 sink 会报告当前是否活跃；未知 exporter 默认按活跃处理。默认 Logtail 的路径选择和实际写入
 复用同一组目标文件存在性及 telemetry sentinel 检查。动态 sink 每次重新读取当前路径，因此暂停后
 恢复不需要重新注册。立即投递仍会调用不活跃 sink 的原有写入门控：落库过程中启用时不会丢弃当前
@@ -77,6 +84,13 @@ SQLite completion 在获取连接锁前序列化 JSON。容量选择使用存储
 避免持锁加载并逐字扫描整份 payload。投递仍为同步执行；这些修改缩短其临界区，不增加持久化队列。
 完成事件的 JSON 按保留 payload 的估算预留容量，并释放序列化产生的多余容量。SQLite 消息列需要完整
 数组时，从该 JSON 借用 `RawValue`；增量子集保留原有序列化方式及完整字段内容。
+
+Pending-match 指纹以固定长度 digest 缓存在 parsed request 中，供 idle 或 crash snapshot 后复用。
+路由、source timestamp、编码或 body 替换会使缓存失效。Raw 投递直接 hash 保留的已序列化 body，
+semantic 投递通过 streaming writer hash 已解析 JSON。非 LLM 记录在这些 hash 计算前被过滤。
+两条路径都不额外保留 payload 副本，并保持 match key 的字节兼容。HTTP/2 流完成事件不携带
+HTTP/1 的请求快照，因此本次改动中仍走完整哈希路径。
+
 直接插入与 promotion 的回退插入复用同一份序列化结果，包括容量错误后的重试。
 
 GenAI 维护通过注册路径打开独立连接，不等待写锁，也不触发自动 WAL checkpoint。按时间和容量删除
@@ -84,6 +98,12 @@ GenAI 维护通过注册路径打开独立连接，不等待写锁，也不触�
 批次之间让出执行机会，写锁冲突时将剩余工作延后。checkpoint 先通过 passive 模式复制 WAL 页面，再
 尝试不等待的截断；未完成 checkpoint 时停止后续容量淘汰。按时间清理、容量清理与 checkpoint 分别计时，
 用于区分维护耗时来源。
+启用 CPU 预算的 worker 每 20 ms 检查 WAL，增长 1 MiB 或距上次 checkpoint 达到 50 ms 时安排
+passive checkpoint，分批清理期间也执行。实际执行仍取决于共享 CPU 预算，这些调度目标不保证 WAL
+大小或 checkpoint 耗时上限。容量清理使用 SQLite 当前 live page 数量，排除 freelist 和可复用 WAL
+空间；只在清理开始和结束时截断，每批之间保留 passive checkpoint 和读锁阻塞检查。
+指标记录 WAL 字节数、总页面数、已复制及待复制页面数、checkpoint 结果，以及 passive/truncate
+各自耗时。PASSIVE 单次仍可能复制全部可用 WAL，不能按分片操作理解。
 
 FFI 将调用和 HTTP 记录 move 到 boxed 队列条目。字节 reservation 在出队后持续到 callback 返回，
 发送失败或 receiver 销毁时自动扣回。大 JSON 字段直接序列化为带 NUL 结尾的字节 buffer，长度不包含

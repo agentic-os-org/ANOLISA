@@ -1309,6 +1309,44 @@ fn call_turn_indices_survives_null_call_id_row() {
     cleanup_db(&path);
 }
 
+/// A skipped NULL `call_id` row must not consume a turn number either. The
+/// existing tests place that row last, which hides the shift: when it precedes
+/// a session's calls, every later call was numbered one turn too high, and the
+/// savings horizon derived from the highest turn index was inflated with it.
+#[test]
+fn null_call_id_row_before_calls_keeps_turn_indices() {
+    let (store, path) = create_populated_store("tc_null_call_id_first");
+    {
+        // Fixture-only raw insert: a foreign writer's malformed row, placed
+        // before every valid sess-1 row.
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (\
+             call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+             provider, model, input_tokens, output_tokens, total_tokens,\
+             session_id, trace_id, conversation_id, agent_name, pid,\
+             status, tool_call_ids, event_json, process_name, user_query\
+             ) VALUES (NULL,'llm_call',?1,?2,?3,'openai','gpt-4',1,1,2,\
+             'sess-1','trace-1','conv-1','agent-a',100,'pending',NULL,'{}','proc-a',NULL)",
+            params![BASE_NS - STEP_NS, BASE_NS, STEP_NS],
+        )
+        .unwrap();
+    }
+
+    let m = store.get_call_turn_indices(&["sess-1"]).unwrap();
+    assert_eq!(m["call-1"], 1);
+    assert_eq!(m["call-2"], 2);
+    assert_eq!(m["call-3"], 3);
+    assert_eq!(m["call-6"], 4);
+
+    let tool = store.get_tool_call_turn_indices(&["sess-1"]).unwrap();
+    assert_eq!(tool["tc-1"].turn_index, 1);
+    assert_eq!(tool["tc-2"].turn_index, 1);
+    assert_eq!(tool["call-2"].turn_index, 2);
+    assert_eq!(tool["call-6"].turn_index, 4);
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_list_traces_by_session() {
     let (store, path) = create_populated_store("traces");
@@ -4984,7 +5022,8 @@ fn call_turn_indices_survive_a_null_call_id_row() {
         .get_call_turn_indices(&["sess-1"])
         .expect("a NULL call_id row must not fail the whole map");
     assert_eq!(indices.get("call-a"), Some(&1));
-    assert_eq!(indices.get("call-b"), Some(&3));
+    // The skipped row is not a call, so it must not consume a turn either.
+    assert_eq!(indices.get("call-b"), Some(&2));
     drop(store);
     let _ = std::fs::remove_file(&path);
 }

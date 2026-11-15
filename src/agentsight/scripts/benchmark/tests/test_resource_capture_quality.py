@@ -71,6 +71,7 @@ def test_valid_quality_boundaries_still_authorize_comparison(
                     "sent": 1000,
                     "completeness_ratio": quality,
                     "token_accuracy": quality,
+                    "conflicts": 0,
                 }
             )
         )
@@ -96,6 +97,7 @@ def test_finite_below_threshold_quality_is_still_a_failure(tmp_path: Path, quali
                 "sent": 1,
                 "completeness_ratio": quality,
                 "token_accuracy": 1,
+                "conflicts": 0,
             }
         )
     )
@@ -112,6 +114,7 @@ def test_zero_requests_do_not_establish_capture_quality(tmp_path: Path) -> None:
                 "sent": 0,
                 "completeness_ratio": 1,
                 "token_accuracy": 1,
+                "conflicts": 0,
             }
         )
     )
@@ -121,7 +124,13 @@ def test_zero_requests_do_not_establish_capture_quality(tmp_path: Path) -> None:
 @pytest.mark.parametrize("sent", ["1", None, {}, [], True, 1.5])
 def test_invalid_capture_count_keeps_ffi_reports_readable(tmp_path: Path, sent: object) -> None:
     directory = artifacts(tmp_path, "run", 20, 250)
-    capture = {"sent": sent, "completeness_ratio": 1, "token_accuracy": 1, "capture_source": "ffi"}
+    capture = {
+        "sent": sent,
+        "completeness_ratio": 1,
+        "token_accuracy": 1,
+        "conflicts": 0,
+        "capture_source": "ffi",
+    }
     (directory / "report.json").write_text(json.dumps(capture))
     (directory / "ffi-consumer.json").write_text(json.dumps({"completed": True, "llm_events": 1}))
     assert not resource_report.report(tmp_path, {"run": {"mode": "ffi"}})
@@ -129,3 +138,16 @@ def test_invalid_capture_count_keeps_ffi_reports_readable(tmp_path: Path, sent: 
     assert summary["runs"]["run"]["capture"] == "FAIL"
     assert summary["runs"]["run"]["capture_source"] == "ffi"
     json.dumps(summary, allow_nan=False)
+
+
+@pytest.mark.parametrize("conflicts", [1, -1, "0", None, True])
+def test_conflicting_capture_evidence_invalidates_the_run(
+    tmp_path: Path, conflicts: object
+) -> None:
+    directory = artifacts(tmp_path, "run", 20, 250)
+    capture = json.loads((directory / "report.json").read_text())
+    capture["conflicts"] = conflicts
+    (directory / "report.json").write_text(json.dumps(capture))
+    measured = resource_report.summarize(directory, {})
+    assert measured["capture"] == "FAIL"
+    assert not measured["valid"]
