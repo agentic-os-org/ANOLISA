@@ -773,8 +773,10 @@ pub struct AnthropicSseMessageStart {
     /// Model used
     #[serde(default)]
     pub model: String,
-    /// Initial usage statistics
-    #[serde(default)]
+    /// Initial usage statistics. A gateway may spell "no snapshot" as
+    /// `null`; the field's defaults already model every absent counter, so a
+    /// null must read the same way instead of failing the whole event.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub usage: AnthropicUsage,
     /// Content blocks (empty at start)
     #[serde(default)]
@@ -834,8 +836,9 @@ pub struct AnthropicSseUsageDelta {
     /// Output tokens. Optional like every other counter: a proxy that splits the
     /// terminal usage between `message_start` and this delta may omit it, and a
     /// required field would fail the whole event, losing the `stop_reason` and
-    /// the counters the delta did carry.
-    #[serde(default)]
+    /// the counters the delta did carry. An explicit `null` means the same as
+    /// an omitted counter.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub output_tokens: u64,
     /// Input tokens, when the provider reports them in the delta
     #[serde(default, skip_serializing_if = "Option::is_none")]
