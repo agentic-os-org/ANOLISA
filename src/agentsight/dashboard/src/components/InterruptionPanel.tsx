@@ -6,7 +6,7 @@
  *   <InterruptionPanel sessionId="abc123" onClose={() => setPanelOpen(false)} />
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import type { InterruptionRecord, InterruptionSeverity } from '../utils/apiClient';
 import {
   fetchSessionInterruptions,
@@ -138,6 +138,9 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
   const [events, setEvents] = useState<InterruptionRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // A read started before Resolve can finish after it. Interruption IDs are
+  // global and resolution is one-way, so retain acknowledged IDs until unmount.
+  const resolvedIds = useRef(new Set<string>());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -162,7 +165,7 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       // The session/conversation endpoints return resolved rows too; this panel
       // shows and counts only what still needs attention, and a resolved event
       // must not be offered the Resolve action again.
-      setEvents(data.filter((event) => !event.resolved));
+      setEvents(data.filter((event) => !event.resolved && !resolvedIds.current.has(event.interruption_id)));
     } catch (e: any) {
       setError(e.message ?? t('comp.interrupt.failedToLoad'));
     } finally {
@@ -173,6 +176,7 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
   useEffect(() => { void load(); }, [load]);
 
   const handleResolved = (resolved: InterruptionRecord) => {
+    resolvedIds.current.add(resolved.interruption_id);
     setEvents(prev => prev.filter(e => e.interruption_id !== resolved.interruption_id));
     onResolvedEvent?.({
       interruption_id: resolved.interruption_id,
