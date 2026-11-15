@@ -8,7 +8,6 @@ import struct
 import unittest
 from pathlib import Path
 
-
 SPEC = importlib.util.spec_from_file_location(
     "verify_macho", Path(__file__).with_name("verify-macho.py")
 )
@@ -24,9 +23,12 @@ def executable(
     name += b"\0" * (-len(name) % 8)
     commands = struct.pack("<6I", 0x32, 24, 1, minimum, 0, 0)
     commands += struct.pack("<6I", 0xC, 24 + len(name), 24, 0, 0, 0) + name
-    return struct.pack(
-        "<IiiIIIII", 0xFEEDFACF, macho.CPU_TYPES[arch], 0, 2, 2, len(commands), 0, 0
-    ) + commands
+    return (
+        struct.pack(
+            "<IiiIIIII", 0xFEEDFACF, macho.CPU_TYPES[arch], 0, 2, 2, len(commands), 0, 0
+        )
+        + commands
+    )
 
 
 class MachOTests(unittest.TestCase):
@@ -34,6 +36,29 @@ class MachOTests(unittest.TestCase):
         for arch in macho.CPU_TYPES:
             with self.subTest(arch=arch):
                 macho.validate(executable(arch), (11, 0, 0), arch)
+
+    def test_system_library_prefix_cannot_escape_through_dot_segments(self) -> None:
+        for arch in macho.CPU_TYPES:
+            for name in (
+                "/usr/lib/../../opt/homebrew/lib/libssl.dylib",
+                "/System/Library/Frameworks/../../../opt/local/lib/libssl.dylib",
+            ):
+                with self.subTest(arch=arch, name=name):
+                    with self.assertRaisesRegex(
+                        macho.MachOError, "non-system"
+                    ) as error:
+                        macho.validate(executable(arch, dylib=name), (11, 0, 0), arch)
+                    self.assertIn(name, str(error.exception))
+
+    def test_normalized_system_library_paths_remain_supported(self) -> None:
+        for arch in macho.CPU_TYPES:
+            for name in (
+                "/usr/lib/./libSystem.B.dylib",
+                "/usr/lib/subdir/../libSystem.B.dylib",
+                "/System/Library/Frameworks/./CoreFoundation.framework/CoreFoundation",
+            ):
+                with self.subTest(arch=arch, name=name):
+                    macho.validate(executable(arch, dylib=name), (11, 0, 0), arch)
 
     def test_default_stays_arm64(self) -> None:
         macho.validate(executable("aarch64"), (11, 0, 0))
@@ -56,9 +81,13 @@ class MachOTests(unittest.TestCase):
 
     def test_non_system_library(self) -> None:
         for arch in macho.CPU_TYPES:
-            with self.subTest(arch=arch), self.assertRaisesRegex(macho.MachOError, "non-system"):
+            with self.subTest(arch=arch), self.assertRaisesRegex(
+                macho.MachOError, "non-system"
+            ):
                 macho.validate(
-                    executable(arch, dylib="/opt/homebrew/lib/libssl.dylib"), (11, 0, 0), arch
+                    executable(arch, dylib="/opt/homebrew/lib/libssl.dylib"),
+                    (11, 0, 0),
+                    arch,
                 )
 
 
