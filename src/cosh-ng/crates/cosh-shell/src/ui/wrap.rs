@@ -270,7 +270,7 @@ fn wrap_long_token(
     }
 }
 
-pub(super) fn strip_ansi_escape(text: &str) -> String {
+pub(crate) fn strip_ansi_escape(text: &str) -> String {
     let mut stripped = String::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -279,13 +279,30 @@ pub(super) fn strip_ansi_escape(text: &str) -> String {
             continue;
         }
 
-        if chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             }
+            Some(']') => {
+                chars.next();
+                // OSC payloads are terminal metadata, not visible text. An
+                // unfinished sequence owns the remaining input as well.
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     stripped
