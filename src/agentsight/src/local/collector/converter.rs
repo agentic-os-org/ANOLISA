@@ -460,6 +460,11 @@ fn flatten_tool_result_content(content: &Value) -> String {
                 .collect();
             text_parts.join("\n")
         }
+        // An explicit null is "the producer recorded no output", not the
+        // four-character string "null": the canonical collector and the
+        // eBPF-side converter both map it to empty text, and stringifying it
+        // here would hand the viewer an output the tool never produced.
+        Value::Null => String::new(),
         other => other.to_string(),
     }
 }
