@@ -5,7 +5,7 @@ const test = require('node:test');
 
 // Drive the compiled form and its effects, with configuration I/O mocked.
 // Model changes must be read through the same input that a user sees.
-async function configForm(config) {
+async function configForm(config, saveConfig) {
   const states = [];
   const dependencies = [];
   const pendingEffects = [];
@@ -40,7 +40,10 @@ async function configForm(config) {
       if (name === '../i18n') return { useI18n: () => ({ t }) };
       if (name === '../utils/apiClient') return {
         fetchOptimizeConfig: async () => config,
-        saveOptimizeConfig: async (body) => { submitted = body; return { ...config, ...body }; },
+        saveOptimizeConfig: async (body) => {
+          submitted = body;
+          return saveConfig ? saveConfig(body) : { ...config, ...body };
+        },
       };
       throw new Error(`Unexpected LlmConfigForm dependency: ${name}`);
     },
@@ -74,6 +77,7 @@ async function configForm(config) {
     input(value) { modelInput().props.onChange({ target: { value } }); },
     apiKey(value) { keyInputs()[0].props.onChange({ target: { value } }); },
     currentApiKey(value) { keyInputs()[1].props.onChange({ target: { value } }); },
+    keys: () => keyInputs().map((node) => node.props.value),
     async provider(value) { selects()[0].props.onChange({ target: { value } }); await flush(); },
     preset(value) { selects()[1].props.onChange({ target: { value } }); },
     async save() {
@@ -90,6 +94,46 @@ test('editing a loaded custom endpoint submits its visible model', async () => {
   form.input('replacement-model');
   assert.equal(form.model(), 'replacement-model');
   assert.equal((await form.save()).model, 'replacement-model');
+});
+
+test('a completed save preserves key edits made while it was pending', async () => {
+  let finish;
+  const form = await configForm({ base_url: 'https://custom.example/v1', model: 'original', api_key: 'masked-old' },
+    () => new Promise((resolve) => { finish = resolve; }));
+  form.apiKey('first-key');
+  form.currentApiKey('first-proof');
+  const saving = form.save();
+  form.apiKey('next-key');
+  form.currentApiKey('next-proof');
+  finish({ base_url: 'https://custom.example/v1', model: 'original', api_key: 'masked' });
+  const submitted = await saving;
+  assert.equal(submitted.api_key, 'first-key');
+  assert.equal(submitted.current_api_key, 'first-proof');
+  assert.deepEqual(form.keys(), ['next-key', 'next-proof']);
+});
+
+test('a completed save clears only unchanged key inputs', async () => {
+  let finish;
+  const form = await configForm({ base_url: 'https://custom.example/v1', model: 'original', api_key: 'masked-old' },
+    () => new Promise((resolve) => { finish = resolve; }));
+  form.apiKey('submitted-key');
+  form.currentApiKey('submitted-proof');
+  const saving = form.save();
+  form.currentApiKey('edited-proof');
+  finish({ base_url: 'https://custom.example/v1', model: 'original', api_key: 'masked' });
+  await saving;
+  assert.deepEqual(form.keys(), ['']);
+  form.apiKey('another-key');
+  assert.deepEqual(form.keys(), ['another-key', 'edited-proof']);
+});
+
+test('a failed save preserves key inputs for retry', async () => {
+  const form = await configForm({ base_url: 'https://custom.example/v1', model: 'original', api_key: 'masked-old' },
+    async () => { throw new Error('Temporary save failure'); });
+  form.apiKey('retry-key');
+  form.currentApiKey('retry-proof');
+  await form.save();
+  assert.deepEqual(form.keys(), ['retry-key', 'retry-proof']);
 });
 
 test('switching a preset custom model to a custom provider preserves the visible edit', async () => {

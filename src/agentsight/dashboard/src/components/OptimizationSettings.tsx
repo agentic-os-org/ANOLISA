@@ -242,8 +242,10 @@ export const LlmConfigForm = React.forwardRef<LlmConfigFormHandle>((_, ref) => {
       }
       const updated = await saveOptimizeConfig(body);
       setConfig(updated);
-      setApiKey('');
-      setCurrentApiKey('');
+      // Inputs remain editable while saving. Do not clear a later edit that
+      // was never included in this request.
+      setApiKey((current) => current === apiKey ? '' : current);
+      setCurrentApiKey((current) => current === currentApiKey ? '' : current);
       return true;
     } catch (e2) {
       const msg = e2 instanceof Error ? e2.message : String(e2);
