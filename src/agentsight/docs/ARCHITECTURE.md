@@ -188,7 +188,7 @@ sequenceDiagram
     AG->>AN: AggregatedResult::HttpComplete/SseComplete
     AN->>AN: TokenParser + AuditAnalyzer + MessageParser
     AN->>GB: AnalysisResult
-    AN->>ST: AnalysisResult::Token/Audit/Http
+    AN->>ST: AnalysisResult::Token/Audit/HttpContext
     GB->>GB: 构建 LLMCall 语义事件
     GB->>ST: GenAISemanticEvent → JSONL/SLS/SQLite
 ```
@@ -211,7 +211,7 @@ sequenceDiagram
 
 ### 3. Dual Export Path: AnalysisResult vs GenAISemanticEvent
 
-`Analyzer` 输出原始 `AnalysisResult`（Token/Audit/Http），`GenAIBuilder` 将其转换为高抽象的 `GenAISemanticEvent`（LLMCall/ToolUse/AgentInteraction）。两条路径独立存储，前者用于本地查询，后者用于远程导出和语义分析。
+`Analyzer` 输出原始 `AnalysisResult`（Token/Audit/HttpContext），`GenAIBuilder` 将其转换为高抽象的 `GenAISemanticEvent`（LLMCall/ToolUse/AgentInteraction）。两条路径独立存储，前者用于本地查询，后者用于远程导出和语义分析。
 
 **实现**: `src/unified.rs:AgentSight::try_process()` 第 287-309 行。
 

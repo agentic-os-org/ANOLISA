@@ -84,10 +84,13 @@ pub enum AggregatedResult {
 
 ```rust
 pub enum AnalysisResult {
-    Audit(AuditRecord),        // Audit record
-    Token(TokenRecord),        // Token usage record
-    Http(HttpRecord),          // HTTP data record
-    Message(ParsedApiMessage), // Parsed API message
+    Abandoned(RemoveReason),                     // Incomplete correlation reason
+    HttpContext(HttpContext),                    // Parsed payloads + HTTP metadata
+    Audit(AuditRecord),                          // Audit record
+    Token(TokenRecord),                          // Token usage record
+    Message(ParsedApiMessage),                   // Parsed API message
+    PromptTokens(PromptTokenCount),              // Computed prompt token count
+    TokenConsumption(TokenConsumptionBreakdown), // Token breakdown by message role
 }
 ```
 
@@ -96,7 +99,7 @@ pub enum AnalysisResult {
 2. **HTTP events** → parallel execution:
    - `AuditAnalyzer` → generates audit records (LLM calls, HTTP request summary)
    - `TokenParser` → extracts token usage from SSE events (reverse search, first match)
-   - `HttpRecord` extraction → raw HTTP data export
+   - `HttpContext` extraction → parsed request/response payloads and HTTP metadata; raw bodies are serialized only when retention requires them
 3. **Manual Token Computation** → if no token data in SSE, uses `MultiModelTokenizer` + chat template to compute
 
 **Source**: `src/analyzer/unified.rs`

@@ -118,7 +118,8 @@ pub struct MessageTokenCount {
 pub enum AnalysisResult {
     /// Incomplete correlation reason, retained through semantic delivery.
     Abandoned(crate::aggregator::RemoveReason),
-    /// Parsed payloads and HTTP metadata without serialized body copies.
+    /// Parsed payloads and HTTP metadata; bodies are serialized only when raw
+    /// retention requires them.
     HttpContext(HttpContext),
     /// Audit record from AuditAnalyzer
     Audit(AuditRecord),
@@ -128,8 +129,6 @@ pub enum AnalysisResult {
     Message(ParsedApiMessage),
     /// Computed prompt token count (from tokenizer)
     PromptTokens(PromptTokenCount),
-    /// HTTP request/response record
-    Http(HttpRecord),
     /// Token consumption breakdown by message role
     TokenConsumption(TokenConsumptionBreakdown),
 }

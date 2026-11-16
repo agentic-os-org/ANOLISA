@@ -522,7 +522,7 @@ fn responses_retrieval_usage_does_not_create_token_or_audit_records() {
     );
     assert!(results.iter().any(|result| matches!(
         result,
-        AnalysisResult::Http(record) if record.path == "/v1/responses/resp_abc123"
+        AnalysisResult::HttpContext(context) if context.http.path == "/v1/responses/resp_abc123"
     )));
 }
 

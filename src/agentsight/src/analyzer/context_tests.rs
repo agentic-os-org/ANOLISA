@@ -189,15 +189,15 @@ fn resource_abandonments_skip_body_analysis_and_preserve_metadata_for_every_deli
                 analyzer.analyze_for_owned_delivery(result.clone(), raw),
             ] {
                 let [
-                    AnalysisResult::Http(http),
+                    AnalysisResult::HttpContext(context),
                     AnalysisResult::Abandoned(actual),
                 ] = &analysis[..]
                 else {
                     panic!("only metadata should be analyzed")
                 };
                 assert_eq!(*actual, reason);
-                assert!(http.request_body.is_none());
-                assert!(http.response_body.is_none());
+                assert!(context.http.request_body.is_none());
+                assert!(context.http.response_body.is_none());
                 let (output, pending) = GenAIBuilder::new().build_for_delivery(
                     &analysis,
                     &ResponseSessionMapper::new(),
@@ -318,7 +318,7 @@ fn semantic_context_preserves_provider_fields_without_raw_body_strings() {
         let original_http = original
             .iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             })
             .unwrap();
@@ -519,20 +519,19 @@ fn raw_export_and_unknown_paths_keep_serialized_http_bodies() {
             false,
         );
         let results = Analyzer::new().analyze_for_delivery(&result, retain_raw);
-        if retain_raw {
-            assert!(results.iter().any(|result| {
-                matches!(result, AnalysisResult::HttpContext(context) if context.retain_raw && context.http.request_body.is_some() && context.http.response_body.is_some())
-            }));
-        } else {
-            assert!(results.iter().any(
-                |result| matches!(result, AnalysisResult::Http(record) if record.request_body.is_some())
-            ));
-            assert!(
-                !results
-                    .iter()
-                    .any(|result| matches!(result, AnalysisResult::HttpContext(_)))
-            );
-        }
+        let context = results
+            .iter()
+            .find_map(|result| match result {
+                AnalysisResult::HttpContext(context) => Some(context),
+                _ => None,
+            })
+            .expect("HTTP context");
+        assert!(context.http.request_body.is_some());
+        assert!(context.http.response_body.is_some());
+        assert!(
+            context.retain_raw,
+            "raw HTTP evidence must stay persistable"
+        );
     }
 }
 
@@ -571,7 +570,7 @@ fn raw_context_persists_the_original_http_record_without_storing_semantic_only_b
     let original_http = original
         .iter()
         .find_map(|result| match result {
-            AnalysisResult::Http(record) => Some(record),
+            AnalysisResult::HttpContext(context) => Some(&context.http),
             _ => None,
         })
         .unwrap();
@@ -778,7 +777,6 @@ fn delivery_keeps_malformed_request_and_response_evidence_on_known_llm_paths() {
         let record = analyzed
             .iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
                 AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             })
