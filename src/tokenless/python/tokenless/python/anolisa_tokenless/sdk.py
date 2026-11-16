@@ -596,7 +596,12 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 def _pre_tool_response(output: bytes) -> PreToolResponse:
     try:
-        value = _json_object(output)["result"]
+        decoded = _json_object(output)
+        # A version-skewed or mismatched envelope must not be trusted: its
+        # result-shaped body would otherwise replace the original command.
+        if decoded.get("protocol_version") != 2 or decoded.get("operation") != "pre_tool":
+            raise ValueError("PreTool response does not match Protocol v2")
+        value = decoded["result"]
         arguments = value["arguments"]
         if not isinstance(arguments, dict):
             raise TypeError("non-object PreTool arguments")
