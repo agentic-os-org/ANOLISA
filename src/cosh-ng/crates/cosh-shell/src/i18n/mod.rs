@@ -416,6 +416,10 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardLoginExitFailed as usize + 1,
+            MessageId::GuideWizardLoginOtherCommand as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardLoginOtherTerminal as usize + 1,
             MessageId::ALL.len()
         );
     }

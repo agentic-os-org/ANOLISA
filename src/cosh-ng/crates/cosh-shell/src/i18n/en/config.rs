@@ -235,9 +235,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardCancel => "Cancel",
         MessageId::GuideWizardLoginSet => "Set Cosh as login shell",
         MessageId::GuideWizardLoginRestore => "Restore original login shell",
-        MessageId::GuideWizardLoginOther => {
-            "Other users: run `cosh login set --user USER` in a terminal (administrator only)."
-        }
+        MessageId::GuideWizardLoginOther => "Other users (administrator only):",
+        MessageId::GuideWizardLoginOtherCommand => "`cosh login set --user USER`",
+        MessageId::GuideWizardLoginOtherTerminal => "Run it in a terminal.",
         MessageId::GuideWizardLoginVerified => "Verified: {value}",
         MessageId::GuideWizardLoginUnconfirmed => "Change unconfirmed; re-query before retrying.",
         MessageId::GuideWizardLoginHandoff => "Opening login management; return to the wizard when done.",

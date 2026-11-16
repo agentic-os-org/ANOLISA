@@ -115,6 +115,16 @@ impl Session {
         rows.push(WizardRow::Text(
             self.i18n.t(MessageId::GuideWizardLoginOther).to_string(),
         ));
+        rows.push(WizardRow::Text(
+            self.i18n
+                .t(MessageId::GuideWizardLoginOtherCommand)
+                .to_string(),
+        ));
+        rows.push(WizardRow::Text(
+            self.i18n
+                .t(MessageId::GuideWizardLoginOtherTerminal)
+                .to_string(),
+        ));
         rows.push(WizardRow::Blank);
         rows.push(WizardRow::Text(
             self.i18n
@@ -164,34 +174,7 @@ impl Session {
             .ok()
             .map(|status| status.current_shell.clone());
         let outcome = settle_outcome(outcome, current.as_deref(), target);
-        match &outcome {
-            Outcome::Unconfirmed => tracing::warn!(
-                operation,
-                stage = "verify_login",
-                result = "unconfirmed",
-                "guide login change unconfirmed"
-            ),
-            Outcome::Error(_) => warn_failure(operation, "login_protocol"),
-            Outcome::HandoffFailed(HandoffFailure::Spawn { kind, .. }) => tracing::warn!(
-                operation,
-                stage = "spawn",
-                result = "failed",
-                error_kind = ?kind,
-                "guide login handoff failed"
-            ),
-            Outcome::HandoffFailed(HandoffFailure::Cancelled) => {
-                warn_failure(operation, "cancelled")
-            }
-            Outcome::HandoffFailed(HandoffFailure::Usage) => warn_failure(operation, "usage"),
-            Outcome::HandoffFailed(HandoffFailure::Exit(code)) => tracing::warn!(
-                operation,
-                stage = "exit",
-                result = "failed",
-                exit_code = code,
-                "guide login handoff failed"
-            ),
-            Outcome::Verified(_) => {}
-        }
+        log_login_outcome(operation, &outcome);
         self.message = Some(login_message(self.i18n, outcome, current));
         // The available rows changed; re-focus the first supported action so a
         // stale cursor cannot dispatch the wrong one.
@@ -199,12 +182,46 @@ impl Session {
     }
 }
 
+/// Records the settled outcome categorically; handoff error payloads may
+/// contain secrets and stay out of the log.
+pub(super) fn log_login_outcome(operation: &'static str, outcome: &Outcome) {
+    match outcome {
+        Outcome::Unconfirmed => tracing::warn!(
+            operation,
+            stage = "verify_login",
+            result = "unconfirmed",
+            "guide login change unconfirmed"
+        ),
+        Outcome::Error(_) => warn_failure(operation, "login_protocol"),
+        Outcome::HandoffFailed(HandoffFailure::Spawn { kind, .. }) => tracing::warn!(
+            operation,
+            stage = "spawn",
+            result = "failed",
+            error_kind = ?kind,
+            "guide login handoff failed"
+        ),
+        Outcome::HandoffFailed(HandoffFailure::Cancelled) => warn_failure(operation, "cancelled"),
+        Outcome::HandoffFailed(HandoffFailure::Usage) => warn_failure(operation, "usage"),
+        Outcome::HandoffFailed(HandoffFailure::Exit(code)) => tracing::warn!(
+            operation,
+            stage = "exit",
+            result = "failed",
+            exit_code = code,
+            "guide login handoff failed"
+        ),
+        Outcome::Verified(_) => {}
+    }
+}
+
 /// A failed handoff can still have applied the change before the structured
 /// result was lost, and a verified reply can disagree with the re-read that
-/// follows it. Neither case may be reported as a definite outcome.
+/// follows it. Neither case may be reported as a definite outcome, and a
+/// missing re-read leaves the result equally unresolved.
 pub(super) fn settle_outcome(outcome: Outcome, current: Option<&str>, target: &str) -> Outcome {
     match outcome {
-        Outcome::HandoffFailed(_) if current == Some(target) => Outcome::Unconfirmed,
+        Outcome::HandoffFailed(_) if current.is_none() || current == Some(target) => {
+            Outcome::Unconfirmed
+        }
         Outcome::Verified(_) if matches!(current, Some(shell) if shell != target) => {
             Outcome::Unconfirmed
         }

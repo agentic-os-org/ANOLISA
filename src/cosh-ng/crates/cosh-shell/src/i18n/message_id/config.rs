@@ -215,6 +215,8 @@ macro_rules! guide_wizard_ids {
             GuideWizardLoginCancelled,
             GuideWizardLoginUsageFailed,
             GuideWizardLoginExitFailed,
+            GuideWizardLoginOtherCommand,
+            GuideWizardLoginOtherTerminal,
         );
     };
 }

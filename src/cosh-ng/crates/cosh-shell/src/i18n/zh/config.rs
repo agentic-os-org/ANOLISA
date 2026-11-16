@@ -231,9 +231,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardCancel => "取消",
         MessageId::GuideWizardLoginSet => "设为 Cosh 登录 Shell",
         MessageId::GuideWizardLoginRestore => "恢复原登录 Shell",
-        MessageId::GuideWizardLoginOther => {
-            "其它用户：请在终端运行 `cosh login set --user 用户名`（仅管理员）。"
-        }
+        MessageId::GuideWizardLoginOther => "其它用户（仅管理员）：",
+        MessageId::GuideWizardLoginOtherCommand => "`cosh login set --user 用户名`",
+        MessageId::GuideWizardLoginOtherTerminal => "请在终端中运行。",
         MessageId::GuideWizardLoginVerified => "已验证：{value}",
         MessageId::GuideWizardLoginUnconfirmed => "未确认变更，请重查后再试。",
         MessageId::GuideWizardLoginHandoff => "正在打开登录管理，完成后返回向导。",

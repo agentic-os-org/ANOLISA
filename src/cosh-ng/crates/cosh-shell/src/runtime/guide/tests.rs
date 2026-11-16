@@ -1,4 +1,4 @@
-use super::login::{login_message, settle_outcome};
+use super::login::{log_login_outcome, login_message, settle_outcome};
 use super::session::{Flow, Page, Session};
 use super::status::{self, Reading};
 use crate::config::guide::cli::UserPaths;
@@ -547,47 +547,68 @@ fn login_page_offers_only_the_actions_the_account_state_supports() {
     let (_guard, _temp, paths) = isolated_fixture();
     let cases = vec![
         (
-            login_status("/usr/bin/cosh", Some("/bin/bash"), true, false),
+            Ok(login_status(
+                "/usr/bin/cosh",
+                Some("/bin/bash"),
+                true,
+                false,
+            )),
             vec!["Restore original login shell"],
             None,
         ),
         (
-            login_status("/bin/bash", Some("/bin/bash"), false, false),
+            Ok(login_status("/bin/bash", Some("/bin/bash"), false, false)),
             vec!["Set Cosh as login shell"],
             None,
         ),
         (
-            login_status("/bin/bash", None, false, false),
+            Ok(login_status("/bin/bash", None, false, false)),
             vec!["Set Cosh as login shell"],
             None,
         ),
         (
-            login_status(COSH_PATH, None, false, false),
+            Ok(login_status(COSH_PATH, None, false, false)),
             Vec::new(),
             Some("no recovery record"),
         ),
         (
-            login_status("/bin/zsh", None, false, true),
+            Ok(login_status("/bin/zsh", None, false, true)),
             Vec::new(),
             Some("conflicts"),
         ),
+        (
+            Err("permission denied".to_string()),
+            Vec::new(),
+            Some("Unable to read the login shell: permission denied"),
+        ),
     ];
     for (status, actions, note) in cases {
-        let mut session = login_session(paths.clone(), status);
+        let readable = status.is_ok();
+        let mut session = login_session_with(paths.clone(), status);
         session.enter(Page::Login);
         let rows = session.view().rows;
         assert_eq!(choice_labels(&session), actions);
-        assert!(
-            rows.iter().any(
-                |row| matches!(row, WizardRow::Text(text) if text.starts_with("Other users:"))
-            ),
-            "the other-user guidance must stay a text row"
-        );
+        if readable {
+            assert!(
+                rows.iter().any(
+                    |row| matches!(row, WizardRow::Text(text) if text.starts_with("Other users"))
+                ),
+                "the other-user guidance must stay a text row"
+            );
+        }
         if let Some(note) = note {
             assert!(
                 rows.iter()
                     .any(|row| matches!(row, WizardRow::Text(text) if text.contains(note))),
                 "missing {note}"
+            );
+        }
+        if !readable {
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| matches!(row, WizardRow::Choice { .. })),
+                "an unreadable state must not offer an action"
             );
         }
         if actions.is_empty() {
@@ -677,19 +698,90 @@ fn login_handoff_failures_have_distinct_feedback() {
 
 #[test]
 fn login_feedback_stays_visible_after_the_page_reloads() {
+    use crate::runtime::login::guide_protocol::Outcome;
+    let (_guard, _temp, paths) = isolated_fixture();
+    std::env::set_var("COSH_SHELL_LANG", "en-US");
+    let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    session.finish_login("restore", "/nonexistent/cosh-target", Outcome::Unconfirmed);
+    let message = session.view().message.clone().expect("failure feedback");
+    assert!(message.to_lowercase().contains("unconfirmed"), "{message}");
+    session.handle(key(KeyCode::Down));
+    assert_eq!(session.view().message.as_deref(), Some(message.as_str()));
+}
+
+#[test]
+fn login_failure_with_an_unreadable_reread_stays_unconfirmed() {
     use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
     let (_guard, _temp, paths) = isolated_fixture();
     std::env::set_var("COSH_SHELL_LANG", "en-US");
     let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    // The worker can apply the change before exiting nonzero. A failed
+    // re-read therefore proves nothing, and the page must not claim the
+    // change did not complete.
     session.finish_login(
-        "restore",
-        "/nonexistent/cosh-target",
-        Outcome::HandoffFailed(HandoffFailure::Cancelled),
+        "set",
+        COSH_PATH,
+        Outcome::HandoffFailed(HandoffFailure::Exit(1)),
     );
-    let message = session.view().message.clone().expect("failure feedback");
-    assert!(message.contains("cancelled"), "{message}");
-    session.handle(key(KeyCode::Down));
-    assert_eq!(session.view().message.as_deref(), Some(message.as_str()));
+    assert!(
+        session.snapshot.login.is_err(),
+        "the fixture must fail the post-handoff status read"
+    );
+    let message = session
+        .view()
+        .message
+        .clone()
+        .expect("unknown-state feedback");
+    assert!(message.to_lowercase().contains("unconfirmed"), "{message}");
+}
+
+#[test]
+fn login_other_user_command_is_readable_at_forty_columns() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    for (language, command) in [
+        (Language::EnUs, "`cosh login set --user USER`"),
+        (Language::ZhCn, "`cosh login set --user 用户名`"),
+    ] {
+        let mut session =
+            login_session(paths.clone(), login_status("/bin/bash", None, false, false));
+        session.i18n = I18n::new(language);
+        session.enter(Page::Login);
+        let text = render_wizard_lines(&session.view(), 40, 24).join("\n");
+        let expected = command.replace(' ', "");
+        let shown = text.lines().any(|line| {
+            line.split_whitespace()
+                .collect::<String>()
+                .contains(&expected)
+        });
+        assert!(
+            shown,
+            "{language:?} truncates the other-user command:\n{text}"
+        );
+    }
+}
+
+fn render_wizard_lines(
+    view: &crate::ui::guide::WizardView,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::ui::guide::render(frame, view);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
 }
 
 #[test]
@@ -711,6 +803,10 @@ fn login_outcomes_are_settled_against_the_reread_shell() {
     assert_eq!(
         settle_outcome(failed(), Some("/bin/bash"), "/usr/bin/cosh"),
         failed()
+    );
+    assert_eq!(
+        settle_outcome(failed(), None, "/usr/bin/cosh"),
+        Outcome::Unconfirmed
     );
     assert_eq!(
         settle_outcome(verified(), Some("/bin/bash"), "/usr/bin/cosh"),
@@ -753,8 +849,15 @@ fn login_status(
 }
 
 fn login_session(paths: UserPaths, status: crate::runtime::login::LoginStatus) -> Session {
+    login_session_with(paths, Ok(status))
+}
+
+fn login_session_with(
+    paths: UserPaths,
+    status: Result<crate::runtime::login::LoginStatus, String>,
+) -> Session {
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
-    session.snapshot.login = Ok(status);
+    session.snapshot.login = status;
     session
 }
 
@@ -788,10 +891,11 @@ fn failed_login_outcomes_are_logged_without_error_payloads() {
             "/nonexistent/cosh-target",
             Outcome::Error("SECRET_PASSWORD".to_string()),
         );
-        session.finish_login(
+        // An unreadable re-read settles this failure to Unconfirmed, so the
+        // spawn branch is exercised directly.
+        log_login_outcome(
             "restore",
-            "/nonexistent/cosh-target",
-            Outcome::HandoffFailed(HandoffFailure::Spawn {
+            &Outcome::HandoffFailed(HandoffFailure::Spawn {
                 message: "SECRET_API_KEY".into(),
                 kind: std::io::ErrorKind::NotFound,
             }),
