@@ -10,7 +10,10 @@ use super::status::{now_hour_bucket, warn_failure, Reading};
 
 impl Session {
     pub(crate) fn tips_default_focus(&mut self) {
-        if matches!(self.page, Page::DataClearConfirm | Page::DataResetConfirm) {
+        if matches!(
+            self.page,
+            Page::DataClearConfirm | Page::DataResetConfirm | Page::PersonalOffConfirm
+        ) {
             self.shift(1);
         } else if self.page == Page::Data && self.bash.unreadable {
             self.shift(-1);
@@ -43,6 +46,7 @@ impl Session {
         match self.page {
             Page::Analysis => self.analysis_rows(),
             Page::Personal => self.personal_rows(),
+            Page::PersonalOffConfirm => self.personal_off_confirm_rows(),
             Page::Data => self.data_rows(),
             Page::DataResetConfirm => self.reset_confirm_rows(),
             Page::DataClearConfirm => self.clear_confirm_rows(),
@@ -65,26 +69,42 @@ impl Session {
             }
             Page::Personal => {
                 let enabled = self.choice_index() == 0;
-                self.save_personal(enabled);
+                if enabled {
+                    self.save_personal(true);
+                } else {
+                    // Turning recommendations off clears local data even when
+                    // the environment already forces it off, so it always asks.
+                    self.open_subpage(Page::PersonalOffConfirm);
+                }
+            }
+            Page::PersonalOffConfirm => {
+                if self.choice_index() == 0 {
+                    self.save_personal(false);
+                    self.return_to_source();
+                } else {
+                    self.message = None;
+                    self.message_fresh = false;
+                    self.return_to_source();
+                }
             }
             Page::Data => {
                 if self.bash.unreadable {
                     match self.choice_index() {
-                        0 => self.enter(Page::DataClearConfirm),
+                        0 => self.open_subpage(Page::DataClearConfirm),
                         1 if self.rec.damaged => {
-                            self.enter(Page::DataResetConfirm);
+                            self.open_subpage(Page::DataResetConfirm);
                         }
-                        _ => self.enter(Page::DataPrivacy),
+                        _ => self.open_subpage(Page::DataPrivacy),
                     }
                 } else {
                     match self.choice_index() {
                         0 => self.save_import(),
-                        1 => self.enter(Page::DataClearConfirm),
+                        1 => self.open_subpage(Page::DataClearConfirm),
                         2 if self.rec.damaged => {
-                            self.enter(Page::DataResetConfirm);
+                            self.open_subpage(Page::DataResetConfirm);
                         }
-                        2 => self.enter(Page::DataPrivacy),
-                        _ => self.enter(Page::DataPrivacy),
+                        2 => self.open_subpage(Page::DataPrivacy),
+                        _ => self.open_subpage(Page::DataPrivacy),
                     }
                 }
             }
@@ -92,14 +112,18 @@ impl Session {
                 if self.choice_index() == 0 {
                     self.reset_data();
                 } else {
-                    self.enter(Page::Data);
+                    self.message = None;
+                    self.message_fresh = false;
+                    self.return_to_source();
                 }
             }
             Page::DataClearConfirm => {
                 if self.choice_index() == 0 {
                     self.clear_data();
                 } else {
-                    self.enter(Page::Data);
+                    self.message = None;
+                    self.message_fresh = false;
+                    self.return_to_source();
                 }
             }
             _ => {}
@@ -286,6 +310,7 @@ impl Session {
         vec![
             WizardRow::Text(i18n.t(MessageId::GuideWizardDataDamaged).to_string()),
             WizardRow::Text(i18n.t(MessageId::GuideWizardDataReset).to_string()),
+            WizardRow::Text(i18n.t(MessageId::GuideWizardDataResetScope).to_string()),
             WizardRow::Blank,
             WizardRow::Choice {
                 label: i18n.t(MessageId::GuideWizardConfirm).to_string(),
@@ -302,6 +327,24 @@ impl Session {
         let i18n = self.i18n;
         vec![
             WizardRow::Text(i18n.t(MessageId::GuideWizardDataClearConfirm).to_string()),
+            WizardRow::Text(i18n.t(MessageId::GuideWizardDataClearScope).to_string()),
+            WizardRow::Blank,
+            WizardRow::Choice {
+                label: i18n.t(MessageId::GuideWizardConfirm).to_string(),
+                value: String::new(),
+            },
+            WizardRow::Choice {
+                label: i18n.t(MessageId::GuideWizardCancel).to_string(),
+                value: String::new(),
+            },
+        ]
+    }
+
+    fn personal_off_confirm_rows(&self) -> Vec<WizardRow> {
+        let i18n = self.i18n;
+        vec![
+            WizardRow::Text(i18n.t(MessageId::GuideWizardPersonalOffConfirm).to_string()),
+            WizardRow::Text(i18n.t(MessageId::GuideWizardPersonalOffScope).to_string()),
             WizardRow::Blank,
             WizardRow::Choice {
                 label: i18n.t(MessageId::GuideWizardConfirm).to_string(),
@@ -315,7 +358,7 @@ impl Session {
     }
 
     fn save_analysis(&mut self, mode: &str) {
-        match config::write_analysis_mode(mode) {
+        match config::write_analysis_mode_checked(mode) {
             Ok(_) => {
                 self.reload();
                 let mut message = self.i18n.format(
@@ -348,36 +391,41 @@ impl Session {
         let Some(store) = self.open_rec_store() else {
             return;
         };
-        let result = store
-            .set_user_enabled(enabled, now_hour_bucket())
-            .and_then(|_| {
-                if enabled {
-                    Ok(())
-                } else {
-                    store.clear(now_hour_bucket()).map(|_| ())
-                }
-            });
-        match result {
+        // Turning recommendations off already rotates the epoch and clears the
+        // payload inside one owner operation; a second clear here could report
+        // failure after the data was in fact removed.
+        match store.set_user_enabled(enabled, now_hour_bucket()) {
             Ok(_) => {
                 self.reload();
-                self.message = Some(self.i18n.format(
+                let mut message = self.i18n.format(
                     MessageId::GuideWizardSavedLine,
                     &[("value", bool_label(self.i18n, enabled))],
-                ));
+                );
+                message.push(' ');
+                message.push_str(self.i18n.t(MessageId::GuideWizardNewSessionNote));
+                self.message = Some(message);
             }
             Err(error) => {
                 warn_failure("save_personal", "update_recommendations");
-                self.message = Some(self.i18n.format(
-                    MessageId::GuideWizardSaveFailed,
-                    &[("error", &error.to_string())],
-                ));
+                self.reload();
+                let saved_off = !enabled && self.rec.user_enabled == Reading::Value(false);
+                self.message = Some(if saved_off {
+                    self.i18n
+                        .t(MessageId::GuideWizardPersonalOffUnconfirmed)
+                        .to_string()
+                } else {
+                    self.i18n.format(
+                        MessageId::GuideWizardSaveFailed,
+                        &[("error", &error.to_string())],
+                    )
+                });
             }
         }
     }
 
     fn save_import(&mut self) {
         let target = !self.bash.effective;
-        match config::write_bash_history(target) {
+        match config::write_bash_history_checked(target) {
             Ok(_) => {
                 self.reload();
                 let mut message = self.i18n.format(
@@ -410,7 +458,7 @@ impl Session {
             Ok(_) => {
                 self.reload();
                 self.message = Some(self.i18n.t(MessageId::GuideWizardDataCleared).to_string());
-                self.enter(Page::Data);
+                self.return_to_source();
             }
             Err(error) => {
                 warn_failure("clear_data", "clear_recommendations");
@@ -430,7 +478,7 @@ impl Session {
             Ok(_) => {
                 self.reload();
                 self.message = Some(self.i18n.t(MessageId::GuideWizardDataResetDone).to_string());
-                self.enter(Page::Data);
+                self.return_to_source();
             }
             Err(error) => {
                 warn_failure("reset_data", "recover_recommendations");

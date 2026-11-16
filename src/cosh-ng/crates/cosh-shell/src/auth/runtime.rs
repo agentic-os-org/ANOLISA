@@ -16,7 +16,7 @@ use crate::auth::delete_confirm::{
     submit_delete_confirmation, DeleteConfirmationOutcome,
 };
 use crate::auth::menu::{
-    has_manageable_entries, management_entry, management_entry_count, management_entry_index,
+    has_manageable_entries, hosted_entry, hosted_entry_count, management_entry_index,
     AuthManagementEntry, EcsRamRolePrepare, PrefetchedAliyunPrepare, SysomMenu,
 };
 use crate::auth::navigation::{step_back, BackOutcome};
@@ -28,10 +28,9 @@ use crate::auth::provider_management::{
 };
 use crate::auth::retry::restore_after_failed_submission_at;
 use crate::auth::validation::{record_field_edit, record_field_submission, FieldSubmission};
-use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
     AuthFieldInfo, AuthProviderInfo, AuthResponse, NoticePanelModel, RatatuiInlineRenderer,
-    ShellEvent, ShellEventKind,
+    ShellEvent,
 };
 use crate::runtime::state::InlineState;
 
@@ -127,6 +126,27 @@ pub(crate) struct AuthState {
     pub(super) ecs: Option<super::ecs_poll::EcsFlow>,
     pub(crate) handled_card_events: HashSet<String>,
     pub(crate) completed_ids: HashSet<String>,
+    /// Which surface owns the flow; the guide runs it as a finite task.
+    pub(crate) host: super::host::AuthHost,
+    /// Guide-only: a business endpoint finished, so the management list must be
+    /// re-read instead of handing control back to a shell prompt.
+    pub(crate) menu_reload: bool,
+    /// Guide-only: the user asked to leave management.
+    pub(crate) exit_requested: bool,
+    pub(crate) outcome: crate::runtime::guide::result::TaskOutcome,
+}
+
+impl AuthState {
+    pub(crate) fn record_fact(
+        &mut self,
+        kind: crate::runtime::guide::result::ActionKind,
+        change: crate::runtime::guide::result::ChangeFact,
+        verification: crate::runtime::guide::result::Verification,
+    ) {
+        if self.host.is_guide() {
+            self.outcome.record(kind, change, verification);
+        }
+    }
 }
 
 pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
@@ -186,6 +206,9 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
 
     let providers =
         auth_providers_for_display(&providers_with_provider_id_field(core_state.templates));
+    if state.auth.host.is_guide() && !core_state.guarded_writes {
+        return super::standalone::refuse_unsafe_core(state, output);
+    }
     let request_id = format!(
         "slash-auth-{}",
         std::time::SystemTime::now()
@@ -201,7 +224,11 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     if let Some(trial) = core_state.ecs_trial.as_ref() {
         sysom.refresh_trial(trial, trial_auto_use);
     }
-    let phase = if core_state.ecs_trial.is_some() {
+    let phase = if state.auth.host.is_guide() {
+        // The guide always opens a management root that can be left, even with
+        // no saved provider and no ECS entry.
+        AuthPhase::ManagingProviders
+    } else if core_state.ecs_trial.is_some() {
         if has_manageable_entries(&sysom, core_state.existing_providers.len()) {
             AuthPhase::ManagingProviders
         } else {
@@ -267,6 +294,7 @@ struct CoreAuthPrepare {
 
 pub(super) fn finish_sysom_menu_prepare(
     auth: &mut RuntimeAuthState,
+    host: super::host::AuthHost,
     result: Result<Value, String>,
 ) {
     let prepare = result.and_then(|value| {
@@ -286,11 +314,12 @@ pub(super) fn finish_sysom_menu_prepare(
     }
     .with_disable_retry(auth.sysom.retry_trial_disable());
     auth.sysom.sync(&mut auth.existing_providers);
-    auth.phase = if has_manageable_entries(&auth.sysom, auth.existing_providers.len()) {
-        AuthPhase::ManagingProviders
-    } else {
-        AuthPhase::SelectingProvider
-    };
+    auth.phase =
+        if host.is_guide() || has_manageable_entries(&auth.sysom, auth.existing_providers.len()) {
+            AuthPhase::ManagingProviders
+        } else {
+            AuthPhase::SelectingProvider
+        };
 }
 
 fn ecs_ram_role_prepare(prepare: CoreAuthPrepare) -> Option<EcsRamRolePrepare> {
@@ -301,7 +330,7 @@ fn ecs_ram_role_prepare(prepare: CoreAuthPrepare) -> Option<EcsRamRolePrepare> {
     })
 }
 
-fn handle_auth_focus<W: std::io::Write>(
+pub(super) fn handle_auth_focus<W: std::io::Write>(
     state: &mut InlineState,
     id: &str,
     selected: usize,
@@ -315,7 +344,8 @@ fn handle_auth_focus<W: std::io::Write>(
     }
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let entries = management_entry_count(&auth.sysom, auth.existing_providers.len());
+            let entries =
+                hosted_entry_count(state.auth.host, &auth.sysom, auth.existing_providers.len());
             auth.selected_provider = selected.min(entries.saturating_sub(1));
             clear_active_auth_panel(state, output)?;
             render_current_auth_panel(state, output)?;
@@ -340,7 +370,7 @@ fn handle_auth_focus<W: std::io::Write>(
     Ok(true)
 }
 
-fn handle_auth_input<W: std::io::Write>(
+pub(super) fn handle_auth_input<W: std::io::Write>(
     state: &mut InlineState,
     id: &str,
     text: &str,
@@ -360,7 +390,7 @@ fn handle_auth_input<W: std::io::Write>(
     Ok(true)
 }
 
-fn handle_auth_answer<W: std::io::Write>(
+pub(super) fn handle_auth_answer<W: std::io::Write>(
     adapter: &AdapterInstance,
     state: &mut InlineState,
     id: &str,
@@ -376,12 +406,17 @@ fn handle_auth_answer<W: std::io::Write>(
 
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let entry = management_entry(
+            let entry = hosted_entry(
+                state.auth.host,
                 &auth.sysom,
                 auth.existing_providers.len(),
                 auth.selected_provider,
             );
             match entry {
+                AuthManagementEntry::GuideExit => {
+                    state.auth.exit_requested = true;
+                    return Ok(true);
+                }
                 AuthManagementEntry::Existing(provider_idx) => {
                     // Selected an existing provider -> show action menu
                     auth.phase = AuthPhase::ProviderAction { provider_idx };
@@ -512,13 +547,30 @@ fn handle_auth_answer<W: std::io::Write>(
                 .existing_providers
                 .get(provider_idx)
                 .is_some_and(|provider| provider.is_active);
-            let outcome = submit_delete_confirmation(
+            let outcome = match submit_delete_confirmation(
                 adapter,
                 auth,
                 provider_idx,
                 state.auth.ecs_trial.auto_use_allowed,
-            )
-            .map_err(std::io::Error::other)?;
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // The registry call may already have removed the provider.
+                    state.auth.record_fact(
+                        crate::runtime::guide::result::ActionKind::Delete,
+                        crate::runtime::guide::result::ChangeFact::Unknown,
+                        crate::runtime::guide::result::Verification::Unconfirmed,
+                    );
+                    return Err(std::io::Error::other(error));
+                }
+            };
+            if matches!(outcome, DeleteConfirmationOutcome::Deleted { .. }) {
+                state.auth.record_fact(
+                    crate::runtime::guide::result::ActionKind::Delete,
+                    crate::runtime::guide::result::ChangeFact::Committed,
+                    crate::runtime::guide::result::Verification::Verified,
+                );
+            }
             clear_observed_model_after_provider_delete(
                 state,
                 deleted_provider_was_active,
@@ -714,7 +766,19 @@ pub(super) fn send_auth_response<W: std::io::Write>(
                 if let Err(error) = core_auth_configure(adapter, &response) {
                     if error.provider_updated {
                         state.auth.completed_ids.insert(auth.id);
-                        return super::completion::finish_partial_configuration(state, output);
+                        return super::completion::finish_partial_configuration(
+                            state,
+                            output,
+                            crate::runtime::guide::result::ActionKind::Configure,
+                        );
+                    }
+                    if error.code.is_none() {
+                        // A transport failure leaves the write outcome unknown.
+                        state.auth.record_fact(
+                            crate::runtime::guide::result::ActionKind::Configure,
+                            crate::runtime::guide::result::ChangeFact::Unknown,
+                            crate::runtime::guide::result::Verification::Unconfirmed,
+                        );
                     }
                     restore_after_configure_failure(
                         &mut auth,
@@ -779,7 +843,7 @@ pub(super) fn auth_validation_body(provider_id: &str, auth_source: Option<&str>)
 ///
 /// The scoped id is what keeps a keystroke left over from an earlier field from acting on
 /// whichever field is live now.
-fn event_targets_pending_auth(state: &InlineState, event: &ShellEvent) -> bool {
+pub(super) fn event_targets_pending_auth(state: &InlineState, event: &ShellEvent) -> bool {
     let Some(target_id) = event.input.as_deref() else {
         return false;
     };
@@ -791,7 +855,7 @@ fn event_targets_pending_auth(state: &InlineState, event: &ShellEvent) -> bool {
 }
 
 /// Applies ESC to the pending auth panel: one step back, or cancel at the first step.
-fn handle_auth_back<W: std::io::Write>(
+pub(super) fn handle_auth_back<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
@@ -847,96 +911,14 @@ pub(super) fn cancel_auth_panel<W: std::io::Write>(
         },
     )?;
 
-    crate::slash::prompt::write_shell_prompt(state, output)?;
+    if state.auth.host.is_guide() {
+        state.auth.outcome.reason = crate::runtime::guide::result::EndReason::Cancelled;
+        state.auth.exit_requested = true;
+    } else {
+        crate::slash::prompt::write_shell_prompt(state, output)?;
+    }
     output.flush()?;
     Ok(())
-}
-
-pub(crate) fn render_auth_card_actions<W: std::io::Write>(
-    events: &[ShellEvent],
-    adapter: &AdapterInstance,
-    state: &mut InlineState,
-    output: &mut W,
-    event_index_base: usize,
-) -> std::io::Result<()> {
-    if !has_pending_auth(state) {
-        return Ok(());
-    }
-    for (idx, event) in events.iter().enumerate() {
-        let event_index = event_index_base + idx;
-        if event.kind != ShellEventKind::UserInputIntercepted {
-            continue;
-        }
-        if !is_auth_card_component(event.component.as_deref()) {
-            continue;
-        }
-        let dedup_key = stable_event_key("auth-card", event_index, event);
-        if !state.auth.handled_card_events.insert(dedup_key) {
-            continue;
-        }
-        match event.message.as_deref() {
-            Some("focus") => {
-                if let Some((id, selected)) = parse_card_id_usize(event) {
-                    handle_auth_focus(state, &id, selected, output)?;
-                }
-            }
-            Some("input") => {
-                if let Some((id, text)) = parse_card_id_text(event) {
-                    handle_auth_input(state, &id, &text, output)?;
-                }
-            }
-            Some("answer") => {
-                if let Some(answer) = event.input.as_deref() {
-                    let auth_id = state.auth.state.as_ref().map(|a| a.id.clone());
-                    if let Some(id) = auth_id {
-                        handle_auth_answer(adapter, state, &id, answer, output)?;
-                        let key = stable_event_key("question-answer", event_index, event);
-                        state.questions.handled_answers.insert(key);
-                    }
-                }
-            }
-            // An empty Enter on a non-secret field arrives as `question_submit_empty`, not
-            // `answer` (secret fields send an empty `answer` instead). Without this arm the
-            // keystroke is dropped, so "Enter to keep current value" never advances an edit.
-            // The event carries the scoped capture id, and routing it through the same
-            // matches_auth_capture check is what keeps a stale `field-N` submission from
-            // advancing whichever field is live now.
-            Some("question_submit_empty") => {
-                if let Some(capture_id) = event.input.as_deref() {
-                    if handle_auth_answer(adapter, state, capture_id.trim(), "", output)? {
-                        let key = stable_event_key("question-answer", event_index, event);
-                        state.questions.handled_answers.insert(key);
-                    }
-                }
-            }
-            // ESC steps back through the form one prompt at a time; Ctrl+C
-            // (`question_abort`) keeps abandoning `/auth` outright, so the multi-step flow
-            // never costs the user their usual interrupt.
-            Some("question_cancel") if event_targets_pending_auth(state, event) => {
-                handle_auth_back(state, output)?;
-            }
-            Some("cancel") | Some("question_abort") if event_targets_pending_auth(state, event) => {
-                cancel_auth_panel(state, output)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn is_auth_card_component(component: Option<&str>) -> bool {
-    matches!(component, Some("card") | Some("card_secret"))
-}
-
-fn parse_card_id_usize(event: &ShellEvent) -> Option<(String, usize)> {
-    let (id, val) = event.input.as_deref()?.split_once(':')?;
-    let val = val.trim().parse::<usize>().ok()?;
-    Some((id.trim().to_string(), val))
-}
-
-fn parse_card_id_text(event: &ShellEvent) -> Option<(String, String)> {
-    let (id, text) = event.input.as_deref()?.split_once(':')?;
-    Some((id.trim().to_string(), text.to_string()))
 }
 
 #[cfg(test)]

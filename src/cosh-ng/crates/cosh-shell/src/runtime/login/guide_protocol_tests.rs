@@ -4,9 +4,9 @@
 use std::os::unix::fs::{symlink, PermissionsExt};
 
 use super::guide_protocol::{
-    classify, parse_sudo_uid, private_file, read_request, run_worker, run_worker_for,
-    validate_identity, Outcome, Reply, Request, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, VERSION,
-    WORKER_FLAG,
+    classify, parse_sudo_uid, private_file, read_request, ready_worker, run_worker,
+    run_worker_authorized, run_worker_for, validate_identity, Outcome, Reply, Request,
+    MAX_REPLY_BYTES, MAX_REQUEST_BYTES, VERSION, WORKER_FLAG,
 };
 
 fn reply_json(username: &str, uid: u32, shell: &str) -> String {
@@ -84,8 +84,13 @@ fn query_worker_returns_status_or_structured_platform_refusal() {
         ),
         0
     );
-    let reply: Reply =
-        serde_json::from_str(&std::fs::read_to_string(output.path()).unwrap()).unwrap();
+    let raw = std::fs::read_to_string(output.path()).unwrap();
+    let final_record = raw
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap();
+    let reply: Reply = serde_json::from_str(final_record).unwrap();
     assert_eq!(reply.uid, request.expected_uid);
     assert_eq!(reply.username, request.username);
     let expected = super::account::require_platform()
@@ -144,6 +149,7 @@ fn sample_request() -> Request {
         action: "set".into(),
         username: "alice".into(),
         expected_uid: 1000,
+        operation_id: "op-sample".into(),
     }
 }
 
@@ -280,6 +286,7 @@ fn caller_request(action: &str) -> Request {
         action: action.into(),
         username: caller.name,
         expected_uid: uid,
+        operation_id: "op-caller".into(),
     }
 }
 
@@ -422,4 +429,90 @@ fn result_fd_rejects_read_only_files_nonzero_offsets_and_devices() {
 fn platform_fixtures_distinguish_supported_linux_from_ubuntu() {
     assert!(super::account::validate_platform("ID=alinux\nVERSION_ID=4.0\n").is_ok());
     assert!(super::account::validate_platform("ID=ubuntu\nVERSION_ID=24.04\n").is_err());
+}
+
+/// The wizard may withdraw authorization while sudo waits for a password. The
+/// worker must publish Ready and stop without ever reaching the account owner.
+#[test]
+fn a_withheld_grant_never_reaches_the_account_owner() {
+    for grant in [b"0".as_slice(), b"".as_slice()] {
+        let request = caller_request("set");
+        let input = request_file(&request);
+        let mut output = tempfile::NamedTempFile::new().unwrap();
+        let mut authorization = std::io::Cursor::new(grant.to_vec());
+        assert_eq!(
+            run_worker_authorized(
+                input.path().to_str().unwrap(),
+                output.as_file_mut(),
+                request.expected_uid,
+                &mut authorization,
+            ),
+            0
+        );
+        let raw = std::fs::read_to_string(output.path()).unwrap();
+        let lines: Vec<&str> = raw.lines().filter(|line| !line.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "worker produced a result without a grant: {raw}"
+        );
+        assert!(raw.contains("\"kind\":\"ready\""), "{raw}");
+        assert_eq!(
+            classify(
+                Some(&raw),
+                &request.username,
+                request.expected_uid,
+                "/usr/bin/cosh"
+            ),
+            Outcome::Unconfirmed
+        );
+    }
+}
+
+#[test]
+fn ready_records_bind_the_operation_and_protocol_version() {
+    let line = serde_json::json!({
+        "version": VERSION,
+        "kind": "ready",
+        "operation_id": "op-1",
+        "worker_pid": 4242,
+    })
+    .to_string();
+    assert_eq!(ready_worker(&line, "op-1"), Some(Some(4242)));
+    assert_eq!(ready_worker(&line, "op-2"), None);
+    let stale = serde_json::json!({
+        "version": VERSION + 1,
+        "kind": "ready",
+        "operation_id": "op-1",
+    })
+    .to_string();
+    assert_eq!(ready_worker(&stale, "op-1"), None);
+    assert_eq!(ready_worker("not json", "op-1"), None);
+    assert_eq!(
+        ready_worker(&reply_json("alice", 1000, "/bin/bash"), "op-1"),
+        None
+    );
+}
+
+#[test]
+fn a_granted_worker_publishes_a_final_record_after_ready() {
+    let request = caller_request("query");
+    let input = request_file(&request);
+    let mut output = tempfile::NamedTempFile::new().unwrap();
+    let mut authorization = std::io::Cursor::new(b"1".to_vec());
+    assert_eq!(
+        run_worker_authorized(
+            input.path().to_str().unwrap(),
+            output.as_file_mut(),
+            request.expected_uid,
+            &mut authorization,
+        ),
+        0
+    );
+    let raw = std::fs::read_to_string(output.path()).unwrap();
+    let lines: Vec<&str> = raw.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "{raw}");
+    assert!(lines[0].contains("\"kind\":\"ready\""), "{raw}");
+    assert!(lines[1].contains("\"outcome\""), "{raw}");
+    assert!(raw.contains(&request.operation_id), "{raw}");
 }

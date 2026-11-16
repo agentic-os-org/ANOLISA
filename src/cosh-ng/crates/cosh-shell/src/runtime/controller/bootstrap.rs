@@ -365,9 +365,6 @@ pub(crate) fn run_raw(
     }
     inline_state.debug = cosh_config.debug;
     inline_state.approval_mode = cosh_config.approval_mode;
-    inline_state.guide_auth_handoff =
-        std::env::var("COSH_GUIDE_AUTH_HANDOFF").as_deref() == Ok("1");
-    std::env::remove_var("COSH_GUIDE_AUTH_HANDOFF");
     for cmd in &cosh_config.trusted_commands {
         if let Some(key) = trust_key_from_command(cmd) {
             inline_state.control.trust.trust_session_command(key);

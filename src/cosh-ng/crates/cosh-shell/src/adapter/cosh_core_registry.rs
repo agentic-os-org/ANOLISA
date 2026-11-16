@@ -59,8 +59,13 @@ impl CoshCoreAdapter {
         &self,
         domain: &str,
         action: &str,
-        params: Value,
+        mut params: Value,
     ) -> Result<Value, RegistryQueryError> {
+        if domain == "auth" && self.guarded_auth_writes {
+            if let Some(object) = params.as_object_mut() {
+                object.insert("guarded_writes".to_string(), Value::Bool(true));
+            }
+        }
         if domain == "auth" && matches!(action, "set_trial_preference" | "state") {
             return self
                 .runtime
@@ -228,18 +233,23 @@ impl CoshCoreAdapter {
         };
 
         let _ = reader_handle.join();
-        if domain == "auth"
-            && matches!(
-                action,
-                "configure" | "activate_trial" | "set_trial_preference" | "state"
-            )
+        // The response already arrived, so the owner operation is finished.
+        // Reaping stays bounded for every action: a core that never exits must
+        // not hold the wizard (or the shell) open after delivering its answer.
         {
             use wait_timeout::ChildExt;
-            if !matches!(child.wait_timeout(Duration::from_millis(250)), Ok(Some(_))) {
+            let grace = if domain == "auth"
+                && matches!(
+                    action,
+                    "configure" | "activate_trial" | "set_trial_preference" | "state"
+                ) {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
+            if !matches!(child.wait_timeout(grace), Ok(Some(_))) {
                 super::terminate_and_reap_process(&mut child);
             }
-        } else {
-            let _ = child.wait();
         }
 
         // Parse the response

@@ -96,6 +96,15 @@ fn bash_history_status_at(path: Option<PathBuf>, env: Option<&str>) -> BashHisto
 }
 
 pub(crate) fn write_analysis_mode(mode: &str) -> Result<PathBuf, String> {
+    write_analysis_mode_inner(mode, false)
+}
+
+/// Wizard entry: ownership-checked write of the same preference.
+pub(crate) fn write_analysis_mode_checked(mode: &str) -> Result<PathBuf, String> {
+    write_analysis_mode_inner(mode, true)
+}
+
+fn write_analysis_mode_inner(mode: &str, guard: bool) -> Result<PathBuf, String> {
     let mode = parse_analysis_mode(mode)
         .ok_or_else(|| format!("invalid analysis mode: {mode}; supported: smart, auto, manual"))?;
     let path =
@@ -105,11 +114,21 @@ pub(crate) fn write_analysis_mode(mode: &str) -> Result<PathBuf, String> {
         &["shell"],
         "analysis_mode",
         toml::Value::String(mode.to_string()),
+        guard,
     )?;
     Ok(path)
 }
 
 pub(crate) fn write_bash_history(enabled: bool) -> Result<PathBuf, String> {
+    write_bash_history_inner(enabled, false)
+}
+
+/// Wizard entry: ownership-checked write of the same preference.
+pub(crate) fn write_bash_history_checked(enabled: bool) -> Result<PathBuf, String> {
+    write_bash_history_inner(enabled, true)
+}
+
+fn write_bash_history_inner(enabled: bool, guard: bool) -> Result<PathBuf, String> {
     let path =
         config_file_path().ok_or_else(|| "HOME is not set; cannot persist config".to_string())?;
     write_pref(
@@ -117,6 +136,7 @@ pub(crate) fn write_bash_history(enabled: bool) -> Result<PathBuf, String> {
         &["shell", "recommendations"],
         "bash_history",
         toml::Value::Boolean(enabled),
+        guard,
     )?;
     Ok(path)
 }
@@ -145,7 +165,13 @@ fn read_pref<T>(
     (value.as_table().and_then(extract), false)
 }
 
-fn write_pref(path: &Path, section: &[&str], key: &str, value: toml::Value) -> Result<(), String> {
+fn write_pref(
+    path: &Path,
+    section: &[&str],
+    key: &str,
+    value: toml::Value,
+    guard: bool,
+) -> Result<(), String> {
     let label = section.join(".");
     let mut root = if path.exists() {
         let content = std::fs::read_to_string(path)
@@ -162,8 +188,10 @@ fn write_pref(path: &Path, section: &[&str], key: &str, value: toml::Value) -> R
             })?
     } else {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("create config directory failed: {err}"))?;
+            if !guard {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| format!("create config directory failed: {err}"))?;
+            }
         }
         toml::map::Map::new()
     };
@@ -179,6 +207,9 @@ fn write_pref(path: &Path, section: &[&str], key: &str, value: toml::Value) -> R
     table.insert(key.to_string(), value);
     let rendered = toml::to_string_pretty(&toml::Value::Table(root))
         .map_err(|err| format!("render config TOML failed: {err}"))?;
+    if guard {
+        return super::guarded_write::write(path, &rendered);
+    }
     std::fs::write(path, rendered).map_err(|err| format!("write config file failed: {err}"))?;
     Ok(())
 }
@@ -237,6 +268,7 @@ mod tests {
             &["shell"],
             "analysis_mode",
             toml::Value::String("auto".into()),
+            false,
         )
         .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -255,6 +287,7 @@ mod tests {
             &["shell", "recommendations"],
             "bash_history",
             toml::Value::Boolean(true),
+            false,
         )
         .unwrap();
         let status = bash_history_status_at(Some(path.clone()), None);
@@ -309,6 +342,7 @@ mod tests {
             &["shell", "recommendations"],
             "bash_history",
             toml::Value::Boolean(true),
+            false,
         )
         .unwrap();
         let mut config = crate::config::CoshConfig::default();
@@ -340,6 +374,7 @@ mod tests {
             &["shell", "recommendations"],
             "bash_history",
             toml::Value::Boolean(false),
+            false,
         )
         .unwrap();
         let mut config = crate::config::CoshConfig::default();

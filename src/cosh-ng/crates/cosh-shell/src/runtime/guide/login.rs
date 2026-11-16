@@ -2,6 +2,7 @@
 //! foreground sudo password prompt owns the terminal.
 
 use crate::i18n::MessageId;
+use crate::runtime::guide::result::{ActionKind, ChangeFact, EndReason, TaskOutcome, Verification};
 use crate::runtime::login::guide_protocol::{self, Outcome};
 use crate::runtime::login::COSH_PATH;
 use crate::ui::guide::WizardRow;
@@ -150,6 +151,11 @@ impl Session {
             for action in ["status", "set", "restore"] {
                 rows.push(WizardRow::Text(format!("cosh login {action} --user USER")));
             }
+            rows.push(WizardRow::Text(
+                self.i18n
+                    .t(MessageId::GuideWizardLoginOtherNote)
+                    .to_string(),
+            ));
         }
         rows
     }
@@ -205,21 +211,53 @@ impl Session {
                 "guide login change unconfirmed"
             ),
             Outcome::Error(_) => warn_failure(operation, "login_protocol"),
-            Outcome::Verified(_) => {}
+            Outcome::Verified(_) | Outcome::Cancelled => {}
         }
-        self.message = Some(match outcome {
-            Outcome::Verified(status) => self.i18n.format(
-                MessageId::GuideWizardLoginVerified,
-                &[("value", &status.current_shell)],
-            ),
-            Outcome::Unconfirmed => self
-                .i18n
-                .t(MessageId::GuideWizardLoginUnconfirmed)
-                .to_string(),
-            Outcome::Error(error) => self
-                .i18n
-                .format(MessageId::GuideWizardSaveFailed, &[("error", &error)]),
-        });
+        let mut task = TaskOutcome::default();
+        let message = match outcome {
+            Outcome::Verified(status) => {
+                task.record(
+                    ActionKind::LoginShell,
+                    ChangeFact::Committed,
+                    Verification::Verified,
+                );
+                format!(
+                    "{} {}",
+                    self.i18n.format(
+                        MessageId::GuideWizardLoginVerified,
+                        &[("value", &status.current_shell)],
+                    ),
+                    self.i18n.t(MessageId::LoginNewLoginsOnly)
+                )
+            }
+            Outcome::Unconfirmed => {
+                task.record(
+                    ActionKind::LoginShell,
+                    ChangeFact::Unknown,
+                    Verification::Unconfirmed,
+                );
+                self.i18n
+                    .t(MessageId::GuideWizardLoginCommitPending)
+                    .to_string()
+            }
+            Outcome::Cancelled => {
+                task.reason = EndReason::Cancelled;
+                task.record(
+                    ActionKind::LoginShell,
+                    ChangeFact::None,
+                    Verification::Verified,
+                );
+                self.i18n
+                    .t(MessageId::GuideWizardLoginCancelled)
+                    .to_string()
+            }
+            Outcome::Error(error) => {
+                task.reason = EndReason::Failed;
+                task.error = Some(error);
+                task.message(self.i18n)
+            }
+        };
+        self.message = Some(message);
         self.login_guidance = false;
         self.reload();
         self.shift(0);

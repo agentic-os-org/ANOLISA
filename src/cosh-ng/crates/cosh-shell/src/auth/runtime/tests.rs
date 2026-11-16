@@ -7,14 +7,16 @@ use super::{
     apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut,
     clear_ecs_auth_source_for_manual_aliyun_edit, clear_observed_model_after_provider_change,
     clear_observed_model_after_provider_delete, ecs_ram_role_prepare, handle_auth_answer,
-    management_entry, render_auth_card_actions, restore_after_configure_failure,
-    should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
-    should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
-    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, DeleteConfirmationOutcome,
-    EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
+    restore_after_configure_failure, should_apply_aliyun_prepare_after_field,
+    should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
+    AuthBackend, AuthFieldInfo, AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare,
+    DeleteConfirmationOutcome, EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState,
+    ShellEvent, SysomMenu,
 };
 use crate::adapter::{AdapterInstance, FakeAgentAdapter};
 use crate::auth::capture::auth_capture_id;
+use crate::auth::menu::management_entry;
+use crate::auth::render_auth_card_actions;
 use std::collections::HashMap;
 
 fn trial_state_adapter(state: serde_json::Value) -> (tempfile::TempDir, AdapterInstance) {
@@ -228,7 +230,11 @@ fn ecs_builtin_legacy_core_preferences_keep_existing_provider_and_old_prepare() 
     super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
     let auth = state.auth.state.as_mut().unwrap();
     assert_eq!(auth.phase, AuthPhase::PreparingMenu);
-    super::finish_sysom_menu_prepare(auth, Ok(serde_json::json!({"mode":"manual"})));
+    super::finish_sysom_menu_prepare(
+        auth,
+        crate::auth::host::AuthHost::Shell,
+        Ok(serde_json::json!({"mode":"manual"})),
+    );
     assert_eq!(auth.phase, AuthPhase::ManagingProviders);
     assert_eq!(
         crate::auth::menu::management_entries(&auth.sysom, auth.existing_providers.len()),
@@ -251,7 +257,11 @@ fn ecs_builtin_legacy_prepare_preserves_failed_disable_retry() {
     state.auth.ecs_trial.auto_use_allowed = false;
     super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
     let auth = state.auth.state.as_mut().unwrap();
-    super::finish_sysom_menu_prepare(auth, Ok(serde_json::json!({"mode":"manual"})));
+    super::finish_sysom_menu_prepare(
+        auth,
+        crate::auth::host::AuthHost::Shell,
+        Ok(serde_json::json!({"mode":"manual"})),
+    );
     assert_eq!(
         crate::auth::menu::management_entries(&auth.sysom, 0),
         vec![

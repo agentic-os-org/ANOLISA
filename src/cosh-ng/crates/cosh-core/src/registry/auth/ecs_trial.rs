@@ -93,6 +93,7 @@ pub(super) async fn activate(
     request_id: &str,
     config: &mut CoreConfig,
     selected: Option<&str>,
+    guarded: bool,
 ) -> OutputMessage {
     match available().await {
         Ok(true) => {}
@@ -150,7 +151,12 @@ pub(super) async fn activate(
             return error(request_id, &code);
         }
     }
-    if crate::config::persist_config(&candidate).is_err() {
+    let persisted = if guarded {
+        crate::config::persist_config_guarded(&candidate)
+    } else {
+        crate::config::persist_config(&candidate)
+    };
+    if persisted.is_err() {
         if !previous_preference && save_preference(false).await.is_err() {
             return error(
                 request_id,

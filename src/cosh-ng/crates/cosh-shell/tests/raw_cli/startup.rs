@@ -82,6 +82,198 @@ fn guide_sigterm_restores_the_terminal_and_screen() {
     verify_guide_exit(Some(nix::libc::SIGTERM));
 }
 
+/// H02/H04: opening AI management from the wizard must never fall back to a
+/// working shell, even when the configured core cannot be trusted.
+#[test]
+#[cfg(target_os = "linux")]
+fn guide_ai_action_refuses_an_untrusted_core_without_starting_a_shell() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let sentinel = root.path().join("core-executed");
+    let fake_core = root.path().join("cosh-core");
+    fs::write(
+        &fake_core,
+        format!("#!/bin/sh\ntouch {}\nexec /bin/sh\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_core, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let size = nix::libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut master = fs::File::from(pty.master);
+    let slave = fs::File::from(pty.slave);
+    let flags = unsafe { nix::libc::fcntl(master.as_raw_fd(), nix::libc::F_GETFL) };
+    assert_eq!(
+        unsafe {
+            nix::libc::fcntl(
+                master.as_raw_fd(),
+                nix::libc::F_SETFL,
+                flags | nix::libc::O_NONBLOCK,
+            )
+        },
+        0
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+    command
+        .arg0("cosh")
+        .arg("guide")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.path())
+        .env("TERM", "xterm-256color")
+        .env("COSH_SHELL_LANG", "en-US")
+        .env("COSH_CORE_PATH", &fake_core)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() < 0
+                || nix::libc::ioctl(nix::libc::STDIN_FILENO, nix::libc::TIOCSCTTY as _, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    drop(slave);
+
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    // Ratatui paints cells in fragments, so assertions read a rendered screen
+    // rather than looking for contiguous text in the raw byte stream.
+    let mut terminal = vt100::Parser::new(24, 80, 0);
+    assert!(
+        pump_until(
+            &mut master,
+            &mut buffer,
+            &mut raw,
+            &mut terminal,
+            "Cosh setup and getting started",
+            20
+        ),
+        "wizard did not start: {}",
+        String::from_utf8_lossy(&raw)
+    );
+    // Home opens on the "ask questions" row; four steps up reach AI service,
+    // open it, then pick the management row (the first row asks questions).
+    master.write_all(b"\x1b[A\x1b[A\x1b[A\x1b[A\r").unwrap();
+    assert!(
+        pump_until(
+            &mut master,
+            &mut buffer,
+            &mut raw,
+            &mut terminal,
+            "Configure AI service",
+            10
+        ),
+        "AI page not reached:\n{}",
+        terminal.screen().contents()
+    );
+    master.write_all(b"\x1b[B\r").unwrap();
+    let refused = pump_until(
+        &mut master,
+        &mut buffer,
+        &mut raw,
+        &mut terminal,
+        "failed the identity check",
+        15,
+    );
+    let descendants = linux_descendant_programs(child.id());
+    let _ = master.write_all(b"\x1b\x1b");
+    let exit_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut status = None;
+    while std::time::Instant::now() < exit_deadline {
+        if let Ok(count) = master.read(&mut buffer) {
+            raw.extend_from_slice(&buffer[..count]);
+        }
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    let output = String::from_utf8_lossy(&raw).to_string();
+    assert!(refused, "untrusted core was not refused:\n{output}");
+    assert!(
+        !sentinel.exists(),
+        "the wizard executed an untrusted core override"
+    );
+    assert!(
+        !descendants
+            .iter()
+            .any(|program| matches!(program.as_str(), "bash" | "zsh" | "sh" | "cosh")),
+        "wizard started a working shell: {descendants:?}"
+    );
+    assert!(status.success(), "{status}");
+}
+
+#[cfg(target_os = "linux")]
+fn pump_until(
+    master: &mut fs::File,
+    buffer: &mut [u8],
+    raw: &mut Vec<u8>,
+    terminal: &mut vt100::Parser,
+    until: &str,
+    seconds: u64,
+) -> bool {
+    use std::io::Read;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        match master.read(buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                raw.extend_from_slice(&buffer[..count]);
+                terminal.process(&buffer[..count]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+        if terminal.screen().contents().contains(until) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_descendant_programs(root_pid: u32) -> Vec<String> {
+    let mut pending = vec![root_pid];
+    let mut programs = Vec::new();
+    while let Some(pid) = pending.pop() {
+        let Ok(children) = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) else {
+            continue;
+        };
+        for token in children.split_whitespace() {
+            let Ok(child_pid) = token.parse::<u32>() else {
+                continue;
+            };
+            if let Ok(comm) = fs::read_to_string(format!("/proc/{child_pid}/comm")) {
+                programs.push(comm.trim().to_string());
+            }
+            pending.push(child_pid);
+        }
+    }
+    programs
+}
+
 #[cfg(target_os = "linux")]
 fn verify_guide_exit(signal: Option<i32>) {
     use std::io::Read;

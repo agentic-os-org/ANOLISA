@@ -164,9 +164,6 @@ pub(crate) struct InlineState {
     pub(crate) startup_upgrade: StartupUpgradeState,
     pub(crate) personalization: PersonalizationState,
     pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
-    /// One-shot: a guide wizard handoff asked this session to open /auth at
-    /// the first ready prompt, then return control to the wizard on exit.
-    pub(crate) guide_auth_handoff: bool,
 }
 
 #[derive(Clone)]

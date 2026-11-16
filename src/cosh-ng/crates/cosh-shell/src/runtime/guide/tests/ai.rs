@@ -15,17 +15,20 @@ fn guide_ai_late_summary_preserves_the_selected_action() {
         let (sender, receiver) = std::sync::mpsc::channel();
         session.ai_rx = Some(receiver);
         sender
-            .send(Reading::Value(GuideAuthSummary {
-                configured: true,
-                source: Some("user".into()),
-                auto_use: Some(true),
-                ..Default::default()
-            }))
+            .send((
+                session.ai_generation,
+                Reading::Value(GuideAuthSummary {
+                    configured: true,
+                    source: Some("user".into()),
+                    auto_use: Some(true),
+                    ..Default::default()
+                }),
+            ))
             .unwrap();
         assert!(session.tick());
         let view = session.view();
         let expected = if management {
-            "Manage AI service (opens /auth)"
+            "Configure AI service"
         } else {
             "Start asking questions"
         };
@@ -34,7 +37,7 @@ fn guide_ai_late_summary_preserves_the_selected_action() {
         );
         let flow = session.handle(key(KeyCode::Enter));
         assert!(if management {
-            matches!(flow, Flow::Handoff)
+            matches!(flow, Flow::AiManage)
         } else {
             matches!(flow, Flow::Ask)
         });
@@ -85,7 +88,10 @@ fn home_and_ai_page_default_to_question_session() {
         session.enter(super::super::session::Page::Ai);
         assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Ask));
         session.handle(key(KeyCode::Down));
-        assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Handoff));
+        assert!(matches!(
+            session.handle(key(KeyCode::Enter)),
+            Flow::AiManage
+        ));
     }
 }
 
@@ -237,14 +243,20 @@ fn guide_ai_refresh_discards_obsolete_results() {
     let (new_sender, new_receiver) = std::sync::mpsc::channel();
     session.ai_rx = Some(new_receiver);
     assert!(old_sender
-        .send(Reading::Value(GuideAuthSummary::default()))
+        .send((
+            session.ai_generation,
+            Reading::Value(GuideAuthSummary::default()),
+        ))
         .is_err());
     new_sender
-        .send(Reading::Value(GuideAuthSummary {
-            configured: true,
-            service: Some("current".into()),
-            ..Default::default()
-        }))
+        .send((
+            session.ai_generation,
+            Reading::Value(GuideAuthSummary {
+                configured: true,
+                service: Some("current".into()),
+                ..Default::default()
+            }),
+        ))
         .unwrap();
     assert!(session.tick());
     assert!(session.ai_value().contains("current"));

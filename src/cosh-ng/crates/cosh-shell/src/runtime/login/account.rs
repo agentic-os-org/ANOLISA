@@ -264,6 +264,8 @@ pub(super) fn read_trusted(path: &Path, limit: usize) -> Result<Vec<u8>> {
 }
 
 pub(super) fn command(program: &str) -> Result<Command> {
+    use std::os::unix::process::CommandExt;
+
     let path = trusted_path_for(Path::new(program), Access::Execute)?;
     let mut command = Command::new(path);
     command
@@ -271,6 +273,12 @@ pub(super) fn command(program: &str) -> Result<Command> {
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .env("LANG", "C")
         .env("LC_ALL", "C");
+    // Account helpers run non-interactively in their own process group so a
+    // terminal Ctrl-C aimed at the wizard cannot interrupt a commit halfway.
+    // sudo keeps the caller's group because it reads the password on the tty.
+    if !program.ends_with("/sudo") {
+        command.process_group(0);
+    }
     Ok(command)
 }
 

@@ -17,6 +17,8 @@ pub use hook_feedback::{
     load_hook_feedback_preferences, record_hook_feedback_key, record_hook_feedback_preference,
     HookFeedbackPreference,
 };
+mod guarded_write;
+pub(crate) use language::write_user_language_config_checked;
 pub use language::{
     detect_language_from_env, language_config_status, parse_language_setting,
     resolve_language_setting, write_user_language_config, Language, LanguageConfigStatus,
@@ -32,7 +34,8 @@ pub use model::{
 };
 pub(crate) use shell_prefs::{
     analysis_mode_status, bash_history_status, parse_analysis_mode, write_analysis_mode,
-    write_bash_history, AnalysisModeStatus, BashHistoryStatus,
+    write_analysis_mode_checked, write_bash_history, write_bash_history_checked,
+    AnalysisModeStatus, BashHistoryStatus,
 };
 pub(crate) use trust::{
     add_consented_project_hook_to_store_path, project_hook_trust,

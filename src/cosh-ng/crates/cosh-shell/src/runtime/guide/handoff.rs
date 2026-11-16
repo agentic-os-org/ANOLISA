@@ -1,21 +1,11 @@
-//! Runs the existing Cosh auth flow in a child session while the wizard is
-//! suspended, reusing `/auth` instead of duplicating its state machine.
+//! Explicit "ask questions" handoff: the user asked to leave the wizard and
+//! start a Cosh session. Configuration never uses this path — it runs as a
+//! finite in-process task instead.
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use nix::libc;
-
-pub(crate) fn run() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let _interrupts = IgnoreInterrupts::new();
-    Command::new(exe)
-        .arg0("cosh")
-        .env("COSH_GUIDE_AUTH_HANDOFF", "1")
-        .status()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
 
 pub(crate) fn start_questions() -> i32 {
     let result = std::env::current_exe().and_then(|exe| {

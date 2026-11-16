@@ -695,6 +695,7 @@ fn post_write_reload_failure_is_unconfirmed_through_the_guide_protocol() {
         action: "set".into(),
         username: "alice".into(),
         expected_uid: 1001,
+        operation_id: "op-post-write".into(),
     };
     let reply = guide_protocol::reply_from_run_error(&request, &error);
     assert_eq!(reply.outcome, "unconfirmed");
@@ -724,6 +725,7 @@ fn pre_write_failure_is_definite_error_through_the_guide_protocol() {
         action: "restore".into(),
         username: "alice".into(),
         expected_uid: 1001,
+        operation_id: "op-missing-record".into(),
     };
     let reply = guide_protocol::reply_from_run_error(&request, &error);
     assert_eq!(reply.outcome, "error");
@@ -778,6 +780,7 @@ fn post_write_conflict_save_failure_is_unconfirmed_for_reload_and_identity_paths
             action: "set".into(),
             username: "alice".into(),
             expected_uid: 1001,
+            operation_id: "op-conflict".into(),
         };
         let reply = guide_protocol::reply_from_run_error(&request, &error);
         assert_eq!(reply.outcome, "unconfirmed");
@@ -820,6 +823,7 @@ fn tool_error_after_a_verified_account_change_is_unconfirmed() {
         action: "set".into(),
         username: "alice".into(),
         expected_uid: 1001,
+        operation_id: "op-verified-tool-error".into(),
     };
     let reply = guide_protocol::reply_from_run_error(&request, &error);
     assert_eq!(reply.outcome, "unconfirmed");

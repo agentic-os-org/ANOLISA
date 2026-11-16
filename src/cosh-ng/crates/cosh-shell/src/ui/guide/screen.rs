@@ -1,12 +1,10 @@
 //! Terminal lifecycle for the full-screen guide wizard.
 
 use std::io::{self, Stdout};
-use std::time::Duration;
 
 use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
-        event::{self, Event, KeyEvent, KeyEventKind},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
@@ -15,12 +13,6 @@ use ratatui::{
 
 use super::view::{self, WizardView};
 use super::ScreenEvent;
-
-pub(crate) enum Input {
-    Key(KeyEvent),
-    Resize,
-    Tick,
-}
 
 pub(crate) struct Screen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -52,6 +44,11 @@ impl Screen {
                 return Err(error);
             }
         };
+        // A finite task may have drawn on this screen while the wizard was
+        // suspended. Ratatui skips blank cells, so start from a cleared canvas
+        // instead of leaving the task's card behind the page.
+        let mut terminal = terminal;
+        terminal.clear()?;
         if !lifecycle(ScreenEvent::Active) {
             return Err(io::ErrorKind::Interrupted.into());
         }
@@ -80,18 +77,6 @@ impl Screen {
         match self.terminal.size() {
             Ok(size) => size.width < view::MIN_COLUMNS || size.height < view::MIN_ROWS,
             Err(_) => true,
-        }
-    }
-
-    /// A tick keeps the loop responsive without forcing a redraw.
-    pub(crate) fn next_input(&mut self) -> io::Result<Input> {
-        if !event::poll(Duration::from_millis(200))? {
-            return Ok(Input::Tick);
-        }
-        match event::read()? {
-            Event::Key(key) if key.kind != KeyEventKind::Release => Ok(Input::Key(key)),
-            Event::Resize(_, _) => Ok(Input::Resize),
-            _ => Ok(Input::Tick),
         }
     }
 }

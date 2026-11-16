@@ -3,7 +3,7 @@
 mod screen;
 mod view;
 
-pub(crate) use screen::{Input, Screen};
+pub(crate) use screen::Screen;
 pub(crate) use view::{render, WizardRow, WizardView, CONTENT_WIDTH, MIN_COLUMNS, MIN_ROWS};
 
 #[derive(Clone, Copy)]
