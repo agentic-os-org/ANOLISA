@@ -1264,9 +1264,12 @@ fn owner_directories_stay_usable_and_private_under_a_restrictive_umask() {
     let Some(root) = token_fixture() else { return };
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
-    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o700));
+    let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o700));
     let directory = root.path().join("a/b");
-    let path = write_owner_file(&directory, "fake", FAKE, uid, gid).unwrap();
+    let written = write_owner_file(&directory, "fake", FAKE, uid, gid);
+    // Restore before exit so coverage output stays readable to its merger.
+    rustix::process::umask(previous);
+    let path = written.unwrap();
     assert_eq!(mode(&root.path().join("a")), 0o700);
     assert_eq!(mode(&directory), 0o700);
     assert_eq!(mode(&path), 0o600);
