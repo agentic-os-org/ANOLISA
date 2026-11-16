@@ -93,6 +93,11 @@ namespace、PID、start time；发现、入队、重试和实际下发必须保�
 重试时重新解释为复用同一 PID 的新进程。进程退出或不再匹配由系统发起清理；局部
 扫描失败不能当作退出或清理完成。PID selector 固定首次发现的实例，不跟随 PID reuse；当前拒绝 cgroup assignment。
 
+主机重启恢复时，当前 boot ID 与保存实例不同即证明旧实例已退出；首次扫描前经 PAP
+持久化其 Binding 删除意图，不受 PID metadata 读取失败影响。相同 boot 的实例继续遵循
+局部读失败保留规则，PID pin 始终保留。Active Scope 和 Policy 快照继续用于后续匹配实例，
+后端删除和本地 Binding 回收由既有 Reconciler 异步完成。
+
 ### 3.1 Scope 删除与清理顺序
 
 以下流程已接入 SQLite PAP、discovery 与 Reconciler。
