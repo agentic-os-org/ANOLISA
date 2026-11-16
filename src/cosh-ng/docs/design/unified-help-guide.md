@@ -159,10 +159,14 @@ Unsupported environments explain why. Root skips sudo only, never checks.
 
 The implemented v2 guide worker is limited to the invoking sudo account:
 `SUDO_UID`, expected UID and both NSS lookups must agree. Other-user selection
-continues to delegate to the existing explicit `cosh login` CLI. The parent
-opens the result FD before sudo; requests contain no output path. Requests
-are limited to 4096 bytes and replies to 16384 bytes. Request files must be
-private, regular, caller-owned files with one link; symlinks are rejected.
+shows the explicit administrator CLI commands (`cosh login status --user USER`,
+`cosh login set --user USER`, `cosh login restore --user USER`) inside the page;
+it does not spawn a bare `cosh login` child or
+extend the worker to arbitrary targets. A full guided other-user flow remains
+future work. The parent opens the result FD before sudo; requests contain no
+output path. Requests are limited to 4096 bytes and replies to 16384 bytes.
+Request files must be private, regular, caller-owned files with one link;
+symlinks are rejected.
 Result files have the same ownership checks. Inherited sudo audit pipes are
 also accepted with nonblocking writes; devices and sockets are rejected.
 The existing administrator CLI retains its explicit other-user operations.
@@ -171,11 +175,16 @@ The existing administrator CLI retains its explicit other-user operations.
 | --- | --- |
 | Supported Bash account | Set Cosh |
 | Cosh with trusted original-shell record | Restore original shell, displaying its recorded Bash path |
-| Missing/conflicting record or read error | Explain and reread; never guess a restore target |
+| Bash already restored from a trusted record | Set Cosh; other-user guidance remains available; do not offer Restore again |
+| Cosh without a trusted record, conflicting record, or read error | Explain and reread; never guess a restore target or offer a mutation |
 | Installation check fails but a valid restore record exists | Block Set Cosh; retain restoration through existing checks |
 
-Confirmation shows account, original/new paths and next-login scope. Leave fullscreen for foreground sudo;
-never collect/store/relay passwords in guide. No automatic infinite retries.
+Confirmation shows account, original/new paths and next-login scope. Rendering,
+routing and cursor clamping share one state-derived choice list. Reread and
+other-user guidance stay inside the fullscreen page. Set/Restore leave
+fullscreen for foreground sudo without printing a generic handoff notice that
+would remain in the original terminal; never collect/store/relay passwords in
+guide. No automatic infinite retries.
 Distinguish cancellation before write, write failure, and possibly-written-but-unverified outcomes.
 Reread before retrying an uncertain write. A successful first set creates the record and makes Restore available.
 Stay on that account's state page after success; do not switch the current terminal shell.
