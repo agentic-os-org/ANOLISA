@@ -111,14 +111,24 @@ fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) -> usize {
         height.saturating_sub(1)
     };
     let max_scroll = total.saturating_sub(content_rows);
+    let has_choice = view
+        .rows
+        .iter()
+        .any(|row| matches!(row, WizardRow::Choice { .. }));
     // Text below the last choice is only reachable through explicit paging, but
     // paging must never scroll the focused row off screen: the effective offset
-    // is bounded by the cursor so Enter always dispatches a visible row.
+    // is bounded by the cursor so Enter always dispatches a visible row. A page
+    // without choices has no focus to protect (the cursor stays on row 0), so
+    // it pages all the way to the last row instead of pinning the offset to 0.
     let focused = view
         .cursor
         .saturating_sub(content_rows.saturating_sub(1))
         .min(max_scroll);
-    let scroll = focused.max(view.scroll).min(view.cursor).min(max_scroll);
+    let scroll = if has_choice {
+        focused.max(view.scroll).min(view.cursor).min(max_scroll)
+    } else {
+        focused.max(view.scroll).min(max_scroll)
+    };
     let visible = lines
         .into_iter()
         .skip(scroll)

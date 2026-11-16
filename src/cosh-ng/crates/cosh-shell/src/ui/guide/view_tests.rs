@@ -336,6 +336,40 @@ fn form_paging_never_scrolls_the_focused_choice_off_the_top() {
 }
 
 #[test]
+fn form_without_choices_pages_to_the_last_row() {
+    let mut page = view();
+    page.rows = (0..14)
+        .map(|index| WizardRow::Text(format!("detail row {index}")))
+        .collect();
+    page.cursor = 0;
+    page.scroll = 30;
+    let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+    let mut returned = usize::MAX;
+    terminal
+        .draw(|frame| {
+            returned = super::render(frame, &page);
+        })
+        .unwrap();
+    assert_eq!(
+        returned, 3,
+        "a page without choices must page to the last row"
+    );
+    let buffer = terminal.backend().buffer();
+    let text = (0..16)
+        .map(|y| {
+            (0..40)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("detail row 13"),
+        "last row is unreachable without a choice cursor:\n{text}"
+    );
+}
+
+#[test]
 fn zh_privacy_last_sentence_is_reachable_at_40x16() {
     let mut page = view();
     page.rows.clear();

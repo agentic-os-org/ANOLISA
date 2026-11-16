@@ -832,6 +832,54 @@ fn login_other_user_guidance_is_reachable_by_paging_at_the_minimum_height() {
 }
 
 #[test]
+fn login_guidance_is_reachable_by_paging_without_any_choice() {
+    use crate::runtime::login::guide_protocol::Outcome;
+    let (_guard, _temp, paths) = isolated_fixture();
+    for (language, command) in [
+        (Language::EnUs, "`cosh login set --user USER`"),
+        (Language::ZhCn, "`cosh login set --user 用户名`"),
+    ] {
+        for status in [
+            // Conflict and "Cosh already is the login shell without a
+            // recovery record" expose no action, so the page has no focus.
+            login_status("/bin/bash", None, false, true),
+            login_status(COSH_PATH, None, false, false),
+        ] {
+            for feedback in [false, true] {
+                let mut session = login_session(paths.clone(), status.clone());
+                session.i18n = I18n::new(language);
+                if feedback {
+                    session.apply_login_outcome("set", COSH_PATH, Outcome::Unconfirmed, None);
+                } else {
+                    session.enter(Page::Login);
+                }
+                assert!(
+                    choice_labels(&session).is_empty(),
+                    "{language:?} {status:?} must not offer an action"
+                );
+                for _ in 0..3 {
+                    session.handle(key(KeyCode::PageDown));
+                    // The wizard loop stores the clamped offset after every draw.
+                    session.scroll = render_scroll(&session.view(), 40, 16);
+                }
+                let lines = render_wizard_lines(&session.view(), 40, 16);
+                let expected = command.replace(' ', "");
+                let shown = lines.iter().any(|line| {
+                    line.split_whitespace()
+                        .collect::<String>()
+                        .contains(&expected)
+                });
+                assert!(
+                    shown,
+                    "{language:?} {status:?} feedback={feedback} leaves the guidance unreachable:\n{}",
+                    lines.join("\n")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn repeated_paging_keeps_the_focused_choice_on_screen() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
