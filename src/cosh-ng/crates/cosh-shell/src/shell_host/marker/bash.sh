@@ -506,6 +506,12 @@ _cosh_guard_slash_submission() {
   if ! _cosh_is_slash_control_candidate "$first_word" ||
      { ! _cosh_assistance_enabled &&
        [[ ! "$classification_input" =~ ^/mode[[:space:]]+routing($|[[:space:]]) ]]; }; then
+    # A non-slash recoverable line executes as an ordinary command. The widget
+    # already proved it non-secret, so confirm re-add for every outcome (success
+    # or ordinary failure), not only the natural-language intercept branch.
+    if [[ "${2:-false}" == true ]]; then
+      _cosh_confirm_pending_recovery_history "$input"
+    fi
     (( restore_xtrace == 1 )) && set -x
     return 0
   fi
