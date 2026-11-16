@@ -109,10 +109,12 @@ sections rather than introducing another persistence queue.
 
 Pending-match fingerprints are cached as fixed-size digests on the parsed request and reused after
 idle or crash snapshots. Routing, source timestamp, encoding and body replacement invalidate the
-cache. Raw delivery hashes its retained serialized body; semantic delivery hashes parsed JSON
-through a streaming writer. Non-LLM records are rejected before this hashing work. Neither path
-retains an extra payload copy, and match-key bytes remain compatible. HTTP/2 stream completions do
-not carry the HTTP/1 request snapshot, so they keep the full-hash path in this change.
+cache. The cache identifies the body by its storage location and length, so code that rewrites body
+fields outside `set_reassembled_body` must clear it explicitly. Raw delivery hashes its retained
+serialized body; semantic delivery hashes parsed JSON through a streaming writer. Non-LLM records
+are rejected before this hashing work. Neither path retains an extra payload copy, and match-key
+bytes remain compatible. HTTP/2 stream completions do not carry the HTTP/1 request snapshot, so
+they always use the full-hash path.
 
 Completed-event JSON reserves from the retained-payload estimate and releases excess serializer
 capacity. SQLite message columns borrow `RawValue` arrays from that JSON when the full message array
