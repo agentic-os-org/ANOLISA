@@ -208,6 +208,7 @@ Schema。创建时原子发布并同步文件及目录，文件属于服务用�
 | aw run 子进程启动与等待 | evidence 关闭时仍记录 instance.started/ended；PID 仅为描述信息 |
 | 已配置的输入/工具 Hook | 捕获元数据及 Provider 完成记录；没有原生采用证据的关闭为 incomplete |
 | 无策略步骤的 Qoder SDK/QwenPaw 工具回调 | 默认元数据路由记录 before/after，不启动 Sight 工作线程，不保留正文 |
+| 普通 `open_event` 完成事件 | 使用调用者报告的 `result_status` 或 `tool.result_projection.status`，打开时保存校验后的状态及原始结果摘要，关联保持 unverified。见[输入契约](../../../../../../docs/developer-guide/zh/aw/reference/cli.md#普通-rpc-完成事件审计) |
 | 原生结果 | QwenPaw 使用明确的 ToolResponse state；SDK 使用成功/失败 Hook 类型及明确错误标记；未知状态记录 gap |
 | 受管调用退休 | 既有 invocation ledger 阻断重放后，回收回调去重细节 |
 | 未受管回调保留 | 每实例最多 256 个回调身份；溢出持久记录一次 aw.observation_callback_limit gap，后续新身份被拒绝 |

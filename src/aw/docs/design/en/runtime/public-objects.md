@@ -254,6 +254,7 @@ store without converting historical chains.
 | `aw run` child spawn / wait | `instance.started` / `instance.ended`, even with evidence disabled; reported PID is descriptive |
 | Configured input/tool Hook | Captured metadata and Provider completion; closure without native adoption remains `incomplete` |
 | Qoder SDK / QwenPaw tool callbacks without policy steps | Default metadata routes record before/after facts without starting a Sight worker or retaining bodies |
+| Manual `open_event` completion | Caller-reported `result_status` or `tool.result_projection.status`; validated status and original result digest are retained at open, with unverified association. See the [input contract](../../../../../../docs/developer-guide/en/aw/reference/cli.md#manual-rpc-completion-audit) |
 | Native result | QwenPaw uses explicit ToolResponse state; SDK uses success/failure Hook types and explicit error flags; unknown states retain a gap |
 | Managed invocation retirement | Removes callback deduplication detail after the existing invocation ledger fences replay |
 | Unmanaged callback retention | At most 256 callback identities per instance; overflow records one durable `aw.observation_callback_limit` gap and rejects later new identities |

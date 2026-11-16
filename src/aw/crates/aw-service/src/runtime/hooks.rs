@@ -400,7 +400,14 @@ impl Runtime {
         // Initialization may wait on durable storage. Keep cancellation writable.
         drop(leases);
         drop(state);
-        let handle = self.open(instance_id, value, Some(native_input), deadline, cancelled)?;
+        let handle = self.open(
+            instance_id,
+            value,
+            Some(native_input),
+            None,
+            deadline,
+            cancelled,
+        )?;
         let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         let lease = leases
             .get_mut(&correlation)
