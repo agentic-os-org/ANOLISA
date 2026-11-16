@@ -184,15 +184,15 @@ def _run_env_check(
         cmd.append("--fix")
     timeout = FIX_TIMEOUT if fix else 10
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except Exception:
         return None
     if proc.returncode != 0:
         _warn(f"env-check{' --fix' if fix else ''} exit {proc.returncode}")
         return None
     try:
-        return json.loads(proc.stdout.strip())
-    except json.JSONDecodeError:
+        return json.loads(proc.stdout.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeError):
         return None
 
 
@@ -223,7 +223,7 @@ def _build_response(
             "additionalContext": ctx,
         }
     }
-    return json.dumps(response, ensure_ascii=False)
+    return json.dumps(response)
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +239,10 @@ def main() -> None:
 
     # 2. Read stdin JSON
     try:
-        raw = sys.stdin.read()
+        # Decode host JSON bytes independently of the interpreter's locale.
+        raw = getattr(sys.stdin, "buffer", sys.stdin).read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         if not raw.strip():
             _skip()
         input_data = json.loads(raw)

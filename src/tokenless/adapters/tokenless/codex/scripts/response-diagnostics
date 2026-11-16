@@ -138,7 +138,10 @@ SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
 
 def main() -> None:
     try:
-        raw = sys.stdin.read()
+        # Decode host JSON bytes independently of the interpreter's locale.
+        raw = getattr(sys.stdin, "buffer", sys.stdin).read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
         if not raw.strip():
             _skip()
         input_data = json.loads(raw)
@@ -169,7 +172,7 @@ def main() -> None:
             ),
         }
     }
-    print(json.dumps(response, ensure_ascii=False))
+    print(json.dumps(response))
 
 
 if __name__ == "__main__":
