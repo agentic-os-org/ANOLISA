@@ -267,6 +267,7 @@ test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cle
 	python3 tests/test_hermes_plugin_import.py
 	python3 tests/test_agentscope_middleware.py
 	python3 tests/test_agentscope_v1.py
+	python3 tests/test_tool_categories_encoding.py
 	python3 tests/test_cosh_extension_matcher.py
 	python3 tests/test_release_regression_probe.py
 	python3 tests/test_verify_release_versions.py
