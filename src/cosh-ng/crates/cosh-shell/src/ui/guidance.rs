@@ -145,6 +145,17 @@ pub(crate) fn style_invitation(text: &str, styled: bool) -> String {
     format!("\x1b[36;1m┃ {brand}\x1b[0m  {label} · {hint}\n{command}")
 }
 
+fn style_question_invitation(text: &str, styled: bool) -> String {
+    if !styled {
+        return text.to_string();
+    }
+    let Some((title, prompt)) = text.split_once('\n') else {
+        return text.to_string();
+    };
+    let title = title.trim_end_matches(['：', ':']);
+    format!("\x1b[36;1m┃ Cosh AI\x1b[0m  {title}\n{prompt}")
+}
+
 fn question_text(prompt: &str, language: Language) -> Option<String> {
     let command = format!("  cosh --ask {}", bash_arg(prompt)?);
     Some(invitation_text(&command, language))
@@ -219,7 +230,10 @@ pub(crate) fn render_health(
             }
             text.push('\n');
         } else if matches!(invitation.target, Target::Cosh) {
-            text.push_str(&invitation.text);
+            text.push_str(&style_question_invitation(
+                &invitation.text,
+                renderer.styled,
+            ));
             text.push('\n');
         } else {
             let language = renderer.i18n().language();
