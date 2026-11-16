@@ -224,7 +224,7 @@ Endpoint groups in 0.11:
 | Service | `GET /health`, `GET /metrics`, `GET /api/docs` | Liveness, Prometheus metrics, route list (`/health` and `/metrics` are loopback-only) |
 | Authentication | `GET /api/auth/status`, `GET /api/auth/verify`, `POST /api/auth/login` | Auth state, capability list, token → cookie exchange |
 | Sessions and traces | `GET /api/sessions`, `GET /api/sessions/{id}/traces`, `GET /api/sessions/{id}/resources`, `GET /api/traces/{id}`, `GET /api/conversations/{id}`, `POST /api/sessions/search` | Session list, per-session conversation summaries (keyed by `conversation_id`) and process resources, per-call detail by response id, semantic search |
-| Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/agent-names` | Token time series, latency percentiles, Agent filter values |
+| Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/metrics/cache`, `GET /api/agent-names` | Token time series, latency percentiles, prompt-cache hit rate and low-hit causes (same fields as `agentsight cache --json`), Agent filter values |
 | Interruptions | `GET /api/interruptions`, `/count`, `/stats`, `/session-counts`, `/conversation-counts`, `POST /api/interruptions/{id}/resolve` | Triage and resolution |
 | Agent health | `GET /api/agent-health`, `DELETE /api/agent-health/{pid}`, `POST /api/agent-health/{pid}/restart` | Live Agent state and recovery actions |
 | Tokenless records | `POST /api/tokenless/refresh`, `GET /api/tokenless/records`, `GET /api/tokenless/records/{cache_id}` | Refresh saved statistics, list metadata, and read details; content requires explicit `include_content=true`. All three routes require Dashboard credentials, including on loopback |

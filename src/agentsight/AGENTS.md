@@ -172,6 +172,7 @@ OpenAI Responses API 的 `response.completed` 事件可能跨多个 TLS record�
 | `agentsight trace` | `src/bin/cli/trace.rs` | eBPF 追踪（需 root）；`--no-ebpf` 仅跑轨迹采集，无需特权 |
 | `agentsight serve` | `src/bin/cli/serve.rs` | API + Dashboard 服务器 |
 | `agentsight token` | `src/bin/cli/token.rs` | 查询 Token 消耗 |
+| `agentsight cache` | `src/bin/cli/cache.rs` | 提示词缓存命中率、低命中原因与成本（诊断逻辑在 `src/health/cache.rs`） |
 | `agentsight audit` | `src/bin/cli/audit.rs` | 查询审计事件 |
 | `agentsight discover` | `src/bin/cli/discover.rs` | 发现运行中的 AI Agent |
 | `agentsight metrics` | `src/bin/cli/metrics.rs` | Prometheus 格式指标 |
@@ -238,6 +239,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/agent-names` | GET | Agent 名称列表 |
 | `/api/timeseries` | GET | 时序 Token 统计 |
 | `/api/metrics/latency` | GET | LLM latency and throughput percentile metrics |
+| `/api/metrics/cache` | GET | 提示词缓存命中率与低命中归因（`start_ns`, `end_ns`, `agent_name`, `session_id`, `compare` 或 `baseline_start_ns`/`baseline_end_ns`, `low_hit_rate`, `cache_ttl_secs`；`price_input`/`price_cache_read`/`price_cache_write`/`price_output` 须同时给出）；默认最近 24 小时，单窗口最多读最新 20,000 次调用 |
 | `/api/agent-health` | GET | 历史 Agent 活动（SQLite 聚合） |
 | `/api/agent-process-health` | GET | 当前 Agent 进程健康状态 |
 | `/api/agent-health/{pid}` | DELETE | 删除健康条目 |
