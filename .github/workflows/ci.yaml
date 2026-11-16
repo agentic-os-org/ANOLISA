@@ -897,6 +897,7 @@ jobs:
           cargo llvm-cov --locked --no-report -p asc-gateway-runtime --lib -- processes::tests::scope_snapshot_survives_members_exiting_mid_enumeration --exact
           cargo llvm-cov --locked --no-report -p asc-credential-store --lib -- tests::token_
           cargo llvm-cov --locked --no-report -p asc-credential-store --lib -- tests::fake_file_is_create_new_private_and_validation_or_generation_failure_creates_nothing --exact
+          cargo llvm-cov --locked --no-report -p asc-cli --lib -- commands::inject_credential::boundary_tests::
       - name: Generate Linux V2 integration coverage
         working-directory: src/agent-sec-core/v2
         run: cargo llvm-cov report --cobertura --output-path ../rust-v2-sandbox-coverage.xml
