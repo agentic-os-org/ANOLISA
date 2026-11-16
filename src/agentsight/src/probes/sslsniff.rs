@@ -21,7 +21,7 @@ use std::{
     path::Path,
     slice,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -92,6 +92,67 @@ struct InodeAttach {
     /// Held for Drop (detaches the uprobes); never read directly.
     _links: Vec<Link>,
     attached_at: Instant,
+}
+
+/// A static-SSL inode whose offsets are attached but not yet confirmed to
+/// capture plaintext. Offsets are persisted to the learned cache only after a
+/// captured buffer decodes as HTTP, so a mis-resolved offset (a byte-pattern
+/// match on a non-SSL function, #10080) is never cached into silent zero
+/// collection.
+struct PendingVerify {
+    offsets: StaticSslOffsets,
+    path: String,
+    attached_at: Instant,
+}
+
+/// Window to observe plaintext before declaring an attached offset unverified.
+const VERIFY_WINDOW: Duration = Duration::from_secs(30);
+
+/// Does a captured SSL buffer begin with an HTTP request or response?
+///
+/// The runtime self-verify keeps a candidate offset only once its buffer decodes
+/// as HTTP plaintext; a wrong candidate (a non-SSL function that merely matches
+/// a byte prologue) yields bytes that never look like HTTP. PoC-verified on
+/// Claude Code 2.1.323: of 7 `WRITE_PAT` candidates only the real `SSL_write`
+/// produced `POST /v1/messages HTTP/1.1`.
+pub(crate) fn ssl_payload_looks_like_http(buf: &[u8]) -> bool {
+    const METHODS: &[&[u8]] = &[
+        b"GET ",
+        b"POST ",
+        b"PUT ",
+        b"DELETE ",
+        b"HEAD ",
+        b"PATCH ",
+        b"OPTIONS ",
+    ];
+    METHODS.iter().any(|m| buf.starts_with(m)) || buf.starts_with(b"HTTP/")
+}
+
+/// Classify pending inodes into those verified by a plaintext-capturing pid and
+/// those that expired without plaintext. Pure (no `self`) so the attribution
+/// logic is unit-testable without a BPF-backed [`SslSniff`].
+fn classify_pending_verdicts(
+    pending: &HashMap<FileKey, PendingVerify>,
+    pid_inodes: &HashMap<u32, Vec<FileKey>>,
+    verified: &HashSet<u32>,
+    now: Instant,
+) -> (Vec<FileKey>, Vec<FileKey>) {
+    // A verified pid confirms every static-SSL inode it has attached.
+    let verified_inodes: HashSet<FileKey> = pid_inodes
+        .iter()
+        .filter(|(pid, _)| verified.contains(pid))
+        .flat_map(|(_, files)| files.iter().copied())
+        .collect();
+    let mut resolved = Vec::new();
+    let mut expired = Vec::new();
+    for (file, p) in pending {
+        if verified_inodes.contains(file) {
+            resolved.push(*file);
+        } else if now.duration_since(p.attached_at) >= VERIFY_WINDOW {
+            expired.push(*file);
+        }
+    }
+    (resolved, expired)
 }
 
 fn should_reattach(
@@ -390,6 +451,14 @@ pub struct SslSniff {
     late_retries: LateRetries,
     /// Rate-limits procfs liveness sweeps to once per second.
     last_pid_prune: Instant,
+    /// Pids whose captured SSL buffer decoded as HTTP plaintext. Shared with the
+    /// ring-buffer poll thread (`run`); drained by `verify_pending_plaintext` to
+    /// confirm an attached inode's offsets before persisting them.
+    plaintext_pids: Arc<Mutex<HashSet<u32>>>,
+    /// Static-SSL inodes attached but not yet plaintext-verified. Offsets persist
+    /// to the learned cache only after verification, so a mis-resolved offset is
+    /// never cached into silent zero collection (#10080).
+    pending_verify: HashMap<FileKey, PendingVerify>,
     // Channel for user-space SslEvent (lightweight, no need for Box)
     tx: crossbeam_channel::Sender<SslEvent>,
     rx: crossbeam_channel::Receiver<SslEvent>,
@@ -457,6 +526,8 @@ impl SslSniff {
             pending_pid_admissions: HashMap::default(),
             late_retries: LateRetries::default(),
             last_pid_prune: Instant::now(),
+            plaintext_pids: Arc::new(Mutex::new(HashSet::new())),
+            pending_verify: HashMap::default(),
             tx,
             rx,
         })
@@ -751,11 +822,25 @@ impl SslSniff {
                                 self.record_attach(file, links);
                                 self.traced_files.insert(file);
                                 self.scan_retry_after.remove(&file);
-                                // The owner is gone, but the verified offsets
-                                // must outlive it: persist them so the next
-                                // process mapping this binary — even after a
-                                // service restart — attaches synchronously.
-                                self.learned_offsets.record(&path, offsets);
+                                // Defer persistence until a process mapping this
+                                // inode captures plaintext, proving the offsets are
+                                // the real SSL entry points and not a byte-pattern
+                                // false positive (#10080). The owner has exited, so
+                                // verification waits for the next mapping process.
+                                self.pending_verify.insert(
+                                    file,
+                                    PendingVerify {
+                                        offsets: offsets.clone(),
+                                        // scanned.path() is a pinned /proc/self/fd/N
+                                        // that dies with the scan descriptor; resolve
+                                        // the real path now so verification can
+                                        // fingerprint it on a later poll.
+                                        path: fs::read_link(&path)
+                                            .map(|p| p.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|_| path.clone()),
+                                        attached_at: Instant::now(),
+                                    },
+                                );
                             }
                             Err(error) => {
                                 log::warn!(
@@ -812,9 +897,23 @@ impl SslSniff {
                             self.traced_files.insert(file);
                             self.scan_retry_after.remove(&file);
                             admitted.extend(self.take_ready_pids(file));
-                            // Persist after admission so learning never delays
-                            // routing the installed offsets to waiting pids.
-                            self.learned_offsets.record(&path, &offsets);
+                            // Defer persistence until plaintext self-verify
+                            // confirms these offsets capture HTTP; caching an
+                            // unverified offset would poison every future process
+                            // mapping this binary (#10080).
+                            self.pending_verify.insert(
+                                file,
+                                PendingVerify {
+                                    offsets: offsets.clone(),
+                                    // scanned.path() is a pinned /proc/self/fd/N that
+                                    // dies with the scan descriptor; resolve the real
+                                    // path now so verification can fingerprint it later.
+                                    path: fs::read_link(&path)
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|_| path.clone()),
+                                    attached_at: Instant::now(),
+                                },
+                            );
                         }
                         Err(error) => {
                             log::warn!(
@@ -842,7 +941,15 @@ impl SslSniff {
                     self.traced_files.insert(file);
                     self.scan_retry_after.remove(&file);
                     self.forget_owners_unless_attached(file);
-                    log::warn!("SSL byte-pattern detection failed for {path}; skipping");
+                    // Surface the miss loudly with the binary size so a new agent
+                    // build the resolver cannot place is visible instead of being
+                    // silently negative-cached into zero collection (#10080).
+                    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    log::warn!(
+                        "SSL byte-pattern detection found no resolvable offsets for {path} \
+                         (size={size}); this binary collects nothing until the resolver or the \
+                         offset table covers it (#10080)"
+                    );
                 }
                 ExecutableScan::Failed => {
                     self.traced_files.remove(&file);
@@ -852,6 +959,7 @@ impl SslSniff {
                 }
             }
         }
+        self.verify_pending_plaintext();
         self.drain_scan_retries();
         self.prune_exited_pid_inodes();
         admitted
@@ -965,6 +1073,48 @@ impl SslSniff {
                 attached_at: Instant::now(),
             },
         );
+    }
+
+    /// Persist offsets for inodes proven to capture plaintext, and surface those
+    /// that attached but saw no HTTP within [`VERIFY_WINDOW`].
+    ///
+    /// The ring-buffer poll thread records a pid whenever a captured buffer
+    /// decodes as HTTP; here each such pid is attributed to the static-SSL inode
+    /// it maps, confirming that inode's offsets are the real entry points rather
+    /// than a byte-pattern false positive (#10080). Only then are the offsets
+    /// written to the learned cache. An inode that never captures plaintext
+    /// within the window is dropped from the pending set with a loud warning
+    /// instead of being silently persisted.
+    fn verify_pending_plaintext(&mut self) {
+        if self.pending_verify.is_empty() {
+            return;
+        }
+        // Take the pids whose captured buffer decoded as HTTP since the last poll.
+        let verified: HashSet<u32> = match self.plaintext_pids.lock() {
+            Ok(mut set) => mem::take(&mut *set),
+            Err(_) => return,
+        };
+        let now = Instant::now();
+        let (resolved, expired) =
+            classify_pending_verdicts(&self.pending_verify, &self.pid_inodes, &verified, now);
+        for file in resolved {
+            if let Some(pending) = self.pending_verify.remove(&file) {
+                self.learned_offsets.record(&pending.path, &pending.offsets);
+                log::info!(
+                    "Static SSL offsets for inode {file:?} verified by captured plaintext; persisted"
+                );
+            }
+        }
+        for file in expired {
+            if let Some(pending) = self.pending_verify.remove(&file) {
+                log::warn!(
+                    "Static SSL offsets for {} attached but captured no HTTP plaintext within {:?}; \
+                     NOT persisted (likely a mis-resolved byte-pattern match, #10080)",
+                    pending.path,
+                    VERIFY_WINDOW
+                );
+            }
+        }
     }
 
     /// Drop `file` from every pid's association list.
@@ -1349,6 +1499,14 @@ impl SslSniff {
         }
     }
 
+    /// Handle to the set of pids whose captured SSL buffer decoded as HTTP
+    /// plaintext. The unified ring-buffer consumer (`Probes::run`) records into
+    /// it; `verify_pending_plaintext` drains it to confirm an inode's attached
+    /// offsets before persisting them (#10080).
+    pub(crate) fn plaintext_signal(&self) -> Arc<Mutex<HashSet<u32>>> {
+        Arc::clone(&self.plaintext_pids)
+    }
+
     /// Spawn a background thread that polls the BPF ring buffer and sends
     /// decoded [`SslEvent`]s through an internal channel.
     ///
@@ -1357,6 +1515,10 @@ impl SslSniff {
     pub fn run(&self) -> Result<SslPoller> {
         config::initialize_event_clock().context("failed to initialize event clock")?;
         let tx = self.tx.clone();
+        // Shared with the poll callback so plaintext capture can confirm an
+        // inode's attached offsets before they are persisted (drained by
+        // verify_pending_plaintext).
+        let plaintext_pids = Arc::clone(&self.plaintext_pids);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
 
@@ -1370,6 +1532,15 @@ impl SslSniff {
                 // SSL records are variable-length (tiered reservation): decode by
                 // header prefix + buf_size, not a full-struct cast.
                 if let Some(event) = SslEvent::from_bytes(data) {
+                    // Plaintext self-verify signal: a buffer decoding as HTTP
+                    // proves the offsets attached for this pid's inode are the
+                    // real SSL_write/SSL_read, not a byte-pattern false positive
+                    // (#10080). verify_pending_plaintext drains this set.
+                    if ssl_payload_looks_like_http(&event.buf) {
+                        if let Ok(mut verified) = plaintext_pids.lock() {
+                            verified.insert(event.pid);
+                        }
+                    }
                     let _ = tx.send(event);
                 }
                 0
@@ -2594,11 +2765,69 @@ mod python_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn plaintext_predicate_accepts_http_rejects_noise() {
+        // SSL_write side (request line) and SSL_read side (response line).
+        assert!(ssl_payload_looks_like_http(
+            b"POST /v1/messages HTTP/1.1\r\nHost: api"
+        ));
+        assert!(ssl_payload_looks_like_http(b"GET /api/bootstrap HTTP/1.1"));
+        assert!(ssl_payload_looks_like_http(b"HTTP/1.1 200 OK\r\n"));
+        // TLS records and arbitrary bytes must not pass, so a wrong candidate
+        // offset is never confirmed as the real SSL entry point (#10080).
+        assert!(!ssl_payload_looks_like_http(
+            b"\x16\x03\x01\x00\x5a\x02\x00"
+        ));
+        assert!(!ssl_payload_looks_like_http(b"\x00\x01\x02\x03garbage"));
+        assert!(!ssl_payload_looks_like_http(b""));
+    }
+
     fn pid_identity(pid: u32) -> ProcessIdentity {
         ProcessIdentity {
             pid,
             start_time: 1000 + u64::from(pid),
         }
+    }
+
+    #[test]
+    fn classify_verdicts_resolves_plaintext_inode_and_expires_silent_one() {
+        let offsets = StaticSslOffsets {
+            ssl_write: 1,
+            ssl_read: 2,
+            ssl_do_handshake: 3,
+            write_is_ex: false,
+            read_is_ex: false,
+        };
+        let now = Instant::now();
+        let stale = now
+            .checked_sub(VERIFY_WINDOW + Duration::from_secs(1))
+            .unwrap_or(now);
+        let mut pending = HashMap::new();
+        // (10,10) attached long ago, saw no plaintext -> expired, NOT persisted.
+        pending.insert(
+            (10, 10),
+            PendingVerify {
+                offsets: offsets.clone(),
+                path: "silent".into(),
+                attached_at: stale,
+            },
+        );
+        // (20,20) just attached and its pid captured plaintext -> resolved.
+        pending.insert(
+            (20, 20),
+            PendingVerify {
+                offsets,
+                path: "live".into(),
+                attached_at: now,
+            },
+        );
+        let mut pid_inodes = HashMap::new();
+        pid_inodes.insert(100, vec![(20, 20)]);
+        pid_inodes.insert(200, vec![(10, 10)]);
+        let verified: HashSet<u32> = [100].into_iter().collect();
+        let (resolved, expired) = classify_pending_verdicts(&pending, &pid_inodes, &verified, now);
+        assert_eq!(resolved, vec![(20, 20)]);
+        assert_eq!(expired, vec![(10, 10)]);
     }
 
     /// Build a raw ring-buffer sample: the header prefix (each field written at its

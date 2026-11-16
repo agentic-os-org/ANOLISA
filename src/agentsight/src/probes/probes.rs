@@ -400,6 +400,9 @@ impl Probes {
         let event_tx = self.event_tx.clone();
         let event_policy = self.event_channel_policy;
         let budget = self.budget.clone();
+        // Plaintext self-verify signal shared with the SSL decode below; sslsniff
+        // drains it to confirm an inode's offsets before persisting them (#10080).
+        let plaintext_signal = self.sslsniff.plaintext_signal();
         let sample_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
@@ -425,7 +428,19 @@ impl Probes {
                     EVENT_SOURCE_SSL => {
                         // SSL records are variable-length (tiered reservation):
                         // decode by header prefix + buf_size, not a full-struct cast.
-                        crate::probes::sslsniff::SslEvent::from_bytes(data).map(Event::Ssl)
+                        crate::probes::sslsniff::SslEvent::from_bytes(data).map(|event| {
+                            // Plaintext self-verify (#10080): a buffer decoding as
+                            // HTTP proves the offsets attached for this pid's inode
+                            // are the real SSL_write/SSL_read; record the pid so
+                            // verify_pending_plaintext persists them. A mis-resolved
+                            // offset never captures HTTP, so it is never confirmed.
+                            if crate::probes::sslsniff::ssl_payload_looks_like_http(&event.buf) {
+                                if let Ok(mut verified) = plaintext_signal.lock() {
+                                    verified.insert(event.pid);
+                                }
+                            }
+                            Event::Ssl(event)
+                        })
                     }
                     EVENT_SOURCE_PROCMON => {
                         // Process monitor event
