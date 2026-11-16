@@ -106,6 +106,12 @@ Live Agent health plus the interruption inbox: every unresolved event with its t
 session, and conversation. **Resolve** closes an event, **Details** opens the captured evidence.
 The latency panel switches between the last 24 hours, 7 days, and 30 days.
 
+The **Prompt cache** panel below the Agent cards uses the same range. Each row is one Agent,
+provider, and model with its token-weighted hit rate, the rate of the preceding window of the same
+length, and a status; rows that need review open by default and list the causes of low hits with a
+link to an example session. The figures and causes match
+[`agentsight cache`](cli-reference.md#agentsight-cache).
+
 ![Agent Dashboard with the interruption inbox](../../../images/agentsight/en/dashboard-agent-health.png)
 
 "No agents discovered" only means no Agent process is running right now; historical sessions stay

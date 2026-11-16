@@ -794,6 +794,84 @@ export async function fetchLatencyMetrics(
   return apiFetch<LatencyMetricsSummary[]>(`${API_BASE}/api/metrics/latency?${params.toString()}`);
 }
 
+export type CacheStatus = 'no_usage' | 'undeterminable' | 'insufficient_samples' | 'needs_review' | 'healthy';
+export type CacheFindingKind = 'suspected' | 'undeterminable' | 'expected';
+export type CacheTrend = 'improved' | 'regressed' | 'unchanged' | 'incomparable';
+
+export interface CacheLatencyBucket {
+  calls: number;
+  median_input_tokens: number | null;
+  ttft_ms: MetricPercentiles | null;
+  e2e_latency_ms: MetricPercentiles | null;
+}
+
+export interface CacheFinding {
+  reason: string;
+  kind: CacheFindingKind;
+  calls: number;
+  unread_tokens: number;
+  missed_tokens: number;
+  ttft_ms_p50: number | null;
+  e2e_latency_ms_p50: number | null;
+  recommendation: string;
+  examples: {
+    trace_id: string | null;
+    call_id: string | null;
+    session_id: string | null;
+    start_ns: number;
+    input_tokens: number;
+    cache_read_tokens: number | null;
+    previous_input_tokens: number | null;
+  }[];
+}
+
+export interface CacheGroupDiagnosis {
+  agent_name: string | null;
+  provider: string | null;
+  model: string | null;
+  status: CacheStatus;
+  coverage: {
+    calls: number;
+    duplicate_calls: number;
+    failed_calls: number;
+    usage_calls: number;
+    cache_read_field_calls: number;
+    cache_creation_field_calls: number;
+    explicit_zero_read_calls: number;
+  };
+  tokens: { input: number; cache_read: number; cache_creation: number; output: number; uncached_input: number };
+  conservative_hit_rate: number | null;
+  complete_hit_rate: number | null;
+  latency: { warm: CacheLatencyBucket; cold: CacheLatencyBucket };
+  findings: CacheFinding[];
+  baseline: {
+    status: CacheStatus;
+    conservative_hit_rate: number | null;
+    hit_rate_change_pp: number | null;
+    trend: CacheTrend;
+    sufficient_samples: boolean;
+  } | null;
+}
+
+export interface CacheDiagnosis {
+  start_ns: number;
+  end_ns: number;
+  truncated: boolean;
+  groups: CacheGroupDiagnosis[];
+}
+
+/**
+ * Fetch prompt-cache hit rates and low-hit causes, compared with the preceding window of equal length.
+ */
+export async function fetchCacheDiagnosis(startNs: number, endNs: number): Promise<CacheDiagnosis> {
+  const params = new URLSearchParams({
+    start_ns: String(startNs),
+    end_ns: String(endNs),
+    compare: 'true',
+  });
+  return apiFetch<CacheDiagnosis>(`${API_BASE}/api/metrics/cache?${params.toString()}`);
+}
+
 /**
  * Fetch time-bucketed token stats and per-model breakdowns.
  */
