@@ -17,6 +17,24 @@ pub(crate) fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+pub(crate) fn start_questions() -> i32 {
+    let result = std::env::current_exe().and_then(|exe| {
+        let _interrupts = IgnoreInterrupts::new();
+        Command::new(exe)
+            .arg0("cosh")
+            .env_remove("COSH_GUIDE_AUTH_HANDOFF")
+            .status()
+    });
+    match result {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            tracing::warn!(operation = "start_questions", kind = ?error.kind(), "guide operation failed");
+            eprintln!("cosh: {error}");
+            1
+        }
+    }
+}
+
 /// The child shares the foreground process group, so a Ctrl-C aimed at the
 /// auth session would also reach the waiting wizard; ignore it for the
 /// handoff and restore the prior handlers afterwards.

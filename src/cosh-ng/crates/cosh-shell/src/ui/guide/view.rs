@@ -144,14 +144,19 @@ fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) {
 
 fn choice_line(label: &str, value: &str, width: usize, selected: bool) -> Line<'static> {
     let prefix = if selected { "> " } else { "  " };
-    let value_width = display_width(value);
-    let room = width.saturating_sub(2 + value_width + usize::from(!value.is_empty()));
-    let label = truncate(label, room);
+    let label = truncate(label, width.saturating_sub(2));
+    let room = width.saturating_sub(3 + display_width(&label));
+    let value = if room == 0 {
+        String::new()
+    } else {
+        truncate(value, room)
+    };
+    let value_width = display_width(&value);
     let mut spans = vec![Span::raw(prefix.to_string()), Span::raw(label.clone())];
     if !value.is_empty() {
         let pad = width.saturating_sub(2 + display_width(&label) + value_width);
         spans.push(Span::raw(" ".repeat(pad.max(1))));
-        spans.push(Span::raw(value.to_string()));
+        spans.push(Span::raw(value));
     }
     let style = if selected {
         Style::default().add_modifier(Modifier::REVERSED)

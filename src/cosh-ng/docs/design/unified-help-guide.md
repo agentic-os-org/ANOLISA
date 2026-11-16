@@ -25,19 +25,22 @@ login settings and onboarding. `guide on/off/status` controls usage guidance onl
 ## 2. Information hierarchy and terminal layout
 
 Home lists Language, AI service, Tips and recommendations, Login health summary, Default login shell,
-then a visually separate Getting started entry. Focus starts on the first setting.
+then Start asking questions and a visually separate Getting started entry. Focus starts on questions.
 Return restores selection; successful saves return to the list with reread state.
 No mandatory first-run sequence or requirement to configure every setting.
+Choice rows reserve the label before the value. At narrow supported sizes,
+overlong values are ellipsized so setting names remain identifiable.
 
 ```text
- Cosh configuration and getting started
+ Cosh setup and getting started
 
- > Language                     English
-   AI service                   Not configured
+   Language                     English
+   AI service                   Zero-config automatic access; ask directly
    Tips and recommendations     View settings
    Login health summary         On
    Default login shell          Current user · Bash
 
+ > Start asking questions
    Getting started              Commands, questions, exit
 
  Up/Down Select  Enter Open  Esc Exit
@@ -78,8 +81,26 @@ Reuse parsing/writing; refresh guide UI immediately after a successful save. Do 
 
 ### AI service
 
-Summarize the active service, Not configured, or Unable to read. Configured does not mean connected.
-Selecting AI service on home enters the existing authentication manager directly; show its current-service summary there without an intermediate Manage button page.
+Separate the access path from connection verification. Automatic access without a saved provider
+is a candidate, not proof of trial eligibility, quota or successful model access. Unconfirmed
+environments invite a direct question; configured services remain connection-unverified.
+Read failures and disabled automatic access are separate states. Incomplete explicit settings keep
+their route and never silently fall back to a trial.
+
+The AI page defaults to Start asking questions, which closes the wizard and opens the existing
+Cosh session without submitting a question. Exiting returns to the caller. Manage AI service is
+secondary and hands off to the existing authentication manager, returning to the wizard afterward.
+Background summary updates preserve the selected action even when source/preference text moves rows.
+
+Core owns route selection through trial_policy::decide. The existing auth state response adds
+ecs_trial.route (existing/ecs_identity/disabled), identity_status
+(not_checked/supported/unsupported/unknown/failed), and a safe probe error_code.
+effective_auth_required and legacy available/active keep their previous meanings. With no probe,
+macOS is unsupported by platform fact and other platforms are not_checked; a negative Linux
+identity probe is unknown because timeout also yields false.
+The guide does not request a probe. Old Core responses degrade conservatively; a saved ECS identity
+auth_source is configuration evidence only and must still respect unreadable or disabled preferences.
+
 Reuse templates, state machine, activation, editing, deletion and retries; no duplicate secret input/storage/validation.
 Retain Aliyun console, Coding Plan, Token Plan, Bailian and OpenAI-compatible template differences.
 Non-ECS AK/SK, ECS RAM role/challenge and zero-configuration service retain their existing paths.
@@ -247,7 +268,7 @@ Split additions into private owner files rather than growing oversized implement
 
 ## 9. Acceptance, risks and rollback
 
-Walk new-user paths: empty config → tutorial → AI setup → one question; language-only change;
+Walk new-user paths: empty config → default question action → one question; optional AI management; language-only change;
 recommendation disable/clear/cancel; current/other-user login shell → sudo → verified state.
 Cover zh/en, light/dark/monochrome, 80×24/60×20/40×16/below-minimum, resize, redirection and TERM=dumb.
 Prototype frame checks do not establish real PTY/VNC/provider/sudo or Linux RPM acceptance.

@@ -212,6 +212,17 @@ macro_rules! guide_wizard_ids {
             GuideWizardLoginOtherGuidance,
             GuideWizardLoginReread,
             GuideWizardLoginRereadDone,
+            GuideWizardAiAsk,
+            GuideWizardAiConfigured,
+            GuideWizardAiUnverified,
+            GuideWizardAiIncomplete,
+            GuideWizardAiNoFallback,
+            GuideWizardAiUnknown,
+            GuideWizardAiDisabled,
+            GuideWizardAiEcs,
+            GuideWizardAiPending,
+            GuideWizardAiIdentityFailed,
+            GuideWizardAiSourceRuntime,
         );
     };
 }

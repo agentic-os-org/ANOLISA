@@ -24,13 +24,7 @@ cases:
         text: "Enter"
         timeout_ms: 15000
       - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
+        hex: "1b5b41"
       - type: key
         name: enter
       - id: login-page
@@ -111,13 +105,7 @@ cases:
         text: "Enter"
         timeout_ms: 15000
       - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
+        hex: "1b5b41"
       - type: key
         name: enter
       - id: login-page
@@ -199,13 +187,7 @@ cases:
         text: "Enter"
         timeout_ms: 15000
       - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
-      - type: bytes
-        hex: "1b5b42"
+        hex: "1b5b41"
       - type: key
         name: enter
       - id: login-page
@@ -216,12 +198,18 @@ cases:
         type: wait_quiet
         quiet_ms: 500
         timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
       - type: resize
         rows: 24
         cols: 80
       - id: login-80
         type: wait_quiet
         quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
         timeout_ms: 10000
       - type: resize
         rows: 20
@@ -230,6 +218,9 @@ cases:
         type: wait_quiet
         quiet_ms: 500
         timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
       - type: resize
         rows: 16
         cols: 40
@@ -237,12 +228,18 @@ cases:
         type: wait_quiet
         quiet_ms: 500
         timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
       - type: resize
         rows: 16
         cols: 39
       - id: too-small-39
         type: wait_quiet
         quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
         timeout_ms: 10000
       - type: key
         name: esc

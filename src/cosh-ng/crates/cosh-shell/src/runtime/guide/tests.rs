@@ -10,6 +10,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
+mod ai;
+
 fn fixture() -> (tempfile::TempDir, UserPaths) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -71,6 +73,42 @@ fn isolated_fixture() -> (EnvGuard, tempfile::TempDir, UserPaths) {
     std::env::remove_var("LC_MESSAGES");
     std::env::remove_var("LANG");
     (guard, temp, paths)
+}
+
+#[test]
+fn guide_ai_unknown_access_invites_questions_and_keeps_management_secondary() {
+    use crate::adapter::GuideAuthSummary;
+    use crate::ui::guide::WizardRow;
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::ZhCn));
+    session.ai = Reading::Value(GuideAuthSummary {
+        auto_use: Some(true),
+        ..Default::default()
+    });
+    session.enter(super::session::Page::Ai);
+    let view = session.view();
+    assert!(view.rows.iter().any(
+        |row| matches!(row, WizardRow::Text(text) if text.contains("免配置自动接入，可直接提问"))
+    ));
+    assert!(
+        matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == "开始提问")
+    );
+    session.handle(key(KeyCode::Down));
+    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Handoff));
+}
+
+#[test]
+fn guide_ai_configured_without_name_is_still_configured() {
+    use crate::adapter::GuideAuthSummary;
+    use crate::ui::guide::WizardRow;
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::ZhCn));
+    session.ai = Reading::Value(GuideAuthSummary {
+        configured: true,
+        ..Default::default()
+    });
+    session.enter(super::session::Page::Ai);
+    assert!(session.view().rows.iter().any(|row| matches!(row, WizardRow::Text(text) if text.contains("已配置 AI 接入") && text.contains("连接未验证"))));
 }
 
 #[test]
@@ -174,6 +212,7 @@ fn home_navigation_opens_a_page_and_returns_to_the_same_row() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
     assert_eq!(session.view().title, "Cosh setup and getting started");
+    session.cursor = 0;
     for _ in 0..3 {
         session.handle(key(KeyCode::Down));
     }
@@ -189,9 +228,7 @@ fn home_navigation_opens_a_page_and_returns_to_the_same_row() {
 fn start_page_scrolls_and_returns_without_saving() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
-    for _ in 0..5 {
-        session.handle(key(KeyCode::Down));
-    }
+    session.handle(key(KeyCode::Down));
     session.handle(key(KeyCode::Enter));
     assert!(session.view().markdown.is_some());
     session.handle(key(KeyCode::Down));
@@ -227,6 +264,7 @@ fn language_save_persists_returns_home_and_refreshes_the_ui_language() {
     std::env::remove_var("COSH_SHELL_LANG");
     let (_temp, paths) = fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
+    session.cursor = 0;
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.view().title, "Language / 语言");
     session.handle(key(KeyCode::Down));
@@ -246,6 +284,7 @@ fn language_escape_keeps_the_draft_unsaved() {
     std::env::remove_var("COSH_SHELL_LANG");
     let (_temp, paths) = fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
+    session.cursor = 0;
     session.handle(key(KeyCode::Enter));
     session.handle(key(KeyCode::Down));
     session.handle(key(KeyCode::Esc));
@@ -256,6 +295,7 @@ fn language_escape_keeps_the_draft_unsaved() {
 fn health_save_reports_the_next_login_scope() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
+    session.cursor = 0;
     for _ in 0..3 {
         session.handle(key(KeyCode::Down));
     }
@@ -273,6 +313,7 @@ fn health_save_reports_the_next_login_scope() {
 fn guide_tip_save_reuses_the_cli_result_and_keeps_banner_independent() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
+    session.cursor = 0;
     session.handle(key(KeyCode::Down));
     session.handle(key(KeyCode::Down));
     session.handle(key(KeyCode::Enter));
@@ -292,7 +333,7 @@ fn guide_tip_save_reuses_the_cli_result_and_keeps_banner_independent() {
 fn ctrl_c_exits_from_any_page() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
-    session.handle(key(KeyCode::Enter));
+    session.enter(super::session::Page::Language);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(matches!(session.handle(ctrl_c), Flow::Exit));
 }

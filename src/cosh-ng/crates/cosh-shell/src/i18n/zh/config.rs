@@ -117,7 +117,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardLanguageTitle => "语言 / Language",
         MessageId::GuideWizardGuideTipLabel => "使用引导提示",
         MessageId::GuideWizardLanguageBody => "界面语言。会话内也可运行 `/config language`。",
-        MessageId::GuideWizardAiBody => "配置与管理 AI 服务。会话内运行 `/auth`。",
+        MessageId::GuideWizardAiBody => "直接开始提问；需要管理 AI 服务时，在会话内运行 `/auth`。",
         MessageId::GuideWizardTipsBody => concat!(
             "使用引导提示、命令分析方式与个性化提问推荐。\n",
             "\n",
@@ -172,7 +172,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "登录时显示健康与资源状态，影响后续登录。"
         }
         MessageId::GuideWizardAiReadonly => {
-            "在 Cosh 会话中运行 /auth 配置与管理 AI 服务。配置完成不等于已连接。"
+            "可直接提问，首次提问时验证；也可管理 AI 服务。"
         }
         MessageId::GuideWizardLoginReadonly => {
             "在终端运行 cosh login set 或 cosh login restore 修改。"
@@ -184,7 +184,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::GuideWizardCurrent => "当前",
         MessageId::GuideWizardAiLoading => "读取中…",
-        MessageId::GuideWizardAiUnconfigured => "未配置",
+        MessageId::GuideWizardAiAsk => "开始提问",
+        MessageId::GuideWizardAiConfigured => "已配置 AI 接入",
+        MessageId::GuideWizardAiUnverified => "连接未验证",
+        MessageId::GuideWizardAiIncomplete => "配置需检查",
+        MessageId::GuideWizardAiNoFallback => "不会自动切换试用接入。",
+        MessageId::GuideWizardAiUnknown => "暂时无法确认 AI 接入状态",
+        MessageId::GuideWizardAiDisabled => "自动使用 ECS 试用已关闭",
+        MessageId::GuideWizardAiEcs => "ECS 免配置接入 · 首次提问时验证",
+        MessageId::GuideWizardAiPending => "免配置自动接入，可直接提问",
+        MessageId::GuideWizardAiIdentityFailed => "ECS 身份检测失败，可重试提问",
+        MessageId::GuideWizardAiSourceRuntime => "运行时配置",
+        MessageId::GuideWizardAiUnconfigured => "需要配置 AI 服务",
         MessageId::GuideWizardAiServiceLine => "当前 AI 服务：{value}",
         MessageId::GuideWizardAiSourceLine => "配置来源：{value}",
         MessageId::GuideWizardAiSourceUser => "用户配置",
@@ -192,7 +203,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseLine => "零配置自动使用：{value}",
         MessageId::GuideWizardAiAutoUseOn => "开启",
         MessageId::GuideWizardAiAutoUseOff => "关闭",
-        MessageId::GuideWizardAiManage => "配置 AI 服务（打开 /auth）",
+        MessageId::GuideWizardAiManage => "管理 AI 服务（打开 /auth）",
         MessageId::GuideWizardAiHandoff => {
             "正在打开 Cosh 会话进行认证，完成后输入 exit 返回向导。"
         }

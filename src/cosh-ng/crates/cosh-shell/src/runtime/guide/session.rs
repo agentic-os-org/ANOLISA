@@ -16,6 +16,7 @@ use crate::adapter::GuideAuthSummary;
 pub(crate) enum Flow {
     Continue,
     Exit,
+    Ask,
     /// Suspend the wizard and hand the terminal to the existing auth flow.
     Handoff,
     LoginSet,
@@ -70,8 +71,8 @@ impl Session {
             i18n,
             snapshot,
             page: Page::Home,
-            cursor: 0,
-            home_cursor: 0,
+            cursor: content::ENTRIES.len() + 1,
+            home_cursor: content::ENTRIES.len() + 1,
             tips_cursor: 0,
             scroll: 0,
             message: None,
@@ -101,9 +102,17 @@ impl Session {
     pub(crate) fn tick(&mut self) -> bool {
         if let Some(receiver) = &self.ai_rx {
             if let Ok(reading) = receiver.try_recv() {
+                let ai_choice = (self.page == Page::Ai).then(|| self.choice_index());
                 self.ai = reading;
                 self.ai_loading = false;
                 self.ai_rx = None;
+                if let Some(choice) = ai_choice {
+                    self.cursor = 0;
+                    self.shift(0);
+                    for _ in 0..choice {
+                        self.shift(1);
+                    }
+                }
                 return true;
             }
         }
@@ -193,6 +202,7 @@ impl Session {
     fn hint(&self) -> String {
         let id = match self.page {
             Page::Home => MessageId::GuideWizardHomeHint,
+            Page::Ai => MessageId::GuideWizardHomeHint,
             Page::Start => MessageId::GuideWizardScrollHint,
             Page::DataPrivacy => MessageId::GuideWizardScrollHint,
             _ => MessageId::GuideWizardChoiceHint,
@@ -274,67 +284,12 @@ impl Session {
             .collect::<Vec<_>>();
         rows.push(WizardRow::Blank);
         rows.push(WizardRow::Choice {
+            label: self.i18n.t(MessageId::GuideWizardAiAsk).to_string(),
+            value: String::new(),
+        });
+        rows.push(WizardRow::Choice {
             label: self.i18n.t(MessageId::GuideWizardEntryStart).to_string(),
             value: self.i18n.t(MessageId::GuideWizardStartSummary).to_string(),
-        });
-        rows
-    }
-
-    fn ai_value(&self) -> String {
-        if self.ai_loading {
-            return self.i18n.t(MessageId::GuideWizardAiLoading).to_string();
-        }
-        match &self.ai {
-            Reading::Value(summary) if summary.configured => {
-                summary.service.clone().unwrap_or_else(|| {
-                    self.i18n
-                        .t(MessageId::GuideWizardAiUnconfigured)
-                        .to_string()
-                })
-            }
-            Reading::Value(_) => self
-                .i18n
-                .t(MessageId::GuideWizardAiUnconfigured)
-                .to_string(),
-            Reading::Unknown => self.i18n.t(MessageId::GuideWizardReadFailed).to_string(),
-        }
-    }
-
-    fn ai_rows(&self) -> Vec<WizardRow> {
-        let mut rows = vec![WizardRow::Text(self.i18n.format(
-            MessageId::GuideWizardAiServiceLine,
-            &[("value", &self.ai_value())],
-        ))];
-        if let Reading::Value(summary) = &self.ai {
-            if let Some(source) = &summary.source {
-                let label = match source.as_str() {
-                    "system" => MessageId::GuideWizardAiSourceSystem,
-                    _ => MessageId::GuideWizardAiSourceUser,
-                };
-                rows.push(WizardRow::Text(self.i18n.format(
-                    MessageId::GuideWizardAiSourceLine,
-                    &[("value", self.i18n.t(label))],
-                )));
-            }
-            if let Some(auto_use) = summary.auto_use {
-                let label = if auto_use {
-                    MessageId::GuideWizardAiAutoUseOn
-                } else {
-                    MessageId::GuideWizardAiAutoUseOff
-                };
-                rows.push(WizardRow::Text(self.i18n.format(
-                    MessageId::GuideWizardAiAutoUseLine,
-                    &[("value", self.i18n.t(label))],
-                )));
-            }
-        }
-        rows.push(WizardRow::Text(
-            self.i18n.t(MessageId::GuideWizardAiReadonly).to_string(),
-        ));
-        rows.push(WizardRow::Blank);
-        rows.push(WizardRow::Choice {
-            label: self.i18n.t(MessageId::GuideWizardAiManage).to_string(),
-            value: String::new(),
         });
         rows
     }
@@ -463,6 +418,7 @@ impl Session {
                     }
                     3 => self.enter(Page::Health),
                     4 => self.enter(Page::Login),
+                    6 => return Flow::Ask,
                     _ => self.enter(Page::Start),
                 }
             }
@@ -500,7 +456,13 @@ impl Session {
                 let enabled = self.choice_index() == 0;
                 self.save_health(enabled);
             }
-            Page::Ai => return Flow::Handoff,
+            Page::Ai => {
+                return if self.choice_index() == 0 {
+                    Flow::Ask
+                } else {
+                    Flow::Handoff
+                }
+            }
             Page::Login => {
                 return match self.login_choices().get(self.choice_index()).copied() {
                     Some(super::login::LoginChoice::Set) => Flow::LoginSet,

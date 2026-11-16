@@ -92,6 +92,26 @@ fn narrow_terminal_keeps_a_single_column_and_truncates_long_values() {
 }
 
 #[test]
+fn choice_values_preserve_labels_within_the_content_width() {
+    for label in ["AI service", "AI 服务", &"L".repeat(36)] {
+        for value in [String::new(), "on".to_string(), "long value ".repeat(10)] {
+            for width in [38, 76] {
+                for selected in [false, true] {
+                    let line = choice_line(label, &value, width, selected);
+                    let text = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>();
+                    assert!(text.contains(label), "{width}: {text}");
+                    assert!(line.width() <= width, "{width}: {text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn undersized_terminal_shows_the_compact_notice_instead_of_the_form() {
     let lines = render_lines(30, 10, &view());
     let text = lines.join("\n");

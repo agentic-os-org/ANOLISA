@@ -416,6 +416,10 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardLoginRereadDone as usize + 1,
+            MessageId::GuideWizardAiAsk as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiSourceRuntime as usize + 1,
             MessageId::ALL.len()
         );
     }
