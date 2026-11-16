@@ -1315,6 +1315,102 @@ fn raw_relay_bash_routes_recalled_and_indented_natural_language() {
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
+// A poisoned input mirror makes the relay hide the submission from Bash
+// history until the shell proves the accepted line non-secret. Both a
+// successful and an ordinary failing command must come back; secrets and
+// cleanly typed lines keep their existing behavior.
+#[test]
+fn raw_relay_bash_recovers_dirty_non_secret_history_entries() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-dirty-history-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::create_dir_all(&work_dir).expect("work");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         export HISTFILESIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+
+    let secret = "TEST_ONLY_SECRET_1119";
+    let snapshot = work_dir.join("history-snapshot");
+    let config = ShellHostConfig::new("bash-dirty-history-test", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            // A cursor movement after typing poisons the relay mirror, so each
+            // submission below takes the fail-closed history path.
+            RawRelayAction::write(b"pwd".to_vec()),
+            RawRelayAction::write(b"\x1b[D".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"lll".to_vec()),
+            RawRelayAction::write(b"\x1b[D".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(format!("TOKEN={secret} true").into_bytes()),
+            RawRelayAction::write(b"\x1b[D".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("echo CLEAN_MARKER"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(format!("history > {}", shell_arg(&snapshot))),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("dirty history relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        rendered_text.contains("command not found"),
+        "the failing probe must run as an ordinary command: {rendered_text}"
+    );
+    let history = std::fs::read_to_string(&snapshot).expect("history snapshot");
+    let recorded = |command: &str| {
+        history.lines().any(|line| {
+            line.trim_start()
+                .split_once(char::is_whitespace)
+                .is_some_and(|(_, entry)| entry.trim() == command)
+        })
+    };
+    assert!(
+        recorded("pwd"),
+        "successful dirty command missing from history: {history}"
+    );
+    assert!(
+        recorded("lll"),
+        "failing dirty command missing from history: {history}"
+    );
+    assert!(
+        recorded("echo CLEAN_MARKER"),
+        "clean control line missing from history: {history}"
+    );
+    assert!(!history.contains(secret), "{history}");
+    let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
+    assert!(!journal.contains(secret), "{journal}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
 #[test]
 fn raw_relay_zsh_preserves_session_history() {
     if Command::new("zsh").arg("--version").output().is_err() {

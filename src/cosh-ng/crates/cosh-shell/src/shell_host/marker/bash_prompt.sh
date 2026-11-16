@@ -284,6 +284,12 @@ _cosh_bounded_preexec_marker() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     return 0
   fi
+  if [[ "$pending_recovery" == true ]]; then
+    # PS0 proves Bash accepted the line the relay hid only provisionally. The
+    # widget already ruled out secrets, so let it return to history whether the
+    # command succeeds or fails.
+    _cosh_confirm_pending_recovery_history "$command"
+  fi
   if [[ "$pending_recovery" != true
      && ( -z "$history_no" || -z "$command"
      || "$history_no" == "$(_cosh_last_preexec_history_no)" ) ]]; then
