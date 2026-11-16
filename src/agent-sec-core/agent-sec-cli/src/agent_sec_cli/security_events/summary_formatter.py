@@ -244,10 +244,10 @@ def _summarize_hardening(events: list[SecurityEvent]) -> str:
         total = result.get("total", 0)
         failures = result.get("failures", [])
 
-        # Include fixed count from reinforce operations in compliance calculation
+        # A rescan already reflects earlier fixes; only add newer reinforcements.
         fixed_count = 0
         for e in reinforcements:
-            if _has_hardening_stats(e):
+            if e.timestamp > latest_scan.timestamp and _has_hardening_stats(e):
                 reinf_result = _get_result(e)
                 fixed_count += reinf_result.get("fixed", 0)
 
