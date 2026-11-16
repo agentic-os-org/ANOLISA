@@ -20,6 +20,38 @@ Scope 受理不代表保护已生效。CLI 和 daemon 需一起升级：Scope up
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## 内置凭据注入（未发布的 V2）
+
+`agent-sec-cli inject-credential` 为随包 GitHub Cedar 模板合并 fake 生成、Policy 创建和
+Scope 分配；原有分步命令保持不变。这是源码树中的新增功能，不是已发布的 Gateway
+安装方式，要求匹配的 V2 CLI/daemon 和已安装的 gateway 资产。
+
+```bash
+sudo agent-sec-cli inject-credential --builtin github \
+  --real-token-file /root/github.token \
+  --owner agentuser --cmdline-arg /usr/local/bin/my-agent
+```
+
+以 root 执行，选择非 root Agent owner（`--owner` 或 `--owner-uid`），再用
+`--cmdline-arg`、`--executable`、`--process-name` 三选一精确命中 Agent。
+脚本型 Agent 使用完整命令路径，不选择共用解释器。real 文件必须私有且由 root 或 owner
+所有，所有父目录必须可信且 group/other 不可写；同时确保 Agent 无法读取 real。
+root 所有的随包模板不会被修改，也不会编入 CLI。
+
+JSON 返回 ID、`fakeTokenFile`、网关状态和撤销命令，不输出 Token 值。
+生成的 fake 默认放在 owner 的 `.config/agent-sec/gateway/`，可用 `--output-dir` 另选 owner 可写目录；
+`--fake-token-file` 则使用现有私有 fake。原 real 文件不变，成功登记后删除暂存副本；
+登记失败保留 root-only 恢复文件，按错误信息提供的人工恢复和清理命令处理。
+保留交付的 fake 供 Agent 启动，自行配置 `GH_TOKEN`/`GITHUB_TOKEN`，不会生成 `agent.env`。
+
+命令不启用网关。另行运行 `sudo agent-sec-cli gateway enable`，通过
+`agent-sec-cli gateway ca` 获取共享 CA，并配置 Agent 的 TLS 信任。
+Binding 受理不等于流量保护生效。`--wait-seconds N` 等待已有匹配进程达到 READY；
+超时仍输出结果并以 1 退出。`--dry-run` 只读取模板，不读 Token、不连接 daemon。
+撤销时执行返回的 Scope 删除命令，等待清理后再删除 Policy。
+ready 条件、响应改写限制及部分失败恢复见
+[网关契约](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)。
+
 ## Policy 数据库位置
 
 未设置非空 `AGENT_SEC_DATA_DIR` 时，daemon 检查两处 Policy 数据库：

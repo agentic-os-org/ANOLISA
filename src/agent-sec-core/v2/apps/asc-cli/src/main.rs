@@ -233,7 +233,10 @@ fn run_owned_transport(cli: &Cli, socket: &std::path::Path) -> Option<Result<u8,
     }
     let result = cli
         .run_observability_query(socket)
-        .or_else(|| cli.run_gateway(socket, &mut io::stdout().lock(), &mut io::stderr()))?;
+        .or_else(|| cli.run_gateway(socket, &mut io::stdout().lock(), &mut io::stderr()))
+        .or_else(|| {
+            cli.run_inject_credential(socket, &mut io::stdout().lock(), &mut io::stderr())
+        })?;
     Some(result.map_err(RunError::Output))
 }
 

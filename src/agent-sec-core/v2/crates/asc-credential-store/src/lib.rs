@@ -14,7 +14,9 @@ mod store;
 
 pub use error::CredentialStoreError;
 pub use fake::{FakeFormat, generate_fake, validate_pair};
-pub use filesystem::{read_token_file, write_fake_file};
+pub use filesystem::{
+    lock_root_directory, read_root_asset, read_token_file, write_fake_file, write_owner_file,
+};
 pub use materialize::{SECRETS_SNAPSHOT_VERSION, SecretsTarget};
 pub use names::{CredentialId, ScopeId};
 pub use secret::{MAX_SECRET_BYTES, Secret};

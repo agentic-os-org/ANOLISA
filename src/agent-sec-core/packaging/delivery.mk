@@ -26,6 +26,11 @@ DELIVERY_BUILD_OUTPUT := $(abspath $(DELIVERY_BUILD_DIR))
 # Monorepo checkouts share the top-level license through a symlink.
 DELIVERY_LICENSE_SOURCE := $(or $(realpath $(DELIVERY_ROOT)/LICENSE),$(DELIVERY_ROOT)/LICENSE)
 
+# inject-credential reads packaged templates from the install location, so the
+# public build uses the delivery layout; RPM/legacy targets use GATEWAY_DATADIR.
+BUILD_GATEWAY_DATADIR = $(GATEWAY_DATADIR)
+build: BUILD_GATEWAY_DATADIR = $(DELIVERY_DATADIR)/gateway
+
 DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUILD_OUTPUT)/v2/bin" BUILD_DIR="$(DELIVERY_BUILD_OUTPUT)" DESTDIR="$(DELIVERY_DESTDIR)" \
 	PREFIX="$(DELIVERY_PREFIX)" BINDIR="$(DELIVERY_BINDIR)" LIBDIR="$(DELIVERY_LIBDIR)" \
 	LIBEXECDIR="$(DELIVERY_LIBEXECDIR)" SKILLDIR="$(DELIVERY_SKILLDIR)" \

@@ -773,6 +773,42 @@ fn gateway_transport_failure_never_falls_back_to_local_execution() {
     assert!(!socket.exists());
 }
 
+#[test]
+fn inject_credential_fails_locally_before_any_daemon_request() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("absent.sock");
+    let args: Vec<OsString> = [
+        "--socket",
+        socket.to_str().unwrap(),
+        "inject-credential",
+        "--builtin",
+        "github",
+        "--real-token-file",
+        directory.0.join("missing-real").to_str().unwrap(),
+        "--owner-uid",
+        "4294967294",
+        "--executable",
+        "/usr/bin/agent",
+        "--output-dir",
+        directory.0.join("out").to_str().unwrap(),
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    let cli = Cli::parse_from(std::iter::once(OsString::from("agent-sec-cli")).chain(args.clone()))
+        .unwrap();
+    assert!(matches!(cli.request(), Err(InputError::Gateway(_))));
+    // A missing template, non-root caller or unreadable token all stop before transport.
+    let output = common::run(&args);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.starts_with("agent-sec-cli: "), "{error}");
+    assert!(!error.contains("connection unavailable"), "{error}");
+    assert!(!directory.0.join("out").exists());
+    assert!(!socket.exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_cli_preserves_minimal_results_and_conflicts() {
     use std::time::Duration;
