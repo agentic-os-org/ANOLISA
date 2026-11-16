@@ -38,7 +38,11 @@ pub(super) fn prepare(
             .is_none_or(|config| config.health.enabled);
     let body = guidance::render_health(renderer, report, show_facts, guidance::Target::Bash, None)
         .unwrap_or_default();
-    let facts = body;
+    let facts = if body.is_empty() {
+        body
+    } else {
+        format!("\n{body}")
+    };
     let mut prepared = Prepared {
         facts,
         invitation: None,
@@ -71,6 +75,11 @@ pub(super) fn prepare(
     if text.len() > 16 * 1024 {
         return prepared;
     }
+    let text = if text.is_empty() {
+        text
+    } else {
+        format!("\n{text}")
+    };
     let session = report.scan_id.as_str();
     let request = ClaimRequest {
         kind,
