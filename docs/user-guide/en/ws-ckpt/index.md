@@ -95,7 +95,7 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | Command | Description |
 |---------|-------------|
 | `ws-ckpt init -w <workspace>` | Initialize a workspace for checkpointing |
-| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | Create a new checkpoint |
+| `ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]` | Create a new checkpoint. Omit `-s` to generate the snapshot ID automatically. |
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | Restore workspace to a checkpoint |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | Rollback N ancestors |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | List checkpoints; auto-page by default |
