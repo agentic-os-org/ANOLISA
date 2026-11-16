@@ -7,6 +7,19 @@ use std::{collections::BTreeMap, ffi::OsString};
 /// Stable JSON lifecycle envelope exposed by `aw instance`.
 pub const REGISTRATION_VERSION: &str = "aw-instance/v1";
 
+/// Negotiated direct SDK extension; old services omit this discovery field.
+pub const SDK_VERSION: &str = "aw-sdk/v1";
+
+/// Application-selected behavior when the service transport becomes unavailable.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Availability {
+    /// Keep AW admission mandatory throughout the task.
+    Required,
+    /// Retire this task's AW contribution on transport loss, preserving native execution.
+    NativeFallback,
+}
+
 /// Caller-selected live process, corroborated against the Unix socket peer.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +69,27 @@ pub enum RegistrationCommand {
         /// Absolute Provider working directory supplied by the application.
         cwd: String,
         /// Complete explicit Provider environment; never inherited from the daemon.
+        #[serde(with = "environment")]
+        environment: BTreeMap<OsString, OsString>,
+    },
+    /// Register installed public SDK callbacks without launching the application.
+    RegisterSdk {
+        /// Explicit SDK protocol discovered before sending this action.
+        sdk_version: String,
+        /// Immutable availability choice for this instance and its tasks.
+        availability: Availability,
+        /// Recovery key scoped to the authenticated application owner.
+        key: RegistrationKey,
+        /// Optional policy snapshot; startup fields must match the service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<String>,
+        /// Configured native dialect selected by the application.
+        target: String,
+        /// Installed callback capabilities; no Agent version allowlist is imposed.
+        capabilities: Capabilities,
+        /// Absolute Provider working directory.
+        cwd: String,
+        /// Explicit Provider environment, retained independently of the daemon.
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
     },

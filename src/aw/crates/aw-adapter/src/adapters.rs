@@ -14,5 +14,6 @@ pub(super) mod pi;
 mod qoder_final;
 pub(super) mod qoder_sdk;
 pub(super) mod qwenpaw;
+pub(super) mod sdk;
 pub(super) mod sdk_tools;
 pub(crate) mod submission;

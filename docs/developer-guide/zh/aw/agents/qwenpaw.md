@@ -2,6 +2,8 @@
 
 [English](../../../en/aw/agents/qwenpaw.md)
 
+应用原生启动并显式选择故障回退时，使用 [Python SDK](../deployment/python-sdk.md)。
+
 从 `src/aw` 运行源码示例；先按[接入教程](../integration.md)构建 AW。
 
 ## 启动 QwenPaw

@@ -19,7 +19,7 @@ pub fn correlation_source(event: &Value) -> Option<&'static str> {
 pub fn supports_event_close(adapter: &str) -> bool {
     matches!(
         adapter,
-        "agentscope" | "claude-sdk" | "hermes" | "openclaw" | "pi" | "qoder-sdk"
+        "sdk" | "agentscope" | "claude-sdk" | "hermes" | "openclaw" | "pi" | "qoder-sdk"
     )
 }
 
@@ -105,13 +105,13 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
                 _ => on_error == "block",
             }
         }
-        ("qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw" | "codex", Some(output)) => {
+        ("sdk" | "qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw" | "codex", Some(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
         (
-            "pi" | "deepseek-harness" | "openclaw" | "qoder-sdk" | "claude-sdk" | "agentscope"
-            | "qwenpaw" | "codex",
+            "sdk" | "pi" | "deepseek-harness" | "openclaw" | "qoder-sdk" | "claude-sdk"
+            | "agentscope" | "qwenpaw" | "codex",
             None,
         ) => on_error == "block",
         _ => false,

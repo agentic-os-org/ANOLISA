@@ -121,7 +121,12 @@ fn exchange(
         )
         .into());
     }
-    if let Operation::OpenEvent { event, .. } | Operation::OpenHookEvent { event, .. } = &operation
+    if let Operation::OpenEvent { event, .. }
+    | Operation::OpenHookEvent { event, .. }
+    | Operation::SdkCallback {
+        native_input: event,
+        ..
+    } = &operation
     {
         let mut pending = vec![(event, 0)];
         while let Some((value, depth)) = pending.pop() {

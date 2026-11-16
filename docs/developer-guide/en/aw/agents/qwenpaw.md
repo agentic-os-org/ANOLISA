@@ -2,6 +2,8 @@
 
 [中文版](../../../zh/aw/agents/qwenpaw.md)
 
+For application-owned startup with explicit native fallback, see the [Python SDK](../deployment/python-sdk.md).
+
 Run source examples from `src/aw`; build AW with the [integration tutorial](../integration.md) first.
 
 ## Start QwenPaw

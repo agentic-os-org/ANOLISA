@@ -94,3 +94,7 @@ aw audit-export --state-dir "$AW_STATE" --request "$AW_QUERY"
 协议失败返回 `result: null`、稳定 `error` 错误码，退出码为 1。
 命令语法及请求文件 I/O 错误使用 stderr。取消没有写入副作用。
 单次命令退出后无需停止资源；请求文件不再需要时删除 `"$AW_QUERY"`。
+
+`aw instance list`、`attach --sdk-instance ID`、`detach --sdk-instance ID`
+操作应用预装的 SDK 监听。使用 `--socket` 或 `--config` 选择服务，在 JSON 中查看应用确认。
+参见[协作式 SDK 控制](../deployment/native-sdk.md#协作式-attach-与-detach)。

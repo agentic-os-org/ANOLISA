@@ -171,6 +171,7 @@
                     "pi",
                     "claude-sdk",
                     "qoder-sdk",
+                    "sdk",
                     "agentscope",
                     "codex"
                   ]

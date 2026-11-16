@@ -5870,6 +5870,40 @@
           ]
         }
       ]
+    },
+    "sdk": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {
+        "aw-hook-source": "v1"
+      },
+      "boundary": "Application-owned semantic callbacks using installed TypeScript and Python packages. Verifies input and tool denial adoption, result observation, identity rejection, bounded release and unsupported effect rejection without Agent framework packages. Automatic discovery and runtime instrumentation are not included.",
+      "cases": [
+        {
+          "name": "semantic-packages",
+          "argv": [
+            "{python}",
+            "sdk/tests/semantic_contract.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/semantic"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "semantic/result.json",
+              "values": {
+                "status": "passed",
+                "packages": 2,
+                "protocol": "aw-hook-source/v1"
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }

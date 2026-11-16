@@ -25,7 +25,8 @@ pub(crate) fn routes(
             continue;
         }
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
-        let observe = adapter == "qoder-sdk" && matches!(event, "tool.before" | "tool.after");
+        let observe =
+            matches!(adapter, "qoder-sdk" | "sdk") && matches!(event, "tool.before" | "tool.after");
         if selected.is_empty() && !observe {
             continue;
         }

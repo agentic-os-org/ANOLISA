@@ -274,3 +274,5 @@ settings. Follow the Agent guide for any separately connected plugin cleanup,
 then restart normally. SDK rollback removes its bootstrap together with the AW
 factory integration after draining work. Restore matching AW and application
 versions together when reverting the integration.
+
+The negotiated direct callback extension is documented in the [SDK protocol](../../../../../src/aw/docs/design/en/runtime/native-sdk.md). It adds explicit availability selection while retaining the existing registration and Scope ownership checks.

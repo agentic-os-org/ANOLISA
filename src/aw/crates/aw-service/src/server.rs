@@ -199,6 +199,7 @@ fn connection(
             | Operation::Registration {
                 command: crate::RegistrationCommand::Register { .. }
                     | crate::RegistrationCommand::RegisterNative { .. }
+                    | crate::RegistrationCommand::RegisterSdk { .. }
             }
     );
     let result = (|| {
@@ -206,6 +207,8 @@ fn connection(
             && !matches!(
                 &request.operation,
                 Operation::Status
+                    | Operation::SdkControl { .. }
+                    | Operation::SdkCallback { close: true, .. }
                     | Operation::Stop
                     | Operation::ReleaseInstance { .. }
                     | Operation::Unbind { .. }
@@ -229,6 +232,14 @@ fn connection(
         runtime.authorize_registration_peer(&request.operation, process.as_ref())?;
         if binding {
             prepare_connected(&stream, &runtime, request, deadline, peer, process.as_ref())
+        } else if let Operation::SdkControl { command } = request.operation {
+            runtime.sdk_control(
+                command,
+                process
+                    .as_ref()
+                    .ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                deadline,
+            )
         } else if let Operation::Registration { command } = request.operation {
             runtime.registration(
                 command,

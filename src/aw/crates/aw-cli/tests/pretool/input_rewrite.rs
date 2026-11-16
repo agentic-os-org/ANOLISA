@@ -4,10 +4,7 @@ use super::*;
 
 #[test]
 fn same_call_rewrite_is_checked_before_native_adoption_for_supported_adapters() {
-    for adapter in native::agents()
-        .into_iter()
-        .filter(|adapter| !matches!(adapter.as_str(), "openclaw" | "deepseek-harness" | "codex"))
-    {
+    for adapter in native::agents_with_effect("tool.before", "replace_input") {
         for verdict in [
             "allow",
             "deny",

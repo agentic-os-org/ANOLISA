@@ -58,3 +58,5 @@ verified Journal record using retained source identity and creation time.
 [Connector](integrations/agentsight/agentsight-readonly.md) · [Evidence context](runtime/evidence-context.md) · [Integration roadmap](integrations/agentsight/agentsight-integration.md)
 
 For independent process identity, request deduplication and Ready gating, see [local service](runtime/local-service.md#independent-registration).
+
+[Application-owned SDK protocol](runtime/native-sdk.md)
