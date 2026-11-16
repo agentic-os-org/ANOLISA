@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::symlink,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{Duration, Instant},
@@ -29,28 +29,17 @@ impl Consumer {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         fs::create_dir_all(&root).unwrap();
-        let provider = root.join("provider");
-        fs::copy(env!("CARGO_BIN_EXE_aw-provider-sec-core"), &provider).unwrap();
-        let cli = root.join("scanner");
-        fs::write(
-            &cli,
-            r#"#!/usr/bin/python3
-import json, os, pathlib, sys, time
-root = pathlib.Path(__file__).parent
-stat = pathlib.Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(')', 1)[1].split()
-(root / 'scanner.pid').write_text(f'{os.getpid()} {stat[19]}')
-with (root / 'scans.jsonl').open('a') as output:
-    output.write(json.dumps(sys.argv[1:]) + '\n')
-mode = (root / 'mode').read_text()
-if mode == 'timeout': time.sleep(30)
-if mode == 'backend':
-    print(json.dumps({'ok': False, 'verdict': 'error'}))
-    sys.exit(1)
-print(json.dumps({'ok': True, 'verdict': 'deny' if mode == 'deny' else 'pass'}))
-"#,
+        // Forked test children can retain writers to newly copied executables.
+        symlink(
+            env!("CARGO_BIN_EXE_aw-provider-sec-core"),
+            root.join("provider"),
         )
         .unwrap();
-        fs::set_permissions(cli, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/coverage-scanner.py"),
+            root.join("scanner"),
+        )
+        .unwrap();
         let consumer = Self { root };
         consumer.scanner_mode("pass");
         consumer
@@ -230,7 +219,13 @@ print(json.dumps({'ok': True, 'verdict': 'deny' if mode == 'deny' else 'pass'}))
     }
 
     pub fn crash_provider(&self) {
-        fs::write(self.root.join("provider"), "#!/bin/sh\nkill -KILL $$\n").unwrap();
+        let provider = self.root.join("provider");
+        fs::remove_file(&provider).unwrap();
+        symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crash-provider.sh"),
+            provider,
+        )
+        .unwrap();
     }
 }
 
