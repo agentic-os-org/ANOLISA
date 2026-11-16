@@ -3714,7 +3714,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 71
+          "tests": 78
         },
         {
           "name": "resident-service",

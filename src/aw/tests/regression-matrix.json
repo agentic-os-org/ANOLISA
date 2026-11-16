@@ -698,6 +698,10 @@
       "target": "aw-adapter/lib/aw_adapter",
       "test": "association::tests::qwenpaw_dispatch_identity_keeps_native_call_and_exact_input"
     },
+    "qwenpaw-resident-checked-output": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::checked_after_only_publishes_one_chunk_per_tool"
+    },
     "qwenpaw-resident-withhold": {
       "target": "aw-cli/test/qwenpaw",
       "test": "resident::withhold_failure_blocks_result_and_next_dispatch_through_launcher"
@@ -1759,6 +1763,7 @@
         "sdk-scope-process-cli",
         "qwenpaw-resident-observation",
         "qwenpaw-managed-association",
+        "qwenpaw-resident-checked-output",
         "qwenpaw-resident-withhold",
         "qwenpaw-resident-boolean-withhold",
         "qwenpaw-resident-native-denial",
@@ -1793,6 +1798,7 @@
         "scope-native-skips",
         "qwenpaw-resident-observation",
         "qwenpaw-managed-association",
+        "qwenpaw-resident-checked-output",
         "qwenpaw-resident-withhold",
         "qwenpaw-resident-boolean-withhold",
         "qwenpaw-resident-native-denial",
