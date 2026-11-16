@@ -93,6 +93,10 @@ sudo systemctl reload agentsight.service
 实时 Agent 健康状态 + 中断收件箱：列出每条未解决事件的类型、严重级别、会话与对话。**解决**用于关闭
 事件，**详情**用于查看采集到的证据。延迟面板可在最近 24 小时、7 天、30 天之间切换。
 
+Agent 卡片下方的 **提示词缓存** 面板使用同一时间范围。每行对应一个 Agent、提供方和模型，显示 Token 加权
+命中率、前一个等长窗口的命中率以及状态；需要排查的行默认展开，列出低命中原因并附示例会话链接。数字与原因
+和 [`agentsight cache`](cli-reference.md#agentsight-cache) 一致。
+
 ![Agent 看板与中断收件箱](../../../images/agentsight/zh/dashboard-agent-health.png)
 
 显示「未发现 Agent」只代表此刻没有 Agent 进程在跑，历史会话仍然保留在其他页面。

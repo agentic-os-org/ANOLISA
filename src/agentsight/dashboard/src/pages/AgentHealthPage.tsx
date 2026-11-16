@@ -19,6 +19,7 @@ import { useI18n, useLocaleTag, INTERRUPTION_TYPES, interruptionTypeKey } from '
 import type { MessageKey } from '../i18n';
 import { formatNs } from '../utils/datetime';
 import { CREDENTIAL_POLICY_ID } from '../constants/policyIds';
+import { CacheDiagnosisPanel } from '../components/CacheDiagnosisPanel';
 
 // ─── Agent status section ─────────────────────────────────────────────────────
 
@@ -1201,6 +1202,8 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
           )}
         </div>
       )}
+
+      <CacheDiagnosisPanel rangeMs={rangeMs} />
     </section>
   );
 };

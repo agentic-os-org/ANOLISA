@@ -2123,6 +2123,7 @@ test('agent health interruptions: one previous click moves back from the display
     },
     '../utils/datetime': { formatNs: (ns) => String(ns) },
     '../constants/policyIds': { CREDENTIAL_POLICY_ID: 'policy' },
+    '../components/CacheDiagnosisPanel': { CacheDiagnosisPanel: () => null },
   }, driver);
 
   // The pagination lives in a section the page renders. Take that component out
