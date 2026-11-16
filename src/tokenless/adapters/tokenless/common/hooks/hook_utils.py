@@ -820,3 +820,14 @@ def parse_version(version_str: str) -> tuple | None:
     if m:
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     return None
+
+
+def read_hook_input() -> object:
+    """Read UTF-8 host JSON without changing the interpreter's stream settings.
+
+    A host may replace stdin with a text-only stream; its text is already decoded.
+    """
+    raw = getattr(sys.stdin, "buffer", sys.stdin).read()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    return json.loads(raw)

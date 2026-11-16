@@ -21,6 +21,7 @@ from hook_utils import (
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
     build_before_model_request,
+    read_hook_input,
     resolve_binary,
     run_compress,
     secure_write_text,
@@ -181,7 +182,7 @@ def before_model(adapter: ModuleType, agent_id: str) -> None:
 
     # 2. Read stdin JSON
     try:
-        input_data = json.load(sys.stdin)
+        input_data = read_hook_input()
     except (json.JSONDecodeError, EOFError, ValueError):
         warn("failed to read BeforeModel payload. Passing through unchanged.")
         skip()

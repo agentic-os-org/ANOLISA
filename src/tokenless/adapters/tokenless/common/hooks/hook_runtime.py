@@ -1,7 +1,6 @@
 """Run normalized hook operations through the shared Protocol v2 transport."""
 
 import json
-import sys
 from types import ModuleType
 
 from hook_utils import (
@@ -12,6 +11,7 @@ from hook_utils import (
     build_pre_tool_request,
     consume_output_optimization,
     mark_rtk_optimized,
+    read_hook_input,
     resolve_binary,
     run_compress,
     skip,
@@ -24,7 +24,7 @@ _PRE_TOOL_TIMEOUT = 8
 
 def pre_tool(adapter: ModuleType, agent_id: str) -> None:
     try:
-        input_data = json.load(sys.stdin)
+        input_data = read_hook_input()
     except (json.JSONDecodeError, EOFError, ValueError):
         skip()
 
@@ -94,7 +94,7 @@ def pre_tool(adapter: ModuleType, agent_id: str) -> None:
 
 def post_tool(adapter: ModuleType, agent_id: str) -> None:
     try:
-        data = json.load(sys.stdin)
+        data = read_hook_input()
     except (json.JSONDecodeError, EOFError, ValueError):
         warn("failed to read PostToolUse payload. Passing through unchanged.")
         skip()
