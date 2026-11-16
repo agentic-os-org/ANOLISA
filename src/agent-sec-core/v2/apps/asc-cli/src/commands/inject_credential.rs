@@ -171,6 +171,9 @@ impl InjectCredentialCommand {
         stdout: &mut impl Write,
         stderr: &mut impl Write,
     ) -> io::Result<u8> {
+        if !cfg!(target_os = "linux") {
+            return Err(failure("inject-credential requires Linux"));
+        }
         let plan = self.plan()?;
         if self.dry_run {
             let preview = json!({
@@ -214,6 +217,7 @@ impl InjectCredentialCommand {
             // Owner-writable parents can substitute directories between mkdir and open.
             let directory = plan.delivered.parent().unwrap_or(Path::new("/"));
             (|| {
+                #[cfg(target_os = "linux")]
                 nix::unistd::setgroups(&[]).map_err(io::Error::other)?;
                 nix::unistd::setgid(nix::unistd::Gid::from_raw(plan.owner.gid))
                     .map_err(io::Error::other)?;
