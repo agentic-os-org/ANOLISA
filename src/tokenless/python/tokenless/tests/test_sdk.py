@@ -460,18 +460,27 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
     @REQUIRES_POSIX_STUBS
     async def test_pre_tool_failures_pass_through_and_warn_once(self) -> None:
         missing = Path(self.temporary_directory.name) / "missing"
-        action = 'result":{"arguments":{},"action":"unknown","output_optimization":"none"}'
+        action = (
+            '"protocol_version":2,"operation":"pre_tool",'
+            '"result":{"arguments":{},"action":"unknown","output_optimization":"none"}'
+        )
         for name, body, detail in (
             ("missing launcher", None, "cannot start"),
             ("exit status", "echo boom >&2\nexit 1", "boom"),
             ("killed", "kill -9 $$", "exited with -9"),
             ("not JSON", "cat >/dev/null\necho not-json", "malformed"),
-            ("no result", "cat >/dev/null\necho '{}'", "malformed"),
-            ("unknown action", f"cat >/dev/null\necho '{{\"{action}}}'", "malformed"),
+            (
+                "no result",
+                'cat >/dev/null\necho \'{"protocol_version":2,"operation":"pre_tool"}\'',
+                "result",
+            ),
+            ("unknown action", f"cat >/dev/null\necho '{{{action}}}'", "unknown"),
         ):
             with self.subTest(name):
                 sdk = self.sdk()
-                sdk._rtk_launcher = missing if body is None else self.stub_launcher(body)
+                sdk._rtk_launcher = (
+                    missing if body is None else self.stub_launcher(body)
+                )
                 request = self.pre_tool_request()
                 with self.assertLogs(SDK_LOGGER, "WARNING") as logs:
                     result = await sdk.pre_tool(request)
@@ -527,7 +536,8 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
 
     @REQUIRES_POSIX_STUBS
     async def test_pre_tool_keeps_child_diagnostics_off_the_host_stderr(self) -> None:
-        response = '{"result":{"arguments":{"command":"x"},"action":"passthrough",'
+        response = '{"protocol_version":2,"operation":"pre_tool",'
+        response += '"result":{"arguments":{"command":"x"},"action":"passthrough",'
         response += '"output_optimization":"none"}}'
         sdk = self.sdk()
         sdk._rtk_launcher = self.stub_launcher(
@@ -916,6 +926,82 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(bypass.output, original)
                     self.assertEqual(bypass.applied_operations, ())
+
+
+class PreToolEnvelopeTests(unittest.IsolatedAsyncioTestCase):
+    """Check public fail-open behavior on Windows too, without POSIX launchers."""
+
+    def setUp(self) -> None:
+        runtime = Mock(data_dir="unused-core-data")
+        with (
+            patch("anolisa_tokenless.sdk.TokenlessRuntime", return_value=runtime),
+            patch.object(
+                TokenlessSdk, "_resolve_launcher", return_value=Path("unused-core")
+            ),
+        ):
+            self.sdk = TokenlessSdk()
+        self.request = PreToolRequest(
+            tool_name="shell",
+            arguments={"command": "echo original", "nested": {"keep": [1]}},
+            command_field="command",
+            capabilities=PreToolCapabilities(
+                replace_arguments=True, block_and_suggest=False
+            ),
+            attribution=Attribution("sdk-test", "envelope-session", "call-1"),
+        )
+        self.envelope = {
+            "protocol_version": 2,
+            "operation": "pre_tool",
+            "result": {
+                "arguments": {"command": "echo changed"},
+                "action": "replace_arguments",
+                "output_optimization": "rtk",
+            },
+        }
+
+    async def test_mismatched_envelopes_preserve_the_original_command(self) -> None:
+        for field, values in (
+            ("protocol_version", (None, 1, 3, "2")),
+            ("operation", (None, "before_model", "post_tool", "retrieve")),
+        ):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    envelope = dict(self.envelope)
+                    if value is None:
+                        del envelope[field]
+                    else:
+                        envelope[field] = value
+                    self.sdk._rewrite_failure_reported = False
+                    with (
+                        patch(
+                            "anolisa_tokenless.sdk._run_compress",
+                            return_value=json.dumps(envelope).encode("utf-8"),
+                        ),
+                        self.assertLogs(SDK_LOGGER, "WARNING") as logs,
+                    ):
+                        result = await self.sdk.pre_tool(self.request)
+                        self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+                        self.assertEqual(
+                            result.output_optimization, OutputOptimization.NONE
+                        )
+                        self.assertEqual(result.arguments, self.request.arguments)
+                        result.arguments["nested"]["keep"].append(2)
+                        self.assertEqual(self.request.arguments["nested"]["keep"], [1])
+                    self.assertIn("malformed", logs.output[0])
+
+    async def test_matching_envelope_still_applies_the_rewrite(self) -> None:
+        with (
+            patch(
+                "anolisa_tokenless.sdk._run_compress",
+                return_value=json.dumps(self.envelope).encode("utf-8"),
+            ),
+            self.assertNoLogs(SDK_LOGGER, "WARNING"),
+        ):
+            result = await self.sdk.pre_tool(self.request)
+        self.assertEqual(result.action, PreToolAction.REPLACE_ARGUMENTS)
+        self.assertEqual(result.output_optimization, OutputOptimization.RTK)
+        self.assertEqual(result.arguments, {"command": "echo changed"})
+        self.assertEqual(self.request.arguments["command"], "echo original")
 
 
 if __name__ == "__main__":

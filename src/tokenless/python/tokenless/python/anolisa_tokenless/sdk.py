@@ -590,7 +590,12 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 def _pre_tool_response(output: bytes) -> PreToolResponse:
     try:
-        value = _json_object(output)["result"]
+        envelope = _json_object(output)
+        if envelope.get("protocol_version") != 2:
+            raise ValueError("unsupported PreTool protocol version")
+        if envelope.get("operation") != "pre_tool":
+            raise ValueError("mismatched PreTool operation")
+        value = envelope["result"]
         arguments = value["arguments"]
         if not isinstance(arguments, dict):
             raise TypeError("non-object PreTool arguments")
@@ -600,7 +605,9 @@ def _pre_tool_response(output: bytes) -> PreToolResponse:
             output_optimization=OutputOptimization(value["output_optimization"]),
         )
     except (KeyError, TypeError, ValueError) as error:
-        raise _RewriteUnavailable(f"malformed tokenless compress response: {error!r}") from error
+        raise _RewriteUnavailable(
+            f"malformed tokenless compress response: {error!r}"
+        ) from error
 
 
 def _attribution_kwargs(attribution: Attribution) -> dict[str, str | None]:
