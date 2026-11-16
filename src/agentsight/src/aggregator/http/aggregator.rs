@@ -659,9 +659,6 @@ impl HttpConnectionAggregator {
             request.body_offset = 0;
             request.body_len = 0;
             request.reassembled_body = None;
-            // Metadata-only conversion rewrites body storage outside
-            // `set_reassembled_body`; drop any digest cached for the old bytes.
-            request.clear_fingerprint_cache();
             self.insert(
                 connection_id,
                 ConnectionState::RequestBodyPending {
@@ -1523,7 +1520,6 @@ mod tests {
 
         // Process request
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             version: 11,
@@ -1588,7 +1584,6 @@ mod tests {
                 ..(*create_mock_ssl_event(4321, 0x2000)).clone()
             });
             aggregator.process_request(ParsedRequest {
-                cached_fingerprint: Default::default(),
                 method: "GET".to_string(),
                 path: "/api/test".to_string(),
                 version: 11,
@@ -1653,7 +1648,6 @@ mod tests {
 
         // Process request
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "GET".to_string(),
             path: "/stream".to_string(),
             version: 11,
@@ -1732,7 +1726,6 @@ mod tests {
         headers.insert("content-length".to_string(), "20".to_string());
 
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/api".to_string(),
             version: 1,
@@ -1839,7 +1832,6 @@ mod tests {
         headers.insert("content-length".to_string(), "100".to_string());
 
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/chat".to_string(),
             version: 1,
@@ -1917,7 +1909,6 @@ mod tests {
         let header_end = headers.len();
         let request_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, headers.into_bytes(), 1);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
             version: 11,
@@ -1983,7 +1974,6 @@ mod tests {
         headers.insert("content-length".to_string(), "5".to_string());
 
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/api".to_string(),
             version: 1,
@@ -2020,7 +2010,6 @@ mod tests {
             + 4;
 
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
             version: 1,
@@ -2109,7 +2098,6 @@ mod tests {
         headers.insert("content-length".to_string(), "50".to_string());
 
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/stream".to_string(),
             version: 1,
@@ -2165,7 +2153,6 @@ mod tests {
         let mut req_headers = HashMap::new();
         req_headers.insert("content-length".to_string(), "2".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/stream".to_string(),
             version: 1,
@@ -2238,7 +2225,6 @@ mod tests {
         let mut req_headers = HashMap::new();
         req_headers.insert("content-length".to_string(), "2".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/stream".to_string(),
             version: 1,
@@ -2299,7 +2285,6 @@ mod tests {
         let mut req_headers = HashMap::new();
         req_headers.insert("content-length".to_string(), "2".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
             version: 11,
@@ -2491,7 +2476,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(1, 0x200);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -2537,7 +2521,6 @@ mod tests {
     ) {
         let req_event = create_mock_ssl_event(pid, ssl_ptr);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -2692,7 +2675,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(6, 0x700);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -2747,7 +2729,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(7, 0x800);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -2798,7 +2779,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(2, 0x300);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -2927,7 +2907,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(3, 0x400);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -2991,7 +2970,6 @@ mod tests {
         let mut req_headers = HashMap::new();
         req_headers.insert("content-length".to_string(), "50".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/stream".to_string(),
             version: 1,
@@ -3104,7 +3082,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(40, 0xF000);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 2,
@@ -3207,7 +3184,6 @@ mod tests {
 
         let req_event = create_mock_ssl_event(pid, ssl_ptr);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version,
@@ -3312,7 +3288,6 @@ mod tests {
     ) -> ConnectionId {
         let req_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, Vec::new(), 1);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: path.to_string(),
             version: 11,
@@ -3645,7 +3620,6 @@ mod tests {
         };
         let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -3703,7 +3677,6 @@ mod tests {
         };
         let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -3760,7 +3733,6 @@ mod tests {
         };
         let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -3815,7 +3787,6 @@ mod tests {
         let source =
             create_mock_ssl_event_with_buf(conn_id.pid, conn_id.ssl_ptr, vec![b'e'; 2048], 0);
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -3925,7 +3896,6 @@ mod tests {
             ssl_ptr: 0x7200,
         };
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
             version: 11,
@@ -3976,7 +3946,6 @@ mod tests {
         let mut agg = HttpConnectionAggregator::with_capacity(1);
         for ssl_ptr in [0x7300, 0x7301] {
             let request = ParsedRequest {
-                cached_fingerprint: Default::default(),
                 method: "POST".to_string(),
                 path: "/v1/messages".to_string(),
                 version: 11,
@@ -4042,7 +4011,6 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("transfer-encoding".to_string(), "Chunked".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/chat".to_string(),
             version: 1,
@@ -4090,7 +4058,6 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("transfer-encoding".to_string(), "chunked".to_string());
         let request = ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: "/chat".to_string(),
             version: 1,
