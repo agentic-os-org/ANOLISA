@@ -358,6 +358,197 @@ class IsolatedRewriteProcessTest(unittest.TestCase):
                             pass
 
 
+@unittest.skipUnless(os.name == "posix", "non-UTF-8 locale fixtures are POSIX-only")
+class HookTransportEncodingTest(unittest.TestCase):
+    """The hook/Core wire is UTF-8 whatever locale the caller runs under (#10153).
+
+    Both pipe paths must encode the request and decode the response as UTF-8:
+    Core reads its stdin into a Rust String and writes UTF-8 JSON, so inheriting
+    a non-UTF-8 locale would either fail to encode a non-ASCII request or
+    mis-decode a valid response.
+    """
+
+    # LC_ALL=C keeps the probe's locale encoding on ASCII; the two Python
+    # variables stop PEP 538 coercion and PEP 540 UTF-8 mode from overriding it.
+    ASCII_LOCALE_ENV = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONUTF8": "0",
+    }
+
+    # Locales whose codec turns UTF-8 bytes into *valid but wrong* text, so a
+    # decoding bug corrupts content without raising. Only some hosts ship one.
+    MOJIBAKE_LOCALES = ("zh_CN.gbk", "zh_CN.gb2312", "zh_CN.gb18030", "ISO-8859-1")
+
+    def probe(self, body: str, locale_env: dict | None = None) -> str:
+        probe = (
+            "import sys; "
+            f"sys.path.insert(0, {str(corpus.HOOKS_DIR)!r}); "
+            "import hook_utils; " + body
+        )
+        env = dict(os.environ)
+        env.update(self.ASCII_LOCALE_ENV if locale_env is None else locale_env)
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.strip()
+
+    def test_ascii_locale_still_reaches_the_probe(self) -> None:
+        body = (
+            "import locale\n"
+            "enc = locale.getpreferredencoding(False)\n"
+            "try:\n"
+            "    chr(0x4e2d).encode(enc); print('UTF8-CAPABLE')\n"
+            "except UnicodeEncodeError:\n"
+            "    print('NON-UTF8')\n"
+        )
+        self.assertEqual(
+            self.probe(body),
+            "NON-UTF8",
+            "the fixture did not produce a non-UTF-8 locale",
+        )
+
+    def test_run_round_trips_non_ascii_over_a_non_utf8_locale(self) -> None:
+        body = (
+            "text = chr(0x4e2d) + chr(0x6587) + ' ' + chr(0x1f680); "
+            "child = 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'; "
+            "proc = hook_utils.run([sys.executable, '-c', child], text, timeout=10); "
+            "print('KEPT' if proc and proc.stdout == text else repr(proc))"
+        )
+        self.assertEqual(self.probe(body), "KEPT")
+
+    def test_grouped_run_round_trips_non_ascii_over_a_non_utf8_locale(self) -> None:
+        body = (
+            "text = chr(0x4e2d) + chr(0x6587) + ' ' + chr(0x1f680); "
+            "child = 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'; "
+            "proc = hook_utils.run("
+            "[sys.executable, '-c', child], text, timeout=10, isolated=True); "
+            "print('KEPT' if proc and proc.stdout == text else repr(proc))"
+        )
+        self.assertEqual(self.probe(body), "KEPT")
+
+    def test_undecodable_output_still_fails_open(self) -> None:
+        body = (
+            "child = 'import sys; sys.stdout.buffer.write(bytes.fromhex(\"fffe\"))'; "
+            "proc = hook_utils.run([sys.executable, '-c', child], 'request', timeout=10); "
+            "print('NONE' if proc is None else repr(proc.stdout))"
+        )
+        self.assertEqual(self.probe(body), "NONE")
+
+    def test_round_trip_survives_a_locale_that_would_mojibake(self) -> None:
+        """A codec that accepts UTF-8 bytes as wrong text must not corrupt (#10153)."""
+        try:
+            installed = {
+                line.strip()
+                for line in subprocess.run(
+                    ["locale", "-a"], capture_output=True, text=True, timeout=10
+                ).stdout.splitlines()
+            }
+        except (OSError, subprocess.SubprocessError):
+            installed = set()
+        locale_name = next(
+            (name for name in self.MOJIBAKE_LOCALES if name in installed), None
+        )
+        if locale_name is None:
+            raise unittest.SkipTest("no single-byte or GBK locale installed")
+        body = (
+            "text = chr(0x4e2d) + chr(0x6587) + ' ' + chr(0x1f680); "
+            "child = 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'; "
+            "proc = hook_utils.run([sys.executable, '-c', child], text, timeout=10); "
+            "print('KEPT' if proc and proc.stdout == text else repr(proc and proc.stdout))"
+        )
+        locale_env = {
+            "LC_ALL": locale_name,
+            "LANG": locale_name,
+            "PYTHONCOERCECLOCALE": "0",
+            "PYTHONUTF8": "0",
+        }
+        self.assertEqual(self.probe(body, locale_env), "KEPT")
+
+
+@unittest.skipUnless(os.name == "posix", "non-UTF-8 locale fixtures are POSIX-only")
+class HookHostSinkEncodingTest(unittest.TestCase):
+    """The payload written back to the host is ASCII-safe JSON (#10153).
+
+    `post_tool()` prints the payload on the hook's own stdout, whose encoding
+    follows the host locale and is strict. A compressed response that decoded
+    correctly would then raise on write and exit non-zero, which no host reads
+    as a pass-through.
+    """
+
+    ASCII_LOCALE_ENV = HookTransportEncodingTest.ASCII_LOCALE_ENV
+
+    def test_post_tool_emits_ascii_json_over_a_non_utf8_locale(self) -> None:
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": "out",
+            "session_id": "session",
+            "tool_use_id": "call",
+        }
+        probe = "\n".join(
+            [
+                "import io, json, sys, types",
+                f"sys.path.insert(0, {str(corpus.HOOKS_DIR)!r})",
+                "import hook_runtime, hook_utils",
+                "class Result:",
+                "    status = 'success'",
+                "    origin = 'tool'",
+                "    replace_output = False",
+                "    replace_with_text = ''",
+                "    command = 'ls'",
+                "    def content(self):",
+                "        return 'out'",
+                "adapter = types.SimpleNamespace(",
+                "    response=lambda data: Result(),",
+                "    is_retrieve_result=lambda name, tool_input: False,",
+                "    recovery_available=lambda: False,",
+                "    response_output=lambda data, result, output, message: "
+                "{'hookSpecificOutput': {'updatedToolOutput': output}},",
+                "    diagnostic_output=lambda message: {},",
+                "    tool_call_id=lambda data: 'call',",
+                "    prepare_input=lambda data: data,",
+                ")",
+                "hook_runtime.resolve_binary = lambda *a, **k: '/bin/true'",
+                "hook_runtime.consume_output_optimization = lambda *a, **k: 'none'",
+                "hook_runtime.run_compress = lambda *a, **k: {",
+                "    'disposition': 'applied',",
+                "    'output': chr(0x4e2d) + chr(0x6587) + ' ' + chr(0x1f680),",
+                "    'additional_context': '',",
+                "}",
+                f"sys.stdin = io.StringIO({json.dumps(payload)!r})",
+                "hook_runtime.post_tool(adapter, 'probe')",
+            ]
+        )
+        env = dict(os.environ)
+        env.update(self.ASCII_LOCALE_ENV)
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        emitted = json.loads(proc.stdout)
+        self.assertEqual(
+            emitted["hookSpecificOutput"]["updatedToolOutput"],
+            "\u4e2d\u6587 \U0001f680",
+        )
+        self.assertTrue(
+            proc.stdout.isascii(),
+            "the host sink must stay ASCII so a non-UTF-8 locale cannot raise",
+        )
+
+
 @unittest.skipUnless(
     os.path.exists(corpus.DEBUG_TOKENLESS_BIN),
     "tokenless debug binary not built",

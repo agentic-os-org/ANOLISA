@@ -621,6 +621,7 @@ def _run_in_group(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         start_new_session=True,
     ) as child:
         try:
@@ -652,6 +653,7 @@ def run(
                 input=input_data,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout,
             )
         forward_stderr(proc)
@@ -791,7 +793,7 @@ def run_compress(
         timeout=timeout,
         isolated=isolated,
     )
-    if proc is None or proc.returncode != 0 or not proc.stdout.strip():
+    if proc is None or proc.returncode != 0 or not (proc.stdout or "").strip():
         if proc is not None and proc.returncode != 0:
             warn(f"tokenless compress exited {proc.returncode}")
         return None
