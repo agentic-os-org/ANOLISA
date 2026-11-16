@@ -102,6 +102,10 @@ side effects. After the one-shot command exits there is no resource to stop.
 Remove `"$AW_QUERY"` when the request file is no longer needed.
 
 `aw instance list`, `attach --sdk-instance ID` and `detach --sdk-instance ID`
-operate on application-installed SDK listeners. Select `--socket` or `--config`
-and inspect the application's confirmation in JSON. See
+operate on application-installed SDK listeners. `attach --sdk-pid PID` selects
+one listener by its pinned process identity; use the instance ID when a process
+has multiple listeners. With `--config` and `daemon.startup: on_demand`, this PID
+selector starts or reuses AW. With `--socket`, it requires an existing service.
+It leaves application startup and ownership native. The existing `--pid`
+selector retains its native hotload restrictions. Inspect confirmation in JSON. See
 [cooperative SDK control](../deployment/native-sdk.md#cooperative-attach-and-detach).

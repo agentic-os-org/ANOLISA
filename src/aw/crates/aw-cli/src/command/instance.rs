@@ -84,19 +84,22 @@ struct Attach {
     /// Target declared in the configuration
     #[arg(
         long,
-        required_unless_present = "sdk_instance",
-        conflicts_with = "sdk_instance",
+        required_unless_present_any = ["sdk_instance", "sdk_pid"],
+        conflicts_with_all = ["sdk_instance", "sdk_pid"],
         value_name = "TARGET"
     )]
     agent: Option<String>,
     /// Explicit native process; identity and native adoption are checked
-    #[arg(long, required_unless_present = "sdk_instance", conflicts_with = "sdk_instance", value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, required_unless_present_any = ["sdk_instance", "sdk_pid"], conflicts_with_all = ["sdk_instance", "sdk_pid"], value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
     pid: Option<u32>,
     /// Application identity published by instance list
-    #[arg(long, value_name = "ID", conflicts_with = "remove")]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["remove", "sdk_pid"], group = "sdk_selection")]
     sdk_instance: Option<String>,
-    /// Existing SDK service socket; no service is started
-    #[arg(long, requires = "sdk_instance", conflicts_with = "config")]
+    /// Find one cooperating SDK application by its live process identity
+    #[arg(long, value_name = "PID", conflicts_with = "remove", group = "sdk_selection", value_parser = clap::value_parser!(u32).range(1..))]
+    sdk_pid: Option<u32>,
+    /// Existing SDK service socket; with --sdk-pid and --config, start on demand
+    #[arg(long, requires = "sdk_selection", conflicts_with = "config")]
     socket: Option<String>,
     /// Wait for application acknowledgement within this deadline
     #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(100..=30000))]
@@ -175,16 +178,19 @@ pub(super) fn run(value: Instance) -> Result<Exit> {
             "native-release",
             &options([("binding", Some(value.binding))]),
         ),
-        Some(Action::Attach(value)) if value.sdk_instance.is_some() => crate::runtime(
-            "sdk-control",
-            &options([
-                ("action", Some("attach".into())),
-                ("config", value.socket.is_none().then_some(value.config)),
-                ("socket", value.socket),
-                ("application", value.sdk_instance),
-                ("timeout-ms", Some(value.timeout_ms.to_string())),
-            ]),
-        ),
+        Some(Action::Attach(value)) if value.sdk_instance.is_some() || value.sdk_pid.is_some() => {
+            crate::runtime(
+                "sdk-control",
+                &options([
+                    ("action", Some("attach".into())),
+                    ("config", value.socket.is_none().then_some(value.config)),
+                    ("socket", value.socket),
+                    ("application", value.sdk_instance),
+                    ("sdk-pid", value.sdk_pid.map(|pid| pid.to_string())),
+                    ("timeout-ms", Some(value.timeout_ms.to_string())),
+                ]),
+            )
+        }
         Some(Action::Attach(value)) => crate::runtime(
             "install",
             &options([
@@ -303,6 +309,17 @@ mod tests {
             .unwrap();
         }
         parse(&["aw", "instance", "list", "--socket", "/socket"]).unwrap();
+        parse(&["aw", "instance", "attach", "--sdk-pid", "123"]).unwrap();
+        parse(&[
+            "aw",
+            "instance",
+            "attach",
+            "--sdk-pid",
+            "123",
+            "--socket",
+            "/socket",
+        ])
+        .unwrap();
     }
 
     #[test]
@@ -312,6 +329,9 @@ mod tests {
             vec!["update"],
             vec!["detach"],
             vec!["attach", "--sdk-instance", "one", "--pid", "123"],
+            vec!["attach", "--sdk-instance", "one", "--sdk-pid", "123"],
+            vec!["attach", "--agent", "target", "--sdk-pid", "123"],
+            vec!["attach", "--sdk-pid", "123", "--remove"],
             vec!["attach", "--sdk-instance", "one", "--remove"],
             vec!["attach", "--sdk-instance", "one", "--timeout-ms", "99"],
             vec!["attach", "--agent", "target", "--pid", "0"],

@@ -156,3 +156,60 @@ Both language package gates cover cooperative selection, busy detach, late Ready
 and recovery; real framework acceptance is documented in the integration guides.
 
 The [TypeScript integration](../../../../../../docs/developer-guide/en/aw/deployment/native-sdk.md) implements this lifecycle and packages canonical Qoder public Hooks. Its offline contract and installation tests run in the default AW gate.
+
+## Deferred after-only task admission
+
+The process-local base belongs to `sdk/typescript/src/admission.mjs` and
+`sdk/python/src/aw_sdk/admission.py`, sharing the existing Instance/Task contract.
+Sources preinstall native capture and pass the installed events to one Admission
+per request. `prepare` waits at input when input.submit is installed, or at the
+first tool for tool-only policies. The same immutable Scope spans all later
+callbacks and native cleanup. The gate adds no Provider Hook; configured before
+and after steps retain their original phases. Optional availability can fall
+back at its admitted deadline, while explicit errors and cancellation propagate.
+
+Qoder public Hooks reuse Admission for readiness, cancellation and one Task.
+The bridge defaults to explicit `native_fallback` availability and rejects an
+enabled required policy before installing its listener. Callers select `required`
+availability explicitly; Service repeats the policy compatibility check on registration and updates.
+QwenPaw's configured native plugin does the same through DeferredScope, extending
+it only with resident invocation ledger activation, Coordinator streams, native
+finalizers and checked model/event publication. It uses required availability.
+`QwenPawPlugin.from_config` installs input capture when enabled; before-only and
+after-only policies allow the model to start before AW. The compatibility
+`AfterOnlyPlugin` keeps its original after-only restriction. Tool-only text
+replies create no remote Scope. Earlier input protection requires reinstalling
+the Source before accepting new requests; it cannot cover in-flight model work.
+
+The Python SDK Task also owns the required native Scope watch: renew at the
+Service-provided interval through long model/tool waits, latch probe or Service
+failure, notify the native owner once, and join the monitor before Scope release.
+Cooperative detach drains fallback Tasks before root release, so a concurrent
+Task close cannot race a deleted child Scope. TypeScript Admission separates
+individual waiter cancellation from the shared operation and internal close.
+
+Configuration loaders reuse AW's canonical offline parser. Service retains
+capability admission, Ready, Scope revisions and the common Hook execution path
+through Host/executor/Provider. Adapter bindings retain native field mapping and
+effect adoption; they do not implement another policy engine. Deployment
+Descriptor generation and a general Source resolver remain unimplemented.
+
+`--sdk-pid` is a cooperative application selector. The CLI pins the existing
+ProcessIdentity before service startup, ensures AW through launch_service, waits
+for exactly one matching SDK announcement and sends the normal control intent.
+SDK confirmation and process ownership remain application-held. Backend startup
+stays with its external deployment; no second lifecycle or Provider protocol is
+introduced.
+
+## Deferred public Qoder Hooks
+
+The configuration-driven bridge preinstalls public native callbacks before Query
+creation. With input.submit disabled, model dispatch does not open a Scope. The
+first tool-before callback waits for cooperative Ready and creates one immutable
+Task with that Query's directory and copied environment. Ordered callbacks reuse
+canonical Adapter normalization and effect handling; the after callback consumes
+the same Scope. Required admission times out before tool dispatch; optional mode fixes native
+fallback immediately when attachment is absent. Input policies instead
+require admission at native UserPromptSubmit. Registration rejects added input
+routes when the bridge was initialized without that source. Native Query close
+and callback cancellation precede Scope release. No runtime patch is installed.

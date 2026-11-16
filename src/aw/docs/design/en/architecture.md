@@ -316,6 +316,12 @@ uses Unbind to close complete request/tool admission atomically, then removes
 owned native registration and private artifacts. External processes are neither
 launched nor signalled by this path. Ordinary `aw run` keeps child supervision.
 
+Language SDKs own shared Admission over Instance/Task. Native Sources install
+capture and choose the configured input or first-tool boundary. Qoder and the
+configured QwenPaw entry reuse it; QwenPaw additionally retains its resident
+result guard. Service/Host/executor keep policy authority and Provider execution.
+See [SDK ownership](runtime/native-sdk.md#deferred-after-only-task-admission).
+
 Public audit consumers use `aw audit-export` → `aw-service::audit_export` →
 `aw-core::journal::reader`. The reader pins owned storage and verifies bounded
 source chains; Service projects retained public objects without a control RPC.

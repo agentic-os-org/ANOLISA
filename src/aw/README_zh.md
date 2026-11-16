@@ -103,7 +103,9 @@ sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按�
 ## 支持范围
 
 当前接入 Qoder CLI、Codex CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
-Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需要显式接入受管工厂。
+Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用可接入受管工厂或
+公共 Runtime SDK。Qoder 可用 `createQoderBridge` 读取一份配置，在首次工具前延迟接入；
+见 [SDK 接入](../../docs/developer-guide/zh/aw/deployment/native-sdk.md)。
 运行准入检查所需原生接口，[已验证基线](../../docs/developer-guide/zh/aw/native-agents.md)记录实际测试的框架版本。
 [Qoder SDK 接入](../../docs/developer-guide/zh/aw/agents/qoder-sdk.md)还支持预热、原样 SDK/Worker 下的原生配置、Pilot runtime launcher 授权、固定摘要的 Bash 消费者及声明式角色资产。
 [能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式说明
@@ -136,3 +138,7 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 
 本地审计消费者可以使用 `aw audit-export` 在服务停止后读取保留的元数据。
 所属状态目录与有界读取接口见[审计导出](../../docs/user-guide/zh/aw/cli-reference.md#aw-audit-export)。
+
+原生 QwenPaw 启动后的实验性协作接入见 [工具后延迟接入](../../docs/developer-guide/zh/aw/deployment/python-sdk.md#工具后的延迟接入)。
+预装插件在首次工具前等待就绪；`aw instance attach --config aw.yaml --sdk-pid PID`
+启动或复用 AW，业务 Agent 继续由原生命令启动。

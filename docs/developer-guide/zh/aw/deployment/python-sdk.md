@@ -25,16 +25,33 @@ python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.1.1-py3-none-any.whl
 上下文默认采用应用目录和环境，目录应与原生 Agent 一致。wheel 不包含二进制或策略引擎。
 
 QwenPaw 接入时，将安装后的 `share/anolisa-aw-sdk/examples/qwenpaw/` 示例复制到
-新的原生插件目录，在应用配置中启用 `plugins.aw-sdk`。`AW_SOCKET` 指向独立 Service
-的私有 socket，AW 配置声明名为 `qwenpaw`、Adapter 为 `qwenpaw` 的目标。
-沿用原模型、插件、权限及配置来源。原生插件加载先安装 middleware，startup Hook
-发布协作式接入能力后返回，显式 attach 完成 AW 注册；shutdown 只释放本插件实例。
-每个 App 使用一种 AW 接线，避免重复策略回调。
+新的原生插件目录，启用 `plugins.aw-sdk`，并将 `AW_CONFIG` 设置为部署配置的绝对路径。
+沿用 `qwenpaw app`、原模型、权限和其他插件。初始化复用 AW 权威离线解析器，
+不启动 AW 或 sec-core。
 
-示例通过 `QwenPawPlugin.ready` 实现 `install`，确认 middleware 已登记并校验返回的路由。
-自定义集成同样应在安装回调后才返回 `True`。客户端会对每个任务的不可变策略快照
-重复确认。每个 Agent reply 持有独立任务，Scope 保留到相关原生工具生成器也完成；
-不同 Agent 实例的任务独立。
+```python
+from aw_sdk.qwenpaw import QwenPawPlugin
+
+plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
+```
+
+只有一个 `qwenpaw` 目标时自动选择，多个目标时传入 `target`。
+`daemon.endpoint` 或 `daemon.state_dir` 采用明确的私有路径。
+配置决定最早保护边界：启用 `input.submit` 时，每个 reply 在模型派发前等待 Ready 和 Scope；
+仅配置 `tool.before`／`tool.after` 时，模型调用可与部署准备重叠，首次工具进入前等待
+Ready 并固定 Scope。内部准入门不执行未配置的 before 策略；工具策略下的纯文本回复不建远端 Scope。
+
+HTTP 就绪后，部署方准备 sec-core，再执行
+`aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`。
+此协作式选择需要已安装插件。配置式 resident 路径采用 required 可用性，默认等待
+5000 ms，支持工具前阻断与工具后替换／扣留；原生生成器、后台任务和最终结果交付
+沿用 resident 保障。每个 App 使用一种 AW 接线。
+初始未安装输入接点时，增加 `input.submit` 需要排空并重启，再重新 attach；已发起的模型
+请求无法补做输入检查。普通策略更新继续沿用空闲更新门。
+
+需要显式管理公开 middleware 时，`QwenPawPlugin(instance)` 保留既有 Instance API、
+可选可用性和每个 reply 的 Task 归属，`ready` 对登记和 Scope 确认实际安装的路由。
+上述配置工厂额外复用 resident 结果保障，按所需原生效果选择入口。
 
 ## 异步生命周期与可用性
 
@@ -62,6 +79,11 @@ Service 仍可达时，回调取消或失败先等待事件清理，再传播原
 `await task.close_event(hook, original_payload)`，随后可在同一 Task 内执行其他事件。
 原生生成器清理完成后再关闭 Task。
 
+使用 required 可用性及调用账本的原生 Source，在激活后可调用
+`await task.watch_scope(probe=..., on_failure=...)`。SDK 在模型和工具等待期间续租，
+向 owner 锁存桥接失败，并在原生排空后关闭 Task 时停止、汇合监视任务。
+配置式 QwenPaw 插件复用这项公共 Task 能力。
+
 ## 协作式控制
 
 原生回调安装后调用 `instance.listen(automatic=False)`，发布初始未接入的应用；
@@ -71,6 +93,46 @@ Service 仍可达时，回调取消或失败先等待事件清理，再传播原
 `application_id` 提供发现 ID。命令、请求期限、空闲脱离和重启规则沿用
 [协作式控制](native-sdk.md#协作式-attach-与-detach)。
 `await instance.stop()` 撤下监听，`await instance.close()` 释放应用持有的资源。
+
+## 工具后的延迟接入
+
+实验性 `AfterOnlyPlugin` 保留原生 `qwenpaw app` 启动，启动阶段不等待 AW 或 sec-core。
+从已安装 wheel 的 `share/anolisa-aw-sdk/examples/qwenpaw-after/` 复制到新的原生插件目录，
+启用 `plugins.aw-after`，将 `AW_SOCKET` 设置为 AW 配置选择的私有 socket。
+该应用使用这一种 AW 接线，替代可选的 `aw-sdk` 插件；原模型、权限和其他 Hook 沿用业务配置。
+
+启用插件后执行原生命令。HTTP 就绪后，通过 sec-core 既有部署入口启动／预热后端，
+再从另一个终端使用应用的实际 PID 接入：
+
+```bash
+aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID \
+  --timeout-ms 10000
+```
+
+配置 `daemon.startup: on_demand` 后，`--sdk-pid` 配合配置文件会按需启动或复用 AW，等待应用发布 SDK 接线，并按准确 PID／
+启动身份选择一个实例。同进程存在多个 SDK 实例时改用 `--sdk-instance` 精确选择。
+命令等待应用确认 Ready，不向任意进程注入，也不启动 Agent。传入 `--socket` 时仅连接
+已有服务。CLI 不启动 sec-core，后端生命周期继续由部署方管理。
+
+prompt 可在 attach 前进入模型。预装入口在首次工具前等待准备完成，创建 Scope 并确认
+仅工具后策略快照，复用 resident 的调用账本、Coordinator 暂扣及审核后模型／事件交付。
+只接受 `tool.after` 策略；内部 `tool.before` 观察路由用于关联，不执行工具前业务扫描。
+`input.submit` 和已配置的工具前检查会被拒绝。无工具的文本回复无需等待 AW。
+Scope 固定同一策略修订，直到原生工作完成清理。
+
+插件固定使用 `required` 可用性。`attach_timeout_ms` 默认 5000，范围 100–60000；
+过早到达的工具等待剩余准备，超时拒绝派发。扫描失败扣留未检查输出，HTTP 进程继续存活；
+未知清理状态沿 resident 的失败围栏处理。不回退该任务，也不重放工具。
+该插件的 `reconnect_ms` 默认 100，控制 SDK 发现轮询。可通过 `cwd` 指定实例工作目录；
+每轮任务传入原生 workspace 和不含任务凭据的 Hook 环境。
+直接 Python 接入也可使用 `instance.task(cwd=..., environment=...)`，上下文按任务复制。
+
+停止时先排空活动任务、detach 选定实例，再按部署生命周期停止 AW／sec-core。
+仅禁用 `plugins.aw-after` 并重启原生 App 即可移除本地接点，同时取消这层附加保护。
+既有 `aw run` 行为保持。原生验收使用 QwenPaw 2.2.2.post1／AgentScope 2.0.10、
+本地模型与替换 Provider 夹具；`after-only-sdk` 覆盖延迟接入、普通／替换结果、扫描失败、
+脱离时纯文本回复及未接入时的有界拒绝。该验收不构成启动或业务时延承诺；原生与插件启动
+差值、后端准备和首次工具剩余等待分别实测。
 
 ## 已验证范围
 

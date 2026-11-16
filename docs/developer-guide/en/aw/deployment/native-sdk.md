@@ -13,6 +13,93 @@ Build AW from the same candidate revision as the language package. Existing
 releases without `aw-sdk/v1` reject connection; cooperative control additionally
 requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
+## Configuration-driven Qoder integration
+
+Use `createQoderBridge` to retain the native Node entrypoint, daemon, authentication,
+model settings, permissions and Hook groups. The bridge reads the same owned
+`aw.yaml` used by deployment, installs public Qoder Hooks and publishes cooperative
+attachment support. AW's offline `config show` parser reads YAML or JSON once
+through a bounded CLI invocation; initialization starts neither AW nor sec-core.
+
+```javascript
+import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
+import { query } from "@qoder-ai/qoder-agent-sdk";
+
+const aw = await createQoderBridge({
+  configFile: "/absolute/aw.yaml",
+  query,
+});
+const session = aw.query({ prompt, options: nativeOptions });
+for await (const message of session) deliver(message);
+// At application shutdown:
+await aw.close();
+```
+
+Set `spec.daemon.endpoint` or `spec.daemon.state_dir` to an explicit private
+absolute path; this bridge rejects configurations with both paths set to `auto`.
+A single `qoder-sdk` target is selected automatically; pass `target` when the
+configuration contains several. The bridge defaults to `availability: "native_fallback"`:
+AW loss leaves native Queries, Hooks, tools and model execution running. Set
+`required: false` on every enabled event; `on_error: block` and explicit denials
+still apply while AW is reachable. A conflicting required policy rejects bridge
+initialization. Choose `availability: "required"` explicitly when protected work
+must stop on AW loss. Availability is an SDK lifecycle option; policy remains in the file.
+The bridge supports input observation/blocking when configured, tool-before
+observation/blocking and tool-after observation. Unsupported policy effects or
+Skill routes fail admission; result replacement and final-result gates retain
+their existing managed entrypoints.
+
+After native application readiness, deployment prepares sec-core in the background
+and runs under the application user:
+
+```bash
+aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+With `daemon.startup: on_demand`, this command starts or reuses AW. The PID must
+belong to the Node application running the installed bridge. Preparation can
+overlap model inference. Without `input.submit`, the bridge installs no
+`UserPromptSubmit` callback and creates no Scope before the first native tool.
+The first `PreToolUse` fixes the Task policy; required mode waits for attachment,
+while optional mode immediately fixes native fallback if AW is not Ready; internal
+before observation also correlates an after-only policy. Text-only replies do not
+wait. `attachTimeoutMs` defaults to 5000 ms: timeout denies a required tool. Optional mode does not wait for attachment. Once admitted, each Query
+retains one Scope and the existing loss/recovery semantics. Changing the file to
+add `input.submit` requires restarting the bridge before attachment.
+
+`aw.query` accepts the original Query input and returns a proxy preserving native
+methods. Consumption completion, early iterator return and explicit `close()`
+close the native Query and its Scope. Application shutdown closes remaining
+Queries. Each Query's `cwd` and copied environment define its task context;
+`QODER_PERSONAL_ACCESS_TOKEN` stays with native authentication and is excluded from
+AW Hook environments. Other sensitive variables should be excluded through the
+bridge's `environment` option. Keep one AW integration per Query. This path uses
+public Hooks and adds no module patch or preload to the native SDK.
+
+## Shared admission boundary
+
+TypeScript and Python export `Admission` alongside `Instance` and `Task`.
+A Source installs its native callbacks first, then creates one Admission for each
+native request with the installed event set and copied workspace/environment.
+Call `prepare()` before the earliest protected input or first tool. The common
+SDK owns bounded Ready waiting, one Task, cancellation and close; the Source owns
+native capture, field mapping and adoption. Service, Host and executor retain
+policy admission and Provider execution.
+
+An installed `input.submit` route waits for preparation even with optional
+availability. Optional input may fall back only after its attachment deadline;
+explicit errors and cancellation still propagate. Required tool admission waits;
+optional tool-only admission fixes native fallback immediately when detached.
+Calling `close()` cancels pending admission, so stop/drain native work before
+releasing its Task. Sources must call `prepare()` at the appropriate boundary;
+the SDK does not infer model dispatch or tool execution from a PID.
+
+The Qoder bridge and configured [QwenPaw plugin](python-sdk.md#install-and-integrate)
+reuse this common lifecycle. Their configuration loaders invoke AW's canonical
+`config show`; this bounded subprocess remains part of integration initialization.
+Deployment-generated descriptors and a general Source resolver remain separate
+work and are not available APIs in this candidate.
+
 ## Framework-free integration
 
 Configure a target named `app` with `adapter: sdk` and the application's ordinary
@@ -53,8 +140,8 @@ on every enabled event; explicit Provider denials still apply. Start the service
 independently with `aw service serve --config /absolute/aw.yaml` and select the
 socket reported by that service. The SDK never starts a service or an Agent.
 
-The installed `examples/qoder.mjs` shows the complete connection, Query and
-cleanup flow. Keep the native application's authentication, daemon, model,
+The installed `examples/qoder.mjs` uses the configuration-driven bridge.
+For explicit lifecycle control, Keep the native application's authentication, daemon, model,
 permissions, setting sources and Hooks. Pass its existing options to
 `qoderOptions(task, options)`, then create the native Query and immediately
 `bind(query)` on the returned integration. Every Query needs its own task; close
@@ -63,8 +150,8 @@ Do not combine this integration with the existing AW Query factory on one Query.
 
 Construct `Instance` with an explicit endpoint, target, capabilities and
 availability. `cwd` and `environment` default to the application values and form
-the task context; the native Query must use that same directory. Use a separate
-Instance for another working directory. `install(routes)` must return `true`
+the task context; pass the native Query directory and copied environment to
+`instance.task({cwd, environment})` when they differ. `install(routes)` must return `true`
 only when the application has installed a router for those events. It runs on
 registration and each task's policy snapshot before Ready acknowledgement.
 The example routes all Queries through `qoderOptions` and rejects unknown events.

@@ -186,6 +186,13 @@ class Acting:
 class QwenPawPlugin:
     """Install through the native PluginAPI before the App startup hook runs."""
 
+    @staticmethod
+    def from_config(config_file: str, **options: Any):
+        """Select the first protection boundary from the canonical AW configuration."""
+        from .configured import from_config
+
+        return from_config(config_file, **options)
+
     def __init__(self, instance: Instance, *, automatic: bool = False) -> None:
         self.instance = instance
         self.automatic = automatic

@@ -17,7 +17,7 @@
     },
     "./qoder": {
       "types": "./dist/qoder.d.ts",
-      "import": "./dist/native/qoder-sdk/sdk.mjs"
+      "import": "./dist/qoder.mjs"
     }
   },
   "files": [

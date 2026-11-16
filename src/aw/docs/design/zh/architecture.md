@@ -252,6 +252,11 @@ loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享�
 `install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
 私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。
 
+语言 SDK 在 Instance／Task 上提供公共 Admission。原生 Source 安装捕获，并根据配置
+选择输入或首次工具准入。Qoder 和配置式 QwenPaw 复用此机制，QwenPaw 同时保留
+resident 结果保障。Service／Host／executor 继续负责权威策略与 Provider 执行，
+见 [SDK 归属](runtime/native-sdk.md#仅工具后的延迟任务准入)。
+
 公共审计消费者通过 `aw audit-export` → `aw-service::audit_export` →
 `aw-core::journal::reader` 读取。读取器固定所属用户的存储并验证有界源链，
 Service 投影保留的公共对象；此路径不使用控制 RPC。

@@ -360,6 +360,20 @@ update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deploymen
 这些命令沿用现有接入和更新的 JSON 响应。update 也支持链接指南中的已准备原生模式，
 attach 仍限于文档列出的入口。下述业务自管 JSON 协议不能与这些子命令混用。
 
+### 已安装 SDK 的应用
+
+业务先安装 SDK 插件，沿用原生启动命令。配置 `daemon.startup: on_demand` 后，
+按应用 PID 选择监听并按需启动或复用 AW：
+
+```bash
+aw instance attach --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+同一进程有多个 SDK 监听时，使用 `aw instance list --config aw.yaml` 返回的
+`--sdk-instance ID`。指定 `--socket PATH` 时选择已有服务。该命令要求应用已安装接点。
+QwenPaw 先启动、AW 后接入的方式见
+[仅工具后插件](../../../developer-guide/zh/aw/deployment/python-sdk.md#工具后的延迟接入)。
+
 ## `aw instance`
 
 供显式 Adapter 连接已有同用户 daemon，使用原生准备流程复用的登记协议。`--socket PATH` 必填；`--connect` 只发现服务身份，不读取 stdin。其余调用从 stdin 接收登记、Ready、查询或释放请求，始终输出 JSON。`--timeout-ms` 默认 30000，范围 1–60000，覆盖输入、连接和请求。

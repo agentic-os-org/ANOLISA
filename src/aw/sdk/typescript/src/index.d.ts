@@ -55,7 +55,11 @@ export class Instance {
   /** Enable one bounded reconnect attempt at a time; known policy errors stop the loop. */
   start(): void;
   stop(): Promise<void>;
-  task(options?: { signal?: AbortSignal }): Promise<Task>;
+  task(options?: {
+    signal?: AbortSignal;
+    cwd?: string;
+    environment?: Record<string, string>;
+  }): Promise<Task>;
   close(): Promise<void>;
 }
 export class Task {
@@ -101,4 +105,30 @@ export interface SemanticTool {
 export interface SemanticDecision {
   decision: "continue" | "block";
   coverage: "checked" | "unavailable" | "not_configured";
+}
+
+/** Install Sources first; prepare before protected input or the first native tool. */
+export class Admission {
+  constructor(
+    instance: Instance,
+    options: {
+      events: string[];
+      timeoutMs?: number;
+      cwd?: string;
+      environment?: Record<string, string>;
+    },
+  );
+  readonly task?: Task;
+  readonly fallback: boolean;
+  readonly routes:
+    | Routes
+    | {
+        events: Record<string, never>;
+        hooks: Pick<Hook, "event" | "budget_ms">[];
+      };
+  prepare(signal?: AbortSignal): Promise<void>;
+  emit: Task["emit"];
+  invoke: Task["invoke"];
+  cancel(): void;
+  close(): Promise<void>;
 }

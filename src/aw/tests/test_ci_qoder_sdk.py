@@ -79,6 +79,7 @@ class QoderSdkNativeTests(GateFixture):
                     "crates/aw-cli/tests/fixtures/qoder_sdk/native-command.test.mjs",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/deadline-native.test.mjs",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/release_lifecycle.py",
+                    "sdk/tests/native_qoder_bridge.py",
                 )):
                     self.assertEqual(
                         commands.environment["QODER_PERSONAL_ACCESS_TOKEN"], credential
@@ -116,8 +117,8 @@ class QoderSdkNativeTests(GateFixture):
             ) as reports:
                 if credential:
                     native_acceptance.main()
-                    self.assertEqual(observed, ["setup"] + ["native"] * 31)
-                    self.assertEqual(reports.call_count, 31)
+                    self.assertEqual(observed, ["setup"] + ["native"] * 32)
+                    self.assertEqual(reports.call_count, 32)
                 else:
                     with self.assertRaisesRegex(ValueError, "requires.*Secret"):
                         native_acceptance.main()

@@ -28,15 +28,18 @@ export function qoderOptions(task, options = {}) {
     ["tool.before", ["PreToolUse"]],
     ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
   ]) {
-    const routes = task.routes.hooks.filter((hook) => hook.event === event);
-    if (!routes.length) continue;
+    const subscribed = task.routes.hooks.filter((hook) => hook.event === event);
+    if (!subscribed.length) continue;
     const callback = async (input, id, context = {}) => {
       const signal = context.signal;
       signal?.throwIfAborted();
-      if (task.fallback) return {};
       let payload,
-        started = false;
+        started = false,
+        routes = [];
       try {
+        await task.prepare?.(signal);
+        if (task.fallback) return {};
+        routes = task.routes.hooks.filter((hook) => hook.event === event);
         payload = structuredClone(input);
         if (
           id !== undefined &&
@@ -81,7 +84,7 @@ export function qoderOptions(task, options = {}) {
         matcher: "*",
         hooks: [callback],
         timeout:
-          routes.reduce((ms, hook) => ms + callbackTimeoutMs(hook), 1000) /
+          subscribed.reduce((ms, hook) => ms + callbackTimeoutMs(hook), 1000) /
           1000,
       });
   }

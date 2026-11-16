@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from aw_sdk import AwError, Instance
 from aw_sdk.transport import rpc
@@ -220,14 +221,15 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         )
         await fresh.close()
 
-    async def cli(self, action: str, *args: str) -> dict:
+    async def cli(self, action: str, *args: str, configuration: bool = False) -> dict:
+        selection = ("--config", str(self.config)) if configuration else ("--socket", self.endpoint)
         process = await asyncio.create_subprocess_exec(
             BINARY,
             "instance",
             action,
-            "--socket",
-            self.endpoint,
+            *selection,
             *args,
+            env=dict(os.environ, XDG_RUNTIME_DIR=str(self.root)),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -236,6 +238,81 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         if process.returncode:
             raise RuntimeError(stdout.decode() or stderr.decode())
         return json.loads(stdout)
+
+    async def test_task_context_is_private_and_copied(self) -> None:
+        await self.start()
+        instance = self.instance(environment={"ROOT_ONLY": "root"})
+        self.assertTrue(await instance.connect())
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        environment = {"TASK_ONLY": "clean"}
+        calls = []
+
+        async def capture(endpoint, identity, operation, timeout_ms):
+            if operation["method"] == "open_scope":
+                calls.append(operation)
+            return await rpc(endpoint, identity, operation, timeout_ms)
+
+        with patch("aw_sdk.client.rpc", side_effect=capture):
+            task = await instance.task(cwd=str(workspace), environment=environment)
+        environment["TASK_ONLY"] = "changed"
+        self.assertEqual(calls[0]["cwd"], str(workspace))
+        self.assertEqual(calls[0]["environment"], {"TASK_ONLY": "clean"})
+        self.assertEqual(instance.environment, {"ROOT_ONLY": "root"})
+        await task.close()
+
+    async def test_config_pid_attach_refreshes_restarted_service(self) -> None:
+        instance = self.instance(reconnect_ms=100)
+        instance.listen()
+        for _ in range(2):
+            await self.start()
+            await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+            self.assertEqual(instance.state, "ready")
+            self.stop()
+            await self.until(lambda: instance.state != "ready")
+
+    async def test_config_pid_attach_rejects_edited_configuration(self) -> None:
+        await self.start()
+        instance = self.instance(reconnect_ms=100)
+        instance.listen()
+        await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+        identity = instance.connection["identity"]
+        original = self.config.read_bytes()
+        edited = json.loads(original)
+        edited["spec"]["events"]["tool.before"]["enabled"] = False
+        for contents in (json.dumps(edited).encode(), b"{invalid json", original + b"\n"):
+            with self.subTest(contents=contents):
+                self.config.write_bytes(contents)
+                await self.cli(
+                    "detach", "--sdk-instance", instance.application_id, configuration=True
+                )
+                self.assertEqual(instance.state, "detached")
+                with self.assertRaisesRegex(RuntimeError, "configuration.*does not match"):
+                    await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+                self.assertEqual(instance.state, "detached")
+                self.assertEqual(
+                    (await rpc(self.endpoint, None, {"method": "status"}, 500))["result"][
+                        "bindings"
+                    ],
+                    0,
+                )
+                self.config.write_bytes(original)
+                await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+                self.assertEqual(instance.connection["identity"], identity)
+                self.assertEqual(instance.state, "ready")
+
+    async def test_pid_selection_rejects_multiple_instances(self) -> None:
+        await self.start()
+        first, second = self.instance(reconnect_ms=100), self.instance(reconnect_ms=100)
+        first.listen()
+        second.listen()
+        await self.until(lambda: first.application_id and second.application_id)
+        with self.assertRaisesRegex(RuntimeError, "sdk_control_ambiguous_process"):
+            await self.cli("attach", "--sdk-pid", str(os.getpid()))
+        await second.stop()
+        result = await self.cli("attach", "--sdk-pid", str(os.getpid()))
+        self.assertEqual(result["result"]["state"], "completed")
+        self.assertEqual(first.state, "ready")
 
     async def until(self, check) -> None:
         async with asyncio.timeout(8):

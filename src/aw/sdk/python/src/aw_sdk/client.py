@@ -9,6 +9,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from aw_sdk.transport import AwError, SDK, rpc, same_identity
+from aw_sdk.scope_watch import ScopeWatch
 
 
 class Instance:
@@ -26,7 +27,7 @@ class Instance:
         environment: dict[str, str] | None = None,
         config: str | None = None,
         timeout_ms: int = 1000,
-        reconnect_ms: int = 1000
+        reconnect_ms: int = 1000,
     ) -> None:
         if availability not in {"required", "native_fallback"}:
             raise AwError("availability_required")
@@ -248,7 +249,12 @@ class Instance:
                 task.connection_error = error
                 task.fallback = self.availability == "native_fallback"
 
-    async def task(self) -> "Task":
+    async def task(
+        self,
+        *,
+        cwd: str | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> "Task":
         if self.detaching:
             raise AwError("sdk_control_busy")
         if self.closed:
@@ -259,7 +265,7 @@ class Instance:
             isinstance(self.last_error, AwError) and self.last_error.unavailable
         ):
             raise self.last_error
-        task = Task(self, self.connection)
+        task = Task(self, self.connection, cwd=cwd, environment=environment)
         self.tasks.add(task)
         try:
             await task.open()
@@ -304,14 +310,24 @@ class Instance:
 class Task:
     """A fixed policy snapshot; a fallback task never rejoins a recovered service."""
 
-    def __init__(self, instance: Instance, connection: dict | None) -> None:
+    def __init__(
+        self,
+        instance: Instance,
+        connection: dict | None,
+        *,
+        cwd: str | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> None:
         self.instance, self.connection = instance, connection
+        self.cwd = str(Path(instance.cwd if cwd is None else cwd).resolve(strict=True))
+        self.environment = dict(instance.environment if environment is None else environment)
         self.fallback = connection is None
         self.routes: dict = {"events": {}, "hooks": []}
         self.binding: dict | None = None
         self.closed = False
         self._closing: asyncio.Task | None = None
         self.connection_error: AwError | None = None
+        self.watch: ScopeWatch | None = None
 
     async def call(self, operation: dict, timeout_ms: int | None = None) -> dict | None:
         if self.closed or self._closing:
@@ -345,8 +361,8 @@ class Task:
                 "method": "open_scope",
                 "parent_id": self.connection["handle"]["binding"]["instance_id"],
                 "pid": os.getpid(),
-                "cwd": self.instance.cwd,
-                "environment": self.instance.environment,
+                "cwd": self.cwd,
+                "environment": self.environment,
             }
         )
         if self.binding is None:
@@ -358,6 +374,24 @@ class Task:
         if not self.fallback:
             await self.instance.installed(self.routes)
             await self.call({"method": "acknowledge_scope", "instance_id": instance_id})
+
+    async def watch_scope(
+        self,
+        *,
+        probe: Callable | None = None,
+        on_failure: Callable | None = None,
+    ) -> ScopeWatch:
+        """Renew native bridge validity until this Task closes after native drain."""
+        if (
+            self.instance.availability != "required"
+            or self.fallback
+            or self.binding is None
+            or self.watch is not None
+        ):
+            raise AwError("scope_watch_unavailable")
+        self.watch = ScopeWatch(self, probe, on_failure)
+        await self.watch.start()
+        return self.watch
 
     async def invoke_native(self, hook: dict, payload: dict) -> tuple[int, bytes, bytes]:
         try:
@@ -467,6 +501,8 @@ class Task:
                 self._closing = None
 
     async def _release(self) -> None:
+        if self.watch is not None:
+            await self.watch.close()
         if self.binding and not self.connection.get("released"):
             try:
                 await rpc(
