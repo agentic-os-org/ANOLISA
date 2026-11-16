@@ -805,6 +805,12 @@ fn inject_credential_fails_locally_before_any_daemon_request() {
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.starts_with("agent-sec-cli: "), "{error}");
     assert!(!error.contains("connection unavailable"), "{error}");
+    if !cfg!(target_os = "linux") {
+        assert!(
+            error.contains("inject-credential requires Linux"),
+            "{error}"
+        );
+    }
     assert!(!directory.0.join("out").exists());
     assert!(!socket.exists());
 }
