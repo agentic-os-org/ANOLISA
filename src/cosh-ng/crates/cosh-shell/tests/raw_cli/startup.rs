@@ -2529,3 +2529,46 @@ fn raw_cli_startup_health_unusable_history_keeps_facts_without_inviting() {
         fs::remove_dir_all(&home).unwrap();
     }
 }
+
+#[test]
+fn raw_cli_startup_banner_blank_line_above_logo_and_single_below_health() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-healthy"),
+            ("NO_COLOR", "1"),
+        ],
+    );
+    assert!(output.contains("Health check"), "{output}");
+    let lines: Vec<&str> = output.split('\n').collect();
+    let logo = lines
+        .iter()
+        .position(|line| line.contains("██████╗"))
+        .expect("startup logo");
+    assert!(logo > 0, "logo must not be the first line: {output}");
+    assert!(
+        !lines[logo].contains("\x1b[2K"),
+        "logo shares the cleared prompt line, no blank line above: {output}"
+    );
+    assert!(
+        lines[logo - 1].contains("\x1b[2K"),
+        "expected a cleared blank line above the logo: {output}"
+    );
+    let bottom = lines
+        .iter()
+        .rposition(|line| line.contains('╰') && line.contains('╯'))
+        .expect("health panel bottom border");
+    let blanks = lines[bottom + 1..]
+        .iter()
+        .take_while(|line| line.trim_matches('\r').is_empty())
+        .count();
+    assert_eq!(
+        blanks, 1,
+        "exactly one blank line below the health panel: {output}"
+    );
+}

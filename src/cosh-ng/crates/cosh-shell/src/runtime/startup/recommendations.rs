@@ -48,6 +48,7 @@ pub(crate) fn render_startup_banner<W: Write>(
             welcome.extra.push(line);
         }
     }
+    writeln!(output)?;
     renderer.write_welcome(output, welcome)?;
     writeln!(output)?;
     if recommendation_notice {
@@ -66,7 +67,6 @@ pub(crate) fn render_startup_banner<W: Write>(
                     .map(|invitation| invitation.problem.as_str()),
             );
         }
-        writeln!(output)?;
         state.startup_health.rendered = true;
     }
     write_startup_suggestion_card(
@@ -284,6 +284,7 @@ pub(crate) fn render_startup_health_banner<W: Write>(
         .unwrap_or_else(|| ".".to_string());
     let suggestions = prepare_startup_suggestions(state, &cwd);
     write!(output, "\r\x1b[2K")?;
+    writeln!(output)?;
     let visible = health::write_session_health(&suggestions.health, &report, &renderer, output)?;
     if !visible {
         health::discard_health_ghost(
@@ -295,7 +296,6 @@ pub(crate) fn render_startup_health_banner<W: Write>(
                 .map(|invitation| invitation.problem.as_str()),
         );
     }
-    writeln!(output)?;
     write_startup_suggestion_card(
         state,
         &renderer,

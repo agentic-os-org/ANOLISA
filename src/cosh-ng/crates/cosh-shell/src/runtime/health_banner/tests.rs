@@ -474,3 +474,30 @@ fn suppressed_invitation_keeps_only_the_guide_inside_the_card() {
     let text = prepared.final_text(&store, None);
     assert_eq!(text.matches("cosh guide").count(), 1, "{text}");
 }
+
+#[test]
+fn login_banner_frames_one_blank_line_above_and_below() {
+    let (_dir, store) = fixture();
+    let snapshot = store.snapshot(None).unwrap();
+    let report = report();
+    let renderer = RatatuiInlineRenderer::plain_with_width(80);
+    let prepared = presentation::prepare(
+        &report,
+        &renderer,
+        (&store, None, &snapshot),
+        Language::EnUs,
+        false,
+        1000,
+    );
+    let text = prepared.final_text(&store, None);
+    assert!(text.starts_with('\n'), "one blank line above: {text:?}");
+    assert!(
+        !text.starts_with("\n\n"),
+        "exactly one blank above: {text:?}"
+    );
+    assert!(text.ends_with("\n\n"), "one blank line below: {text:?}");
+    assert!(
+        !text.ends_with("\n\n\n"),
+        "exactly one blank below: {text:?}"
+    );
+}
