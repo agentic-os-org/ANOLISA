@@ -17,6 +17,15 @@ pub(crate) enum LoginChoice {
     Reread,
 }
 
+pub(crate) fn reread_message_id(
+    login: &Result<crate::runtime::login::LoginStatus, String>,
+) -> MessageId {
+    match login {
+        Ok(_) => MessageId::GuideWizardLoginRereadDone,
+        Err(_) => MessageId::GuideWizardReadFailed,
+    }
+}
+
 impl Session {
     pub(crate) fn login_choices(&self) -> Vec<LoginChoice> {
         let status = match &self.snapshot.login {
@@ -148,6 +157,7 @@ impl Session {
     pub(crate) fn run_login(&mut self, action: &str) {
         if action == "other" {
             self.login_guidance = true;
+            self.message = None;
             self.shift(0);
             return;
         }
@@ -156,7 +166,7 @@ impl Session {
             self.shift(0);
             self.message = Some(
                 self.i18n
-                    .t(MessageId::GuideWizardLoginRereadDone)
+                    .t(reread_message_id(&self.snapshot.login))
                     .to_string(),
             );
             return;

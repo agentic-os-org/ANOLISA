@@ -49,6 +49,9 @@ fn env_guard() -> EnvGuard {
         "COSH_SHELL_ANALYSIS_MODE",
         "COSH_RECOMMENDATIONS_ENABLED",
         "COSH_RECOMMENDATIONS_BASH_HISTORY",
+        "LC_ALL",
+        "LC_MESSAGES",
+        "LANG",
     ]
     .iter()
     .map(|name| (*name, std::env::var_os(name)))
@@ -64,6 +67,9 @@ fn isolated_fixture() -> (EnvGuard, tempfile::TempDir, UserPaths) {
     std::env::remove_var("COSH_SHELL_ANALYSIS_MODE");
     std::env::remove_var("COSH_RECOMMENDATIONS_ENABLED");
     std::env::remove_var("COSH_RECOMMENDATIONS_BASH_HISTORY");
+    std::env::remove_var("LC_ALL");
+    std::env::remove_var("LC_MESSAGES");
+    std::env::remove_var("LANG");
     (guard, temp, paths)
 }
 
@@ -766,10 +772,68 @@ fn reread_login_reports_refresh() {
     let (_guard, _temp, mut session) =
         login_session(login_status("/bin/bash", None, "unmanaged", false, false));
     session.run_login("reread");
-    assert!(session
-        .message
-        .as_deref()
-        .is_some_and(|message| message.contains("reread")));
+    let expected = match &session.snapshot.login {
+        Ok(_) => "Login status reread.",
+        Err(_) => "Unable to read",
+    };
+    assert_eq!(session.message.as_deref(), Some(expected));
+}
+
+#[test]
+fn reread_login_message_follows_host_locale() {
+    let (_guard, _temp, mut session) =
+        login_session(login_status("/bin/bash", None, "unmanaged", false, false));
+    std::env::set_var("LC_ALL", "zh_CN.UTF-8");
+    session.run_login("reread");
+    let expected = match &session.snapshot.login {
+        Ok(_) => "已重新读取登录状态。",
+        Err(_) => "无法读取",
+    };
+    assert_eq!(session.message.as_deref(), Some(expected));
+}
+
+#[test]
+fn reread_message_id_maps_read_failure_to_read_failed() {
+    let status = login_status("/bin/bash", None, "unmanaged", false, false);
+    assert_eq!(
+        super::login::reread_message_id(&Ok(status)),
+        crate::i18n::MessageId::GuideWizardLoginRereadDone
+    );
+    assert_eq!(
+        super::login::reread_message_id(&Err("read failed".into())),
+        crate::i18n::MessageId::GuideWizardReadFailed
+    );
+    assert_eq!(
+        I18n::new(Language::EnUs).t(crate::i18n::MessageId::GuideWizardLoginRereadDone),
+        "Login status reread."
+    );
+    assert_eq!(
+        I18n::new(Language::ZhCn).t(crate::i18n::MessageId::GuideWizardLoginRereadDone),
+        "已重新读取登录状态。"
+    );
+    assert_eq!(
+        I18n::new(Language::EnUs).t(crate::i18n::MessageId::GuideWizardReadFailed),
+        "Unable to read"
+    );
+    assert_eq!(
+        I18n::new(Language::ZhCn).t(crate::i18n::MessageId::GuideWizardReadFailed),
+        "无法读取"
+    );
+}
+
+#[test]
+fn other_user_guidance_clears_stale_message() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    session.message = Some("stale failure notice".into());
+    session.run_login("other");
+    assert!(session.message.is_none());
+    assert!(session.login_guidance);
 }
 
 #[test]
