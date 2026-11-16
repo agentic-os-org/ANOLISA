@@ -48,6 +48,19 @@ impl CoshCoreAdapter {
         let value = self.registry_query("auth", "state", serde_json::Value::Null)?;
         guide_auth_summary_from_value(&value)
     }
+
+    /// Read-only summary with the automatic-access identity probe.
+    ///
+    /// Only an explicit user action may run this: it performs the same
+    /// read-only IMDS check as a real request but never activates a provider.
+    pub(crate) fn guide_auth_probe(&self) -> Result<GuideAuthSummary, String> {
+        let value = self.registry_query(
+            "auth",
+            "state",
+            serde_json::json!({"probe_ecs_trial": true}),
+        )?;
+        guide_auth_summary_from_value(&value)
+    }
 }
 
 fn guide_auth_summary_from_value(value: &serde_json::Value) -> Result<GuideAuthSummary, String> {
@@ -68,6 +81,9 @@ fn guide_auth_summary_from_value(value: &serde_json::Value) -> Result<GuideAuthS
                 })
             })
     });
+    let preferences = value.get("trial_preferences");
+    let auto_use_unreadable = preferences.is_some_and(|prefs| prefs.get("error_code").is_some());
+    let access = value.get("access");
     Ok(GuideAuthSummary {
         configured,
         service: active.map(str::to_string),
@@ -75,11 +91,64 @@ fn guide_auth_summary_from_value(value: &serde_json::Value) -> Result<GuideAuthS
             .and_then(|provider| provider.get("source"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
-        auto_use: value
-            .get("trial_preferences")
+        // An unreadable preference is not the user turning automatic use off.
+        auto_use: preferences
             .and_then(|prefs| prefs.get("auto_use"))
-            .and_then(serde_json::Value::as_bool),
+            .and_then(serde_json::Value::as_bool)
+            .filter(|_| !auto_use_unreadable),
+        auto_use_unreadable,
+        access: access_path(access),
+        probe: probe_state(access),
+        probe_error_code: access
+            .and_then(|access| access.get("probe_error_code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
+}
+
+fn access_path(access: Option<&serde_json::Value>) -> AccessPath {
+    match access
+        .and_then(|access| access.get("path"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("explicit") => AccessPath::Explicit,
+        Some("ecs_trial") => AccessPath::EcsTrial,
+        Some("none") => AccessPath::None,
+        _ => AccessPath::Unknown,
+    }
+}
+
+fn probe_state(access: Option<&serde_json::Value>) -> ProbeState {
+    match access
+        .and_then(|access| access.get("probe"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("confirmed_supported") => ProbeState::ConfirmedSupported,
+        Some("confirmed_unsupported") => ProbeState::ConfirmedUnsupported,
+        Some("failed") => ProbeState::Failed,
+        _ => ProbeState::NotChecked,
+    }
+}
+
+/// Route a user-initiated question would take for credentials.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AccessPath {
+    /// Core predates the `access` summary or reported an unknown route.
+    #[default]
+    Unknown,
+    Explicit,
+    EcsTrial,
+    None,
+}
+
+/// How far the automatic-access identity probe got, if it ran at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProbeState {
+    #[default]
+    NotChecked,
+    ConfirmedSupported,
+    ConfirmedUnsupported,
+    Failed,
 }
 
 /// Current AI service facts shown by the guide; never carries credentials.
@@ -89,6 +158,10 @@ pub(crate) struct GuideAuthSummary {
     pub(crate) service: Option<String>,
     pub(crate) source: Option<String>,
     pub(crate) auto_use: Option<bool>,
+    pub(crate) auto_use_unreadable: bool,
+    pub(crate) access: AccessPath,
+    pub(crate) probe: ProbeState,
+    pub(crate) probe_error_code: Option<String>,
 }
 
 fn startup_auth_hint(auto_use: Option<bool>, ecs: Option<bool>) -> StartupAuthHint {
@@ -289,13 +362,18 @@ mod tests {
                 "has_api_key": true,
                 "source": "user"
             }],
-            "trial_preferences": {"auto_use": true}
+            "trial_preferences": {"auto_use": true},
+            "access": {"path": "explicit", "probe": "not_checked", "probe_error_code": null}
         });
         let summary = guide_auth_summary_from_value(&value).unwrap();
         assert!(summary.configured);
         assert_eq!(summary.service.as_deref(), Some("prod"));
         assert_eq!(summary.source.as_deref(), Some("user"));
         assert_eq!(summary.auto_use, Some(true));
+        assert!(!summary.auto_use_unreadable);
+        assert_eq!(summary.access, AccessPath::Explicit);
+        assert_eq!(summary.probe, ProbeState::NotChecked);
+        assert_eq!(summary.probe_error_code, None);
     }
 
     #[test]
@@ -310,5 +388,106 @@ mod tests {
         assert_eq!(summary.service.as_deref(), Some("dashscope"));
         assert_eq!(summary.source, None);
         assert_eq!(summary.auto_use, None);
+        // An old core without the access summary degrades to unknown facts.
+        assert_eq!(summary.access, AccessPath::Unknown);
+        assert_eq!(summary.probe, ProbeState::NotChecked);
+    }
+
+    #[test]
+    fn guide_summary_parses_probe_states_and_unknown_paths() {
+        for (probe, expected) in [
+            ("not_checked", ProbeState::NotChecked),
+            ("confirmed_supported", ProbeState::ConfirmedSupported),
+            ("confirmed_unsupported", ProbeState::ConfirmedUnsupported),
+            ("failed", ProbeState::Failed),
+            ("unexpected", ProbeState::NotChecked),
+        ] {
+            let value = serde_json::json!({
+                "active_provider": "dashscope",
+                "saved_providers": [],
+                "effective_auth_required": true,
+                "access": {"path": "ecs_trial", "probe": probe}
+            });
+            let summary = guide_auth_summary_from_value(&value).unwrap();
+            assert_eq!(summary.access, AccessPath::EcsTrial, "{probe}");
+            assert_eq!(summary.probe, expected, "{probe}");
+        }
+
+        for (path, expected) in [
+            ("explicit", AccessPath::Explicit),
+            ("ecs_trial", AccessPath::EcsTrial),
+            ("none", AccessPath::None),
+            ("unknown", AccessPath::Unknown),
+            ("unexpected", AccessPath::Unknown),
+        ] {
+            let value = serde_json::json!({
+                "active_provider": "dashscope",
+                "saved_providers": [],
+                "effective_auth_required": true,
+                "access": {"path": path, "probe": "not_checked"}
+            });
+            let summary = guide_auth_summary_from_value(&value).unwrap();
+            assert_eq!(summary.access, expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn guide_summary_reports_unreadable_preference_as_unknown_not_off() {
+        let value = serde_json::json!({
+            "active_provider": "dashscope",
+            "saved_providers": [],
+            "effective_auth_required": true,
+            "trial_preferences": {"auto_use": false, "error_code": "trial_preferences_invalid"},
+            "access": {"path": "unknown", "probe": "not_checked"}
+        });
+        let summary = guide_auth_summary_from_value(&value).unwrap();
+        assert!(summary.auto_use_unreadable);
+        assert_eq!(summary.auto_use, None);
+        assert_eq!(summary.access, AccessPath::Unknown);
+    }
+
+    #[test]
+    fn guide_summary_saved_trial_with_unreadable_preference_has_no_access_path() {
+        // Core cannot decide the route without the preference, so a saved trial
+        // provider comes back with an unknown path and the read error; the page
+        // must show unknown rather than a working trial.
+        let value = serde_json::json!({
+            "active_provider": "ecs-free-trial",
+            "saved_providers": [{
+                "provider_id": "ecs-free-trial",
+                "provider_type": "aliyun",
+                "auth_source": "ecs_identity",
+                "source": "user"
+            }],
+            "effective_auth_required": true,
+            "trial_preferences": {"auto_use": false, "error_code": "trial_preferences_invalid"},
+            "access": {"path": "unknown", "probe": "not_checked"}
+        });
+        let summary = guide_auth_summary_from_value(&value).unwrap();
+        assert!(!summary.configured);
+        assert_eq!(summary.service.as_deref(), Some("ecs-free-trial"));
+        assert!(summary.auto_use_unreadable);
+        assert_eq!(summary.auto_use, None);
+        assert_eq!(summary.access, AccessPath::Unknown);
+        assert_eq!(summary.probe, ProbeState::NotChecked);
+    }
+
+    #[test]
+    fn guide_summary_preserves_runtime_and_system_sources() {
+        for source in ["runtime", "system"] {
+            let value = serde_json::json!({
+                "active_provider": "managed",
+                "saved_providers": [{
+                    "provider_id": "managed",
+                    "provider_type": "openai_compat",
+                    "has_api_key": true,
+                    "source": source
+                }],
+                "trial_preferences": {"auto_use": true},
+                "access": {"path": "explicit", "probe": "not_checked"}
+            });
+            let summary = guide_auth_summary_from_value(&value).unwrap();
+            assert_eq!(summary.source.as_deref(), Some(source));
+        }
     }
 }

@@ -44,6 +44,7 @@ fn env_guard() -> EnvGuard {
     let lock = crate::diagnostics::test_env::env_guard();
     let saved = [
         "HOME",
+        "COSH_CORE_PATH",
         "COSH_SHELL_LANG",
         "COSH_SHELL_ANALYSIS_MODE",
         "COSH_RECOMMENDATIONS_ENABLED",
@@ -682,4 +683,436 @@ fn too_small_screen_only_accepts_exit_keys() {
     ] {
         assert!(matches!(super::too_small_flow(key(code)), Flow::Continue));
     }
+}
+
+fn summary(
+    access: crate::adapter::AccessPath,
+    probe: crate::adapter::ProbeState,
+) -> crate::adapter::GuideAuthSummary {
+    crate::adapter::GuideAuthSummary {
+        access,
+        probe,
+        ..Default::default()
+    }
+}
+
+/// Flattens rendered rows into searchable text for assertions and messages.
+fn rendered(rows: &[crate::ui::guide::WizardRow]) -> Vec<String> {
+    rows.iter()
+        .map(|row| match row {
+            crate::ui::guide::WizardRow::Text(text) => text.clone(),
+            crate::ui::guide::WizardRow::Choice { label, .. } => label.clone(),
+            crate::ui::guide::WizardRow::Blank => String::new(),
+        })
+        .collect()
+}
+
+#[test]
+fn ai_status_separates_explicit_automatic_and_unknown_access() {
+    use super::session::ai::{ai_status, AiStatus};
+    use crate::adapter::{AccessPath, ProbeState};
+
+    let mut configured = summary(AccessPath::Explicit, ProbeState::NotChecked);
+    configured.configured = true;
+    configured.service = Some("prod".into());
+    assert_eq!(
+        ai_status(&configured),
+        AiStatus::Configured {
+            service: Some("prod".into())
+        }
+    );
+
+    let mut configured_generic = summary(AccessPath::Explicit, ProbeState::NotChecked);
+    configured_generic.configured = true;
+    assert_eq!(
+        ai_status(&configured_generic),
+        AiStatus::Configured { service: None }
+    );
+
+    assert_eq!(
+        ai_status(&summary(AccessPath::Explicit, ProbeState::NotChecked)),
+        AiStatus::ExplicitIncomplete
+    );
+    assert_eq!(
+        ai_status(&summary(AccessPath::EcsTrial, ProbeState::NotChecked)),
+        AiStatus::AutoPending
+    );
+    assert_eq!(
+        ai_status(&summary(
+            AccessPath::EcsTrial,
+            ProbeState::ConfirmedSupported
+        )),
+        AiStatus::AutoReady
+    );
+    assert_eq!(
+        ai_status(&summary(
+            AccessPath::EcsTrial,
+            ProbeState::ConfirmedUnsupported
+        )),
+        AiStatus::NeedsConfig
+    );
+    assert_eq!(
+        ai_status(&summary(AccessPath::EcsTrial, ProbeState::Failed)),
+        AiStatus::AutoProbeFailed
+    );
+    assert_eq!(
+        ai_status(&summary(AccessPath::None, ProbeState::NotChecked)),
+        AiStatus::AutoDisabled
+    );
+
+    // A saved trial provider is a trusted identity fact before any probe.
+    let mut saved_trial = summary(AccessPath::EcsTrial, ProbeState::NotChecked);
+    saved_trial.configured = true;
+    saved_trial.service = Some("ecs-free-trial-2".into());
+    assert_eq!(ai_status(&saved_trial), AiStatus::AutoReady);
+
+    // Old cores and unreadable preferences stay unknown, not "not configured".
+    assert_eq!(
+        ai_status(&summary(AccessPath::Unknown, ProbeState::NotChecked)),
+        AiStatus::Unknown
+    );
+    let mut configured_old_core = summary(AccessPath::Unknown, ProbeState::NotChecked);
+    configured_old_core.configured = true;
+    assert_eq!(
+        ai_status(&configured_old_core),
+        AiStatus::Configured { service: None }
+    );
+}
+
+#[test]
+fn ai_actions_offer_the_primary_action_first() {
+    use super::session::ai::{ai_actions, AiAction, AiStatus};
+
+    assert_eq!(
+        ai_actions(&AiStatus::Configured { service: None }),
+        vec![AiAction::Ask, AiAction::Manage]
+    );
+    assert_eq!(
+        ai_actions(&AiStatus::AutoReady),
+        vec![AiAction::Ask, AiAction::Manage]
+    );
+    assert_eq!(
+        ai_actions(&AiStatus::AutoPending),
+        vec![AiAction::Ask, AiAction::Check, AiAction::Manage]
+    );
+    assert_eq!(
+        ai_actions(&AiStatus::AutoProbeFailed),
+        vec![AiAction::Ask, AiAction::Check, AiAction::Manage]
+    );
+    assert_eq!(
+        ai_actions(&AiStatus::AutoDisabled),
+        vec![AiAction::Enable, AiAction::Manage]
+    );
+    assert_eq!(ai_actions(&AiStatus::NeedsConfig), vec![AiAction::Manage]);
+    assert_eq!(
+        ai_actions(&AiStatus::ExplicitIncomplete),
+        vec![AiAction::Manage]
+    );
+    assert_eq!(
+        ai_actions(&AiStatus::Unknown),
+        vec![AiAction::Retry, AiAction::Manage]
+    );
+}
+
+#[test]
+fn ai_page_reports_automatic_access_without_probing_or_writing() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
+    let mut summary = summary(AccessPath::EcsTrial, ProbeState::NotChecked);
+    summary.auto_use = Some(true);
+    session.ai = Reading::Value(summary);
+    session.enter(Page::Ai);
+
+    let rows = rendered(&session.view().rows);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Automatic access unconfirmed")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|row| row == "Start asking"), "{rows:?}");
+    // Opening the page renders the cached reading; it never starts a query.
+    assert!(session.ai_rx.is_none());
+    assert!(!session.ai_loading);
+
+    session.handle(key(KeyCode::Esc));
+    assert!(matches!(session.page, Page::Home));
+    assert!(!paths.cosh_dir.as_ref().unwrap().exists());
+}
+
+#[test]
+fn ai_page_primary_choice_exits_and_manage_hands_off() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    let mut summary = summary(AccessPath::Explicit, ProbeState::NotChecked);
+    summary.configured = true;
+    summary.service = Some("prod".into());
+    session.ai = Reading::Value(summary);
+
+    session.enter(Page::Ai);
+    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Exit));
+
+    session.enter(Page::Ai);
+    session.shift(1);
+    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Handoff));
+}
+
+#[test]
+fn ai_page_status_copy_covers_degraded_states() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+
+    for (access, probe, expected) in [
+        (
+            AccessPath::Unknown,
+            ProbeState::NotChecked,
+            "Unable to confirm",
+        ),
+        (
+            AccessPath::None,
+            ProbeState::NotChecked,
+            "Automatic ECS trial use is off",
+        ),
+        (
+            AccessPath::EcsTrial,
+            ProbeState::ConfirmedUnsupported,
+            "AI service required",
+        ),
+        (
+            AccessPath::EcsTrial,
+            ProbeState::Failed,
+            "identity check failed",
+        ),
+    ] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(Language::EnUs));
+        let mut reading = summary(access, probe);
+        if probe == ProbeState::Failed {
+            reading.probe_error_code = Some("metadata_timeout".into());
+        }
+        session.ai = Reading::Value(reading);
+        session.enter(Page::Ai);
+        let rows = rendered(&session.view().rows);
+        assert!(
+            rows.iter().any(|row| row.contains(expected)),
+            "{access:?}/{probe:?}: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn ai_page_failed_probe_keeps_retrying_actions_available() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+    use crate::ui::guide::WizardRow;
+
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.ai = Reading::Unknown;
+    session.enter(Page::Ai);
+    let labels = session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            WizardRow::Choice { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels, vec!["Retry", "Configure AI service (opens /auth)"]);
+
+    // An unreadable preference is not shown as a user decision.
+    session.ai = Reading::Value(crate::adapter::GuideAuthSummary {
+        auto_use_unreadable: true,
+        ..summary(AccessPath::Unknown, ProbeState::NotChecked)
+    });
+    session.enter(Page::Ai);
+    assert!(!session
+        .view()
+        .rows
+        .iter()
+        .any(|row| matches!(row, WizardRow::Text(text) if text.contains("Zero-config auto use"))));
+}
+
+#[test]
+fn ai_page_saved_trial_with_unreadable_preference_is_unknown_not_ready() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+    use crate::ui::guide::WizardRow;
+
+    // A saved trial provider makes the request path read the preference before
+    // it answers, so a corrupt preference file rejects the question even though
+    // the provider is stored. Core reports that as an unknown route.
+    for (configured, service) in [(true, Some("ecs-free-trial".to_string())), (false, None)] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(Language::EnUs));
+        session.ai = Reading::Value(crate::adapter::GuideAuthSummary {
+            configured,
+            service,
+            auto_use_unreadable: true,
+            ..summary(AccessPath::Unknown, ProbeState::NotChecked)
+        });
+        session.enter(Page::Ai);
+        let rows = rendered(&session.view().rows);
+        assert!(
+            rows.iter().any(|row| row.contains("Unable to confirm")),
+            "configured={configured}: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row == "Start asking"),
+            "configured={configured}: {rows:?}"
+        );
+        let labels = session
+            .view()
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                WizardRow::Choice { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["Retry", "Configure AI service (opens /auth)"],
+            "configured={configured}"
+        );
+    }
+}
+
+/// Label of the choice under the cursor, if the cursor is on a choice at all.
+fn focused_choice(session: &Session) -> Option<String> {
+    match session.view().rows.get(session.cursor) {
+        Some(crate::ui::guide::WizardRow::Choice { label, .. }) => Some(label.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn ai_page_focus_returns_to_a_valid_choice_after_the_probe_finishes() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+
+    let (_guard, temp, paths) = isolated_fixture();
+    // Keep the background read from starting a real core process.
+    std::env::set_var("COSH_CORE_PATH", temp.path().join("missing-cosh-core"));
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    let mut reading = summary(AccessPath::EcsTrial, ProbeState::NotChecked);
+    reading.auto_use = Some(true);
+    session.ai = Reading::Value(reading);
+    session.enter(Page::Ai);
+
+    // Choose "Check automatic access": the read in flight leaves no action
+    // to execute, so the cursor cannot reach a stale row.
+    session.shift(1);
+    assert_eq!(
+        focused_choice(&session).as_deref(),
+        Some("Check automatic access")
+    );
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert!(session.ai_loading);
+    assert_eq!(
+        session
+            .view()
+            .rows
+            .iter()
+            .filter(|row| matches!(row, crate::ui::guide::WizardRow::Choice { .. }))
+            .count(),
+        0,
+        "loading still offered an executable action"
+    );
+
+    // Deliver a successful probe on the controller's own channel; "Check" is
+    // gone from the new plan.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    session.ai_rx = Some(receiver);
+    sender
+        .send(Reading::Value(summary(
+            AccessPath::EcsTrial,
+            ProbeState::ConfirmedSupported,
+        )))
+        .unwrap();
+    assert!(session.tick());
+    assert!(!session.ai_loading);
+    assert_eq!(focused_choice(&session).as_deref(), Some("Start asking"));
+
+    // The next key starts the conversation instead of falling through to /auth.
+    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Exit));
+}
+
+#[test]
+fn ai_page_second_enter_while_loading_keeps_the_probe_in_flight() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+
+    let (_guard, temp, paths) = isolated_fixture();
+    // Keep the background read from starting a real core process.
+    std::env::set_var("COSH_CORE_PATH", temp.path().join("missing-cosh-core"));
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    let mut reading = summary(AccessPath::EcsTrial, ProbeState::NotChecked);
+    reading.auto_use = Some(true);
+    session.ai = Reading::Value(reading);
+    session.enter(Page::Ai);
+
+    // Start the explicit identity probe through the controller path.
+    session.shift(1);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert!(session.ai_loading);
+
+    // Stand in for the probe result that is still on its way.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    session.ai_rx = Some(receiver);
+
+    // A habitual second Enter must not restart the read: a replacement
+    // receiver would drop this probe and settle the page back on a plain
+    // not-checked reading.
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert!(session.ai_loading);
+    sender
+        .send(Reading::Value(summary(
+            AccessPath::EcsTrial,
+            ProbeState::ConfirmedSupported,
+        )))
+        .expect("the in-flight probe receiver was replaced");
+
+    assert!(session.tick());
+    assert!(!session.ai_loading);
+    assert_eq!(focused_choice(&session).as_deref(), Some("Start asking"));
+    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Exit));
+}
+
+#[test]
+fn ai_page_stale_cursor_does_not_open_the_auth_handoff() {
+    use super::session::Page;
+    use crate::adapter::{AccessPath, ProbeState};
+
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    let mut reading = summary(AccessPath::Explicit, ProbeState::NotChecked);
+    reading.configured = true;
+    reading.service = Some("prod".into());
+    session.ai = Reading::Value(reading);
+    session.enter(Page::Ai);
+
+    // A cursor past the last choice has no action to run; it must not fall
+    // through to the /auth handoff on its own.
+    session.cursor = 99;
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert!(matches!(session.page, Page::Ai));
 }

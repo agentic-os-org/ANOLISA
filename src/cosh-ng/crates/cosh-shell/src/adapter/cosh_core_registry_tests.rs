@@ -294,3 +294,45 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     let error = format!("{:?}", result.unwrap_err());
     assert!(error.contains("provider_updated: true"), "{error}");
 }
+
+#[test]
+fn guide_auth_summary_reads_state_without_the_identity_probe() {
+    let script = write_mock_script(
+        "guide-no-probe",
+        r#"read REQUEST
+case "$REQUEST" in
+    *'"params":null'*) ;;
+    *) exit 2 ;;
+esac
+printf '%s\n' '{"type":"registry_response","request_id":"guide","success":true,"data":{"active_provider":"dashscope","saved_providers":[],"effective_auth_required":true,"trial_preferences":{"auto_use":true},"access":{"path":"ecs_trial","probe":"not_checked"}}}'
+"#,
+    );
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let summary = adapter.guide_auth_summary();
+    let _ = std::fs::remove_file(&script);
+    let summary = summary.expect("summary");
+    assert_eq!(summary.access, super::AccessPath::EcsTrial);
+    assert_eq!(summary.probe, super::ProbeState::NotChecked);
+    assert_eq!(summary.auto_use, Some(true));
+}
+
+#[test]
+fn guide_auth_probe_requests_the_identity_probe_and_parses_its_state() {
+    let script = write_mock_script(
+        "guide-probe",
+        r#"read REQUEST
+case "$REQUEST" in
+    *'"probe_ecs_trial":true'*) ;;
+    *) exit 3 ;;
+esac
+printf '%s\n' '{"type":"registry_response","request_id":"guide","success":true,"data":{"active_provider":"dashscope","saved_providers":[],"effective_auth_required":true,"trial_preferences":{"auto_use":true},"access":{"path":"ecs_trial","probe":"confirmed_supported","probe_error_code":null}}}'
+"#,
+    );
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let summary = adapter.guide_auth_probe();
+    let _ = std::fs::remove_file(&script);
+    let summary = summary.expect("probe summary");
+    assert_eq!(summary.access, super::AccessPath::EcsTrial);
+    assert_eq!(summary.probe, super::ProbeState::ConfirmedSupported);
+    assert_eq!(summary.probe_error_code, None);
+}

@@ -174,6 +174,18 @@ pub(crate) fn load_ai() -> Reading<GuideAuthSummary> {
     }
 }
 
+/// Same read with the read-only identity probe; only a user's explicit
+/// "check automatic access" action may trigger it.
+pub(crate) fn load_ai_probe() -> Reading<GuideAuthSummary> {
+    match CoshCoreAdapter::default().guide_auth_probe() {
+        Ok(summary) => Reading::Value(summary),
+        Err(_) => {
+            warn_failure("load_ai_probe", "query_core");
+            Reading::Unknown
+        }
+    }
+}
+
 fn language() -> LanguageStatus {
     let (saved, mut setting, mut source) = match saved_language_setting() {
         Ok(Some(setting)) => (Reading::Value(setting), setting, Source::Config),

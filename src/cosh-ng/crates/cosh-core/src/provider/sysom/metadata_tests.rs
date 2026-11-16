@@ -239,6 +239,37 @@ async fn ecs_metadata_prepare_timeout_is_manual_auth() {
 }
 
 #[tokio::test]
+async fn ecs_metadata_probe_identity_keeps_transport_failures_distinct() {
+    // The read-only status probe must not reuse the auth challenge's "an
+    // unreachable token endpoint means non-ECS" collapse: a transient failure
+    // is an inconclusive answer there, not evidence of a non-ECS host.
+    let mut reply = Reply::token();
+    reply.delay = Duration::from_secs(4);
+    let status_fixture = Fixture::start(vec![reply]).await;
+    let mut reply = Reply::token();
+    reply.delay = Duration::from_secs(4);
+    let challenge_fixture = Fixture::start(vec![reply]).await;
+    let (status, challenge) = tokio::join!(
+        TEST_ENDPOINT.scope(status_fixture.base_url.clone(), probe_ecs_identity()),
+        TEST_ENDPOINT.scope(
+            challenge_fixture.base_url.clone(),
+            detect_ecs_auth_challenge()
+        )
+    );
+    assert_eq!(status, Err(ProbeError::Timeout));
+    assert_eq!(challenge, Ok(None));
+    status_fixture.finish(1).await;
+    challenge_fixture.finish(1).await;
+
+    // An unreachable metadata address is equally inconclusive, not non-ECS.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let result = TEST_ENDPOINT.scope(base_url, probe_ecs_identity()).await;
+    assert_eq!(result, Err(ProbeError::Unreachable));
+}
+
+#[tokio::test]
 async fn ecs_metadata_prepare_instance_timeout_is_not_manual() {
     let mut instance = Reply::new(INSTANCE_PATH, 200, "i-test");
     instance.delay = Duration::from_secs(4);

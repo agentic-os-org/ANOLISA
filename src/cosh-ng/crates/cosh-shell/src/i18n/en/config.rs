@@ -243,6 +243,33 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardConfigUnreadable => "Unable to read the config file. Edit it manually, then reopen the wizard.",
         MessageId::GuideWizardDataClearConfirm => "Clear local recommendation data? The on/off setting will be kept.",
         MessageId::GuideWizardLoginHandoffFailed => "Login management handoff failed: {error}",
+        MessageId::GuideWizardAiStatusConfiguredGeneric => "Configured AI access",
+        MessageId::GuideWizardAiStatusUnverified => "Connection not verified.",
+        MessageId::GuideWizardAiStatusAutoReady => {
+            "ECS zero-config access · verified on the first question"
+        }
+        MessageId::GuideWizardAiStatusAutoPending => {
+            "Automatic access unconfirmed · you can ask right away"
+        }
+        MessageId::GuideWizardAiStatusAutoProbeFailed => {
+            "Automatic access unconfirmed · identity check failed ({value})"
+        }
+        MessageId::GuideWizardAiStatusAutoDisabled => "Automatic ECS trial use is off",
+        MessageId::GuideWizardAiStatusNeedsConfig => "AI service required",
+        MessageId::GuideWizardAiStatusExplicitIncomplete => {
+            "Explicit AI access is selected but incomplete"
+        }
+        MessageId::GuideWizardAiStatusUnknown => "Unable to confirm AI access status right now",
+        MessageId::GuideWizardAiShortConfigured => "Configured",
+        MessageId::GuideWizardAiShortAutoReady => "ECS automatic access",
+        MessageId::GuideWizardAiShortAutoPending => "Automatic access pending",
+        MessageId::GuideWizardAiShortAutoDisabled => "Automatic access off",
+        MessageId::GuideWizardAiShortUnknown => "Status unknown",
+        MessageId::GuideWizardAiActionAsk => "Start asking",
+        MessageId::GuideWizardAiActionCheck => "Check automatic access",
+        MessageId::GuideWizardAiActionRetry => "Retry",
+        MessageId::GuideWizardAiActionEnable => "Re-enable automatic use (opens /auth)",
+        MessageId::GuideWizardAiSourceRuntime => "runtime config",
         _ => return None,
     })
 }

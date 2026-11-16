@@ -209,6 +209,27 @@ macro_rules! guide_wizard_ids {
             GuideWizardConfigUnreadable,
             GuideWizardDataClearConfirm,
             GuideWizardLoginHandoffFailed,
+            // The read-only access summary segment stays the tail so every
+            // earlier MessageId discriminant is preserved.
+            GuideWizardAiStatusConfiguredGeneric,
+            GuideWizardAiStatusUnverified,
+            GuideWizardAiStatusAutoReady,
+            GuideWizardAiStatusAutoPending,
+            GuideWizardAiStatusAutoProbeFailed,
+            GuideWizardAiStatusAutoDisabled,
+            GuideWizardAiStatusNeedsConfig,
+            GuideWizardAiStatusExplicitIncomplete,
+            GuideWizardAiStatusUnknown,
+            GuideWizardAiShortConfigured,
+            GuideWizardAiShortAutoReady,
+            GuideWizardAiShortAutoPending,
+            GuideWizardAiShortAutoDisabled,
+            GuideWizardAiShortUnknown,
+            GuideWizardAiActionAsk,
+            GuideWizardAiActionCheck,
+            GuideWizardAiActionRetry,
+            GuideWizardAiActionEnable,
+            GuideWizardAiSourceRuntime,
         );
     };
 }

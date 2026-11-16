@@ -868,6 +868,22 @@ pub async fn detect_ecs_auth_challenge() -> Result<Option<EcsAuthChallenge>, Pro
     }))
 }
 
+/// Detect ECS identity for read-only status without collapsing transport errors.
+///
+/// Unlike [`detect_ecs_auth_challenge`], an unreachable or timed-out metadata
+/// session stays an error so a status preview can report an inconclusive probe
+/// instead of claiming this host has no ECS identity.
+///
+/// # Errors
+/// Returns the metadata transport or validation failure.
+pub async fn probe_ecs_identity() -> Result<Option<EcsAuthChallenge>, ProbeError> {
+    let identity = ecs_metadata::fetch_identity_strict().await?;
+    Ok(identity.map(|(instance_id, region_id)| EcsAuthChallenge {
+        console_url: generate_console_url(&instance_id, &region_id),
+        instance_id,
+    }))
+}
+
 fn region_id_from_zone_id(zone_id: &str) -> Option<String> {
     if zone_id.is_empty() {
         return None;

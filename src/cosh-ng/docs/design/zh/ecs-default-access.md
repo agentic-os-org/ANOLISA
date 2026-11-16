@@ -13,6 +13,17 @@ Shell 初始化协商 `can_handle_ecs_trial_v1`，并在用户主动提问时发
 `ecs_trial_context`。Core 负责身份、凭据与派发，Shell 负责等待界面和会话屏蔽。
 旧客户端保留原认证流程；通用 headless 客户端不能仅靠选择身份配置启用此路径。
 
+向导读取 `auth state`，不产生副作用。返回的 `access` 摘要给出策略会选择的路由
+（`explicit`、`ecs_trial`、`none`，偏好不可读时为 `unknown`）以及身份探测状态
+（`not_checked`、`confirmed_supported`、`confirmed_unsupported`，或带稳定错误码的
+`failed`）。只读探测把元数据传输失败保留为 `failed`，只有拿到完整元数据应答才
+报告 `confirmed_unsupported`。请求路径在回答前先读偏好，因此偏好不可读时即使已
+保存试用 Provider 也返回 `unknown`，页面给出重试而不是开始提问。打开向导、切换
+页面、调整窗口或关闭都不会探测、开通、写入偏好或调用模型；只有用户显式选择
+“检测自动接入”才执行只读探测。`unknown` 以及旧 Core 缺失 `access` 字段时保持未
+确认，不臆测为不支持。加载或新读数改变可选动作时，焦点停留在仍然存在的动作上，
+下一次按键不会落到已失效的行。
+
 Core 使用无代理、无重定向且不回退 IMDSv1 的 IMDSv2 探测，取得 challenge，
 获取实例证明并置换受限 STS。敏感数据只保存在内存。每个 Provider 的 manager
 共享刷新，最后一个等待者取消时丢弃置换 future。凭据按服务端 TTL 和单调时钟

@@ -412,6 +412,12 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardLoginHandoffFailed as usize + 1,
+            MessageId::GuideWizardAiStatusConfiguredGeneric as usize
+        );
+        // The access-summary segment keeps the tail; tail ownership assertions
+        // move with each appended segment.
+        assert_eq!(
+            MessageId::GuideWizardAiSourceRuntime as usize + 1,
             MessageId::ALL.len()
         );
     }

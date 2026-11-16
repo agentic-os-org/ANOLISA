@@ -18,6 +18,22 @@ credentials and dispatch. Shell owns waiting UI and session suppression.
 Older clients retain the existing authentication flow. Generic headless
 clients cannot enable this path by selecting an identity configuration alone.
 
+The guide reads `auth state` without side effects. Its `access` summary reports
+the route the policy would take (`explicit`, `ecs_trial`, `none`, or `unknown`
+when the preference is unreadable) and the identity probe state (`not_checked`,
+`confirmed_supported`, `confirmed_unsupported`, or `failed` with a stable error
+code). The read-only probe keeps a metadata transport failure as `failed`; only
+a completed metadata answer can report `confirmed_unsupported`. The request path
+reads the preference before answering, so an unreadable preference reports
+`unknown` even when a trial provider is saved, and the page offers a retry
+instead of starting the question. Rendering the wizard, switching pages,
+resizing, or closing it never probes, activates, writes preferences, or calls a
+model; only an explicit "check automatic access" action runs the read-only
+probe. `unknown`, and a missing `access` field from an older Core, stay
+unconfirmed instead of being shown as unsupported. When loading or a new
+reading changes the offered actions, the cursor stays on an action that still
+exists, so the next key cannot act on a stale row.
+
 Core probes IMDSv2 without proxies, redirects or IMDSv1 fallback, acquires a
 challenge, obtains an instance proof and exchanges it for constrained STS.
 Secrets remain in memory. A per-provider manager shares refresh work;

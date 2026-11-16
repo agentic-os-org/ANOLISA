@@ -69,7 +69,9 @@ pub(super) async fn handle_auth(
 ) -> OutputMessage {
     match action {
         "state" => {
-            let (trial_preferences, available) = tokio::join!(
+            let probe_requested =
+                params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true);
+            let (trial_preferences, (probe, probe_error)) = tokio::join!(
                 async {
                     match tokio::task::spawn_blocking(crate::auth::trial_preferences::load).await {
                         Ok(Ok(auto_use)) => serde_json::json!({ "auto_use": auto_use }),
@@ -83,18 +85,22 @@ pub(super) async fn handle_auth(
                     }
                 },
                 async {
-                    params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true)
-                        && ecs_trial::available().await.unwrap_or(false)
+                    if probe_requested {
+                        ecs_trial::probe().await
+                    } else {
+                        (ecs_trial::ProbeState::NotChecked, None)
+                    }
                 }
             );
-            let ecs_trial = ecs_trial::state(
-                config,
-                available,
-                trial_preferences
-                    .get("auto_use")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            );
+            // An unreadable preference is unknown, not a user decision to opt
+            // out; only a successfully loaded value may shape the summary.
+            let auto_use = trial_preferences
+                .get("auto_use")
+                .and_then(Value::as_bool)
+                .filter(|_| trial_preferences.get("error_code").is_none());
+            let available = probe == ecs_trial::ProbeState::ConfirmedSupported;
+            let ecs_trial = ecs_trial::state(config, available, auto_use.unwrap_or(false));
+            let access = ecs_trial::access(config, auto_use, probe, probe_error);
             let templates: Vec<Value> = crate::auth::builtin_auth_providers()
                 .into_iter()
                 .map(|provider| {
@@ -154,6 +160,7 @@ pub(super) async fn handle_auth(
                 data: Some(serde_json::json!({
                     "trial_preferences": trial_preferences,
                     "ecs_trial": ecs_trial,
+                    "access": access,
                     "templates": templates,
                     "saved_providers": saved_providers,
                     "active_provider": active_provider,

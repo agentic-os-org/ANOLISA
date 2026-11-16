@@ -46,6 +46,22 @@ fn missing_preferences_default_to_auto_use_without_creating_file() {
 }
 
 #[test]
+fn state_reports_a_read_only_access_summary_without_side_effects() {
+    let home = tempfile::tempdir().unwrap();
+    let response = state(home.path());
+    assert_eq!(
+        response["data"]["access"],
+        serde_json::json!({"path": "ecs_trial", "probe": "not_checked", "probe_error_code": null}),
+        "{response}"
+    );
+    assert_eq!(set(home.path(), false.into())["success"], true);
+    assert_eq!(state(home.path())["data"]["access"]["path"], "none");
+    assert_eq!(set(home.path(), true.into())["success"], true);
+    assert_eq!(state(home.path())["data"]["access"]["path"], "ecs_trial");
+    assert!(!home.path().join(".copilot-shell/config.toml").exists());
+}
+
+#[test]
 fn writable_preferences_fail_closed_and_are_not_overwritten() {
     for mode in [0o620, 0o602, 0o666] {
         let home = tempfile::tempdir().unwrap();
@@ -156,6 +172,8 @@ fn invalid_preferences_fail_closed_and_are_not_overwritten() {
             response["data"]["trial_preferences"],
             serde_json::json!({"auto_use": false, "error_code": code})
         );
+        // A read failure is unknown, not a user decision to disable access.
+        assert_eq!(response["data"]["access"]["path"], "unknown", "{code}");
         let response = set(home.path(), false.into());
         assert_eq!(response["success"], false, "{response}");
         assert_eq!(response["data"]["error_code"], code);

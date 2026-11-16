@@ -473,3 +473,116 @@ fn explicit_reenable_normalizes_implicit_and_saved_models_to_auto() {
         });
     }
 }
+
+#[test]
+fn ecs_builtin_access_describes_the_route_without_side_effects() {
+    isolated(|home| {
+        run(async {
+            let server = Metadata::start(true).await;
+            let mut config = CoreConfig::default();
+            TEST_ECS_PROBE
+                .scope(
+                    (Ok(server.available), Arc::clone(&server.requests)),
+                    async {
+                        let state = query(&mut config, "state", Value::Null).await;
+                        let access = &state["data"]["access"];
+                        assert_eq!(access["path"], "ecs_trial");
+                        assert_eq!(access["probe"], "not_checked");
+                        assert!(access["probe_error_code"].is_null());
+                        // Opening the summary never runs the identity probe.
+                        assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+                        assert_eq!(state["data"]["effective_auth_required"], true);
+                        assert!(config.ai.providers.is_empty());
+                        assert!(!home.join(".copilot-shell/config.toml").exists());
+                        assert!(!home.join(".copilot-shell/cosh/preferences.toml").exists());
+                    },
+                )
+                .await;
+        })
+    });
+}
+
+#[test]
+fn ecs_builtin_access_separates_probe_states_and_error_codes() {
+    isolated(|_| {
+        run(async {
+            for (result, probe) in [
+                (Ok(true), "confirmed_supported"),
+                (Ok(false), "confirmed_unsupported"),
+                (Err(ProbeError::AccessDenied), "failed"),
+                (Err(ProbeError::Timeout), "failed"),
+            ] {
+                let mut config = CoreConfig::default();
+                let expected_code = match &result {
+                    Ok(_) => None,
+                    Err(error) => Some(error.code().to_string()),
+                };
+                TEST_ECS_PROBE
+                    .scope(
+                        (result, Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+                        async {
+                            let state = query(
+                                &mut config,
+                                "state",
+                                serde_json::json!({"probe_ecs_trial":true}),
+                            )
+                            .await;
+                            let access = &state["data"]["access"];
+                            assert_eq!(access["path"], "ecs_trial");
+                            assert_eq!(access["probe"], probe);
+                            assert_eq!(
+                                access["probe_error_code"].as_str(),
+                                expected_code.as_deref(),
+                                "{probe}"
+                            );
+                            assert!(config.ai.providers.is_empty());
+                        },
+                    )
+                    .await;
+            }
+        })
+    });
+}
+
+#[test]
+fn ecs_builtin_access_reports_explicit_and_disabled_routes() {
+    isolated(|_| {
+        run(async {
+            let mut explicit = configured();
+            let state = query(&mut explicit, "state", Value::Null).await;
+            assert_eq!(state["data"]["access"]["path"], "explicit");
+            assert_eq!(state["data"]["effective_auth_required"], false);
+
+            crate::auth::trial_preferences::save(false).unwrap();
+            let mut fresh = CoreConfig::default();
+            let state = query(&mut fresh, "state", Value::Null).await;
+            assert_eq!(state["data"]["access"]["path"], "none");
+            assert_eq!(state["data"]["trial_preferences"]["auto_use"], false);
+        })
+    });
+}
+
+#[test]
+fn ecs_builtin_access_reports_unknown_for_unreadable_preferences() {
+    isolated(|home| {
+        run(async {
+            let path = home.join(".copilot-shell/cosh/preferences.toml");
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path.parent().unwrap())
+                .unwrap();
+            std::fs::write(&path, "[invalid").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let mut config = CoreConfig::default();
+            let state = query(&mut config, "state", Value::Null).await;
+            assert_eq!(state["data"]["access"]["path"], "unknown");
+            assert_eq!(
+                state["data"]["trial_preferences"]["error_code"],
+                "trial_preferences_invalid"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "[invalid");
+            assert!(!home.join(".copilot-shell/config.toml").exists());
+        })
+    });
+}

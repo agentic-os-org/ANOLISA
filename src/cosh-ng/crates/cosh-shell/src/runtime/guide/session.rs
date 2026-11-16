@@ -13,6 +13,10 @@ use crate::config::guide::wizard::content;
 use super::status::{self, Reading, Snapshot, Source};
 use crate::adapter::GuideAuthSummary;
 
+use ai::AiAction;
+
+pub(super) mod ai;
+
 pub(crate) enum Flow {
     Continue,
     Exit,
@@ -54,6 +58,8 @@ pub(crate) struct Session {
     pub(crate) ai: Reading<GuideAuthSummary>,
     pub(crate) ai_loading: bool,
     pub(crate) ai_rx: Option<std::sync::mpsc::Receiver<Reading<GuideAuthSummary>>>,
+    /// Action the cursor was on when the AI row set last changed.
+    pub(crate) ai_focus: Option<AiAction>,
     pub(crate) analysis: crate::config::AnalysisModeStatus,
     pub(crate) bash: crate::config::BashHistoryStatus,
     pub(crate) rec: status::RecStatus,
@@ -76,21 +82,11 @@ impl Session {
             ai: Reading::Unknown,
             ai_loading: false,
             ai_rx: None,
+            ai_focus: None,
             analysis: crate::config::analysis_mode_status(),
             bash: crate::config::bash_history_status(),
             rec,
         }
-    }
-
-    /// Loads the AI service summary off the UI thread; the registry query
-    /// spawns cosh-core and must not block rendering.
-    pub(crate) fn start_ai_load(&mut self) {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        self.ai_rx = Some(receiver);
-        self.ai_loading = true;
-        std::thread::spawn(move || {
-            let _ = sender.send(status::load_ai());
-        });
     }
 
     /// Collects a finished background read; called on every loop tick.
@@ -101,6 +97,9 @@ impl Session {
                 self.ai = reading;
                 self.ai_loading = false;
                 self.ai_rx = None;
+                if self.page == Page::Ai {
+                    self.reconcile_ai_focus();
+                }
                 return true;
             }
         }
@@ -277,65 +276,6 @@ impl Session {
         rows
     }
 
-    fn ai_value(&self) -> String {
-        if self.ai_loading {
-            return self.i18n.t(MessageId::GuideWizardAiLoading).to_string();
-        }
-        match &self.ai {
-            Reading::Value(summary) if summary.configured => {
-                summary.service.clone().unwrap_or_else(|| {
-                    self.i18n
-                        .t(MessageId::GuideWizardAiUnconfigured)
-                        .to_string()
-                })
-            }
-            Reading::Value(_) => self
-                .i18n
-                .t(MessageId::GuideWizardAiUnconfigured)
-                .to_string(),
-            Reading::Unknown => self.i18n.t(MessageId::GuideWizardReadFailed).to_string(),
-        }
-    }
-
-    fn ai_rows(&self) -> Vec<WizardRow> {
-        let mut rows = vec![WizardRow::Text(self.i18n.format(
-            MessageId::GuideWizardAiServiceLine,
-            &[("value", &self.ai_value())],
-        ))];
-        if let Reading::Value(summary) = &self.ai {
-            if let Some(source) = &summary.source {
-                let label = match source.as_str() {
-                    "system" => MessageId::GuideWizardAiSourceSystem,
-                    _ => MessageId::GuideWizardAiSourceUser,
-                };
-                rows.push(WizardRow::Text(self.i18n.format(
-                    MessageId::GuideWizardAiSourceLine,
-                    &[("value", self.i18n.t(label))],
-                )));
-            }
-            if let Some(auto_use) = summary.auto_use {
-                let label = if auto_use {
-                    MessageId::GuideWizardAiAutoUseOn
-                } else {
-                    MessageId::GuideWizardAiAutoUseOff
-                };
-                rows.push(WizardRow::Text(self.i18n.format(
-                    MessageId::GuideWizardAiAutoUseLine,
-                    &[("value", self.i18n.t(label))],
-                )));
-            }
-        }
-        rows.push(WizardRow::Text(
-            self.i18n.t(MessageId::GuideWizardAiReadonly).to_string(),
-        ));
-        rows.push(WizardRow::Blank);
-        rows.push(WizardRow::Choice {
-            label: self.i18n.t(MessageId::GuideWizardAiManage).to_string(),
-            value: String::new(),
-        });
-        rows
-    }
-
     fn language_rows(&self) -> Vec<WizardRow> {
         let language = &self.snapshot.language;
         let saved = match language.saved {
@@ -497,7 +437,7 @@ impl Session {
                 let enabled = self.choice_index() == 0;
                 self.save_health(enabled);
             }
-            Page::Ai => return Flow::Handoff,
+            Page::Ai => return self.open_ai_page(),
             Page::Login => {
                 let has_restore =
                     matches!(&self.snapshot.login, Ok(status) if status.original_bash.is_some());
@@ -518,6 +458,10 @@ impl Session {
         self.scroll = 0;
         self.shift(0);
         self.tips_default_focus();
+        if page == Page::Ai {
+            // Entering the page always starts on its primary action.
+            self.ai_focus = None;
+        }
         if page == Page::Language {
             if let Reading::Value(setting) = self.snapshot.language.saved {
                 self.cursor = self

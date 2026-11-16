@@ -221,12 +221,27 @@ pub(super) async fn fetch_instance_id() -> Result<String, ProbeError> {
 }
 
 pub(super) async fn fetch_identity() -> Result<Option<(String, String)>, ProbeError> {
+    // Only the token phase may mean "not ECS"; a failure after a valid token
+    // must not select manual authentication.
     let session = match MetadataSession::start(&metadata_endpoint()).await {
         Ok(session) => session,
         Err(ProbeError::Unreachable | ProbeError::Timeout) => return Ok(None),
         Err(error) => return Err(error),
     };
-    // A valid token establishes ECS; later metadata failures must not select manual auth.
+    read_identity(session).await
+}
+
+/// Reads ECS identity without collapsing transport failures into "not ECS".
+///
+/// The auth challenge deliberately treats an unreachable token endpoint as
+/// non-ECS so manual authentication stays available. Read-only status previews
+/// must not: there a transport failure is an unknown answer, not evidence.
+pub(super) async fn fetch_identity_strict() -> Result<Option<(String, String)>, ProbeError> {
+    let session = MetadataSession::start(&metadata_endpoint()).await?;
+    read_identity(session).await
+}
+
+async fn read_identity(session: MetadataSession) -> Result<Option<(String, String)>, ProbeError> {
     let instance_id = session.instance_id().await?;
     let zone_id = session.text("/latest/meta-data/zone-id").await?;
     let region_id = super::region_id_from_zone_id(&zone_id).ok_or(ProbeError::InvalidResponse)?;

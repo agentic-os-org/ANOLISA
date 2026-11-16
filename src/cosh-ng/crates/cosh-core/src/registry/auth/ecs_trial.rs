@@ -26,6 +26,88 @@ fn saved_provider(config: &CoreConfig) -> Option<&str> {
         })
 }
 
+/// Verification state of the automatic-access identity probe.
+///
+/// `ConfirmedUnsupported` is the identity owner's answer that no ECS identity
+/// is available here; it never means "the probe did not run". A probe that
+/// could not produce an answer stays `Failed` with its stable code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProbeState {
+    NotChecked,
+    ConfirmedSupported,
+    ConfirmedUnsupported,
+    Failed,
+}
+
+impl ProbeState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotChecked => "not_checked",
+            Self::ConfirmedSupported => "confirmed_supported",
+            Self::ConfirmedUnsupported => "confirmed_unsupported",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Runs the read-only identity probe and keeps failures distinct from absence.
+pub(super) async fn probe() -> (ProbeState, Option<&'static str>) {
+    #[cfg(test)]
+    if let Ok(result) = super::TEST_ECS_PROBE.try_with(|(available, requests)| {
+        requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *available
+    }) {
+        return classify_probe(result);
+    }
+    // Use the strict transport read: a transient metadata failure is not
+    // evidence that this host lacks an ECS identity.
+    classify_probe(
+        crate::provider::sysom::probe_ecs_identity()
+            .await
+            .map(|challenge| challenge.is_some()),
+    )
+}
+
+fn classify_probe(result: Result<bool, ProbeError>) -> (ProbeState, Option<&'static str>) {
+    match result {
+        Ok(true) => (ProbeState::ConfirmedSupported, None),
+        Ok(false) => (ProbeState::ConfirmedUnsupported, None),
+        Err(error) => (ProbeState::Failed, Some(error.code())),
+    }
+}
+
+/// Read-only route a user-initiated question would take, without activating.
+///
+/// Reuses the same pure policy as the request path so the wizard cannot
+/// disagree with real selection; it never selects a provider or writes state.
+pub(super) fn access(
+    config: &CoreConfig,
+    auto_use: Option<bool>,
+    probe: ProbeState,
+    probe_error: Option<&str>,
+) -> Value {
+    let decision = trial_policy::decide(
+        config,
+        &ProviderIntent::from_env(),
+        true,
+        true,
+        auto_use.unwrap_or(false),
+    );
+    let path = match decision {
+        TrialDecision::Existing => "explicit",
+        TrialDecision::EcsIdentity => "ecs_trial",
+        // The policy fails closed when the preference is unreadable; that is
+        // unknown, not a user decision to disable automatic access.
+        TrialDecision::Disabled if auto_use.is_none() => "unknown",
+        TrialDecision::Disabled => "none",
+    };
+    serde_json::json!({
+        "path": path,
+        "probe": probe.as_str(),
+        "probe_error_code": probe_error,
+    })
+}
+
 pub(super) async fn available() -> Result<bool, ProbeError> {
     #[cfg(test)]
     if let Ok(available) = super::TEST_ECS_PROBE.try_with(|(available, requests)| {
