@@ -2174,6 +2174,110 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
 }
 
 #[test]
+fn compress_post_tool_groups_paths_losslessly_without_recovery() {
+    let fixture = TempDataDir::new().unwrap();
+    for ending in ["\n", "\r\n"] {
+        for trailing in [false, true] {
+            let paths: Vec<_> = (0..3)
+                .flat_map(|directory| {
+                    (0..30).map(move |file| {
+                        let name = match file % 8 {
+                            0 => String::new(),
+                            1 => "Dir=\"other\"".to_owned(),
+                            2 => "Base=other".to_owned(),
+                            3 => "\"quoted.rs".to_owned(),
+                            4 => "中文 quote\"back\\slash.rs".to_owned(),
+                            6 => "line\u{2028}separator.rs".to_owned(),
+                            7 => "line\u{2029}separator.rs".to_owned(),
+                            _ => "duplicate file.rs".to_owned(),
+                        };
+                        format!("/workspace/project/component_{directory}/nested/{name}")
+                    })
+                })
+                .collect();
+            let content = format!(
+                "{}{}",
+                paths.join(ending),
+                if trailing { ending } else { "" }
+            );
+            let mut request: serde_json::Value =
+                serde_json::from_str(&post_tool_request_json(&content, false, "grouped-paths"))
+                    .unwrap();
+            request["input"]["tool_name"] = "Bash".into();
+            request["input"]["content_origin"] = "command_output".into();
+            request["input"]["capabilities"]["replace_with_text"] = true.into();
+            for enabled in [true, false] {
+                let output = spawn_with_stdin(
+                    fixture
+                        .command()
+                        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                        .env(
+                            "TOKENLESS_SEARCH_PATH_SHARING_ENABLED",
+                            if enabled { "1" } else { "0" },
+                        )
+                        .env("TOKENLESS_STATS_ENABLED", "0")
+                        .env("TOKENLESS_SLS_ENABLED", "0"),
+                    &["compress"],
+                    &request.to_string(),
+                );
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let result = &response["result"];
+                let view = result["output"].as_str().unwrap();
+                assert_eq!(result["stash_keys"], serde_json::json!([]));
+                if !enabled {
+                    assert_eq!(view, content);
+                    assert_eq!(result["applied_operations"], serde_json::json!([]));
+                    continue;
+                }
+                assert_eq!(result["disposition"], "applied");
+                assert_eq!(result["recoverability"], "lossless");
+                assert_eq!(
+                    result["applied_operations"],
+                    serde_json::json!(["search_path_sharing"])
+                );
+                let mut lines = view.lines();
+                assert_eq!(
+                    lines.next().unwrap(),
+                    "[Paths grouped by directory; all received paths retained; full path = base + Dir + entry]"
+                );
+                let metadata: serde_json::Value =
+                    serde_json::from_str(lines.next().unwrap()).unwrap();
+                let mut directory = None;
+                let mut restored = Vec::new();
+                for line in lines {
+                    if let Some(value) = line.strip_prefix("Dir=") {
+                        directory = Some(serde_json::from_str::<String>(value).unwrap());
+                    } else {
+                        let entry = if line.starts_with('"') {
+                            serde_json::from_str::<String>(line).unwrap()
+                        } else {
+                            line.to_owned()
+                        };
+                        restored.push(format!(
+                            "{}{}{entry}",
+                            metadata["base"].as_str().unwrap(),
+                            directory.as_ref().unwrap()
+                        ));
+                    }
+                }
+                assert_eq!(restored, paths);
+                let decoded_ending = metadata["line_ending"].as_str().unwrap();
+                let mut decoded = restored.join(decoded_ending);
+                if metadata["trailing_newline"].as_bool().unwrap() {
+                    decoded.push_str(decoded_ending);
+                }
+                assert_eq!(decoded, content);
+            }
+        }
+    }
+}
+
+#[test]
 fn compress_post_tool_dry_run_previews_record_reduction_without_stash_writes() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,

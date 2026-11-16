@@ -205,13 +205,13 @@ candidate; byte length and estimated tokens must both decrease before normal Run
 The applied operation is `search_path_sharing` (`AppliedOperation.SEARCH_PATH_SHARING` in the
 Python SDK), with `lossless` recoverability and no Stash writes.
 
-Plain path lists can also share a common directory prefix for `command_output` and `api_response`
+Plain path lists can also share a common directory prefix or consecutive parent directories for `command_output` and `api_response`
 origins. At least three POSIX paths are required, with uniform LF or CRLF endings; all received
 paths, their order, duplicates, and the final newline are retained. The entire input is validated,
 including beyond the detector's bounded sample. Blank lines, control characters, colon-bearing
 paths (including URLs and Windows paths), mixed endings, double-leading slashes, and ambiguous relative roots reject
 the candidate. Bare relative roots use letters, digits, `.`, `_`, or `-`; paths starting with `/`,
-`./`, or `../` can include spaces and quoted or backslash characters, encoded as JSON strings.
+`./`, or `../` can include spaces, quotes, and backslashes, retained by the selected view.
 The compressor never reads files or normalizes paths. Both `file_content` and `file_read` origins
 bypass this path-list strategy; existing file-read JSON, table, and log handling is unchanged.
 For tools outside the search-only route, established source and table detection takes precedence over plain path-list detection. A bounded
@@ -219,12 +219,30 @@ path probe stops at its last complete line so a byte cut inside a path or CRLF i
 Outside the dedicated search route, eligibility checks parse the full path list before the
 compressor parses it to build a candidate. The candidate then goes through common arbitration.
 
-The path-list view starts with
+The flat path-list view starts with
 `[Path list; all received paths retained; full path = base + each paths entry]`, followed by compact
 JSON with `base`, `paths`, `line_ending`, and `trailing_newline`. Concatenate `base` with each decoded
 `paths` entry, join with `line_ending`, and append that ending only when `trailing_newline` is true
 to reconstruct the input byte for byte. The shared prefix always ends at `/`. The full view,
 including its header and metadata, must reduce bytes and estimated tokens before arbitration.
+
+The compressor also considers a directory-grouped view, starting with
+`[Paths grouped by directory; all received paths retained; full path = base + Dir + entry]`. Its next line is compact JSON
+containing `base`, `line_ending`, and `trailing_newline`. Subsequent `Dir=` lines contain a
+JSON-quoted directory relative to `base` (including its final `/`, or `""` for the base itself).
+Each entry uses the most recent `Dir`, so reconstruct a path as `base + Dir + entry`.
+Unquoted entry lines are literal filenames; entry lines starting with `"` are JSON strings.
+Empty basenames and filenames beginning with `"`, `Dir=`, or `Base=` are JSON-quoted to avoid
+ambiguity. `Base=` is reserved for reader clarity, not a decoder instruction: it must not
+look like a base override. Join reconstructed paths using the metadata's line-ending contract as above.
+Only consecutive directories are shared: no sorting, deduplication, or path normalization occurs.
+
+The selected candidate is reconstructed in-process and compared byte for byte with the input before
+emission. Grouping must reduce input bytes and estimated tokens. If the flat candidate is
+profitable, grouping must also be no larger in either measure and improve at least one measure.
+If the flat candidate is unprofitable, grouping may still be selected based on its savings
+against the original input alone.
+Ties and directory-interleaved lists retain the flat view when grouping offers no benefit.
 
 PreTool leaves recognized native `find` invocations unchanged so PostTool receives native results. This also
 preserves an entire compound command containing such a call; mixed output is not a path list and stays
@@ -239,7 +257,7 @@ are not read or inferred; a configured custom prefix can still let RTK rewrite w
 
 This intentionally trades RTK coverage for faithful native execution: mixed compounds, `-print0`,
 `-ls`, `-printf`, and other non-path-list actions do not receive path-list compression, and lists
-with fewer than three paths or no profitable shared prefix remain unchanged. A leading `.` or bare
+with fewer than three paths, or with neither view profitable, remain unchanged. A leading `.` or bare
 start-point directory also rejects the strict path-list format; this version does not add a separate
 head-record encoding. In the deterministic
 three-command native-find replay, the 60-path list compresses; the mixed compound with two paths

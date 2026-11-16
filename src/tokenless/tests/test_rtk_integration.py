@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from path_list_view import restore_path_list
 from test_hermes_lifecycle import _load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -373,7 +374,8 @@ class RtkIntegrationTest(unittest.TestCase):
         target = self.root / "project with spaces/long_directory_for_read_regression/records"
         target.mkdir(parents=True)
         for index in range(60):
-            (target / f"document {index}.json").write_text(str(index), encoding="utf-8")
+            separator = "\u2028" if index == 0 else "\u2029" if index == 1 else " "
+            (target / f"document{separator}name {index}.json").write_text(str(index), encoding="utf-8")
         quoted = shlex.quote(str(target))
 
         def run_hook(script: str, payload: dict) -> dict:
@@ -428,11 +430,7 @@ class RtkIntegrationTest(unittest.TestCase):
             })
             slot = result["hookSpecificOutput"]
             view = slot.get("updatedToolOutput", slot.get("updatedToolResponse"))
-            data = json.loads(view.split("\n", 1)[1])
-            paths = [data["base"] + path for path in data["paths"]]
-            restored = data["line_ending"].join(paths)
-            if data["trailing_newline"]:
-                restored += data["line_ending"]
+            restored, paths = restore_path_list(view)
             self.assertEqual(restored, executed.stdout)
             self.assertEqual(len(paths), 60)
             for path in paths:

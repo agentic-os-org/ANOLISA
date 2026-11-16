@@ -385,7 +385,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
 | Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
-| 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
+| 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀或连续父目录；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
@@ -487,11 +487,22 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 文件内容和文件读取跳过路径列表策略；既有文件读取的 JSON、表格和日志处理仍可用。
 其他非文件来源工具结果无论工具名称如何，都可使用同一 Core 能力。
 
-纯列表至少需要三条 POSIX 路径，并使用统一的 LF 或 CRLF。更小的视图以固定英文说明开头，
-后接包含公共目录 `base`、全部 `paths`、`line_ending` 和 `trailing_newline` 的紧凑 JSON。
-将 `base` 与每个解码后的路径项拼接，保留顺序和重复项，以 `line_ending` 连接；仅当
-`trailing_newline` 为 true 时追加该行尾。无需 Stash 或恢复调用。混合输出、空行、NUL 分隔、
-歧义格式，以及扣除完整格式开销后字节数或估算 Token 无收益的候选均透传。
+纯列表至少需要三条 POSIX 路径，并使用统一的 LF 或 CRLF。Tokenless 会在共享前缀的 JSON
+视图和进一步共享连续父目录的视图之间选择。平铺视图以
+`[Path list; all received paths retained; full path = base + each paths entry]` 开头，后接包含公共目录
+`base`、全部 `paths`、`line_ending` 和 `trailing_newline` 的紧凑 JSON；将 `base` 与每个解码后的路径项拼接。
+分组视图以 `[Paths grouped by directory; all received paths retained; full path = base + Dir + entry]` 开头，
+下一行是包含 `base`、`line_ending` 和 `trailing_newline` 的 JSON 元数据。
+每个 `Dir=` 行用 JSON 字符串设置相对目录；将 `base`、最近设置的目录和后续每个条目拼接。
+以 `"` 开头的条目行按 JSON 字符串解码，其余条目行是字面文件名。
+空文件名（路径以 `/` 结束）及以 `"`、`Dir=`、`Base=` 开头的文件名均使用 JSON 字符串编码。
+`Base=` 为读者保留，避免文件名看起来像覆盖公共目录的指令；解码器没有此指令。
+两种视图均保留顺序和重复项，以 `line_ending` 连接解码后的路径；仅当 `trailing_newline` 为 true
+时追加该行尾。无需 Stash 或恢复调用。
+平铺视图有收益时，分组视图的字节数和估算 Token 必须均不大于平铺视图，且至少一个指标更小。
+平铺视图无收益时，分组仍可单独采用，只要相较原始输入的字节数和估算 Token 都减少。
+选中的完整视图必须减少输入字节数和估算 Token，且能够精确还原输入。混合输出、空行、NUL 分隔、
+歧义格式，以及扣除完整格式开销后无净收益的候选均透传。
 
 直接调用或经 [RTK 内置前缀](cli-reference.md#shell-重写) 调用的原生 `find`、`grep`、`rg`，使整条命令（含复合命令）
 跳过 RTK 改写。支持嵌套和 Shell 反斜杠换行续行；不会读取自定义 `hooks.transparent_prefixes`，

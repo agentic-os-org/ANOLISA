@@ -1,5 +1,10 @@
 //! Byte-reversible prefix sharing for newline-separated POSIX paths.
 
+mod grouped;
+
+#[cfg(test)]
+mod grouped_tests;
+
 use tokenless_protocol::estimate_tokens;
 
 const HEADER: &str =
@@ -50,7 +55,7 @@ fn is_path(path: &str) -> bool {
     })
 }
 
-/// Encodes an exact common-prefix view only when the whole view saves tokens.
+/// Selects a byte-reversible view that saves bytes and estimated tokens.
 pub(super) fn compress(input: &str) -> Option<String> {
     let list = parse(input)?;
     let first = list.paths.first()?;
@@ -76,9 +81,45 @@ pub(super) fn compress(input: &str) -> Option<String> {
         "trailing_newline": list.trailing_newline,
     }))
     .ok()?;
-    let output = format!("{HEADER}{encoded}");
-    (output.len() < input.len() && estimate_tokens(&output) < estimate_tokens(input))
-        .then_some(output)
+    let flat = format!("{HEADER}{encoded}");
+    let input_tokens = estimate_tokens(input);
+    let flat_tokens = estimate_tokens(&flat);
+    let flat = (flat.len() < input.len() && flat_tokens < input_tokens).then_some(flat);
+    let grouped = grouped::encode(base, &paths, list.line_ending, list.trailing_newline);
+    let grouped_tokens = estimate_tokens(&grouped);
+    if grouped.len() < input.len()
+        && grouped_tokens < input_tokens
+        && flat.as_ref().is_none_or(|flat| {
+            grouped.len() <= flat.len()
+                && grouped_tokens <= flat_tokens
+                && (grouped.len() < flat.len() || grouped_tokens < flat_tokens)
+        })
+        && grouped::restore(&grouped).as_deref() == Some(input)
+    {
+        return Some(grouped);
+    }
+    flat.filter(|view| restore_flat(view).as_deref() == Some(input))
+}
+
+fn restore_flat(view: &str) -> Option<String> {
+    let data: serde_json::Value = serde_json::from_str(view.strip_prefix(HEADER)?).ok()?;
+    let base = data["base"].as_str()?;
+    let ending = data["line_ending"].as_str()?;
+    if !matches!(ending, "\n" | "\r\n") {
+        return None;
+    }
+    let mut output = String::new();
+    for (index, path) in data["paths"].as_array()?.iter().enumerate() {
+        if index > 0 {
+            output.push_str(ending);
+        }
+        output.push_str(base);
+        output.push_str(path.as_str()?);
+    }
+    if data["trailing_newline"].as_bool()? {
+        output.push_str(ending);
+    }
+    Some(output)
 }
 
 #[cfg(test)]
@@ -86,6 +127,9 @@ mod tests {
     use super::*;
 
     fn restore(view: &str) -> String {
+        if view.starts_with(grouped::HEADER) {
+            return grouped::restore(view).unwrap();
+        }
         let data: serde_json::Value =
             serde_json::from_str(view.strip_prefix(HEADER).unwrap()).unwrap();
         let base = data["base"].as_str().unwrap();
