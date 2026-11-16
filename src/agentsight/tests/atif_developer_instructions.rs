@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use agentsight::aggregator::ConnectionId;
 use agentsight::analyzer::message::MessageParser;
-use agentsight::analyzer::{AnalysisResult, HttpRecord};
+use agentsight::analyzer::{AnalysisResult, HttpContext, HttpRecord};
 use agentsight::atif::{convert_session_to_atif, convert_trace_to_atif};
 use agentsight::config::PeriodicStoragePolicy;
 use agentsight::database::{
@@ -104,7 +104,9 @@ fn completed_at(
         is_sse: false,
         sse_event_count: 0,
     };
-    let mut results = vec![AnalysisResult::Http(http)];
+    let mut results = vec![AnalysisResult::HttpContext(HttpContext::new(
+        true, http, None, None,
+    ))];
     if typed {
         results.push(AnalysisResult::Message(
             MessageParser::new()

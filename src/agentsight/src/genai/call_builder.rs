@@ -29,7 +29,6 @@ impl GenAIBuilder {
         });
 
         let http_record = results.iter().find_map(|r| match r {
-            AnalysisResult::Http(h) => Some(h),
             AnalysisResult::HttpContext(context) => Some(&context.http),
             _ => None,
         });
@@ -39,7 +38,7 @@ impl GenAIBuilder {
             _ => None,
         });
 
-        // Need at least HttpRecord to build LLMCall
+        // Need at least the HTTP context to build LLMCall
         let http = http_record?;
         let context = results.iter().find_map(|result| match result {
             AnalysisResult::HttpContext(context) => Some(context),
@@ -92,14 +91,12 @@ impl GenAIBuilder {
         };
         let request =
             cached_request.unwrap_or_else(|| self.build_request(&parsed_message, http, copy_raw));
-        // Build response from parsed message or HTTP record
-        let mut response = self.build_response(
-            &parsed_message,
-            http,
-            &token_record,
-            context.is_some(),
-            copy_raw,
-        );
+        // Build response from parsed message or HTTP record. A context without
+        // parsed response JSON (the legacy raw path) must still allow the SSE
+        // body fallback below.
+        let cached_json = context.is_some_and(|context| context.response.is_some());
+        let mut response =
+            self.build_response(&parsed_message, http, &token_record, cached_json, copy_raw);
 
         if let Some(context) = context
             .filter(|_| http.is_sse || crate::parser::llm::is_dashscope_native_path(&http.path))
@@ -1285,7 +1282,7 @@ mod tests {
         AnthropicUsage, MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest,
         OpenAIResponse,
     };
-    use crate::analyzer::{AnalysisResult, HttpRecord, ParsedApiMessage, TokenRecord};
+    use crate::analyzer::{AnalysisResult, HttpContext, HttpRecord, ParsedApiMessage, TokenRecord};
     use crate::interruption::{InterruptionDetector, InterruptionType};
     use crate::response_map::ResponseSessionMapper;
     use std::collections::HashMap;
@@ -1313,6 +1310,10 @@ mod tests {
         }
     }
 
+    fn http_result(http: HttpRecord) -> AnalysisResult {
+        AnalysisResult::HttpContext(HttpContext::new(true, http, None, None))
+    }
+
     fn build_call(builder: &GenAIBuilder, results: &[AnalysisResult]) -> Option<LLMCall> {
         let mapper = ResponseSessionMapper::new();
         let cache = HashMap::new();
@@ -1338,7 +1339,7 @@ mod tests {
     fn test_build_llm_call_returns_none_for_non_llm() {
         let builder = GenAIBuilder::new();
         let http = make_http("/api/health", None, None);
-        assert!(build_call(&builder, &[AnalysisResult::Http(http)]).is_none());
+        assert!(build_call(&builder, &[http_result(http)]).is_none());
     }
 
     #[test]
@@ -1360,7 +1361,7 @@ mod tests {
             Some(r#"{"input_tokens":1256}"#.to_string()),
         );
         assert!(
-            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            build_call(&builder, &[http_result(http)]).is_none(),
             "count_tokens is not an inference call and must not build an llm_call"
         );
     }
@@ -1385,7 +1386,7 @@ mod tests {
         );
         http.method = "GET".to_string();
         assert!(
-            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            build_call(&builder, &[http_result(http)]).is_none(),
             "a retrieval poll is not an inference call and must not build an llm_call"
         );
     }
@@ -1404,7 +1405,7 @@ mod tests {
             ),
         );
         assert!(
-            build_call(&builder, &[AnalysisResult::Http(http)]).is_none(),
+            build_call(&builder, &[http_result(http)]).is_none(),
             "cancel is not an inference call and must not build an llm_call"
         );
     }
@@ -1423,8 +1424,8 @@ mod tests {
             Some("this is not a valid chat-completions body".to_string()),
             Some("neither is this a parseable response".to_string()),
         );
-        let call = build_call(&builder, &[AnalysisResult::Http(http)])
-            .expect("LLM path still builds an LLMCall");
+        let call =
+            build_call(&builder, &[http_result(http)]).expect("LLM path still builds an LLMCall");
         assert!(
             call.is_semantically_empty(),
             "unparsable LLM body must yield a semantically-empty call (→ HTTPS fallback)"
@@ -1458,7 +1459,7 @@ mod tests {
         let http = make_http("/v1/messages", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .expect("valid LLM call builds");
         assert!(
@@ -1507,7 +1508,7 @@ mod tests {
             Some(request_body),
             Some(response_body),
         );
-        let call = build_call(&builder, &[AnalysisResult::Http(http)])
+        let call = build_call(&builder, &[http_result(http)])
             .expect("native non-streaming call must build an LLMCall");
 
         assert_eq!(call.provider, "dashscope");
@@ -1548,11 +1549,8 @@ mod tests {
         // Simulates the pre-fix mislabelling reaching build_llm_call.
         let token = TokenRecord::new(100, "python3".to_string(), "anthropic".to_string(), 30, 12)
             .with_model(String::new());
-        let call = build_call(
-            &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Token(token)],
-        )
-        .expect("native call builds");
+        let call = build_call(&builder, &[http_result(http), AnalysisResult::Token(token)])
+            .expect("native call builds");
         assert_eq!(call.provider, "dashscope");
         assert_eq!(call.model, "qwen3-vl-plus");
     }
@@ -1563,7 +1561,7 @@ mod tests {
         let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers = r#"{"host":"api.openai.com:443"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.provider, "openai");
         assert_eq!(call.model, "gpt-4");
         assert_eq!(
@@ -1582,7 +1580,7 @@ mod tests {
         let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers = r#"{"Host":"example.com"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.metadata.get("server.address").unwrap(), "example.com");
         assert!(!call.metadata.contains_key("server.port"));
         assert_eq!(call.metadata.get("http.domain").unwrap(), "example.com");
@@ -1599,7 +1597,7 @@ mod tests {
         let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers = r#"{":method":"POST",":path":"/v1/chat/completions",":authority":"api.openai.com:443","content-type":"application/json"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("server.address").unwrap(),
             "api.openai.com",
@@ -1619,7 +1617,7 @@ mod tests {
         let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers = r#"{":method":"POST",":path":"/v1/chat/completions",":scheme":"http",":authority":"127.0.0.1:11434","content-type":"application/json"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("url.scheme").unwrap(),
             "http",
@@ -1637,7 +1635,7 @@ mod tests {
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers =
             r#"{"host":"api.openai.com","content-type":"application/json"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert!(!call.metadata.contains_key("url.scheme"));
     }
 
@@ -1649,7 +1647,7 @@ mod tests {
         let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers = r#"{"host":"[::1]:11434"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.metadata.get("server.address").unwrap(), "::1");
         assert_eq!(call.metadata.get("server.port").unwrap(), "11434");
         assert_eq!(call.metadata.get("http.domain").unwrap(), "::1");
@@ -1663,7 +1661,7 @@ mod tests {
         let body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let mut http = make_http("/v1/chat/completions", Some(body), None);
         http.request_headers = r#"{"host":"[2001:db8::1]"}"#.to_string();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.metadata.get("server.address").unwrap(), "2001:db8::1");
         assert!(!call.metadata.contains_key("server.port"));
     }
@@ -1673,7 +1671,7 @@ mod tests {
         let builder = GenAIBuilder::new();
         let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let http = make_http("/v1/completions", Some(body), None);
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("operation_name").unwrap(),
             "text_completion"
@@ -1689,7 +1687,7 @@ mod tests {
             Some(body),
             None,
         );
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.metadata.get("operation_name").unwrap(), "chat");
         assert_eq!(call.provider, "sysom");
     }
@@ -1707,7 +1705,7 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
         ] {
             let http = make_http(path, Some(body.clone()), None);
-            let call = build_call(&builder, &[AnalysisResult::Http(http)])
+            let call = build_call(&builder, &[http_result(http)])
                 .unwrap_or_else(|| panic!("{path}: a Responses call must build"));
             assert_eq!(
                 call.metadata.get("operation_name").unwrap(),
@@ -1729,7 +1727,7 @@ mod tests {
             "/api/v1/services/aigc/multimodal-generation/generation",
         ] {
             let http = make_http(path, Some(body.clone()), None);
-            let call = build_call(&builder, &[AnalysisResult::Http(http)])
+            let call = build_call(&builder, &[http_result(http)])
                 .unwrap_or_else(|| panic!("{path}: a native call must build"));
             assert_eq!(
                 call.metadata.get("operation_name").unwrap(),
@@ -1744,7 +1742,7 @@ mod tests {
         let builder = GenAIBuilder::new();
         let body = r#"{"llmParamString":"{\"model\":\"qwen\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"}"#.to_string();
         let http = make_http("/some/proxy/path", Some(body), None);
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.provider, "sysom");
     }
 
@@ -1757,7 +1755,7 @@ mod tests {
             Some(r#"{"error":{"message":"rate limit"}}"#.to_string()),
         );
         http.status_code = 429;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.error.as_deref(), Some("rate limit"));
     }
 
@@ -1767,7 +1765,7 @@ mod tests {
         let body = "b6\r\n{\"error\":{\"message\":\"oops\"}}\r\n0\r\n\r\n";
         let mut http = make_http("/v1/messages", None, Some(body.to_string()));
         http.status_code = 500;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.error.as_deref(), Some("oops"));
     }
 
@@ -1783,7 +1781,7 @@ mod tests {
         );
         http.status_code = 500;
 
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).expect("call is built");
+        let call = build_call(&builder, &[http_result(http)]).expect("call is built");
         // Nothing parses, so the raw body is reported as the error.
         assert_eq!(call.error.as_deref(), Some("} trailing {"));
     }
@@ -1794,7 +1792,7 @@ mod tests {
         let body = r#"{"error":"{\"error\":{\"message\":\"inner_msg\"}}"}"#;
         let mut http = make_http("/v1/chat/completions", None, Some(body.to_string()));
         http.status_code = 400;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.error.as_deref(), Some("inner_msg"));
     }
 
@@ -1804,7 +1802,7 @@ mod tests {
         let body = r#"{"message":"top msg"}"#;
         let mut http = make_http("/v1/chat/completions", None, Some(body.to_string()));
         http.status_code = 503;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.error.as_deref(), Some("top msg"));
     }
 
@@ -1814,7 +1812,7 @@ mod tests {
         let body = "Internal Server Error";
         let mut http = make_http("/v1/messages", None, Some(body.to_string()));
         http.status_code = 502;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(call.error.as_deref(), Some("Internal Server Error"));
     }
 
@@ -1823,7 +1821,7 @@ mod tests {
         let builder = GenAIBuilder::new();
         let body = r#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#.to_string();
         let http = make_http("/v1/chat/completions", Some(body), None);
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert!(call.error.is_none());
     }
 
@@ -1840,7 +1838,7 @@ mod tests {
         let mut http = make_http(path, None, Some(body.to_string()));
         http.is_sse = true;
 
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).expect("call");
+        let call = build_call(&builder, &[http_result(http)]).expect("call");
 
         assert_eq!(call.provider, "gemini");
         assert_eq!(call.model, "gemini-2.5-pro");
@@ -1858,7 +1856,7 @@ mod tests {
         let response = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"4"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-2.5-flash"}"#;
         let http = make_http(path, Some(request.to_string()), Some(response.to_string()));
 
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).expect("call");
+        let call = build_call(&builder, &[http_result(http)]).expect("call");
 
         assert_eq!(call.response.messages.len(), 1);
         assert!(
@@ -2202,7 +2200,7 @@ mod tests {
             None,
             Some(r#"{"candidates":[{"finishReason":"SAFETY","index":0}]}"#.to_string()),
         );
-        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+        let call = build_call(&GenAIBuilder::new(), &[http_result(http)]).expect("call");
 
         assert_eq!(call.response.messages.len(), 1);
         assert!(call.response.messages[0].parts.is_empty());
@@ -2226,7 +2224,7 @@ mod tests {
             None,
             Some(r#"{"candidates":[{"finishReason":"MALFORMED_RESPONSE","index":0}]}"#.to_string()),
         );
-        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+        let call = build_call(&GenAIBuilder::new(), &[http_result(http)]).expect("call");
 
         assert_eq!(
             call.response.messages[0].finish_reason.as_deref(),
@@ -2255,7 +2253,7 @@ mod tests {
             Some(r#"[{"choices":[{"delta":{},"finish_reason":"content_filter"}]}]"#.to_string()),
         );
         http.is_sse = true;
-        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+        let call = build_call(&GenAIBuilder::new(), &[http_result(http)]).expect("call");
 
         assert_eq!(
             call.response.messages[0].finish_reason.as_deref(),
@@ -2283,7 +2281,7 @@ mod tests {
             Some(r#"[{"candidates":[{"content":{"parts":[{"text":"partial"}]},"index":0}]},{"candidates":[{"finishReason":"SAFETY","index":0}]}]"#.to_string()),
         );
         http.is_sse = true;
-        let call = build_call(&GenAIBuilder::new(), &[AnalysisResult::Http(http)]).expect("call");
+        let call = build_call(&GenAIBuilder::new(), &[http_result(http)]).expect("call");
 
         assert!(matches!(
             &call.response.messages[0].parts[0],
@@ -2316,7 +2314,7 @@ mod tests {
         let http = make_http(path, None, None);
         let call = build_call(
             &GenAIBuilder::new(),
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .expect("call");
 
@@ -2353,11 +2351,8 @@ mod tests {
             tool_calls: vec![],
             reasoning_content: None,
         };
-        let call = build_call(
-            &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Token(token)],
-        )
-        .unwrap();
+        let call =
+            build_call(&builder, &[http_result(http), AnalysisResult::Token(token)]).unwrap();
         assert_eq!(call.model, "token-model");
         let tu = call.token_usage.unwrap();
         assert_eq!(tu.input_tokens, 10);
@@ -2376,11 +2371,8 @@ mod tests {
         let token = TokenRecord::new(100, "openclaw".to_string(), "anthropic".to_string(), 6, 105)
             .with_cache_tokens(100, 20_565);
 
-        let call = build_call(
-            &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Token(token)],
-        )
-        .expect("Anthropic call builds");
+        let call = build_call(&builder, &[http_result(http), AnalysisResult::Token(token)])
+            .expect("Anthropic call builds");
         let usage = call.token_usage.expect("token usage is present");
         assert_eq!(usage.input_tokens, 20_671);
         assert_eq!(usage.output_tokens, 105);
@@ -2419,7 +2411,7 @@ mod tests {
         let http = make_http("/v1/chat/completions", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.request.temperature, Some(0.7));
@@ -2462,7 +2454,7 @@ mod tests {
         let http = make_http("/v1/messages", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.provider, "anthropic");
@@ -2504,7 +2496,7 @@ mod tests {
         let http = make_http("/v1/messages", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.request.messages.len(), 2);
@@ -2547,7 +2539,7 @@ mod tests {
         let http = make_http("/v1/messages", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.request.messages.len(), 1);
@@ -2601,7 +2593,7 @@ mod tests {
         let http = make_http("/v1/messages", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
 
@@ -2682,7 +2674,7 @@ mod tests {
         let http = make_http("/api/v1/copilot/generate_copilot", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.provider, "sysom");
@@ -2770,7 +2762,7 @@ mod tests {
         let http = make_http("/v1/messages", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.response.messages.len(), 1);
@@ -2823,7 +2815,7 @@ mod tests {
         let http = make_http("/v1/chat/completions", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert_eq!(call.response.messages.len(), 1);
@@ -2864,7 +2856,7 @@ mod tests {
         let http = make_http("/api/v1/copilot/generate_copilot", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         let msg = &call.response.messages[0];
@@ -2900,7 +2892,7 @@ mod tests {
         let http = make_http("/api/v1/copilot/generate_copilot", None, None);
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         assert!(call.response.messages.is_empty());
@@ -2918,7 +2910,7 @@ mod tests {
         );
         http.is_sse = true;
         http.sse_event_count = 1;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert!(call.response.streamed);
         assert!(!call.response.messages.is_empty());
         let msg = &call.response.messages[0];
@@ -2955,7 +2947,7 @@ mod tests {
         http.is_sse = true;
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         let msg = &call.response.messages[0];
@@ -2998,7 +2990,7 @@ mod tests {
         http.is_sse = true;
         let call = build_call(
             &builder,
-            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+            &[http_result(http), AnalysisResult::Message(parsed)],
         )
         .unwrap();
         let msg = &call.response.messages[0];
@@ -3012,7 +3004,7 @@ mod tests {
         let builder = GenAIBuilder::new();
         let mut http = make_http("/v1/chat/completions", None, None);
         http.is_sse = true;
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert!(call.request.messages.is_empty());
         assert!(!call.request.stream);
     }
@@ -3036,7 +3028,7 @@ mod tests {
         http.sse_event_count = 4;
 
         let builder = GenAIBuilder::new();
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("first_output_timestamp_ns"),
             Some(&"1100000000".to_string())
@@ -3080,7 +3072,7 @@ mod tests {
         })
         .to_string();
         let http = make_http("/v1/chat/completions", Some(body), None);
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("call_kind").map(|s| s.as_str()),
             Some("main")
@@ -3099,7 +3091,7 @@ mod tests {
         })
         .to_string();
         let http = make_http("/v1/chat/completions", Some(body), None);
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("call_kind").map(|s| s.as_str()),
             Some("recap")
@@ -3117,7 +3109,7 @@ mod tests {
         })
         .to_string();
         let http = make_http("/v1/chat/completions", Some(body), None);
-        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        let call = build_call(&builder, &[http_result(http)]).unwrap();
         assert_eq!(
             call.metadata.get("call_kind").map(|s| s.as_str()),
             Some("recap")
@@ -3179,7 +3171,7 @@ mod tests {
             response: Some(response),
         };
         let http = make_http("/v1/chat/completions", None, None);
-        vec![AnalysisResult::Http(http), AnalysisResult::Message(parsed)]
+        vec![http_result(http), AnalysisResult::Message(parsed)]
     }
 
     fn conv_id(builder: &GenAIBuilder, results: &[AnalysisResult]) -> String {
@@ -3286,7 +3278,7 @@ mod tests {
         );
         let mut http = make_http("/v1/chat/completions", Some(request_body), Some(sse_body));
         http.is_sse = true;
-        vec![AnalysisResult::Http(http)]
+        vec![http_result(http)]
     }
 
     #[test]
@@ -3344,7 +3336,7 @@ mod tests {
             response: Some(response),
         };
         let http = make_http("/api/v1/copilot/generate_copilot", None, None);
-        vec![AnalysisResult::Http(http), AnalysisResult::Message(parsed)]
+        vec![http_result(http), AnalysisResult::Message(parsed)]
     }
 
     #[test]

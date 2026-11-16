@@ -2,7 +2,7 @@
 #![cfg(target_os = "linux")]
 
 use agentsight::analyzer::message::MessageParser;
-use agentsight::analyzer::{AnalysisResult, HttpRecord};
+use agentsight::analyzer::{AnalysisResult, HttpContext, HttpRecord};
 use agentsight::genai::semantic::LLMCall;
 use agentsight::genai::{GenAIBuilder, GenAISemanticEvent, MessagePart};
 use agentsight::response_map::ResponseSessionMapper;
@@ -60,11 +60,12 @@ fn exchange_mode(with_ids: bool, stream: bool, raw: bool) -> LLMCall {
         is_sse: stream,
         sse_event_count: usize::from(stream),
     };
+    let context = AnalysisResult::HttpContext(HttpContext::new(raw, http, None, None));
     let (delivery, _) = GenAIBuilder::new().build_with_pending(
         &if raw {
-            vec![AnalysisResult::Http(http)]
+            vec![context]
         } else {
-            vec![AnalysisResult::Http(http), AnalysisResult::Message(parsed)]
+            vec![context, AnalysisResult::Message(parsed)]
         },
         &ResponseSessionMapper::disabled(),
         &HashMap::from([(424242, "fixture-agent".to_string())]),

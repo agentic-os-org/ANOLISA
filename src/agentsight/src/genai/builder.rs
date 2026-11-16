@@ -34,7 +34,6 @@ impl BuildOutput {
             return;
         };
         let Some(http) = results.iter_mut().find_map(|result| match result {
-            AnalysisResult::Http(http) => Some(http),
             AnalysisResult::HttpContext(context) => Some(&mut context.http),
             _ => None,
         }) else {
@@ -263,7 +262,6 @@ impl GenAIBuilder {
             }
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
-                AnalysisResult::Http(h) => Some(h),
                 AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             });

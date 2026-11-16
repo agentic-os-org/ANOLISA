@@ -35,8 +35,8 @@ use crate::tokenizer::get_global_tokenizer;
 use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
 use super::token::merge_usage_from_event;
 use super::{
-    AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
-    TokenRecord, TokenUsage,
+    AnalysisResult, AuditAnalyzer, HttpContext, HttpRecord, MessageParser, ParsedApiMessage,
+    TokenParser, TokenRecord, TokenUsage,
 };
 
 /// Token count result for request messages
@@ -493,7 +493,8 @@ impl Analyzer {
     ///
     /// Returns `AnalysisResult::Audit` for LLM calls and process actions,
     /// `AnalysisResult::Token` for SSE streams containing token usage,
-    /// or `AnalysisResult::Message` for parsed LLM API request/response bodies.
+    /// `AnalysisResult::Message` for parsed LLM API request/response bodies,
+    /// and `AnalysisResult::HttpContext` carrying the raw HTTP exchange.
     pub fn analyze_aggregated(&self, result: &AggregatedResult) -> Vec<AnalysisResult> {
         if let Some(metadata) = context::resource_abandonment(result) {
             return metadata;
@@ -657,7 +658,14 @@ impl Analyzer {
                 results.push(AnalysisResult::Audit(audit_record));
             }
 
-            results.push(AnalysisResult::Http(http_record));
+            // The legacy path has always persisted every HTTP record, so the
+            // context keeps its pre-serialized bodies and raw retention.
+            results.push(AnalysisResult::HttpContext(HttpContext::new(
+                true,
+                http_record,
+                None,
+                None,
+            )));
         }
 
         if let Some(record) = token_result {
@@ -1778,10 +1786,10 @@ mod tests {
             .analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream))
             .into_iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(context.http),
                 _ => None,
             })
-            .expect("Analyzer must emit HttpRecord")
+            .expect("Analyzer must emit HttpContext")
     }
 
     #[test]
@@ -1812,7 +1820,7 @@ mod tests {
         );
         assert!(results.iter().any(|result| matches!(
             result,
-            AnalysisResult::Http(record) if record.path == "/v1/responses/resp_h2"
+            AnalysisResult::HttpContext(context) if context.http.path == "/v1/responses/resp_h2"
         )));
     }
 
@@ -1913,10 +1921,10 @@ mod tests {
         let http = results
             .iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             })
-            .expect("Analyzer must emit HttpRecord");
+            .expect("Analyzer must emit HttpContext");
         assert_eq!(http.first_output_timestamp_ns, Some(1_000_000_000));
         assert!(http.is_sse);
 
@@ -1993,10 +2001,10 @@ mod tests {
         let http = results
             .iter()
             .find_map(|result| match result {
-                AnalysisResult::Http(record) => Some(record),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             })
-            .expect("Analyzer must emit HttpRecord");
+            .expect("Analyzer must emit HttpContext");
         assert!(http.is_sse, "native SSE response must be observed");
 
         let builder = GenAIBuilder::new();

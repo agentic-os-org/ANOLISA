@@ -505,7 +505,7 @@ fn compatibility_accessors_can_drain_and_analyze_retained_responses() {
         .complete_pid_partial_responses(std::process::id());
     assert_eq!(completed.len(), 1);
     let analysis = fixture.analyzer().analyze_aggregated(&completed[0]);
-    assert!(analysis.iter().any(|result| matches!(result, crate::analyzer::AnalysisResult::Http(record) if record.status_code == 500)));
+    assert!(analysis.iter().any(|result| matches!(result, crate::analyzer::AnalysisResult::HttpContext(context) if context.http.status_code == 500)));
 }
 
 fn pending_runtime(pid: u32, response: &[u8]) -> RuntimeFixture {
