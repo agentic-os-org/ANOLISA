@@ -7,7 +7,8 @@ trusts only a throwaway CA for its upstream connections. Tokens are generated
 dummies. The tests add an address to `lo`, a runtime drop-in for the gateway
 unit, and restart agent-sec-core.service, so they run only when
 ASC_GATEWAY_E2E_USER names the non-root user that owns the test Scopes.
-The gateway must be disabled with no credential Scopes configured beforehand.
+The daemon must be started with --enable-gateway. The proxy must be disabled
+with no credential Scopes configured beforehand.
 """
 
 import base64
@@ -491,7 +492,12 @@ def host():
         pytest.fail("requires root and PID 1 systemd")
     cli = shutil.which("agent-sec-cli")
     assert cli is not None, "agent-sec-cli must be installed or built and on PATH"
-    status = gateway(cli, "status")
+    result = command(cli, "gateway", "status", check=False)
+    assert result.returncode == 0, (
+        "start the daemon service with --enable-gateway before Gateway acceptance: "
+        + result.stderr
+    )
+    status = json.loads(result.stdout)
     # Global import/retirement must never modify operator Scopes or an active key.
     assert not status["enabled"] and not status["scopes"], "requires an unused gateway"
     assert gateway(cli, "key", "list") == {
