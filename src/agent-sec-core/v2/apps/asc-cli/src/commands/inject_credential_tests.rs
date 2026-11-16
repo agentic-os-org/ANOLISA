@@ -142,6 +142,13 @@ fn command() -> InjectCredentialCommand {
     parse(&["--owner-uid", "1000", "--process-name", "agent"]).unwrap()
 }
 
+fn root_directory() -> tempfile::TempDir {
+    let root = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(0))
+        .unwrap()
+        .unwrap();
+    tempfile::tempdir_in(root.dir).unwrap()
+}
+
 fn source() -> CedarPolicySource {
     CedarPolicySource {
         schema: CedarSchemaReference {
@@ -468,11 +475,12 @@ impl PackagedFixture {
             files: Vec::new(),
             directories: Vec::new(),
         };
-        if let Err(error) = installed.directory(Path::new(GATEWAY_DATADIR)) {
-            eprintln!("skipped packaged-template flow: {error}");
-            return None;
+        for directory in [GATEWAY_DATADIR, STAGING_ROOT] {
+            if let Err(error) = installed.directory(Path::new(directory)) {
+                eprintln!("skipped packaged-template flow: {error}");
+                return None;
+            }
         }
-        installed.directory(Path::new(STAGING_ROOT)).unwrap();
         let template_path = command().template_path();
         match File::options()
             .write(true)
@@ -490,7 +498,7 @@ impl PackagedFixture {
         }
         Some(Self {
             _installed: installed,
-            directory: tempfile::tempdir_in("/run").unwrap(),
+            directory: root_directory(),
         })
     }
 }
@@ -734,7 +742,7 @@ fn policy_then_scope_creation_reads_private_staging_and_removes_it() {
     if !root_child() {
         return;
     }
-    let directory = tempfile::tempdir_in("/run").unwrap();
+    let directory = root_directory();
     let plan = plan(directory.path());
     let expected_source = serde_json::to_value(PolicySource::Cedar(plan.rendered.clone())).unwrap();
     let staging = plan.staging.clone();
@@ -800,7 +808,7 @@ fn failed_policy_admission_preserves_exact_registration_recovery() {
         return;
     }
     for response in [Some(rejected()), None] {
-        let directory = tempfile::tempdir_in("/run").unwrap();
+        let directory = root_directory();
         let plan = plan(directory.path());
         let daemon = Daemon::new(vec![(POLICY_TEMPLATES_CREATE, response)]);
         let error = create(
@@ -853,7 +861,7 @@ fn malformed_created_identifiers_do_not_admit_a_scope_or_leave_secret_copies() {
         ),
         (policy(), Some(json!({})), "scopeId"),
     ] {
-        let directory = tempfile::tempdir_in("/run").unwrap();
+        let directory = root_directory();
         let plan = plan(directory.path());
         let mut steps = vec![(POLICY_TEMPLATES_CREATE, Some(success(policy)))];
         if let Some(scope) = scope {
@@ -884,7 +892,7 @@ fn private_input_rejects_wrong_owner_permissions_and_links() {
     if !root_child() {
         return;
     }
-    let directory = tempfile::tempdir_in("/run").unwrap();
+    let directory = root_directory();
     let real = write_owner_file(directory.path(), "real", REAL, 0, 0).unwrap();
     assert_eq!(read_private(&real, 1000).unwrap().expose(), REAL);
     let link = directory.path().join("link");
@@ -906,7 +914,7 @@ fn scope_rejection_or_unknown_outcome_warns_about_committed_admission_without_re
         return;
     }
     for response in [Some(rejected()), None] {
-        let directory = tempfile::tempdir_in("/run").unwrap();
+        let directory = root_directory();
         let plan = plan(directory.path());
         let daemon = Daemon::new(vec![
             (POLICY_TEMPLATES_CREATE, Some(success(policy()))),
