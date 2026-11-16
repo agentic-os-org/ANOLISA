@@ -77,9 +77,10 @@ def _pre_tool(tokenless_bin: str, request: dict) -> Optional[dict]:
             input=json.dumps(request, ensure_ascii=False),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=_PRE_TOOL_TIMEOUT,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
     if proc.returncode != 0:
         return None
@@ -104,7 +105,9 @@ def main() -> None:
         _skip()
 
     try:
-        raw = sys.stdin.read()
+        # The host writes UTF-8 JSON; decode it as such instead of trusting the
+        # caller's locale, which may be ASCII or a legacy codepage.
+        raw = sys.stdin.buffer.read().decode("utf-8")
         if not raw.strip():
             _skip()
         input_data = json.loads(raw)
@@ -177,7 +180,10 @@ def main() -> None:
             "updatedInput": updated_input,
         }
     }
-    print(json.dumps(response, ensure_ascii=False))
+    # The host reads this envelope from the hook's stdout, whose strict locale
+    # encoding would raise on a non-ASCII command. ASCII-escaped JSON keeps the
+    # payload intact on any codec.
+    print(json.dumps(response))
 
 
 if __name__ == "__main__":

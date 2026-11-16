@@ -138,7 +138,9 @@ SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
 
 def main() -> None:
     try:
-        raw = sys.stdin.read()
+        # The host writes UTF-8 JSON; decode it as such instead of trusting the
+        # caller's locale, which may be ASCII or a legacy codepage.
+        raw = sys.stdin.buffer.read().decode("utf-8")
         if not raw.strip():
             _skip()
         input_data = json.loads(raw)
@@ -169,7 +171,10 @@ def main() -> None:
             ),
         }
     }
-    print(json.dumps(response, ensure_ascii=False))
+    # The host reads this envelope from the hook's stdout, whose strict locale
+    # encoding would raise on a non-ASCII hint. ASCII-escaped JSON keeps the
+    # context intact on any codec.
+    print(json.dumps(response))
 
 
 if __name__ == "__main__":

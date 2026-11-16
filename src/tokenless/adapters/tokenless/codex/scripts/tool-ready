@@ -184,7 +184,9 @@ def _run_env_check(
         cmd.append("--fix")
     timeout = FIX_TIMEOUT if fix else 10
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout
+        )
     except Exception:
         return None
     if proc.returncode != 0:
@@ -223,7 +225,7 @@ def _build_response(
             "additionalContext": ctx,
         }
     }
-    return json.dumps(response, ensure_ascii=False)
+    return json.dumps(response)
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +241,9 @@ def main() -> None:
 
     # 2. Read stdin JSON
     try:
-        raw = sys.stdin.read()
+        # The host writes UTF-8 JSON; decode it as such instead of trusting the
+        # caller's locale, which may be ASCII or a legacy codepage.
+        raw = sys.stdin.buffer.read().decode("utf-8")
         if not raw.strip():
             _skip()
         input_data = json.loads(raw)

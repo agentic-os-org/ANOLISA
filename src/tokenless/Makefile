@@ -261,6 +261,7 @@ test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cle
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_codex_rewrite_hook.py
+	python3 tests/test_codex_standalone_codecs.py
 	python3 tests/test_hermes_lifecycle.py
 	python3 tests/test_compress_schema_hook.py
 	python3 tests/test_hook_payload_shapes.py
