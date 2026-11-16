@@ -467,6 +467,34 @@ fn native_cosh_health_suggests_a_question_instead_of_copying_a_shell_command() {
 }
 
 #[test]
+fn cosh_question_invitation_shares_the_bash_brand_line() {
+    for language in [Language::ZhCn, Language::EnUs] {
+        let candidate = health_candidate_for(&report(), language, Target::Cosh).unwrap();
+        let prompt =
+            primary_health_prompt_suggestion(&report(), crate::I18n::new(language)).unwrap();
+        let mut renderer = RatatuiInlineRenderer::with_width(80).with_language(language);
+        renderer.styled = true;
+        let text =
+            render_health(&renderer, &report(), false, Target::Cosh, Some(&candidate)).unwrap();
+        let unstyled = crate::ui::wrap::strip_ansi_escape(&text);
+        let heading = if language == Language::ZhCn {
+            "┃ Cosh AI  可以直接提问"
+        } else {
+            "┃ Cosh AI  Try asking"
+        };
+        assert!(unstyled.lines().any(|line| line == heading), "{unstyled}");
+        assert!(text.contains("\x1b[36;1m┃ Cosh AI\x1b[0m"));
+        assert!(unstyled.lines().any(|line| line == prompt), "{unstyled}");
+        assert!(!unstyled.contains('╭') && !unstyled.contains('│'));
+        renderer.styled = false;
+        let plain =
+            render_health(&renderer, &report(), false, Target::Cosh, Some(&candidate)).unwrap();
+        assert!(plain.contains(&candidate.text));
+        assert!(!plain.contains('┃'));
+    }
+}
+
+#[test]
 fn startup_entry_highlights_both_actions_without_coloring_the_whole_line() {
     for language in [Language::ZhCn, Language::EnUs] {
         let mut renderer = RatatuiInlineRenderer::with_width(80).with_language(language);
