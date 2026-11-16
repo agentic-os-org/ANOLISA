@@ -6,6 +6,7 @@ use crate::config::{detect_language_from_env, read_guidance_language};
 use crate::i18n::I18n;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+mod ai;
 mod handoff;
 mod login;
 mod session;
@@ -71,6 +72,10 @@ pub(crate) fn run_interactive() -> i32 {
                 };
                 match flow {
                     session::Flow::Exit => return 0,
+                    session::Flow::Ask => {
+                        drop(screen);
+                        return handoff::start_questions();
+                    }
                     session::Flow::Handoff => {
                         drop(screen);
                         let notice = I18n::new(session.language())

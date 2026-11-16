@@ -118,7 +118,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Interface language. In a session, `/config language` does the same."
         }
         MessageId::GuideWizardAiBody => {
-            "Configure and manage AI services. In a session, run `/auth`."
+            "Start asking questions directly. Run `/auth` in a session to manage AI services."
         }
         MessageId::GuideWizardTipsBody => concat!(
             "Usage tips, command analysis mode, and question recommendations.\n",
@@ -174,7 +174,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Shows health and resource state at login; affects later logins."
         }
         MessageId::GuideWizardAiReadonly => {
-            "Run /auth in a Cosh session to manage AI services. Configured is not connected."
+            "Ask directly; access is checked on your first question."
         }
         MessageId::GuideWizardLoginReadonly => {
             "Run cosh login set or cosh login restore in the terminal to change it."
@@ -186,7 +186,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::GuideWizardCurrent => "current",
         MessageId::GuideWizardAiLoading => "Loading…",
-        MessageId::GuideWizardAiUnconfigured => "Not configured",
+        MessageId::GuideWizardAiAsk => "Start asking questions",
+        MessageId::GuideWizardAiConfigured => "AI access configured",
+        MessageId::GuideWizardAiUnverified => "Connection unverified",
+        MessageId::GuideWizardAiIncomplete => "Check configuration",
+        MessageId::GuideWizardAiNoFallback => "No automatic trial fallback.",
+        MessageId::GuideWizardAiUnknown => "Unable to confirm AI access right now",
+        MessageId::GuideWizardAiDisabled => "Automatic ECS trial use is off",
+        MessageId::GuideWizardAiEcs => "ECS zero-config access; verified on first question",
+        MessageId::GuideWizardAiPending => "Zero-config automatic access; ask directly",
+        MessageId::GuideWizardAiIdentityFailed => "ECS identity check failed; retry asking",
+        MessageId::GuideWizardAiSourceRuntime => "Runtime configuration",
+        MessageId::GuideWizardAiUnconfigured => "AI service configuration needed",
         MessageId::GuideWizardAiServiceLine => "Current AI service: {value}",
         MessageId::GuideWizardAiSourceLine => "Config source: {value}",
         MessageId::GuideWizardAiSourceUser => "user config",
@@ -194,7 +205,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseLine => "Zero-config auto use: {value}",
         MessageId::GuideWizardAiAutoUseOn => "on",
         MessageId::GuideWizardAiAutoUseOff => "off",
-        MessageId::GuideWizardAiManage => "Configure AI service (opens /auth)",
+        MessageId::GuideWizardAiManage => "Manage AI service (opens /auth)",
         MessageId::GuideWizardAiHandoff => {
             "Opening a Cosh session for authentication; type exit to return to the wizard."
         }

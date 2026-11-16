@@ -19,6 +19,14 @@ Analysis mode and recommendation switches save new-session defaults; environment
 `COSH_RECOMMENDATIONS_ENABLED=0`) are shown honestly as "saved but overridden" or reject an enable
 request, without misleading you about the current session.
 
+The wizard selects **Start asking questions** by default. It opens a Cosh session; submit your
+question there. **Manage AI service** remains a secondary entry to `/auth`. Opening the wizard
+does not activate a trial, change provider preferences, or call a model. For automatic access,
+the guide invites you with "Zero-config automatic access; ask directly"; the first question
+verifies access. An ECS identity
+check does not prove trial eligibility or remaining quota. Configured services show that their
+connection is unverified, and explicit provider settings keep priority over automatic trial access.
+
 The three entries have distinct roles: `cosh --help` is the static launch-option and public-command
 index; `cosh guide` is interactive configuration and onboarding; in-session `/help` is the existing
 session command reference. On restricted terminals (non-TTY, undersized, or limited TERM) `cosh guide`

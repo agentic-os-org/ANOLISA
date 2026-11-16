@@ -46,12 +46,31 @@ pub(super) async fn available() -> Result<bool, ProbeError> {
         })
 }
 
-pub(super) fn state(config: &CoreConfig, available: bool, auto_use: bool) -> Value {
-    let active = available
-        && trial_policy::decide(config, &ProviderIntent::from_env(), true, true, auto_use)
-            == TrialDecision::EcsIdentity;
+pub(super) fn state(
+    config: &CoreConfig,
+    probe: Option<Result<bool, ProbeError>>,
+    auto_use: bool,
+) -> Value {
+    let available = matches!(probe, Some(Ok(true)));
+    let decision = trial_policy::decide(config, &ProviderIntent::from_env(), true, true, auto_use);
+    let active = available && decision == TrialDecision::EcsIdentity;
+    let route = match decision {
+        TrialDecision::Existing => "existing",
+        TrialDecision::EcsIdentity => "ecs_identity",
+        TrialDecision::Disabled => "disabled",
+    };
+    let (identity_status, error_code) = match probe {
+        Some(Ok(true)) => ("supported", None),
+        Some(Err(error)) => ("failed", Some(error.code())),
+        Some(Ok(false)) => ("unknown", None),
+        None if cfg!(target_os = "macos") => ("unsupported", None),
+        None => ("not_checked", None),
+    };
     let provider_id = saved_provider(config);
-    serde_json::json!({"available":available,"active":active,"model":MODEL,"provider_id":provider_id})
+    serde_json::json!({
+        "available": available, "active": active, "model": MODEL, "provider_id": provider_id,
+        "route": route, "identity_status": identity_status, "error_code": error_code,
+    })
 }
 
 async fn save_preference(value: bool) -> Result<(), String> {

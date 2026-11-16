@@ -69,7 +69,7 @@ pub(super) async fn handle_auth(
 ) -> OutputMessage {
     match action {
         "state" => {
-            let (trial_preferences, available) = tokio::join!(
+            let (trial_preferences, probe) = tokio::join!(
                 async {
                     match tokio::task::spawn_blocking(crate::auth::trial_preferences::load).await {
                         Ok(Ok(auto_use)) => serde_json::json!({ "auto_use": auto_use }),
@@ -83,13 +83,16 @@ pub(super) async fn handle_auth(
                     }
                 },
                 async {
-                    params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true)
-                        && ecs_trial::available().await.unwrap_or(false)
+                    if params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true) {
+                        Some(ecs_trial::available().await)
+                    } else {
+                        None
+                    }
                 }
             );
             let ecs_trial = ecs_trial::state(
                 config,
-                available,
+                probe,
                 trial_preferences
                     .get("auto_use")
                     .and_then(Value::as_bool)
