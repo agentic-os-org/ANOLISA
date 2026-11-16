@@ -22,7 +22,7 @@ pub use server::Server;
 pub use wire::{
     Availability, Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation,
     RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
-    RegistrationRequest, Request, Response, RunOutcome, SdkControl, SdkIntent,
+    RegistrationRequest, Request, Response, ResultStatus, RunOutcome, SdkControl, SdkIntent,
     REGISTRATION_VERSION, SDK_CONTROL_VERSION, SDK_VERSION, VERSION,
 };
 

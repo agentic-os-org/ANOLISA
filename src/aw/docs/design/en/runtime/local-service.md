@@ -86,7 +86,7 @@ available to existing callers.
 | `acknowledge_scope` | task `instance_id` | Enable callbacks after the owner receives its handle, within five seconds of preparation |
 | `unbind` | `instance_id` | Release after events close; reloadable instances also require complete native request/tool idle |
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
-| `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
+| `open_event` | `instance_id`, normalized `event`, optional `result_status` for tool.after | Event ID, instance ID and admitted step IDs |
 | `enable_submissions` | `instance_id`, before any input claim | Enable monotonic input turns and reclaim details after closure |
 | `close_input_event` | `instance_id`, `session_id`, `turn_id` | Cancel and drain a submission; retire details for sequenced bindings |
 | `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
@@ -99,6 +99,15 @@ available to existing callers.
 | `freeze_context` | `event_id`, `instance_id`, original `candidate_revision` | One immutable bounded evidence context; no step invocation |
 | `audit` | Preparation or event `key` | Verified durable envelopes and a `terminal` flag |
 | `stop` | None | Acknowledge requested shutdown; process exit completes cleanup |
+
+For manual tool completion, `open_event` accepts a typed operation-level
+`result_status` or the existing `event.tool.result_projection.status`. The
+service compares the reported status with any recognized native completion
+callback outcome and persists the ExecutionEvent before acknowledging the open.
+The operation field requires valid public metadata. A projection-only request
+with missing public metadata keeps its Provider path and records an audit gap.
+See the
+[completion input and runnable audit example](../../../../../../docs/developer-guide/en/aw/reference/cli.md#manual-rpc-completion-audit).
 
 Event handles include the original `candidate_revision`. The explicit
 `freeze_context` operation uses only configured sources and corroborated native

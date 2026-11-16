@@ -1,6 +1,6 @@
 //! A client-to-service-to-Provider demonstration with synthetic native events.
 
-use aw_service::{Binding, Capabilities, Client, EventHandle, Operation};
+use aw_service::{Binding, Capabilities, Client, EventHandle, Operation, ResultStatus};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -54,9 +54,10 @@ fn demonstrate(client: &Client, binding: &Binding) -> Result<(), Box<dyn std::er
     ] {
         let expires = deadline();
         let handle: EventHandle = serde_json::from_value(client.call(Operation::OpenEvent {
+            result_status: (name == "tool.after").then_some(ResultStatus::Success),
             instance_id: binding.instance_id.clone(),
             event: json!({"name": name, "agent": {"adapter": "qoder", "binding_id": binding.target, "instance_id": binding.instance_id},
-                "session_id": "synthetic-demo", "tool": {"name": tool, "native_name": tool, "call_id": null, "input": {},
+                "session_id": "synthetic-demo", "tool": {"name": tool, "native_name": tool, "call_id": tool, "input": {},
                     "result": if name == "tool.after" { json!({"text": "demo result"}) } else { Value::Null }}, "native": {}}),
         }, expires)?)?;
         let results = handle

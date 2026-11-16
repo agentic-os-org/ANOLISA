@@ -107,6 +107,7 @@ impl Native {
             }
         } else {
             Operation::OpenEvent {
+                result_status: None,
                 instance_id: self.id().into(),
                 event,
             }

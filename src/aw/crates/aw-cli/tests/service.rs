@@ -220,6 +220,7 @@ fn instance_identity_prevents_cross_binding_calls_and_early_unbind() {
         .client
         .call(
             Operation::OpenEvent {
+                result_status: None,
                 instance_id: second.instance_id,
                 event: event(&first, "tool.before", "allow")
             },

@@ -136,10 +136,15 @@ impl Runtime {
                 deadline,
                 cancelled,
             ),
-            Operation::OpenEvent { instance_id, event } => self.open(
+            Operation::OpenEvent {
+                instance_id,
+                event,
+                result_status,
+            } => self.open(
                 instance_id,
                 event,
                 None,
+                result_status,
                 deadline,
                 Arc::new(AtomicBool::new(false)),
             ),

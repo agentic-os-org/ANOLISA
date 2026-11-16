@@ -72,7 +72,7 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `acknowledge_scope` | 任务 `instance_id` | 准备完成五秒内确认句柄交接，再允许回调 |
 | `unbind` | `instance_id` | 在全部事件关闭后释放绑定 |
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
-| `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
+| `open_event` | `instance_id`、归一化 `event`、tool.after 的可选 `result_status` | 事件 ID、实例 ID 和已准入步骤 ID |
 | `enable_submissions` | `instance_id`，首个输入声明之前 | 启用递增输入轮次，关闭后回收明细 |
 | `close_input_event` | `instance_id`、`session_id`、`turn_id` | 取消并排空输入事件；顺序协议绑定回收关联明细 |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
@@ -85,6 +85,12 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `freeze_context` | `event_id`、`instance_id`、原始 `candidate_revision` | 一个不可变有界证据上下文，不执行步骤 |
 | `audit` | 准备阶段或事件的 `key` | 已验证的持久记录信封和 `terminal` 标志 |
 | `stop` | 无 | 确认收到停止请求；进程退出才表示清理完成 |
+
+普通工具完成事件通过 `open_event` 操作层的类型化 `result_status`，或已有的
+`event.tool.result_projection.status` 上报状态。服务校验上报状态与可识别原生完成
+回调的一致性，并在确认打开前持久化 ExecutionEvent。使用操作层字段时须具备有效的
+公共元数据。仅使用投影的请求在缺少公共元数据时仍可执行 Provider，并记录审计缺口。
+完整输入要求和可运行示例见[完成事件审计](../../../../../../docs/developer-guide/zh/aw/reference/cli.md#普通-rpc-完成事件审计)。
 
 提交事件在实例内按 `(input.submit, session_id, turn_id)` 关联，与工具调用账本独立。
 事件包含 `input.text`，不带 `tool`。同轮步骤回调保留首次输入、原生字节和截止时间；

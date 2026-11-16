@@ -113,6 +113,7 @@ fn poisoned_audit_prevents_context_publication() {
         .unwrap();
     let instance = binding["instance_id"].as_str().unwrap();
     let handle = runtime.handle(Operation::OpenEvent {
+        result_status: None,
         instance_id:instance.into(), event:json!({"name":"tool.after", "agent":{"adapter":"qoder","binding_id":"qoder","instance_id":instance},
             "tool":{"input":{},"result":"private candidate"},"native":{}}),
     }, deadline, &cancelled).unwrap();

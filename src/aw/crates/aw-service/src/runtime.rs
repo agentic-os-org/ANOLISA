@@ -232,6 +232,7 @@ impl Runtime {
         instance_id: String,
         value: Value,
         native_input: Option<Vec<u8>>,
+        declared_status: Option<crate::ResultStatus>,
         deadline: Instant,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Value> {
@@ -244,25 +245,34 @@ impl Runtime {
             .and_then(Option::as_ref)
             .filter(|instance| !instance.closing)
             .ok_or_else(|| rejected("unknown_or_draining_instance"))?;
+        let result_status = if native_input.is_none() {
+            facts::reported_result_status(
+                &instance.host.capabilities().adapter,
+                &value,
+                declared_status,
+            )?
+        } else {
+            None
+        };
         let execution = self.event_execution(instance, &instance_id, &value)?;
         let lifecycle = value["name"]
             .as_str()
             .is_some_and(aw_adapter::callback::lifecycle);
-        if native_input.is_none() {
+        let mut invocation_protocol = if native_input.is_none() {
             if lifecycle {
                 return Err(rejected("native_lifecycle_callback_required"));
             }
-            let mut state = instance
+            let state = instance
                 .invocations
                 .lock()
                 .map_err(|_| rejected("state_poisoned"))?;
             if state.ledger.is_some() {
                 return Err(rejected("invocation_correlated_event_required"));
             }
-            // Enable and legacy admission share the protocol lock. Once used,
-            // even a completed legacy event cannot switch to managed identity.
-            state.legacy_used = true;
-        }
+            Some(state)
+        } else {
+            None
+        };
         let host = Arc::clone(&instance.host);
         if value["agent"]["instance_id"] != instance_id {
             return Err(rejected("event_instance_mismatch"));
@@ -271,7 +281,7 @@ impl Runtime {
         let metadata = if lifecycle {
             self.lifecycle_metadata(instance, &instance_id, &value)?
         } else {
-            event_metadata(&value)?
+            facts::event_metadata(&value)?
         };
         let key = if lifecycle {
             let key = self.lifecycle_key(&instance_id, &hooks::event_correlation(&value)?)?;
@@ -281,6 +291,23 @@ impl Runtime {
             key
         } else {
             self.identifier()?
+        };
+        let reported_event = if let Some(status) = result_status {
+            let association = evidence::association(&host.capabilities().adapter, &value, None);
+            let fact = self.hook_fact(
+                &key,
+                &host,
+                &instance_id,
+                &value,
+                &association,
+                Some(status),
+            )?;
+            if declared_status.is_some() && fact.is_none() {
+                return Err(rejected("public_event_invalid"));
+            }
+            fact
+        } else {
+            None
         };
         let context = Arc::new(evidence::Cell::default());
         let (sender, receiver) = mpsc::sync_channel(MAX_STEPS + 1);
@@ -311,7 +338,12 @@ impl Runtime {
                     context: Arc::clone(&context),
                 },
             );
+            if let Some(state) = invocation_protocol.as_mut() {
+                // Commit protocol use with the reserved event slot.
+                state.legacy_used = true;
+            }
         }
+        drop(invocation_protocol);
         drop(instances);
         let runtime = Arc::clone(self);
         let thread_key = key.clone();
@@ -343,8 +375,12 @@ impl Runtime {
                         }
                     };
                     let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
-                    let public_event = if lifecycle { Ok(None) } else {
-                        runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association)
+                    let public_event = if lifecycle {
+                        Ok(None)
+                    } else if result_status.is_some() {
+                        Ok(reported_event)
+                    } else {
+                        runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association, None)
                     };
                     let claimed = public_event.and_then(|public_event| {
                         let mut plan = json!({"kind": "event", "identity": runtime.identity,
@@ -652,38 +688,4 @@ impl Drop for CallGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-fn event_metadata(value: &Value) -> Result<Value> {
-    if value["name"] == "input.submit" {
-        let fields = [&value["session_id"], &value["turn_id"]];
-        if fields.iter().any(|field| {
-            !field
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 512)
-        }) {
-            return Err(rejected("event_metadata_limit"));
-        }
-        return Ok(json!({"name":"input.submit", "session_id":fields[0], "turn_id":fields[1]}));
-    }
-    let fields = [
-        &value["name"],
-        &value["session_id"],
-        &value["tool"]["name"],
-        &value["tool"]["native_name"],
-        &value["tool"]["call_id"],
-    ];
-    if fields
-        .iter()
-        .any(|field| !(field.is_null() || field.as_str().is_some_and(|text| text.len() <= 512)))
-    {
-        return Err(rejected("event_metadata_limit"));
-    }
-    let mut metadata = json!({"name": fields[0], "session_id": fields[1], "tool": {
-        "name": fields[2], "native_name": fields[3], "call_id": fields[4],
-    }});
-    if let Some(source) = aw_adapter::callback::correlation_source(value) {
-        metadata["correlation_source"] = json!(source);
-    }
-    Ok(metadata)
 }
