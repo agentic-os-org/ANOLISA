@@ -553,6 +553,7 @@ class NativeResidentTests(NativeFixture):
 
 from native_resident_review import ReviewResidentTests
 from native_resident_delivery import DeliveryResidentTests
+from native_resident_output import OutputResidentTests
 from native_resident_cleanup import CleanupResidentTests
 from native_private import PrivateResidentTests
 from native_resident_reload import ReloadResidentTests, ScopePolicyTests

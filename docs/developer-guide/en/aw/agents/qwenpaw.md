@@ -43,6 +43,11 @@ Providers and boolean Hooks, after `withhold_result` prevents unverified result
 delivery and later dispatch. This action is admitted only on ordinary resident
 launches. Strict after processing withholds streaming chunks for matching tools.
 Task-private execution also withholds intermediate chunks until terminal redaction.
+After checks and cleanup, a foreground tool emits its reviewed final body as one
+chunk to the native Agent, which produces tool output events before consuming the
+terminal result. Ordinary text is preserved; sensitive text uses the replacement.
+Failed checks and cancellation do not publish unverified content. Tools without
+withholding keep native streaming; background output retains the callback boundary above.
 Native Hook or lifecycle failures fence the Agent even when AW steps use `report`;
 restart the failed Agent after correcting the cause. Cleanup timeout or uncertain finish/release acknowledgement fences
 new requests process-wide and requires a worker restart. Credentials remain owned
