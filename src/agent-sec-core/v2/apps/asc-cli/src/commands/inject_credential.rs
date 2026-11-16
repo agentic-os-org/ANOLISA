@@ -214,31 +214,13 @@ impl InjectCredentialCommand {
         };
         let result = self.report(socket, timeout, &plan, &created, &bindings);
         if self.fake_token_file.is_none() {
-            // Owner-writable parents can substitute directories between mkdir and open.
-            let directory = plan.delivered.parent().unwrap_or(Path::new("/"));
-            (|| {
-                #[cfg(target_os = "linux")]
-                nix::unistd::setgroups(&[]).map_err(io::Error::other)?;
-                nix::unistd::setgid(nix::unistd::Gid::from_raw(plan.owner.gid))
-                    .map_err(io::Error::other)?;
-                nix::unistd::setuid(nix::unistd::Uid::from_raw(plan.owner.uid))
-                    .map_err(io::Error::other)?;
-                write_owner_file(
-                    directory,
-                    &fake_name(self.builtin, &plan.id),
-                    &fake,
-                    plan.owner.uid,
-                    plan.owner.gid,
-                )
-                .map_err(io::Error::other)
-            })()
-            .map_err(|error| {
-                failure(format!(
-                    "Policy and Scope were created but the fake file was not delivered: {error}; \
-                     tear down with: {}",
-                    created.teardown.join(" && ")
-                ))
-            })?;
+            deliver_fake(
+                plan.delivered.parent().unwrap_or(Path::new("/")),
+                &fake_name(self.builtin, &plan.id),
+                &fake,
+                &plan.owner,
+                &created.teardown,
+            )?;
         }
         print_json(stdout, &result)?;
         match waited {
@@ -304,7 +286,10 @@ impl InjectCredentialCommand {
                 "point SSL_CERT_FILE/REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO at caBundlePath".into(),
             );
         } else if !enabled {
-            next.push("run `agent-sec-cli gateway enable` as root to start injection".into());
+            next.push(format!(
+                "run `{} gateway enable` as root to start injection",
+                cli(socket)
+            ));
         }
         let pair_ids: std::collections::BTreeSet<&str> = created.policy["credentialBindings"]
             .as_array()
@@ -427,6 +412,7 @@ fn create(
     real: &Secret,
     fake: &str,
 ) -> io::Result<Created> {
+    let cli = cli(socket);
     let policy = {
         use std::os::unix::fs::OpenOptionsExt as _;
         let mut staging = Staging {
@@ -453,8 +439,8 @@ fn create(
             staging.retain = true;
             failure(format!(
                 "{error}; root-only recovery files retained in {}. Find Policy {:?} with \
-                 `agent-sec-cli policy list`; if absent, after fixing the failure run \
-                 `agent-sec-cli policy create --name {} --file {} --language json` to recover \
+                 `{cli} policy list`; if absent, after fixing the failure run \
+                 `{cli} policy create --name {} --file {} --language json` to recover \
                  the same registration and its pair IDs. Check for referencing Scopes before \
                  deleting the Policy or retiring unused pairs. Remove recovery files after cleanup",
                 staging.path.display(),
@@ -467,7 +453,7 @@ fn create(
     let policy_id: ResourceId = field(&policy, "policyId")?;
     let revision: Revision = field(&policy, "revision")?;
     let delete_policy = format!(
-        "agent-sec-cli policy delete --policy-id {policy_id} --revision {}",
+        "{cli} policy delete --policy-id {policy_id} --revision {}",
         revision.get()
     );
     let scope = call(
@@ -488,7 +474,7 @@ fn create(
             "{error}; Scope admission may have committed: list Scopes referencing Policy {policy_id}, \
              delete those Scopes and wait for cleanup before running `{delete_policy}`. \
              If no Scope was created, retire newly imported pair IDs {:?} using \
-             `agent-sec-cli gateway key remove PAIR_ID` only after checking they have no other users",
+             `{cli} gateway key remove PAIR_ID` only after checking they have no other users",
             policy["credentialBindings"].as_array().into_iter().flatten()
                 .filter_map(|binding| binding["pairId"].as_str())
                 .collect::<std::collections::BTreeSet<_>>()
@@ -497,7 +483,7 @@ fn create(
     let scope_id: ResourceId = field(&scope, "scopeId")?;
     Ok(Created {
         teardown: [
-            format!("agent-sec-cli scope delete --scope-id {scope_id}"),
+            format!("{cli} scope delete --scope-id {scope_id}"),
             delete_policy,
         ],
         policy,
@@ -505,6 +491,46 @@ fn create(
         revision,
         scope_id,
     })
+}
+
+/// Permanently drops to the owner, then writes the generated fake as that owner.
+///
+/// Owner-writable parents can substitute directories between mkdir and open, so
+/// root never writes there. A failure names the teardown of the admitted records.
+fn deliver_fake(
+    directory: &Path,
+    name: &str,
+    fake: &str,
+    owner: &ResolvedOwner,
+    teardown: &[String],
+) -> io::Result<()> {
+    (|| {
+        #[cfg(target_os = "linux")]
+        nix::unistd::setgroups(&[]).map_err(io::Error::other)?;
+        nix::unistd::setgid(nix::unistd::Gid::from_raw(owner.gid)).map_err(io::Error::other)?;
+        nix::unistd::setuid(nix::unistd::Uid::from_raw(owner.uid)).map_err(io::Error::other)?;
+        write_owner_file(directory, name, fake, owner.uid, owner.gid).map_err(io::Error::other)
+    })()
+    .map(drop)
+    .map_err(|error| {
+        failure(format!(
+            "Policy and Scope were created but the fake file was not delivered: {error}; \
+             tear down with: {}",
+            teardown.join(" && ")
+        ))
+    })
+}
+
+/// Spells follow-up commands so they reach the same daemon as this run.
+fn cli(socket: &Path) -> String {
+    if socket == Path::new(crate::DEFAULT_SOCKET) {
+        "agent-sec-cli".into()
+    } else {
+        format!(
+            "agent-sec-cli --socket {}",
+            crate::sandbox::hook::shell_quote(&socket.to_string_lossy())
+        )
+    }
 }
 
 /// Renders the packaged template with per-run token paths.

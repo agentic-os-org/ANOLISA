@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 
 use ring::rand::{SecureRandom as _, SystemRandom};
 use rustix::fs::{
-    AtFlags, Dir, FileType, FlockOperation, Gid, Mode, OFlags, fchmod, fchown, flock, fstat,
-    mkdirat, open, openat, renameat, statat, unlinkat,
+    AtFlags, Dir, FileType, FlockOperation, Gid, Mode, OFlags, chmodat, fchmod, fchown, flock,
+    fstat, mkdirat, open, openat, renameat, statat, unlinkat,
 };
 
 use crate::error::io_error;
@@ -419,7 +419,14 @@ fn create_owner_directories(
             Ok(file) => File::from(file),
             Err(rustix::io::Errno::NOENT) => {
                 let created_here = match mkdirat(&current, name, Mode::from_raw_mode(0o700)) {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        // A restrictive umask would leave the new directory unopenable by a
+                        // non-root owner. Only root or this caller (the destination owner)
+                        // can write `current`, so the by-name chmod grants nothing new.
+                        chmodat(&current, name, Mode::from_raw_mode(0o700), AtFlags::empty())
+                            .map_err(|error| io_error(directory, error))?;
+                        true
+                    }
                     Err(rustix::io::Errno::EXIST) => false,
                     Err(error) => return Err(io_error(directory, error)),
                 };
@@ -435,7 +442,7 @@ fn create_owner_directories(
                         Some(Gid::from_raw(gid)),
                     )
                     .map_err(|error| io_error(directory, error))?;
-                    // mkdir honours the umask; set the mode explicitly.
+                    // Pins the mode on the object actually opened.
                     fchmod(&opened, Mode::from_raw_mode(0o700))
                         .map_err(|error| io_error(directory, error))?;
                     current

@@ -407,6 +407,9 @@ fn reports_gateway_guidance_and_unique_pair_ids_without_token_values() {
         let text = report.to_string();
         assert!(!text.contains(REAL) && !text.contains(FAKE));
         assert_eq!(text.contains("gateway enable"), !enabled && ca.is_none());
+        if !enabled {
+            assert!(text.contains(&format!("`{} gateway enable`", cli(&daemon.socket))));
+        }
         assert_eq!(text.contains("SSL_CERT_FILE"), ca.is_some());
         assert!(text.contains("GH_TOKEN/GITHUB_TOKEN"));
         assert_eq!(daemon.finish().len(), if ready { 2 } else { 1 });
@@ -780,11 +783,13 @@ fn policy_then_scope_creation_reads_private_staging_and_removes_it() {
     .unwrap();
     assert_eq!(created.policy, policy());
     assert_eq!(created.scope_id.as_str(), "test-scope");
+    let cli = cli(&daemon.socket);
+    assert!(cli.starts_with("agent-sec-cli --socket '"));
     assert_eq!(
         created.teardown,
         [
-            "agent-sec-cli scope delete --scope-id test-scope",
-            "agent-sec-cli policy delete --policy-id test-policy --revision 2",
+            format!("{cli} scope delete --scope-id test-scope"),
+            format!("{cli} policy delete --policy-id test-policy --revision 2"),
         ]
     );
     assert!(!plan.staging.exists());
@@ -822,7 +827,9 @@ fn failed_policy_admission_preserves_exact_registration_recovery() {
         .unwrap()
         .to_string();
         assert!(error.contains("root-only recovery files retained"));
-        assert!(error.contains("policy create --name"));
+        let cli = cli(&daemon.socket);
+        assert!(error.contains(&format!("`{cli} policy list`")));
+        assert!(error.contains(&format!("`{cli} policy create --name")));
         assert!(!error.contains(REAL) && !error.contains(FAKE));
         assert_eq!(
             read_token_file(&plan.staging.join("real"), 0)
@@ -931,6 +938,9 @@ fn scope_rejection_or_unknown_outcome_warns_about_committed_admission_without_re
         .unwrap()
         .to_string();
         assert!(error.contains("Scope admission may have committed"));
+        let cli = cli(&daemon.socket);
+        assert!(error.contains(&format!("`{cli} policy delete --policy-id test-policy")));
+        assert!(error.contains(&format!("`{cli} gateway key remove PAIR_ID`")));
         assert!(error.contains("scope") || error.contains("Scopes"));
         assert!(
             error.contains("test-policy") && error.contains("pair-a") && error.contains("pair-z")
@@ -940,4 +950,84 @@ fn scope_rejection_or_unknown_outcome_warns_about_committed_admission_without_re
         assert!(!plan.delivered.exists());
         assert_eq!(daemon.finish().len(), 2);
     }
+}
+
+#[test]
+fn follow_up_commands_name_the_socket_only_when_it_is_not_the_default() {
+    assert_eq!(cli(Path::new(crate::DEFAULT_SOCKET)), "agent-sec-cli");
+    assert_eq!(
+        cli(Path::new("/tmp/a b/it's.sock")),
+        "agent-sec-cli --socket '/tmp/a b/it'\\''s.sock'"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn generated_fake_delivery_drops_to_the_owner_and_never_replaces() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    const TARGET: &str = "ASC_INJECT_DELIVERY_TARGET";
+    if !root_child() {
+        return;
+    }
+    let owner = ResolvedOwner {
+        uid: 1000,
+        gid: 1000,
+        home: None,
+    };
+    if let Some(base) = std::env::var_os(TARGET) {
+        // The privilege drop is permanent, so each delivery runs in its own test child.
+        let result = deliver_fake(
+            &Path::new(&base).join("gateway"),
+            "fake",
+            FAKE,
+            &owner,
+            &["teardown-scope".into(), "teardown-policy".into()],
+        );
+        assert_eq!(rustix::process::geteuid().as_raw(), owner.uid);
+        assert_eq!(rustix::process::getegid().as_raw(), owner.gid);
+        assert!(nix::unistd::getgroups().unwrap().is_empty());
+        match result {
+            Ok(()) => println!("DELIVERY ok"),
+            Err(error) => println!("DELIVERY failed: {error}"),
+        }
+        return;
+    }
+    // A root-owned ancestor chain the owner can traverse; the owner-owned base is trusted.
+    let base = tempfile::tempdir_in("/").unwrap();
+    nix::unistd::chown(
+        base.path(),
+        Some(nix::unistd::Uid::from_raw(owner.uid)),
+        Some(nix::unistd::Gid::from_raw(owner.gid)),
+    )
+    .unwrap();
+    let deliver = || {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", thread::current().name().unwrap(), "--nocapture"])
+            .env(TARGET, base.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+    };
+    assert!(deliver().contains("DELIVERY ok"));
+    let directory = base.path().join("gateway");
+    let path = directory.join("fake");
+    for (path, mode) in [(&directory, 0o700), (&path, 0o600)] {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), (owner.uid, owner.gid));
+        assert_eq!(metadata.permissions().mode() & 0o7777, mode);
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), FAKE);
+    let replaced = deliver();
+    assert!(replaced.contains(
+        "DELIVERY failed: Policy and Scope were created but the fake file was not delivered"
+    ));
+    assert!(replaced.contains("tear down with: teardown-scope && teardown-policy"));
+    assert!(!replaced.contains(FAKE));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), FAKE);
 }

@@ -1239,6 +1239,41 @@ fn owner_file_creates_private_directories_and_never_replaces() {
 }
 
 #[test]
+fn owner_directories_stay_usable_and_private_under_a_restrictive_umask() {
+    const CHILD: &str = "ASC_CREDENTIAL_STORE_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // The umask is process-wide, so the restrictive case runs alone in a child.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::owner_directories_stay_usable_and_private_under_a_restrictive_umask",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    let Some(root) = token_fixture() else { return };
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o700));
+    let directory = root.path().join("a/b");
+    let path = write_owner_file(&directory, "fake", FAKE, uid, gid).unwrap();
+    assert_eq!(mode(&root.path().join("a")), 0o700);
+    assert_eq!(mode(&directory), 0o700);
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(fs::read_to_string(&path).unwrap(), FAKE);
+}
+
+#[test]
 fn root_asset_requires_root_ownership_and_no_shared_write() {
     run_root_case(concat!(
         module_path!(),
