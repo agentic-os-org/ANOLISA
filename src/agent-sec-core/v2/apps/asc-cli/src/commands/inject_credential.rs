@@ -649,6 +649,10 @@ fn failure(message: impl Into<String>) -> io::Error {
 }
 
 #[cfg(test)]
+#[path = "inject_credential_tests.rs"]
+mod boundary_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
@@ -659,7 +663,7 @@ mod tests {
         command: InjectCredentialCommand,
     }
 
-    fn parse(extra: &[&str]) -> Result<InjectCredentialCommand, clap::Error> {
+    pub(super) fn parse(extra: &[&str]) -> Result<InjectCredentialCommand, clap::Error> {
         let mut argv = vec![
             "inject-credential",
             "--builtin",
@@ -728,86 +732,6 @@ mod tests {
             Path::new(GATEWAY_DATADIR).join("github.cedar")
         );
         assert_eq!(fake_name(Builtin::Github, "ab"), "github-ab.fake");
-    }
-
-    #[test]
-    fn failed_policy_admission_preserves_exact_registration_recovery() {
-        use std::io::BufRead as _;
-        use std::os::unix::net::UnixListener;
-        if !cfg!(target_os = "linux") || !rustix::process::geteuid().is_root() {
-            return;
-        }
-        let directory = tempfile::tempdir_in(std::fs::canonicalize(".").unwrap()).unwrap();
-        let socket = directory.path().join("daemon.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            std::io::BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut request)
-                .unwrap();
-            assert_eq!(
-                serde_json::from_str::<Value>(&request).unwrap()["method"],
-                POLICY_TEMPLATES_CREATE
-            );
-            let response = DaemonResponse::<Value>::error(
-                asc_daemon_protocol::RequestId::new("failed-policy").unwrap(),
-                "internal",
-                "Policy persistence failed",
-            );
-            writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
-        });
-        let rendered = CedarPolicySource {
-            schema: asc_policy_cedar::schema::embedded_reference(),
-            text: "permit(principal, action, resource);".into(),
-        };
-        let plan = Plan {
-            owner: ResolvedOwner {
-                uid: 1000,
-                gid: 1000,
-                home: None,
-            },
-            selector: ScopeSelector::Process {
-                matcher: ProcessMatcher::Name {
-                    process_name: "agent".into(),
-                },
-            },
-            id: "recovery".into(),
-            policy_name: "inject-credential/github/1000/recovery".into(),
-            staging: directory.path().join("staged"),
-            delivered: directory.path().join("delivered"),
-            rendered: rendered.clone(),
-        };
-        let real = Secret::new("aaaaaaaaaaaaaaaaaaaa".into()).unwrap();
-        let error = create(
-            &socket,
-            Duration::from_secs(5),
-            &plan,
-            &real,
-            "bbbbbbbbbbbbbbbbbbbb",
-        )
-        .err()
-        .unwrap()
-        .to_string();
-        assert!(
-            error.contains("root-only recovery files retained"),
-            "{error}"
-        );
-        server.join().unwrap();
-        assert!(!error.contains(real.expose()));
-        assert_eq!(
-            read_token_file(&plan.staging.join("real"), 0)
-                .unwrap()
-                .expose(),
-            real.expose()
-        );
-        let recovery =
-            read_root_asset(&plan.staging.join("policy-source.json"), TEMPLATE_LIMIT).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&recovery).unwrap(),
-            serde_json::to_value(PolicySource::Cedar(rendered)).unwrap()
-        );
-        assert!(!plan.delivered.exists());
     }
 
     #[test]

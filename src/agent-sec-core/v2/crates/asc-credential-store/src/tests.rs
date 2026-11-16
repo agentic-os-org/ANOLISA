@@ -1047,22 +1047,59 @@ fn valid_store_open_cleans_crashed_writer_temporaries() {
     assert!(!leftover.exists());
 }
 
-// /tmp is intentionally rejected by the CLI helpers. Use a private fixture below
-// an already trusted workspace, or report the exact environment limitation.
+// The home directory keeps trust-boundary tests runnable in group-writable CI checkouts.
 fn token_fixture() -> Option<tempfile::TempDir> {
-    let base = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
     let uid = rustix::process::geteuid().as_raw();
-    for ancestor in base.ancestors() {
-        let metadata = fs::metadata(ancestor).unwrap();
-        if (metadata.uid() != 0 && metadata.uid() != uid) || metadata.mode() & 0o7022 != 0 {
-            eprintln!(
-                "token helper test skipped: workspace ancestor is not trusted: {}",
-                ancestor.display()
-            );
-            return None;
+    let candidates = std::iter::once(std::env::current_dir().unwrap())
+        .chain(std::env::var_os("HOME").map(PathBuf::from))
+        .chain((uid == 0 && cfg!(target_os = "linux")).then(|| PathBuf::from("/run")));
+    for candidate in candidates {
+        let Ok(base) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if base.ancestors().all(|ancestor| {
+            let metadata = fs::metadata(ancestor).unwrap();
+            (metadata.uid() == 0 || metadata.uid() == uid) && metadata.mode() & 0o7022 == 0
+        }) {
+            return Some(tempfile::tempdir_in(base).unwrap());
         }
     }
-    Some(tempfile::tempdir_in(base).unwrap())
+    eprintln!("token helper test skipped: no trusted fixture directory");
+    None
+}
+
+fn run_root_case(test_name: &str) {
+    if !cfg!(target_os = "linux") || rustix::process::geteuid().is_root() {
+        return;
+    }
+    if !std::process::Command::new("sudo")
+        .args(["-n", "true"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("root fixture skipped: passwordless sudo unavailable");
+        return;
+    }
+    let mut command = std::process::Command::new("sudo");
+    command.args(["-n", "env"]);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        let mut assignment = std::ffi::OsString::from("LLVM_PROFILE_FILE=");
+        assignment.push(profile);
+        command.arg(assignment);
+    }
+    let test_name = test_name.split_once("::").unwrap().1;
+    let output = command
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
 }
 
 #[test]
@@ -1173,13 +1210,7 @@ fn owner_file_creates_private_directories_and_never_replaces() {
     let Some(root) = token_fixture() else { return };
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
-    if uid == 0 {
-        let lock_path = root.path().join("locked");
-        let lock = crate::lock_root_directory(&lock_path).unwrap();
-        assert!(crate::lock_root_directory(&lock_path).is_err());
-        drop(lock);
-        assert!(crate::lock_root_directory(&lock_path).is_ok());
-    } else {
+    if uid != 0 {
         assert!(crate::lock_root_directory(root.path()).is_err());
     }
     let directory = root.path().join("a/b");
@@ -1209,11 +1240,20 @@ fn owner_file_creates_private_directories_and_never_replaces() {
 
 #[test]
 fn root_asset_requires_root_ownership_and_no_shared_write() {
+    run_root_case(concat!(
+        module_path!(),
+        "::root_asset_requires_root_ownership_and_no_shared_write"
+    ));
     let Some(root) = token_fixture() else { return };
     let path = root.path().join("asset");
     fs::write(&path, "permit(principal, action, resource);").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     if rustix::process::geteuid().is_root() {
+        let lock_path = root.path().join("locked");
+        let lock = crate::lock_root_directory(&lock_path).unwrap();
+        assert!(crate::lock_root_directory(&lock_path).is_err());
+        drop(lock);
+        assert!(crate::lock_root_directory(&lock_path).is_ok());
         assert_eq!(
             read_root_asset(&path, 64).unwrap(),
             b"permit(principal, action, resource);"
