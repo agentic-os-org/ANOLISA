@@ -30,6 +30,50 @@ use asc_policy_types::scope::PreparedScope;
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_DISCOVERY_JOBS: usize = 32;
 
+/// Drops persisted instances and pins from a previous boot.
+///
+/// A persisted instance carries the boot it was observed in. A different
+/// boot proves that instance exited, even when the same numeric PID exists
+/// again with unreadable metadata, so its Binding must reach the durable
+/// cleanup path instead of surviving the reboot outside the deletion
+/// lifecycle. The PID pin follows the same rule: the pinned process from a
+/// previous boot is gone, and the scope stays available for the first
+/// matching process of this boot rather than silently matching nothing
+/// forever. Same-boot instances, including unreadable ones, are preserved.
+fn seed_for_current_boot(
+    seed: &asc_pap::ScopeDiscoverySeed,
+    boot_id: &str,
+) -> asc_pap::ScopeDiscoverySeed {
+    let mut current_boot = seed.clone();
+    current_boot
+        .instances
+        .retain(|instance| instance.boot_id == boot_id);
+    if current_boot
+        .pinned_process
+        .as_ref()
+        .is_some_and(|pin| pin.boot_id != boot_id)
+    {
+        current_boot.pinned_process = None;
+    }
+    current_boot
+}
+
+/// Reads the current host boot id; discovery identities are only comparable
+/// within one boot.
+///
+/// # Errors
+///
+/// Returns an error when the boot id cannot be read or is empty.
+fn read_boot_id(root: &Path) -> Result<String, PapError> {
+    let boot_id = fs::read_to_string(root.join("sys/kernel/random/boot_id"))
+        .map_err(|_| PapError::Unavailable)?;
+    let trimmed = boot_id.trim().to_owned();
+    if trimmed.is_empty() {
+        return Err(PapError::Unavailable);
+    }
+    Ok(trimmed)
+}
+
 /// Bounded owner of discovery jobs created through Scope admission.
 pub struct ScopeDiscoveryRegistry {
     // None closes admission before workers are taken out for joining.
@@ -78,12 +122,23 @@ impl asc_pap::ScopeDiscovery for ScopeDiscoveryRegistry {
         if jobs.len() >= MAX_DISCOVERY_JOBS {
             return Err(PapError::Unavailable);
         }
-        let state =
-            ScopeDiscoveryState::from_seed(scope.clone()).map_err(|_| PapError::Conflict)?;
+        let root = PathBuf::from("/proc");
+        let boot_id = read_boot_id(&root)?;
+        // A persisted instance carries the boot it was observed in. A
+        // different boot proves that instance exited, even when the same
+        // numeric PID exists again with unreadable metadata, so its Binding
+        // must reach the durable cleanup path instead of surviving the
+        // reboot outside the deletion lifecycle. The PID pin follows the
+        // same rule: the pinned process from a previous boot is gone, and
+        // the scope stays available for the first matching process of this
+        // boot rather than silently matching nothing forever.
+        let state = ScopeDiscoveryState::from_seed(seed_for_current_boot(scope, &boot_id))
+            .map_err(|_| PapError::Conflict)?;
         let job = ScopeDiscoveryJob::spawn(
             scope.scope_id.clone(),
             state,
-            PathBuf::from("/proc"),
+            root,
+            boot_id,
             SCAN_INTERVAL,
             self.sink.clone(),
         )
@@ -117,6 +172,7 @@ impl ScopeDiscoveryJob {
         scope_id: ResourceId,
         state: ScopeDiscoveryState,
         root: PathBuf,
+        boot_id: String,
         interval: Duration,
         sink: Arc<dyn asc_pap::ScopeBindingSink>,
     ) -> Result<Self, PapError> {
@@ -125,11 +181,6 @@ impl ScopeDiscoveryJob {
             arguments: state.requires_arguments(),
         };
         let state = Arc::new(Mutex::new(state));
-        let boot_id = fs::read_to_string(root.join("sys/kernel/random/boot_id"))
-            .map_err(|_| PapError::Unavailable)?;
-        if boot_id.trim().is_empty() {
-            return Err(PapError::Unavailable);
-        }
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker_state = state.clone();
@@ -629,6 +680,7 @@ mod tests {
             scope.scope_id,
             state,
             "/proc".into(),
+            read_boot_id(Path::new("/proc")).unwrap(),
             Duration::from_millis(20),
             Arc::new(TestSink),
         )
@@ -749,6 +801,7 @@ mod tests {
             scope.scope_id.clone(),
             ScopeDiscoveryState::for_scope(scope).unwrap(),
             "/proc".into(),
+            read_boot_id(&PathBuf::from("/proc")).unwrap(),
             Duration::from_millis(20),
             Arc::new(TestSink),
         )
@@ -778,6 +831,148 @@ mod tests {
             !arguments
                 .iter()
                 .any(|argument| argument.as_encoded_bytes() == target)
+        );
+    }
+
+    fn seed_identity(pid: u32, boot: &str) -> ProcessIdentity {
+        ProcessIdentity {
+            boot_id: boot.to_owned(),
+            pid_namespace: "pid:[42]".to_owned(),
+            pid,
+            start_time: 1,
+        }
+    }
+
+    #[test]
+    fn recovery_drops_previous_boot_instances_and_keeps_same_boot_unreadable_ones() {
+        // After a host reboot a persisted instance whose PID exists again but
+        // whose metadata cannot be read must not survive in the seed: the
+        // different boot id proves the old instance exited, so its Binding
+        // reaches the durable PENDING_DELETE path on the first sync. A
+        // same-boot instance stays restored even while unreadable.
+        let seed = asc_pap::ScopeDiscoverySeed {
+            scope: PreparedScope {
+                scope_id: ResourceId::new("scope-one").unwrap(),
+                owner_uid: None,
+                status: asc_policy_types::scope::ScopeStatus::Active,
+                selector: asc_policy_types::scope::ScopeSelector::Process {
+                    matcher: asc_policy_types::scope::ProcessMatcher::Executable {
+                        executable: "/bin/agent".to_owned(),
+                    },
+                },
+                policy_snapshots: Vec::new(),
+            },
+            pinned_process: None,
+            instances: vec![
+                seed_identity(10, "boot-one"),
+                seed_identity(20, "boot-two"),
+            ],
+        };
+        let restored = seed_for_current_boot(&seed, "boot-two");
+        assert_eq!(
+            restored.instances.iter().map(|i| i.pid).collect::<Vec<_>>(),
+            vec![20],
+            "the previous-boot instance must not survive the reboot seed"
+        );
+        assert_eq!(
+            seed_for_current_boot(&seed, "boot-one")
+                .instances
+                .iter()
+                .map(|i| i.pid)
+                .collect::<Vec<_>>(),
+            vec![10],
+            "same-boot instances, unreadable or not, are preserved"
+        );
+    }
+
+    #[test]
+    fn recovery_clears_a_previous_boot_pin_so_pid_scopes_stay_available() {
+        // The pinned process from a previous boot is gone. Keeping its pin
+        // would make a PID scope match nothing forever, so the pin is
+        // cleared and the scope stays available for the first matching
+        // process of the current boot; PID reuse within one boot keeps the
+        // original pin.
+        let mut seed = asc_pap::ScopeDiscoverySeed {
+            scope: PreparedScope {
+                scope_id: ResourceId::new("scope-one").unwrap(),
+                owner_uid: None,
+                status: asc_policy_types::scope::ScopeStatus::Active,
+                selector: asc_policy_types::scope::ScopeSelector::Pid { pid: 10 },
+                policy_snapshots: Vec::new(),
+            },
+            pinned_process: Some(seed_identity(10, "boot-one")),
+            instances: vec![seed_identity(10, "boot-one")],
+        };
+        let restored = seed_for_current_boot(&seed, "boot-two");
+        assert!(
+            restored.pinned_process.is_none(),
+            "a previous-boot pin must not survive the reboot"
+        );
+        assert!(
+            restored.instances.is_empty(),
+            "the previous-boot instance must not survive the reboot seed"
+        );
+        seed.pinned_process = Some(seed_identity(10, "boot-two"));
+        let same_boot = seed_for_current_boot(&seed, "boot-two");
+        assert_eq!(
+            same_boot.pinned_process.as_ref().map(|p| p.start_time),
+            Some(1),
+            "same-boot pins are preserved"
+        );
+    }
+
+    #[test]
+    fn recovered_previous_boot_binding_retires_on_first_sync() {
+        // End-to-end at the source level: a Pid-scope Binding persisted for a
+        // boot-one process is restored against boot-two. The seed no longer
+        // carries the instance, so the worker's first sync submits no
+        // instances and the repository retires the Binding toward
+        // PENDING_DELETE instead of leaving it PENDING_APPLY.
+        let (repository, policy) = policies();
+        let pap = PapService::new(repository.clone());
+        use asc_pap::PapRepository;
+        let scope_id = ResourceId::new("scope:reboot").unwrap();
+        repository
+            .put_scope(&PreparedScope {
+                scope_id: scope_id.clone(),
+                owner_uid: None,
+                status: asc_policy_types::scope::ScopeStatus::Active,
+                selector: asc_policy_types::scope::ScopeSelector::Pid { pid: 10 },
+                policy_snapshots: vec![policy],
+            })
+            .unwrap();
+        let previous_boot = seed_identity(10, "boot-one");
+        repository
+            .sync_scope_instances(&scope_id, &[previous_boot])
+            .unwrap();
+        let binding_id = repository
+            .list_bindings(10, 0)
+            .unwrap()
+            .items
+            .iter()
+            .find(|binding| binding.spec.scope.scope_id == scope_id)
+            .map(|binding| binding.spec.binding_id.clone())
+            .unwrap();
+        assert_eq!(
+            repository.get_binding(&binding_id).unwrap().status.phase,
+            asc_policy_types::binding::BindingStatus::PendingApply,
+            "the persisted Binding is live before recovery"
+        );
+        let seed = repository.scope_discovery_seed(&scope_id).unwrap();
+        let restored = seed_for_current_boot(&seed, "boot-two");
+        assert!(
+            restored.instances.is_empty(),
+            "the previous-boot instance must not survive the seed"
+        );
+        // The worker submits the restored (empty) selection; the repository
+        // then retires the orphaned Binding.
+        repository
+            .sync_scope_instances(&scope_id, &restored.instances)
+            .unwrap();
+        assert_eq!(
+            repository.get_binding(&binding_id).unwrap().status.phase,
+            asc_policy_types::binding::BindingStatus::PendingDelete,
+            "the stale previous-boot Binding must enter the durable cleanup path"
         );
     }
 }
