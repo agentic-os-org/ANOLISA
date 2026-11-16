@@ -91,7 +91,11 @@ impl Daemon {
         steps: Vec<(&'static str, Option<DaemonResponse<Value>>)>,
         inspect: impl Fn(&DaemonRequest) + Send + 'static,
     ) -> Self {
-        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        // Whitespace in the endpoint exercises quoting of every emitted follow-up command.
+        let directory = tempfile::Builder::new()
+            .prefix("asc daemon ")
+            .tempdir_in("/tmp")
+            .unwrap();
         let socket = directory.path().join("d.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -545,6 +549,26 @@ fn assert_packaged_dry_run(
     assert!(!command.fake_token_file.as_ref().unwrap().exists());
 }
 
+/// A concurrent run holding the staging lock is rejected at once, before any daemon call.
+fn assert_contended_run_is_rejected_before_daemon_calls(
+    command: &InjectCredentialCommand,
+    directory: &Path,
+) {
+    let _held = lock_root_directory(Path::new(STAGING_ROOT)).unwrap();
+    let socket = directory.join("contended.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let error = command
+        .run(&socket, TIMEOUT, &mut Vec::new(), &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("in use by another process"), "{error}");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
 #[test]
 fn existing_fake_run_and_dry_run_preserve_packaged_asset_and_never_enable_gateway() {
     if !root_child() {
@@ -562,6 +586,7 @@ fn existing_fake_run_and_dry_run_preserve_packaged_asset_and_never_enable_gatewa
     command.real_token_file = write_owner_file(directory.path(), "real", REAL, 0, 0).unwrap();
     command.fake_token_file = Some(write_owner_file(directory.path(), "fake", FAKE, 0, 0).unwrap());
     command.dry_run = false;
+    assert_contended_run_is_rejected_before_daemon_calls(&command, directory.path());
     for phase in [None, Some("READY"), Some("APPLY_FAILED")] {
         command.wait_seconds = u32::from(phase.is_some());
         let mut steps = vec![
