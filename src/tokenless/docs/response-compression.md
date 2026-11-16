@@ -248,7 +248,11 @@ block 中）；`<svg>`（保留 `xlink:href` 等前缀属性，去除根上纯�
 `application/ld+json`）、表单控件与状态、`del`/`ins`/`s`/`sub`/`sup`/`time`/`data`、行内
 `line-through`/`sub`/`super`/`white-space`、不含函数调用的 `list-style`、含文字的
 `aria-hidden` 及 `javascript:`/`data:`
-链接和图片作为紧凑 HTML 原地保留（`Verbatim`）。全局风险——可执行或外部 `<script>`、行内 `on*` 事件属性、`javascript:`/`data:` 表单提交
+链接和图片作为紧凑 HTML 原地保留（`Verbatim`）。零值 `text-indent` 作为纯外观样式移除；
+未分类的行内 CSS 声明连同其元素、原始 `style` 属性和完整子树保留为 HTML，其他独立子树
+继续压缩。非零缩进、逻辑尺寸、定位、网格位置、计数器和动画等已知可见性或跨元素效果仍整值回退。
+样式表中未识别的声明同样整值回退，因为当前不匹配选择器，无法定位到局部元素。
+全局风险——可执行或外部 `<script>`、行内 `on*` 事件属性、`javascript:`/`data:` 表单提交
 地址、`<template>`、`iframe`/`object`/`embed`、MathML、未知或自定义元素、`<base>`、`<link>`、非
 纯外观 `<meta>`、折叠或分组 `details`、`hidden` 属性、HTML 或 SVG `<style>` 中超出纯外观白
 名单的规则、带 `url()` 等函数的 `list-style*`、零尺寸隐藏替换图片、

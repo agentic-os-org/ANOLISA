@@ -214,6 +214,14 @@ HTML:
   `vertical-align`, preserved `white-space`, and `javascript:`, `data:`, or
   unbalanced-bracket links and images.
 
+Zero `text-indent` values such as `0`, `0px`, and `0%` are cosmetic and removed.
+An otherwise unclassified inline declaration keeps its element, original `style`
+attribute, and complete subtree as HTML; independent sibling subtrees can still
+convert to Markdown. Known visibility and cross-element effects (including
+non-zero indentation, logical sizes, positioning, grid placement, counters, and
+animation) still reject the whole value. Unknown declarations in a `<style>` sheet also reject the
+value because selectors are not matched to individual elements.
+
 A value still passes through unchanged as a whole when global safety cannot be verified,
 when the view could reveal hidden text or obscure legible text, or when no subtree
 converts to Markdown:
