@@ -15,9 +15,9 @@ use cli::serve::ServeCommand;
 use cli::trace::TraceCommand;
 #[cfg(target_os = "linux")]
 use cli::{
-    audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
-    metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, summary::SummaryCommand,
-    token::TokenCommand,
+    audit::AuditCommand, cache::CacheCommand, discover::DiscoverCommand,
+    interruption::InterruptionCommand, metrics::MetricsCommand, skill_metrics::SkillMetricsCommand,
+    summary::SummaryCommand, token::TokenCommand,
 };
 
 #[derive(Debug, StructOpt)]
@@ -39,6 +39,9 @@ pub enum Command {
     /// Query token consumption data
     #[cfg(target_os = "linux")]
     Token(TokenCommand),
+    /// Diagnose prompt-cache hit rates, low-hit causes and their cost
+    #[cfg(target_os = "linux")]
+    Cache(CacheCommand),
     /// Trace agent activity (default)
     #[cfg(any(target_os = "linux", feature = "server"))]
     Trace(TraceCommand),
@@ -79,6 +82,8 @@ fn main() {
     match cmd {
         #[cfg(target_os = "linux")]
         Command::Token(token_cmd) => token_cmd.execute(),
+        #[cfg(target_os = "linux")]
+        Command::Cache(cache_cmd) => cache_cmd.execute(),
         #[cfg(any(target_os = "linux", feature = "server"))]
         Command::Trace(trace_cmd) => trace_cmd.execute(),
         #[cfg(target_os = "linux")]

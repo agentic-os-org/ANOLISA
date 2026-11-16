@@ -11,9 +11,9 @@
 |---|---|
 | 权限 | `trace` 需要 root（或 `CAP_BPF` + `CAP_PERFMON`）。查询类命令需要读取 `/var/log/sysak/.agentsight`，该目录归服务所有，请加 `sudo`。 |
 | 配置文件 | 需要读取规则的命令支持 `--config`，默认 `/etc/agentsight/config.json`。`discover` 读取与 `trace` 相同的文件，因此会反映你的自定义规则。 |
-| 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption`、`token` 支持用 `--db` 指定其他数据库文件。 |
-| 机器可读输出 | `discover`、`token`、`metrics`、`audit`、`summary`、`interruption *`、`skill-metrics *` 都支持 `--json`。 |
-| 输出语言 | `summary`、`metrics`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`。 |
+| 数据位置 | 固定为 `/var/log/sysak/.agentsight`。`serve`、`dashboard`、`skill-metrics`、`audit`、`metrics`、`summary`、`interruption`、`token`、`cache` 支持用 `--db` 指定其他数据库文件。 |
+| 机器可读输出 | `discover`、`token`、`cache`、`metrics`、`audit`、`summary`、`interruption *`、`skill-metrics *` 都支持 `--json`。 |
+| 输出语言 | `summary`、`metrics`、`cache`、`interruption` 输出英文；`discover`、`token` 无论 locale 都输出中文。需要稳定文本时请用 `--json`。 |
 | 平台 | macOS 上只有 `trace`（轨迹采集）和 `serve`。 |
 | 示例 ID | 示例里的会话、对话、调用、中断 ID 都是占位值，请替换成你自己输出里的实际 ID。 |
 
@@ -265,6 +265,100 @@ $ sudo agentsight token --json
 # 本周与上周对比
 sudo agentsight token --period week --compare
 ```
+
+## agentsight cache
+
+按 Agent、提供方和模型给出提示词缓存命中率、低命中原因以及对应成本。账单或延迟上涨、需要知道请求的
+哪一部分不再复用缓存时使用；修复前后各取一个窗口对比，即可验证修复效果。
+
+```
+FLAGS:
+        --compare    Compare with the preceding window of the same length
+        --json       Output as JSON
+
+OPTIONS:
+        --agent <agent>                            Only calls of this agent (case-insensitive)
+        --baseline-until <baseline-until>          Compare with the window of the same length ending at this RFC 3339 time
+        --db <db>                                  Override the database path
+        --last <last>                              Window length in hours [default: 24]
+        --low-hit-rate <low-hit-rate>              Conservative hit rate below which a well-sampled group needs review [default: 0.5]
+        --price-cache-read <price-cache-read>      Price per million tokens read from the cache
+        --price-cache-write <price-cache-write>    Price per million tokens written to the cache
+        --price-input <price-input>                Price per million uncached input tokens (all four prices go together)
+        --price-output <price-output>              Price per million output tokens
+        --session <session>                        Only calls of this session
+        --ttl-secs <ttl-secs>                      Gap in seconds after which a cache entry is assumed expired [default: 300]
+        --until <until>                            End of the window as RFC 3339 (default: now)
+```
+
+```bash
+$ sudo agentsight cache --agent profiling --compare
+Prompt cache, 2026-01-01 08:00 → 2026-01-02 08:00
+
+Profiling · openai · qwen3.8-max — needs review
+  Hit rate: 20.0% conservative, 20.0% with complete fields (baseline 90.0%, -70.0 pp, regressed)
+  Calls: 40 (40 with usage, 40 with cache-read counter, 4 explicit zero, 0 duplicates, 0 failed)
+  Tokens: input 2,000,000 · read 400,000 · write 100,000 · uncached 1,500,000 · output 5,000
+  Latency p50, TTFT / end-to-end: hit 1000 ms / 5000 ms (4 calls, median input 20,000) · miss 2000 ms / 10000 ms (36 calls, median input 60,000)
+  [suspected] fixed_prefix_plateau: calls 30, missed 1,000,000 of 1,200,000 unread tokens, latency p50 2000 ms / 10000 ms
+      Cache reads stay at one fixed size while the input grows, so only a static prefix is cached. Move the cache breakpoint forward with the history, for example onto the latest tool result.
+      e.g. trace 00000000-0000-0000-0000-000000000001 (session 00000000-0000-0000-0000-000000000002): input 100,000, read 10,000, previous input 90,000
+  [expected] cold_start: calls 4, missed 0 of 40,000 unread tokens, latency p50 2000 ms / 10000 ms
+      The first call of a session writes the cache. Longer sessions or a shared static prefix amortize it.
+      e.g. trace 00000000-0000-0000-0000-000000000003 (session 00000000-0000-0000-0000-000000000002): input 10,000, read 0, previous input -
+```
+
+解读方式：
+
+- **命中率**按 Token 加权：缓存读取量除以输入量，不对单次调用的比例取平均。保守口径把缺少缓存读取
+  字段的调用按 0 计入；字段完整口径不统计这类调用。缺少字段不等于确认未命中，因此整组都没有该字段时
+  显示 `cannot judge`，而不是 0%。
+- **状态**只有在该组至少有 20 条带用量的调用、累计 200,000 个输入 Token，并且满足以下任一条件时，
+  才显示 `needs review`：保守命中率低于 `--low-hit-rate`；疑似缺陷类原因漏用的输入占总输入 20% 以上；
+  比基线下降 15 个百分点以上。样本更少的组显示 `too few samples to judge`。
+- **Latency p50** 分别给出命中调用（从缓存读取了至少 `--low-hit-rate` 比例输入，hit）与其余调用（miss）
+  的首 token 时间和端到端耗时。`n/a` 表示这些调用没有对应的时间数据。输入规模同样影响延迟，请结合每项
+  旁边的输入中位数比较。
+- **Findings** 把每次调用与同一会话的上一次调用比较。`missed` 是上一次调用中本可从缓存读取却没读到
+  的输入；`unread` 是所有没有从缓存读取的输入，包含缓存写入。排序时疑似缺陷在前，再按 missed Token 数。
+
+| 原因 | 类别 | 含义 |
+|---|---|---|
+| `fixed_prefix_plateau` | suspected | 历史增长时读取量保持不变：只缓存了静态前缀 |
+| `prefix_not_reused` | suspected | 上一次未变化的输入没有被读取，且没有其他原因能解释 |
+| `system_prompt_changed` | suspected | 系统提示词与上一次调用不同 |
+| `tools_changed` | suspected | 工具定义与上一次调用不同 |
+| `model_switched` | suspected | 会话内切换了模型；缓存按模型和路由隔离 |
+| `history_rewritten` | expected | 请求的消息数少于上一次（压缩或截断） |
+| `cache_expired` | expected | 上一次调用结束距今超过 `--ttl-secs` |
+| `cold_start` | expected | 会话的第一次调用 |
+| `new_input_dominant` | expected | 上一次的输入已被复用，比例偏低来自新增内容 |
+| `cache_fields_missing` | undeterminable | 响应没有缓存读取字段 |
+| `failed_calls` | undeterminable | HTTP 错误或已记录的中断 |
+| `no_session_context` | undeterminable | 没有会话或对话 ID，无法比较 |
+
+价格按每百万 Token 计，并随提供方、模型、地域和合同变化，因此命令不会假设价格。四个价格同时传入时
+才输出成本行：输入成本为 `(uncached × input + read × cache read + write × cache write) / 1,000,000`，
+其中 `uncached = input − read − write`，缓存写入不会再按普通输入重复计费。读取与写入之和超过输入的
+调用使用了不相容的计数口径，不计入成本。`missed` 估算的是这些 Token 若从缓存读取还能再省下的费用。
+
+```bash
+# 2026-01-02 12:00 上线修复，对比修复前一天与修复后一天
+sudo agentsight cache --last 24 --until 2026-01-03T12:00:00+08:00 \
+  --baseline-until 2026-01-02T12:00:00+08:00 \
+  --price-input 12 --price-cache-read 1 --price-cache-write 15 --price-output 36 --json
+```
+
+限制：
+
+- 原因由 Token 计数，以及系统提示词、工具定义和消息数的指纹推断。AgentSight 不记录 `cache_control`
+  这类显式缓存标记挂在哪条消息上，因此标记放错位置会表现为 `fixed_prefix_plateau` 或
+  `prefix_not_reused`，需要在实际发出的请求里确认。
+- 单个窗口最多读取最新的 20,000 次已完成调用；窗口内调用更多时输出会注明。
+- 传入价格时，JSON 输出会给出两个窗口的 `input_cost_per_mtok`，便于比较负载不同的窗口，但工作负载
+  不同仍会改变命中率。请对比运行相同工作的窗口。
+
+同样的诊断也通过 `GET /api/metrics/cache` 提供，并显示在 Dashboard 的 Agent 看板页。
 
 ## agentsight audit
 

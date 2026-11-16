@@ -1,11 +1,13 @@
 //! CLI subcommand modules for agentsight binary
 //!
-//! Linux-only subcommands: token, audit, discover, interruption,
+//! Linux-only subcommands: token, cache, audit, discover, interruption,
 //! metrics, skill-metrics, summary, dashboard
 //! Cross-platform: serve, trace (branches internally on OS)
 
 #[cfg(target_os = "linux")]
 pub mod audit;
+#[cfg(target_os = "linux")]
+pub mod cache;
 #[cfg(all(feature = "server", target_os = "linux"))]
 pub mod dashboard;
 #[cfg(target_os = "linux")]

@@ -4,6 +4,7 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
+mod cache;
 mod capabilities;
 mod causal;
 pub(crate) mod causal_store;
@@ -261,6 +262,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
                 .service(handlers::get_latency_metrics)
+                .service(cache::get_cache_diagnosis)
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
@@ -441,6 +443,11 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/agent-names", "Distinct agent names"),
     ("GET", "/api/timeseries", "Token/call time series"),
     ("GET", "/api/metrics/latency", "LLM latency metrics"),
+    (
+        "GET",
+        "/api/metrics/cache",
+        "Prompt-cache hit rate and low-hit diagnosis",
+    ),
     ("POST", "/api/grader/evaluate", "Run grader on a session"),
     ("GET", "/api/grader/latest", "Latest grader result"),
     (
