@@ -21,6 +21,7 @@ pub(crate) enum Flow {
     LoginSet,
     LoginRestore,
     LoginOther,
+    LoginReread,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,7 @@ pub(crate) struct Session {
     pub(crate) tips_cursor: usize,
     pub(crate) scroll: usize,
     pub(crate) message: Option<String>,
+    pub(crate) login_guidance: bool,
     pub(crate) ai: Reading<GuideAuthSummary>,
     pub(crate) ai_loading: bool,
     pub(crate) ai_rx: Option<std::sync::mpsc::Receiver<Reading<GuideAuthSummary>>>,
@@ -73,6 +75,7 @@ impl Session {
             tips_cursor: 0,
             scroll: 0,
             message: None,
+            login_guidance: false,
             ai: Reading::Unknown,
             ai_loading: false,
             ai_rx: None,
@@ -499,12 +502,12 @@ impl Session {
             }
             Page::Ai => return Flow::Handoff,
             Page::Login => {
-                let has_restore =
-                    matches!(&self.snapshot.login, Ok(status) if status.original_bash.is_some());
-                return match self.choice_index() {
-                    0 => Flow::LoginSet,
-                    1 if has_restore => Flow::LoginRestore,
-                    _ => Flow::LoginOther,
+                return match self.login_choices().get(self.choice_index()).copied() {
+                    Some(super::login::LoginChoice::Set) => Flow::LoginSet,
+                    Some(super::login::LoginChoice::Restore) => Flow::LoginRestore,
+                    Some(super::login::LoginChoice::Other) => Flow::LoginOther,
+                    Some(super::login::LoginChoice::Reread) => Flow::LoginReread,
+                    None => Flow::Continue,
                 };
             }
             Page::Start => {}
@@ -516,6 +519,7 @@ impl Session {
         self.page = page;
         self.cursor = 0;
         self.scroll = 0;
+        self.login_guidance = false;
         self.shift(0);
         self.tips_default_focus();
         if page == Page::Language {
@@ -555,6 +559,7 @@ impl Session {
         }
         self.scroll = 0;
         self.message = None;
+        self.login_guidance = false;
         Flow::Continue
     }
 

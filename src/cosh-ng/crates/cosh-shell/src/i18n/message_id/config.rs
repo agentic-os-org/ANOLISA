@@ -209,6 +209,9 @@ macro_rules! guide_wizard_ids {
             GuideWizardConfigUnreadable,
             GuideWizardDataClearConfirm,
             GuideWizardLoginHandoffFailed,
+            GuideWizardLoginOtherGuidance,
+            GuideWizardLoginReread,
+            GuideWizardLoginRereadDone,
         );
     };
 }

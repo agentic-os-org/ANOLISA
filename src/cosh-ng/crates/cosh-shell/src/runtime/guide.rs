@@ -66,6 +66,7 @@ pub(crate) fn run_interactive() -> i32 {
                     session::Flow::LoginSet => "set",
                     session::Flow::LoginRestore => "restore",
                     session::Flow::LoginOther => "other",
+                    session::Flow::LoginReread => "reread",
                     _ => "",
                 };
                 match flow {
@@ -82,13 +83,11 @@ pub(crate) fn run_interactive() -> i32 {
                         };
                         session.finish_handoff(result);
                     }
-                    session::Flow::LoginSet
-                    | session::Flow::LoginRestore
-                    | session::Flow::LoginOther => {
+                    session::Flow::LoginOther | session::Flow::LoginReread => {
+                        session.run_login(login_action);
+                    }
+                    session::Flow::LoginSet | session::Flow::LoginRestore => {
                         drop(screen);
-                        let notice = I18n::new(session.language())
-                            .t(crate::i18n::MessageId::GuideWizardLoginHandoff);
-                        println!("{notice}");
                         session.run_login(login_action);
                         screen = match enter_screen() {
                             Ok(screen) => screen,

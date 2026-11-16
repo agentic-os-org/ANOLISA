@@ -1,3 +1,4 @@
+use super::login::LoginChoice;
 use super::session::{Flow, Session};
 use super::status::{self, Reading};
 use crate::config::guide::cli::UserPaths;
@@ -539,21 +540,236 @@ fn failed_config_saves_are_logged_without_sensitive_toml_lines() {
     assert!(!logs.contains("api_key"), "{logs}");
 }
 
-#[test]
-fn other_user_login_reports_current_exe_and_spawn_failures() {
-    let (_guard, temp, paths) = isolated_fixture();
-    let mut session = Session::new(paths, I18n::new(Language::EnUs));
-    for exe in [
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "exe unavailable",
-        )),
-        Ok(temp.path().join("missing-cosh-executable")),
-    ] {
-        session.message = None;
-        session.run_login_other(exe);
-        assert!(session.view().message.unwrap().contains("failed"));
+fn login_status(
+    current_shell: &str,
+    original_bash: Option<&str>,
+    transaction: &str,
+    managed: bool,
+    conflict: bool,
+) -> crate::runtime::login::LoginStatus {
+    crate::runtime::login::LoginStatus {
+        username: "root".into(),
+        uid: 0,
+        current_shell: current_shell.into(),
+        original_bash: original_bash.map(str::to_string),
+        transaction: transaction.into(),
+        managed,
+        conflict,
     }
+}
+
+fn login_session(
+    status: crate::runtime::login::LoginStatus,
+) -> (EnvGuard, tempfile::TempDir, Session) {
+    let (guard, temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.snapshot.login = Ok(status);
+    session.enter(super::session::Page::Login);
+    (guard, temp, session)
+}
+
+fn login_choice_labels(session: &Session) -> Vec<String> {
+    session
+        .login_rows()
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::guide::WizardRow::Choice { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn restored_login_page_offers_set_and_other_only() {
+    let (_guard, _temp, session) = login_session(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    assert_eq!(
+        session.login_choices(),
+        vec![LoginChoice::Set, LoginChoice::Other]
+    );
+    assert_eq!(
+        login_choice_labels(&session),
+        vec![
+            "Set Cosh as login shell",
+            "Other user (show management commands)"
+        ]
+    );
+}
+
+#[test]
+fn restored_login_second_choice_routes_to_other() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    let second_choice = session
+        .login_rows()
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| matches!(row, crate::ui::guide::WizardRow::Choice { .. }))
+        .nth(1)
+        .unwrap()
+        .0;
+    session.cursor = second_choice;
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginOther
+    ));
+}
+
+#[test]
+fn managed_login_page_offers_restore_and_other_only() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/usr/bin/cosh",
+        Some("/bin/bash"),
+        "applied",
+        true,
+        false,
+    ));
+    assert_eq!(
+        session.login_choices(),
+        vec![LoginChoice::Restore, LoginChoice::Other]
+    );
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginRestore
+    ));
+}
+
+#[test]
+fn unmanaged_bash_login_page_offers_set_and_other() {
+    let (_guard, _temp, session) =
+        login_session(login_status("/bin/bash", None, "unmanaged", false, false));
+    assert_eq!(
+        session.login_choices(),
+        vec![LoginChoice::Set, LoginChoice::Other]
+    );
+}
+
+#[test]
+fn unmanaged_cosh_login_page_has_no_mutation_choice() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/usr/bin/cosh",
+        None,
+        "unmanaged",
+        false,
+        false,
+    ));
+    assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginReread
+    ));
+}
+
+#[test]
+fn conflict_login_page_has_no_mutation_choice() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/bin/zsh",
+        Some("/bin/bash"),
+        "conflict",
+        false,
+        true,
+    ));
+    assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginReread
+    ));
+}
+
+#[test]
+fn read_error_login_page_has_no_mutation_choice() {
+    let (_guard, _temp, mut session) =
+        login_session(login_status("/bin/bash", None, "unmanaged", false, false));
+    session.snapshot.login = Err("read failed".into());
+    assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+    assert_eq!(login_choice_labels(&session), vec!["Reread login status"]);
+    session.shift(0);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginReread
+    ));
+}
+
+#[test]
+fn login_cursor_clamps_when_choices_shrink() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/usr/bin/cosh",
+        Some("/bin/bash"),
+        "applied",
+        true,
+        false,
+    ));
+    let second_choice = session
+        .login_rows()
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| matches!(row, crate::ui::guide::WizardRow::Choice { .. }))
+        .nth(1)
+        .unwrap()
+        .0;
+    session.cursor = second_choice;
+    session.snapshot.login = Ok(login_status(
+        "/bin/zsh",
+        Some("/bin/bash"),
+        "conflict",
+        false,
+        true,
+    ));
+    session.shift(0);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginReread
+    ));
+}
+
+#[test]
+fn other_user_login_shows_cli_guidance_without_handoff() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    session.run_login("other");
+    let rows = session.login_rows();
+    for command in [
+        "cosh login status --user USER",
+        "cosh login set --user USER",
+        "cosh login restore --user USER",
+    ] {
+        assert!(
+            rows.iter().any(
+                |row| matches!(row, crate::ui::guide::WizardRow::Text(text) if text == command)
+            ),
+            "{command} missing"
+        );
+    }
+    assert_eq!(
+        session.login_choices(),
+        vec![LoginChoice::Set, LoginChoice::Other]
+    );
+}
+
+#[test]
+fn reread_login_reports_refresh() {
+    let (_guard, _temp, mut session) =
+        login_session(login_status("/bin/bash", None, "unmanaged", false, false));
+    session.run_login("reread");
+    assert!(session
+        .message
+        .as_deref()
+        .is_some_and(|message| message.contains("reread")));
 }
 
 #[test]
@@ -570,15 +786,11 @@ fn failed_login_outcomes_and_handoffs_are_logged_without_error_payloads() {
         let mut session = Session::new(paths, I18n::new(Language::EnUs));
         session.finish_login("set", Outcome::Unconfirmed);
         session.finish_login("restore", Outcome::Error("SECRET_PASSWORD".to_string()));
-        session.run_login_other(Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "SECRET_API_KEY",
-        )));
+        session.run_login("other");
     });
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("result=\"unconfirmed\""), "{logs}");
     assert!(logs.contains("operation=\"restore\""), "{logs}");
-    assert!(logs.contains("stage=\"current_exe\""), "{logs}");
     assert!(!logs.contains("SECRET"), "{logs}");
 }
 
