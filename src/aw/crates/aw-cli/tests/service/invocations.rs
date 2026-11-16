@@ -1,7 +1,7 @@
 //! Real service/Provider calls retire details while retaining a producer high-water mark.
 
 use super::*;
-use aw_service::{Binding, EventHandle};
+use aw_service::{Binding, EventHandle, ResultStatus};
 use std::collections::BTreeMap;
 
 fn register(binding: &Binding, sequence: u64, value: &Value) -> Operation {
@@ -119,6 +119,7 @@ fn invocation_overload_is_observable_and_recovers_without_replaying_old_calls() 
     .unwrap();
     let first = event(&binding, "tool.before", "allow");
     assert!(call(Operation::OpenEvent {
+        result_status: None,
         instance_id: binding.instance_id.clone(),
         event: first.clone()
     })
@@ -156,6 +157,51 @@ fn invocation_overload_is_observable_and_recovers_without_replaying_old_calls() 
     assert!(call(hook(&binding, second)).is_err());
     assert_eq!(fixture.calls("invoke").len(), 1);
     fixture.assert_reaped();
+}
+
+#[test]
+fn full_event_capacity_does_not_commit_legacy_protocol() {
+    let fixture = Fixture::new();
+    let mut document = fixture.document();
+    document["spec"]["daemon"]["limits"] = json!({"events":1});
+    let service = Running::start(&fixture, &document);
+    let occupied = fixture.bind(&service.client);
+    let fresh = fixture.bind(&service.client);
+    let call = |operation| service.client.call(operation, Instant::now() + TIMEOUT);
+    let slots = || call(Operation::Status).unwrap()["resources"]["usage"]["event_slots"].clone();
+    let held = open(
+        &service.client,
+        &occupied,
+        event(&occupied, "tool.before", "allow"),
+    );
+    assert_eq!(slots(), 1);
+
+    let completion = event(&fresh, "tool.after", "observe");
+    let rejected = call(Operation::OpenEvent {
+        instance_id: fresh.instance_id.clone(),
+        event: completion.clone(),
+        result_status: Some(ResultStatus::Success),
+    });
+    assert!(
+        matches!(rejected, Err(aw_service::Error::Rejected(ref code)) if code == "event_limit"),
+        "{rejected:?}"
+    );
+    assert_eq!(slots(), 1);
+    assert_eq!(close(&service.client, &held)["closed"], true);
+    assert_eq!(slots(), 0);
+
+    call(Operation::EnableInvocations {
+        instance_id: fresh.instance_id.clone(),
+    })
+    .unwrap();
+    call(register(&fresh, 1, &completion)).unwrap();
+    let already_used = call(Operation::EnableInvocations {
+        instance_id: occupied.instance_id,
+    });
+    assert!(
+        matches!(already_used, Err(aw_service::Error::Rejected(ref code)) if code == "invocation_protocol_requires_unused_binding"),
+        "{already_used:?}"
+    );
 }
 
 #[test]

@@ -110,3 +110,134 @@ selector starts or reuses AW. With `--socket`, it requires an existing service.
 It leaves application startup and ownership native. The existing `--pid`
 selector retains its native hotload restrictions. Inspect confirmation in JSON. See
 [cooperative SDK control](../deployment/native-sdk.md#cooperative-attach-and-detach).
+
+## Manual RPC completion audit
+
+A same-user integration can report a completed tool through `aw request` without
+constructing a framework callback. For `open_event`, supply the existing
+`event.tool.result_projection.status` when a text projection is available, or the
+optional operation-level `result_status` for a result without that projection.
+Both accept `success`, `error`, `interrupted`, or `denied`. When supplied together,
+they must agree. When `native` identifies a supported completion callback, its
+recognized status must also agree. The operation-level `result_status` requires
+a `tool.after` event with a valid public tool-call identity. A request using only
+the existing projection can still execute Providers without a public tool-call
+ID, with `projection_unavailable` in audit export.
+
+Qoder, Qoder SDK and Claude SDK events with native `hook_event_name: PostToolUse`
+can also report success using a Boolean `tool.result.isError: false` or
+`tool.result.is_error: false`, without duplicating the result in
+`native.tool_response`. Explicit failure or interruption takes precedence.
+Missing flags, string values such as `"false"` and arbitrary business fields do
+not establish success. This native-dialect mapping applies to manual RPC and
+native callbacks alike.
+
+These are caller-reported facts: ordinary RPC association remains unverified.
+The service stores `resultStatus` and a digest of the original `tool.result` when
+opening the event. Provider success and replacement text do not change that tool
+outcome or digest. For framework-independent reports, send `native: {}` and put
+arbitrary JSON in `tool.result`. The reported status applies even when the
+result contains fields such as `isError` or `state` for business use. Providers
+receive the normalized event with its original result.
+
+Use a CLI and daemon containing this RPC completion support. Older daemons reject
+the new operation field. JSON callers can omit it. Rust callers constructing
+`aw_service::Operation::OpenEvent` set `result_status: None` to omit it. Other
+event kinds retain their existing projection behavior when the field is omitted.
+An event without a recognized native status or an applicable result projection
+can still produce `projection_unavailable`. Existing historical gap chains are unchanged.
+
+For an integration check, start a private test service with a configured target
+and a `tool.after` Provider step, for example Tokenless `post_tool` from the
+[Provider integration guide](../providers/tokenless.md). Run from any directory
+as the service owner, with `aw` on PATH and Python 3 installed. Set the three
+variables below to that service's state directory, target name and adapter.
+The example reports a synthetic completion to exercise the audit API; it does
+not launch an Agent or execute the command described by the event.
+
+```bash
+export AW_STATE=/absolute/private/state
+export AW_TARGET=openclaw
+export AW_ADAPTER=openclaw
+python3 - <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import uuid
+
+state = Path(os.environ["AW_STATE"])
+target = os.environ["AW_TARGET"]
+adapter = os.environ["AW_ADAPTER"]
+
+def rpc(operation):
+    reply = subprocess.run(
+        ["aw", "request", "--socket", str(state / "aw.sock")],
+        input=json.dumps(operation), text=True, capture_output=True,
+        check=True, timeout=10,
+    )
+    return json.loads(reply.stdout)["result"]
+
+binding = rpc({
+    "method": "bind", "target": target, "cwd": str(Path.cwd()), "environment": {},
+    "capabilities": {
+        "adapter": adapter, "version": "audit-example", "entrypoint": "manual-rpc",
+        "events": {"tool.before": ["observe", "block"],
+                   "tool.after": ["observe", "replace_result"]},
+    },
+})
+instance = binding["instance_id"]
+try:
+    handle = rpc({
+        "method": "open_event", "instance_id": instance, "result_status": "success",
+        "event": {
+            "name": "tool.after",
+            "agent": {"adapter": adapter, "binding_id": target, "instance_id": instance},
+            "session_id": "audit-example",
+            "tool": {
+                "name": "exec", "native_name": "exec", "call_id": str(uuid.uuid4()),
+                "input": {"command": "printf AW_AUDIT_EXAMPLE"},
+                "result": {"stdout": "AW_AUDIT_EXAMPLE", "exitCode": 0},
+                "result_projection": {"text": "AW_AUDIT_EXAMPLE", "status": "success",
+                    "content_origin": "command_output", "command": "printf AW_AUDIT_EXAMPLE"},
+            },
+            "native": {},
+        },
+    })
+    try:
+        for step in handle["steps"]:
+            print(json.dumps(rpc({"method": "invoke_step", "instance_id": instance,
+                "event_id": handle["event_id"], "step_id": step})))
+    finally:
+        rpc({"method": "close_event", "instance_id": instance, "event_id": handle["event_id"]})
+    with tempfile.TemporaryDirectory() as directory:
+        request = Path(directory) / "read.json"
+        request.write_text(json.dumps({"api_version": "audit-export.aw/v1alpha1",
+            "operation": {"type": "read", "chain_id": handle["event_id"],
+                          "cursor": None, "limit": 64}}))
+        subprocess.run(["aw", "audit-export", "--state-dir", str(state),
+                        "--request", str(request)], check=True, timeout=10)
+finally:
+    rpc({"method": "release_instance", "instance_id": instance})
+PYTHON
+```
+
+The read response has `error: null`, an `ExecutionEvent` with
+`details.resultStatus: success` and `details.resultDigest`, and a
+`provider.completed` record for each invoked Provider. A successful Tokenless
+attempt has `providerId: tokenless` and `status: ok` when configured under that
+provider ID. Provider failures remain visible with `status: failed` independently
+of the tool outcome. Follow `result.cursor` if `caught_up` is false. Closing the
+manual event does not establish native effect adoption; `event.closed` retains
+its existing `incomplete` outcome. The example releases its binding and deletes
+the temporary request file; the pre-existing service remains running.
+
+Invalid enum values are rejected during request decoding. `result_status_conflict`
+means the declared, projected or recognized native statuses disagree.
+`result_status_requires_tool_after` means the declaration was attached to another
+event kind. `event_invalid` identifies an invalid normalized event or projection.
+`public_event_invalid` means the operation-level `result_status` was supplied
+with missing or invalid public identity metadata. These rejections do not create
+an event journal chain or execute a Provider. Correct the reported metadata
+before opening a new event.

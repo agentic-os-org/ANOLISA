@@ -120,6 +120,7 @@ fn expired_handles_are_bounded_instance_scoped_and_reclaimed_by_close_or_unbind(
         .call(invoke(&handle, "absent"), deadline())
         .is_err());
     let request = || Operation::OpenEvent {
+        result_status: None,
         instance_id: binding.instance_id.clone(),
         event: event(&binding, "tool.before", "allow"),
     };

@@ -443,7 +443,7 @@ impl Runtime {
         // Reserve before writing; failed durable metadata must never be retried as a new fact.
         claims.claims.insert(correlation.clone(), None);
         let key = self.identifier()?;
-        let fact = self.hook_fact(&key, &host, instance_id, &event, &association)?;
+        let fact = self.hook_fact(&key, &host, instance_id, &event, &association, None)?;
         if let Some(fact) = fact {
             self.standalone_fact(fact)?;
         } else {

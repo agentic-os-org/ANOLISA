@@ -1,6 +1,6 @@
 //! Correlate per-step native callbacks without extending or replaying an event.
 
-use super::{event_metadata, Job, Runtime};
+use super::{facts::event_metadata, Job, Runtime};
 use crate::{rejected, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -534,7 +534,14 @@ impl Runtime {
         // Initialization may wait on durable storage. Keep cancellation writable.
         drop(leases);
         drop(state);
-        let handle = self.open(instance_id, value, Some(native_input), deadline, cancelled)?;
+        let handle = self.open(
+            instance_id,
+            value,
+            Some(native_input),
+            None,
+            deadline,
+            cancelled,
+        )?;
         let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         let lease = leases
             .get_mut(&correlation)
