@@ -165,7 +165,11 @@ pub(crate) fn load(paths: &UserPaths) -> Snapshot {
 /// Bounded read of the current AI service; runs off the UI thread because the
 /// registry query spawns cosh-core. An unavailable core is Unknown, not Off.
 pub(crate) fn load_ai() -> Reading<GuideAuthSummary> {
-    match CoshCoreAdapter::default().guide_auth_summary() {
+    let Ok(program) = super::core::admit() else {
+        warn_failure("load_ai", "core_admission");
+        return Reading::Unknown;
+    };
+    match CoshCoreAdapter::new(program, false).guide_auth_summary() {
         Ok(summary) => Reading::Value(summary),
         Err(_) => {
             warn_failure("load_ai", "query_core");

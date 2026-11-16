@@ -94,7 +94,10 @@ fn guide_ai_unknown_access_invites_questions_and_keeps_management_secondary() {
         matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == "开始提问")
     );
     session.handle(key(KeyCode::Down));
-    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Handoff));
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::AiManage
+    ));
 }
 
 #[test]
@@ -228,7 +231,7 @@ fn home_navigation_opens_a_page_and_returns_to_the_same_row() {
 fn start_page_scrolls_and_returns_without_saving() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
-    session.handle(key(KeyCode::Down));
+    session.select_home_entry(6);
     session.handle(key(KeyCode::Enter));
     assert!(session.view().markdown.is_some());
     session.handle(key(KeyCode::Down));
@@ -244,7 +247,8 @@ fn start_page_scrolls_and_returns_without_saving() {
 fn data_privacy_page_scrolls_like_other_markdown_pages() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
-    session.enter(super::session::Page::DataPrivacy);
+    session.open_subpage(super::session::Page::Data);
+    session.open_subpage(super::session::Page::DataPrivacy);
     assert!(session.view().markdown.is_some());
     session.handle(key(KeyCode::Down));
     assert_eq!(session.view().scroll, 1);
@@ -253,11 +257,11 @@ fn data_privacy_page_scrolls_like_other_markdown_pages() {
     session.handle(key(KeyCode::Up));
     assert_eq!(session.view().scroll, 10);
     session.handle(key(KeyCode::Esc));
-    assert!(matches!(session.page, super::session::Page::Tips));
+    assert!(matches!(session.page, super::session::Page::Data));
 }
 
 #[test]
-fn language_save_persists_returns_home_and_refreshes_the_ui_language() {
+fn language_save_persists_stays_on_page_and_refreshes_the_ui_language() {
     let _guard = env_guard();
     let temp = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", temp.path());
@@ -272,7 +276,7 @@ fn language_save_persists_returns_home_and_refreshes_the_ui_language() {
     session.handle(key(KeyCode::Enter));
     let config = fs::read_to_string(temp.path().join(".copilot-shell/config.toml")).unwrap();
     assert!(config.contains("zh-CN"), "{config}");
-    assert_eq!(session.view().title, "Cosh 配置与入门");
+    assert_eq!(session.view().title, "语言 / Language");
     assert!(session.view().message.unwrap().contains("已保存"));
 }
 
@@ -643,7 +647,7 @@ fn restored_login_page_offers_set_and_other_only() {
         login_choice_labels(&session),
         vec![
             "Set Cosh as login shell",
-            "Other user (show management commands)"
+            "View other-user management commands"
         ]
     );
 }
@@ -999,4 +1003,158 @@ fn too_small_screen_only_accepts_exit_keys() {
     ] {
         assert!(matches!(super::too_small_flow(key(code)), Flow::Continue));
     }
+}
+
+#[test]
+fn every_home_entry_returns_to_its_own_row_across_repeated_visits() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    for _ in 0..3 {
+        // Ordinal 5 is "ask questions", which leaves the wizard by design.
+        for entry in [0, 1, 2, 3, 4, 6] {
+            session.select_home_entry(entry);
+            session.handle(key(KeyCode::Enter));
+            assert_ne!(session.page, super::session::Page::Home);
+            session.handle(key(KeyCode::Esc));
+            assert_eq!(session.page, super::session::Page::Home);
+            assert_eq!(session.choice_index(), entry);
+        }
+    }
+}
+
+#[test]
+fn tips_subpages_return_to_the_tips_row_that_opened_them() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.select_home_entry(2);
+    session.handle(key(KeyCode::Enter));
+    for entry in 0..4 {
+        session.select_choice_for_test(entry);
+        session.handle(key(KeyCode::Enter));
+        assert_ne!(session.page, super::session::Page::Tips);
+        session.handle(key(KeyCode::Esc));
+        assert_eq!(session.page, super::session::Page::Tips);
+        assert_eq!(session.choice_index(), entry);
+    }
+}
+
+#[test]
+fn turning_recommendations_off_asks_first_and_cancel_writes_nothing() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let store = crate::recommendation::personal_store::PersonalStore::open(
+        paths.cosh_dir.as_ref().unwrap().join("recommendations"),
+    )
+    .unwrap();
+    store.set_user_enabled(true, 1_000).unwrap();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.open_subpage(super::session::Page::Personal);
+    session.shift(1);
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::PersonalOffConfirm);
+    let rows = session.view().rows;
+    assert!(rows.iter().any(|row| matches!(
+        row,
+        crate::ui::guide::WizardRow::Text(text) if text.contains("Bash history")
+    )));
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::Personal);
+    assert_eq!(
+        store.peek().unwrap().unwrap().preferences.user_enabled,
+        Some(true)
+    );
+}
+
+#[test]
+fn confirming_recommendations_off_clears_once_and_returns_to_the_page() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let store = crate::recommendation::personal_store::PersonalStore::open(
+        paths.cosh_dir.as_ref().unwrap().join("recommendations"),
+    )
+    .unwrap();
+    store.set_user_enabled(true, 1_000).unwrap();
+    store
+        .merge(
+            &crate::recommendation::personal_store::StateVersion::of(
+                &store.peek().unwrap().unwrap(),
+            ),
+            1_000,
+            |state| state.journal.records.push(seeded_record(0)),
+        )
+        .unwrap();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.open_subpage(super::session::Page::Personal);
+    session.shift(1);
+    session.handle(key(KeyCode::Enter));
+    session.shift(-1);
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::Personal);
+    let state = store.peek().unwrap().unwrap();
+    assert_eq!(state.preferences.user_enabled, Some(false));
+    assert!(state.journal.records.is_empty());
+    let message = session.view().message.unwrap();
+    assert!(message.contains("new sessions"), "{message}");
+}
+
+#[test]
+fn other_user_commands_expand_in_place_and_escape_leaves_the_login_page() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.snapshot.login = Ok(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    session.select_home_entry(4);
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::Login);
+    session.shift(1);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginOther
+    ));
+    session.run_login("other");
+    assert_eq!(session.page, super::session::Page::Login);
+    let rows = session.view().rows;
+    assert!(rows.iter().any(|row| matches!(
+        row,
+        crate::ui::guide::WizardRow::Text(text) if text.contains("USER is a placeholder")
+    )));
+    session.handle(key(KeyCode::Esc));
+    assert_eq!(session.page, super::session::Page::Home);
+    assert_eq!(session.choice_index(), 4);
+}
+
+#[test]
+fn returning_to_login_keeps_the_semantic_action_when_choices_change() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.snapshot.login = Ok(login_status(
+        "/usr/bin/cosh",
+        Some("/bin/bash"),
+        "applied",
+        true,
+        false,
+    ));
+    session.select_home_entry(4);
+    session.handle(key(KeyCode::Enter));
+    session.shift(1);
+    assert_eq!(
+        session.login_choices().get(session.choice_index()),
+        Some(&LoginChoice::Other)
+    );
+    let frame = session.current_frame();
+    session.snapshot.login = Ok(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    session.restore_frame(frame);
+    assert_eq!(
+        session.login_choices().get(session.choice_index()),
+        Some(&LoginChoice::Other)
+    );
 }

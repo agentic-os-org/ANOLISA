@@ -53,6 +53,14 @@ impl TrialSession {
     pub(crate) fn is_blocking(&self) -> bool {
         self.flow.is_some() || self.preference_job.is_some()
     }
+
+    /// Reaps the preference writer so a finite task never leaves it running.
+    pub(crate) fn settle_preference_worker(&mut self) {
+        self.preference_job = None;
+        if let Some(worker) = self.preference_worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Drop for TrialSession {
@@ -334,6 +342,19 @@ pub(crate) fn poll<W: Write>(
             tracing::warn!(error=%error.message,"ECS trial preference save failed");
         }
         clear(state, output)?;
+        {
+            use crate::runtime::guide::result::{ActionKind, ChangeFact, Verification};
+            let (change, verification) = match &result {
+                Ok(_) => (ChangeFact::Committed, Verification::Verified),
+                Err(error) if error.provider_updated => {
+                    (ChangeFact::Partial, Verification::Unconfirmed)
+                }
+                Err(_) => (ChangeFact::Unknown, Verification::Unconfirmed),
+            };
+            state
+                .auth
+                .record_fact(ActionKind::TrialPreference, change, verification);
+        }
         if state.auth.ecs_trial.enabling {
             if result.is_ok() || result.as_ref().is_err_and(|error| error.provider_updated) {
                 state.auth.ecs_trial.auto_use_allowed = true;
@@ -341,8 +362,12 @@ pub(crate) fn poll<W: Write>(
                 super::runtime::clear_observed_model_after_provider_change(state);
             }
             if result.as_ref().is_err_and(|error| error.provider_updated) {
-                super::completion::finish_partial_configuration(state, output)?;
-            } else {
+                super::completion::finish_partial_configuration(
+                    state,
+                    output,
+                    crate::runtime::guide::result::ActionKind::TrialPreference,
+                )?;
+            } else if !state.auth.host.is_guide() {
                 notice(
                     state,
                     output,
@@ -360,20 +385,24 @@ pub(crate) fn poll<W: Write>(
             }
         } else {
             state.auth.ecs_trial.disable_save_failed = result.is_err();
-            notice(
-                state,
-                output,
-                if result.is_ok() {
-                    "✓ 以后不再提示免配置接入。问题已保留，可用 /auth 配置模型或重新启用。"
-                } else {
-                    "未能保存，已仅对本次会话生效。问题已保留，可用 /auth 重试。"
-                },
-                if result.is_ok() {
-                    "Automatic OS Console access disabled. Your question is retained."
-                } else {
-                    "Unable to save; disabled for this session only. Your question is retained."
-                },
-            )?;
+            // A guide task ends with its own process, so a session-only
+            // fallback would evaporate; the task result reports the facts.
+            if !state.auth.host.is_guide() {
+                notice(
+                    state,
+                    output,
+                    if result.is_ok() {
+                        "✓ 以后不再提示免配置接入。问题已保留，可用 /auth 配置模型或重新启用。"
+                    } else {
+                        "未能保存，已仅对本次会话生效。问题已保留，可用 /auth 重试。"
+                    },
+                    if result.is_ok() {
+                        "Automatic OS Console access disabled. Your question is retained."
+                    } else {
+                        "Unable to save; disabled for this session only. Your question is retained."
+                    },
+                )?;
+            }
         }
         state.auth.ecs_trial.enabling = false;
         state.auth.ecs_trial.permanent = false;

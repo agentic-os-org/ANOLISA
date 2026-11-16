@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use nix::libc;
 
@@ -8,6 +8,39 @@ mod guide_screen;
 static mut ORIGINAL_TERMIOS: Option<libc::termios> = None;
 static ORIGINAL_FILE_STATUS_FLAGS: AtomicI32 = AtomicI32::new(-1);
 static GUIDE_SCREEN: guide_screen::GuideScreenRecovery = guide_screen::GuideScreenRecovery::new();
+/// Set for the whole wizard lifetime, including the finite auth task and the
+/// sudo handoff. While set, a signal only publishes an exit request: the loop
+/// that owns the terminal reaps its children and threads before restoring it.
+static GUIDE_LOOP: AtomicBool = AtomicBool::new(false);
+static GUIDE_PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+pub(crate) fn guide_loop_begin() {
+    GUIDE_PENDING_SIGNAL.store(0, Ordering::Release);
+    GUIDE_LOOP.store(true, Ordering::Release);
+}
+
+pub(crate) fn guide_loop_end() {
+    GUIDE_LOOP.store(false, Ordering::Release);
+}
+
+pub(crate) fn take_guide_signal() -> Option<i32> {
+    match GUIDE_PENDING_SIGNAL.swap(0, Ordering::AcqRel) {
+        0 => None,
+        signal => Some(signal),
+    }
+}
+
+/// Re-publishes a termination request a sub-task observed but could not act on
+/// itself, so the wizard still exits after the task converged.
+pub(crate) fn publish_guide_signal(signal: i32) {
+    let _ = GUIDE_PENDING_SIGNAL.compare_exchange(0, signal, Ordering::AcqRel, Ordering::Acquire);
+}
+
+/// Restores the terminal and re-raises the signal after the owner converged.
+pub(crate) fn exit_with_signal(signal: i32) -> ! {
+    finish_signal_exit(signal);
+    wait_for_signal_exit()
+}
 
 // Signal-driven exit bypasses `Screen::drop`, so the full-screen guide would
 // otherwise leave the tty in the alternate screen with a hidden cursor. Only
@@ -56,7 +89,11 @@ pub(crate) fn install_terminal_recovery() {
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
+        // The wizard scope owns cleanup while it runs; restoring here would
+        // race its child/thread reaping and could double-leave the screen.
+        if !GUIDE_LOOP.load(Ordering::Acquire) {
+            restore_terminal();
+        }
         prev_hook(info);
     }));
 
@@ -111,6 +148,10 @@ fn restore_terminal() {
 }
 
 extern "C" fn restore_and_exit(sig: libc::c_int) {
+    if GUIDE_LOOP.load(Ordering::Acquire) {
+        let _ = GUIDE_PENDING_SIGNAL.compare_exchange(0, sig, Ordering::AcqRel, Ordering::Acquire);
+        return;
+    }
     if GUIDE_SCREEN.defer_signal(sig) {
         return;
     }

@@ -395,7 +395,7 @@ mod tests {
             MessageId::GuideWizardTitle as usize
         );
         assert_eq!(
-            MessageId::GuideWizardAiHandoffFailed as usize + 1,
+            MessageId::GuideWizardAiManage as usize + 1,
             MessageId::GuideWizardTipsAnalysis as usize
         );
         assert_eq!(
@@ -408,10 +408,6 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardDataClearConfirm as usize + 1,
-            MessageId::GuideWizardLoginHandoffFailed as usize
-        );
-        assert_eq!(
-            MessageId::GuideWizardLoginHandoffFailed as usize + 1,
             MessageId::GuideWizardLoginOtherGuidance as usize
         );
         assert_eq!(
@@ -428,6 +424,10 @@ mod tests {
         );
         assert_eq!(
             MessageId::SuggestionShortcutAsk as usize + 1,
+            MessageId::GuideWizardDetailHint as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardPartialSessionRecord as usize + 1,
             MessageId::ALL.len()
         );
     }

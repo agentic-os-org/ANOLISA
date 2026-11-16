@@ -77,6 +77,14 @@ pub fn write_user_language_config(language: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Wizard entry: the same document, written through the ownership-checked path.
+pub(crate) fn write_user_language_config_checked(language: &str) -> Result<PathBuf, String> {
+    let path =
+        config_file_path().ok_or_else(|| "HOME is not set; cannot persist config".to_string())?;
+    write_language_config_inner(&path, language, true)?;
+    Ok(path)
+}
+
 pub fn language_config_status() -> LanguageConfigStatus {
     let config_path = config_file_path();
     let config_setting = config_read_file_path()
@@ -182,16 +190,25 @@ pub(super) fn language_setting_from_config_content(content: &str) -> Option<Stri
 }
 
 pub(super) fn write_language_config_to_path(path: &Path, language: &str) -> Result<(), String> {
+    write_language_config_inner(path, language, false)
+}
+
+fn write_language_config_inner(path: &Path, language: &str, guard: bool) -> Result<(), String> {
     let setting = parse_language_setting(language)
         .ok_or_else(|| format!("invalid language: {language}; supported: auto, en-US, zh-CN"))?;
     let language = setting.as_config_value();
 
     if !path.exists() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("create config directory failed: {err}"))?;
+            if !guard {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| format!("create config directory failed: {err}"))?;
+            }
         }
         let content = format!("[ui]\nlanguage = \"{language}\"\n");
+        if guard {
+            return super::guarded_write::write(path, &content);
+        }
         return std::fs::write(path, content)
             .map_err(|err| format!("write config file failed: {err}"));
     }
@@ -216,6 +233,9 @@ pub(super) fn write_language_config_to_path(path: &Path, language: &str) -> Resu
     );
     let rendered = toml::to_string_pretty(&value)
         .map_err(|err| format!("render config TOML failed: {err}"))?;
+    if guard {
+        return super::guarded_write::write(path, &rendered);
+    }
     std::fs::write(path, rendered).map_err(|err| format!("write config file failed: {err}"))
 }
 

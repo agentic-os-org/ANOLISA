@@ -466,6 +466,7 @@ pub(crate) fn poll<W: Write>(
                         .state
                         .as_mut()
                         .expect("auth retained while preparing menu"),
+                    state.auth.host,
                     result,
                 );
                 return redraw(state, output);
@@ -557,7 +558,11 @@ pub(crate) fn poll<W: Write>(
                     return finish_auth_configuration(state, output, &label);
                 }
                 Err(error) if error.provider_updated => {
-                    return super::completion::finish_partial_configuration(state, output);
+                    return super::completion::finish_partial_configuration(
+                        state,
+                        output,
+                        crate::runtime::guide::result::ActionKind::Configure,
+                    );
                 }
                 Err(error) if error.code.as_deref() == Some("credential_source_unavailable") => {
                     flow.stage = Stage::Checking;
@@ -638,6 +643,7 @@ pub(crate) fn poll<W: Write>(
                 .state
                 .as_mut()
                 .expect("auth retained while preparing menu"),
+            state.auth.host,
             Err(flow
                 .error
                 .take()
@@ -665,6 +671,16 @@ pub(crate) fn shutdown(state: &mut InlineState) {
         }
         flow.operation.take();
     }
+}
+
+/// A registry operation is still running, so its answer may already have been
+/// applied even if the task stops waiting for it.
+pub(crate) fn operation_in_flight(state: &InlineState) -> bool {
+    state
+        .auth
+        .ecs
+        .as_ref()
+        .is_some_and(|flow| flow.operation.is_some())
 }
 
 #[cfg(test)]

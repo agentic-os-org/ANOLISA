@@ -2,30 +2,31 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config::guide::GuideStore;
-use crate::config::{write_user_language_config, Language, LanguageSetting};
+use crate::config::{Language, LanguageSetting};
 use crate::i18n::{I18n, MessageId};
 use crate::ui::guide::{WizardRow, WizardView};
 
-use crate::config::guide::cli::{self, UserPaths};
+use crate::config::guide::cli::UserPaths;
 use crate::config::guide::wizard::content;
 
 use super::status::{self, Reading, Snapshot, Source};
 use crate::adapter::GuideAuthSummary;
 
+use super::navigation::{Frame, Navigation};
+
 pub(crate) enum Flow {
     Continue,
     Exit,
     Ask,
-    /// Suspend the wizard and hand the terminal to the existing auth flow.
-    Handoff,
+    /// Suspend the wizard and run the finite, in-process auth management task.
+    AiManage,
     LoginSet,
     LoginRestore,
     LoginOther,
     LoginReread,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Page {
     Home,
     Language,
@@ -37,6 +38,7 @@ pub(crate) enum Page {
     Start,
     Analysis,
     Personal,
+    PersonalOffConfirm,
     Data,
     DataPrivacy,
     DataResetConfirm,
@@ -49,17 +51,19 @@ pub(crate) struct Session {
     pub(crate) snapshot: Snapshot,
     pub(crate) page: Page,
     pub(crate) cursor: usize,
-    pub(crate) home_cursor: usize,
-    pub(crate) tips_cursor: usize,
     pub(crate) scroll: usize,
     pub(crate) message: Option<String>,
     pub(crate) login_guidance: bool,
     pub(crate) ai: Reading<GuideAuthSummary>,
     pub(crate) ai_loading: bool,
-    pub(crate) ai_rx: Option<std::sync::mpsc::Receiver<Reading<GuideAuthSummary>>>,
+    pub(crate) ai_rx: Option<std::sync::mpsc::Receiver<(u64, Reading<GuideAuthSummary>)>>,
+    pub(crate) ai_join: Option<std::thread::JoinHandle<()>>,
+    pub(crate) ai_generation: u64,
     pub(crate) analysis: crate::config::AnalysisModeStatus,
     pub(crate) bash: crate::config::BashHistoryStatus,
     pub(crate) rec: status::RecStatus,
+    pub(crate) navigation: Navigation,
+    pub(crate) message_fresh: bool,
 }
 
 impl Session {
@@ -72,46 +76,88 @@ impl Session {
             snapshot,
             page: Page::Home,
             cursor: content::ENTRIES.len() + 1,
-            home_cursor: content::ENTRIES.len() + 1,
-            tips_cursor: 0,
             scroll: 0,
             message: None,
             login_guidance: false,
             ai: Reading::Unknown,
             ai_loading: false,
             ai_rx: None,
+            ai_join: None,
+            ai_generation: 0,
             analysis: crate::config::analysis_mode_status(),
             bash: crate::config::bash_history_status(),
             rec,
+            navigation: Navigation::default(),
+            message_fresh: false,
         }
     }
 
     /// Loads the AI service summary off the UI thread; the registry query
     /// spawns cosh-core and must not block rendering.
     pub(crate) fn start_ai_load(&mut self) {
+        self.settle_ai_load();
+        self.ai_generation = self.ai_generation.wrapping_add(1);
+        let generation = self.ai_generation;
         let (sender, receiver) = std::sync::mpsc::channel();
         self.ai_rx = Some(receiver);
         self.ai_loading = true;
-        std::thread::spawn(move || {
-            let _ = sender.send(status::load_ai());
-        });
+        self.ai_join = std::thread::Builder::new()
+            .name("cosh-guide-ai-summary".to_string())
+            .spawn(move || {
+                let _ = sender.send((generation, status::load_ai()));
+            })
+            .ok();
+        if self.ai_join.is_none() {
+            self.ai_loading = false;
+            self.ai_rx = None;
+        }
+    }
+
+    /// Retires an in-flight summary read and joins its worker. The wizard owns
+    /// the thread until it is reaped, so quitting or opening the auth task
+    /// never leaves a detached registry child behind.
+    pub(crate) fn settle_ai_load(&mut self) {
+        self.ai_generation = self.ai_generation.wrapping_add(1);
+        self.ai_rx = None;
+        self.ai_loading = false;
+        if let Some(handle) = self.ai_join.take() {
+            let _ = handle.join();
+        }
+    }
+
+    pub(crate) fn set_message(&mut self, message: String) {
+        self.message = Some(message);
+    }
+
+    /// A newly produced result scrolls its full text into view once; later
+    /// scrolling stays where the user put it.
+    pub(crate) fn refresh_message_focus(&mut self, previous: &Option<String>) {
+        if self.message != *previous {
+            self.message_fresh = self.message.is_some();
+            if self.message_fresh {
+                self.scroll = 0;
+            }
+        }
     }
 
     /// Collects a finished background read; called on every loop tick.
     /// Returns true when a new reading arrived and the view should redraw.
     pub(crate) fn tick(&mut self) -> bool {
-        if let Some(receiver) = &self.ai_rx {
-            if let Ok(reading) = receiver.try_recv() {
+        let received = self
+            .ai_rx
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        if let Some((generation, reading)) = received {
+            if generation == self.ai_generation {
                 let ai_choice = (self.page == Page::Ai).then(|| self.choice_index());
                 self.ai = reading;
                 self.ai_loading = false;
                 self.ai_rx = None;
+                if let Some(handle) = self.ai_join.take() {
+                    let _ = handle.join();
+                }
                 if let Some(choice) = ai_choice {
-                    self.cursor = 0;
-                    self.shift(0);
-                    for _ in 0..choice {
-                        self.shift(1);
-                    }
+                    self.select_choice(choice);
                 }
                 return true;
             }
@@ -123,17 +169,31 @@ impl Session {
         self.i18n.language()
     }
 
-    /// Re-read state after the auth handoff child exits; a spawn failure is
-    /// surfaced but never blocks the wizard from resuming.
-    pub(crate) fn finish_handoff(&mut self, result: Result<(), String>) {
+    /// Re-read state after the finite auth task returns and report what it
+    /// actually changed. Facts come from the task, never from the exit path.
+    pub(crate) fn finish_ai_task(&mut self, outcome: super::result::TaskOutcome) {
         self.reload();
         self.start_ai_load();
-        if let Err(error) = result {
-            status::warn_failure("auth_handoff", "child_process");
-            self.message = Some(
-                self.i18n
-                    .format(MessageId::GuideWizardAiHandoffFailed, &[("error", &error)]),
-            );
+        if outcome.reason == super::result::EndReason::Failed {
+            status::warn_failure("auth_task", "task_failed");
+        }
+        let message = outcome.message(self.i18n);
+        self.set_message(message);
+    }
+
+    /// Restores the page that opened the auth task, keeping its choice.
+    pub(crate) fn restore_frame(&mut self, frame: Frame) {
+        self.restore(frame);
+    }
+
+    pub(crate) fn current_frame(&self) -> Frame {
+        Frame {
+            page: self.page,
+            choice: self.choice_index(),
+            scroll: self.scroll,
+            login: (self.page == Page::Login)
+                .then(|| self.login_choices().get(self.choice_index()).copied())
+                .flatten(),
         }
     }
 
@@ -148,6 +208,7 @@ impl Session {
             markdown: self.markdown(),
             scroll: self.scroll,
             language: self.i18n.language(),
+            message_fresh: self.message_fresh,
         }
     }
 
@@ -171,6 +232,14 @@ impl Session {
         match key.code {
             KeyCode::Up => self.shift(-1),
             KeyCode::Down => self.shift(1),
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(10);
+                self.message_fresh = false;
+            }
+            KeyCode::PageDown => {
+                self.scroll += 10;
+                self.message_fresh = false;
+            }
             KeyCode::Enter => return self.open(),
             KeyCode::Esc => return self.back(),
             KeyCode::Char('q') | KeyCode::Char('Q') if self.page == Page::Home => {
@@ -191,7 +260,7 @@ impl Session {
             Page::Login => MessageId::GuideWizardEntryLogin,
             Page::Start => MessageId::GuideWizardEntryStart,
             Page::Analysis => MessageId::GuideWizardTipsAnalysis,
-            Page::Personal => MessageId::GuideWizardTipsPersonal,
+            Page::Personal | Page::PersonalOffConfirm => MessageId::GuideWizardTipsPersonal,
             Page::Data | Page::DataPrivacy | Page::DataResetConfirm | Page::DataClearConfirm => {
                 MessageId::GuideWizardTipsData
             }
@@ -205,6 +274,12 @@ impl Session {
             Page::Ai => MessageId::GuideWizardHomeHint,
             Page::Start => MessageId::GuideWizardScrollHint,
             Page::DataPrivacy => MessageId::GuideWizardScrollHint,
+            Page::Data
+            | Page::Personal
+            | Page::Analysis
+            | Page::PersonalOffConfirm
+            | Page::DataResetConfirm
+            | Page::DataClearConfirm => MessageId::GuideWizardDetailHint,
             _ => MessageId::GuideWizardChoiceHint,
         };
         self.i18n.t(id).to_string()
@@ -229,6 +304,7 @@ impl Session {
             Page::Tips => self.tips_menu_rows(),
             Page::Analysis
             | Page::Personal
+            | Page::PersonalOffConfirm
             | Page::Data
             | Page::DataResetConfirm
             | Page::DataClearConfirm => self.tips_rows(),
@@ -403,25 +479,81 @@ impl Session {
             .count()
     }
 
+    fn choice_positions(&self) -> Vec<usize> {
+        self.rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, WizardRow::Choice { .. }))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    pub(super) fn select_choice(&mut self, ordinal: usize) {
+        let positions = self.choice_positions();
+        self.cursor = positions
+            .get(ordinal.min(positions.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_choice_for_test(&mut self, ordinal: usize) {
+        self.select_choice(ordinal);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_home_entry(&mut self, ordinal: usize) {
+        self.page = Page::Home;
+        self.select_choice(ordinal);
+    }
+
+    /// Opens a sub-page, remembering the page and choice that opened it.
+    fn open_page(&mut self, page: Page) {
+        let frame = self.current_frame();
+        self.navigation.push(frame);
+        self.message = None;
+        self.message_fresh = false;
+        self.enter(page);
+    }
+
+    fn restore(&mut self, frame: Frame) {
+        self.page = frame.page;
+        self.login_guidance = false;
+        self.scroll = frame.scroll;
+        let ordinal = match (frame.page, frame.login) {
+            (Page::Login, Some(choice)) => self
+                .login_choices()
+                .iter()
+                .position(|candidate| *candidate == choice)
+                .unwrap_or(frame.choice),
+            _ => frame.choice,
+        };
+        self.select_choice(ordinal);
+    }
+
+    /// Returns to the page that opened the current one, keeping any result
+    /// message the caller just produced.
+    pub(crate) fn return_to_source(&mut self) {
+        if let Some(frame) = self.navigation.pop() {
+            self.restore(frame);
+        }
+    }
+
+    pub(crate) fn open_subpage(&mut self, page: Page) {
+        self.open_page(page);
+    }
+
     fn open(&mut self) -> Flow {
         match self.page {
-            Page::Home => {
-                self.home_cursor = self.cursor;
-                self.message = None;
-                self.scroll = 0;
-                match self.cursor {
-                    0 => self.enter(Page::Language),
-                    1 => self.enter(Page::Ai),
-                    2 => {
-                        self.tips_cursor = 0;
-                        self.enter(Page::Tips);
-                    }
-                    3 => self.enter(Page::Health),
-                    4 => self.enter(Page::Login),
-                    6 => return Flow::Ask,
-                    _ => self.enter(Page::Start),
-                }
-            }
+            Page::Home => match self.choice_index() {
+                0 => self.open_page(Page::Language),
+                1 => self.open_page(Page::Ai),
+                2 => self.open_page(Page::Tips),
+                3 => self.open_page(Page::Health),
+                4 => self.open_page(Page::Login),
+                5 => return Flow::Ask,
+                _ => self.open_page(Page::Start),
+            },
             Page::Language => {
                 let setting = match self.choice_index() {
                     0 => LanguageSetting::Auto,
@@ -430,18 +562,15 @@ impl Session {
                 };
                 self.save_language(setting);
             }
-            Page::Tips => {
-                self.tips_cursor = self.cursor;
-                self.message = None;
-                match self.choice_index() {
-                    0 => self.enter(Page::GuideTip),
-                    1 => self.enter(Page::Analysis),
-                    2 => self.enter(Page::Personal),
-                    _ => self.enter(Page::Data),
-                }
-            }
+            Page::Tips => match self.choice_index() {
+                0 => self.open_page(Page::GuideTip),
+                1 => self.open_page(Page::Analysis),
+                2 => self.open_page(Page::Personal),
+                _ => self.open_page(Page::Data),
+            },
             Page::Analysis
             | Page::Personal
+            | Page::PersonalOffConfirm
             | Page::Data
             | Page::DataResetConfirm
             | Page::DataClearConfirm => {
@@ -460,8 +589,8 @@ impl Session {
                 return if self.choice_index() == 0 {
                     Flow::Ask
                 } else {
-                    Flow::Handoff
-                }
+                    Flow::AiManage
+                };
             }
             Page::Login => {
                 return match self.login_choices().get(self.choice_index()).copied() {
@@ -503,109 +632,14 @@ impl Session {
     }
 
     fn back(&mut self) -> Flow {
-        match self.page {
-            Page::Home => return Flow::Exit,
-            Page::DataResetConfirm | Page::DataClearConfirm => self.enter(Page::Data),
-            Page::GuideTip => {
-                self.page = Page::Tips;
-                self.cursor = self.tips_cursor;
+        match self.navigation.pop() {
+            Some(frame) => {
+                self.message = None;
+                self.message_fresh = false;
+                self.restore(frame);
+                Flow::Continue
             }
-            Page::Analysis | Page::Personal | Page::Data | Page::DataPrivacy => {
-                self.page = Page::Tips;
-                self.cursor = self.tips_cursor;
-            }
-            _ => {
-                self.page = Page::Home;
-                self.cursor = self.home_cursor;
-            }
-        }
-        self.scroll = 0;
-        self.message = None;
-        self.login_guidance = false;
-        Flow::Continue
-    }
-
-    fn save_language(&mut self, setting: LanguageSetting) {
-        if matches!(self.snapshot.language.saved, Reading::Unknown) {
-            status::warn_failure("save_language", "unreadable_config");
-            self.message = Some(self.i18n.t(MessageId::GuideWizardReadFailed).to_string());
-            return;
-        }
-        match write_user_language_config(setting.as_config_value()) {
-            Ok(_) => {
-                self.reload();
-                self.i18n = I18n::new(self.snapshot.language.effective);
-                self.message = Some(self.i18n.format(
-                    MessageId::GuideWizardSavedLine,
-                    &[("value", self.language_label_setting(setting))],
-                ));
-                self.page = Page::Home;
-                self.cursor = self.home_cursor;
-            }
-            Err(error) => {
-                status::warn_failure("save_language", "write_config");
-                self.message = Some(
-                    self.i18n
-                        .format(MessageId::GuideWizardSaveFailed, &[("error", &error)]),
-                );
-            }
-        }
-    }
-
-    fn save_guide_tip(&mut self, enabled: bool) {
-        let Some(store) = self.open_store() else {
-            return;
-        };
-        let output = cli::set(&store, &self.paths, enabled, self.i18n);
-        if output.exit_code != 0 {
-            status::warn_failure("save_guide_tip", "set_guide");
-        }
-        self.message = Some(output.summary());
-        self.reload();
-    }
-
-    fn save_health(&mut self, enabled: bool) {
-        let Some(store) = self.open_store() else {
-            return;
-        };
-        match store.set_banner(enabled) {
-            Ok(_) => {
-                self.message = Some(format!(
-                    "{} {}",
-                    self.i18n.format(
-                        MessageId::GuideWizardSavedLine,
-                        &[("value", self.toggle_label(enabled))],
-                    ),
-                    self.i18n.t(MessageId::GuideWizardSavedNextLogin),
-                ));
-                self.reload();
-            }
-            Err(error) => {
-                status::warn_failure("save_health", "set_banner");
-                self.message = Some(self.i18n.format(
-                    MessageId::GuideWizardSaveFailed,
-                    &[("error", &cli::error_reason(self.i18n, &error))],
-                ));
-            }
-        }
-    }
-
-    fn open_store(&mut self) -> Option<GuideStore> {
-        let Some(cosh_dir) = self.paths.cosh_dir.clone() else {
-            status::warn_failure("open_guide_store", "missing_home");
-            self.message = Some(self.i18n.t(MessageId::ConfigHomeMissingBody).to_string());
-            return None;
-        };
-        match GuideStore::open(cosh_dir.join("guide")) {
-            Ok(store) => Some(store),
-            Err(error) => {
-                status::warn_failure("open_guide_store", "open_store");
-                self.message = Some(self.i18n.format(
-                    MessageId::GuideWizardSaveFailed,
-                    &[("error", &cli::error_reason(self.i18n, &error))],
-                ));
-                None
-            }
+            None => Flow::Exit,
         }
     }
 
@@ -615,36 +649,5 @@ impl Session {
         self.analysis = crate::config::analysis_mode_status();
         self.bash = crate::config::bash_history_status();
         self.rec = status::load_recommendations(&self.paths);
-    }
-
-    fn toggle_label(&self, enabled: bool) -> &'static str {
-        self.i18n.t(if enabled {
-            MessageId::GuideStateOn
-        } else {
-            MessageId::GuideStateOff
-        })
-    }
-
-    fn toggle_value(&self, reading: Reading<bool>) -> String {
-        match reading {
-            Reading::Value(enabled) => self.toggle_label(enabled).to_string(),
-            Reading::Unknown => self.i18n.t(MessageId::GuideWizardReadFailed).to_string(),
-        }
-    }
-
-    fn language_label(&self, language: Language) -> &'static str {
-        self.language_label_setting(LanguageSetting::Language(language))
-    }
-
-    fn language_label_setting(&self, setting: LanguageSetting) -> &'static str {
-        match setting {
-            LanguageSetting::Auto => self.i18n.t(MessageId::GuideWizardLanguageAuto),
-            LanguageSetting::Language(Language::EnUs) => {
-                self.i18n.t(MessageId::GuideWizardLanguageEn)
-            }
-            LanguageSetting::Language(Language::ZhCn) => {
-                self.i18n.t(MessageId::GuideWizardLanguageZh)
-            }
-        }
     }
 }

@@ -172,7 +172,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "登录时显示健康与资源状态，影响后续登录。"
         }
         MessageId::GuideWizardAiReadonly => {
-            "可直接提问，首次提问时验证；也可管理 AI 服务。"
+            "可直接提问；也可在向导内管理 AI 服务，结束后返回本页。配置完成不等于已连接。"
         }
         MessageId::GuideWizardLoginReadonly => {
             "在终端运行 cosh login set 或 cosh login restore 修改。"
@@ -203,11 +203,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseLine => "零配置自动使用：{value}",
         MessageId::GuideWizardAiAutoUseOn => "开启",
         MessageId::GuideWizardAiAutoUseOff => "关闭",
-        MessageId::GuideWizardAiManage => "管理 AI 服务（打开 /auth）",
-        MessageId::GuideWizardAiHandoff => {
-            "正在打开 Cosh 会话进行认证，完成后输入 exit 返回向导。"
-        }
-        MessageId::GuideWizardAiHandoffFailed => "无法打开 Cosh 会话：{error}",
+        MessageId::GuideWizardAiManage => "配置 AI 服务",
         MessageId::GuideWizardTipsAnalysis => "命令分析方式",
         MessageId::GuideWizardTipsPersonal => "个性化提问推荐",
         MessageId::GuideWizardTipsData => "推荐数据与隐私",
@@ -242,17 +238,64 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardCancel => "取消",
         MessageId::GuideWizardLoginSet => "设为 Cosh 登录 Shell",
         MessageId::GuideWizardLoginRestore => "恢复原登录 Shell",
-        MessageId::GuideWizardLoginOther => "其它用户（显示管理命令）",
+        MessageId::GuideWizardLoginOther => "查看其他用户管理命令",
         MessageId::GuideWizardLoginVerified => "已验证：{value}",
         MessageId::GuideWizardLoginUnconfirmed => "未确认变更，请重查后再试。",
-        MessageId::GuideWizardLoginHandoff => "正在打开登录管理，完成后返回向导。",
         MessageId::GuideWizardLoginSudoNote => "变更需要管理员授权；密码在终端输入，不进入向导。",
         MessageId::GuideWizardConfigUnreadable => "无法读取配置文件。请手动编辑后重新打开向导。",
         MessageId::GuideWizardDataClearConfirm => "确认清除本地推荐数据？开关偏好将保留。",
-        MessageId::GuideWizardLoginHandoffFailed => "打开登录管理失败：{error}",
         MessageId::GuideWizardLoginOtherGuidance => "其它用户管理命令（需管理员权限）：",
         MessageId::GuideWizardLoginReread => "重新读取登录状态",
         MessageId::GuideWizardLoginRereadDone => "已重新读取登录状态。",
+        MessageId::GuideWizardDetailHint => "↑↓ 选择  Enter 确认  PgUp/PgDn 滚动  Esc 返回",
+        MessageId::GuideWizardResultSaved => "已保存：{actions}。",
+        MessageId::GuideWizardResultPartial => "部分完成：{actions}。",
+        MessageId::GuideWizardResultUnconfirmed => "结果未确认：{actions}。请重新读取后再决定是否重试。",
+        MessageId::GuideWizardResultNone => "未更改配置。",
+        MessageId::GuideWizardResultCancelled => "已取消本次操作，已保存的更改保留。",
+        MessageId::GuideWizardResultFailed => "未完成：{error}",
+        MessageId::GuideWizardResultInterrupted => "操作被中断。",
+        MessageId::GuideWizardResultScope => "新会话按保存值运行；已有会话未同步。",
+        MessageId::GuideWizardActionConfigure => "新增或编辑 AI 服务",
+        MessageId::GuideWizardActionActivate => "切换 AI 服务",
+        MessageId::GuideWizardActionDelete => "删除 AI 服务",
+        MessageId::GuideWizardActionTrial => "免配置接入设置",
+        MessageId::GuideWizardActionLogin => "登录 Shell",
+        MessageId::GuideWizardAiExit => "完成并返回",
+        MessageId::GuideWizardAiAddService => "添加 AI 服务",
+        MessageId::GuideWizardAiUnavailable => "无法打开 AI 服务管理：{error}",
+        MessageId::GuideWizardAiCoreUntrusted => {
+            "cosh-core 未通过身份校验，已拒绝打开 AI 服务管理。请使用受信任的 cosh-core。"
+        }
+        MessageId::GuideWizardAiCoreCapability => {
+            "当前 cosh-core 不支持安全配置写入，已拒绝修改。请升级 cosh-core 后重试。"
+        }
+        MessageId::GuideWizardInputLost => "终端输入已结束，向导退出。",
+        MessageId::GuideWizardPersonalOffConfirm => {
+            "关闭个性化推荐，并清理本地推荐派生活动、画像与缓存？"
+        }
+        MessageId::GuideWizardPersonalOffScope => {
+            "已有 Cosh 会话未同步，重新打开后按关闭偏好运行。保留源 Bash 历史、认证配置与服务端记录。"
+        }
+        MessageId::GuideWizardDataClearScope => {
+            "清理本地推荐派生活动、画像与缓存，保留推荐与导入开关。不删除源 Bash 历史，不修改认证配置，不清理服务端记录。"
+        }
+        MessageId::GuideWizardDataResetScope => {
+            "隔离损坏的推荐载荷，重建推荐状态并关闭推荐。旧载荷可能作为隔离副本保留，不等于彻底擦除。源 Bash 历史、认证配置与服务端记录不变。"
+        }
+        MessageId::GuideWizardPersonalOffUnconfirmed => {
+            "关闭偏好已保存；本地推荐数据的清理结果尚未确认。"
+        }
+        MessageId::GuideWizardLoginOtherNote => {
+            "USER 是占位符，请替换为目标用户名；退出向导后在终端自行执行，向导不会代为执行。"
+        }
+        MessageId::GuideWizardLoginCancelled => "已取消管理员授权，未修改登录 Shell。",
+        MessageId::GuideWizardLoginCommitPending => {
+            "登录 Shell 变更可能已提交，结果未确认；请重新读取后再决定是否重试。"
+        }
+        MessageId::GuideWizardPartialSessionRecord => {
+            "模型配置已保存，但会话记录未保存；不会影响原终端或后续会话。"
+        }
         _ => return None,
     })
 }

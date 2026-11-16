@@ -1,11 +1,13 @@
 use crate::input::InterceptReason;
 
+mod auth_capture;
 mod capture_bridge;
 mod card_capture;
 mod draft_editor;
 mod event_parser;
 mod event_sender;
 
+pub(crate) use auth_capture::AuthCardInput;
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
 mod mode;

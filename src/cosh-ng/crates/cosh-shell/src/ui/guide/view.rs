@@ -32,7 +32,13 @@ pub(crate) struct WizardView {
     pub(crate) markdown: Option<String>,
     pub(crate) scroll: usize,
     pub(crate) language: Language,
+    /// A freshly produced result scrolls its full text into view once.
+    pub(crate) message_fresh: bool,
 }
+
+/// Rows a result may occupy before it moves into the scrollable body, where
+/// the whole text stays reachable on narrow terminals.
+const INLINE_MESSAGE_ROWS: usize = 2;
 
 /// Renders the wizard and returns the effective (clamped) scroll offset so the
 /// controller can store it back and keep Up/Down responsive at the boundaries.
@@ -48,7 +54,11 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
         width,
         ..area
     };
-    let message_rows = u16::from(view.message.is_some());
+    let inline_message = view.message.as_deref().and_then(|message| {
+        let lines = wrap_text(message, width as usize);
+        (lines.len() <= INLINE_MESSAGE_ROWS).then_some(lines)
+    });
+    let message_rows = inline_message.as_ref().map_or(0, |lines| lines.len()) as u16;
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -69,16 +79,20 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
     let scroll = match &view.markdown {
         Some(markdown) => render_markdown(frame, body, view, markdown),
         None => {
-            render_rows(frame, body, view);
-            view.scroll
+            let overflow_message = view.message.as_deref().filter(|_| inline_message.is_none());
+            render_rows(frame, body, view, overflow_message)
         }
     };
-    if let Some(message) = &view.message {
+    if let Some(lines) = &inline_message {
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                message.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
+            Paragraph::new(
+                lines
+                    .iter()
+                    .map(|line| {
+                        Line::styled(line.clone(), Style::default().add_modifier(Modifier::BOLD))
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             chunks[4],
         );
     }
@@ -92,36 +106,72 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
     scroll
 }
 
-fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) {
+fn render_rows(
+    frame: &mut Frame,
+    area: Rect,
+    view: &WizardView,
+    overflow_message: Option<&str>,
+) -> usize {
     let width = area.width as usize;
     let height = area.height as usize;
-    let total = view.rows.len();
-    let lines = view
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| match row {
-            WizardRow::Blank => Line::raw(""),
-            WizardRow::Text(text) => Line::raw(truncate(text, width)),
-            WizardRow::Choice { label, value } => {
-                choice_line(label, value, width, index == view.cursor)
+    let mut lines: Vec<(usize, Line<'static>)> = Vec::new();
+    for (index, row) in view.rows.iter().enumerate() {
+        match row {
+            WizardRow::Blank => lines.push((index, Line::raw(""))),
+            WizardRow::Text(text) => {
+                for segment in wrap_text(text, width) {
+                    lines.push((index, Line::raw(segment)));
+                }
             }
-        })
-        .collect::<Vec<_>>();
+            WizardRow::Choice { label, value } => lines.push((
+                index,
+                choice_line(label, value, width, index == view.cursor),
+            )),
+        }
+    }
+    let message_owner = view.rows.len();
+    if let Some(message) = overflow_message {
+        lines.push((message_owner, Line::raw("")));
+        for segment in wrap_text(message, width) {
+            lines.push((
+                message_owner,
+                Line::styled(segment, Style::default().add_modifier(Modifier::BOLD)),
+            ));
+        }
+    }
+    let total = lines.len();
     let content_rows = if total <= height {
         height
     } else {
         height.saturating_sub(1)
     };
     let max_scroll = total.saturating_sub(content_rows);
-    let scroll = view
-        .cursor
-        .saturating_sub(content_rows.saturating_sub(1))
-        .min(max_scroll);
+    let focus_start = lines
+        .iter()
+        .position(|(owner, _)| *owner == view.cursor)
+        .unwrap_or(0);
+    let focus_end = lines
+        .iter()
+        .rposition(|(owner, _)| *owner == view.cursor)
+        .unwrap_or(focus_start);
+    let mut scroll = view.scroll.min(max_scroll);
+    if view.message_fresh && overflow_message.is_some() {
+        // A fresh result owns the view: show its tail rather than snapping back
+        // to the focused choice, which the next keypress brings back anyway.
+        scroll = max_scroll;
+    } else {
+        if focus_end >= scroll + content_rows {
+            scroll = (focus_end + 1).saturating_sub(content_rows).min(max_scroll);
+        }
+        if focus_start < scroll {
+            scroll = focus_start.min(max_scroll);
+        }
+    }
     let visible = lines
         .into_iter()
         .skip(scroll)
         .take(content_rows)
+        .map(|(_, line)| line)
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(visible),
@@ -140,6 +190,7 @@ fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) {
             Rect::new(area.x, area.y + content_rows as u16, area.width, 1),
         );
     }
+    scroll
 }
 
 fn choice_line(label: &str, value: &str, width: usize, selected: bool) -> Line<'static> {
@@ -241,6 +292,30 @@ fn truncate(text: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Wraps by display columns so CJK text keeps whole glyphs on narrow terminals.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        let mut columns = 0usize;
+        for character in paragraph.chars() {
+            let glyph = character.to_string();
+            let glyph_width = display_width(&glyph);
+            if columns + glyph_width > width && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                columns = 0;
+            }
+            current.push(character);
+            columns += glyph_width;
+        }
+        lines.push(current);
+    }
+    lines
 }
 
 #[cfg(test)]

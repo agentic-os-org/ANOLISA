@@ -35,6 +35,8 @@ pub(super) struct CoreAuthState {
     pub(super) ecs_trial: Option<CoreEcsTrialState>,
     pub(super) templates: Vec<AuthProviderInfo>,
     pub(super) existing_providers: Vec<ExistingProvider>,
+    /// The core advertises the ownership-checked configuration writer.
+    pub(super) guarded_writes: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,8 @@ struct RegistryAuthState {
     ecs_trial: Option<CoreEcsTrialState>,
     #[serde(default)]
     saved_providers: Vec<CoreSavedProvider>,
+    #[serde(default)]
+    config_write_guard: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +195,7 @@ pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAu
         ecs_trial: state.ecs_trial,
         templates: state.templates,
         existing_providers,
+        guarded_writes: state.config_write_guard.as_deref() == Some("v1"),
     })
 }
 

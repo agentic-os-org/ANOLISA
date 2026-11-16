@@ -174,7 +174,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Shows health and resource state at login; affects later logins."
         }
         MessageId::GuideWizardAiReadonly => {
-            "Ask directly; access is checked on your first question."
+            "Ask directly, or manage AI services inside the wizard; you return here when the task ends. Configured is not connected."
         }
         MessageId::GuideWizardLoginReadonly => {
             "Run cosh login set or cosh login restore in the terminal to change it."
@@ -205,11 +205,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseLine => "Zero-config auto use: {value}",
         MessageId::GuideWizardAiAutoUseOn => "on",
         MessageId::GuideWizardAiAutoUseOff => "off",
-        MessageId::GuideWizardAiManage => "Manage AI service (opens /auth)",
-        MessageId::GuideWizardAiHandoff => {
-            "Opening a Cosh session for authentication; type exit to return to the wizard."
-        }
-        MessageId::GuideWizardAiHandoffFailed => "Could not open a Cosh session: {error}",
+        MessageId::GuideWizardAiManage => "Configure AI service",
         MessageId::GuideWizardTipsAnalysis => "Command analysis",
         MessageId::GuideWizardTipsPersonal => "Personalized prompt recommendations",
         MessageId::GuideWizardTipsData => "Recommendation data & privacy",
@@ -246,17 +242,72 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardCancel => "Cancel",
         MessageId::GuideWizardLoginSet => "Set Cosh as login shell",
         MessageId::GuideWizardLoginRestore => "Restore original login shell",
-        MessageId::GuideWizardLoginOther => "Other user (show management commands)",
+        MessageId::GuideWizardLoginOther => "View other-user management commands",
         MessageId::GuideWizardLoginVerified => "Verified: {value}",
         MessageId::GuideWizardLoginUnconfirmed => "Change unconfirmed; re-query before retrying.",
-        MessageId::GuideWizardLoginHandoff => "Opening login management; return to the wizard when done.",
         MessageId::GuideWizardLoginSudoNote => "Changes require administrator authorization; the password is entered in the terminal, not the wizard.",
         MessageId::GuideWizardConfigUnreadable => "Unable to read the config file. Edit it manually, then reopen the wizard.",
         MessageId::GuideWizardDataClearConfirm => "Clear local recommendation data? The on/off setting will be kept.",
-        MessageId::GuideWizardLoginHandoffFailed => "Login management handoff failed: {error}",
         MessageId::GuideWizardLoginOtherGuidance => "Other user commands (administrator):",
         MessageId::GuideWizardLoginReread => "Reread login status",
         MessageId::GuideWizardLoginRereadDone => "Login status reread.",
+        MessageId::GuideWizardDetailHint => "↑↓ select  Enter apply  PgUp/PgDn scroll  Esc back",
+        MessageId::GuideWizardResultSaved => "Saved: {actions}.",
+        MessageId::GuideWizardResultPartial => "Partly completed: {actions}.",
+        MessageId::GuideWizardResultUnconfirmed => {
+            "Unconfirmed: {actions}. Reread the state before deciding whether to retry."
+        }
+        MessageId::GuideWizardResultNone => "No configuration changed.",
+        MessageId::GuideWizardResultCancelled => {
+            "This action was cancelled; saved changes are kept."
+        }
+        MessageId::GuideWizardResultFailed => "Not completed: {error}",
+        MessageId::GuideWizardResultInterrupted => "The action was interrupted.",
+        MessageId::GuideWizardResultScope => {
+            "New sessions use the saved value; existing sessions are not updated."
+        }
+        MessageId::GuideWizardActionConfigure => "add or edit AI service",
+        MessageId::GuideWizardActionActivate => "switch AI service",
+        MessageId::GuideWizardActionDelete => "delete AI service",
+        MessageId::GuideWizardActionTrial => "zero-config access setting",
+        MessageId::GuideWizardActionLogin => "login shell",
+        MessageId::GuideWizardAiExit => "Finish and return",
+        MessageId::GuideWizardAiAddService => "Add AI service",
+        MessageId::GuideWizardAiUnavailable => "Could not open AI service management: {error}",
+        MessageId::GuideWizardAiCoreUntrusted => {
+            "cosh-core failed the identity check, so AI service management stayed closed. Use a trusted cosh-core."
+        }
+        MessageId::GuideWizardAiCoreCapability => {
+            "This cosh-core does not support safe configuration writes, so changes were refused. Upgrade cosh-core and retry."
+        }
+        MessageId::GuideWizardInputLost => "Terminal input ended; the wizard exited.",
+        MessageId::GuideWizardPersonalOffConfirm => {
+            "Turn off personalized recommendations and clear local recommendation activity, profiles, and caches?"
+        }
+        MessageId::GuideWizardPersonalOffScope => {
+            "Existing Cosh sessions are not updated; a new session runs with recommendations off. Source Bash history, credentials, and server-side records are kept."
+        }
+        MessageId::GuideWizardDataClearScope => {
+            "Clears local recommendation activity, profiles, and caches, and keeps the recommendation and import settings. Source Bash history is not deleted, credentials are not changed, and server-side records are not cleared."
+        }
+        MessageId::GuideWizardDataResetScope => {
+            "Quarantines the damaged recommendation payload, rebuilds the state, and turns recommendations off. The old payload may remain as a quarantine copy, so this is not a full erase. Source Bash history, credentials, and server-side records are unchanged."
+        }
+        MessageId::GuideWizardPersonalOffUnconfirmed => {
+            "The off preference was saved; clearing local recommendation data is unconfirmed."
+        }
+        MessageId::GuideWizardLoginOtherNote => {
+            "USER is a placeholder: replace it with the target account. Run these commands yourself in a terminal after leaving the wizard; the wizard does not run them."
+        }
+        MessageId::GuideWizardLoginCancelled => {
+            "Administrator authorization was cancelled; the login shell was not changed."
+        }
+        MessageId::GuideWizardLoginCommitPending => {
+            "The login shell change may already be committed and is unconfirmed; reread the state before deciding whether to retry."
+        }
+        MessageId::GuideWizardPartialSessionRecord => {
+            "Model configuration saved, but the session record was not; existing terminals and later sessions are unaffected."
+        }
         _ => return None,
     })
 }

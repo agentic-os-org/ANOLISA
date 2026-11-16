@@ -25,6 +25,7 @@ fn view() -> WizardView {
         markdown: None,
         scroll: 0,
         language: Language::EnUs,
+        message_fresh: false,
     }
 }
 
@@ -286,5 +287,105 @@ fn zh_privacy_last_sentence_is_reachable_at_40x16() {
     assert!(
         compact.contains("服务方记录。"),
         "zh privacy tail unreachable at 40x16:\n{text}"
+    );
+}
+
+fn confirmation_rows() -> Vec<WizardRow> {
+    vec![
+        WizardRow::Text(
+            "Turning this off clears local recommendation activity, profiles, and caches. \
+             Existing Cosh sessions are not updated. Source Bash history, credentials, and \
+             server-side records are kept."
+                .to_string(),
+        ),
+        WizardRow::Blank,
+        WizardRow::Choice {
+            label: "Confirm".to_string(),
+            value: String::new(),
+        },
+        WizardRow::Choice {
+            label: "Cancel".to_string(),
+            value: String::new(),
+        },
+    ]
+}
+
+#[test]
+fn destructive_disclosure_keeps_its_last_sentence_reachable_at_40x16() {
+    let mut page = view();
+    page.rows = confirmation_rows();
+    page.cursor = 3;
+    page.scroll = 999;
+    let lines = render_lines(40, 16, &page);
+    let text = lines.join("\n");
+    assert!(
+        text.contains("server-side records are kept."),
+        "disclosure tail unreachable:\n{text}"
+    );
+}
+
+#[test]
+fn long_result_moves_into_the_body_and_scrolls_to_its_tail() {
+    let mut page = view();
+    page.message = Some(
+        "Saved the AI service switch. The delete result is unconfirmed; re-read the service \
+         list before retrying. The zero-config access preference was partly completed, so the \
+         session record may still be pending. Nothing was rolled back: the switch you already \
+         made stays in place. New sessions use the saved value."
+            .to_string(),
+    );
+    page.message_fresh = true;
+    let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+    let mut returned = usize::MAX;
+    terminal
+        .draw(|frame| {
+            returned = super::render(frame, &page);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..16)
+        .map(|y| {
+            (0..40)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(returned > 0, "long result must be scrollable: {returned}");
+    let compact: String = text.chars().filter(|character| !character.is_whitespace()).collect();
+    assert!(
+        compact.contains("Newsessionsusethesavedvalue."),
+        "result tail unreachable:\n{text}"
+    );
+}
+
+#[test]
+fn short_result_stays_on_one_inline_line() {
+    let mut page = view();
+    page.message = Some("Saved: On".to_string());
+    page.message_fresh = true;
+    let lines = render_lines(80, 24, &page);
+    assert!(lines.iter().any(|line| line.contains("Saved: On")));
+    assert!(lines[3].contains("> Language"));
+}
+
+#[test]
+fn zh_result_tail_is_reachable_at_40x16() {
+    let mut page = view();
+    page.language = Language::ZhCn;
+    page.message = Some(
+        "已保存关闭偏好；本地推荐数据的清理结果尚未确认。已有 Cosh 会话未同步，新会话按保存值运行。"
+            .to_string(),
+    );
+    page.message_fresh = true;
+    let lines = render_lines(40, 16, &page);
+    let compact: String = lines
+        .join("\n")
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(
+        compact.contains("新会话按保存值运行。"),
+        "zh result tail unreachable:\n{compact}"
     );
 }
