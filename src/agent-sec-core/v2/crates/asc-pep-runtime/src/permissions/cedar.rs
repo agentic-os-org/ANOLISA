@@ -50,6 +50,25 @@ pub(super) fn bind(
             }
         }
     }
+    // Classify missing paths before pinning identities, so a not-yet-created
+    // output reports the policy boundary instead of a raw ENOENT. Creation is
+    // represented separately from writes to existing objects.
+    for path in &paths {
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                // Canonicalization cannot identify other hardlink names. Reject before a
+                // redundant exclusion disappears and bypasses the backend's hardlink check.
+                if metadata.is_file() && metadata.nlink() > 1 {
+                    return Err(unsupported(format!("hardlinked permission path: {path}")).into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let evaluator = unnormalized_evaluator(source, &parsed.pst)?;
+                missing_destination(&evaluator, &parsed.programs, path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     let empty = OsPermissionSet {
         version: 1,
         filesystem: FilesystemPermissions {
@@ -69,14 +88,6 @@ pub(super) fn bind(
             return Err(
                 unsupported(format!("launch path changed during preparation: {path}")).into(),
             );
-        }
-    }
-    for path in &paths {
-        let metadata = std::fs::metadata(path)?;
-        // Canonicalization cannot identify other hardlink names. Reject before a
-        // redundant exclusion disappears and bypasses the backend's hardlink check.
-        if metadata.is_file() && metadata.nlink() > 1 {
-            return Err(unsupported(format!("hardlinked permission path: {path}")).into());
         }
     }
     let permissions = project_parsed(source, launch, parsed, Some(&facts))?;
@@ -408,6 +419,52 @@ fn is_file(path: &str, facts: Option<&[PathFact]>) -> Result<bool> {
             .ok_or_else(|| unsupported(format!("point permission lacks a pinned object: {path}")));
     }
     Ok(std::fs::metadata(path)?.is_file())
+}
+
+fn unnormalized_evaluator(source: &CedarPolicySource, pst: &cedar_policy::pst::PolicySet) -> Result<Evaluator> {
+    let policies = PolicySet::from_pst(pst.clone()).map_err(|error| unsupported(error.to_string()))?;
+    Ok(Evaluator {
+        policies,
+        schema: asc_policy_cedar::schema::load_schema(&source.schema)?,
+    })
+}
+
+/// Classifies a permission path that does not exist during preparation.
+///
+/// The strict backend pins existing objects by identity, so it cannot enforce a
+/// scope on a not-yet-created file, and granting the parent directory would
+/// infer writes to it and its siblings. The classification stays explicit: a
+/// policy that permits a mutation at the destination reports the exact backend
+/// capability limitation, and any other destination reports the policy denial.
+fn missing_destination(
+    evaluator: &Evaluator,
+    programs: &BTreeSet<String>,
+    path: &str,
+) -> Result<()> {
+    let mut permitted = false;
+    let mut forbidden = false;
+    for program in programs {
+        for operation in OPERATIONS {
+            let write = evaluator.query("file.write", "File", path, &json!({"path": path}), json!({"input": {
+                "program": program, "operation": {"__entity": {"type": "SecCore::WriteOperation", "id": operation}}
+            }}))?;
+            forbidden |= write.forbidden;
+            permitted |= write.allowed;
+        }
+    }
+    if forbidden {
+        return Err(unsupported(format!(
+            "policy denies creation at the missing permission path: {path}"
+        )));
+    }
+    if permitted {
+        return Err(unsupported(format!(
+            "policy permits creating {path}, but the backend cannot enforce a scope on a file that does not exist yet; pre-create the file or bind a directory scope that already exists"
+        )));
+    }
+    Err(unsupported(format!(
+        "policy does not permit creating the missing permission path: {path}"
+    )))
 }
 
 fn fact_index(facts: &[PathFact]) -> Facts<'_> {

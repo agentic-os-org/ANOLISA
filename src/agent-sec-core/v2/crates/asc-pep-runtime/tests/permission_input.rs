@@ -466,6 +466,82 @@ when {{ resource.path == {} }};"#,
 }
 
 #[test]
+fn missing_destinations_are_classified_instead_of_failing_with_enoent() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let missing = out.join("upper.txt");
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(missing)
+    ))
+    .unwrap();
+    // An authorized new output must reach an explicit capability report, never a raw ENOENT.
+    let error = input.prepare(&launch()).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("cannot enforce a scope on a file that does not exist yet")
+            && message.contains(missing.to_str().unwrap()),
+        "{message}"
+    );
+    // The same destination for which creation is denied names the policy boundary.
+    let denied = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(missing)
+    ))
+    .unwrap()
+    .prepare(&launch())
+    .unwrap_err()
+    .to_string();
+    assert!(
+        denied.contains("policy denies creation at the missing permission path"),
+        "{denied}"
+    );
+    // A missing read-only literal grants no mutation: a policy denial, not ENOENT.
+    let ungranted = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(out.join("other.txt"))
+    ))
+    .unwrap()
+    .prepare(&launch())
+    .unwrap_err()
+    .to_string();
+    assert!(
+        ungranted.contains("does not permit creating the missing permission path"),
+        "{ungranted}"
+    );
+    // An existing output still binds exactly as before.
+    std::fs::write(&missing, "").unwrap();
+    let bound = input.prepare(&launch()).unwrap();
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == missing.to_str().unwrap())
+    );
+    // A dangling link name must not gain a creation classification.
+    let dangling = dir.path().join("dangling");
+    std::os::unix::fs::symlink(out.join("absent"), &dangling).unwrap();
+    let error = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(dangling)
+    ))
+    .unwrap()
+    .prepare(&launch())
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("cannot enforce a scope on a file that does not exist yet"),
+        "{error}"
+    );
+}
+
+#[test]
 fn writable_ancestors_cannot_retarget_permission_aliases() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("key");
