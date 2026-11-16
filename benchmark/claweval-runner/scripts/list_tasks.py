@@ -16,6 +16,8 @@
 
 """List and group tasks under claw-eval/tasks/ by prefix (T/M/C) and difficulty.
 
+Uses PyYAML from ce-runner's existing dependencies.
+
 Usage:
     python scripts/list_tasks.py
     python scripts/list_tasks.py --prefix T
@@ -28,33 +30,32 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = REPO_ROOT / "claw-eval" / "tasks"
 
 
-def _load_yaml_simple(path: Path) -> dict:
-    """Minimal YAML parser for flat task.yaml files (no external deps)."""
-    import re
+def _load_yaml_simple(path: Path) -> dict[str, str]:
+    """Decode YAML scalars while retaining the inventory's flat string metadata."""
+    content = path.read_text(encoding="utf-8")
+    document = yaml.compose(content, Loader=yaml.SafeLoader)
+    if document is None:
+        return {}
+    if not isinstance(document, yaml.MappingNode):
+        raise ValueError(f"{path}: task metadata must be a YAML mapping")
 
-    result = {}
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip()
-            if not line or line.startswith("#"):
-                continue
-            # Stop at nested structures (prompt:, tools:, services:, etc.)
-            if re.match(r"^\w", line) and ":" in line:
-                key, _, value = line.partition(":")
-                value = value.strip()
-                # Strip quotes
-                if value and value[0] in ('"', "'"):
-                    value = value.strip("\"'")
-                result[key.strip()] = value
-            elif not line.startswith(" ") and not line.startswith("\t"):
-                # Top-level key with nested value (e.g. "prompt:")
-                key = line.rstrip(":")
-                if key not in result:
-                    result[key] = ""
+    result: dict[str, str] = {}
+    for key, value in document.value:
+        if not isinstance(key, yaml.ScalarNode):
+            continue
+        if isinstance(value, yaml.ScalarNode):
+            result[key.value] = value.value
+        elif value.flow_style:
+            # Existing machine inventories expose inline collections as text.
+            result[key.value] = content[value.start_mark.index : value.end_mark.index]
+        else:
+            result[key.value] = ""
     return result
 
 
