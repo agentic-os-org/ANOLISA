@@ -274,14 +274,14 @@ struct CallMetrics {
 
 /// Latency and throughput of one recorded call.
 ///
-/// Produced by [`call_latency`] alone, so the agent-grouped latency view and
-/// the pid/session-grouped `top` rows cannot drift apart.
+/// Produced by [`call_latency`] alone, so the agent-grouped latency view, the
+/// pid/session-grouped `top` rows and cache diagnosis cannot drift apart.
 #[derive(Debug, Default)]
-struct CallLatency {
-    ttft_ms: Option<f64>,
+pub(super) struct CallLatency {
+    pub(super) ttft_ms: Option<f64>,
     tps_tokens_per_second: Option<f64>,
     tpot_ms_per_token: Option<f64>,
-    e2e_latency_ms: Option<f64>,
+    pub(super) e2e_latency_ms: Option<f64>,
 }
 
 /// Derives TTFT / TPS / TPOT / end-to-end latency for one recorded call.
@@ -289,7 +289,7 @@ struct CallLatency {
 /// A sample is left `None` rather than reported when its timestamps are
 /// inconsistent (first token before the call started, or an end at or before
 /// the first token); TPS and TPOT additionally need positive `output_tokens`.
-fn call_latency(
+pub(super) fn call_latency(
     start: i64,
     end: Option<i64>,
     first: Option<i64>,
@@ -361,7 +361,8 @@ fn percentile(sorted: &[f64], pct: f64) -> Option<f64> {
     Some(sorted[lower] * (1.0 - fraction) + sorted[upper] * fraction)
 }
 
-fn percentiles(mut values: Vec<f64>) -> Option<MetricPercentiles> {
+/// Interpolated p50/p95/p99 of `values`; `None` when there are no samples.
+pub(crate) fn percentiles(mut values: Vec<f64>) -> Option<MetricPercentiles> {
     values.sort_by(f64::total_cmp);
     Some(MetricPercentiles {
         p50: percentile(&values, 50.0)?,
