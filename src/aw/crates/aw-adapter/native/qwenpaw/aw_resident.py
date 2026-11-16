@@ -189,7 +189,7 @@ class ResidentMiddleware(MiddlewareBase):
         self.config = dict(self.root_config)
         self.evaluate = evaluate
         self.context = context
-        self.scope = Scope(self.config)
+        self.scope = self.create_scope(self.config)
         self.scope.probe = self.check_seams
         self.scope.on_failure = self.bridge_failed
         self.active: dict[str, Invocation] = {}
@@ -209,6 +209,9 @@ class ResidentMiddleware(MiddlewareBase):
         self.agent = None
         self.reply_stream = None
         self.reply_task = None
+
+    def create_scope(self, config):
+        return Scope(config)
 
     def check(self) -> None:
         check_cleanup()

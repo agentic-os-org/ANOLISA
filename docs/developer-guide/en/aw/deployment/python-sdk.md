@@ -31,21 +31,43 @@ application's directory and environment; use the same directory as the native
 Agent. No binary or policy engine is included in the wheel.
 
 For QwenPaw, copy the installed example under
-`share/anolisa-aw-sdk/examples/qwenpaw/` into a new native plugin directory and
-enable `plugins.aw-sdk` in the application's own configuration. Set `AW_SOCKET`
-to the independent Service's private socket and configure the target named
-`qwenpaw` with Adapter `qwenpaw`. Keep the original model, plugins, permissions
-and configuration sources. Native plugin loading installs the middleware before
-its startup hook publishes cooperative support and returns without waiting for AW
-registration. Shutdown releases this plugin's instance.
-Use one AW integration per App to avoid duplicate policy callbacks.
+`share/anolisa-aw-sdk/examples/qwenpaw/` into a new native plugin directory,
+enable `plugins.aw-sdk`, and set `AW_CONFIG` to the absolute deployment
+configuration path. Keep `qwenpaw app`, the original model, permissions and other
+plugins. The example reads the configuration through AW's authoritative offline
+parser; initialization starts neither AW nor sec-core.
 
-The example's `install` callback delegates to `QwenPawPlugin.ready`, which
-confirms registered middleware and validates the supplied routes. A custom
-integration must likewise return `True` only after installing its callbacks.
-The client repeats this confirmation for each task's immutable policy snapshot.
-Each Agent reply owns a task, and that Scope remains until its native tool
-generators also finish. Separate Agent instances retain independent tasks.
+```python
+from aw_sdk.qwenpaw import QwenPawPlugin
+
+plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
+```
+
+A single `qwenpaw` target is selected automatically; pass `target` for multiple
+targets. Set an explicit private `daemon.endpoint` or `daemon.state_dir`.
+The configuration selects the earliest protected boundary. With `input.submit`
+enabled, each reply waits for Ready and its Scope before model dispatch. With only
+`tool.before` and/or `tool.after`, model calls can overlap deployment preparation;
+the first tool waits for Ready and fixes the Scope before native execution.
+The internal admission gate does not execute an unconfigured before policy.
+A tool-only reply without tools creates no remote Scope.
+
+After HTTP readiness, prepare sec-core through deployment and run
+`aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`.
+This cooperative selector needs the installed plugin; it does not inject into an
+arbitrary PID. The configured resident path uses required availability, a default
+5000 ms attachment wait, native before blocking and after result replacement or
+withholding. Native generators, background work and final result publication
+retain the existing resident guard. Keep one AW integration per App.
+Adding `input.submit` to a deployment initially wired without it requires drain
+and restart before reattachment; an in-flight model request cannot be checked
+retroactively. Ordinary policy updates still use the existing idle update gate.
+
+For explicit public-middleware control, `QwenPawPlugin(instance)` retains the
+existing `Instance` API, optional availability and per-reply Task ownership. Its
+`ready` callback confirms installed routes for the registration and each Scope.
+The configured factory above additionally uses the resident result guard;
+select the integration according to the required native effects.
 
 ## Async lifecycle and availability
 
@@ -80,6 +102,12 @@ drain while preserving the original exception. To stop between native steps, cal
 `await task.close_event(hook, original_payload)` before continuing with another
 event in the same Task. Finish the Task after native generators have drained.
 
+Native Sources using required availability and the invocation ledger may call
+`await task.watch_scope(probe=..., on_failure=...)` after activation. The SDK
+renews the Service's validity lease during model and tool waits, latches bridge
+failure for the owner, and stops/joins the monitor when the Task closes after
+native drain. The configured QwenPaw plugin uses this common Task capability.
+
 ## Cooperative control
 
 Call `instance.listen(automatic=False)` after installing native callbacks to
@@ -92,6 +120,60 @@ startup and reconnect automatically.
 idle detach and restart rules match [cooperative control](native-sdk.md#cooperative-attach-and-detach).
 Use `await instance.stop()` to withdraw the listener, and `await instance.close()`
 to release application-owned resources.
+
+## Deferred tool-after attachment
+
+The experimental `AfterOnlyPlugin` keeps native `qwenpaw app` startup independent
+of AW and sec-core. Copy `share/anolisa-aw-sdk/examples/qwenpaw-after/` from the
+installed wheel into a new native plugin directory and enable `plugins.aw-after`.
+Set `AW_SOCKET` to the private socket selected by your AW configuration. Use this
+plugin alone for the AW integration; it replaces the optional `aw-sdk` plugin.
+The application retains its native model, permissions and other Hooks.
+
+Run the native command with the installed plugin. After HTTP readiness, start or
+prewarm sec-core through its existing deployment entrypoint and attach from a
+second terminal, using the actual application PID:
+
+```bash
+aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID \
+  --timeout-ms 10000
+```
+
+With `--sdk-pid` and a configuration using `daemon.startup: on_demand`, the CLI starts or reuses AW on demand, waits
+for the application to publish its SDK support, and selects one exact PID/start
+identity. Multiple SDK instances in that process require `--sdk-instance` instead.
+The command confirms Ready; it never injects into an arbitrary process or launches
+the Agent. A supplied `--socket` selects an existing service and does not start it.
+The CLI does not start sec-core; its external lifecycle remains deployment-owned.
+
+A prompt can enter the model before attachment. The installed result boundary
+waits at the first tool, then opens a Scope, confirms an after-only snapshot and
+reuses the resident invocation ledger, Coordinator withholding and reviewed
+model/event publication. Only `tool.after` policy is accepted; the internal
+`tool.before` observation route supplies correlation without a before policy
+scan. `input.submit` and configured before checks are rejected. No-tool replies
+can finish without AW. The Scope keeps one revision until native work drains.
+
+The plugin uses `required` availability. `attach_timeout_ms` is 5000 by default
+(100–60000); an early tool waits only for the remaining attachment preparation,
+and a timeout refuses dispatch. Scanner errors withhold unchecked output while
+the HTTP process stays alive. Unknown cleanup retains the resident failure fence.
+There is no task fallback or tool replay. `reconnect_ms` defaults to 100 for this
+plugin and controls SDK discovery polling. `cwd` optionally selects the instance
+working directory; each reply passes its native workspace and clean Hook
+environment to the task. `instance.task(cwd=..., environment=...)` also exposes
+these copied per-task contexts for direct Python consumers.
+
+To stop, let active work drain, detach the selected SDK instance, and stop AW and
+sec-core through their own deployment lifecycle. Disable only `plugins.aw-after`
+and restart the native App to remove its installed boundary. Disabling the plugin
+removes this additional protection. Existing `aw run` behavior is unchanged.
+Acceptance uses QwenPaw 2.2.2.post1 and AgentScope 2.0.10 with a local model and
+replacement Provider fixture. Run the pinned `after-only-sdk` native suite for
+late attachment, ordinary/replaced results, failed scanning, detached text and
+bounded refusal without attachment. This does not establish a startup cost or
+business latency guarantee; measure the native/installed-plugin difference,
+backend preparation and first-tool residual wait separately.
 
 ## Verified coverage
 

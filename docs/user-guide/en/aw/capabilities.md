@@ -197,6 +197,16 @@ The matrix is generated from the [regression manifest](../../../../src/aw/tests/
 
 Framework releases use the [native integration checks](../../../developer-guide/en/aw/native-agents.md). The recorded test baselines identify reproducible validation inputs; other releases can use the same native contracts.
 
+
+The configuration-driven QwenPaw SDK plugin selects input or first-tool
+admission from the AW file. Configured input checks wait before model dispatch;
+tool-only policies let model inference overlap AW attachment, then fix the Scope
+before native tool entry. The required resident path retains result withholding
+and native cleanup. `AfterOnlyPlugin` keeps its narrower compatibility contract.
+Pinned native suites cover after-only, before-only and input-only configurations
+on QwenPaw 2.2.2.post1 / AgentScope 2.0.10. See
+[Python SDK deployment](../../../developer-guide/en/aw/deployment/python-sdk.md#install-and-integrate).
+
 ## Native configuration loading
 
 The common native-loader API and offline source-reference editor preserve
@@ -227,3 +237,9 @@ On the verified SDK 0.2.88 / CLI 2.1.161 baseline, native `disableAllHooks: true
 disables settings Hooks while registered SDK AW callbacks still run. Native rewrite
 cases record the unchecked execution boundary and confirm that an AW deny still
 prevents execution. These cases do not certify final-argument enforcement.
+
+The configuration-driven Qoder SDK bridge uses public native Hooks and cooperative
+PID attachment. Model inference starts without AW when input.submit is disabled;
+first-tool admission fixes its Scope. Supported checks are input/tool-before
+observation and blocking, and tool-after observation. Result replacement/final
+checks retain their managed entrypoints. See [SDK deployment](../../../developer-guide/en/aw/deployment/native-sdk.md#configuration-driven-qoder-integration).

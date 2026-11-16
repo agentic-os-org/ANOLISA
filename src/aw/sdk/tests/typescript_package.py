@@ -64,7 +64,8 @@ def main(binary: str) -> None:
         consumer = root / "consumer.mjs"
         consumer.write_text("""import assert from 'node:assert/strict';
 import { Instance } from '@anolisa/aw-sdk';
-import { qoderOptions } from '@anolisa/aw-sdk/qoder';
+import { qoderOptions, createQoderBridge } from '@anolisa/aw-sdk/qoder';
+assert.equal(typeof createQoderBridge,'function');
 const instance = new Instance({endpoint: process.argv[2], target:'app',
   availability:'native_fallback', capabilities:{}, install:()=>true});
 assert.equal(await instance.connect(),false);

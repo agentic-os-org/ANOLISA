@@ -165,6 +165,14 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 
 框架版本沿用[原生接入检查](../../../developer-guide/zh/aw/native-agents.md)。记录的测试基线用于复现验收，其他版本可通过相同原生合同接入。
 
+
+配置式 QwenPaw SDK 插件从 AW 文件选择输入或首次工具准入。
+配置输入检查时，在模型派发前等待；仅工具策略时，模型推理与 AW 接入可重叠，
+原生工具进入前固定 Scope。required resident 路径保留结果扣留和原生清理。
+AfterOnlyPlugin 保持范围较窄的兼容合同。固定原生套件覆盖
+QwenPaw 2.2.2.post1／AgentScope 2.0.10 的 after-only、before-only 和 input-only 配置。
+见 [Python SDK 部署](../../../developer-guide/zh/aw/deployment/python-sdk.md#安装与接入)。
+
 ## 原生配置加载
 
 通用 native-loader API 和离线来源引用编辑器保留原文件，区分声明、加载、准入和激活。
@@ -189,3 +197,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 已验收的 SDK 0.2.88 / CLI 2.1.161 中，原生 `disableAllHooks: true` 关闭 settings
 Hook，SDK 注册的 AW callbacks 仍执行。原生改参用例记录执行前终检缺口，并验证 AW
 明确拒绝时工具不会执行；这些用例不构成最终参数强制检查验收。
+
+配置式 Qoder SDK 接入使用原生公开 Hook 与协作 PID attach；未启用 input.submit 时，
+模型推理可先于 AW 开始，首次工具准入固定 Scope。支持输入／工具前观察和阻断、工具后
+观察；结果替换和最终检查继续沿用受管入口。见 [SDK 部署](../../../developer-guide/zh/aw/deployment/native-sdk.md#按配置接入-qoder)。

@@ -96,5 +96,9 @@ aw audit-export --state-dir "$AW_STATE" --request "$AW_QUERY"
 单次命令退出后无需停止资源；请求文件不再需要时删除 `"$AW_QUERY"`。
 
 `aw instance list`、`attach --sdk-instance ID`、`detach --sdk-instance ID`
-操作应用预装的 SDK 监听。使用 `--socket` 或 `--config` 选择服务，在 JSON 中查看应用确认。
+操作应用预装的 SDK 监听。`attach --sdk-pid PID` 按固定的进程身份选择一个监听；
+同一进程有多个监听时使用实例 ID。配合 `--config` 与 `daemon.startup: on_demand`，
+该 PID 选择器按需启动或复用 AW；指定 `--socket` 时要求服务已启动。
+应用保持原生启动和进程归属。原有 `--pid` 选择器保留原生热加载限制。
+在 JSON 中查看应用确认。
 参见[协作式 SDK 控制](../deployment/native-sdk.md#协作式-attach-与-detach)。

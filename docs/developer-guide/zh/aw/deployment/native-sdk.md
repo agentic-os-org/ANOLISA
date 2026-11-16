@@ -10,6 +10,73 @@ AW 与 Provider 分别安装。当前交付源码构建候选，registry 发布�
 AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` 的既有发行版会拒绝
 连接；协作式控制还要求 `aw-sdk-control/v1`。安装语言包不会升级 AW。
 
+## 按配置接入 Qoder
+
+使用 `createQoderBridge` 保留业务原生 Node 入口、daemon、认证、模型、权限和 Hook。
+接入模块读取部署所用的同一份自有 `aw.yaml`，安装 Qoder 公开 Hook 并发布协作监听。
+初始化通过一次有界 CLI 调用，复用 AW 离线 `config show` 解析 YAML／JSON，
+不启动 AW 或 sec-core。
+
+```javascript
+import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
+import { query } from "@qoder-ai/qoder-agent-sdk";
+
+const aw = await createQoderBridge({
+  configFile: "/absolute/aw.yaml",
+  query,
+});
+const session = aw.query({ prompt, options: nativeOptions });
+for await (const message of session) deliver(message);
+// At application shutdown:
+await aw.close();
+```
+
+将 `spec.daemon.endpoint` 或 `spec.daemon.state_dir` 设置为私有目录中的绝对路径；
+两项同时为 `auto` 时，本接入模块拒绝初始化。配置只有一个 `qoder-sdk` 目标时自动选择，
+多个目标时传入 `target`。接入模块默认采用 `availability: "native_fallback"`，AW 失联后
+原生 Query、Hook、工具和模型继续运行。每个启用事件设置 `required: false`；AW 可达时，
+`on_error: block` 和明确拒绝仍然生效。配置含 required 事件时，回退模式拒绝初始化。
+需要在 AW 失联时停止受保护操作，可显式传入 `availability: "required"`。
+可用性属于 SDK 生命周期选项，策略统一留在文件中。支持已配置输入的观察／阻断、工具前观察／阻断和
+工具后观察；不支持的效果和 Skill 路由在准入时拒绝。结果替换与最终结果门继续使用既有
+受管入口。
+
+业务原生就绪后，部署方后台准备 sec-core，并以应用用户执行：
+
+```bash
+aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+设置 `daemon.startup: on_demand` 时，命令启动或复用 AW。PID 对应已安装接入模块的
+Node 应用。服务准备可与模型推理重叠；未配置 `input.submit` 时，不安装
+`UserPromptSubmit` 回调，也不在首次工具前创建 Scope。首次 `PreToolUse` 固定 Task 策略；required 模式等待 attach，
+可选模式在 AW 尚未 Ready 时立即固定原生回退；仅后策略同样通过内部前观察关联调用。纯文本回复不等待。
+`attachTimeoutMs` 默认为 5000 ms，超时会拒绝 required 工具；可选模式不等待 attach。准入后的每个 Query 持有一个 Scope，沿用既有失联／恢复合同。
+修改文件增加 `input.submit` 后，应先重启接入模块再 attach。
+
+`aw.query` 接受原生 Query 输入，返回保留原方法的代理；消费结束、提前退出迭代或显式
+`close()` 会关闭原生 Query 与 Scope。应用结束时关闭其余 Query。每个 Query 的 cwd
+和复制后的环境构成任务上下文；`QODER_PERSONAL_ACCESS_TOKEN` 留在原生认证中，
+不进入 AW Hook 环境。其他敏感变量通过接入模块的 `environment` 选项排除。
+同一 Query 保留一种 AW 接线。该路径使用公开 Hook，不向原 SDK 添加模块补丁或 preload。
+
+## 公共准入边界
+
+TypeScript、Python 均在 Instance／Task 旁导出 `Admission`。
+Source 先安装原生回调，再为每个原生请求创建一个 Admission，传入已安装事件集合及复制的
+目录／环境。在最早的受保护输入或首次工具进入前调用 `prepare()`。
+公共 SDK 负责有界 Ready 等待、唯一 Task、取消和关闭；Source 负责原生捕获、字段映射和
+效果采纳。策略准入与 Provider 执行继续由 Service／Host／executor 承接。
+
+已安装 `input.submit` 时，可选可用性同样先等待准备；达到 attach 期限后才允许可选输入
+回退，明确错误和取消继续传播。required 工具准入等待就绪；可选工具策略在未接入时立即
+固定原生回退。`close()` 会取消待完成准入；释放 Task 前应先停止并排空原生任务。
+Source 负责在正确边界调用 `prepare()`，SDK 不从 PID 推断模型派发或工具执行。
+
+Qoder bridge 和[配置式 QwenPaw 插件](python-sdk.md#安装与接入)复用这条生命周期。
+配置加载仍调用 AW 权威 `config show`，这个有界子进程仍计入集成初始化。
+部署 Descriptor 和通用 Source resolver 属于独立后续，当前候选未提供对应 API。
+
 ## 通用应用接入
 
 TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执行及审计合同。
@@ -47,15 +114,15 @@ npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
 `aw service serve --config /absolute/aw.yaml`，使用该服务报告的 socket。
 SDK 不启动服务或 Agent。
 
-安装包中的 `examples/qoder.mjs` 给出完整连接、Query 与清理流程。沿用业务原有的
+安装包中的 `examples/qoder.mjs` 使用配置式接入。显式管理生命周期时，沿用业务原有的
 认证、daemon、模型、权限、配置来源和 Hook。将现有选项传给
 `qoderOptions(task, options)`，创建原生 Query 后立即通过返回对象执行
 `bind(query)`。每个 Query 使用独立 task，先关闭 Query，再关闭 task；应用退出时
 关闭 Instance。同一 Query 只使用一种 AW 接线方式，避免与原 AW Query factory 重复。
 
 创建 `Instance` 时显式传入 endpoint、target、capabilities 和 availability。
-`cwd`、`environment` 默认采用应用值并构成任务上下文，原生 Query 必须使用同一目录。
-其他工作目录使用另一个 Instance。`install(routes)` 仅在应用已安装对应事件路由时
+`cwd`、`environment` 默认采用应用值并构成任务上下文，不同目录的原生 Query 可通过
+`instance.task({cwd, environment})` 提供独立且复制后的任务上下文。`install(routes)` 仅在应用已安装对应事件路由时
 返回 `true`；登记及每个任务的策略快照均在 Ready 确认前调用它。
 示例将所有 Query 路由到 `qoderOptions`，遇到未知事件拒绝确认。
 

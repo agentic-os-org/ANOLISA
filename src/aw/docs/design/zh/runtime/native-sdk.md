@@ -114,3 +114,44 @@ cargo test --locked -p aw-service --lib runtime::registration
 防重放。两语言包 gate 覆盖协作选择、忙时脱离、迟到 Ready 与恢复；原生框架验收见接入指南。
 
 [TypeScript 接线](../../../../../../docs/developer-guide/zh/aw/deployment/native-sdk.md)实现该生命周期，并打包 Adapter 的 Qoder 公开 Hook 源码。离线合同与安装测试纳入默认 AW gate。
+
+## 仅工具后的延迟任务准入
+
+进程内公共底座归 `sdk/typescript/src/admission.mjs` 和
+`sdk/python/src/aw_sdk/admission.py`，复用既有 Instance／Task 合同。
+Source 先安装原生捕获，再为每个请求向 Admission 传入已安装事件集合。
+安装 input.submit 时，prepare 在输入边界等待；仅工具策略时，在首次工具进入前等待。
+后续回调和原生清理沿用同一不可变 Scope。准入门不增加 Provider Hook，配置的 before／after
+步骤继续在原阶段执行。可选可用性按准入期限回退，明确错误和取消继续传播。
+
+Qoder 公开 Hook 复用 Admission 的就绪等待、取消与唯一 Task。
+QwenPaw 配置式插件通过 DeferredScope 复用同一机制，只补充 resident 调用账本激活、
+Coordinator 流、原生 finalizer 与经检查的模型／事件发布，采用 required 可用性。
+QwenPawPlugin.from_config 按配置启用输入捕获；仅 before 或 after 策略允许模型先于 AW 启动。
+兼容入口 AfterOnlyPlugin 保持原 after-only 限制。工具策略的纯文本回复不建远端 Scope。
+提前到输入边界的保护需要在接收新请求前重新安装 Source，无法覆盖已发起的模型调用。
+
+Python SDK Task 同时拥有 required 原生 Scope 续租：按服务间隔覆盖长模型／工具等待，
+锁存原生接点或 Service 故障，向 owner 通知一次，释放 Scope 前停止并汇合监视任务。
+协作 detach 先关闭 fallback Task，再释放根注册，避免并发关闭重复释放已删除的子 Scope。
+TypeScript Admission 将各等待者的取消与共享操作、内部关闭分开。
+
+配置加载继续复用 AW 权威离线解析器。Service 保留能力准入、Ready、Scope 修订，
+Hook 经 Host／executor／Provider 执行；Adapter 保留原生字段映射和效果采纳。
+部署 Descriptor 与通用 Source resolver 尚未实现。
+
+`--sdk-pid` 选择已预装 SDK 的协作应用。CLI 在启动服务前固定既有 ProcessIdentity，
+通过 launch_service 准备 AW，等待唯一匹配的 SDK 声明，再发送原控制意图。
+SDK 确认及进程所有权仍由应用持有。后端启动沿外部部署，不引入第二套生命周期或 Provider
+协议。
+
+## Qoder 公开 Hook 的延迟准入
+
+配置式接入默认采用 `native_fallback`，在安装监听器前拒绝启用的 required 策略。
+调用方可显式选择 `required`；Service 在登记和策略更新时继续执行可用性兼容校验。
+接入模块在创建 Query 前安装原生公开回调。未启用 input.submit 时，模型派发不创建
+Scope；首次工具前回调等待协作 Ready，并按该 Query 的目录和复制后的环境创建一个
+不可变 Task。有序回调复用 Adapter 的规范化和效果处理，后回调使用同一 Scope。
+required 模式在工具派发前等待 attach，超时拒绝；可选模式在尚未 Ready 时立即将该 Query 固定为原生回退。
+输入策略在原生 UserPromptSubmit 处准入；初始化未安装输入来源时，新增输入路由会在
+登记时拒绝。原生 Query 关闭和回调取消先于 Scope 释放。该接线不安装运行时补丁。

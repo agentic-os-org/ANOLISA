@@ -87,7 +87,8 @@ def main(binary: str) -> None:
             [
                 sys.executable,
                 "-c",
-                "import aw_sdk,sys; assert 'agentscope' not in sys.modules; assert 'qwenpaw' not in sys.modules",
+                "import aw_sdk,sys; from aw_sdk.qwenpaw import AfterOnlyPlugin; "
+                "assert 'agentscope' not in sys.modules; assert 'qwenpaw' not in sys.modules",
             ],
             root,
             environment,

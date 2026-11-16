@@ -3,6 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AwError, rpc, SDK, sameIdentity } from "./transport.mjs";
 export { AwError } from "./transport.mjs";
+export { Admission } from "./admission.mjs";
 import { Controller } from "./control.mjs";
 const neutral = () => ({
   code: 0,
@@ -226,14 +227,14 @@ export class Instance {
         task.fallback = this.options.availability === "native_fallback";
       }
   }
-  async task({ signal } = {}) {
+  async task({ signal, cwd, environment } = {}) {
     signal?.throwIfAborted();
     if (this.detaching) throw new AwError("sdk_control_busy");
     if (this.closed) throw new AwError("instance_closed");
     if (this.state !== "ready" && this.options.availability === "required")
       throw new AwError("instance_not_ready");
     if (this.lastError && !this.lastError.unavailable) throw this.lastError;
-    const task = new Task(this, this.connection, signal);
+    const task = new Task(this, this.connection, signal, cwd, environment);
     this.tasks.add(task);
     try {
       await task.open();
@@ -279,13 +280,15 @@ export class Instance {
 }
 
 export class Task {
-  constructor(instance, connection, signal) {
+  constructor(instance, connection, signal, cwd, environment) {
     this.instance = instance;
     this.connection = connection;
     this.signal = signal;
     this.fallback = !connection;
     this.closed = false;
     this.routes = { events: {}, hooks: [] };
+    this.cwd = cwd ?? instance.cwd;
+    this.environment = { ...(environment ?? instance.environment) };
   }
   async call(
     operation,
@@ -324,12 +327,13 @@ export class Task {
   }
   async open() {
     if (this.fallback) return;
+    this.cwd = await realpath(this.cwd);
     const binding = await this.call({
       method: "open_scope",
       parent_id: this.connection.handle.binding.instance_id,
       pid: process.pid,
-      cwd: this.instance.cwd,
-      environment: this.instance.environment,
+      cwd: this.cwd,
+      environment: this.environment,
     });
     if (!binding) return;
     this.binding = binding;

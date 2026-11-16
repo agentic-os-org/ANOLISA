@@ -20,8 +20,22 @@ class Build(build_py):
         native.mkdir(parents=True, exist_ok=True)
         (native.parent / "__init__.py").write_text("")
         (native / "__init__.py").write_text("")
-        for name in ("sdk.py", "plugin.py", "aw_skill.py", "aw_submission.py"):
+        for name in (
+            "sdk.py",
+            "configured.py",
+            "deferred.py",
+            "plugin.py",
+            "aw_skill.py",
+            "aw_submission.py",
+            "after_only.py",
+            "after_resident.py",
+            "aw_resident.py",
+            "aw_native.py",
+            "aw_private.py",
+            "aw_mcp.py",
+        ):
             shutil.copyfile(NATIVE / name, native / name)
+        shutil.copyfile(NATIVE / "../claude-sdk/aw_scope.py", native / "aw_scope.py")
         shutil.copyfile(ROOT / "../../../../LICENSE", package / "LICENSE")
 
 

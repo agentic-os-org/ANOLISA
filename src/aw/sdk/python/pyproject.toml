@@ -19,3 +19,5 @@ aw_sdk = ["py.typed"]
 [tool.setuptools.data-files]
 "share/anolisa-aw-sdk/examples" = ["examples/application.py"]
 "share/anolisa-aw-sdk/examples/qwenpaw" = ["examples/qwenpaw/plugin.py", "examples/qwenpaw/plugin.json"]
+
+"share/anolisa-aw-sdk/examples/qwenpaw-after" = ["examples/qwenpaw-after/plugin.py", "examples/qwenpaw-after/plugin.json"]

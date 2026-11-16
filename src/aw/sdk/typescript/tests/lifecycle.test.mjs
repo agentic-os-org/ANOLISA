@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
-import { Instance } from "../src/client.mjs";
+import { Admission, Instance } from "../src/client.mjs";
 import { rpc } from "../src/transport.mjs";
 const binary =
   process.env.AW_TEST_BINARY ??
@@ -36,12 +36,14 @@ const config = {
     ),
   },
 };
-async function setup() {
+async function setup(configure = () => {}) {
   const directory = await mkdtemp(join(tmpdir(), "aw-sdk-test-"));
   const state = join(directory, "state");
   await mkdir(state, { mode: 0o700 });
   const file = join(directory, "config.json");
-  await writeFile(file, JSON.stringify(config));
+  const document = structuredClone(config);
+  configure(document);
+  await writeFile(file, JSON.stringify(document));
   const endpoint = join(state, "aw.sock");
   let service;
   return {
@@ -264,6 +266,111 @@ test(
       if (moved) await rename(`${server.endpoint}.held`, server.endpoint);
       await client.close();
       await server.close();
+    }
+  },
+);
+
+test(
+  "shared Admission waits at input and shares one Task through cancellation",
+  { timeout: 15000 },
+  async () => {
+    const server = await setup((document) => {
+      document.spec.agents.app.adapter = "sdk";
+      document.spec.events["input.submit"] = {
+        enabled: true,
+        required: false,
+        steps: [],
+      };
+    });
+    const client = instance(server.endpoint, {
+      capabilities: {
+        adapter: "sdk",
+        version: "aw-hook-source/v1",
+        entrypoint: "application",
+        events: Object.fromEntries(
+          ["input.submit", "tool.before", "tool.after"].map((event) => [
+            event,
+            ["observe"],
+          ]),
+        ),
+      },
+    });
+    const admission = new Admission(client, {
+      events: ["input.submit", "tool.before", "tool.after"],
+    });
+    let settled = false;
+    const first = admission.prepare().finally(() => (settled = true));
+    const second = admission.prepare();
+    try {
+      assert.equal(first instanceof Promise, true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(settled, false);
+      assert.equal(client.tasks.size, 0);
+      await server.start();
+      await client.connect();
+      await Promise.all([first, second]);
+      assert.equal(client.tasks.size, 1);
+      assert.equal(admission.fallback, false);
+      assert.deepEqual(
+        await admission.emit("input.submit", {
+          session_id: "session",
+          turn_id: "turn",
+          text: "hello",
+        }),
+        { decision: "continue", coverage: "not_configured" },
+      );
+      await Promise.all([admission.close(), admission.close()]);
+      assert.equal(client.tasks.size, 0);
+      assert.throws(
+        () => admission.prepare(),
+        (error) => error.name === "AbortError",
+      );
+    } finally {
+      await admission.close();
+      await Promise.allSettled([first, second]);
+      await client.close();
+      await server.close();
+    }
+  },
+);
+
+test(
+  "shared Admission preserves deadlines, explicit errors and tool fallback",
+  { timeout: 5000 },
+  async () => {
+    const client = instance("/tmp/aw-sdk-missing.sock");
+    const tool = new Admission(client, { events: ["tool.before"] });
+    const required = instance("/tmp/aw-sdk-missing.sock", {
+      availability: "required",
+    });
+    const gate = new Admission(required, {
+      events: ["tool.after"],
+      timeoutMs: 100,
+    });
+    try {
+      await tool.prepare();
+      assert.equal(tool.fallback, true);
+      await assert.rejects(
+        gate.prepare(),
+        (error) => error.name === "AbortError",
+      );
+      assert.equal(gate.task, undefined);
+      client.lastError = new Error("policy_invalid");
+      const failed = new Admission(client, { events: ["tool.before"] });
+      await assert.rejects(failed.prepare(), /policy_invalid/);
+      await failed.close();
+      const cancelled = new Admission(required, { events: ["tool.after"] });
+      const waiting = cancelled.prepare();
+      const rejected = assert.rejects(
+        waiting,
+        (error) => error.name === "AbortError",
+      );
+      await cancelled.close();
+      await rejected;
+      assert.equal(required.tasks.size, 0);
+    } finally {
+      await Promise.all([tool.close(), gate.close()]);
+      await Promise.all([client.close(), required.close()]);
     }
   },
 );
