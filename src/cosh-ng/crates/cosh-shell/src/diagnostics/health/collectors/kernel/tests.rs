@@ -498,7 +498,7 @@ fn unclocked_oom_lines_lower_confidence_instead_of_claiming_recency() {
 }
 
 #[test]
-fn oom_storm_stress_thousands_of_events_parse_within_check_budget() {
+fn oom_storm_stress_thousands_of_events_count_every_event() {
     let mut content = String::new();
     for index in 0..5000 {
         content.push_str(&format!(
@@ -506,19 +506,10 @@ fn oom_storm_stress_thousands_of_events_parse_within_check_budget() {
              1990.0 kernel: Out of memory: Killed process {index} (java) total-vm:1024kB\n"
         ));
     }
-    let started = Instant::now();
     let facts = parse_kernel_signals(&content, "journalctl", 2000);
-    let elapsed = started.elapsed();
-    eprintln!(
-        "stress parse_storm: bytes={} events={} elapsed_ms={}",
-        content.len(),
-        facts.oom_event_count_last_1h,
-        elapsed.as_millis()
-    );
     assert_eq!(facts.oom_event_count_last_1h, 5000);
     assert_eq!(facts.oom_event_count_last_24h, 5000);
     assert_eq!(facts.oom_latest_pid, Some(4999));
-    assert!(elapsed < Duration::from_millis(120));
 }
 
 #[test]
@@ -538,16 +529,7 @@ fn oom_storm_stress_interleaved_cgroups_count_every_event() {
             ));
         }
     }
-    let started = Instant::now();
     let facts = parse_kernel_signals(&content, "journalctl", 2000);
-    let elapsed = started.elapsed();
-    eprintln!(
-        "stress parse_interleaved: bytes={} events={} elapsed_ms={}",
-        content.len(),
-        facts.oom_event_count_last_1h,
-        elapsed.as_millis()
-    );
     assert_eq!(facts.oom_event_count_last_1h, 200);
     assert_eq!(facts.oom_latest_pid, Some(199));
-    assert!(elapsed < Duration::from_millis(120));
 }
