@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::MetadataExt;
@@ -146,6 +147,173 @@ const _: () = assert!(
 
 /// Exact official upstream revision compiled into this adapter.
 pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
+
+/// Outcome of the pre-existing descendant sweep on bind.
+///
+/// Every entry in `gaps` names a process path that the binding could not
+/// bring under the policy — a failed map update, a namespaced root, or a
+/// fork racing the last pass. A caller that ignores the report would install
+/// a binding whose coverage is narrower than its state claims.
+#[derive(Debug, Default)]
+struct AdoptReport {
+    adopted: Vec<i32>,
+    gaps: Vec<String>,
+}
+
+/// The kernel surface the pre-existing descendant sweep touches.
+///
+/// Separated from `PinnedEngine` so the sweep's control flow — pass loop,
+/// stale-adoption revocation, fork-race closing pass — can be witnessed in
+/// tests with an in-memory engine and a fabricated process graph instead of a
+/// live bpfeb map.
+trait AdoptionSurface {
+    fn adopt_child(&self, parent_pid: i32, child_pid: i32, domain_id: u32) -> io::Result<bool>;
+    fn unbind_pid_from_domain(&self, pid: i32, domain_id: u32) -> io::Result<()>;
+    /// Parent/child edges below `root_pid`, parents before children.
+    fn tree_edges(&self, root_pid: i32) -> Vec<(i32, i32)>;
+    /// The live parent of `pid`, re-read after every successful adoption.
+    fn parent_of(&self, pid: i32) -> Option<i32>;
+    /// The domain `pid` is bound to in the kernel, if any.
+    fn task_domain(&self, pid: i32) -> io::Result<Option<u32>>;
+}
+
+impl AdoptionSurface for PinnedEngine {
+    fn adopt_child(&self, parent_pid: i32, child_pid: i32, domain_id: u32) -> io::Result<bool> {
+        PinnedEngine::adopt_child(self, parent_pid, child_pid, domain_id)
+    }
+
+    fn unbind_pid_from_domain(&self, pid: i32, domain_id: u32) -> io::Result<()> {
+        PinnedEngine::unbind_pid_from_domain(self, pid, domain_id)
+    }
+
+    fn tree_edges(&self, root_pid: i32) -> Vec<(i32, i32)> {
+        preexisting_maps::process_tree_edges(root_pid)
+    }
+
+    fn parent_of(&self, pid: i32) -> Option<i32> {
+        preexisting_maps::parent_of(pid)
+    }
+
+    fn task_domain(&self, pid: i32) -> io::Result<Option<u32>> {
+        PinnedEngine::domain_for_pid(self, pid)
+    }
+}
+
+/// Sweeps pre-existing descendants into `domain_id`, reporting every path it
+/// could not cover as a gap.
+///
+/// The kernel interaction is generic over [`AdoptionSurface`]; the pass loop,
+/// stale-adoption revocation, and fork-race closing pass are the parts the
+/// gaps exist for, so they are exercised against a fabricated engine in tests.
+fn sweep_preexisting_descendants<S: AdoptionSurface>(
+    surface: &S,
+    request: &ApplyPolicy,
+    kernel_pid: i32,
+    id: u32,
+) -> AdoptReport {
+    const PASSES: usize = 4;
+    // `/proc` speaks the enforcer's PID namespace while the maps are keyed
+    // by init-namespace TGIDs; only a shared namespace makes them agree.
+    if kernel_pid != request.root_pid {
+        log::warn!(
+            "binding {} domain {}: root pid {} is namespaced (kernel pid {kernel_pid}); pre-existing descendants are not adopted",
+            request.binding_id,
+            id,
+            request.root_pid
+        );
+        return AdoptReport {
+            adopted: Vec::new(),
+            gaps: vec![format!(
+                "root pid {} is namespaced (kernel pid {kernel_pid}); pre-existing descendants were not adopted",
+                request.root_pid
+            )],
+        };
+    }
+    let mut adopted = Vec::new();
+    let mut revoked = Vec::new();
+    let mut errors = Vec::new();
+    for _ in 0..PASSES {
+        let mut progressed = false;
+        for (parent, child) in surface.tree_edges(kernel_pid) {
+            match surface.adopt_child(parent, child, id) {
+                Ok(false) => {}
+                // Re-check the link: a child that exited or whose pid was
+                // reused after the snapshot must not keep the binding.
+                Ok(true) if surface.parent_of(child) == Some(parent) => {
+                    adopted.push(child);
+                    progressed = true;
+                }
+                Ok(true) => {
+                    // Revoking a stale adoption is progress: the pass must
+                    // continue scanning, or the re-parented survivor ends
+                    // the sweep while unadopted processes remain.
+                    if let Err(error) = surface.unbind_pid_from_domain(child, id) {
+                        errors.push(format!("drop stale pid {child}: {error}"));
+                    } else {
+                        revoked.push(child);
+                    }
+                    progressed = true;
+                }
+                Err(error) => errors.push(format!("adopt pid {child}: {error}")),
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let mut report = AdoptReport {
+        adopted,
+        gaps: Vec::new(),
+    };
+    if !report.adopted.is_empty() {
+        log::info!(
+            "binding {} domain {}: adopted {} pre-existing descendants {:?}",
+            request.binding_id,
+            id,
+            report.adopted.len(),
+            report.adopted
+        );
+    }
+    if !revoked.is_empty() {
+        log::warn!(
+            "binding {} domain {}: revoked {revoked:?} stale pre-existing adoptions",
+            request.binding_id,
+            id
+        );
+    }
+    if !errors.is_empty() {
+        let detail = format!(
+            "pre-existing descendants remain outside the policy: {}",
+            errors.join("; ")
+        );
+        log::warn!("binding {} domain {}: {detail}", request.binding_id, id);
+        report.gaps.push(detail);
+    }
+    // A fork racing the final pass can leave a child unadopted even though
+    // every map update succeeded; a closing pass names the survivors
+    // instead of ending the sweep with a silent coverage hole.
+    let remaining: Vec<i32> = surface
+        .tree_edges(kernel_pid)
+        .into_iter()
+        .filter(|(parent, child)| {
+            surface.parent_of(*child) == Some(*parent)
+                // `adopt_child` also reports `Ok(false)` for a child the
+                // sweep already adopted; only an unbound survivor is a fork
+                // racing the final pass.
+                && matches!(surface.task_domain(*child), Ok(None))
+                && matches!(surface.adopt_child(*parent, *child, id), Ok(false))
+        })
+        .map(|(_, child)| child)
+        .collect();
+    if !remaining.is_empty() {
+        let detail = format!(
+            "processes {remaining:?} were still not adopted after {PASSES} passes and remain outside the policy"
+        );
+        log::warn!("binding {} domain {}: {detail}", request.binding_id, id);
+        report.gaps.push(detail);
+    }
+    report
+}
 
 #[derive(Clone)]
 struct ActiveBinding {
@@ -309,60 +477,18 @@ impl ActPlaneBackend {
     /// Forks from an adopted parent inherit the domain in the kernel; a fork
     /// from a parent not adopted yet can slip between the `/proc` snapshot and
     /// the parent's adoption, so the sweep repeats until a pass adopts nothing.
-    fn adopt_preexisting_descendants(&self, request: &ApplyPolicy, kernel_pid: i32, id: u32) {
-        const PASSES: usize = 4;
-        // `/proc` speaks the enforcer's PID namespace while the maps are keyed
-        // by init-namespace TGIDs; only a shared namespace makes them agree.
-        if kernel_pid != request.root_pid {
-            log::warn!(
-                "binding {} domain {}: root pid {} is namespaced (kernel pid {kernel_pid}); pre-existing descendants are not adopted",
-                request.binding_id,
-                id,
-                request.root_pid
-            );
-            return;
-        }
-        let mut adopted = Vec::new();
-        let mut errors = Vec::new();
-        for _ in 0..PASSES {
-            let mut progressed = false;
-            for (parent, child) in preexisting_maps::process_tree_edges(kernel_pid) {
-                match self.engine.adopt_child(parent, child, id) {
-                    Ok(false) => {}
-                    // Re-check the link: a child that exited or whose pid was
-                    // reused after the snapshot must not keep the binding.
-                    Ok(true) if preexisting_maps::parent_of(child) == Some(parent) => {
-                        adopted.push(child);
-                        progressed = true;
-                    }
-                    Ok(true) => {
-                        if let Err(error) = self.engine.unbind_pid_from_domain(child, id) {
-                            errors.push(format!("drop stale pid {child}: {error}"));
-                        }
-                    }
-                    Err(error) => errors.push(format!("adopt pid {child}: {error}")),
-                }
-            }
-            if !progressed {
-                break;
-            }
-        }
-        if !adopted.is_empty() {
-            log::info!(
-                "binding {} domain {}: adopted {} pre-existing descendants {adopted:?}",
-                request.binding_id,
-                id,
-                adopted.len()
-            );
-        }
-        if !errors.is_empty() {
-            log::warn!(
-                "binding {} domain {}: pre-existing descendants remain outside the policy: {}",
-                request.binding_id,
-                id,
-                errors.join("; ")
-            );
-        }
+    ///
+    /// Every path that leaves a process outside the policy is reported back to
+    /// the caller — a namespaced root, a failed map update, or a fork racing
+    /// the final pass — so the binding's acknowledged state reflects actual
+    /// coverage instead of claiming `Enforced` over an unadopted subtree.
+    fn adopt_preexisting_descendants(
+        &self,
+        request: &ApplyPolicy,
+        kernel_pid: i32,
+        id: u32,
+    ) -> AdoptReport {
+        sweep_preexisting_descendants(self.engine.as_ref(), request, kernel_pid, id)
     }
 
     fn cleanup_binding(&self, id: u32, kernel_pid: i32) -> Vec<String> {
@@ -590,7 +716,7 @@ impl ActPlaneBackend {
                 migration.summary()
             );
         }
-        self.adopt_preexisting_descendants(&request, kernel_pid, id);
+        let adoption = self.adopt_preexisting_descendants(&request, kernel_pid, id);
 
         if let Some(compiled) = compiled.as_ref() {
             let control_state = CapState {
@@ -636,15 +762,33 @@ impl ActPlaneBackend {
             }
         }
 
-        let binding = Binding {
-            request,
-            state: BindingState::Enforced,
-            message: if migration.is_empty() {
-                None
-            } else {
-                Some(migration.summary())
-            },
-            domain_id: Some(id),
+        // A binding whose pre-existing descendants could not all be adopted
+        // covers less than the caller asked for. Acknowledge it as Degraded
+        // with the named gaps so no caller reads a partial coverage as a
+        // fully protected tree; the domain itself is live either way.
+        let binding = if adoption.gaps.is_empty() {
+            Binding {
+                request,
+                state: BindingState::Enforced,
+                message: if migration.is_empty() {
+                    None
+                } else {
+                    Some(migration.summary())
+                },
+                domain_id: Some(id),
+            }
+        } else {
+            let mut detail = Vec::new();
+            if !migration.is_empty() {
+                detail.push(migration.summary());
+            }
+            detail.extend(adoption.gaps);
+            Binding {
+                request,
+                state: BindingState::Degraded,
+                message: Some(detail.join("; ")),
+                domain_id: Some(id),
+            }
         };
         let (reasons, rule_names, label_names) = match compiled {
             Some(compiled) => (
@@ -2839,5 +2983,376 @@ mod tests {
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
+    }
+}
+
+/// Witness tests for [`sweep_preexisting_descendants`].
+///
+/// The sweep is the part of bind that decides whether the acknowledged state
+/// matches real kernel coverage, so each way it can leave a process outside
+/// the policy is exercised here against a fabricated engine and process graph
+/// instead of a live bpfeb map.
+#[cfg(test)]
+mod sweep_tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::io;
+
+    use agentsight_enforcement_protocol::{
+        ApplyPolicy, FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
+        FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections, PolicyMode,
+    };
+    use uuid::Uuid;
+
+    use super::{sweep_preexisting_descendants, AdoptionSurface};
+
+    /// The `ApplyPolicy` fields the sweep reads; everything else is filler.
+    fn sweep_request(root_pid: i32) -> ApplyPolicy {
+        ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "sweep-witness-test".into(),
+            session_id: None,
+            root_pid,
+            process_start_time: 1,
+            policy_id: "file-protection".into(),
+            policy_revision: "1".into(),
+            policy_dsl: String::new(),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: Some(FileProtectionPolicy {
+                version: FILE_PROTECTION_POLICY_VERSION,
+                topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                targets: vec![FileProtectionTarget {
+                    path: "/fixture/protected".into(),
+                    kind: FileProtectionTargetKind::ExactFile,
+                    protections: FileProtections {
+                        delete: true,
+                        ordinary_write: false,
+                        read: false,
+                    },
+                    exclusions: Vec::new(),
+                }],
+            }),
+        }
+    }
+
+    /// An in-memory process graph and adoption engine.
+    ///
+    /// `adopt_child` succeeds only while the parent is joined to the domain
+    /// and the child is unbound, mirroring `PinnedEngine::adopt_child`: the
+    /// graph is mutated so a re-read parent link can simulate a pid whose
+    /// parent changed after the snapshot (the stale-adoption path).
+    struct FakeSweep {
+        /// Every pid -> its (mutable) parent; pids absent from the graph are
+        /// treated as exited.
+        parents: RefCell<HashMap<i32, i32>>,
+        /// Children returned per snapshot by `tree_edges`.
+        edges: RefCell<Vec<(i32, i32)>>,
+        /// Tasks bound to the sweep's domain (the fake `cap_task` map).
+        bound: RefCell<HashMap<i32, ()>>,
+        /// Adoption calls that must fail, keyed by child pid.
+        failing: RefCell<HashMap<i32, ()>>,
+        /// Edges that join the snapshot only after `threshold` reads — the
+        /// fabricated shape of a fork landing mid-sweep.
+        late_edges: RefCell<Vec<(i32, i32, usize)>>,
+        /// Pids whose unbind must fail, modeling map-write failures on the
+        /// revocation path.
+        failing_unbind: RefCell<HashMap<i32, ()>>,
+        /// Pids whose adoption is permanently refused (`Ok(false)`) — the
+        /// shape of a child the kernel cannot bring under the policy.
+        blocked_adopt: RefCell<HashMap<i32, ()>>,
+        /// How many times the process graph has been re-walked.
+        snapshot_reads: RefCell<usize>,
+    }
+
+    impl FakeSweep {
+        fn new() -> Self {
+            Self {
+                parents: RefCell::new(HashMap::new()),
+                edges: RefCell::new(Vec::new()),
+                bound: RefCell::new(HashMap::new()),
+                failing: RefCell::new(HashMap::new()),
+                late_edges: RefCell::new(Vec::new()),
+                failing_unbind: RefCell::new(HashMap::new()),
+                blocked_adopt: RefCell::new(HashMap::new()),
+                snapshot_reads: RefCell::new(0),
+            }
+        }
+
+        fn edge(&self, parent: i32, child: i32) {
+            self.edges.borrow_mut().push((parent, child));
+            self.parents.borrow_mut().insert(child, parent);
+        }
+
+        fn fail_adopt(&self, child: i32) {
+            self.failing.borrow_mut().insert(child, ());
+        }
+
+        /// Permanently blocks the adoption of `child`: `adopt_child`
+        /// deterministically reports it as not adopted.
+        fn block_adopt(&self, child: i32) {
+            self.blocked_adopt.borrow_mut().insert(child, ());
+        }
+
+        /// Makes the unbind path fail for `child`, modeling a map failure
+        /// that hits while a stale adoption is being revoked.
+        fn fail_unbind(&self, child: i32) {
+            self.failing_unbind
+                .borrow_mut()
+                .insert(child, ());
+        }
+
+        /// Seeds the sweep root into the fake `cap_task` map — the state the
+        /// bind flow establishes before the sweep runs.
+        fn seed(&self, pid: i32) {
+            self.bound.borrow_mut().insert(pid, ());
+        }
+
+        /// Records `(parent, child)` as invisible to the first `threshold - 1`
+        /// snapshot reads and present from the `threshold`-th on.
+        fn late_edge(&self, parent: i32, child: i32, threshold: usize) {
+            self.parents.borrow_mut().insert(child, parent);
+            self.late_edges.borrow_mut().push((parent, child, threshold));
+        }
+    }
+
+    impl AdoptionSurface for FakeSweep {
+        fn adopt_child(&self, parent: i32, child: i32, _domain: u32) -> io::Result<bool> {
+            if self.failing.borrow().contains_key(&child) {
+                return Err(io::Error::other("map update failed"));
+            }
+            if self.blocked_adopt.borrow().contains_key(&child) {
+                return Ok(false);
+            }
+            let bound = self.bound.borrow();
+            if bound.contains_key(&child) || !bound.contains_key(&parent) {
+                return Ok(false);
+            }
+            drop(bound);
+            self.bound.borrow_mut().insert(child, ());
+            Ok(true)
+        }
+
+        fn unbind_pid_from_domain(&self, pid: i32, _domain: u32) -> io::Result<()> {
+            if self.failing_unbind.borrow().contains_key(&pid) {
+                return Err(io::Error::other("map update failed"));
+            }
+            self.bound.borrow_mut().remove(&pid);
+            Ok(())
+        }
+
+        fn tree_edges(&self, root: i32) -> Vec<(i32, i32)> {
+            // Breadth-first over the snapshot edge list, mirroring the real
+            // `/proc` walk: every edge recorded below `root`, parents first.
+            let reads = {
+                let mut reads = self.snapshot_reads.borrow_mut();
+                *reads += 1;
+                *reads
+            };
+            {
+                let mut edges = self.edges.borrow_mut();
+                let mut late = self.late_edges.borrow_mut();
+                late.retain(|(parent, child, threshold)| {
+                    if reads >= *threshold {
+                        edges.push((*parent, *child));
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            let mut visited = std::collections::HashSet::from([root]);
+            let mut edges = Vec::new();
+            let mut queue = std::collections::VecDeque::from([root]);
+            while let Some(pid) = queue.pop_front() {
+                for (parent, child) in self.edges.borrow().iter().copied() {
+                    if parent == pid && visited.insert(child) {
+                        edges.push((parent, child));
+                        queue.push_back(child);
+                    }
+                }
+            }
+            edges
+        }
+
+        fn parent_of(&self, pid: i32) -> Option<i32> {
+            self.parents.borrow().get(&pid).copied()
+        }
+
+        fn task_domain(&self, pid: i32) -> io::Result<Option<u32>> {
+            Ok(self
+                .bound
+                .borrow()
+                .contains_key(&pid)
+                .then_some(u32::MAX)) // bound to "some" domain
+        }
+    }
+
+    #[test]
+    fn namespaced_root_is_reported_as_a_gap_without_kernel_calls() {
+        // kernel_pid != root_pid: nothing is adopted, and the report must name
+        // the namespace mismatch so the binding is acknowledged Degraded
+        // instead of Enforced over processes no map ever saw.
+        let request = sweep_request(100);
+        let report = sweep_preexisting_descendants(
+            &FakeSweep::new(),
+            &request,
+            4242, // kernel pid, different namespace
+            9,
+        );
+        assert!(
+            report.adopted.is_empty(),
+            "a namespaced root must not adopt anything"
+        );
+        assert_eq!(report.gaps.len(), 1, "the namespace mismatch is one gap");
+        assert!(
+            report.gaps[0].contains("namespaced"),
+            "the gap must name the namespace mismatch, got: {}",
+            report.gaps[0]
+        );
+    }
+
+    #[test]
+    fn full_coverage_reports_enforced_with_no_gaps() {
+        // A well-formed sweep over a joined tree adopts everything and leaves
+        // no gap: this is the witness that a healthy binding still reaches the
+        // Enforced path after the report plumbing.
+        let request = sweep_request(100);
+        let surface = FakeSweep::new();
+        surface.seed(100);
+        surface.edge(100, 101);
+        surface.edge(101, 102);
+
+        let report = sweep_preexisting_descendants(&surface, &request, 100, 9);
+
+        assert_eq!(report.gaps, Vec::<String>::new(), "coverage is complete");
+        assert_eq!(report.adopted, vec![101, 102]);
+        assert!(
+            surface.bound.borrow().contains_key(&101)
+                && surface.bound.borrow().contains_key(&102),
+            "both descendants must end up bound"
+        );
+    }
+
+    #[test]
+    fn a_failed_map_update_is_reported_as_a_gap_and_the_binding_is_not_enforced() {
+        // A map write that errors leaves the child outside the policy; the
+        // gap must name the pid so the acknowledged state can say what the
+        // binding does not cover.
+        let request = sweep_request(100);
+        let surface = FakeSweep::new();
+        surface.seed(100);
+        surface.edge(100, 200);
+        surface.edge(100, 300);
+        surface.fail_adopt(300);
+
+        let report = sweep_preexisting_descendants(&surface, &request, 100, 9);
+
+        assert_eq!(report.adopted, vec![200]);
+        assert_eq!(report.gaps.len(), 1, "the failed write is one gap");
+        assert!(
+            report.gaps[0].contains("300"),
+            "the gap must name the uncovered process, got: {}",
+            report.gaps[0]
+        );
+        assert!(
+            report.gaps[0].contains("outside the policy"),
+            "the gap must state the coverage consequence, got: {}",
+            report.gaps[0]
+        );
+        assert!(
+            !surface.bound.borrow().contains_key(&300),
+            "a failed adoption must not leave the child bound"
+        );
+    }
+
+    #[test]
+    fn a_fork_racing_the_last_pass_is_named_in_a_closing_gap() {
+        // A fork that lands after the final pass cannot be adopted, but it
+        // was invisible to every pass that would have retried; the closing
+        // check must name it so the binding is Degraded, not silently short.
+        // The snapshot gains the edge only on its third read: the first two
+        // are pass one and two, the third is the closing re-walk.
+        let request = sweep_request(100);
+        let surface = FakeSweep::new();
+        surface.seed(100);
+        surface.edge(100, 200);
+        // 400 joins the snapshot only on the closing re-walk, and its
+        // adoption is deterministically refused — the closing check must
+        // name it instead of ending the sweep with a silent hole.
+        surface.late_edge(200, 400, 3);
+        surface.block_adopt(400);
+
+        let report = sweep_preexisting_descendants(&surface, &request, 100, 9);
+
+        assert_eq!(report.adopted, vec![200]);
+        assert!(
+            report.gaps.iter().any(|gap| gap.contains("400")
+                && gap.contains("still not adopted")),
+            "the fork-race survivor must be named in a closing gap, got: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn a_stale_adoption_is_revoked_and_the_sweep_continues() {
+        // A child that moved to another parent between the snapshot and its
+        // adoption (pid reuse) must be revoked and the sweep must keep
+        // going: the pass that revokes counts as progress.
+        let request = sweep_request(100);
+        let surface = FakeSweep::new();
+        surface.seed(100);
+        surface.edge(100, 200);
+        surface.edge(100, 300);
+        // 300 is adopted (parent in cap_task, child unbound), and the
+        // adoption re-read finds its live parent is 555 — the stale branch.
+        surface.parents.borrow_mut().insert(300, 555);
+
+        let report = sweep_preexisting_descendants(&surface, &request, 100, 9);
+
+        assert_eq!(report.adopted, vec![200]);
+        assert!(
+            surface.bound.borrow().get(&300).is_none(),
+            "the stale adoption must be revoked"
+        );
+        assert!(
+            report.gaps.is_empty(),
+            "revocation keeps the kernel consistent, so no gap names 300: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn a_failed_revocation_is_reported_as_a_gap() {
+        // Revoking a stale adoption whose map write fails must surface as a
+        // gap: it would otherwise leave a stale kernel entry with no visible
+        // trace while the binding claims full coverage.
+        let request = sweep_request(100);
+        let surface = FakeSweep::new();
+        surface.seed(100);
+        surface.edge(100, 300);
+        surface.parents.borrow_mut().insert(300, 555);
+        surface.fail_unbind(300);
+
+        let report = sweep_preexisting_descendants(&surface, &request, 100, 9);
+
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("300") && gap.contains("outside the policy")),
+            "the failed revocation must be named as a coverage gap, got: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn an_empty_tree_sweeps_clean() {
+        // A root with no pre-existing children: Enforced with no gaps and no
+        // kernel writes — the loop must not report phantom progress.
+        let request = sweep_request(100);
+        let report =
+            sweep_preexisting_descendants(&FakeSweep::new(), &request, 100, 9);
+        assert!(report.adopted.is_empty());
+        assert!(report.gaps.is_empty());
     }
 }

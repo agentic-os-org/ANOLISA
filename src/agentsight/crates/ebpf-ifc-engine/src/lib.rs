@@ -3238,6 +3238,20 @@ impl PinnedEngine {
         Ok(())
     }
 
+    /// The domain `pid` is currently bound to in `cap_task`, if any.
+    ///
+    /// The pre-existing descendant sweep uses this to tell an already adopted
+    /// pid (which `adopt_child` reports as not adopted) from a survivor the
+    /// sweep could not bring under the policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the map cannot be read.
+    pub fn domain_for_pid(&self, pid: i32) -> io::Result<Option<u32>> {
+        let tasks: HashMap<_, i32, u32> = pinned_hash_map(&self.paths, "cap_task")?;
+        map_get_optional(&tasks, &pid, "lookup pid domain")
+    }
+
     pub fn unbind_pid_from_domain(&self, pid: i32, domain_id: u32) -> io::Result<()> {
         let mut tasks: HashMap<_, i32, u32> = pinned_hash_map(&self.paths, "cap_task")?;
         ignore_missing_remove(tasks.remove(&pid), "remove cap_task")?;
