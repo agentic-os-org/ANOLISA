@@ -235,7 +235,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardCancel => "Cancel",
         MessageId::GuideWizardLoginSet => "Set Cosh as login shell",
         MessageId::GuideWizardLoginRestore => "Restore original login shell",
-        MessageId::GuideWizardLoginOther => "Other user (opens cosh login)",
+        MessageId::GuideWizardLoginOther => {
+            "Other users: run `cosh login set --user USER` in a terminal (administrator only)."
+        }
         MessageId::GuideWizardLoginVerified => "Verified: {value}",
         MessageId::GuideWizardLoginUnconfirmed => "Change unconfirmed; re-query before retrying.",
         MessageId::GuideWizardLoginHandoff => "Opening login management; return to the wizard when done.",
@@ -243,6 +245,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardConfigUnreadable => "Unable to read the config file. Edit it manually, then reopen the wizard.",
         MessageId::GuideWizardDataClearConfirm => "Clear local recommendation data? The on/off setting will be kept.",
         MessageId::GuideWizardLoginHandoffFailed => "Login management handoff failed: {error}",
+        MessageId::GuideWizardLoginConflictNote => {
+            "Login state conflicts with the administrator record; no change is offered. Run `cosh login status` for details."
+        }
+        MessageId::GuideWizardLoginNoRecordNote => {
+            "Cosh is the login shell but no recovery record exists; no change is offered. Run `cosh login status` in a terminal."
+        }
+        MessageId::GuideWizardLoginRootNote => "Running as root; no sudo password is needed.",
+        MessageId::GuideWizardLoginCancelled => "Login change cancelled; nothing was verified.",
+        MessageId::GuideWizardLoginUsageFailed => {
+            "Login command did not run (usage error, exit 2); nothing was changed."
+        }
+        MessageId::GuideWizardLoginExitFailed => {
+            "Login change did not complete (exit {code}); check sudo authorization or the password, then retry."
+        }
         _ => return None,
     })
 }

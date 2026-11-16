@@ -6,6 +6,8 @@ use crate::config::{detect_language_from_env, read_guidance_language};
 use crate::i18n::I18n;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use login::LoginAction;
+
 mod handoff;
 mod login;
 mod session;
@@ -13,6 +15,8 @@ mod status;
 #[cfg(test)]
 mod tests;
 mod tips;
+
+pub(crate) use handoff::IgnoreInterrupts;
 
 fn too_small_flow(key: KeyEvent) -> session::Flow {
     match key.code {
@@ -62,12 +66,6 @@ pub(crate) fn run_interactive() -> i32 {
                 } else {
                     session.handle(key)
                 };
-                let login_action = match flow {
-                    session::Flow::LoginSet => "set",
-                    session::Flow::LoginRestore => "restore",
-                    session::Flow::LoginOther => "other",
-                    _ => "",
-                };
                 match flow {
                     session::Flow::Exit => return 0,
                     session::Flow::Handoff => {
@@ -82,14 +80,16 @@ pub(crate) fn run_interactive() -> i32 {
                         };
                         session.finish_handoff(result);
                     }
-                    session::Flow::LoginSet
-                    | session::Flow::LoginRestore
-                    | session::Flow::LoginOther => {
+                    session::Flow::LoginSet | session::Flow::LoginRestore => {
+                        let action = match flow {
+                            session::Flow::LoginSet => LoginAction::Set,
+                            _ => LoginAction::Restore,
+                        };
                         drop(screen);
                         let notice = I18n::new(session.language())
                             .t(crate::i18n::MessageId::GuideWizardLoginHandoff);
                         println!("{notice}");
-                        session.run_login(login_action);
+                        session.run_login(action);
                         screen = match enter_screen() {
                             Ok(screen) => screen,
                             Err(_) => return 1,

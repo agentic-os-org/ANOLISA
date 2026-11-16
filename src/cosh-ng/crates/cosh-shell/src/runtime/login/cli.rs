@@ -240,14 +240,8 @@ fn administrator_command(user: &str, action: Action, i18n: I18n) -> Error {
 }
 
 fn status_text(snapshot: &super::LoginStatus, i18n: I18n) -> String {
-    let transaction = match snapshot.transaction.as_str() {
-        "unmanaged" => i18n.t(MessageId::LoginTransactionUnmanaged),
-        "prepared" => i18n.t(MessageId::LoginTransactionPrepared),
-        "applied" => i18n.t(MessageId::LoginTransactionApplied),
-        "restored" => i18n.t(MessageId::LoginTransactionRestored),
-        "conflict" => i18n.t(MessageId::LoginTransactionConflict),
-        value => value,
-    };
+    let transaction = super::transaction_label(&snapshot.transaction)
+        .map_or(snapshot.transaction.as_str(), |id| i18n.t(id));
     format!(
         "{} {} (UID {})\n{} {}\n{} {}\n{} {}\n{} {}\n{}",
         i18n.t(MessageId::LoginUser),

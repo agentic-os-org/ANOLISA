@@ -4,10 +4,24 @@
 use std::os::unix::fs::{symlink, PermissionsExt};
 
 use super::guide_protocol::{
-    classify, parse_sudo_uid, private_file, read_request, run_worker, run_worker_for,
-    validate_identity, Outcome, Reply, Request, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, VERSION,
-    WORKER_FLAG,
+    classify, failure_from_status, parse_sudo_uid, private_file, read_request, run_worker,
+    run_worker_for, validate_identity, HandoffFailure, Outcome, Reply, Request, MAX_REPLY_BYTES,
+    MAX_REQUEST_BYTES, VERSION, WORKER_FLAG,
 };
+
+#[test]
+fn non_zero_handoff_status_distinguishes_cancel_usage_and_failure() {
+    use std::os::unix::process::ExitStatusExt;
+    let status = std::process::ExitStatus::from_raw;
+    assert_eq!(failure_from_status(status(2)), HandoffFailure::Cancelled);
+    assert_eq!(failure_from_status(status(15)), HandoffFailure::Cancelled);
+    assert_eq!(failure_from_status(status(2 << 8)), HandoffFailure::Usage);
+    assert_eq!(failure_from_status(status(1 << 8)), HandoffFailure::Exit(1));
+    assert_eq!(
+        failure_from_status(status(130 << 8)),
+        HandoffFailure::Exit(130)
+    );
+}
 
 fn reply_json(username: &str, uid: u32, shell: &str) -> String {
     serde_json::json!({

@@ -412,6 +412,10 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardLoginHandoffFailed as usize + 1,
+            MessageId::GuideWizardLoginConflictNote as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardLoginExitFailed as usize + 1,
             MessageId::ALL.len()
         );
     }

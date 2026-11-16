@@ -134,6 +134,19 @@ impl From<Status> for LoginStatus {
     }
 }
 
+/// Shared transaction wording for `cosh login status` and the guide page so the
+/// two surfaces cannot describe the same state differently.
+pub(crate) fn transaction_label(transaction: &str) -> Option<crate::i18n::MessageId> {
+    Some(match transaction {
+        "unmanaged" => crate::i18n::MessageId::LoginTransactionUnmanaged,
+        "prepared" => crate::i18n::MessageId::LoginTransactionPrepared,
+        "applied" => crate::i18n::MessageId::LoginTransactionApplied,
+        "restored" => crate::i18n::MessageId::LoginTransactionRestored,
+        "conflict" => crate::i18n::MessageId::LoginTransactionConflict,
+        _ => return None,
+    })
+}
+
 pub(crate) fn query_status(user: Option<&str>) -> std::result::Result<LoginStatus, String> {
     (|| {
         let euid = unsafe { nix::libc::geteuid() };

@@ -1,9 +1,12 @@
-use super::session::{Flow, Session};
+use super::login::{login_message, settle_outcome};
+use super::session::{Flow, Page, Session};
 use super::status::{self, Reading};
 use crate::config::guide::cli::UserPaths;
 use crate::config::guide::GuideStore;
 use crate::config::{private_state, Language};
 use crate::i18n::I18n;
+use crate::runtime::login::COSH_PATH;
+use crate::ui::guide::WizardRow;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::ffi::OsString;
 use std::fs;
@@ -540,25 +543,236 @@ fn failed_config_saves_are_logged_without_sensitive_toml_lines() {
 }
 
 #[test]
-fn other_user_login_reports_current_exe_and_spawn_failures() {
-    let (_guard, temp, paths) = isolated_fixture();
-    let mut session = Session::new(paths, I18n::new(Language::EnUs));
-    for exe in [
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "exe unavailable",
-        )),
-        Ok(temp.path().join("missing-cosh-executable")),
-    ] {
-        session.message = None;
-        session.run_login_other(exe);
-        assert!(session.view().message.unwrap().contains("failed"));
+fn login_page_offers_only_the_actions_the_account_state_supports() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let cases = vec![
+        (
+            login_status("/usr/bin/cosh", Some("/bin/bash"), true, false),
+            vec!["Restore original login shell"],
+            None,
+        ),
+        (
+            login_status("/bin/bash", Some("/bin/bash"), false, false),
+            vec!["Set Cosh as login shell"],
+            None,
+        ),
+        (
+            login_status("/bin/bash", None, false, false),
+            vec!["Set Cosh as login shell"],
+            None,
+        ),
+        (
+            login_status(COSH_PATH, None, false, false),
+            Vec::new(),
+            Some("no recovery record"),
+        ),
+        (
+            login_status("/bin/zsh", None, false, true),
+            Vec::new(),
+            Some("conflicts"),
+        ),
+    ];
+    for (status, actions, note) in cases {
+        let mut session = login_session(paths.clone(), status);
+        session.enter(Page::Login);
+        let rows = session.view().rows;
+        assert_eq!(choice_labels(&session), actions);
+        assert!(
+            rows.iter().any(
+                |row| matches!(row, WizardRow::Text(text) if text.starts_with("Other users:"))
+            ),
+            "the other-user guidance must stay a text row"
+        );
+        if let Some(note) = note {
+            assert!(
+                rows.iter()
+                    .any(|row| matches!(row, WizardRow::Text(text) if text.contains(note))),
+                "missing {note}"
+            );
+        }
+        if actions.is_empty() {
+            assert!(matches!(
+                session.handle(key(KeyCode::Enter)),
+                Flow::Continue
+            ));
+        } else {
+            assert!(matches!(rows[session.cursor], WizardRow::Choice { .. }));
+        }
     }
 }
 
 #[test]
-fn failed_login_outcomes_and_handoffs_are_logged_without_error_payloads() {
-    use crate::runtime::login::guide_protocol::Outcome;
+fn login_page_routes_each_visible_choice_to_its_own_action() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = login_session(
+        paths,
+        login_status("/usr/bin/cosh", Some("/bin/bash"), true, false),
+    );
+    session.enter(Page::Login);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginRestore
+    ));
+
+    session.snapshot.login = Ok(login_status("/bin/bash", Some("/bin/bash"), false, false));
+    session.enter(Page::Login);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginSet
+    ));
+
+    session.snapshot.login = Ok(login_status("/bin/zsh", None, false, true));
+    session.enter(Page::Login);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+}
+
+#[test]
+fn login_page_cursor_wraps_only_between_visible_actions() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = login_session(
+        paths,
+        login_status("/usr/bin/cosh", Some("/bin/bash"), true, false),
+    );
+    session.enter(Page::Login);
+    let choices = session
+        .view()
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| matches!(row, WizardRow::Choice { .. }))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(choices, vec![session.cursor]);
+    session.handle(key(KeyCode::Down));
+    assert_eq!(choices, vec![session.cursor]);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginRestore
+    ));
+}
+
+#[test]
+fn login_handoff_failures_have_distinct_feedback() {
+    use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
+    let i18n = I18n::new(Language::EnUs);
+    for (failure, expected) in [
+        (
+            HandoffFailure::Spawn {
+                message: "no sudo binary".into(),
+                kind: std::io::ErrorKind::NotFound,
+            },
+            "handoff failed: no sudo binary",
+        ),
+        (HandoffFailure::Cancelled, "cancelled"),
+        (HandoffFailure::Usage, "exit 2"),
+        (HandoffFailure::Exit(7), "exit 7"),
+    ] {
+        let message = login_message(i18n, Outcome::HandoffFailed(failure), None);
+        assert!(message.to_lowercase().contains(expected), "{message}");
+    }
+}
+
+#[test]
+fn login_feedback_stays_visible_after_the_page_reloads() {
+    use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
+    let (_guard, _temp, paths) = isolated_fixture();
+    std::env::set_var("COSH_SHELL_LANG", "en-US");
+    let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    session.finish_login(
+        "restore",
+        "/nonexistent/cosh-target",
+        Outcome::HandoffFailed(HandoffFailure::Cancelled),
+    );
+    let message = session.view().message.clone().expect("failure feedback");
+    assert!(message.contains("cancelled"), "{message}");
+    session.handle(key(KeyCode::Down));
+    assert_eq!(session.view().message.as_deref(), Some(message.as_str()));
+}
+
+#[test]
+fn login_outcomes_are_settled_against_the_reread_shell() {
+    use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
+    let verified = || {
+        Outcome::Verified(login_status(
+            "/usr/bin/cosh",
+            Some("/bin/bash"),
+            true,
+            false,
+        ))
+    };
+    let failed = || Outcome::HandoffFailed(HandoffFailure::Exit(1));
+    assert_eq!(
+        settle_outcome(failed(), Some("/usr/bin/cosh"), "/usr/bin/cosh"),
+        Outcome::Unconfirmed
+    );
+    assert_eq!(
+        settle_outcome(failed(), Some("/bin/bash"), "/usr/bin/cosh"),
+        failed()
+    );
+    assert_eq!(
+        settle_outcome(verified(), Some("/bin/bash"), "/usr/bin/cosh"),
+        Outcome::Unconfirmed
+    );
+    assert_eq!(
+        settle_outcome(verified(), Some("/usr/bin/cosh"), "/usr/bin/cosh"),
+        verified()
+    );
+    assert_eq!(
+        settle_outcome(verified(), None, "/usr/bin/cosh"),
+        verified()
+    );
+}
+
+fn login_status(
+    shell: &str,
+    original: Option<&str>,
+    managed: bool,
+    conflict: bool,
+) -> crate::runtime::login::LoginStatus {
+    crate::runtime::login::LoginStatus {
+        username: "alice".into(),
+        uid: 1000,
+        current_shell: shell.into(),
+        original_bash: original.map(str::to_string),
+        transaction: if conflict {
+            "conflict"
+        } else if managed {
+            "applied"
+        } else if original.is_some() {
+            "restored"
+        } else {
+            "unmanaged"
+        }
+        .into(),
+        managed,
+        conflict,
+    }
+}
+
+fn login_session(paths: UserPaths, status: crate::runtime::login::LoginStatus) -> Session {
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.snapshot.login = Ok(status);
+    session
+}
+
+fn choice_labels(session: &Session) -> Vec<String> {
+    session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            WizardRow::Choice { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn failed_login_outcomes_are_logged_without_error_payloads() {
+    use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
     let (_guard, _temp, paths) = isolated_fixture();
     let capture = LogCapture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -568,17 +782,25 @@ fn failed_login_outcomes_and_handoffs_are_logged_without_error_payloads() {
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         let mut session = Session::new(paths, I18n::new(Language::EnUs));
-        session.finish_login("set", Outcome::Unconfirmed);
-        session.finish_login("restore", Outcome::Error("SECRET_PASSWORD".to_string()));
-        session.run_login_other(Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "SECRET_API_KEY",
-        )));
+        session.finish_login("set", "/nonexistent/cosh-target", Outcome::Unconfirmed);
+        session.finish_login(
+            "restore",
+            "/nonexistent/cosh-target",
+            Outcome::Error("SECRET_PASSWORD".to_string()),
+        );
+        session.finish_login(
+            "restore",
+            "/nonexistent/cosh-target",
+            Outcome::HandoffFailed(HandoffFailure::Spawn {
+                message: "SECRET_API_KEY".into(),
+                kind: std::io::ErrorKind::NotFound,
+            }),
+        );
     });
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("result=\"unconfirmed\""), "{logs}");
     assert!(logs.contains("operation=\"restore\""), "{logs}");
-    assert!(logs.contains("stage=\"current_exe\""), "{logs}");
+    assert!(logs.contains("stage=\"spawn\""), "{logs}");
     assert!(!logs.contains("SECRET"), "{logs}");
 }
 

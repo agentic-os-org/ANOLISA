@@ -11,6 +11,7 @@ use crate::config::guide::cli::{self, UserPaths};
 use crate::config::guide::wizard::content;
 
 use super::status::{self, Reading, Snapshot, Source};
+use super::LoginAction;
 use crate::adapter::GuideAuthSummary;
 
 pub(crate) enum Flow {
@@ -20,7 +21,6 @@ pub(crate) enum Flow {
     Handoff,
     LoginSet,
     LoginRestore,
-    LoginOther,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -499,12 +499,17 @@ impl Session {
             }
             Page::Ai => return Flow::Handoff,
             Page::Login => {
-                let has_restore =
-                    matches!(&self.snapshot.login, Ok(status) if status.original_bash.is_some());
-                return match self.choice_index() {
-                    0 => Flow::LoginSet,
-                    1 if has_restore => Flow::LoginRestore,
-                    _ => Flow::LoginOther,
+                // Only a row that is still a choice may dispatch; both sides
+                // read the same state-derived action list as the rendering.
+                let focused =
+                    matches!(self.rows().get(self.cursor), Some(WizardRow::Choice { .. }));
+                let action = focused
+                    .then(|| self.login_actions().get(self.choice_index()).copied())
+                    .flatten();
+                return match action {
+                    Some(LoginAction::Set) => Flow::LoginSet,
+                    Some(LoginAction::Restore) => Flow::LoginRestore,
+                    None => Flow::Continue,
                 };
             }
             Page::Start => {}

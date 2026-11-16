@@ -7,12 +7,14 @@ use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
-use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
+use std::process::{Command, ExitStatus, Stdio};
 
 use serde::{Deserialize, Serialize};
 
 use super::{account, cli, query_status, Action, LoginStatus};
 use crate::i18n::I18n;
+use crate::runtime::guide::IgnoreInterrupts;
 
 pub(crate) const WORKER_FLAG: &str = "--__cosh-login-guide-v2";
 pub(super) const VERSION: u32 = 2;
@@ -93,6 +95,32 @@ pub(crate) enum Outcome {
     Verified(LoginStatus),
     Unconfirmed,
     Error(String),
+    HandoffFailed(HandoffFailure),
+}
+
+/// Why the foreground handoff produced no structured result. None of these
+/// prove the account is unchanged, so callers must re-read status before
+/// reporting a definite failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HandoffFailure {
+    Spawn {
+        message: String,
+        kind: std::io::ErrorKind,
+    },
+    Cancelled,
+    Usage,
+    Exit(i32),
+}
+
+/// Maps a non-zero child status: a signal means the operator interrupted the
+/// prompt, 2 is a usage rejection, everything else is an authorization,
+/// password, or worker failure.
+pub(super) fn failure_from_status(status: ExitStatus) -> HandoffFailure {
+    match status.code() {
+        None => HandoffFailure::Cancelled,
+        Some(2) => HandoffFailure::Usage,
+        Some(code) => HandoffFailure::Exit(code),
+    }
 }
 
 pub(crate) fn classify(
@@ -325,17 +353,39 @@ pub(crate) fn elevated(
     let Ok(output) = result.as_file().try_clone() else {
         return Outcome::Unconfirmed;
     };
-    let status = Command::new("/usr/bin/sudo")
+    let mut command = Command::new("/usr/bin/sudo");
+    command
         .arg("--")
         .arg(exe)
         .arg(WORKER_FLAG)
         .arg(&request_path)
         .stdin(Stdio::inherit())
         .stdout(Stdio::from(output))
-        .stderr(Stdio::inherit())
-        .status();
-    if !matches!(status, Ok(status) if status.success()) {
-        return Outcome::Unconfirmed;
+        .stderr(Stdio::inherit());
+    // Safety: only async-signal-safe `signal` calls run between fork and exec,
+    // and they restore the dispositions the guard below masked so sudo's own
+    // Ctrl-C handling still applies to the child.
+    unsafe {
+        command.pre_exec(|| {
+            nix::libc::signal(nix::libc::SIGINT, nix::libc::SIG_DFL);
+            nix::libc::signal(nix::libc::SIGQUIT, nix::libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    // sudo shares this foreground process group; a Ctrl-C aimed at its password
+    // prompt must cancel the change and return to the page, not tear the
+    // wizard down through the terminal recovery handler.
+    let _interrupts = IgnoreInterrupts::new();
+    let status = command.status();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => return Outcome::HandoffFailed(failure_from_status(status)),
+        Err(error) => {
+            return Outcome::HandoffFailed(HandoffFailure::Spawn {
+                message: error.to_string(),
+                kind: error.kind(),
+            })
+        }
     }
     if result.seek(SeekFrom::Start(0)).is_err() {
         return Outcome::Unconfirmed;

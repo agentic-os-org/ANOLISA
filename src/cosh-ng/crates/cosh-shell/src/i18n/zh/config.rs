@@ -231,7 +231,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardCancel => "取消",
         MessageId::GuideWizardLoginSet => "设为 Cosh 登录 Shell",
         MessageId::GuideWizardLoginRestore => "恢复原登录 Shell",
-        MessageId::GuideWizardLoginOther => "其它用户（打开 cosh login）",
+        MessageId::GuideWizardLoginOther => {
+            "其它用户：请在终端运行 `cosh login set --user 用户名`（仅管理员）。"
+        }
         MessageId::GuideWizardLoginVerified => "已验证：{value}",
         MessageId::GuideWizardLoginUnconfirmed => "未确认变更，请重查后再试。",
         MessageId::GuideWizardLoginHandoff => "正在打开登录管理，完成后返回向导。",
@@ -239,6 +241,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardConfigUnreadable => "无法读取配置文件。请手动编辑后重新打开向导。",
         MessageId::GuideWizardDataClearConfirm => "确认清除本地推荐数据？开关偏好将保留。",
         MessageId::GuideWizardLoginHandoffFailed => "打开登录管理失败：{error}",
+        MessageId::GuideWizardLoginConflictNote => {
+            "登录状态与管理员记录冲突，不提供变更操作。请运行 `cosh login status` 查看详情。"
+        }
+        MessageId::GuideWizardLoginNoRecordNote => {
+            "Cosh 已是登录 Shell，但缺少恢复记录，不提供变更操作。请在终端运行 `cosh login status`。"
+        }
+        MessageId::GuideWizardLoginRootNote => "当前为 root，无需输入 sudo 密码。",
+        MessageId::GuideWizardLoginCancelled => "已取消登录变更，未确认任何修改。",
+        MessageId::GuideWizardLoginUsageFailed => {
+            "登录命令未执行（用法错误，退出码 2），未做任何修改。"
+        }
+        MessageId::GuideWizardLoginExitFailed => {
+            "登录变更未完成（退出码 {code}），请检查 sudo 授权或密码后重试。"
+        }
         _ => return None,
     })
 }

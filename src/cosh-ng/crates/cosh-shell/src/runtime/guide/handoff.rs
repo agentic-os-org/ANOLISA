@@ -18,16 +18,16 @@ pub(crate) fn run() -> Result<(), String> {
 }
 
 /// The child shares the foreground process group, so a Ctrl-C aimed at the
-/// auth session would also reach the waiting wizard; ignore it for the
-/// handoff and restore the prior handlers afterwards.
-/// The child inherits SIG_IGN only until main installs terminal recovery handlers.
-struct IgnoreInterrupts {
+/// child would also reach the waiting wizard; ignore it for the handoff and
+/// restore the prior handlers afterwards.
+/// The child inherits SIG_IGN only until it installs its own handlers.
+pub(crate) struct IgnoreInterrupts {
     previous_int: libc::sighandler_t,
     previous_quit: libc::sighandler_t,
 }
 
 impl IgnoreInterrupts {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         unsafe {
             Self {
                 previous_int: libc::signal(libc::SIGINT, libc::SIG_IGN),
