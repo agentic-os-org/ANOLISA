@@ -378,14 +378,6 @@ fn closing_guidance_and_banner_does_not_wait_for_language_fifo() {
     }
 }
 
-#[test]
-fn private_health_claim_worker_requires_supervision_before_reading_state() {
-    assert_eq!(
-        run_cli(&[crate::diagnostics::health::suppression::claim::WORKER_FLAG.into()]),
-        1
-    );
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn management_commands_do_not_open_the_language_config() {

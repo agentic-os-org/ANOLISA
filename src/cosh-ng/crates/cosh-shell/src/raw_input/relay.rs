@@ -148,7 +148,10 @@ pub(super) fn relay_prompt_ghost_input(
 ) -> io::Result<bool> {
     if bytes.starts_with(b"\x1b[Z") {
         if let PromptGhostRoute::AgentSelection {
-            candidates, active, ..
+            candidates,
+            active,
+            generation,
+            ..
         } = route
         {
             if candidates.len() > 1 {
@@ -157,6 +160,7 @@ pub(super) fn relay_prompt_ghost_input(
                 let next_route = PromptGhostRoute::AgentSelection {
                     candidates: candidates.clone(),
                     active: next,
+                    generation: *generation,
                 };
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
@@ -166,6 +170,8 @@ pub(super) fn relay_prompt_ghost_input(
                 }
                 let _ = relay.input_events.send(RawInputEvent::PromptGhostCycle {
                     text: candidate.text.clone(),
+                    suggestion_id: Some(candidate.suggestion_id.clone()),
+                    generation: *generation,
                 });
                 let remainder = &bytes[3..];
                 if !remainder.is_empty() {

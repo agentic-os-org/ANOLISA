@@ -146,14 +146,10 @@ fn health_projection_reuses_one_layout_and_preserves_report_facts_and_candidates
 #[test]
 fn cosh_projection_uses_the_same_question_without_a_nested_cosh_command() {
     let report = report();
-    let bash = health_candidate_for(&report, Language::EnUs, Target::Bash).unwrap();
-    let cosh = health_candidate_for(&report, Language::EnUs, Target::Cosh).unwrap();
-    let question =
-        crate::ui::primary_health_prompt_suggestion(&report, crate::I18n::new(Language::EnUs))
-            .unwrap();
-    assert_eq!(bash.problem, cosh.problem);
-    assert!(cosh.text.contains(&question));
-    assert!(!cosh.text.contains("cosh --ask"));
+    let bash = health_candidate(&report, Language::EnUs).unwrap();
+    let session = session_health_questions(&report, Language::EnUs);
+    assert!(session.iter().any(|item| item.id == bash.problem));
+    assert!(session.iter().all(|item| !item.question.contains("cosh --ask")));
     assert!(bash.text.contains("cosh --ask"));
 }
 
@@ -276,8 +272,8 @@ fn cosh_projection_preserves_existing_read_only_and_service_questions_without_ex
         let mut report = report();
         report.try_items.truncate(1);
         report.try_items[0].prompt_id = Some(prompt);
-        assert!(health_candidate_for(&report, Language::EnUs, Target::Cosh).is_some());
-        assert!(health_candidate_for(&report, Language::EnUs, Target::Bash).is_none());
+        assert!(!session_health_questions(&report, Language::EnUs).is_empty());
+        assert!(health_candidate(&report, Language::EnUs).is_none());
     }
 }
 
@@ -351,11 +347,22 @@ fn common_health_questions_fit_a_standard_terminal_without_losing_the_object() {
             report.try_items[0]
                 .prompt_args
                 .insert("process".into(), "worker".into());
-            let bash = health_candidate_for(&report, language, Target::Bash).unwrap();
-            let cosh = health_candidate_for(&report, language, Target::Cosh).unwrap();
+            let bash = health_candidate(&report, language).unwrap();
+            let session = session_health_questions(&report, language);
             assert!(crate::ui::display_width(&bash.text) <= 96, "{}", bash.text);
-            let question = cosh.text.lines().nth(1).unwrap();
-            assert!(bash.text.contains(question), "{}", bash.text);
+            assert_eq!(session.len(), 1);
+            let question = &session[0].question;
+            match prompt {
+                HealthMessageId::HealthPromptInspectDiskUsage => {
+                    assert!(question.contains("/data"), "{question}");
+                    assert!(bash.text.contains("/data"));
+                }
+                HealthMessageId::HealthPromptInspectProcessMemory => {
+                    assert!(question.contains("worker"), "{question}");
+                    assert!(bash.text.contains("worker"));
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -448,15 +455,28 @@ fn localization_failure_uses_the_same_user_setting_as_login_and_cosh() {
 #[test]
 fn native_cosh_health_suggests_a_question_instead_of_copying_a_shell_command() {
     for language in [Language::ZhCn, Language::EnUs] {
-        let candidate = health_candidate_for(&report(), language, Target::Cosh).unwrap();
         let renderer = RatatuiInlineRenderer::with_width(80).with_language(language);
-        let text =
-            render_health(&renderer, &report(), true, Target::Cosh, Some(&candidate)).unwrap();
+        let mut bytes =
+            render_health(&renderer, &report(), true, Target::Cosh, None)
+                .unwrap()
+                .into_bytes();
+        let items = session_health_questions(&report(), language);
+        renderer
+            .write_suggestion_list(
+                &mut bytes,
+                SuggestionListModel {
+                    items: &items,
+                    active: 0,
+                    interactive: true,
+                },
+            )
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
         assert!(
             text.contains(if language == Language::ZhCn {
                 "可以直接提问"
             } else {
-                "Try asking"
+                "Ask directly"
             }),
             "{text}"
         );
@@ -469,28 +489,41 @@ fn native_cosh_health_suggests_a_question_instead_of_copying_a_shell_command() {
 #[test]
 fn cosh_question_invitation_shares_the_bash_brand_line() {
     for language in [Language::ZhCn, Language::EnUs] {
-        let candidate = health_candidate_for(&report(), language, Target::Cosh).unwrap();
-        let prompt =
-            primary_health_prompt_suggestion(&report(), crate::I18n::new(language)).unwrap();
+        let items = session_health_questions(&report(), language);
+        let single = &items[..1];
+        let prompt = single[0].question.clone();
         let mut renderer = RatatuiInlineRenderer::with_width(80).with_language(language);
         renderer.styled = true;
-        let text =
-            render_health(&renderer, &report(), false, Target::Cosh, Some(&candidate)).unwrap();
+        let text = renderer
+            .suggestion_list_lines(SuggestionListModel {
+                items: single,
+                active: 0,
+                interactive: true,
+            })
+            .join("\n");
         let unstyled = crate::ui::wrap::strip_ansi_escape(&text);
         let heading = if language == Language::ZhCn {
             "┃ Cosh AI  可以直接提问"
         } else {
-            "┃ Cosh AI  Try asking"
+            "┃ Cosh AI  Ask directly"
         };
         assert!(unstyled.lines().any(|line| line == heading), "{unstyled}");
         assert!(text.contains("\x1b[36;1m┃ Cosh AI\x1b[0m"));
-        assert!(unstyled.lines().any(|line| line == prompt), "{unstyled}");
+        assert!(
+            unstyled.lines().any(|line| line.trim_start() == prompt),
+            "{unstyled}"
+        );
         assert!(!unstyled.contains('╭') && !unstyled.contains('│'));
         renderer.styled = false;
-        let plain =
-            render_health(&renderer, &report(), false, Target::Cosh, Some(&candidate)).unwrap();
-        assert!(plain.contains(&candidate.text));
-        assert!(!plain.contains('┃'));
+        let plain = renderer
+            .suggestion_list_lines(SuggestionListModel {
+                items: single,
+                active: 0,
+                interactive: true,
+            })
+            .join("\n");
+        assert!(plain.contains(&prompt));
+        assert!(!plain.contains('\x1b'));
     }
 }
 
@@ -611,14 +644,11 @@ fn native_health_has_no_duplicate_guide_with_or_without_an_invitation() {
             ] {
                 let renderer = renderer.with_language(language);
                 let report = report();
-                for invitation in [None, health_candidate_for(&report, language, Target::Cosh)] {
-                    let text =
-                        render_health(&renderer, &report, true, Target::Cosh, invitation.as_ref())
-                            .unwrap();
-                    assert!(!text.contains("cosh guide"), "{text}");
-                    assert!(!text.contains("cosh --ask"), "{text}");
-                    assert!(text.contains("92%"), "{text}");
-                }
+                let text =
+                    render_health(&renderer, &report, true, Target::Cosh, None).unwrap();
+                assert!(!text.contains("cosh guide"), "{text}");
+                assert!(!text.contains("cosh --ask"), "{text}");
+                assert!(text.contains("92%"), "{text}");
             }
         }
     }
@@ -633,16 +663,16 @@ fn bash_can_offer_the_same_oom_process_question_as_cosh() {
         .prompt_args
         .insert("process".into(), "java".into());
     for language in [Language::ZhCn, Language::EnUs] {
-        let bash = health_candidate_for(&report, language, Target::Bash);
-        let cosh = health_candidate_for(&report, language, Target::Cosh).unwrap();
+        let bash = health_candidate(&report, language);
+        let session = session_health_questions(&report, language);
         assert!(
             bash.is_some(),
             "Cosh question has no Bash entry: {}",
-            cosh.text
+            session[0].question
         );
         let bash = bash.unwrap();
         assert!(bash.text.starts_with("  cosh --ask "));
-        assert!(bash.text.contains("java") && cosh.text.contains("java"));
+        assert!(bash.text.contains("java") && session[0].question.contains("java"));
     }
 }
 

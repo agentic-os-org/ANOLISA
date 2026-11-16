@@ -37,6 +37,7 @@ fn completed_agent_run_restores_prompt_through_the_pty_owner() {
         RawObserverAction::RestorePrompt {
             ghost_text: None,
             ghost_route: Default::default(),
+            suggestion_surface: None,
         }
     );
     assert!(
@@ -268,7 +269,8 @@ fn shell_handoff_timeout_notice_is_deferred_until_foreground_is_idle() {
         action,
         Some(RawObserverAction::RestorePrompt {
             ghost_text: None,
-            ghost_route: Default::default()
+            ghost_route: Default::default(),
+            suggestion_surface: None
         })
     );
     assert!(
@@ -368,6 +370,7 @@ fn deferred_handoff_timeout_notice_restores_native_prompt_without_input() {
         Some(RawObserverAction::RestorePrompt {
             ghost_text: None,
             ghost_route: Default::default(),
+            suggestion_surface: None,
         })
     );
     assert!(String::from_utf8_lossy(&output).contains("handoff timeout (2s)."));

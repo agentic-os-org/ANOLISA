@@ -27,6 +27,15 @@ verifies access. An ECS identity
 check does not prove trial eligibility or remaining quota. Configured services show that their
 connection is unverified, and explicit provider settings keep priority over automatic trial access.
 
+At startup Cosh shows health facts once, followed by a single open suggestion
+area shared by health and personal recommendations (at most three questions).
+One question is shown without a number; several questions are numbered `1.` to
+`3.` with a `›` marker on the active one. `Shift+Tab` cycles the active
+question, `Tab` inserts it for editing, and `Enter` at an empty recommendation
+prompt asks it directly. If the list cannot fit the terminal or the prompt is
+owned by another program, Cosh keeps the printed list as history and shows the
+current number and question at the prompt instead of repainting old rows.
+
 The three entries have distinct roles: `cosh --help` is the static launch-option and public-command
 index; `cosh guide` is interactive configuration and onboarding; in-session `/help` is the existing
 session command reference. On restricted terminals (non-TTY, undersized, or limited TERM) `cosh guide`

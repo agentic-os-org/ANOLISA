@@ -1351,7 +1351,7 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -1362,9 +1362,9 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
     assert!(!output.contains("Mem avail 94%"), "{output}");
     assert!(output.contains("Swap used"), "{output}");
     assert!(output.contains("Needs attention"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(first_health_prompt(&output).is_some(), "{output}");
-    assert_eq!(output.matches("Try asking:").count(), 1, "{output}");
+    assert_eq!(output.matches("Ask directly").count(), 1, "{output}");
     assert!(!output.contains("Next:"), "{output}");
     assert_inline_before_followup(&output, "╭─ Health check", "exit");
 }
@@ -1476,16 +1476,16 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("critical"), "{output}");
     assert!(output.contains("OOM"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(
-        output.contains("Check recent OOM impact on java")
-            && output.contains("event timing and memory limits"),
+        output.contains("Help me check the recent OOM impact on java")
+            && output.contains("and its memory limits"),
         "{output}"
     );
     assert!(!output.contains("CONSTRAINT_"), "{output}");
@@ -1526,7 +1526,7 @@ fn raw_cli_startup_health_degraded_fixture_is_read_only() {
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("degraded"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(first_health_prompt(&output).is_some(), "{output}");
     assert!(!output.contains("[Personal]"), "{output}");
     assert!(!output.contains("Tab insert"), "{output}");
@@ -1579,7 +1579,7 @@ fn raw_cli_startup_health_healthy_fixture_renders_resource_summary_once() {
     }
     assert!(!visible.contains("Unavailable:"), "{output}");
     assert!(!visible.contains("Needs attention"), "{output}");
-    assert!(!output.contains("Try asking:"), "{output}");
+    assert!(!output.contains("Ask directly"), "{output}");
     assert_inline_before_followup(&output, "╭ Cosh AI Shell", "exit");
     assert_inline_before_followup(
         &output,
@@ -1609,7 +1609,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -1618,14 +1618,14 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
     assert!(!output.contains("Load  Load 1m"), "{output}");
     assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(first_health_prompt(&output).is_some(), "{output}");
     assert!(!output.contains("Next:"), "{output}");
     let health_block = output
         .split("Health check")
         .nth(1)
         .unwrap_or(output.as_str())
-        .split("Try asking:")
+        .split("Ask directly")
         .next()
         .unwrap_or(output.as_str());
     assert!(!health_block.contains("\x1b["), "{output}");
@@ -1659,7 +1659,7 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
     assert!(!output.contains("Load  Load 1m"), "{output}");
     assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
-    assert!(!output.contains("Try asking:"), "{output}");
+    assert!(!output.contains("Ask directly"), "{output}");
     assert!(!output.contains("Shift+Tab cycle"), "{output}");
     assert!(!output.contains("▕"), "{output}");
     assert!(!output.contains("Next:"), "{output}");
@@ -1673,9 +1673,11 @@ fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
     let cwd = private_startup_health_home("startup-health-suppressed-try");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
+    let home = cwd.to_string_lossy().into_owned();
     let env = [
         ("COSH_SHELL_STARTUP_BANNER", "1"),
         ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-warning"),
+        ("HOME", home.as_str()),
         (
             "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
             suppression_store.as_str(),
@@ -1690,9 +1692,9 @@ fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
         &[],
         &env,
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
-    assert!(first.contains("Try asking:"), "{first}");
+    assert!(first.contains("Ask directly"), "{first}");
     assert!(!first.contains("Next:"), "{first}");
 
     let second = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1700,15 +1702,16 @@ fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
         &[],
         &env,
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Health check", b"exit\n")],
     );
     assert!(second.contains("Health check"), "{second}");
     assert!(second.contains("warning"), "{second}");
-    assert_eq!(second.matches("Try asking:").count(), 1, "{second}");
     let first_prompt = first_health_prompt(&first).expect("first primary health prompt");
-    let second_prompt = first_health_prompt(&second).expect("next unsuppressed health prompt");
-    assert_ne!(first_prompt, second_prompt, "{second}");
     assert!(!second.contains(&first_prompt), "{second}");
+    assert!(
+        !second.contains("Ask directly"),
+        "displayed candidates are charged once: {second}"
+    );
     assert!(!second.contains("Next:"), "{second}");
 }
 
@@ -1756,11 +1759,11 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(shown.contains("Health check"), "{shown}");
-    assert!(shown.contains("Try asking:"), "{shown}");
+    assert!(shown.contains("Ask directly"), "{shown}");
 }
 
 #[test]
@@ -1786,14 +1789,14 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
         ],
         &cwd,
         &[
-            (" › Check memory pressure, top consumers", b"\t\n"),
+            (" › Help me check memory pressure, top consumers", b"\t\n"),
             ("Received shell prompt request", b"exit\n"),
         ],
     );
 
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(
-        output.contains("Check memory pressure, top consumers"),
+        output.contains("Help me check memory pressure, top consumers"),
         "{output}"
     );
     let first_prompt = first_health_prompt(&output).expect("first health prompt");
@@ -1872,26 +1875,24 @@ fn raw_cli_startup_health_shift_tab_cycles_then_enter_submits_active_prompt() {
         ],
         &cwd,
         &[
-            (" › Check memory pressure, top consumers", b"\x1b[Z"),
+            (" › Help me check memory pressure, top consumers", b"\x1b[Z"),
+            ("Help me check swap pressure and available memory", b"\n"),
             (
-                " › Check whether swap pressure is active, available memory and related processes",
-                b"\n",
-            ),
-            (
-                "Received shell prompt request: Check whether swap pressure is active",
+                "Received shell prompt request: Help me check swap pressure",
                 b"exit\n",
             ),
         ],
     );
 
-    assert_eq!(output.matches("Try asking:").count(), 1, "{output}");
+    assert_eq!(output.matches("Ask directly").count(), 1, "{output}");
     assert!(
-        output.contains("\x1b[2m › Check whether swap pressure"),
+        output.contains("\x1b[2m › ")
+            && output.contains("Help me check swap pressure and available memory"),
         "{output}"
     );
     assert!(
         compact_without_box_chars(&output).contains(
-            "Received shell prompt request: Check whether swap pressure is active, available memory and related processes"
+            "Received shell prompt request: Help me check swap pressure and available memory"
         ),
         "{output}"
     );
@@ -1935,7 +1936,7 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
             &[("Health check:", b"\t\nexit\n")]
         } else {
             &[
-                (" › Check memory pressure, top consumers", b"\t\n"),
+                (" › Help me check memory pressure, top consumers", b"\t\n"),
                 ("Received shell prompt request:", b"exit\n"),
             ]
         };
@@ -1943,14 +1944,14 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
             run_raw_cli_with_args_env_current_dir_and_marker_input("fake", &[], &env, &cwd, steps);
 
         if name == "dumb" {
-            assert!(!output.contains("Try asking:"), "{name}\n{output}");
+            assert!(!output.contains("Ask directly"), "{name}\n{output}");
             assert!(first_health_prompt(&output).is_none(), "{name}\n{output}");
             assert!(
                 !output.contains("Received shell prompt request:"),
                 "{name}\n{output}"
             );
         } else {
-            assert!(output.contains("Try asking:"), "{name}\n{output}");
+            assert!(output.contains("Ask directly"), "{name}\n{output}");
             assert!(first_health_prompt(&output).is_some(), "{name}\n{output}");
             assert!(
                 output.contains("Received shell prompt request:"),
@@ -2405,11 +2406,17 @@ fn first_health_prompt(output: &str) -> Option<String> {
     let plain = strip_ansi_escape(output);
     let mut lines = plain
         .lines()
-        .skip_while(|line| line.trim() != "Try asking:");
+        .skip_while(|line| !line.contains("Ask directly"));
     lines.next()?;
-    lines
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_string())
+    let row = lines.find(|line| !line.trim().is_empty())?.trim();
+    let unmarked = row.strip_prefix('›').unwrap_or(row).trim_start();
+    Some(
+        match unmarked.split_once(". ") {
+            Some((number, question)) if number.chars().all(|ch| ch.is_ascii_digit()) => question,
+            _ => unmarked,
+        }
+        .to_string(),
+    )
 }
 
 fn compact_without_box_chars(output: &str) -> String {
@@ -2522,7 +2529,7 @@ fn raw_cli_startup_health_unusable_history_keeps_facts_without_inviting() {
             &[("Health check", b"exit\n")],
         );
         assert!(output.contains("Health check"), "{kind}: {output}");
-        assert!(!output.contains("Try asking:"), "{kind}: {output}");
+        assert!(!output.contains("Ask directly"), "{kind}: {output}");
         if let Some(before) = before {
             assert_eq!(fs::read(&history).unwrap(), before);
         }

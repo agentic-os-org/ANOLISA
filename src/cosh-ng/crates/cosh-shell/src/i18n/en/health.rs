@@ -84,6 +84,31 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthPromptReviewUnavailableChecks => {
             "Explain why startup health checks were unavailable and how to restore them."
         }
+        MessageId::HealthSessionPromptAnalyzeMemoryPressure => {
+            "Help me check memory pressure, top consumers and cgroup limits"
+        }
+        MessageId::HealthSessionPromptCheckSwapPressure => {
+            "Help me check swap pressure and available memory"
+        }
+        MessageId::HealthSessionPromptCheckRecentOom => {
+            "Help me investigate the recent OOM impact and memory limits"
+        }
+        MessageId::HealthSessionPromptInspectDiskUsage => {
+            "Help me check disk usage and its main sources"
+        }
+        MessageId::HealthSessionPromptInspectServiceStatus => {
+            "Help me verify the current state of service {service}"
+        }
+        MessageId::HealthSessionPromptInspectHighLoad => {
+            "Help me check load and separate CPU work from I/O waits"
+        }
+        MessageId::HealthSessionPromptInspectProcessMemory => {
+            "Help me check the recent OOM impact on {process} and its memory limits"
+        }
+        MessageId::SuggestionListTitle => "Ask directly",
+        MessageId::SuggestionShortcutCycle => "Shift+Tab cycle",
+        MessageId::SuggestionShortcutInsert => "Tab insert",
+        MessageId::SuggestionShortcutAsk => "Enter ask",
         MessageId::HealthInsightMemoryAvailableLow => {
             "available memory is low"
         }

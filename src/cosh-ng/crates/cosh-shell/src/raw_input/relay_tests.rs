@@ -107,6 +107,7 @@ fn selection_input_mode() -> Arc<Mutex<RawInputMode>> {
         route: PromptGhostRoute::AgentSelection {
             candidates,
             active: 0,
+            generation: 0,
         },
     }))
 }
@@ -1079,6 +1080,7 @@ fn prompt_ghost_candidate_cycle_during_read_does_not_drop_input() {
             route: PromptGhostRoute::AgentSelection {
                 candidates,
                 active: 1,
+                generation: 0,
             },
         };
     }
@@ -1455,6 +1457,7 @@ fn selection_bare_escape_times_out_without_waiting_for_another_key() {
         route: PromptGhostRoute::AgentSelection {
             candidates,
             active: 0,
+            generation: 0,
         },
     }));
     let relay = super::super::spawn_raw_input_relay(
@@ -1497,6 +1500,7 @@ fn selection_action_wait_flushes_escape_at_the_deadline() {
                 suggestion_id: "health-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     }));
     let relay = super::super::spawn_raw_action_relay(
@@ -1537,6 +1541,8 @@ fn selection_shift_tab_cycles_when_arriving_in_one_chunk() {
     assert_eq!(output, b"exit\n");
     assert!(events.contains(&RawInputEvent::PromptGhostCycle {
         text: "continue deployment".to_string(),
+        suggestion_id: Some("personal-1".to_string()),
+        generation: 0,
     }));
     assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
     assert!(matches!(mode, RawInputMode::Passthrough));
@@ -1616,7 +1622,7 @@ fn selection_shift_tab_received_before_deadline_survives_a_delayed_relay() {
 
     assert!(rx.try_iter().any(|event| matches!(
         event,
-        RawInputEvent::PromptGhostCycle { text } if text == "continue deployment"
+        RawInputEvent::PromptGhostCycle { text, .. } if text == "continue deployment"
     )));
     assert_eq!(fs::read(&path).expect("read test output"), b"");
     fs::remove_file(path).ok();
@@ -1674,6 +1680,7 @@ fn selection_pending_escape_at_eof_after_route_change_is_cancelled() {
             suggestion_id: "old-1".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "old selection".to_string(),
@@ -1699,6 +1706,7 @@ fn selection_pending_escape_at_eof_after_route_change_is_cancelled() {
                 suggestion_id: "new-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     };
     finish_input_relay(&mut master, &tx, &classifier, &input_mode, &mut state)
@@ -1725,6 +1733,7 @@ fn selection_route_change_before_deadline_dismisses_then_forwards_shift_tab() {
             suggestion_id: "old-1".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "old selection".to_string(),
@@ -1758,6 +1767,7 @@ fn selection_route_change_before_deadline_dismisses_then_forwards_shift_tab() {
                 },
             ],
             active: 0,
+            generation: 0,
         },
     };
 
@@ -1795,6 +1805,7 @@ fn selection_expired_escape_dismisses_instead_of_rebuffering_for_a_new_route() {
             suggestion_id: "old-1".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "old selection".to_string(),
@@ -1823,6 +1834,7 @@ fn selection_expired_escape_dismisses_instead_of_rebuffering_for_a_new_route() {
                 suggestion_id: "new-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     };
     relay_input_bytes(
@@ -2493,6 +2505,8 @@ fn selection_shift_tab_cycles_and_tab_inserts_the_active_prompt() {
     let (events, output, mode) = relay.finish();
     assert!(events.contains(&RawInputEvent::PromptGhostCycle {
         text: "continue deployment".to_string(),
+        suggestion_id: Some("personal-1".to_string()),
+        generation: 0,
     }));
     assert!(events.contains(&RawInputEvent::PromptGhostAccepted {
         suggestion_id: Some("personal-1".to_string()),
@@ -2511,6 +2525,7 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
             suggestion_id: "health-disk".to_string(),
         }],
         active: 0,
+        generation: 0,
     };
     let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
         text: "inspect disk pressure".to_string(),

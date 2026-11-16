@@ -420,6 +420,14 @@ mod tests {
         );
         assert_eq!(
             MessageId::GuideWizardAiSourceRuntime as usize + 1,
+            MessageId::HealthSessionPromptAnalyzeMemoryPressure as usize
+        );
+        assert_eq!(
+            MessageId::HealthSessionPromptInspectProcessMemory as usize + 1,
+            MessageId::SuggestionListTitle as usize
+        );
+        assert_eq!(
+            MessageId::SuggestionShortcutAsk as usize + 1,
             MessageId::ALL.len()
         );
     }

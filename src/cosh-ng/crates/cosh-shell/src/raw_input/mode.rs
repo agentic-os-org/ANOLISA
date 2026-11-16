@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 mod model;
 
+pub use model::SuggestionSurfacePayload;
 pub(crate) use model::{InputOwnership, PostCaptureOwner, RawInputMode};
 pub use model::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 
@@ -213,6 +214,7 @@ pub(crate) fn update_locked_input_mode(
         RawObserverAction::RestorePrompt {
             ghost_text: Some(text),
             ghost_route,
+            ..
         } => RawInputMode::PromptGhost {
             text: text.clone(),
             route: ghost_route.clone(),

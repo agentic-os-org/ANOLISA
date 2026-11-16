@@ -110,6 +110,7 @@ fn input_ownership_ignores_same_owner_display_updates() {
         route: PromptGhostRoute::AgentSelection {
             candidates: candidates.clone(),
             active: 0,
+            generation: 0,
         },
     };
     let cycled = RawInputMode::PromptGhost {
@@ -117,6 +118,7 @@ fn input_ownership_ignores_same_owner_display_updates() {
         route: PromptGhostRoute::AgentSelection {
             candidates: candidates.clone(),
             active: 1,
+            generation: 0,
         },
     };
     assert_ne!(first, cycled);

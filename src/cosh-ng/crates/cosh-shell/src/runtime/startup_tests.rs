@@ -10,11 +10,11 @@ use super::probe_outcome::{record_probe_outcome, ProbeStartOutcome};
 use super::{
     bootstrap_path_command, bootstrap_path_probe_plan, bootstrap_process_path_from_shell,
     extract_bootstrap_path, merge_bootstrap_paths, merge_path_additions_at_anchors,
-    merge_path_lists, plan_startup_for_render, record_visible_personal_impressions,
-    render_pending_recommendation_notice, render_pending_upgrade_notice, render_startup_banner,
-    run_bootstrap_path_probe, startup_suggestion_mode, visible_personal_candidates,
-    write_startup_suggestion_card, BootstrapPathProbeError, BootstrapPathProbeIo, RawShellKind,
-    StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    merge_path_lists, plan_startup_for_render, prepare_startup_suggestions,
+    record_visible_personal_impressions, render_pending_recommendation_notice,
+    render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
+    startup_suggestion_mode, write_startup_suggestions, BootstrapPathProbeError,
+    BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -337,8 +337,11 @@ fn startup_render_plan_is_health_first_and_caps_actual_visible_at_three() {
         Some("health-a")
     );
     assert_eq!(
-        visible_personal_candidates(&rendered)
+        rendered
+            .visible_candidates
             .iter()
+            .filter(|candidate| candidate.source
+                != crate::recommendation::personal_model::CandidateSource::Health)
             .map(|candidate| candidate.candidate_id.as_str())
             .collect::<Vec<_>>(),
         vec!["recent-a"]
@@ -346,7 +349,7 @@ fn startup_render_plan_is_health_first_and_caps_actual_visible_at_three() {
 }
 
 #[test]
-fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
+fn unified_suggestion_list_orders_health_before_personal_and_explains_all_keys() {
     let mut report = HealthScanReport::new("health", 0);
     report.try_items = vec![health_try("health-a", 100)];
     let rendered = plan_startup_for_render(
@@ -355,23 +358,21 @@ fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
         &planner_context(),
         &[personal("recent-a"), personal("recent-b")],
     );
-    let state = InlineState {
-        language: Language::ZhCn,
-        ..InlineState::default()
-    };
     let mut output = Vec::new();
 
-    write_startup_suggestion_card(
-        &state,
+    write_startup_suggestions(
         &RatatuiInlineRenderer::with_width(120).with_language(Language::ZhCn),
-        StartupSuggestionMode::Interactive,
         &rendered.visible_candidates,
+        true,
         &mut output,
     )
     .unwrap();
 
     let text = String::from_utf8(output).unwrap();
-    assert!(text.find("[异常排查]").unwrap() < text.find("[个性化]").unwrap());
+    assert!(text.find("1. ").unwrap() < text.find("2. ").unwrap());
+    assert!(text.find("2. ").unwrap() < text.find("3. ").unwrap());
+    assert!(!text.contains("[异常排查]"));
+    assert!(!text.contains("[个性化]"));
     assert!(text.contains("Shift+Tab 切换"));
     assert!(text.contains("Tab 填入"));
     assert!(text.contains("Enter 直接提问"));
@@ -380,13 +381,11 @@ fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
 
 #[test]
 fn single_suggestion_hides_cycle_instruction() {
-    let state = InlineState::default();
     let mut output = Vec::new();
-    write_startup_suggestion_card(
-        &state,
+    write_startup_suggestions(
         &RatatuiInlineRenderer::with_width(120),
-        StartupSuggestionMode::Interactive,
         &[personal("recent-a")],
+        true,
         &mut output,
     )
     .unwrap();
@@ -501,7 +500,299 @@ fn startup_render_plan_keeps_three_health_prompts_at_narrow_width() {
             .collect::<Vec<_>>(),
         vec!["health-a", "health-b", "health-c"]
     );
-    assert!(visible_personal_candidates(&rendered).is_empty());
+    assert!(rendered
+        .visible_candidates
+        .iter()
+        .all(|candidate| candidate.source
+            == crate::recommendation::personal_model::CandidateSource::Health));
+}
+
+#[test]
+fn startup_snapshot_keeps_display_route_bindings_and_ghost_in_one_order() {
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var("HOME", home.path().canonicalize().unwrap());
+    std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    let old_term = std::env::var_os("TERM");
+    let old_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let old_isolated = std::env::var_os("COSH_SHELL_ISOLATED");
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    std::env::remove_var("COSH_SHELL_ISOLATED");
+    let mut report = HealthScanReport::new("snapshot", 0);
+    report.overall_severity = crate::diagnostics::health::HealthSeverity::Warning;
+    for (id, score) in [("health-a", 100), ("health-b", 90)] {
+        let item = health_try(id, score);
+        report
+            .findings
+            .push(crate::diagnostics::health::HealthFinding {
+                id: item.finding_id.clone(),
+                severity: crate::diagnostics::health::HealthSeverity::Warning,
+                category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+                title_id:
+                    crate::diagnostics::health::HealthMessageId::HealthFindingMemoryAvailableLow,
+                detail_id: None,
+                detail_args: BTreeMap::new(),
+                evidence_fact_ids: vec![],
+                suggested_try_ids: vec![id.to_string()],
+            });
+        report.try_items.push(item);
+    }
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    state.startup_health.report = Some(report);
+    let prepared = prepare_startup_suggestions(&mut state, "/fixture");
+    let ids: Vec<String> = prepared
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect();
+    assert!(!ids.is_empty());
+    match &state.pending_input_ghost_route {
+        crate::raw_input::PromptGhostRoute::AgentSelection {
+            candidates,
+            active,
+            generation,
+        } => {
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|c| c.suggestion_id.clone())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            assert_eq!(*active, 0);
+            assert_eq!(*generation, state.suggestion_snapshot_generation);
+        }
+        other => panic!("expected selection route, got {other:?}"),
+    }
+    let mut binding_ids: Vec<String> = state
+        .pending_prompt_suggestion_bindings
+        .keys()
+        .cloned()
+        .collect();
+    binding_ids.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(binding_ids, expected);
+    assert_eq!(
+        state.pending_input_ghost.as_deref(),
+        Some(prepared.candidates[0].prompt_text.as_str())
+    );
+    let mut output = Vec::new();
+    write_startup_suggestions(
+        &RatatuiInlineRenderer::with_width(100).with_language(Language::EnUs),
+        &prepared.candidates,
+        true,
+        &mut output,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for candidate in &prepared.candidates {
+        assert_eq!(text.matches(candidate.prompt_text.as_str()).count(), 1);
+    }
+    match old_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
+    }
+    match old_term {
+        Some(value) => std::env::set_var("TERM", value),
+        None => std::env::remove_var("TERM"),
+    }
+    match old_xdg {
+        Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+        None => std::env::remove_var("XDG_RUNTIME_DIR"),
+    }
+    match old_isolated {
+        Some(value) => std::env::set_var("COSH_SHELL_ISOLATED", value),
+        None => std::env::remove_var("COSH_SHELL_ISOLATED"),
+    }
+}
+
+#[test]
+fn suppressed_first_health_candidate_does_not_consume_a_display_slot() {
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    std::env::set_var("HOME", &root);
+    let store_path = root.join("suppression");
+    std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", &store_path);
+    let old_term = std::env::var_os("TERM");
+    let old_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let old_isolated = std::env::var_os("COSH_SHELL_ISOLATED");
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    std::env::remove_var("COSH_SHELL_ISOLATED");
+    let mut report = HealthScanReport::new("suppressed", 0);
+    report.overall_severity = crate::diagnostics::health::HealthSeverity::Warning;
+    for (id, score) in [("health-a", 100), ("health-b", 90)] {
+        let item = health_try(id, score);
+        report
+            .findings
+            .push(crate::diagnostics::health::HealthFinding {
+                id: item.finding_id.clone(),
+                severity: crate::diagnostics::health::HealthSeverity::Warning,
+                category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+                title_id:
+                    crate::diagnostics::health::HealthMessageId::HealthFindingMemoryAvailableLow,
+                detail_id: None,
+                detail_args: BTreeMap::new(),
+                evidence_fact_ids: vec![],
+                suggested_try_ids: vec![id.to_string()],
+            });
+        report.try_items.push(item);
+    }
+    let mut suppression =
+        crate::diagnostics::health::suppression::HealthSuppressionStore::default();
+    let host = crate::diagnostics::health::suppression::host_id_for_report(
+        &report,
+        crate::diagnostics::health::suppression::health_machine_id().as_deref(),
+    );
+    suppression.record_shown(
+        &host,
+        &report.findings[0],
+        crate::diagnostics::health::suppression::metrics_for_report(&report),
+        crate::diagnostics::health::suppression::current_time_ms(),
+    );
+    suppression.write_to_path(&store_path).unwrap();
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    state.startup_health.report = Some(report);
+    let prepared = prepare_startup_suggestions(&mut state, "/fixture");
+    let ids: Vec<&str> = prepared
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect();
+    assert!(!ids.contains(&"health-a"), "{ids:?}");
+    assert!(ids.contains(&"health-b"), "{ids:?}");
+    match old_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match old_store {
+        Some(value) => std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", value),
+        None => std::env::remove_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE"),
+    }
+    match old_term {
+        Some(value) => std::env::set_var("TERM", value),
+        None => std::env::remove_var("TERM"),
+    }
+    match old_xdg {
+        Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+        None => std::env::remove_var("XDG_RUNTIME_DIR"),
+    }
+    match old_isolated {
+        Some(value) => std::env::set_var("COSH_SHELL_ISOLATED", value),
+        None => std::env::remove_var("COSH_SHELL_ISOLATED"),
+    }
+}
+
+#[test]
+fn displayed_claim_charges_exactly_the_displayed_findings() {
+    let _lock = crate::diagnostics::test_env::env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_store = std::env::var_os("COSH_SHELL_HEALTH_SUPPRESSION_STORE");
+    let old_term = std::env::var_os("TERM");
+    let old_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    std::env::set_var("HOME", &root);
+    std::env::set_var(
+        "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+        root.join("suppression"),
+    );
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    let mut report = HealthScanReport::new("omitted", 0);
+    report.overall_severity = crate::diagnostics::health::HealthSeverity::Warning;
+    for (id, score, prompt) in [
+        (
+            "health-a",
+            100,
+            crate::diagnostics::health::HealthMessageId::HealthPromptAnalyzeMemoryPressure,
+        ),
+        (
+            "health-b",
+            90,
+            crate::diagnostics::health::HealthMessageId::HealthPromptInspectDiskUsage,
+        ),
+        (
+            "health-c",
+            80,
+            crate::diagnostics::health::HealthMessageId::HealthPromptCheckSwapPressure,
+        ),
+    ] {
+        let mut item = health_try(id, score);
+        item.prompt_id = Some(prompt);
+        report
+            .findings
+            .push(crate::diagnostics::health::HealthFinding {
+                id: item.finding_id.clone(),
+                severity: crate::diagnostics::health::HealthSeverity::Warning,
+                category: crate::diagnostics::health::HealthFindingCategory::RootCause,
+                title_id:
+                    crate::diagnostics::health::HealthMessageId::HealthFindingMemoryAvailableLow,
+                detail_id: None,
+                detail_args: BTreeMap::new(),
+                evidence_fact_ids: vec![],
+                suggested_try_ids: vec![id.to_string()],
+            });
+        report.try_items.push(item);
+    }
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    state.startup_health.report = Some(report.clone());
+    let first = prepare_startup_suggestions(&mut state, "/fixture");
+    assert_eq!(first.candidates.len(), 3);
+    let store = std::fs::read_to_string(root.join("suppression")).unwrap();
+    assert_eq!(
+        store
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .count(),
+        3
+    );
+    let mut second_state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    second_state.startup_health.report = Some(report);
+    let second = prepare_startup_suggestions(&mut second_state, "/fixture");
+    let second_ids: Vec<&str> = second
+        .candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect();
+    assert!(second_ids.is_empty(), "{second_ids:?}");
+    for (key, value) in [
+        ("HOME", old_home),
+        ("COSH_SHELL_HEALTH_SUPPRESSION_STORE", old_store),
+        ("TERM", old_term),
+        ("XDG_RUNTIME_DIR", old_xdg),
+    ] {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
 }
 
 #[test]
