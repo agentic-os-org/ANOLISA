@@ -41,8 +41,8 @@ mod welcome;
 pub(crate) use bash_capability::{exported_bash_functions_posix_compatible, resolve_bash_for_r2};
 #[cfg(test)]
 use recommendations::{
-    plan_startup_for_render, record_visible_personal_impressions, render_pending_upgrade_notice,
-    visible_personal_candidates, write_startup_suggestion_card,
+    plan_startup_for_render, prepare_startup_suggestions, record_visible_personal_impressions,
+    render_pending_upgrade_notice, write_startup_suggestions,
 };
 pub(crate) use recommendations::{
     render_pending_recommendation_notice, render_pending_upgrade_notice_at_idle_prompt,

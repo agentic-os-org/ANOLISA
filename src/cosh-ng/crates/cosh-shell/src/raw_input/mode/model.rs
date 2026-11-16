@@ -17,7 +17,20 @@ pub enum RawObserverAction {
     RestorePrompt {
         ghost_text: Option<String>,
         ghost_route: PromptGhostRoute,
+        suggestion_surface: Option<SuggestionSurfacePayload>,
     },
+}
+
+/// Pre-rendered recommendation list variants owned by the shell host surface.
+/// Plain data only: the shell host must not depend on the UI renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionSurfacePayload {
+    pub variants: Vec<Vec<String>>,
+    pub labels: Vec<String>,
+    pub ids: Vec<String>,
+    pub rows: usize,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +42,7 @@ pub enum PromptGhostRoute {
     AgentSelection {
         candidates: Vec<PromptGhostCandidate>,
         active: usize,
+        generation: u64,
     },
 }
 

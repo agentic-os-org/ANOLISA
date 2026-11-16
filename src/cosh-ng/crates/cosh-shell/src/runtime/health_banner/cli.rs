@@ -13,10 +13,6 @@ use crate::runtime::shell_integration::write_frame;
 use crate::ui::RatatuiInlineRenderer;
 
 pub(crate) fn run_cli(args: &[OsString]) -> i32 {
-    if matches!(args, [flag] if flag == crate::diagnostics::health::suppression::claim::WORKER_FLAG)
-    {
-        return crate::diagnostics::health::suppression::claim::run_worker();
-    }
     let started = Instant::now();
     let default_deadline = started + Duration::from_millis(500);
     let action = match parse_action(args) {

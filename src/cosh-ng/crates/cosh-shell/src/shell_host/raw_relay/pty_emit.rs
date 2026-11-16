@@ -224,6 +224,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
         RawObserverAction::RestorePrompt {
             ghost_text,
             ghost_route,
+            suggestion_surface,
         } => {
             if ghost_text.is_none() {
                 let mut mode = input_mode
@@ -239,6 +240,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                     return Ok(RawObserverAction::RestorePrompt {
                         ghost_text,
                         ghost_route,
+                        suggestion_surface,
                     });
                 }
                 if matches!(&*mode, RawInputMode::Terminal { .. }) {
@@ -256,6 +258,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 return Ok(RawObserverAction::RestorePrompt {
                     ghost_text,
                     ghost_route,
+                    suggestion_surface,
                 });
             }
             // This restore follows new output; an earlier ghost's replay arm
@@ -269,6 +272,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                     prompt_replay,
                     prompt_presentation,
                 )?;
+                prompt_presentation.selection_surface_mut().invalidate();
             } else {
                 prompt_presentation.write_restored_prompt(output, prompt)?;
                 mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
@@ -282,10 +286,27 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 if let Ok(mut mode) = input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
                         text: text.clone(),
-                        route: ghost_route,
+                        route: ghost_route.clone(),
                     };
                 }
                 write_prompt_ghost(output, text, selection)?;
+                if let (
+                    Some(payload),
+                    crate::raw_input::PromptGhostRoute::AgentSelection {
+                        active, generation, ..
+                    },
+                ) = (suggestion_surface, &ghost_route)
+                {
+                    prompt_presentation.selection_surface_mut().publish(
+                        payload,
+                        *active,
+                        *generation,
+                        &String::from_utf8_lossy(prompt),
+                        parser.display_position(),
+                    );
+                }
+            } else {
+                prompt_presentation.selection_surface_mut().retire();
             }
             output.flush()?;
             Ok(RawObserverAction::Continue)

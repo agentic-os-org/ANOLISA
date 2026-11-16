@@ -2,6 +2,11 @@
 
 [中文版](../zh/shell-entry-guidance.md)
 
+The [unified startup suggestion design](startup-suggestion-unification.md)
+and [execution plan](startup-suggestion-unification-plan.md) are implemented
+for ordinary Cosh startup; real-terminal product acceptance is still pending.
+The contracts below describe the implemented behavior.
+
 Ordinary Cosh displays the original six-line outline logo outside its welcome card. The card starts
 with command and natural-language capabilities, followed by Shell, approval mode
 and cwd. Short metadata fits on one row; long paths retain their own full-width
@@ -36,6 +41,20 @@ Below 42 columns ordinary startup omits the logo and keeps the card title.
 Bash failure invitations use two open lines: a cyan left accent and brand, normal-foreground action label and copy hint, followed by the intact
 ask command. Terminal wrapping preserves the logical command. The guide stays in
 the login banner and is not repeated after failures. Plain fallback and suppression are unchanged.
+
+Ordinary Cosh startup prints health facts once, then one open suggestion area
+shared by health and personal candidates (at most three in total). A single
+question has no number or marker; multiple questions use stable `1.`-`3.`
+numbers with one cyan `›` marker on the active row. `Shift+Tab` cycles the
+active candidate, `Tab` inserts the exact question, and `Enter` at an empty
+recommendation prompt submits the active candidate. The shell host owns the
+live list region and only repaints it while the empty prompt and list anchor
+are proven and the whole region fits the viewport; otherwise the list stays a
+historical snapshot and the current number/question is shown locally at the
+prompt. Session health claims record only the displayed health candidates,
+deduplicated by finding fingerprint and persisted once. Bash login invitations
+and explicit `/health` keep their existing single-invitation and try-item
+projections.
 
 Failure diagnostics use existing context and permitted read-only checks before requesting missing information; manually copying terminal output is not the default next step. Native Cosh retrieves available bound output through evidence access; uncaptured Bash output remains unavailable. Start missing-evidence investigation with one focused check, follow up only when justified by new evidence, and stop when sufficient. Recommend and analysis-only restrictions remain authoritative.
 

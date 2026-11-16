@@ -78,6 +78,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthPromptReviewUnavailableChecks => {
             "说明启动健康检查为什么不可用，以及如何恢复这些检查。"
         }
+        MessageId::HealthSessionPromptAnalyzeMemoryPressure => {
+            "帮我核实当前内存压力、主要占用及适用的 cgroup 限制"
+        }
+        MessageId::HealthSessionPromptCheckSwapPressure => "帮我核实换页压力与内存余量",
+        MessageId::HealthSessionPromptCheckRecentOom => "帮我排查近期 OOM 的影响和相关内存限制",
+        MessageId::HealthSessionPromptInspectDiskUsage => "帮我核实当前磁盘占用与主要来源",
+        MessageId::HealthSessionPromptInspectServiceStatus => "帮我核实服务 {service} 的当前状态",
+        MessageId::HealthSessionPromptInspectHighLoad => "帮我核实当前负载，区分 CPU 繁忙与 I/O 等待",
+        MessageId::HealthSessionPromptInspectProcessMemory => {
+            "帮我核对近期 OOM 中 {process} 的受影响情况及相关内存限制"
+        }
+        MessageId::SuggestionListTitle => "可以直接提问",
+        MessageId::SuggestionShortcutCycle => "Shift+Tab 切换",
+        MessageId::SuggestionShortcutInsert => "Tab 填入",
+        MessageId::SuggestionShortcutAsk => "Enter 直接提问",
         MessageId::HealthInsightMemoryAvailableLow => {
             "可用内存偏低"
         }

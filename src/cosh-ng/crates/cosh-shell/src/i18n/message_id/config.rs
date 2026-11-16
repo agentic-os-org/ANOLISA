@@ -223,6 +223,17 @@ macro_rules! guide_wizard_ids {
             GuideWizardAiPending,
             GuideWizardAiIdentityFailed,
             GuideWizardAiSourceRuntime,
+            HealthSessionPromptAnalyzeMemoryPressure,
+            HealthSessionPromptCheckSwapPressure,
+            HealthSessionPromptCheckRecentOom,
+            HealthSessionPromptInspectDiskUsage,
+            HealthSessionPromptInspectServiceStatus,
+            HealthSessionPromptInspectHighLoad,
+            HealthSessionPromptInspectProcessMemory,
+            SuggestionListTitle,
+            SuggestionShortcutCycle,
+            SuggestionShortcutInsert,
+            SuggestionShortcutAsk,
         );
     };
 }

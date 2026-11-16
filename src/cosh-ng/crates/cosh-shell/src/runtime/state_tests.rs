@@ -63,6 +63,7 @@ fn clearing_personal_candidates_rebuilds_health_first_selection() {
             },
         ],
         active: 0,
+        generation: 0,
     };
 
     assert!(state.clear_personal_prompt_ghost());
@@ -74,6 +75,7 @@ fn clearing_personal_candidates_rebuilds_health_first_selection() {
                 text: "inspect memory".to_string(),
                 suggestion_id: "health-1".to_string(),
             }],
+            generation: 0,
             active: 0,
         }
     );
