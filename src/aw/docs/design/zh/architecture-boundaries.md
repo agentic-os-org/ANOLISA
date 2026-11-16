@@ -77,15 +77,8 @@ Qoder 的步骤排序要求、Hermes 的观察/转换阶段、OpenClaw 的替换
 
 ## Schema 与演进
 
-能力、计划和证据合同归 `aw-contracts`，配置归 `aw-config`，Provider 公共消息和
-View 归 `aw-provider`。原生桥接数据归 Adapter，Provider 私有数据归各实现。
-
-`aw-contracts` 保留 23 份已注册合同；此前八份未注册、无仓库内调用方的能力 v1
-草案已删除，历史可从 Git 查阅，不另设 `references/`。计划和证据等活跃 v1 合同仍保留。
-迁移未改变活跃 Schema 的字节、`$id`、Registry 名称或摘要向量。
-
-新版本使用独立名称和 `$id`，与受支持的旧版并存，并增加语义校验和正反样例。
-目录清单测试要求每份合同都在 Registry 中，防止新增文件未接入运行时。
+架构总览的[Schema 归属](architecture.md#schema-归属)统一定义合同归属、
+受支持版本演进和迁移要求。活跃 Schema 清单以该章节引用的 Registry 和目录清单测试为准。
 
 ## 组件 owner 与 OS 发行方
 

@@ -90,18 +90,10 @@ rules remain unchanged.
 
 ## Schema ownership and evolution
 
-Capability, plan and evidence contracts belong to `aw-contracts`; configuration
-to `aw-config`; public Provider messages and Views to `aw-provider`. Native bridge
-data belongs to the Adapter, and private Provider data to its implementation.
-
-`aw-contracts` retains 23 registered contracts. Eight unregistered capability v1
-drafts with no repository consumers were removed; Git retains their history,
-without a separate `references/` directory. Active v1 plan and evidence contracts
-remain. Active schema bytes, `$id`, Registry names and digest vectors are unchanged.
-
-New versions use distinct names and IDs alongside supported older versions, with
-semantic validation and positive/negative fixtures. The schema inventory test
-requires each contract file to be registered, preventing unused runtime schemas.
+The architecture overview's [schema ownership](architecture.md#schema-ownership)
+section defines contract ownership, supported-version evolution and relocation
+requirements. Use its Registry and inventory-test references for the active
+schema list.
 
 ## Component owners and the OS distributor
 

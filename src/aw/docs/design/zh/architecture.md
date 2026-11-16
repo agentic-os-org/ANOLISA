@@ -207,9 +207,12 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 | 活跃能力、计划与证据 Schema | `aw-contracts/schemas/` |
 | 配置 | `aw-config/schemas/` |
 | Provider 消息与 View 协议 | `aw-provider/schemas/` |
+| 原生桥接数据 | Adapter |
 | Provider 私有配置与后端数据 | 对应的具体 Provider 目录 |
 
-`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 28 份。
+`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同。
+[Registry](../../../crates/aw-contracts/src/registry.rs) 列出活跃 Schema；
+[目录清单测试](../../../crates/aw-contracts/tests/schemas.rs) 要求每份 Schema 文件均已注册。
 计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
 此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
 

@@ -258,9 +258,13 @@ development environment and checks.
 | Active capability, plan and evidence schemas | `aw-contracts/schemas/` |
 | Configuration | `aw-config/schemas/` |
 | Provider messages and View protocol | `aw-provider/schemas/` |
+| Native bridge data | The Adapter |
 | Provider private configuration and backend data | The concrete Provider directory |
 
-`aw-contracts/schemas/` contains only registered, tested contracts, currently 28.
+`aw-contracts/schemas/` contains only registered, tested contracts. The
+[Registry](../../../crates/aw-contracts/src/registry.rs) lists the active schemas;
+the [inventory test](../../../crates/aw-contracts/tests/schemas.rs) requires every
+schema file to be registered.
 Plan, evidence and other v1 contracts remain active; the four capability profiles
 use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
 in this repository and were removed. Their contents remain in Git history.
