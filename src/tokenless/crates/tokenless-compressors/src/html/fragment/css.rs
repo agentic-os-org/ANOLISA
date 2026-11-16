@@ -7,8 +7,8 @@
 //!   can be stripped without changing meaning, order or visibility.
 //! - [`CssVerdict::LocalSemantic`]: local meaning or formatting on the styled
 //!   element itself (such as `line-through`, `super`/`sub`, preserved
-//!   whitespace, list markers, flex reversal or SVG paint), which stays
-//!   faithful when that element and its `style` attribute remain HTML.
+//!   whitespace, list markers, flex reversal, SVG paint or unknown inline
+//!   declarations), which stays on the element and its HTML subtree.
 //! - [`CssVerdict::Hazard`]: hidden or off-screen text, narrow fixed boxes
 //!   whose text can overflow onto neighbours, tall inline borders/padding,
 //!   cross-parent `order`, symbol fonts, escapes, or functions other than
@@ -391,12 +391,44 @@ fn classify_declaration(
         }
     };
     match property.as_str() {
+        "visibility"
+        | "opacity"
+        | "position"
+        | "top"
+        | "right"
+        | "bottom"
+        | "left"
+        | "inset"
+        | "clip"
+        | "clip-path"
+        | "transform"
+        | "translate"
+        | "rotate"
+        | "scale"
+        | "filter"
+        | "z-index"
+        | "all"
+        | "content"
+        | "content-visibility"
+        | "contain"
+        | "float"
+        | "clear"
+        | "zoom"
+        | "mix-blend-mode"
+        | "text-decoration-thickness"
+        | "mso-hide" => CssVerdict::Hazard,
+        // Logical sizes depend on writing mode and can hide or clip content.
+        "inline-size" | "block-size" | "max-inline-size" | "max-block-size" => CssVerdict::Hazard,
+        _ if property.starts_with('-') => CssVerdict::Hazard,
         "color" | "background-color" => cosmetic_if(color_value(value)),
         "background" => cosmetic_if(background(value).is_some()),
         "font" => cosmetic_if(font(value).is_some_and(|font| !has_symbol_font(&font.family))),
         "font-family" => cosmetic_if(!has_symbol_font(value)),
         "font-size" => cosmetic_if(font_size(value).is_some()),
         "line-height" => cosmetic_if(line_height(value).is_some()),
+        "text-indent" => cosmetic_if(dimension(value).is_some_and(|(number, unit)| {
+            number == 0.0 && (unit == "%" || length(value).is_some())
+        })),
         // Negative spacing stacks glyphs onto each other, and wide spacing
         // scatters them.
         "letter-spacing" | "word-spacing" => cosmetic_if(
@@ -678,6 +710,31 @@ fn classify_declaration(
         | "word-break"
         | "word-wrap"
         | "overflow-wrap" => CssVerdict::Cosmetic,
+        // These declarations can depend on a parent or change other nodes, so
+        // preserving only the styled subtree would lose their context.
+        _ if [
+            "grid",
+            "counter",
+            "animation",
+            "transition",
+            "mask",
+            "offset",
+            "inset",
+        ]
+        .iter()
+        .any(|prefix| {
+            property == prefix
+                || property
+                    .strip_prefix(prefix)
+                    .is_some_and(|s| s.starts_with('-'))
+        }) =>
+        {
+            CssVerdict::Hazard
+        }
+        // Keep unclassified inline declarations on their original subtree so
+        // independent siblings can still be rendered. Stylesheets have no
+        // matched element on which to retain an unknown declaration locally.
+        _ if styled.is_some() => CssVerdict::LocalSemantic,
         _ => CssVerdict::Hazard,
     }
 }
