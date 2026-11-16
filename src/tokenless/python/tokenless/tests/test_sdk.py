@@ -424,6 +424,40 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertNoLogs(SDK_LOGGER, "WARNING"):
                     await sdk.pre_tool(request)
 
+    @REQUIRES_POSIX_STUBS
+    async def test_pre_tool_rejects_envelopes_from_another_contract(self) -> None:
+        result = (
+            '"result":{"arguments":{"command":"changed"},'
+            '"action":"replace_arguments","output_optimization":"rtk"}'
+        )
+        envelopes = {
+            "legacy protocol": '{"protocol_version":1,"operation":"pre_tool",' + result + "}",
+            "other operation": '{"protocol_version":2,"operation":"post_tool",' + result + "}",
+            "missing version": '{"operation":"pre_tool",' + result + "}",
+        }
+        for name, envelope in envelopes.items():
+            with self.subTest(name):
+                sdk = self.sdk()
+                sdk._rtk_launcher = self.stub_launcher(
+                    f"cat >/dev/null\necho '{envelope}'"
+                )
+                request = self.pre_tool_request()
+                with self.assertLogs(SDK_LOGGER, "WARNING") as logs:
+                    output = await sdk.pre_tool(request)
+                self.assertIn("malformed", logs.output[0])
+                self.assertEqual(output.action, PreToolAction.PASSTHROUGH)
+                self.assertEqual(output.output_optimization, OutputOptimization.NONE)
+                self.assertEqual(output.arguments, request.arguments)
+                self.assertIsNot(output.arguments, request.arguments)
+
+        tagged = '{"protocol_version":2,"operation":"pre_tool",' + result + "}"
+        sdk = self.sdk()
+        sdk._rtk_launcher = self.stub_launcher(f"cat >/dev/null\necho '{tagged}'")
+        output = await sdk.pre_tool(self.pre_tool_request())
+        self.assertEqual(output.action, PreToolAction.REPLACE_ARGUMENTS)
+        self.assertEqual(output.output_optimization, OutputOptimization.RTK)
+        self.assertEqual(output.arguments, {"command": "changed"})
+
     async def test_pre_tool_raises_for_a_request_the_cli_cannot_decode(self) -> None:
         request = PreToolRequest(
             tool_name=1,  # type: ignore[arg-type]
@@ -468,8 +502,11 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
 
     @REQUIRES_POSIX_STUBS
     async def test_pre_tool_keeps_child_diagnostics_off_the_host_stderr(self) -> None:
-        response = '{"result":{"arguments":{"command":"x"},"action":"passthrough",'
-        response += '"output_optimization":"none"}}'
+        response = (
+            '{"protocol_version":2,"operation":"pre_tool","result":'
+            '{"arguments":{"command":"x"},"action":"passthrough",'
+            '"output_optimization":"none"}}'
+        )
         sdk = self.sdk()
         sdk._rtk_launcher = self.stub_launcher(
             f"cat >/dev/null\necho '[rtk] noise' >&2\necho '{response}'"
