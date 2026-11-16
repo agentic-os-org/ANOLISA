@@ -79,6 +79,7 @@ cases:
         - "恢复原登录"
         - "正在打开登录管理"
         - "用法：cosh"
+        - "usage:"
         - "打开登录管理失败"
         - "Traceback"
     evidence:
