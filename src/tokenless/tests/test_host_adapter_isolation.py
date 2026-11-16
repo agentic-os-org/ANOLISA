@@ -187,6 +187,60 @@ class HostAdapterIsolation(unittest.TestCase):
                 self.assertEqual(json.loads(process.stdout), {})
                 self.assertIn("Hook adapter unavailable", process.stderr)
 
+    def adapter_status(self, directory: str, fields: dict) -> str:
+        """Return ``ToolResult.status`` from one real adapter's response()."""
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "build"},
+            "tool_response": {"stdout": "out", "stderr": "", "exit_code": 0},
+            "session_id": "session",
+            "tool_use_id": "call",
+            **fields,
+        }
+        probe = (
+            "import json,sys; "
+            f"sys.path[:0]=[{str(self.adapters / 'common/hooks')!r},"
+            f" {str(self.adapters / directory)!r}]; "
+            "import hook_adapter; "
+            f"print(hook_adapter.response(json.loads({json.dumps(payload)!r})).status)"
+        )
+        process = subprocess.run(
+            [sys.executable, "-c", probe],
+            text=True,
+            capture_output=True,
+            env={**self.env, "COSH_NG_VERSION": "0.21.0"},
+            timeout=10,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        return process.stdout.strip()
+
+    def test_explicit_error_status_survives_every_adapter(self) -> None:
+        """A host-reported error must not be upgraded to success (#10151)."""
+        for host, directory in HOSTS.items():
+            with self.subTest(host=host):
+                self.assertEqual(
+                    self.adapter_status(directory, {"status": "error"}), "error"
+                )
+                self.assertEqual(
+                    self.adapter_status(directory, {"status": "ERROR"}), "error"
+                )
+
+    def test_explicit_status_keeps_its_priority(self) -> None:
+        for host, directory in HOSTS.items():
+            with self.subTest(host=host):
+                self.assertEqual(
+                    self.adapter_status(
+                        directory, {"status": "interrupted", "is_error": False}
+                    ),
+                    "interrupted",
+                )
+                self.assertEqual(
+                    self.adapter_status(directory, {"status": "success"}), "success"
+                )
+                self.assertEqual(
+                    self.adapter_status(directory, {"is_error": True}), "error"
+                )
+
     def test_before_model_entrypoint_for_every_host(self) -> None:
         for host in HOSTS:
             with self.subTest(host=host):

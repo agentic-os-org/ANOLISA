@@ -69,8 +69,10 @@ def process_result(value: object) -> dict | None:
 
 
 def result_status(status: str, is_error: bool, process: dict | None) -> str:
+    # An explicit status wins over inference: a host that reports "error" has
+    # already judged the tool result, so a clean exit code must not upgrade it.
     status = str(status).lower()
-    if status in {"interrupted", "denied"}:
+    if status in {"interrupted", "denied", "error"}:
         return status
     if is_error or (
         process is not None
