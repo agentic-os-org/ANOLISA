@@ -134,6 +134,32 @@ def _strip_trailing_shell_comment(line: str) -> str:
     return line
 
 
+def _find_unquoted_heredoc(line: str) -> tuple[str, str, str] | None:
+    """Locate the first <<'MARK' operator that sits outside quotes.
+
+    Returns (marker, before, after) — the text before and after the
+    operator — or None when the line has no unquoted heredoc operator. An
+    operator inside a quoted string (echo "<<'EOF'") is data, not a
+    heredoc: matching it would swallow the following commands as body.
+    """
+    for m in re.finditer(r"<<\s*'(\w+)'", line):
+        quote: str | None = None
+        escaped = False
+        for char in line[: m.start()]:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif char in ("'", '"'):
+                if quote is None:
+                    quote = char
+                elif quote == char:
+                    quote = None
+        if quote is None:
+            return m.group(1), line[: m.start()], line[m.end():]
+    return None
+
+
 class OpenClawExternalAgent(BaseAgent):
     """Route between an OpenClaw process on the **host** and a Harbor Docker container.
 
@@ -818,17 +844,68 @@ class OpenClawExternalAgent(BaseAgent):
                 i += 1
                 continue
 
-            # Detect heredoc: "<cmd> <<'MARKER' > <file>"
-            # \S+ matches any command (cat, tee, etc.) — single pattern suffices.
-            m = re.match(r"(\S+)\s*<<\s*'(\w+)'\s*>\s*(\S+)", line)
+            # Detect heredoc in its legal forms — but only when the
+            # operator sits OUTSIDE quotes (an operator inside a quoted
+            # string, echo "<<'EOF'", is data and would swallow the next
+            # commands as body):
+            #   "<cmd> <<'MARK' > file" / ">> file"  (redirect after)
+            #   "<cmd> [>>] file <<'MARK'"           (redirect before)
+            #   "<cmd ...> <<'MARK'"                  (bare; tee and friends
+            #                                          write the file
+            #                                          themselves)
+            # Before this, only the first form was recognized: ">>"
+            # captured the target file as literally ">", and the other
+            # forms let every body line leak into the steps as a
+            # standalone command.
             marker: str | None = None
             target_file: str | None = None
-            if m:
-                marker = m.group(2)
-                target_file = m.group(3)
+            cmd_text: str | None = None
+            heredoc = _find_unquoted_heredoc(line)
+            if heredoc:
+                marker, before, after = heredoc
+                m = re.match(r"\s*(>>?)\s*(\S+)\s*$", after)
+                if m:
+                    # "<cmd> <<'MARK' > file" / ">> file"  (redirect after)
+                    target_file = m.group(2)
+                else:
+                    m = re.match(r"(.+?)\s+(>>?)\s+(\S+)\s*$", before)
+                    if m:
+                        # "<cmd> [>>] file <<'MARK'"       (redirect before)
+                        target_file = m.group(3)
+                    else:
+                        # Bare form: only known writers infer a target.
+                        # tee writes the file named on its command line;
+                        # an interpreter reading stdin (python3 -) writes
+                        # nothing, let alone a file named "-".
+                        cmd_text = before.strip()
+                        words = before.split()
+                        j = 0
+                        while j < len(words) and (
+                            words[j] in ("sudo", "nohup", "nice", "command")
+                            or (words[j] == "env" and j + 1 < len(words))
+                        ):
+                            j += 1
+                            while (
+                                j < len(words)
+                                and "=" in words[j]
+                                and not words[j].startswith("-")
+                            ):
+                                j += 1
+                        if j < len(words) and words[j] == "tee":
+                            args = [
+                                w for w in words[j + 1 :] if not w.startswith("-")
+                            ]
+                            if args:
+                                target_file = args[-1]
 
-            if marker and target_file:
-                block = [f"Write {target_file} with heredoc:"]
+            if marker:
+                if target_file:
+                    label = f"Write {target_file} with heredoc:"
+                else:
+                    # keep the receiving command in the step: an
+                    # interpreter's stdin heredoc is a run step, not a write
+                    label = f"Provide heredoc input to `{cmd_text}`:"
+                block = [label]
                 i += 1
                 body_lines: list[str] = []
                 while i < len(lines):
