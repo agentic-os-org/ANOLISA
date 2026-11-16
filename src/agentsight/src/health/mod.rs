@@ -4,7 +4,10 @@
 //! - Detecting their listening TCP ports via `/proc`
 //! - Probing them with HTTP requests
 //! - Storing results in a shared `HealthStore`
+//!
+//! It also diagnoses prompt-cache hit rates of recorded LLM calls ([`cache`]).
 
+pub mod cache;
 pub mod checker;
 pub mod port_detector;
 pub(crate) mod resource;
