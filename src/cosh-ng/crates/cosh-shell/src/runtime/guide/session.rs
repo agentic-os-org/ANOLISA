@@ -14,6 +14,9 @@ use super::status::{self, Reading, Snapshot, Source};
 use super::LoginAction;
 use crate::adapter::GuideAuthSummary;
 
+/// Rows revealed by one PageUp/PageDown on both markdown and form pages.
+const PAGE_ROWS: usize = 10;
+
 pub(crate) enum Flow {
     Continue,
     Exit,
@@ -149,8 +152,8 @@ impl Session {
             match key.code {
                 KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
                 KeyCode::Down => self.scroll += 1,
-                KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-                KeyCode::PageDown => self.scroll += 10,
+                KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(PAGE_ROWS),
+                KeyCode::PageDown => self.scroll += PAGE_ROWS,
                 KeyCode::Esc => return self.back(),
                 _ => {}
             }
@@ -159,6 +162,8 @@ impl Session {
         match key.code {
             KeyCode::Up => self.shift(-1),
             KeyCode::Down => self.shift(1),
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(PAGE_ROWS),
+            KeyCode::PageDown => self.scroll += PAGE_ROWS,
             KeyCode::Enter => return self.open(),
             KeyCode::Esc => return self.back(),
             KeyCode::Char('q') | KeyCode::Char('Q') if self.page == Page::Home => {
@@ -434,6 +439,11 @@ impl Session {
             .position(|index| *index == self.cursor)
             .unwrap_or(0);
         let next = (position as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+        if choices[next] != self.cursor {
+            // A moved focus drops any explicit page offset so the cursor stays
+            // on screen; a key that cannot move focus leaves the offset alone.
+            self.scroll = 0;
+        }
         self.cursor = choices[next];
     }
 

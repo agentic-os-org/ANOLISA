@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{account, cli, query_status, Action, LoginStatus};
 use crate::i18n::I18n;
-use crate::runtime::guide::IgnoreInterrupts;
+use crate::runtime::terminal::IgnoreInterrupts;
 
 pub(crate) const WORKER_FLAG: &str = "--__cosh-login-guide-v2";
 pub(super) const VERSION: u32 = 2;
@@ -112,14 +112,25 @@ pub(crate) enum HandoffFailure {
     Exit(i32),
 }
 
-/// Maps a non-zero child status: a signal means the operator interrupted the
-/// prompt, 2 is a usage rejection, everything else is an authorization,
-/// password, or worker failure.
+/// Maps a non-zero child status: only the interrupt signals the operator sends
+/// at the prompt mean the change was cancelled, 2 is a usage rejection, and a
+/// crash signal or any other exit code is a failure the page must not dress up
+/// as a cancellation.
 pub(super) fn failure_from_status(status: ExitStatus) -> HandoffFailure {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = status.signal() {
+        // sudo re-raises whatever killed the worker, so a worker crash arrives
+        // here as the crash signal rather than as a sudo exit code.
+        return if matches!(signal, nix::libc::SIGINT | nix::libc::SIGQUIT) {
+            HandoffFailure::Cancelled
+        } else {
+            HandoffFailure::Exit(128 + signal)
+        };
+    }
     match status.code() {
-        None => HandoffFailure::Cancelled,
         Some(2) => HandoffFailure::Usage,
         Some(code) => HandoffFailure::Exit(code),
+        None => HandoffFailure::Cancelled,
     }
 }
 

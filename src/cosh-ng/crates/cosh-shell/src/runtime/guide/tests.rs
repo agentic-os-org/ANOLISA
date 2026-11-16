@@ -713,19 +713,17 @@ fn login_feedback_stays_visible_after_the_page_reloads() {
 fn login_failure_with_an_unreadable_reread_stays_unconfirmed() {
     use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
     let (_guard, _temp, paths) = isolated_fixture();
-    std::env::set_var("COSH_SHELL_LANG", "en-US");
     let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    session.i18n = I18n::new(Language::EnUs);
     // The worker can apply the change before exiting nonzero. A failed
     // re-read therefore proves nothing, and the page must not claim the
-    // change did not complete.
-    session.finish_login(
+    // change did not complete. The reading is injected so the case holds on
+    // any host account.
+    session.apply_login_outcome(
         "set",
         COSH_PATH,
         Outcome::HandoffFailed(HandoffFailure::Exit(1)),
-    );
-    assert!(
-        session.snapshot.login.is_err(),
-        "the fixture must fail the post-handoff status read"
+        None,
     );
     let message = session
         .view()
@@ -733,6 +731,108 @@ fn login_failure_with_an_unreadable_reread_stays_unconfirmed() {
         .clone()
         .expect("unknown-state feedback");
     assert!(message.to_lowercase().contains("unconfirmed"), "{message}");
+}
+
+#[test]
+fn login_failure_with_a_readable_unchanged_reread_keeps_the_cause() {
+    use crate::runtime::login::guide_protocol::{HandoffFailure, Outcome};
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    session.i18n = I18n::new(Language::EnUs);
+    session.apply_login_outcome(
+        "set",
+        COSH_PATH,
+        Outcome::HandoffFailed(HandoffFailure::Exit(1)),
+        Some("/bin/bash".to_string()),
+    );
+    let message = session.view().message.clone().expect("failure feedback");
+    assert!(message.to_lowercase().contains("exit 1"), "{message}");
+}
+
+#[test]
+fn finish_login_reloads_before_reporting() {
+    use crate::runtime::login::guide_protocol::Outcome;
+    let (_guard, temp, paths) = isolated_fixture();
+    let dir = temp.path().join(".copilot-shell");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.toml"), "[ui]\nlanguage = \"zh-CN\"\n").unwrap();
+    let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    assert_eq!(session.language(), Language::EnUs);
+    session.finish_login("set", COSH_PATH, Outcome::Unconfirmed);
+    assert_eq!(session.language(), Language::ZhCn);
+    let message = session.view().message.clone().expect("feedback");
+    assert!(message.contains("未确认"), "{message}");
+}
+
+#[test]
+fn login_notices_stay_visible_at_the_minimum_size() {
+    use crate::runtime::login::guide_protocol::Outcome;
+    let (_guard, _temp, paths) = isolated_fixture();
+    for (language, note, scope) in [
+        (
+            Language::EnUs,
+            "Requires sudo",
+            "Changes affect new logins only.",
+        ),
+        (
+            Language::ZhCn,
+            "需要 sudo",
+            "仅影响新登录，已有会话保持不变。",
+        ),
+    ] {
+        for feedback in [false, true] {
+            let mut session =
+                login_session(paths.clone(), login_status("/bin/bash", None, false, false));
+            session.i18n = I18n::new(language);
+            if feedback {
+                session.apply_login_outcome("set", COSH_PATH, Outcome::Unconfirmed, None);
+            } else {
+                session.enter(Page::Login);
+            }
+            for (width, height) in [(40, 16), (80, 16)] {
+                let text =
+                    compact_ws(&render_wizard_lines(&session.view(), width, height).join("\n"));
+                assert!(
+                    text.contains(&compact_ws(note)),
+                    "{language:?} {width}x{height} lost the sudo note:\n{text}"
+                );
+                assert!(
+                    text.contains(&compact_ws(scope)),
+                    "{language:?} {width}x{height} lost the scope note:\n{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn login_other_user_guidance_is_reachable_by_paging_at_the_minimum_height() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    for (language, command) in [
+        (Language::EnUs, "`cosh login set --user USER`"),
+        (Language::ZhCn, "`cosh login set --user 用户名`"),
+    ] {
+        let mut session =
+            login_session(paths.clone(), login_status("/bin/bash", None, false, false));
+        session.i18n = I18n::new(language);
+        session.enter(Page::Login);
+        let command = compact_ws(command);
+        let first = compact_ws(&render_wizard_lines(&session.view(), 40, 16).join("\n"));
+        assert!(
+            !first.contains(&command),
+            "{language:?} guidance must sit below the first page:\n{first}"
+        );
+        session.handle(key(KeyCode::PageDown));
+        let paged = compact_ws(&render_wizard_lines(&session.view(), 40, 16).join("\n"));
+        assert!(
+            paged.contains(&command),
+            "{language:?} paging does not reach the command:\n{paged}"
+        );
+    }
+}
+
+fn compact_ws(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 #[test]

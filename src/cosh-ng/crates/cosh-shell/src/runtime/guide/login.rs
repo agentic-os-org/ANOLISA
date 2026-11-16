@@ -95,9 +95,15 @@ impl Session {
                     MessageId::LoginManagedNo
                 })
             )),
-            WizardRow::Blank,
         ];
-        for action in self.login_actions() {
+        if let Some(note) = self.login_note() {
+            rows.push(WizardRow::Text(self.i18n.t(note).to_string()));
+        }
+        let actions = self.login_actions();
+        if !actions.is_empty() {
+            rows.push(WizardRow::Blank);
+        }
+        for action in actions {
             rows.push(WizardRow::Choice {
                 label: self
                     .i18n
@@ -109,9 +115,23 @@ impl Session {
                 value: String::new(),
             });
         }
-        if let Some(note) = self.login_note() {
-            rows.push(WizardRow::Text(self.i18n.t(note).to_string()));
-        }
+        rows.push(WizardRow::Blank);
+        // The state and safety notes stay above the supplementary other-user
+        // guidance: at the minimum supported height the chosen action and both
+        // notes remain on screen and only the guidance needs paging.
+        rows.push(WizardRow::Text(
+            self.i18n
+                .t(if status.uid == 0 {
+                    MessageId::GuideWizardLoginRootNote
+                } else {
+                    MessageId::GuideWizardLoginSudoNote
+                })
+                .to_string(),
+        ));
+        rows.push(WizardRow::Text(
+            self.i18n.t(MessageId::LoginNewLoginsOnly).to_string(),
+        ));
+        rows.push(WizardRow::Blank);
         rows.push(WizardRow::Text(
             self.i18n.t(MessageId::GuideWizardLoginOther).to_string(),
         ));
@@ -124,19 +144,6 @@ impl Session {
             self.i18n
                 .t(MessageId::GuideWizardLoginOtherTerminal)
                 .to_string(),
-        ));
-        rows.push(WizardRow::Blank);
-        rows.push(WizardRow::Text(
-            self.i18n
-                .t(if status.uid == 0 {
-                    MessageId::GuideWizardLoginRootNote
-                } else {
-                    MessageId::GuideWizardLoginSudoNote
-                })
-                .to_string(),
-        ));
-        rows.push(WizardRow::Text(
-            self.i18n.t(MessageId::LoginNewLoginsOnly).to_string(),
         ));
         rows
     }
@@ -173,6 +180,19 @@ impl Session {
             .as_ref()
             .ok()
             .map(|status| status.current_shell.clone());
+        self.apply_login_outcome(operation, target, outcome, current);
+    }
+
+    /// Reports a handoff against the shell a re-read returned, or `None` when
+    /// the re-read failed. The caller supplies the reading so the page can be
+    /// exercised without depending on the host account.
+    pub(super) fn apply_login_outcome(
+        &mut self,
+        operation: &'static str,
+        target: &str,
+        outcome: Outcome,
+        current: Option<String>,
+    ) {
         let outcome = settle_outcome(outcome, current.as_deref(), target);
         log_login_outcome(operation, &outcome);
         self.message = Some(login_message(self.i18n, outcome, current));

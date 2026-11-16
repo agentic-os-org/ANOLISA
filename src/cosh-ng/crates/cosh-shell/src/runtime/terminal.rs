@@ -38,6 +38,35 @@ pub(crate) struct CrLfWriter<'a, W: Write> {
     inner: &'a mut W,
 }
 
+/// The child shares the foreground process group, so a Ctrl-C aimed at the
+/// child would also reach the waiting parent; ignore it for the handoff and
+/// restore the prior handlers afterwards.
+/// The child inherits SIG_IGN only until it installs its own handlers.
+pub(crate) struct IgnoreInterrupts {
+    previous_int: libc::sighandler_t,
+    previous_quit: libc::sighandler_t,
+}
+
+impl IgnoreInterrupts {
+    pub(crate) fn new() -> Self {
+        unsafe {
+            Self {
+                previous_int: libc::signal(libc::SIGINT, libc::SIG_IGN),
+                previous_quit: libc::signal(libc::SIGQUIT, libc::SIG_IGN),
+            }
+        }
+    }
+}
+
+impl Drop for IgnoreInterrupts {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGINT, self.previous_int);
+            libc::signal(libc::SIGQUIT, self.previous_quit);
+        }
+    }
+}
+
 pub(crate) fn install_terminal_recovery() {
     let fd = libc::STDIN_FILENO;
     if unsafe { libc::isatty(fd) } != 1 {

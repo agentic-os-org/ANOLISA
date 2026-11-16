@@ -16,8 +16,6 @@ mod status;
 mod tests;
 mod tips;
 
-pub(crate) use handoff::IgnoreInterrupts;
-
 fn too_small_flow(key: KeyEvent) -> session::Flow {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => session::Flow::Exit,

@@ -68,10 +68,7 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
     let body = chunks[3];
     let scroll = match &view.markdown {
         Some(markdown) => render_markdown(frame, body, view, markdown),
-        None => {
-            render_rows(frame, body, view);
-            view.scroll
-        }
+        None => render_rows(frame, body, view),
     };
     if let Some(message) = &view.message {
         frame.render_widget(
@@ -92,7 +89,7 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
     scroll
 }
 
-fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) {
+fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) -> usize {
     let width = area.width as usize;
     let height = area.height as usize;
     let total = view.rows.len();
@@ -114,10 +111,14 @@ fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) {
         height.saturating_sub(1)
     };
     let max_scroll = total.saturating_sub(content_rows);
-    let scroll = view
+    // Text below the last choice is only reachable through explicit paging, so
+    // the stored offset can scroll past the focus-following position; the
+    // cursor still wins whenever paging would hide it.
+    let focused = view
         .cursor
         .saturating_sub(content_rows.saturating_sub(1))
         .min(max_scroll);
+    let scroll = focused.max(view.scroll).min(max_scroll);
     let visible = lines
         .into_iter()
         .skip(scroll)
@@ -140,6 +141,7 @@ fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) {
             Rect::new(area.x, area.y + content_rows as u16, area.width, 1),
         );
     }
+    scroll
 }
 
 fn choice_line(label: &str, value: &str, width: usize, selected: bool) -> Line<'static> {

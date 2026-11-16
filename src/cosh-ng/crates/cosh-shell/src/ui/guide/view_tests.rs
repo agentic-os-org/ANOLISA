@@ -248,6 +248,43 @@ fn form_scrolls_to_keep_the_focused_row_visible() {
 }
 
 #[test]
+fn form_page_offset_reaches_text_below_the_last_choice() {
+    let mut page = view();
+    page.rows = (0..14)
+        .map(|index| match index {
+            2 => WizardRow::Choice {
+                label: "Only choice".to_string(),
+                value: String::new(),
+            },
+            _ => WizardRow::Text(format!("detail row {index}")),
+        })
+        .collect();
+    page.cursor = 2;
+    page.scroll = 999;
+    let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+    let mut returned = usize::MAX;
+    terminal
+        .draw(|frame| {
+            returned = super::render(frame, &page);
+        })
+        .unwrap();
+    assert!(returned < 999, "offset must be clamped: {returned}");
+    let buffer = terminal.backend().buffer();
+    let text = (0..16)
+        .map(|y| {
+            (0..40)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("detail row 13"),
+        "text below the choice is unreachable:\n{text}"
+    );
+}
+
+#[test]
 fn zh_privacy_last_sentence_is_reachable_at_40x16() {
     let mut page = view();
     page.rows.clear();

@@ -14,7 +14,11 @@ fn non_zero_handoff_status_distinguishes_cancel_usage_and_failure() {
     use std::os::unix::process::ExitStatusExt;
     let status = std::process::ExitStatus::from_raw;
     assert_eq!(failure_from_status(status(2)), HandoffFailure::Cancelled);
-    assert_eq!(failure_from_status(status(15)), HandoffFailure::Cancelled);
+    assert_eq!(failure_from_status(status(3)), HandoffFailure::Cancelled);
+    // sudo re-raises the signal that killed the worker, so a crash must not be
+    // reported as an operator cancellation.
+    assert_eq!(failure_from_status(status(15)), HandoffFailure::Exit(143));
+    assert_eq!(failure_from_status(status(11)), HandoffFailure::Exit(139));
     assert_eq!(failure_from_status(status(2 << 8)), HandoffFailure::Usage);
     assert_eq!(failure_from_status(status(1 << 8)), HandoffFailure::Exit(1));
     assert_eq!(

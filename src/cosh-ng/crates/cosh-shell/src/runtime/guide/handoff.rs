@@ -4,7 +4,7 @@
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use nix::libc;
+use crate::runtime::terminal::IgnoreInterrupts;
 
 pub(crate) fn run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -15,33 +15,4 @@ pub(crate) fn run() -> Result<(), String> {
         .status()
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-/// The child shares the foreground process group, so a Ctrl-C aimed at the
-/// child would also reach the waiting wizard; ignore it for the handoff and
-/// restore the prior handlers afterwards.
-/// The child inherits SIG_IGN only until it installs its own handlers.
-pub(crate) struct IgnoreInterrupts {
-    previous_int: libc::sighandler_t,
-    previous_quit: libc::sighandler_t,
-}
-
-impl IgnoreInterrupts {
-    pub(crate) fn new() -> Self {
-        unsafe {
-            Self {
-                previous_int: libc::signal(libc::SIGINT, libc::SIG_IGN),
-                previous_quit: libc::signal(libc::SIGQUIT, libc::SIG_IGN),
-            }
-        }
-    }
-}
-
-impl Drop for IgnoreInterrupts {
-    fn drop(&mut self) {
-        unsafe {
-            libc::signal(libc::SIGINT, self.previous_int);
-            libc::signal(libc::SIGQUIT, self.previous_quit);
-        }
-    }
 }
