@@ -44,7 +44,10 @@ must be trusted and non-writable by group/others. Keep the real token inaccessib
 to the Agent. The root-owned packaged template is never changed or embedded in the CLI.
 
 The JSON result contains IDs, `fakeTokenFile`, gateway status and teardown commands,
-never token values. Generated fakes default to the owner's
+never token values. When the run used a non-default daemon socket, every returned
+teardown, recovery and next-step command includes the same `--socket`. A second
+concurrent run fails immediately with a lock error and creates no records; retry after
+the first finishes. Generated fakes default to the owner's
 `.config/agent-sec/gateway/`; `--output-dir` selects another owner-writable directory.
 `--fake-token-file` instead uses an existing private fake. The original real file
 is unchanged; staged copies are removed after successful registration. Admission

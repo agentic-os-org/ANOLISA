@@ -145,13 +145,15 @@ selector 为 `--executable`、`--process-name`、`--cmdline-arg` 三选一，不
 复用旧登记。随后 `scope create` 绑定该 Policy revision；最后把生成的 fake 以 owner 所有的 0600
 文件写入 `--output-dir`（默认 `~owner/.config/agent-sec/gateway/github-<id>.fake`），不覆盖
 已有文件。同一 owner、同一 selector 已有 Active 的同模板注入 Scope 时，命令在读取 Token 后、
-任何写入前拒绝；root 目录锁串行化重复检查和 Scope 创建，防止并发命令绕过检查。
+任何写入前拒绝；root 目录锁串行化重复检查和 Scope 创建，防止并发命令绕过检查。锁为非阻塞：
+另一次运行持锁时，后到的命令立即以锁冲突失败而不排队，且不创建任何记录，可在前者结束后重试。
 交付到 owner 可写目录之前，CLI 清除补充组并永久降权到 owner；不以 root 对可被替换的
 目录执行 chown。`--output-dir` 必须允许 owner 创建文件。
 
 命令不执行 `gateway enable`，不生成 `agent.env` 或环境变量映射。成功输出 JSON：Policy/Scope
 ID、pair ID、fake 文件路径、网关 `enabled/ready` 与 ready 时的 `caBundlePath`、后续步骤及
-`teardown` 命令；任何输出都不含 Token 或 fake 值。`--wait-seconds` 等待新 Scope 的 Binding
+`teardown` 命令；任何输出都不含 Token 或 fake 值。本次运行使用非默认 daemon socket 时，
+撤销、恢复和后续步骤中的命令都带同一 `--socket`，避免对另一 daemon 执行而误报成功。`--wait-seconds` 等待新 Scope 的 Binding
 全部 READY，超时或失败时仍输出 JSON 并以 1 退出。`--dry-run` 只校验模板并打印计划，不读取
 Token、不连接 daemon。`policy create` 失败或结果不确定时不自动重试：保留 root-only 暂存文件和原始 JSON source，
 错误信息给出 Policy 名、恢复文件位置及人工恢复命令。先查找该 Policy；不存在时，排除故障后

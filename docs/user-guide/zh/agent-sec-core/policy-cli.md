@@ -39,6 +39,8 @@ sudo agent-sec-cli inject-credential --builtin github \
 root 所有的随包模板不会被修改，也不会编入 CLI。
 
 JSON 返回 ID、`fakeTokenFile`、网关状态和撤销命令，不输出 Token 值。
+本次运行使用非默认 daemon socket 时，返回的撤销、恢复和后续命令都带同一 `--socket`。
+并发的第二次运行会立即以锁冲突失败且不创建任何记录，待前一次结束后重试。
 生成的 fake 默认放在 owner 的 `.config/agent-sec/gateway/`，可用 `--output-dir` 另选 owner 可写目录；
 `--fake-token-file` 则使用现有私有 fake。原 real 文件不变，成功登记后删除暂存副本；
 登记失败保留 root-only 恢复文件，按错误信息提供的人工恢复和清理命令处理。

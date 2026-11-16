@@ -319,6 +319,9 @@ impl Cli {
     }
 }
 
+/// Daemon endpoint used when neither `--socket` nor the environment names one.
+pub(crate) const DEFAULT_SOCKET: &str = "/run/agent-sec-core/daemon.sock";
+
 /// Resolves the daemon endpoint from the option, then the environment.
 fn resolve_socket(
     option: Option<PathBuf>,
@@ -329,7 +332,7 @@ fn resolve_socket(
         None => daemon_socket_path_from_env(
             socket_env
                 .filter(|path| !path.is_empty())
-                .or(Some(OsStr::new("/run/agent-sec-core/daemon.sock"))),
+                .or(Some(OsStr::new(DEFAULT_SOCKET))),
         )
         .map_err(|error| {
             clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
