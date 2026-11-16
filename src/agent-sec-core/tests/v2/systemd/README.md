@@ -50,6 +50,14 @@ RPM 安装套件 914 项通过、37 项跳过，再单独通过修正后的 syst
 
 ## 部署配置和兼容边界
 
+Gateway 的 DPROC-GW-004 验收要求已安装 Gateway 资产，并为被测 daemon 服务的 `ExecStart`
+通过 drop-in 添加 `--enable-gateway`；配置方法见
+[部署契约 DPROC-GW-005](../../../docs/design/DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md)。
+该启动选项装配管理并恢复已有状态，不替代运行时的 `gateway enable`。
+`test_gateway.py` 在服务未提供 Gateway 接口时明确失败，要求先修正启动配置。
+该 suite 仅在显式设置 `ASC_GATEWAY_E2E_USER` 的 root/PID 1 systemd 环境运行，会操作
+本机测试地址、Gateway drop-in 和已安装服务；不属于下述使用独立临时 unit 的生命周期测试。
+
 V2 RPM 安装 `/usr/lib/systemd/system/agent-sec-core.service`，以 `root:root` 运行，
 不创建专用账户或安装 sysusers 文件。
 也可用 `make install-systemd-system DESTDIR=<staging>` 审阅生成物；该 target 仅 staging。

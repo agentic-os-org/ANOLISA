@@ -393,8 +393,14 @@ canonical Scope、固定的 Policy revision 和 Binding，核对 lifecycle 与�
 回滚须先关闭网关并确认撤流，不能直接回退二进制沿用新 Store/plan/投影；canonical
 Scope/Binding、Store 与 tombstone 不属于运行投影的清理范围，不提供本次迁移工具。
 
-当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并在 blocking task 中执行
+指定 `agent-sec-daemon serve --enable-gateway` 后，原有 Gateway 装配路径在启动
+Binding worker 前恢复 file Scope 的删除屏障，并在 blocking task 中执行
 网关构造与 `GatewayService.recover()`；信号监听先启动，恢复期间收到停止请求后不开放 UDS。
+当前 daemon 默认 `disable_gateway=true`，跳过网关构造与恢复。
+仅提供 `--enable-gateway` 恢复管理路径，并保留已保存的数据面 enabled 状态；
+它不替代运行时的 `agent-sec-cli gateway enable`。已有状态的部署可为 systemd 服务的
+`ExecStart` 通过 drop-in 追加该启动选项；未装配时，运行时 `gateway enable` 不可用。
+适用条件、职责检查和验收见[部署契约 DPROC-GW-005](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md)。
 开放 UDS 请求前再执行 `PapService.recover_scopes()`，不设置独立网关恢复 Job。SQLite 在 claim Apply 的同一事务中核对 canonical Scope 仍为 `Active`，
 防止删除中的 Scope 在 discovery 清理前重新部署策略。网关投影不可读、损坏或版本不支持时，
 构造失败先停止代理、撤除 nft 表并清除运行时快照，再返回错误；不依赖损坏投影判断是否撤流。

@@ -28,6 +28,13 @@ Start the daemon with background Binding delivery:
 sudo agent-sec-daemon serve --socket /run/agent-sec-core/daemon.sock
 ```
 
+Gateway management is disabled by default. Add `--enable-gateway` to the daemon
+command before using credential Policy/Scope or Gateway methods; existing Gateway
+state also requires this option. It restores the original synchronous startup
+recovery path and saved proxy enablement. The runtime `agent-sec-cli gateway enable`
+command still controls activation of a disabled proxy. For systemd configuration,
+see the [deployment contract](../docs/design/DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md).
+
 Create the root-owned runtime directory first (0755 for local clients). The daemon entrypoint
 starts the reconciliation service. Its `reconciliation.rs`
 composition module registers `AgentSightClientFactory::default()` without reading
