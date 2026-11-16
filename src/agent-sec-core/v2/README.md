@@ -55,6 +55,12 @@ an explicit daemon socket. Its Cargo package and source directory remain `asc-cl
 the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [lifecycle acceptance criteria](../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收).
 
+`agent-sec-cli inject-credential --builtin github` adds an unreleased root-only
+shortcut for fake generation and Policy/Scope creation from the packaged Cedar
+template. It leaves the template and existing manual commands unchanged, never
+enables the gateway, and returns only IDs, file paths and status. See the
+[credential injection reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md#built-in-credential-injection-unreleased-v2).
+
 The Rust CLI also provides local sandbox execution:
 
 ```bash

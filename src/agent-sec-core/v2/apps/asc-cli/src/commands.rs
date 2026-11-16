@@ -6,6 +6,7 @@ mod common;
 mod events;
 mod events_summary;
 mod gateway;
+mod inject_credential;
 mod intent;
 mod key;
 mod observability;
@@ -23,6 +24,7 @@ use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
 pub(crate) use self::gateway::GatewayCommand;
+pub(crate) use self::inject_credential::InjectCredentialCommand;
 pub use self::intent::IntentFailure;
 pub use self::key::KeyCommand;
 pub use self::policy::DefaultPolicy;
@@ -71,6 +73,11 @@ pub(crate) enum Command {
     /// Manage the credential gateway and query its public CA bundle.
     #[command(subcommand)]
     Gateway(GatewayCommand),
+    /// Inject a credential in one step from a packaged template (root only).
+    ///
+    /// Generates a fake, registers per-run token paths, creates the Policy and
+    /// Scope; it does not enable the gateway.
+    InjectCredential(InjectCredentialCommand),
     /// Generate fake credentials locally without sending tokens to a daemon.
     #[command(subcommand)]
     Key(KeyCommand),
@@ -160,6 +167,9 @@ impl Command {
             Self::Gateway(_) => Err(InputError::Gateway(
                 "gateway commands run through their own transport".into(),
             )),
+            Self::InjectCredential(_) => Err(InputError::Gateway(
+                "inject-credential runs through its own transport".into(),
+            )),
             Self::SkillLedger(command) => command.request(),
         }
     }
@@ -168,6 +178,14 @@ impl Command {
     pub(crate) const fn gateway(&self) -> Option<&GatewayCommand> {
         match self {
             Self::Gateway(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    /// Returns the one-step credential injection command, when selected.
+    pub(crate) const fn inject_credential(&self) -> Option<&InjectCredentialCommand> {
+        match self {
+            Self::InjectCredential(command) => Some(command),
             _ => None,
         }
     }

@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use crate::{
     CredentialId, CredentialState, CredentialStore, CredentialStoreError, FakeFormat,
     MAX_ACTIVE_FAKES_PER_SCOPE, MAX_FAKES_TOTAL, PairInput, STORE_FILE_NAME, ScopeId, Secret,
-    SecretsTarget, generate_fake, read_token_file, validate_pair, write_fake_file,
+    SecretsTarget, generate_fake, read_root_asset, read_token_file, validate_pair, write_fake_file,
+    write_owner_file,
 };
 
 const REAL: &str = "aaaaaaaaaaaaaaaaaaaa";
@@ -1165,4 +1166,66 @@ fn fake_file_is_create_new_private_and_validation_or_generation_failure_creates_
             .is_err()
     );
     assert!(!absent.exists());
+}
+
+#[test]
+fn owner_file_creates_private_directories_and_never_replaces() {
+    let Some(root) = token_fixture() else { return };
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    if uid == 0 {
+        let lock_path = root.path().join("locked");
+        let lock = crate::lock_root_directory(&lock_path).unwrap();
+        assert!(crate::lock_root_directory(&lock_path).is_err());
+        drop(lock);
+        assert!(crate::lock_root_directory(&lock_path).is_ok());
+    } else {
+        assert!(crate::lock_root_directory(root.path()).is_err());
+    }
+    let directory = root.path().join("a/b");
+    let path = write_owner_file(&directory, "fake", FAKE, uid, gid).unwrap();
+    assert_eq!(path, directory.join("fake"));
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&directory), 0o700);
+    assert_eq!(mode(&root.path().join("a")), 0o700);
+    assert_eq!(fs::read_to_string(&path).unwrap(), FAKE);
+    assert!(write_owner_file(&directory, "fake", OTHER, uid, gid).is_err());
+    assert!(write_owner_file(&directory, "foreign", FAKE, uid.wrapping_add(1), gid).is_err());
+    assert!(!directory.join("foreign").exists());
+    assert_eq!(fs::read_to_string(&path).unwrap(), FAKE);
+    for name in ["", ".", "..", "x/y"] {
+        assert!(write_owner_file(&directory, name, FAKE, uid, gid).is_err());
+    }
+    assert!(write_owner_file(&directory, "bad", "has space", uid, gid).is_err());
+    assert!(!directory.join("bad").exists());
+    let alias = root.path().join("alias");
+    symlink(&directory, &alias).unwrap();
+    assert!(write_owner_file(&alias, "new", FAKE, uid, gid).is_err());
+    assert!(write_owner_file(&root.path().join("c/../d"), "new", FAKE, uid, gid).is_err());
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o720)).unwrap();
+    assert!(write_owner_file(&directory, "new", FAKE, uid, gid).is_err());
+    assert!(!directory.join("new").exists());
+}
+
+#[test]
+fn root_asset_requires_root_ownership_and_no_shared_write() {
+    let Some(root) = token_fixture() else { return };
+    let path = root.path().join("asset");
+    fs::write(&path, "permit(principal, action, resource);").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    if rustix::process::geteuid().is_root() {
+        assert_eq!(
+            read_root_asset(&path, 64).unwrap(),
+            b"permit(principal, action, resource);"
+        );
+        assert!(read_root_asset(&path, 8).is_err());
+        for permissions in [0o664, 0o646, 0o4644] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(permissions)).unwrap();
+            assert!(read_root_asset(&path, 64).is_err());
+        }
+    } else {
+        // A non-root workspace cannot hold a trusted asset.
+        assert!(read_root_asset(&path, 64).is_err());
+    }
+    assert!(read_root_asset(&root.path().join("missing"), 64).is_err());
 }

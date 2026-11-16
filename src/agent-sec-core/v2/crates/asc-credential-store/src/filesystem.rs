@@ -173,7 +173,7 @@ impl PinnedDirectory {
             file,
             &path,
             rustix::process::geteuid().as_raw(),
-            Some(mode),
+            ModeRule::Exact(mode),
             limit,
         )
         .map(Some)
@@ -262,7 +262,7 @@ pub fn read_token_file(path: &Path, owner_uid: u32) -> Result<Secret, Credential
     );
     let limit = u64::try_from(MAX_SECRET_BYTES + 2)
         .map_err(|_| unsafe_path(path, "token size limit is out of range"))?;
-    let bytes = read_regular(file, path, owner_uid, None, limit)?;
+    let bytes = read_regular(file, path, owner_uid, ModeRule::Private, limit)?;
     let value = String::from_utf8(bytes).map_err(|_| CredentialStoreError::Invalid {
         field: "token file",
         reason: "must contain only visible ASCII characters",
@@ -318,7 +318,172 @@ pub fn write_fake_file(path: &Path, fake: &str) -> Result<(), CredentialStoreErr
     result
 }
 
-fn token_parent(path: &Path, owner_uid: u32) -> Result<File, CredentialStoreError> {
+/// Reads a root-owned, non-writable asset such as a packaged policy template.
+///
+/// Every ancestor and the file itself must be owned by root and must not be
+/// group/other writable, so only root can have changed the content. The file
+/// must be a singly linked regular file no larger than `limit` bytes.
+///
+/// # Errors
+/// Returns path, ownership, permission or bounded-read errors.
+pub fn read_root_asset(path: &Path, limit: u64) -> Result<Vec<u8>, CredentialStoreError> {
+    let parent = token_parent(path, 0)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| unsafe_path(path, "must name a file"))?;
+    let file = File::from(
+        openat(
+            &parent,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| io_error(path, error))?,
+    );
+    read_regular(file, path, 0, ModeRule::NotWritable, limit)
+}
+
+/// Creates `directory/name` as a new 0600 file owned by `uid:gid`.
+///
+/// Missing directories are created as 0700 and owned by `uid:gid`. Every
+/// directory on the way must be owned by root or `uid` and must not be
+/// group/other writable. The caller must already run as `uid:gid`; root must
+/// drop privilege before writing another user's directory. Existing files are never replaced.
+///
+/// # Errors
+/// Returns validation, unsafe path, existing destination or write/durability errors.
+pub fn write_owner_file(
+    directory: &Path,
+    name: &str,
+    value: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<PathBuf, CredentialStoreError> {
+    validate_token_value(value, "file value")?;
+    let path = directory.join(name);
+    if rustix::process::geteuid().as_raw() != uid || rustix::process::getegid().as_raw() != gid {
+        return Err(unsafe_path(
+            &path,
+            "writer must run as the destination owner and group",
+        ));
+    }
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(unsafe_path(&path, "file name must be one path component"));
+    }
+    normalized_absolute(directory)?;
+    let parent = create_owner_directories(directory, uid, gid)?;
+    let mut file = File::from(
+        openat(
+            &parent,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|error| io_error(&path, error))?,
+    );
+    let result = (|| {
+        fchown(
+            &file,
+            Some(rustix::fs::Uid::from_raw(uid)),
+            Some(Gid::from_raw(gid)),
+        )
+        .map_err(|error| io_error(&path, error))?;
+        fchmod(&file, Mode::from_raw_mode(0o600)).map_err(|error| io_error(&path, error))?;
+        file.write_all(value.as_bytes())
+            .map_err(|error| io_error(&path, error))?;
+        file.sync_all().map_err(|error| io_error(&path, error))?;
+        parent.sync_all().map_err(|error| io_error(&path, error))
+    })();
+    if let Err(error) = result {
+        let _ = unlinkat(&parent, name, AtFlags::empty());
+        let _ = parent.sync_all();
+        return Err(error);
+    }
+    Ok(path)
+}
+
+/// Opens `directory`, creating missing components owned by `uid:gid`.
+fn create_owner_directories(
+    directory: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<File, CredentialStoreError> {
+    let mut current = File::from(
+        open("/", DIRECTORY_FLAGS, Mode::empty()).map_err(|error| io_error(directory, error))?,
+    );
+    for component in directory.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current = match openat(&current, name, DIRECTORY_FLAGS, Mode::empty()) {
+            Ok(file) => File::from(file),
+            Err(rustix::io::Errno::NOENT) => {
+                let created_here = match mkdirat(&current, name, Mode::from_raw_mode(0o700)) {
+                    Ok(()) => true,
+                    Err(rustix::io::Errno::EXIST) => false,
+                    Err(error) => return Err(io_error(directory, error)),
+                };
+                let opened = File::from(
+                    openat(&current, name, DIRECTORY_FLAGS, Mode::empty())
+                        .map_err(|error| io_error(directory, error))?,
+                );
+                // A concurrently created directory is only checked, never adopted.
+                if created_here {
+                    fchown(
+                        &opened,
+                        Some(rustix::fs::Uid::from_raw(uid)),
+                        Some(Gid::from_raw(gid)),
+                    )
+                    .map_err(|error| io_error(directory, error))?;
+                    // mkdir honours the umask; set the mode explicitly.
+                    fchmod(&opened, Mode::from_raw_mode(0o700))
+                        .map_err(|error| io_error(directory, error))?;
+                    current
+                        .sync_all()
+                        .map_err(|error| io_error(directory, error))?;
+                }
+                opened
+            }
+            Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
+                return Err(unsafe_path(
+                    directory,
+                    "path contains a symlink or non-directory",
+                ));
+            }
+            Err(error) => return Err(io_error(directory, error)),
+        };
+        let stat = fstat(&current).map_err(|error| io_error(directory, error))?;
+        if (stat.st_uid != 0 && stat.st_uid != uid) || stat.st_mode & 0o7022 != 0 {
+            return Err(unsafe_path(
+                directory,
+                "ancestor has untrusted ownership or write permissions",
+            ));
+        }
+    }
+    Ok(current)
+}
+
+/// Holds an exclusive lock on a root-trusted directory until the returned file is dropped.
+///
+/// # Errors
+/// Rejects non-root callers, unsafe directories and competing lock holders.
+pub fn lock_root_directory(path: &Path) -> Result<File, CredentialStoreError> {
+    if !rustix::process::geteuid().is_root() {
+        return Err(unsafe_path(path, "directory locking requires root"));
+    }
+    normalized_absolute(path)?;
+    let directory = create_owner_directories(path, 0, 0)?;
+    flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        if error == rustix::io::Errno::WOULDBLOCK {
+            CredentialStoreError::Locked { path: path.into() }
+        } else {
+            io_error(path, error)
+        }
+    })?;
+    Ok(directory)
+}
+
+fn normalized_absolute(path: &Path) -> Result<(), CredentialStoreError> {
     // Path::components normalizes dots and repeated separators; compare raw spelling too.
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -328,8 +493,14 @@ fn token_parent(path: &Path, owner_uid: u32) -> Result<File, CredentialStoreErro
         }
     }
     if !path.is_absolute() || normalized.as_os_str() != path.as_os_str() {
-        return Err(unsafe_path(path, "must be a normalized absolute file path"));
+        return Err(unsafe_path(path, "must be a normalized absolute path"));
     }
+    Ok(())
+}
+
+fn token_parent(path: &Path, owner_uid: u32) -> Result<File, CredentialStoreError> {
+    normalized_absolute(path)
+        .map_err(|_| unsafe_path(path, "must be a normalized absolute file path"))?;
     if path.file_name().is_none() {
         return Err(unsafe_path(path, "must name a file below a directory"));
     }
@@ -339,11 +510,22 @@ fn token_parent(path: &Path, owner_uid: u32) -> Result<File, CredentialStoreErro
     open_no_follow(parent, Some(owner_uid))
 }
 
+/// Accepted permission bits for [`read_regular`].
+#[derive(Clone, Copy)]
+enum ModeRule {
+    /// No group/other bits and no special bits.
+    Private,
+    /// Exactly this mode.
+    Exact(rustix::fs::RawMode),
+    /// No group/other write and no special bits.
+    NotWritable,
+}
+
 fn read_regular(
     mut file: File,
     path: &Path,
     owner_uid: u32,
-    exact_mode: Option<rustix::fs::RawMode>,
+    rule: ModeRule,
     limit: u64,
 ) -> Result<Vec<u8>, CredentialStoreError> {
     let check = |stat: &rustix::fs::Stat| {
@@ -351,7 +533,11 @@ fn read_regular(
             return Err(unsafe_path(path, "not a singly linked regular file"));
         }
         let mode = stat.st_mode & 0o7777;
-        let valid_mode = exact_mode.map_or(mode & 0o7077 == 0, |expected| mode == expected);
+        let valid_mode = match rule {
+            ModeRule::Private => mode & 0o7077 == 0,
+            ModeRule::Exact(expected) => mode == expected,
+            ModeRule::NotWritable => mode & 0o7022 == 0,
+        };
         if stat.st_uid != owner_uid || !valid_mode {
             return Err(unsafe_path(path, "unexpected file owner or mode"));
         }
