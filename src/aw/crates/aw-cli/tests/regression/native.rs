@@ -17,6 +17,14 @@ pub fn agents() -> Vec<String> {
 pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path) -> Value {
     let before = event == "tool.before";
     let mut native = match adapter {
+        "sdk" => {
+            let mut payload = json!({"api_version":"aw-hook-source/v1", "event":event,
+                "session_id":"session","call_id":call,"name":"bash","input":input});
+            if !before {
+                payload["result"] = json!("original");
+            }
+            payload
+        }
         "qoder" | "qoder-sdk" | "claude-sdk" | "codex" => {
             let response = if adapter == "claude-sdk" {
                 json!({"stdout":"original", "stderr":"", "interrupted":false, "isImage":false})
@@ -56,4 +64,18 @@ pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path
         }
     }
     native
+}
+
+/// Select only Adapters declaring the effect exercised by the shared regression.
+pub fn agents_with_effect(event: &str, effect: &str) -> Vec<String> {
+    let matrix: Value =
+        serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
+    agents()
+        .into_iter()
+        .filter(|agent| {
+            matrix["agents"][agent]["events"][event]
+                .get(effect)
+                .is_some()
+        })
+        .collect()
 }

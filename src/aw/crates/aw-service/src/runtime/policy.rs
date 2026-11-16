@@ -261,15 +261,17 @@ impl Runtime {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         Ok(Value::Array(instances.iter().filter_map(|(id, instance)| instance.as_ref().map(|instance| {
             let state = instance.reload.as_ref();
+            let sdk = owners.get(id).filter(|owner| owner.sdk.is_some());
             json!({"instance_id":id,"target":instance.host.target(),"policy_revision":instance.host.revision(),
                 "parent_instance_id":owners.get(id).and_then(|owner| owner.parent.as_ref()),
                 "scope_validity":owners.get(id).map(|owner| owner.validity_status()),
                 "adapter":instance.host.capabilities().adapter,"native_version":instance.host.capabilities().version,
                 "entrypoint":instance.host.capabilities().entrypoint,"cwd":instance.context.cwd,
-                "reloadable":state.is_some(),"resident_reload":state.is_some_and(|s| s.resident),"ready":state.is_some_and(|s| s.ready),
+                "reloadable":state.is_some(),"resident_reload":state.is_some_and(|s| s.resident),"ready":sdk.map_or_else(|| state.is_some_and(|s| s.ready), |owner| owner.process.check().is_ok() && owner.acknowledge_by.is_none() && !owner.cancelled.load(Ordering::Acquire) && !instance.closing),
+                "sdk_availability":sdk.and_then(|owner| owner.sdk),
                 "process_audit":state.and_then(|s| s.process_audit.as_ref()),"bridge_audit":state.and_then(|s| s.bridge_audit.as_ref()),
                 "requests":state.map(|s| s.requests.len()),"tools":state.map(|s| s.tools.len()),
-                "process":state.and_then(|s| s.process.as_ref()).map(Process::metadata)})
+                "process":state.and_then(|s| s.process.as_ref()).or_else(|| sdk.map(|owner| &owner.process)).map(Process::metadata)})
         })).collect()))
     }
 
@@ -441,6 +443,13 @@ impl Runtime {
         validator
             .parse(&baseline)?
             .validate_policy_update(&candidate)?;
+        let sdk = self
+            .owners
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?
+            .get(id)
+            .and_then(|owner| owner.sdk);
+        super::sdk::validate_availability(candidate.as_value(), sdk)?;
         if resident {
             aw_adapter::reload::validate_resident(candidate.as_value(), &target, &capabilities)
                 .map_err(|_| rejected("native_policy_unsupported"))?;

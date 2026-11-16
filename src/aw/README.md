@@ -75,6 +75,7 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
@@ -102,7 +103,8 @@ injection scanning with separate risk and failure policies; see
 
 AW currently integrates Qoder CLI, Codex CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
 Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
-SDK applications explicitly use managed factories. Runtime admission checks the required
+SDK applications can use managed factories or the public Runtime SDK with
+application-owned semantic callbacks; see [SDK integration](../../docs/developer-guide/en/aw/deployment/native-sdk.md). Runtime admission checks the required
 native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)
 record the tested framework versions.
 [Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers prewarming, native configuration with unmodified SDK/Worker files, Pilot runtime launcher grants, pinned Bash consumers and declarative role assets.

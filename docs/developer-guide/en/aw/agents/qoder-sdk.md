@@ -2,6 +2,8 @@
 
 [中文版](../../../zh/aw/agents/qoder-sdk.md)
 
+For application-owned startup with explicit native fallback, see the [TypeScript SDK](../deployment/native-sdk.md).
+
 ## Dependencies and factories
 
 Verified baseline: `@qoder-ai/qoder-agent-sdk@1.0.56` with bundled international Worker 1.1.78. Use Node.js 22+, install the SDK in the application directory and retain SDK authentication. AW accepts other SDK/Worker releases with the required native interfaces and records their actual versions. Package identity, the declared site, Hook dispatch, invocation identity and Query cleanup remain checked at launch and use.

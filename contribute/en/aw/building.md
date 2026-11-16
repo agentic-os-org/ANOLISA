@@ -91,3 +91,10 @@ of [security checks](../../../docs/user-guide/en/aw/security.md) and
 backend core components. Provider file installation alone does not enable them.
 
 Other components use the [repository build guide](../../../docs/user-guide/en/getting-started/building.md).
+
+SDK wheel construction and its offline install test also require packaging tools:
+
+```bash
+python3 -m pip install setuptools==68.1.2 wheel==0.42.0
+python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-dir src/aw/target/sdk-package
+```

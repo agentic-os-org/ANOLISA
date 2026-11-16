@@ -2,7 +2,18 @@
 
 [English](../../en/aw/capabilities.md)
 
+两语言 SDK 支持应用确认的 attach／detach，操作见[协作式控制](../../../developer-guide/zh/aw/deployment/native-sdk.md#协作式-attach-与-detach)。
+
+应用自行持有的 QwenPaw App 可使用 [Python SDK](../../../developer-guide/zh/aw/deployment/python-sdk.md)，公开 middleware 的覆盖范围在接入指南中单独说明。
+
+应用自行持有的 Qoder Query 可通过 [TypeScript SDK](../../../developer-guide/zh/aw/deployment/native-sdk.md) 显式选择原生回退。公开 Hook 接线的覆盖与验收范围单独列出。
+
 AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下能力由 Adapter 接入原生工具流程；具体版本和启动步骤见[Agent 接入索引](../../../developer-guide/zh/aw/native-agents.md)。
+
+两种语言包均可通过 `sdk/application` profile 接入无框架依赖的输入与工具回调，
+支持输入／工具前置观察和阻断、工具后置观察。应用负责安装真实边界并在执行前采用
+`block`。候选包测试覆盖两种语言；自动插桩和任意应用的最终结果防护仍需独立实现与
+验收。见 [通用 Runtime SDK 接入](../../../developer-guide/zh/aw/deployment/native-sdk.md#通用应用接入)。
 
 ## Hook 支持矩阵
 
@@ -21,6 +32,7 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。

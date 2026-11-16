@@ -35,6 +35,16 @@ impl Profile {
     }
 }
 
+pub(crate) const SDK: Profile = Profile {
+    name: "sdk",
+    adapter: &super::super::adapters::sdk::Sdk,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe"]),
+    ],
+};
+
 pub(crate) const QODER: Profile = Profile {
     name: "qoder",
     adapter: &super::super::qoder::Qoder,
@@ -133,7 +143,7 @@ pub(crate) const CODEX: Profile = Profile {
 };
 
 pub(crate) const PROFILES: &[Profile] = &[
-    QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE, CODEX,
+    SDK, QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE, CODEX,
 ];
 
 #[cfg(test)]

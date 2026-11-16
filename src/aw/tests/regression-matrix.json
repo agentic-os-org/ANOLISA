@@ -51,7 +51,8 @@
     "aw-provider-sec-core/test/pii_transport",
     "aw-cli/test/native_setup",
     "aw-cli/test/deepseek",
-    "aw-cli/test/codex"
+    "aw-cli/test/codex",
+    "aw-cli/test/sdk_protocol"
   ],
   "cases": {
     "package-doctor-files": {
@@ -1257,6 +1258,22 @@
     "claude-final-factory": {
       "target": "aw-cli/test/claude_sdk",
       "test": "final_factory_rejects_uncovered_delivery_paths"
+    },
+    "native-sdk-contract": {
+      "target": "aw-cli/test/sdk_protocol",
+      "test": "direct_sdk_consumer_registers_executes_and_exports_native_facts"
+    },
+    "typescript-sdk-package": {
+      "target": "aw-cli/test/sdk_protocol",
+      "test": "typescript_sdk_contracts_and_out_of_tree_package"
+    },
+    "python-sdk-package": {
+      "target": "aw-cli/test/sdk_protocol",
+      "test": "python_sdk_contracts_and_out_of_tree_wheel"
+    },
+    "semantic-sdk-normalization": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::sdk::tests::semantic_events_bind_server_identity_and_reject_private_fields"
     }
   },
   "agents": {
@@ -2012,6 +2029,50 @@
         "codex-admission"
       ],
       "unsupported": {}
+    },
+    "sdk": {
+      "events": {
+        "input.submit": {
+          "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ],
+          "block": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ]
+        },
+        "tool.before": {
+          "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ],
+          "block": [
+            "security-retry",
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ]
+        }
+      },
+      "lifecycle": [
+        "typescript-sdk-package",
+        "python-sdk-package"
+      ],
+      "security": [
+        "security-retry",
+        "semantic-sdk-normalization",
+        "typescript-sdk-package",
+        "python-sdk-package"
+      ],
+      "tokenless": [
+        "security-retry"
+      ]
     }
   },
   "providers": {

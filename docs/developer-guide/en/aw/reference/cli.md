@@ -100,3 +100,8 @@ Protocol failures return `result: null` and a stable `error` code, with exit 1.
 Command syntax/request-file I/O failures use stderr. Cancellation has no write
 side effects. After the one-shot command exits there is no resource to stop.
 Remove `"$AW_QUERY"` when the request file is no longer needed.
+
+`aw instance list`, `attach --sdk-instance ID` and `detach --sdk-instance ID`
+operate on application-installed SDK listeners. Select `--socket` or `--config`
+and inspect the application's confirmation in JSON. See
+[cooperative SDK control](../deployment/native-sdk.md#cooperative-attach-and-detach).

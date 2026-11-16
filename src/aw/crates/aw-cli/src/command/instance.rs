@@ -28,8 +28,12 @@ enum Action {
     Prepare(Prepare),
     /// Release the calling application's registration and staged bridge assets
     Release(Release),
-    /// Install supported native Hooks in an explicitly selected process
+    /// Attach native Hooks to a process or request an installed SDK connection
     Attach(Attach),
+    /// List live applications that published cooperative SDK support
+    List(SdkList),
+    /// Ask one SDK application to release its idle AW connection
+    Detach(SdkSelection),
     /// Apply policy to an already connected idle instance
     Update(Update),
 }
@@ -78,14 +82,50 @@ struct Attach {
     #[arg(long, default_value = "aw.yaml", value_name = "FILE")]
     config: String,
     /// Target declared in the configuration
-    #[arg(long, value_name = "TARGET")]
-    agent: String,
+    #[arg(
+        long,
+        required_unless_present = "sdk_instance",
+        conflicts_with = "sdk_instance",
+        value_name = "TARGET"
+    )]
+    agent: Option<String>,
     /// Explicit native process; identity and native adoption are checked
-    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
-    pid: u32,
+    #[arg(long, required_unless_present = "sdk_instance", conflicts_with = "sdk_instance", value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
+    pid: Option<u32>,
+    /// Application identity published by instance list
+    #[arg(long, value_name = "ID", conflicts_with = "remove")]
+    sdk_instance: Option<String>,
+    /// Existing SDK service socket; no service is started
+    #[arg(long, requires = "sdk_instance", conflicts_with = "config")]
+    socket: Option<String>,
+    /// Wait for application acknowledgement within this deadline
+    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(100..=30000))]
+    timeout_ms: u64,
     /// Remove owned Hooks while idle and leave the process running
     #[arg(long)]
     remove: bool,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct SdkList {
+    /// Shared configuration, used only to find an existing service
+    #[arg(long, default_value = "aw.yaml", conflicts_with = "socket")]
+    config: String,
+    /// Existing private service socket
+    #[arg(long)]
+    socket: Option<String>,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct SdkSelection {
+    #[command(flatten)]
+    endpoint: SdkList,
+    /// Exact application identity returned by instance list
+    #[arg(long, value_name = "ID")]
+    sdk_instance: String,
+    /// Wait for application acknowledgement within this deadline
+    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(100..=30000))]
+    timeout_ms: u64,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -135,13 +175,48 @@ pub(super) fn run(value: Instance) -> Result<Exit> {
             "native-release",
             &options([("binding", Some(value.binding))]),
         ),
+        Some(Action::Attach(value)) if value.sdk_instance.is_some() => crate::runtime(
+            "sdk-control",
+            &options([
+                ("action", Some("attach".into())),
+                ("config", value.socket.is_none().then_some(value.config)),
+                ("socket", value.socket),
+                ("application", value.sdk_instance),
+                ("timeout-ms", Some(value.timeout_ms.to_string())),
+            ]),
+        ),
         Some(Action::Attach(value)) => crate::runtime(
             "install",
             &options([
                 ("config", Some(value.config)),
-                ("agent", Some(value.agent)),
-                ("pid", Some(value.pid.to_string())),
+                ("agent", value.agent),
+                ("pid", value.pid.map(|pid| pid.to_string())),
                 ("remove", value.remove.then(|| "true".into())),
+            ]),
+        ),
+        Some(Action::List(value)) => crate::runtime(
+            "sdk-control",
+            &options([
+                ("action", Some("list".into())),
+                ("config", value.socket.is_none().then_some(value.config)),
+                ("socket", value.socket),
+            ]),
+        ),
+        Some(Action::Detach(value)) => crate::runtime(
+            "sdk-control",
+            &options([
+                ("action", Some("detach".into())),
+                (
+                    "config",
+                    value
+                        .endpoint
+                        .socket
+                        .is_none()
+                        .then_some(value.endpoint.config),
+                ),
+                ("socket", value.endpoint.socket),
+                ("application", Some(value.sdk_instance)),
+                ("timeout-ms", Some(value.timeout_ms.to_string())),
             ]),
         ),
         Some(Action::Update(value)) => crate::runtime(
@@ -189,7 +264,7 @@ mod tests {
             panic!("expected attach")
         };
         assert_eq!(value.config, "aw.yaml");
-        assert_eq!(value.pid, 123);
+        assert_eq!(value.pid, Some(123));
         let value = parse(&["aw", "instance", "update", "--instance", "one"]).unwrap();
         let Some(Action::Update(value)) = value.action else {
             panic!("expected update")
@@ -214,10 +289,31 @@ mod tests {
     }
 
     #[test]
+    fn sdk_selection_uses_explicit_application_identity() {
+        for action in ["attach", "detach"] {
+            parse(&[
+                "aw",
+                "instance",
+                action,
+                "--sdk-instance",
+                "one",
+                "--socket",
+                "/socket",
+            ])
+            .unwrap();
+        }
+        parse(&["aw", "instance", "list", "--socket", "/socket"]).unwrap();
+    }
+
+    #[test]
     fn invalid_or_mixed_management_modes_are_rejected() {
         for tail in [
             vec![],
             vec!["update"],
+            vec!["detach"],
+            vec!["attach", "--sdk-instance", "one", "--pid", "123"],
+            vec!["attach", "--sdk-instance", "one", "--remove"],
+            vec!["attach", "--sdk-instance", "one", "--timeout-ms", "99"],
             vec!["attach", "--agent", "target", "--pid", "0"],
             vec!["update", "--agent", "target", "--pid", "123"],
             vec!["--socket", "/socket", "update", "--instance", "one"],

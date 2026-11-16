@@ -211,6 +211,13 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
     }
+    assert_eq!(
+        call(Operation::SdkControl {
+            command: aw_service::SdkControl::List
+        })
+        .unwrap()["applications"],
+        json!([])
+    );
     let mut second = first.clone();
     second["tool"]["call_id"] = json!("second");
     assert!(call(register(&binding, 2, &second))

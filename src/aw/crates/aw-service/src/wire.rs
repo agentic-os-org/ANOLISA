@@ -7,10 +7,12 @@ use std::{collections::BTreeMap, ffi::OsString};
 
 mod environment;
 mod registration;
+mod sdk_control;
 pub use registration::{
-    RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
-    RegistrationRequest, REGISTRATION_VERSION,
+    Availability, RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
+    RegistrationRequest, REGISTRATION_VERSION, SDK_VERSION,
 };
+pub use sdk_control::{SdkControl, SdkIntent, SDK_CONTROL_VERSION};
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
 pub const VERSION: &str = "aw-service/v1alpha7";
@@ -163,10 +165,28 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    /// Exchange application-owned control intents over an authenticated peer.
+    SdkControl {
+        /// Negotiated cooperative control command.
+        command: SdkControl,
+    },
     /// Coordinate an application-owned instance through an authenticated peer.
     Registration {
         /// Versioned independent lifecycle action.
         command: RegistrationCommand,
+    },
+    /// Execute one installed SDK callback through the canonical Adapter mapping.
+    SdkCallback {
+        /// Acknowledged task Scope of an SDK registration.
+        instance_id: String,
+        /// Admitted event name.
+        event: String,
+        /// Step from the immutable Scope routes, including the observation sentinel.
+        step_id: String,
+        /// Native callback object; normalized by the selected Adapter.
+        native_input: Value,
+        /// Close the correlation after native completion or cancellation.
+        close: bool,
     },
     /// Discover identity and current bounded resource counts.
     #[serde(deserialize_with = "empty_fields")]

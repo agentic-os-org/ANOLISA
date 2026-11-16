@@ -62,6 +62,9 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 
 ✓ 已声明且有契约测试覆盖，× 尚不支持。矩阵从[回归清单](tests/regression-matrix.json)生成。结果替换的原生限制与 MCP、更新范围见[完整能力表](../../docs/user-guide/zh/aw/capabilities.md)。
 
+应用也可通过通用 Runtime SDK 提交输入与工具语义回调，自主管理启动并使用协作式
+attach；见 [SDK 接入](../../docs/developer-guide/zh/aw/deployment/native-sdk.md)。
+
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -75,6 +78,7 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI 也可通过 `input.submit` 检查原生 `UserPromptSubmit` 文本，见 [Qoder 输入检查](../../docs/developer-guide/zh/aw/agents/qoder.md#检查用户提交)。

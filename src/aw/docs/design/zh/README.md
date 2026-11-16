@@ -43,3 +43,5 @@
 [来源连接器](integrations/agentsight/agentsight-readonly.md) · [证据上下文](runtime/evidence-context.md) · [集成规划](integrations/agentsight/agentsight-integration.md)
 
 独立进程登记的身份、去重与 Ready 门禁见[本地服务](runtime/local-service.md#独立登记)。
+
+[应用自有 SDK 协议](runtime/native-sdk.md)

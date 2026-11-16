@@ -2,7 +2,20 @@
 
 [中文版](../../zh/aw/capabilities.md)
 
+Both SDKs support application-confirmed attach/detach; see [cooperative control](../../../developer-guide/en/aw/deployment/native-sdk.md#cooperative-attach-and-detach).
+
+Application-owned QwenPaw Apps can use the [Python SDK](../../../developer-guide/en/aw/deployment/python-sdk.md); its public middleware coverage is documented separately.
+
+Application-owned Qoder Queries can use the [TypeScript SDK](../../../developer-guide/en/aw/deployment/native-sdk.md) with explicit native fallback. Its public-Hook coverage and acceptance are listed separately from resident `aw run`.
+
 AW shares tool checks, result processing and custom rules across Agents. Adapters connect these capabilities to native tool execution. See the [Agent index](../../../developer-guide/en/aw/native-agents.md) for versions and setup.
+
+The `sdk/application` profile accepts framework-free input and tool callbacks in
+both language packages. It supports input/tool-before observation and blocking,
+and tool-after observation. The application must install those boundaries and
+adopt `block` before execution. Candidate package tests cover both languages;
+this does not certify automatic instrumentation or final-result protection for
+arbitrary applications. See [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration).
 
 ## Hook support matrix
 
@@ -21,6 +34,7 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
