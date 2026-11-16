@@ -578,7 +578,11 @@ agent-sec-cli observability schema
 
 ## Security Events
 
-安全事件会同时写入 JSONL 与 SQLite 存储。使用 `agent-sec-cli events` 查询该存储：
+安全事件会同时写入 JSONL 与 SQLite 存储。
+
+如果追加中断后 JSONL 文件末尾缺少换行，写入器会保留原有字节，并用换行将下一条记录隔开。它不会修复损坏记录，也不会更改独立的 SQLite 存储。
+
+使用 `agent-sec-cli events` 查询该存储。
 
 V2 查询使用 UDS peer UID：普通用户读取自身事件，root 读取全部 UID。
 使用原始 session ID 筛选；root 返回所有 UID 下匹配该 ID 的事件。
