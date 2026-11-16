@@ -312,10 +312,10 @@ driver 旁加载 receipt 归属文件，不修改桌面应用的激活状态。e
 查看组件日志或生成诊断包：
 
 ```bash
-anolisa logs <component>
-anolisa logs <component> --limit 50
-anolisa logs <component> --severity warn
-anolisa logs <component> --since '2026-10-01T00:30:00Z'
+anolisa logs agentsight
+anolisa logs agentsight --limit 50
+anolisa logs agentsight --severity warn
+anolisa logs agentsight --since '2026-10-01T00:30:00Z'
 anolisa bug
 ```
 
