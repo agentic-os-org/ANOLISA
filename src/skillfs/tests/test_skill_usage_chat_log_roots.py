@@ -112,6 +112,25 @@ class TestLiteralChatLogRoots(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("No chat logs found under", result.stdout)
 
+    def test_jsonl_directory_does_not_hide_regular_chat_logs(self) -> None:
+        logs_dir = self.root / "logs[ab]"
+        self.write_log(logs_dir, "requested")
+        (logs_dir / "projects" / "example" / "chats" / "folder.jsonl").mkdir()
+        result = self.run_cli(logs_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Analyzed 1 chat sessions", result.stdout)
+        self.assertIn("  requested: 1\n", result.stdout)
+        self.assertIn("Total skill invocations: 1", result.stdout)
+
+    def test_jsonl_directories_only_keep_no_logs_exit_status(self) -> None:
+        chats = self.root / "projects" / "example" / "chats"
+        (chats / "folder.jsonl").mkdir(parents=True)
+        result = self.run_cli(self.root)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("No chat logs found under", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
