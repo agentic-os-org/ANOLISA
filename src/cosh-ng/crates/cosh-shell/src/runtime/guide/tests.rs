@@ -831,6 +831,57 @@ fn login_other_user_guidance_is_reachable_by_paging_at_the_minimum_height() {
     }
 }
 
+#[test]
+fn repeated_paging_keeps_the_focused_choice_on_screen() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = login_session(paths, login_status("/bin/bash", None, false, false));
+    session.enter(Page::Login);
+    let view = session.view();
+    let focused = match view.rows.get(view.cursor) {
+        Some(WizardRow::Choice { label, .. }) => label.clone(),
+        _ => panic!("login page must focus a choice"),
+    };
+    for _ in 0..5 {
+        session.handle(key(KeyCode::PageDown));
+        let scroll = render_scroll(&session.view(), 40, 16);
+        assert!(
+            scroll <= session.cursor,
+            "rendered offset {scroll} hides cursor {}",
+            session.cursor
+        );
+        // The wizard loop stores the clamped offset after every draw.
+        session.scroll = scroll;
+    }
+    let lines = render_wizard_lines(&session.view(), 40, 16);
+    let selected = lines.iter().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("> ") && line.contains(&focused)
+    });
+    assert!(
+        selected,
+        "paging scrolled the focused choice off screen:\n{}",
+        lines.join("\n")
+    );
+    session.handle(key(KeyCode::PageUp));
+    assert_eq!(
+        session.view().scroll,
+        0,
+        "one PageUp must return to the first page"
+    );
+}
+
+fn render_scroll(view: &crate::ui::guide::WizardView, width: u16, height: u16) -> usize {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let mut scroll = usize::MAX;
+    terminal
+        .draw(|frame| {
+            scroll = crate::ui::guide::render(frame, view);
+        })
+        .unwrap();
+    scroll
+}
+
 fn compact_ws(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }

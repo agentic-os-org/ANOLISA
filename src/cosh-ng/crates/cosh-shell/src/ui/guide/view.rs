@@ -111,14 +111,14 @@ fn render_rows(frame: &mut Frame, area: Rect, view: &WizardView) -> usize {
         height.saturating_sub(1)
     };
     let max_scroll = total.saturating_sub(content_rows);
-    // Text below the last choice is only reachable through explicit paging, so
-    // the stored offset can scroll past the focus-following position; the
-    // cursor still wins whenever paging would hide it.
+    // Text below the last choice is only reachable through explicit paging, but
+    // paging must never scroll the focused row off screen: the effective offset
+    // is bounded by the cursor so Enter always dispatches a visible row.
     let focused = view
         .cursor
         .saturating_sub(content_rows.saturating_sub(1))
         .min(max_scroll);
-    let scroll = focused.max(view.scroll).min(max_scroll);
+    let scroll = focused.max(view.scroll).min(view.cursor).min(max_scroll);
     let visible = lines
         .into_iter()
         .skip(scroll)

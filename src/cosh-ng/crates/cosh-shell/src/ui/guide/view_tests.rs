@@ -252,14 +252,14 @@ fn form_page_offset_reaches_text_below_the_last_choice() {
     let mut page = view();
     page.rows = (0..14)
         .map(|index| match index {
-            2 => WizardRow::Choice {
+            5 => WizardRow::Choice {
                 label: "Only choice".to_string(),
                 value: String::new(),
             },
             _ => WizardRow::Text(format!("detail row {index}")),
         })
         .collect();
-    page.cursor = 2;
+    page.cursor = 5;
     page.scroll = 999;
     let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
     let mut returned = usize::MAX;
@@ -269,6 +269,10 @@ fn form_page_offset_reaches_text_below_the_last_choice() {
         })
         .unwrap();
     assert!(returned < 999, "offset must be clamped: {returned}");
+    assert!(
+        returned <= page.cursor,
+        "offset {returned} scrolls the focused row off the top"
+    );
     let buffer = terminal.backend().buffer();
     let text = (0..16)
         .map(|y| {
@@ -279,9 +283,56 @@ fn form_page_offset_reaches_text_below_the_last_choice() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
+        text.contains("> Only choice"),
+        "focused row left the viewport:\n{text}"
+    );
+    assert!(
         text.contains("detail row 13"),
         "text below the choice is unreachable:\n{text}"
     );
+}
+
+#[test]
+fn form_paging_never_scrolls_the_focused_choice_off_the_top() {
+    for cursor in [1usize, 8, 15, 22] {
+        let mut page = view();
+        page.rows = (0..24)
+            .map(|index| match index {
+                1 | 8 | 15 | 22 => WizardRow::Choice {
+                    label: format!("choice {index}"),
+                    value: String::new(),
+                },
+                _ => WizardRow::Text(format!("detail row {index}")),
+            })
+            .collect();
+        page.cursor = cursor;
+        // What repeated PageDown (10 rows each) leaves before the clamp.
+        page.scroll = 50;
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+        let mut returned = usize::MAX;
+        terminal
+            .draw(|frame| {
+                returned = super::render(frame, &page);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..16)
+            .map(|y| {
+                (0..40)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            returned <= cursor,
+            "offset {returned} hides cursor {cursor}:\n{text}"
+        );
+        assert!(
+            text.contains(&format!("> choice {cursor}")),
+            "focused choice {cursor} is not visible:\n{text}"
+        );
+    }
 }
 
 #[test]
