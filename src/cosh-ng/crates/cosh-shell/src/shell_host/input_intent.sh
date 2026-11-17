@@ -361,6 +361,8 @@ _cosh_command_veto() {
   local input="$1"
   local top_token="$2"
   local top_han_status="${3:-1}"
+  local caller_lc_all="${4-}"
+  local caller_lang="${5-}"
   local scan="$input"
   local word name
 
@@ -369,6 +371,28 @@ _cosh_command_veto() {
       return 0
       ;;
   esac
+
+  local quoted_line=0
+  local unquoted
+  if (( top_han_status != 0 )); then
+    case "$scan" in
+      *'??'*)
+        # Two adjacent question marks read as a glob (`you??` matches a
+        # three-character name) or as the shell's agent marker, not as a
+        # doubled question mark.
+        return 0
+        ;;
+      \"*\")
+        # The wrapping is decided on the line as typed: a sentence-final `?`
+        # after the closing quote is unquoted and stays a live glob carrier.
+        unquoted="${scan#\"}"
+        unquoted="${unquoted%\"}"
+        if [[ -n "$unquoted" && "$unquoted" != *'"'* ]]; then
+          quoted_line=1
+        fi
+        ;;
+    esac
+  fi
 
   case "$scan" in
     *'?') scan="${scan%\?}" ;;
@@ -442,18 +466,38 @@ _cosh_command_veto() {
     return 1
   fi
 
+  # A line wrapped in one balanced pair of double quotes is a quoted sentence:
+  # the shell sees a single word, so the line is judged by the text it quotes.
+  # Any other quote placement stays shell-owned, as before.
+  if (( quoted_line == 1 )); then
+    scan="${scan#\"}"
+    scan="${scan%\"}"
+  fi
+
   case "$scan" in
-    *"'"*|*'"'*|*'\'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'?'*|*'？'*|*'~'*|*[[:cntrl:]]*)
+    *"'"*|*'"'*|*'\'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'？'*|*'~'*|*[[:cntrl:]]*)
       return 0
       ;;
   esac
 
-  if [[ -n "${ZSH_VERSION:-}" ]]; then
-    set -- ${=scan}
-  else
-    set -- $scan
-  fi
-  for word in "$@"; do
+  # The words are read byte by byte: `set -- $scan` would glob a `?` word away
+  # before the probe could tell whether the shell rewrites the line. Quotes and
+  # escapes are already vetoed above, so whitespace is the only word boundary.
+  local index=0 word_start=0 length="${#scan}"
+  while (( index <= length )); do
+    if (( index < length )); then
+      case "${scan:$index:1}" in
+        ' '|$'\t')
+          word="${scan:$word_start:$((index - word_start))}"
+          ;;
+        *)
+          (( index += 1 ))
+          continue
+          ;;
+      esac
+    else
+      word="${scan:$word_start}"
+    fi
     case "$word" in
       -*) return 0 ;;
       [A-Za-z_]*=*)
@@ -463,7 +507,20 @@ _cosh_command_veto() {
           *) return 0 ;;
         esac
         ;;
+      *'?'*)
+        # A `?` is question punctuation unless its word really globs: such a
+        # word was rewritten by the shell before the line reached the
+        # classifier, so the line stays native. A `?` inside the quotes of a
+        # whole-line quoted sentence is never expanded, so only an unquoted
+        # `?` carries that risk. The probe keeps the caller's locale so it
+        # matches the interactive shell (`?` is one character).
+        if (( quoted_line == 0 )); then
+          _cosh_word_globs_to_files "$word" "$caller_lc_all" "$caller_lang" && return 0
+        fi
+        ;;
     esac
+    (( index += 1 ))
+    word_start=$index
   done
   return 1
 }
@@ -478,6 +535,10 @@ _cosh_request_verb() {
 }
 
 _cosh_classify_missing() {
+  # The veto's `?` probe predicts the shell's own globbing, so it needs the
+  # caller's locale; capture it before the byte-wise scan shadows it.
+  local _cosh_caller_lc_all="${LC_ALL-}"
+  local _cosh_caller_lang="${LANG-}"
   local LC_ALL=C
   local original
   original="$(_cosh_ascii_trim "$1")"
@@ -503,7 +564,8 @@ _cosh_classify_missing() {
     return 0
   fi
 
-  if _cosh_command_veto "$original" "$top_token" "$top_han_status"; then
+  if _cosh_command_veto "$original" "$top_token" "$top_han_status" \
+       "$_cosh_caller_lc_all" "$_cosh_caller_lang"; then
     printf '%s' "command"
     return 0
   fi
@@ -512,6 +574,18 @@ _cosh_classify_missing() {
     printf '%s' "natural_language"
     return 0
   fi
+
+  # The veto judged a fully quoted line by the text it quotes, so classify that
+  # same text: quoting a sentence must not change its routing.
+  case "$original" in
+    \"*\")
+      local unquoted="${original#\"}"
+      unquoted="${unquoted%\"}"
+      if [[ -n "$unquoted" && "$unquoted" != *'"'* ]]; then
+        original="$unquoted"
+      fi
+      ;;
+  esac
 
   case "$original" in
     *'?') original="${original%\?}"; had_question=1 ;;

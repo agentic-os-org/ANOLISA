@@ -212,3 +212,25 @@ Task state growth, extract a Task presentation state holder with its owning
 fields and lifecycle together; continue the existing per-domain state split
 before reaching the 1000-line growth bar. Do not move the two fields alone
 into a new cross-owner interface.
+
+## D22: input_intent.sh crossed the 700-line threshold (owner note)
+
+`crates/cosh-shell/src/shell_host/input_intent.sh` is 732 lines at this revision
+(`main` baseline 658; 722 before the review round that moved the quote-wrapping
+decision ahead of the sentence-final `?` strip). The English question-mark
+routing fix added the caller-locale `?` probe and the whole-line quote unwrap,
+which is what crossed the threshold; the file is not newly created, and the
+shell is a single `include_str!` template, so the new helpers could not land in
+an existing fragment. Owner: shell_host.
+
+`crates/cosh-shell/scripts/check-layout.sh` scans `*.rs` only, so it does not
+enforce the `AGENTS.md` 700-line rule for this template. This entry is the
+owner note that audit cannot produce; it records a growth condition, not a
+waiver of the threshold.
+
+Split plan: move `_cosh_word_globs_to_files` and `_cosh_command_veto` into a
+sibling template (for example `shell_host/input_intent/veto.sh`) composed with
+`concat!(include_str!(...))`, the pattern `marker/bash.rs` already uses for
+`bash.sh` + `bash_prompt.sh`; `_cosh_classify_missing` stays in
+`input_intent.sh` as the dispatch. Until that split lands, do not add another
+routing carrier to the veto's blanket list without first extracting a fragment.
