@@ -8,6 +8,7 @@ for (const file of [
   "client.mjs",
   "admission.mjs",
   "configuration.mjs",
+  "deployment.mjs",
   "transport.mjs",
   "control.mjs",
   "index.d.ts",

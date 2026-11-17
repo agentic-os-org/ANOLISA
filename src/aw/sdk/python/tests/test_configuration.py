@@ -24,6 +24,11 @@ class ConfigurationTests(unittest.TestCase):
                     )
                     executable.chmod(0o700)
                     with self.assertRaisesRegex(AwError, "sdk_configuration_too_large"):
-                        load_configuration(str(root / "aw.yaml"), "qwenpaw", None, str(executable))
+                        load_configuration(
+                            str(root / "aw.yaml"),
+                            {"adapter": "fixture", "version": "v1", "entrypoint": "worker"},
+                            None,
+                            str(executable),
+                        )
                     pid = int((root / "pid").read_text())
                     self.assertFalse(Path(f"/proc/{pid}").exists())

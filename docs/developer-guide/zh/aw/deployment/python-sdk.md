@@ -35,6 +35,18 @@ from aw_sdk.qwenpaw import QwenPawPlugin
 plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
 ```
 
+可将配置解析移至部署阶段：使用 `qwenpaw-installed-native-hooks` Profile 生成
+[Descriptor](native-sdk.md#部署-descriptor)，再传入其绝对路径：
+
+```python
+plugin = QwenPawPlugin.from_config(
+    "/absolute/aw.yaml", descriptor_file="/absolute/aw-qwenpaw.json"
+)
+```
+
+此路径校验配置的准确字节，不调用 `aw`；Descriptor 错误会在注册原生 middleware 前
+使初始化失败。
+
 QwenPaw 专用入口同时尝试安装 Adapter 的插件隔离路径加速，仅适用于已验证的
 QwenPaw `2.1.1b3`。安装不启动服务，保留原生隔离与清理；其他版本或接点不可用时
 跳过加速。通过插件导入时，从安装后的加载过程开始生效，已经加载的插件保留此前耗时。

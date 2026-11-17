@@ -94,9 +94,11 @@ An enabled `input.submit` requires input waiting, including an optional event
 with an empty step list. Static admission still checks that the supplied profile
 supports it. `NativeFallback` conflicts with any globally enabled required event,
 matching Service availability checks even when selectors exclude that event
-from this target. The Adapter/caller chooses any stricter profile-specific
-availability requirement and supplies the capability profile; Core contains no
-framework-specific branches.
+from this target. Adapters own profile identities, capability declarations and
+stricter service requirements. The CLI derives its profile choices from the
+Adapter declarations. Native SDK bindings pass their expected identity and service
+requirement to the shared readers, which validate them without framework-name
+branches. Core applies the same static admission to every supplied profile.
 
 `descriptor::verify` recompiles the exact configuration bytes, target, capability
 profile and availability choice and compares every hint. Use this during

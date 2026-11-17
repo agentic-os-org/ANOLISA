@@ -24,6 +24,8 @@ export function createQoderBridge<
   Q extends NativeQuery,
 >(options: {
   configFile: string;
+  /** Trusted deployment hints bound to the exact configFile bytes. */
+  descriptorFile?: string;
   query: (input: I) => Q;
   /** Defaults to native_fallback; enabled required events need required mode. */
   availability?: Availability;

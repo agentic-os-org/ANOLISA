@@ -2,19 +2,23 @@
 import { loadConfiguration } from "./configuration.mjs";
 import { Instance, AwError } from "./client.mjs";
 import { Admission } from "./admission.mjs";
-import { qoderOptions } from "../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
+import {
+  qoderOptions,
+  qoderProfile,
+  qoderCapabilities,
+} from "../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs";
 export { qoderOptions };
 
-const events = ["input.submit", "tool.before", "tool.after"];
 const hookEnvironment = (environment) => {
   const copy = { ...environment };
   delete copy.QODER_PERSONAL_ACCESS_TOKEN;
   return copy;
 };
 
-/** Read YAML/JSON through AW's canonical offline parser without starting services. */
+/** Select wiring from a trusted descriptor or AW's offline configuration parser. */
 export async function createQoderBridge({
   configFile,
+  descriptorFile,
   target,
   query,
   availability = "native_fallback",
@@ -33,24 +37,24 @@ export async function createQoderBridge({
     throw new AwError("invalid_attach_timeout");
   const clean = hookEnvironment(environment);
   const {
-    document,
+    inputEnabled,
+    availability: configuredAvailability,
     target: selected,
     endpoint,
   } = await loadConfiguration({
     configFile,
-    adapter: "qoder-sdk",
+    descriptorFile,
+    profile: qoderProfile,
     target,
     executable,
     environment: clean,
   });
   target = selected;
-  const inputEnabled = document.events["input.submit"]?.enabled === true;
-  const supported = inputEnabled ? events : events.slice(1);
+  const capabilities = qoderCapabilities(inputEnabled);
+  const supported = Object.keys(capabilities.events);
   if (
     availability === "native_fallback" &&
-    Object.values(document.events).some(
-      (event) => event.enabled && event.required,
-    )
+    configuredAvailability === "required"
   )
     throw new AwError("sdk_required_policy_conflict");
   const pending = new Set();
@@ -62,17 +66,7 @@ export async function createQoderBridge({
     environment: clean,
     availability,
     reconnectMs: 100,
-    capabilities: {
-      adapter: "qoder-sdk",
-      version: "public-hooks/v1",
-      entrypoint: "sdk-worker",
-      events: Object.fromEntries(
-        supported.map((event) => [
-          event,
-          event === "tool.after" ? ["observe"] : ["observe", "block"],
-        ]),
-      ),
-    },
+    capabilities,
     install: (routes) =>
       routes.hooks.every(
         (hook) => supported.includes(hook.event) && !hook.skill_check,

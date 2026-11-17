@@ -2,6 +2,12 @@
 
 from aw_sdk import AwError, Instance
 
+PROFILE = {
+    "adapter": "qwenpaw",
+    "version": "installed-native-hooks/v1",
+    "entrypoint": "app",
+}
+
 
 class DeferredPlugin:
     """Install native guards and admit at the configured input or first tool."""
@@ -26,9 +32,7 @@ class DeferredPlugin:
             target=target,
             availability="required",
             capabilities={
-                "adapter": "qwenpaw",
-                "version": "installed-native-hooks/v1",
-                "entrypoint": "app",
+                **PROFILE,
                 "events": {
                     "tool.before": ["observe", "block"],
                     "tool.after": ["observe", "replace_result"],
