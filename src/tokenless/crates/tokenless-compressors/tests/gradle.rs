@@ -524,3 +524,55 @@ fn regenerate_gradle_goldens() {
     assert_eq!(decode(&outcome.output), strip_sgr(&raw));
     std::fs::write(path.with_extension("expected.txt"), outcome.output).unwrap();
 }
+
+#[test]
+fn deep_non_task_tail_after_compactable_run_never_aborts() {
+    // Regression for the recursive run-scan: 50 000 non-task lines after a
+    // compactable run must close the scan iteratively, not per line.
+    let before = tasks(12, ":core:compileJava", " UP-TO-DATE");
+    let noise = "Some deep diagnostic body line that is not a task record\n".repeat(50_000);
+    let input = format!("{HEAD}{before}{noise}");
+    let outcome = BuildLogCompressor.compress(&input, None);
+    assert_eq!(decode(&outcome.output), input);
+    // The run before the noise still compacted; the noise tail stays verbatim.
+    assert!(outcome.output.contains(HEADER));
+    assert!(outcome.output.contains(&noise[..80]));
+    assert!(estimate_tokens(&outcome.output) < estimate_tokens(&input));
+}
+
+#[test]
+fn recompressing_an_encoded_tail_with_raw_task_records_is_byte_identical() {
+    // A byte-level splice of two raw `> Task :` records into an encoded
+    // result keeps Gradle detection live, but already encoded results are
+    // terminal: re-compression must be byte-identical with zero stash.
+    let head_block = tasks(12, ":core:compileJava", " UP-TO-DATE");
+    let input = format!("{HEAD}{head_block}");
+    let encoded = check(&input, true);
+    let spliced = format!("{encoded}> Task :core:lint\n> Task :core:jar\n");
+    assert!(BuildLogCompressor::detect(&spliced));
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&spliced, Some(&store));
+    assert_eq!(outcome.output, spliced);
+    assert!(outcome.operations.is_empty());
+    assert!(outcome.stash_writes.is_empty());
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
+fn compaction_resumes_after_a_failed_task_record() {
+    // 30 compactable lines before and after a FAILED record: both sides
+    // compact, the failure record keeps its diagnostics, and compaction
+    // does not stop globally at the failure.
+    let before = tasks(30, ":core:compileJava", " UP-TO-DATE");
+    let failure = "> Task :core:test FAILED\n\norg.example.SampleTest > missingMethod FAILED\n    java.lang.NoSuchMethodError at SampleTest.java:12\n\n1 test completed, 1 failed\n";
+    let after = tasks(30, ":core:jar", "");
+    let input = format!("{HEAD}{before}{failure}{after}");
+    let output = check(&input, true);
+    assert!(output.contains(failure));
+    // Both the leading and trailing runs were replaced by template blocks.
+    let blocks = output.matches(HEADER).count();
+    assert_eq!(
+        blocks, 2,
+        "expected a template block on each side of the failure"
+    );
+}

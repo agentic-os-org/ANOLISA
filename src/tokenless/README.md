@@ -39,8 +39,10 @@ explicit `TokenlessConfig` arguments take precedence. Diff cropping is enabled b
 [compression coverage and protocol limits](../../docs/user-guide/en/tokenless/framework-integration.md#compression-coverage-and-protocol-limits)
 for the remaining host restrictions.
 
-Maven and Gradle output reaching PostTool can share repeated literal templates and
-download URL prefixes without Stash while retaining every record. See [Maven build output](../../docs/user-guide/en/tokenless/index.md#maven-build-output)
+Maven output reaching PostTool can share repeated literal templates and download
+URL prefixes without Stash while retaining every record; Gradle output shares
+repeated literal task templates (its grammar covers no download progress). See
+[Maven build output](../../docs/user-guide/en/tokenless/index.md#maven-build-output)
 and [Gradle build output](../../docs/user-guide/en/tokenless/index.md#gradle-build-output)
 for scope boundaries, output reconstruction and validation limits.
 

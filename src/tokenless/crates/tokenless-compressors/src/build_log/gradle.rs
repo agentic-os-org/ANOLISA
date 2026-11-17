@@ -256,12 +256,6 @@ pub(super) fn is_compacted(lines: &[&str]) -> bool {
     lines.iter().any(|line| line.starts_with(HEADER))
 }
 
-/// A complete non-failure `> Task :` record. Standalone Generic progress
-/// rules must not claim these lines.
-pub(super) fn is_task_evidence(line: &str) -> bool {
-    task_line(line).is_some()
-}
-
 /// Plan atomic literal-sharing edits without omitting or stashing records.
 pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
     // Already encoded results are terminal representations. This also avoids
@@ -312,10 +306,10 @@ pub(super) fn plan(lines: &[&str]) -> Vec<LayoutEdit> {
     edits
 }
 
+/// One complete non-failure task record: `"> Task :"` + path + status.
 struct Record {
-    literals: Vec<String>,
-    fields: Vec<String>,
-    prefix_field: Option<usize>,
+    path: String,
+    status: Option<&'static str>,
 }
 
 fn task_line(line: &str) -> Option<Record> {
@@ -328,22 +322,23 @@ fn task_line(line: &str) -> Option<Record> {
     // `> Task :` plus a bounded identifier path is already distinctive; the
     // detection gate additionally requires two consecutive records, and
     // compaction requires a run of at least three.
-    let status = captures.get(2).map(|m| m.as_str());
-    // One field plus a trailing literal: `"> Task :"` + path + `" <status>"`.
-    // The capture already includes the leading space; keep it verbatim.
-    let literals = vec![
-        "> Task :".to_owned(),
-        status.map_or_else(String::new, str::to_owned),
-    ];
-    let fields = vec![path.to_owned()];
+    // The status capture includes the leading space; restore it from the
+    // closed set so the record borrows no data from the input line.
+    let status = captures.get(2).and_then(|m| match m.as_str().trim() {
+        "UP-TO-DATE" => Some(" UP-TO-DATE"),
+        "FROM-CACHE" => Some(" FROM-CACHE"),
+        "SKIPPED" => Some(" SKIPPED"),
+        "NO-SOURCE" => Some(" NO-SOURCE"),
+        _ => None,
+    });
     Some(Record {
-        literals,
-        fields,
-        prefix_field: Some(0),
+        path: path.to_owned(),
+        status,
     })
 }
 
 /// Find the next bounded run of consecutive complete non-failure task lines.
+/// Iterative: untrusted input must never drive unbounded recursion.
 fn next_run(lines: &[&str], start: usize, task: &Regex) -> Option<(usize, usize)> {
     let mut index = start;
     let mut consecutive = 0;
@@ -365,52 +360,50 @@ fn next_run(lines: &[&str], start: usize, task: &Regex) -> Option<(usize, usize)
         if consecutive >= REOPEN_ROWS {
             return Some((index - consecutive, index));
         }
-        if is_failure(line) {
-            return None;
-        }
-        return next_run(lines, index + 1, task);
+        consecutive = 0;
+        // A failure record never joins a run, but it does not stop the scan:
+        // failed records and their diagnostics stay verbatim while later
+        // compactable runs still compact.
+        index += 1;
     }
     (consecutive >= REOPEN_ROWS).then_some((index - consecutive, index))
 }
 
-fn is_failure(line: &str) -> bool {
-    let stripped = line.strip_suffix('\n').unwrap_or(line);
-    stripped.starts_with("> Task ") && stripped.contains(" FAILED")
-}
-
 fn render(records: &[Record]) -> String {
+    // Each template is `["<prefix:>", "<status>"]`; rows carry only the path
+    // tail, so a decoder interleaves `literals[0] + path + literals[1]`.
     let mut templates: Vec<Vec<String>> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut ids = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
-        let id = if let Some(id) = templates
-            .iter()
-            .position(|template| *template == record.literals)
-        {
+        let template = vec![
+            "> Task :".to_owned(),
+            record.status.unwrap_or("").to_owned(),
+        ];
+        let id = if let Some(id) = templates.iter().position(|stored| *stored == template) {
             id
         } else {
-            templates.push(record.literals.clone());
+            templates.push(template);
             groups.push(Vec::new());
             templates.len() - 1
         };
         groups[id].push(index);
         ids.push(id);
     }
-    // Factor the shared module-path prefix of a template's task field at
+    // Factor the shared module-path prefix of a template's task path at
     // `:`/`-`/`_` boundaries once the template has enough complete rows.
-    let mut shared = vec![None; templates.len()];
+    let mut shared = vec![0; templates.len()];
     for (id, group) in groups.iter().enumerate() {
         if group.len() < 3 {
             continue;
         }
-        let field = 0;
-        let first = &records[group[0]].fields[field];
+        let first = &records[group[0]].path;
         let length = group
             .iter()
             .map(|index| {
                 first
                     .chars()
-                    .zip(records[*index].fields[field].chars())
+                    .zip(records[*index].path.chars())
                     .take_while(|(a, b)| a == b)
                     .map(|(ch, _)| ch.len_utf8())
                     .sum::<usize>()
@@ -420,22 +413,17 @@ fn render(records: &[Record]) -> String {
         if let Some(end) = first[..length].rfind([':', '-', '_']) {
             let prefix = &first[..=end];
             // The prefix becomes part of the shared literal so a decoder
-            // reassembles the full field from the stored tail alone.
-            templates[id][field].push_str(prefix);
-            shared[id] = Some(prefix.len());
+            // reassembles the full path from the stored tail alone.
+            templates[id][0].push_str(prefix);
+            shared[id] = prefix.len();
         }
     }
     let header = serde_json::json!({"rows": records.len(), "literals": templates});
     let mut output = format!("{HEADER}{header}\n");
-    for (record, id) in records.iter().zip(ids) {
+    for (index, id) in ids.iter().enumerate() {
         output.push_str(&id.to_string());
-        for (index, value) in record.fields.iter().enumerate() {
-            output.push('\t');
-            let offset = shared[id]
-                .filter(|_| record.prefix_field == Some(index))
-                .unwrap_or(0);
-            output.push_str(&value[offset..]);
-        }
+        output.push('\t');
+        output.push_str(&records[index].path[shared[*id]..]);
         output.push('\n');
     }
     output
@@ -480,8 +468,11 @@ mod tests {
 mod plan_debug {
     use super::*;
 
+    /// The `:library:core-module{index:02}` shape is the prefix-factoring
+    /// case worth pinning: one template literal carries the shared module
+    /// prefix at a `-` boundary, and each row stores only its tail.
     #[test]
-    fn debug_plan_output() {
+    fn prefix_factoring_stores_the_shared_module_prefix_in_the_literal() {
         let block = (0..30)
             .map(|index| format!("> Task :library:core-module{index:02}:compileJava UP-TO-DATE\n"))
             .collect::<String>();
@@ -490,7 +481,25 @@ mod plan_debug {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].start, 0);
         assert_eq!(edits[0].end, 30);
-        println!("{}", edits[0].replacement);
+        let replacement = &edits[0].replacement;
+        let header = replacement
+            .lines()
+            .find(|line| line.starts_with(HEADER))
+            .unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(header.strip_prefix(HEADER).unwrap()).unwrap();
+        let literals = header["literals"].as_array().unwrap();
+        assert_eq!(header["rows"].as_u64(), Some(30));
+        // The factored prefix lives in the template literal (factored at the
+        // `-` token boundary), and rows carry only the module tail.
+        assert!(
+            literals
+                .iter()
+                .any(|literal| literal[0].as_str().unwrap().contains(":library:core-")),
+            "{literals:?}"
+        );
+        assert!(replacement.contains("\tmodule00:compileJava"));
+        assert!(!replacement.contains(":library:core-module"));
     }
 
     #[test]

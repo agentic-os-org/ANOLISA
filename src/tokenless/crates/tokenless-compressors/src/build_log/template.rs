@@ -21,8 +21,11 @@ pub(crate) fn generic_progress_template(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.contains('\r')
         || trimmed.starts_with("Progress (")
+        // Every `> Task ` line belongs to the Gradle route, including
+        // failure records and malformed fragments the strict record
+        // grammar rejects.
+        || trimmed.starts_with("> Task ")
         || super::maven::is_download_line(trimmed)
-        || super::gradle::is_task_evidence(trimmed)
     {
         return None;
     }

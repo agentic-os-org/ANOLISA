@@ -137,7 +137,8 @@ impl BuildLogCompressor {
             }
             // No-edit or no-savings Gradle logs retain anchored Generic
             // recovery when Stash plus Shell/Tool recovery are available.
-            if store.is_none() {
+            // Already encoded results are terminal: never re-route them.
+            if store.is_none() || gradle::is_compacted(gradle_lines) {
                 return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
             }
             if let Some(generic) = detect_generic(&sample) {
@@ -400,10 +401,11 @@ fn render_marker(
 fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     let mut sample = sample_lines(input);
     let maven = maven::detect(&sample);
-    // Keep CR visible to Gradle, whose grammar only handles LF records;
-    // CRLF-only logs stay on the other detectors.
+    // Maven and the scoring detectors match line-anchored grammars over
+    // normalized records, so strip the trailing CR of CRLF lines. Keep CR
+    // visible to Gradle, whose grammar only handles LF records; CRLF-only
+    // logs stay on the other detectors.
     let gradle = gradle::detect(&sample);
-    // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
         if line.ends_with('\r') {
             line.pop();
