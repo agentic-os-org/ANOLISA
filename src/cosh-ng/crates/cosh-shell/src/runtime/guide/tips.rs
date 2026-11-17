@@ -8,15 +8,32 @@ use crate::ui::guide::WizardRow;
 use super::session::{Flow, Page, Session};
 use super::status::{now_hour_bucket, warn_failure, Reading};
 
+/// Choice order of the merged recommendation-and-data page, shared by the
+/// rows and the dispatcher so an inserted row cannot shift an action.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PersonalAction {
+    Recommend(bool),
+    Import,
+    Clear,
+    Reset,
+    Privacy,
+}
+
 impl Session {
     pub(crate) fn tips_default_focus(&mut self) {
         if matches!(
             self.page,
-            Page::DataClearConfirm | Page::DataResetConfirm | Page::PersonalOffConfirm
+            Page::DataClearConfirm
+                | Page::DataResetConfirm
+                | Page::PersonalOffConfirm
+                | Page::DataImportConfirm
         ) {
             self.shift(1);
-        } else if self.page == Page::Data && self.bash.unreadable {
-            self.shift(-1);
+        } else if self.page == Page::Personal && self.bash.unreadable {
+            // An unreadable import config leaves only the read-only notes as a
+            // safe default; the recommendation choices stay reachable by keys.
+            let actions = self.personal_actions().len();
+            self.select_choice(actions.saturating_sub(1));
         }
     }
 
@@ -24,20 +41,12 @@ impl Session {
         let i18n = self.i18n;
         vec![
             WizardRow::Choice {
-                label: i18n.t(MessageId::GuideWizardGuideTipLabel).to_string(),
-                value: bool_value(i18n, self.snapshot.guide_tip),
-            },
-            WizardRow::Choice {
                 label: i18n.t(MessageId::GuideWizardTipsAnalysis).to_string(),
                 value: analysis_label(i18n, &self.analysis.effective).to_string(),
             },
             WizardRow::Choice {
                 label: i18n.t(MessageId::GuideWizardTipsPersonal).to_string(),
                 value: bool_value(i18n, self.rec.effective),
-            },
-            WizardRow::Choice {
-                label: i18n.t(MessageId::GuideWizardTipsData).to_string(),
-                value: String::new(),
             },
         ]
     }
@@ -47,7 +56,18 @@ impl Session {
             Page::Analysis => self.analysis_rows(),
             Page::Personal => self.personal_rows(),
             Page::PersonalOffConfirm => self.personal_off_confirm_rows(),
-            Page::Data => self.data_rows(),
+            Page::DataImportConfirm => vec![
+                WizardRow::Text(self.i18n.t(MessageId::GuideWizardImportConsent).to_string()),
+                WizardRow::Blank,
+                WizardRow::Choice {
+                    label: self.i18n.t(MessageId::GuideWizardConfirm).to_string(),
+                    value: String::new(),
+                },
+                WizardRow::Choice {
+                    label: self.i18n.t(MessageId::GuideWizardCancel).to_string(),
+                    value: String::new(),
+                },
+            ],
             Page::DataResetConfirm => self.reset_confirm_rows(),
             Page::DataClearConfirm => self.clear_confirm_rows(),
             _ => Vec::new(),
@@ -67,14 +87,32 @@ impl Session {
                 };
                 self.save_analysis(mode);
             }
-            Page::Personal => {
-                let enabled = self.choice_index() == 0;
-                if enabled {
-                    self.save_personal(true);
-                } else {
-                    // Turning recommendations off clears local data even when
-                    // the environment already forces it off, so it always asks.
+            Page::Personal => match self.personal_actions().get(self.choice_index()).copied() {
+                Some(PersonalAction::Recommend(true)) => self.save_personal(true),
+                // Turning recommendations off clears local data even when the
+                // environment already forces it off, so it always asks.
+                Some(PersonalAction::Recommend(false)) => {
                     self.open_subpage(Page::PersonalOffConfirm);
+                }
+                Some(PersonalAction::Import) => {
+                    if self.bash.saved.unwrap_or(false) {
+                        self.save_import();
+                    } else {
+                        self.open_subpage(Page::DataImportConfirm);
+                    }
+                }
+                Some(PersonalAction::Clear) => self.open_subpage(Page::DataClearConfirm),
+                Some(PersonalAction::Reset) => self.open_subpage(Page::DataResetConfirm),
+                Some(PersonalAction::Privacy) => self.open_subpage(Page::DataPrivacy),
+                None => {}
+            },
+            Page::DataImportConfirm => {
+                if self.choice_index() != 0 {
+                    self.message = None;
+                    self.message_fresh = false;
+                    self.return_to_source();
+                } else if self.save_import() {
+                    self.return_to_source();
                 }
             }
             Page::PersonalOffConfirm => {
@@ -85,27 +123,6 @@ impl Session {
                     self.message = None;
                     self.message_fresh = false;
                     self.return_to_source();
-                }
-            }
-            Page::Data => {
-                if self.bash.unreadable {
-                    match self.choice_index() {
-                        0 => self.open_subpage(Page::DataClearConfirm),
-                        1 if self.rec.damaged => {
-                            self.open_subpage(Page::DataResetConfirm);
-                        }
-                        _ => self.open_subpage(Page::DataPrivacy),
-                    }
-                } else {
-                    match self.choice_index() {
-                        0 => self.save_import(),
-                        1 => self.open_subpage(Page::DataClearConfirm),
-                        2 if self.rec.damaged => {
-                            self.open_subpage(Page::DataResetConfirm);
-                        }
-                        2 => self.open_subpage(Page::DataPrivacy),
-                        _ => self.open_subpage(Page::DataPrivacy),
-                    }
                 }
             }
             Page::DataResetConfirm => {
@@ -182,10 +199,19 @@ impl Session {
     fn personal_rows(&self) -> Vec<WizardRow> {
         let i18n = self.i18n;
         let mut rows = vec![
-            WizardRow::Text(i18n.format(
-                MessageId::GuideWizardSavedLine,
-                &[("value", &bool_value(i18n, self.rec.user_enabled))],
-            )),
+            WizardRow::Text(match self.rec.user_enabled {
+                Reading::Value(value) => preference_line(i18n, value, false),
+                Reading::Unknown if matches!(self.rec.effective, Reading::Value(_)) => {
+                    preference_line(
+                        i18n,
+                        crate::config::load_guidance_config()
+                            .recommendations
+                            .enabled,
+                        true,
+                    )
+                }
+                Reading::Unknown => i18n.t(MessageId::GuideWizardReadFailed).to_string(),
+            }),
             WizardRow::Text(i18n.format(
                 MessageId::GuideWizardEffectiveLine,
                 &[("value", &bool_value(i18n, self.rec.effective))],
@@ -196,6 +222,11 @@ impl Session {
             )),
             WizardRow::Blank,
         ];
+        if self.cleanup_unconfirmed {
+            rows.push(WizardRow::Text(
+                i18n.t(MessageId::GuideWizardCleanupUnconfirmed).to_string(),
+            ));
+        }
         let current = match self.rec.user_enabled {
             Reading::Value(value) => Some(value),
             Reading::Unknown => None,
@@ -221,10 +252,27 @@ impl Session {
                 i18n.t(MessageId::GuideWizardManualPausedNote).to_string(),
             ));
         }
+        rows.extend(self.data_section_rows());
         rows
     }
 
-    fn data_rows(&self) -> Vec<WizardRow> {
+    pub(crate) fn personal_actions(&self) -> Vec<PersonalAction> {
+        let mut actions = vec![
+            PersonalAction::Recommend(true),
+            PersonalAction::Recommend(false),
+        ];
+        if !self.bash.unreadable {
+            actions.push(PersonalAction::Import);
+        }
+        actions.push(PersonalAction::Clear);
+        if self.rec.damaged {
+            actions.push(PersonalAction::Reset);
+        }
+        actions.push(PersonalAction::Privacy);
+        actions
+    }
+
+    fn data_section_rows(&self) -> Vec<WizardRow> {
         let i18n = self.i18n;
         let overridden = self.bash.source == "env";
         let import_value = if self.bash.unreadable {
@@ -235,12 +283,10 @@ impl Session {
         let saved_value = if self.bash.unreadable {
             i18n.t(MessageId::GuideWizardReadFailed).to_string()
         } else {
-            bool_value(
+            preference_line(
                 i18n,
-                self.bash
-                    .saved
-                    .map(Reading::Value)
-                    .unwrap_or(Reading::Unknown),
+                self.bash.saved.unwrap_or(false),
+                self.bash.saved.is_none(),
             )
         };
         let mut rows = vec![
@@ -248,9 +294,7 @@ impl Session {
                 MessageId::GuideWizardDataImportLine,
                 &[("value", &import_value)],
             )),
-            WizardRow::Text(
-                i18n.format(MessageId::GuideWizardSavedLine, &[("value", &saved_value)]),
-            ),
+            WizardRow::Text(saved_value),
             WizardRow::Text(i18n.format(
                 MessageId::GuideWizardSourceLine,
                 &[("value", source_label(i18n, self.bash.source))],
@@ -262,16 +306,14 @@ impl Session {
                 i18n.t(MessageId::GuideWizardConfigUnreadable).to_string(),
             ));
         } else {
-            let primary = if self.bash.effective {
-                if overridden {
-                    MessageId::GuideWizardDataSaveOffPref
-                } else {
-                    MessageId::GuideWizardDataStopImport
-                }
-            } else if overridden {
-                MessageId::GuideWizardDataSaveOnPref
-            } else {
-                MessageId::GuideWizardDataAllowImport
+            // The saved preference decides the next target: an environment
+            // override must not pin the action or block withdrawing consent.
+            let saved_on = self.bash.saved.unwrap_or(false);
+            let primary = match (overridden, saved_on) {
+                (true, true) => MessageId::GuideWizardDataSaveOffPref,
+                (true, false) => MessageId::GuideWizardDataSaveOnPref,
+                (false, true) => MessageId::GuideWizardDataStopImport,
+                (false, false) => MessageId::GuideWizardDataAllowImport,
             };
             rows.push(WizardRow::Choice {
                 label: i18n.t(primary).to_string(),
@@ -282,9 +324,6 @@ impl Session {
                     i18n.t(MessageId::GuideWizardDataEnvNote).to_string(),
                 ));
             }
-            rows.push(WizardRow::Text(
-                i18n.t(MessageId::GuideWizardDataStopKeepsNote).to_string(),
-            ));
         }
         rows.push(WizardRow::Blank);
         rows.push(WizardRow::Choice {
@@ -302,6 +341,10 @@ impl Session {
             label: i18n.t(MessageId::GuideWizardTipsData).to_string(),
             value: String::new(),
         });
+        rows.push(WizardRow::Blank);
+        rows.push(WizardRow::Text(
+            i18n.t(MessageId::GuideWizardDataStopKeepsNote).to_string(),
+        ));
         rows
     }
 
@@ -396,6 +439,9 @@ impl Session {
         // failure after the data was in fact removed.
         match store.set_user_enabled(enabled, now_hour_bucket()) {
             Ok(_) => {
+                if !enabled {
+                    self.cleanup_unconfirmed = false;
+                }
                 self.reload();
                 let mut message = self.i18n.format(
                     MessageId::GuideWizardSavedLine,
@@ -409,6 +455,7 @@ impl Session {
                 warn_failure("save_personal", "update_recommendations");
                 self.reload();
                 let saved_off = !enabled && self.rec.user_enabled == Reading::Value(false);
+                self.cleanup_unconfirmed |= saved_off;
                 self.message = Some(if saved_off {
                     self.i18n
                         .t(MessageId::GuideWizardPersonalOffUnconfirmed)
@@ -423,8 +470,8 @@ impl Session {
         }
     }
 
-    fn save_import(&mut self) {
-        let target = !self.bash.effective;
+    fn save_import(&mut self) -> bool {
+        let target = !self.bash.saved.unwrap_or(false);
         match config::write_bash_history_checked(target) {
             Ok(_) => {
                 self.reload();
@@ -436,9 +483,10 @@ impl Session {
                 message.push_str(self.i18n.t(if self.bash.source == "env" {
                     MessageId::GuideWizardDataEnvNote
                 } else {
-                    MessageId::GuideWizardDataStopKeepsNote
+                    MessageId::GuideWizardImportScope
                 }));
                 self.message = Some(message);
+                true
             }
             Err(error) => {
                 warn_failure("save_import", "write_config");
@@ -446,6 +494,7 @@ impl Session {
                     self.i18n
                         .format(MessageId::GuideWizardSaveFailed, &[("error", &error)]),
                 );
+                false
             }
         }
     }
@@ -456,6 +505,7 @@ impl Session {
         };
         match store.clear(now_hour_bucket()) {
             Ok(_) => {
+                self.cleanup_unconfirmed = false;
                 self.reload();
                 self.message = Some(self.i18n.t(MessageId::GuideWizardDataCleared).to_string());
                 self.return_to_source();
@@ -540,4 +590,15 @@ fn source_label(i18n: I18n, source: &str) -> &'static str {
         "user" => i18n.t(MessageId::GuideWizardSourceUser),
         _ => i18n.t(MessageId::GuideWizardSourceDefault),
     }
+}
+
+fn preference_line(i18n: I18n, value: bool, default: bool) -> String {
+    i18n.format(
+        if default {
+            MessageId::GuideWizardPreferenceDefault
+        } else {
+            MessageId::GuideWizardPreferenceSaved
+        },
+        &[("value", bool_label(i18n, value))],
+    )
 }

@@ -82,7 +82,10 @@ impl Session {
             self.i18n.t(MessageId::GuideWizardAiReadonly).to_string(),
         ));
         rows.push(WizardRow::Blank);
-        for label in [MessageId::GuideWizardAiAsk, MessageId::GuideWizardAiManage] {
+        for label in [
+            MessageId::GuideWizardAiHowTo,
+            MessageId::GuideWizardAiManage,
+        ] {
             rows.push(WizardRow::Choice {
                 label: self.i18n.t(label).to_string(),
                 value: String::new(),

@@ -26,6 +26,7 @@ fn view() -> WizardView {
         scroll: 0,
         language: Language::EnUs,
         message_fresh: false,
+        follow_cursor: true,
     }
 }
 
@@ -132,7 +133,7 @@ fn markdown_page_renders_shared_content_and_a_scroll_position() {
     page.scroll = 2;
     let lines = render_lines(40, 16, &page);
     let text = lines.join("\n");
-    assert!(text.contains("cosh --ask 'one question'"), "{text}");
+    assert!(text.contains("cosh --ask"), "{text}");
     let has_indicator = lines.iter().any(|line| {
         let mut parts = line.trim().split('/');
         match (parts.next(), parts.next(), parts.next()) {
@@ -146,6 +147,60 @@ fn markdown_page_renders_shared_content_and_a_scroll_position() {
         }
     });
     assert!(has_indicator, "scroll position missing: {text}");
+}
+
+#[test]
+fn markdown_pages_fit_the_render_buffer_at_supported_sizes() {
+    for language in [Language::EnUs, Language::ZhCn] {
+        let i18n = crate::I18n::new(language);
+        let pages = [
+            (
+                crate::config::guide::wizard::content::start_markdown(i18n),
+                "cosh --ask",
+                match language {
+                    Language::EnUs => "ends the login.",
+                    _ => "会结束登录会话。",
+                },
+            ),
+            (
+                i18n.t(crate::i18n::MessageId::GuideWizardDataPrivacy),
+                match language {
+                    Language::EnUs => "Bash history is not imported by default",
+                    _ => "默认不导入 Bash 历史",
+                },
+                match language {
+                    Language::EnUs => "provider records.",
+                    _ => "服务方记录。",
+                },
+            ),
+        ];
+        for (markdown, head_anchor, tail) in pages {
+            let mut page = view();
+            page.rows.clear();
+            page.language = language;
+            page.markdown = Some(markdown.to_string());
+            for (width, height) in [(80, 24), (80, 30), (100, 30), (40, 24), (40, 16), (120, 40)] {
+                page.scroll = 0;
+                let head = render_lines(width, height, &page).join("\n");
+                let compact_head: String =
+                    head.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(
+                    compact_head
+                        .contains(&head_anchor.chars().filter(|c| !c.is_whitespace()).collect::<String>()),
+                    "{language:?} {width}x{height} head: {head}"
+                );
+                page.scroll = 999;
+                let bottom = render_lines(width, height, &page).join("\n");
+                let compact: String = bottom.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(
+                    compact.contains(
+                        &tail.chars().filter(|c| !c.is_whitespace()).collect::<String>()
+                    ),
+                    "{language:?} {width}x{height} tail unreachable: {bottom}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -171,6 +226,54 @@ fn markdown_render_clamps_oversized_scroll() {
         returned > 0,
         "long content should allow scrolling: {returned}"
     );
+}
+
+#[test]
+fn quick_guide_separates_sections_and_isolates_the_copyable_command() {
+    fn compact(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    for (language, heading, command) in [
+        (
+            Language::ZhCn,
+            "在 Bash 中按需提问",
+            "cosh --ask '磁盘不足时先检查什么？'",
+        ),
+        (
+            Language::EnUs,
+            "Ask from Bash when you need it",
+            "cosh --ask 'Why is my disk full?'",
+        ),
+    ] {
+        let mut page = view();
+        page.rows.clear();
+        page.language = language;
+        page.markdown = Some(
+            crate::config::guide::wizard::content::start_markdown(crate::I18n::new(language))
+                .to_string(),
+        );
+        let lines = render_lines(100, 30, &page);
+        let head = lines
+            .iter()
+            .position(|line| compact(line) == compact(heading))
+            .unwrap_or_else(|| panic!("{language:?} heading missing: {lines:?}"));
+        assert!(
+            lines[head - 1].trim().is_empty(),
+            "{language:?} section not separated: {lines:?}"
+        );
+        assert!(
+            lines[head + 1].contains('─') && !lines[head + 2].trim().is_empty(),
+            "{language:?} heading detached from its body: {lines:?}"
+        );
+        let cmd = lines
+            .iter()
+            .position(|line| compact(line) == compact(command))
+            .unwrap_or_else(|| panic!("{language:?} command not on its own row: {lines:?}"));
+        assert!(
+            lines[cmd - 1].trim().is_empty() && lines[cmd + 1].trim().is_empty(),
+            "{language:?} command not set apart: {lines:?}"
+        );
+    }
 }
 
 #[test]

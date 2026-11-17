@@ -98,31 +98,40 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::LoginRecoveryMissing => "没有可信的登录恢复记录，未修改账号。",
         MessageId::GuideWizardTitle => "Cosh 配置与入门",
         MessageId::GuideWizardStart => concat!(
-            "## 进入 AI Shell\n",
+            "### 在 Bash 中按需提问\n",
             "\n",
-            "- 在原终端运行 `cosh`，照常执行 `df -h` 等命令，也可直接提问。\n",
-            "- `cosh --ask '你的问题'` 带着首问进入交互会话。\n",
-            "- 会话中用 `/agent` 打开提问编辑器；首次需要 AI 时沿用现有认证流程。\n",
-            "- `/help` 查看会话命令，`cosh --help` 查看启动参数。\n",
-            "- `exit` 退出；从 Bash 启动时回到原 Bash。\n",
-            "- 作为登录 Shell 时，`exit` 可能结束本次登录。\n",
+            "按 Esc 逐级退出后在 Bash 运行：\n",
+            "\n",
+            "`cosh --ask '磁盘不足时先检查什么？'`\n",
+            "\n",
+            "首次按提示接入 AI，回答后仍在 Cosh，输入 `exit` 返回原 Bash。\n",
+            "\n",
+            "### 进入 Cosh 日常使用\n",
+            "\n",
+            "`cosh`\n",
+            "\n",
+            "提示符下照常执行命令或直接提问，例如 `df -h`。会话内用 `/help` 查看命令。\n",
+            "已在 Cosh 中时无需再次启动。\n",
+            "\n",
+            "### 设为默认登录 Shell\n",
+            "\n",
+            "每次登录直接进入 Cosh，不必先启动。在首页“默认登录 Shell”里设置。\n",
+            "只影响后续登录；有可信记录时可恢复原 Bash。以 Cosh 登录时，`exit` 会结束登录会话。\n",
         ),
         MessageId::GuideWizardEntryLanguage => "语言",
         MessageId::GuideWizardEntryAi => "AI 服务",
-        MessageId::GuideWizardEntryTips => "提示与推荐",
+        MessageId::GuideWizardEntryTips => "更多设置",
         MessageId::GuideWizardEntryHealth => "登录健康摘要",
         MessageId::GuideWizardEntryLogin => "默认登录 Shell",
-        MessageId::GuideWizardEntryStart => "使用入门",
-        MessageId::GuideWizardStartSummary => "命令、提问与退出",
+        MessageId::GuideWizardEntryStart => "快速使用指南",
+        MessageId::GuideWizardStartSummary => "从 Bash 开始体验",
         MessageId::GuideWizardLanguageTitle => "语言 / Language",
         MessageId::GuideWizardGuideTipLabel => "使用引导提示",
         MessageId::GuideWizardLanguageBody => "界面语言。会话内也可运行 `/config language`。",
-        MessageId::GuideWizardAiBody => "直接开始提问；需要管理 AI 服务时，在会话内运行 `/auth`。",
+        MessageId::GuideWizardAiBody => "在原终端提问，首次使用时验证接入。",
         MessageId::GuideWizardTipsBody => concat!(
-            "使用引导提示、命令分析方式与个性化提问推荐。\n",
+            "命令分析方式与个性化推荐数据。\n",
             "\n",
-            "- `cosh guide off` 关闭使用引导提示，不影响手动使用 Cosh。\n",
-            "- `cosh guide on` 开启；`cosh guide status` 查看。\n",
             "- `/mode analysis` 修改当前会话的命令分析方式。\n",
             "- `/recommendations` 管理个性化提问推荐与本地数据。\n",
         ),
@@ -172,7 +181,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "登录时显示健康与资源状态，影响后续登录。"
         }
         MessageId::GuideWizardAiReadonly => {
-            "可直接提问；也可在向导内管理 AI 服务，结束后返回本页。配置完成不等于已连接。"
+            "在原终端提问，首次使用时验证接入。"
         }
         MessageId::GuideWizardLoginReadonly => {
             "在终端运行 cosh login set 或 cosh login restore 修改。"
@@ -203,7 +212,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseLine => "零配置自动使用：{value}",
         MessageId::GuideWizardAiAutoUseOn => "开启",
         MessageId::GuideWizardAiAutoUseOff => "关闭",
-        MessageId::GuideWizardAiManage => "配置 AI 服务",
+        MessageId::GuideWizardAiManage => "管理 AI 服务",
         MessageId::GuideWizardTipsAnalysis => "命令分析方式",
         MessageId::GuideWizardTipsPersonal => "个性化提问推荐",
         MessageId::GuideWizardTipsData => "推荐数据与隐私",
@@ -234,13 +243,17 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::GuideWizardDataCleared => "已清理本地推荐数据，保留开关设置。",
         MessageId::GuideWizardDataResetDone => "已重置损坏数据并关闭推荐。",
+        MessageId::GuideWizardImportConsent => "允许导入 Bash 历史？少量近期活动可能发送给当前 AI 服务，脱敏不能保证覆盖全部敏感内容。首次同步只建立读取基线，本次保存不导入历史。",
+        MessageId::GuideWizardImportScope => "导入偏好供新 Cosh 会话使用；已有会话未同步，已有数据保留。",
+        MessageId::GuideWizardPreferenceDefault => "偏好：{value}（默认）",
+        MessageId::GuideWizardPreferenceSaved => "偏好：{value}（已保存）",
         MessageId::GuideWizardConfirm => "确认",
         MessageId::GuideWizardCancel => "取消",
         MessageId::GuideWizardLoginSet => "设为 Cosh 登录 Shell",
         MessageId::GuideWizardLoginRestore => "恢复原登录 Shell",
         MessageId::GuideWizardLoginOther => "查看其他用户管理命令",
         MessageId::GuideWizardLoginVerified => "已验证：{value}",
-        MessageId::GuideWizardLoginUnconfirmed => "未确认变更，请重查后再试。",
+        MessageId::GuideWizardLoginUnconfirmed => "变更结果未确认。可读取当前状态或返回，本次向导中请勿重复提交。",
         MessageId::GuideWizardLoginSudoNote => "变更需要管理员授权；密码在终端输入，不进入向导。",
         MessageId::GuideWizardConfigUnreadable => "无法读取配置文件。请手动编辑后重新打开向导。",
         MessageId::GuideWizardDataClearConfirm => "确认清除本地推荐数据？开关偏好将保留。",
@@ -250,7 +263,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardDetailHint => "↑↓ 选择  Enter 确认  PgUp/PgDn 滚动  Esc 返回",
         MessageId::GuideWizardResultSaved => "已保存：{actions}。",
         MessageId::GuideWizardResultPartial => "部分完成：{actions}。",
-        MessageId::GuideWizardResultUnconfirmed => "结果未确认：{actions}。请重新读取后再决定是否重试。",
+        MessageId::GuideWizardResultUnconfirmed => "结果未确认：{actions}。可读取当前状态或完成返回，本次向导中相关写入仍暂停。",
         MessageId::GuideWizardResultNone => "未更改配置。",
         MessageId::GuideWizardResultCancelled => "已取消本次操作，已保存的更改保留。",
         MessageId::GuideWizardResultFailed => "未完成：{error}",
@@ -291,11 +304,38 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::GuideWizardLoginCancelled => "已取消管理员授权，未修改登录 Shell。",
         MessageId::GuideWizardLoginCommitPending => {
-            "登录 Shell 变更可能已提交，结果未确认；请重新读取后再决定是否重试。"
+            "登录 Shell 变更可能已提交，结果未确认。可读取当前状态或返回，本次向导中暂停继续变更登录 Shell。"
         }
         MessageId::GuideWizardPartialSessionRecord => {
             "模型配置已保存，但会话记录未保存；不会影响原终端或后续会话。"
         }
+        MessageId::GuideWizardTipsSummary => "分析方式与推荐数据",
+        MessageId::GuideWizardCleanupUnconfirmed => "本地推荐数据清理结果尚未确认。",
+        MessageId::GuideWizardLoginSummarySet => "Cosh · 已设为默认",
+        MessageId::GuideWizardLoginSummaryBenefit => "后续登录直接使用 Cosh",
+        MessageId::GuideWizardLoginSummaryPending => "变更结果未确认",
+        MessageId::GuideWizardLoginSummaryConflict => "登录 Shell 与记录冲突",
+        MessageId::GuideWizardLoginSummaryRecoveryMissing => "Cosh · 缺少可信恢复记录",
+        MessageId::GuideWizardLoginBenefit => {
+            "让每次登录直接进入 Cosh。照常执行命令，需要帮助时向 AI 提问。"
+        }
+        MessageId::GuideWizardLoginSudoConfirmNote => {
+            "确认后在当前终端按 sudo 提示验证权限。"
+        }
+        MessageId::GuideWizardAiHowTo => "查看提问方式",
+        MessageId::GuideWizardSudoHandoffTitle => "默认登录 Shell 变更",
+        MessageId::GuideWizardSudoHandoffTarget => "目标账号：{user} · UID {uid}",
+        MessageId::GuideWizardSudoHandoffSet => "将默认登录 Shell 设为 {target}",
+        MessageId::GuideWizardSudoHandoffRestore => "将默认登录 Shell 恢复为 {target}",
+        MessageId::GuideWizardSudoHandoffPrompt => "如 sudo 要求密码，请在当前终端输入。",
+        MessageId::GuideWizardSudoHandoffEnter => "输入后按 Enter 继续。",
+        MessageId::GuideWizardSudoHandoffEcho => "输入通常不显示字符或星号。",
+        MessageId::GuideWizardSudoHandoffCancel => "Ctrl-C 请求取消。",
+        MessageId::GuideWizardSudoHandoffNoPassword => "无需密码时直接继续。",
+        MessageId::GuideWizardAiWriteBlocked => {
+            "上一次{action}的结果尚未确认，已暂停该类写入。可查看当前状态或结束管理后核查。"
+        }
+        MessageId::GuideWizardAiWritesHeld => "上一次变更结果未确认，相关写入已暂停。",
         _ => return None,
     })
 }

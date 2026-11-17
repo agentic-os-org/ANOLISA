@@ -63,7 +63,6 @@ fn static_output_is_plain_bilingual_and_within_the_content_width() {
                 assert!(crate::ui::display_width(line) <= 76, "{line}");
             }
             for command in [
-                "cosh guide off",
                 "cosh health banner off",
                 "cosh login set",
                 "cosh login restore",
@@ -72,12 +71,16 @@ fn static_output_is_plain_bilingual_and_within_the_content_width() {
             ] {
                 assert!(text.contains(command), "{command} missing: {text}");
             }
+            assert!(
+                text.contains("Quick start guide") || text.contains("快速使用指南"),
+                "{text}"
+            );
         }
     }
     let english = plain_text(I18n::new(Language::EnUs));
     let chinese = plain_text(I18n::new(Language::ZhCn));
-    assert!(english.contains("cosh --ask 'one question'"));
-    assert!(chinese.contains("cosh --ask '你的问题'"));
+    assert!(english.contains("cosh --ask 'Why is my disk full?'"));
+    assert!(chinese.contains("cosh --ask '磁盘不足时先检查什么？'"));
     assert_ne!(english, chinese);
 }
 
@@ -87,7 +90,7 @@ fn usage_text_keeps_the_synopsis_ahead_of_the_shared_body() {
     let usage = usage_text(i18n);
     assert!(usage.starts_with(i18n.t(MessageId::GuideUsage)));
     assert!(usage.contains("cosh guide --plain"));
-    assert!(plain_text(i18n).contains("Enter the AI Shell"));
+    assert!(plain_text(i18n).contains("Ask from Bash when you need it"));
 }
 
 #[test]

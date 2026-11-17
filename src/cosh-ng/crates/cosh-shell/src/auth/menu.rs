@@ -211,6 +211,20 @@ pub(super) fn hosted_entries(
     entries
 }
 
+/// Row of `entry` on the hosting surface, which for the guide includes the
+/// explicit exit row that `management_entries` does not carry.
+pub(super) fn hosted_entry_index(
+    host: super::host::AuthHost,
+    sysom: &SysomMenu,
+    existing_count: usize,
+    entry: AuthManagementEntry,
+) -> usize {
+    hosted_entries(host, sysom, existing_count)
+        .iter()
+        .position(|candidate| *candidate == entry)
+        .unwrap_or_else(|| management_entry_index(sysom, existing_count, entry))
+}
+
 pub(super) fn hosted_entry_count(
     host: super::host::AuthHost,
     sysom: &SysomMenu,

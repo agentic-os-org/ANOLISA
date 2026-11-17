@@ -11,7 +11,6 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 mod ai;
 pub(crate) mod core;
-mod handoff;
 pub(crate) mod input;
 mod login;
 mod navigation;
@@ -127,10 +126,6 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                 };
                 match flow {
                     session::Flow::Exit => return LoopExit::Status(0),
-                    session::Flow::Ask => {
-                        drop(screen);
-                        return LoopExit::Status(handoff::start_questions());
-                    }
                     session::Flow::AiManage => {
                         let frame = session.current_frame();
                         session.settle_ai_load();
@@ -159,6 +154,9 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                     session::Flow::LoginSet | session::Flow::LoginRestore => {
                         let action = login_action(&flow);
                         drop(screen);
+                        for line in session.login_handoff_lines(action) {
+                            eprint!("{line}\r\n");
+                        }
                         session.run_login(action);
                         screen = match enter_screen() {
                             Ok(screen) => screen,
@@ -224,5 +222,10 @@ fn run_auth_task(
     let adapter = crate::adapter::AdapterInstance::CoshCore(
         crate::adapter::CoshCoreAdapter::new(program, false).with_guarded_auth_writes(),
     );
-    crate::auth::standalone::run(guide_input, &adapter, session.language())
+    crate::auth::standalone::run(
+        guide_input,
+        &adapter,
+        session.language(),
+        session.blocked_writes.clone(),
+    )
 }

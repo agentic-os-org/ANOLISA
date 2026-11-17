@@ -22,16 +22,16 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {id: narrow-home, type: wait_quiet, quiet_ms: 2500, timeout_ms: 30000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
       - {id: narrow-ai-page, type: wait_quiet, quiet_ms: 800, timeout_ms: 15000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["AI service", "Start asking questions", "/auth"]
+      contains: ["AI service", "See how to ask"]
       not_contains: ["Not configured", "Terminal too small"]
     evidence:
       points:
@@ -46,16 +46,16 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {id: narrow-home, type: wait_quiet, quiet_ms: 2500, timeout_ms: 30000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_quiet, quiet_ms: 1200, timeout_ms: 45000}
       - {id: narrow-ai-page, type: wait_quiet, quiet_ms: 800, timeout_ms: 15000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["AI 服务", "开始提问", "/auth"]
+      contains: ["AI 服务", "查看提问方式"]
       not_contains: ["未配置", "终端过小"]
     evidence:
       points:
@@ -80,12 +80,12 @@ cases:
         quiet_ms: 2500
         timeout_ms: 30000
       - type: bytes
-        hex: "1b5b411b5b411b5b411b5b41"
+        hex: "1b5b421b5b42"
       - type: key
         name: enter
-      - type: wait_for
-        text: "/auth"
-        timeout_ms: 15000
+      - type: wait_quiet
+        quiet_ms: 1200
+        timeout_ms: 45000
       - id: ai-page-settled
         type: wait_quiet
         quiet_ms: 800
@@ -135,12 +135,12 @@ cases:
         quiet_ms: 2500
         timeout_ms: 30000
       - type: bytes
-        hex: "1b5b411b5b411b5b411b5b41"
+        hex: "1b5b421b5b42"
       - type: key
         name: enter
       - type: wait_for
-        text: "/auth"
-        timeout_ms: 15000
+        text: "See how to ask"
+        timeout_ms: 45000
       - id: ai-page-settled
         type: wait_quiet
         quiet_ms: 800
@@ -155,8 +155,8 @@ cases:
     expect:
       status: 0
       contains:
-        - "Current AI"
-        - "Zero-config auto use: on"
+        - "AI service"
+        - "Zero-config auto use"
         - "Zero-config automatic access; ask directly"
       not_contains:
         - "Not configured"
@@ -230,7 +230,7 @@ cases:
           layout_sensitive: true
           required_types: [screenshot]
   - id: GUIDE-PRIMARY-ASK-ZH
-    title: The default guide choice starts a real Cosh question without opening configuration
+    title: The default guide choice opens the quick guide and its documented Bash command gets a real answer
     tags: [shell, guide, ai-state, issue-10166, ecs-real, scripted-pty-downgraded]
     command:
       - env
@@ -250,20 +250,32 @@ cases:
       - type: wait_for
         text: "Enter"
         timeout_ms: 30000
-      - id: default-ask-choice
+      - id: default-guide-choice
         type: wait_quiet
         quiet_ms: 2000
         timeout_ms: 15000
       - type: key
         name: enter
       - type: wait_for
-        text: "Cosh AI Shell"
+        text: "cosh --ask"
         timeout_ms: 30000
-      - type: wait_quiet
-        quiet_ms: 1200
+      - id: quick-guide-page
+        type: wait_quiet
+        quiet_ms: 800
         timeout_ms: 15000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_for
+        text: "GUIDE_RETURN_PARENT"
+        occurrence: "+1"
+        timeout_ms: 30000
       - type: line
-        text: "?? 请把数字 66101 倒序后接在 GUIDESTART 后面，仅回复结果，不执行命令。"
+        text: "cosh --ask '请把数字 66101 倒序后接在 GUIDESTART 后面，仅回复结果，不执行命令。'; printf 'GUIDE_ASK_DONE\\n'"
       - type: wait_for
         text: "GUIDESTART10166"
         timeout_ms: 90000
@@ -274,19 +286,27 @@ cases:
       - type: line
         text: "exit"
       - type: wait_for
-        text: "GUIDE_RETURN_PARENT"
+        text: "GUIDE_ASK_DONE"
         occurrence: "+1"
         timeout_ms: 30000
       - type: line
         text: "exit 0"
     expect:
       status: 0
-      contains: ["GUIDESTART10166", "GUIDE_RETURN_PARENT"]
-      not_contains: ["Waiting for activation", "ModelNotConfigured", "EcsTrialDisabled"]
+      contains:
+        - "快速使用指南"
+        - "磁盘不足时先检查什么？"
+        - "GUIDESTART10166"
+        - "GUIDE_RETURN_PARENT"
+      not_contains: ["等待开通", "Waiting for activation", "ModelNotConfigured", "EcsTrialDisabled"]
     evidence:
       points:
-        - id: default-ask-choice
-          trigger_event: default-ask-choice
+        - id: default-guide-choice
+          trigger_event: default-guide-choice
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: quick-guide-page
+          trigger_event: quick-guide-page
           layout_sensitive: true
           required_types: [screenshot]
         - id: default-ask-answer
@@ -294,7 +314,7 @@ cases:
           layout_sensitive: true
           required_types: [screenshot]
   - id: GUIDE-AI-PAGE-ASK-EN
-    title: The primary AI page choice starts a Cosh question and retains management as secondary
+    title: The primary AI page choice shows how to ask and keeps management secondary
     tags: [shell, guide, ai-state, issue-10166, ecs-real, scripted-pty-downgraded]
     terminal_cols: 80
     command:
@@ -319,12 +339,12 @@ cases:
         quiet_ms: 2000
         timeout_ms: 15000
       - type: bytes
-        hex: "1b5b411b5b411b5b411b5b41"
+        hex: "1b5b421b5b42"
       - type: key
         name: enter
       - type: wait_for
-        text: "/auth"
-        timeout_ms: 15000
+        text: "See how to ask"
+        timeout_ms: 45000
       - id: ai-page-primary-choice
         type: wait_quiet
         quiet_ms: 500
@@ -332,13 +352,30 @@ cases:
       - type: key
         name: enter
       - type: wait_for
-        text: "Cosh AI Shell"
+        text: "cosh --ask"
         timeout_ms: 30000
-      - type: wait_quiet
-        quiet_ms: 1200
+      - id: ai-how-to-page
+        type: wait_quiet
+        quiet_ms: 800
         timeout_ms: 15000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_for
+        text: "AI_PAGE_RETURN_PARENT"
+        occurrence: "+1"
+        timeout_ms: 30000
       - type: line
-        text: "?? 请把数字 66101 倒序后接在 AIPAGE 后面，仅回复结果，不执行命令。"
+        text: "cosh --ask '请把数字 66101 倒序后接在 AIPAGE 后面，仅回复结果，不执行命令。'; printf 'AI_PAGE_ASK_DONE\\n'"
       - type: wait_for
         text: "AIPAGE10166"
         timeout_ms: 90000
@@ -349,19 +386,28 @@ cases:
       - type: line
         text: "exit"
       - type: wait_for
-        text: "AI_PAGE_RETURN_PARENT"
+        text: "AI_PAGE_ASK_DONE"
         occurrence: "+1"
         timeout_ms: 30000
       - type: line
         text: "exit 0"
     expect:
       status: 0
-      contains: ["AIPAGE10166", "AI_PAGE_RETURN_PARENT"]
+      contains:
+        - "See how to ask"
+        - "Quick start guide"
+        - "Why is my disk full?"
+        - "AIPAGE10166"
+        - "AI_PAGE_RETURN_PARENT"
       not_contains: ["Waiting for activation", "ModelNotConfigured", "EcsTrialDisabled"]
     evidence:
       points:
         - id: ai-page-primary-choice
           trigger_event: ai-page-primary-choice
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ai-how-to-page
+          trigger_event: ai-how-to-page
           layout_sensitive: true
           required_types: [screenshot]
         - id: ai-page-answer
@@ -389,9 +435,9 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
       - {id: disabled-state, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
@@ -424,9 +470,9 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
       - {id: preference-error, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
@@ -459,9 +505,9 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
       - {id: explicit-provider, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
@@ -495,9 +541,9 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
       - {id: incomplete-provider, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
@@ -516,33 +562,30 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
-      - {type: bytes, hex: "1b5b411b5b411b5b411b5b41"}
+      - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "/auth", timeout_ms: 15000}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: bytes, hex: "1b5b42"}
       - {type: key, name: enter}
       - {type: wait_for, text: "Provider Management", timeout_ms: 30000}
       - {id: real-provider-management, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
-      - {type: wait_for, text: "Auth cancelled", timeout_ms: 15000}
-      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
-      - {type: line, text: exit}
-      - {type: wait_for, text: "Enter", occurrence: "+1", timeout_ms: 15000}
-      - {id: refreshed-guide, type: wait_quiet, quiet_ms: 2000, timeout_ms: 15000}
+      - {type: wait_for, text: "This action was cancelled", timeout_ms: 30000}
+      - {id: refreshed-guide, type: wait_quiet, quiet_ms: 2000, timeout_ms: 30000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["Provider Management", "Auth cancelled", "Zero-config automatic access; ask directly"]
+      contains: ["Provider Management", "This action was cancelled", "Zero-config automatic access; ask directly"]
       not_contains: ["Provider switched", "Auth configured", "Agent reply", "Waiting for activation"]
     evidence:
       points:
         - {id: real-provider-management, trigger_event: real-provider-management, layout_sensitive: true, required_types: [screenshot]}
         - {id: refreshed-guide, trigger_event: refreshed-guide, layout_sensitive: true, required_types: [screenshot]}
   - id: GUIDE-AI-FAILURE-RECOVERY-EN
-    title: An explicit loopback provider failure does not switch to ECS and a fresh guide question recovers
+    title: An explicit loopback provider failure does not switch to ECS and a fresh Bash question recovers
     tags: [shell, guide, ai-state, issue-10166, fault-injection, ecs-real-recovery, scripted-pty-downgraded]
     timeout_ms: 240000
     command: [env, TERM=xterm-256color, LANG=C.UTF-8, COSH_SHELL_LANG=en-US, 'PS1=GUIDEQA$ ', bash, --login, -i]
@@ -558,14 +601,18 @@ cases:
       - {type: wait_for, text: "Enter", timeout_ms: 30000}
       - {type: wait_quiet, quiet_ms: 2000, timeout_ms: 15000}
       - {type: key, name: enter}
-      - {type: wait_for, text: "Cosh AI Shell", occurrence: "+1", timeout_ms: 30000}
-      - {type: wait_quiet, quiet_ms: 1200, timeout_ms: 10000}
+      - {type: wait_for, text: "cosh --ask", timeout_ms: 30000}
+      - {id: recovery-quick-guide, type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_for, text: "RECOVERY_RETURN_PARENT", occurrence: "+1", timeout_ms: 30000}
       - type: line
-        text: "?? 请把数字 66101 倒序后接在 RECOVERED 后面，仅回复结果，不执行命令。"
+        text: "cosh --ask '请把数字 66101 倒序后接在 RECOVERED 后面，仅回复结果，不执行命令。'; printf 'RECOVERY_ASK_DONE\\n'"
       - {type: wait_for, text: "RECOVERED10166", timeout_ms: 90000}
       - {id: recovered-ecs-answer, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: line, text: exit}
-      - {type: wait_for, text: "RECOVERY_RETURN_PARENT", occurrence: "+1", timeout_ms: 30000}
+      - {type: wait_for, text: "RECOVERY_ASK_DONE", occurrence: "+1", timeout_ms: 30000}
       - {type: line, text: "exit 0"}
     expect:
       status: 0
@@ -574,4 +621,5 @@ cases:
     evidence:
       points:
         - {id: explicit-request-failed, trigger_event: explicit-request-failed, layout_sensitive: true, required_types: [screenshot]}
+        - {id: recovery-quick-guide, trigger_event: recovery-quick-guide, layout_sensitive: true, required_types: [screenshot]}
         - {id: recovered-ecs-answer, trigger_event: recovered-ecs-answer, layout_sensitive: true, required_types: [screenshot]}

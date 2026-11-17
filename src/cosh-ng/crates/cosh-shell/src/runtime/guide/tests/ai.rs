@@ -28,9 +28,9 @@ fn guide_ai_late_summary_preserves_the_selected_action() {
         assert!(session.tick());
         let view = session.view();
         let expected = if management {
-            "Configure AI service"
+            "Manage AI services"
         } else {
-            "Start asking questions"
+            "See how to ask"
         };
         assert!(
             matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == expected)
@@ -39,8 +39,11 @@ fn guide_ai_late_summary_preserves_the_selected_action() {
         assert!(if management {
             matches!(flow, Flow::AiManage)
         } else {
-            matches!(flow, Flow::Ask)
+            matches!(flow, Flow::Continue)
         });
+        if !management {
+            assert_eq!(session.view().title, "Quick start guide");
+        }
     }
 }
 
@@ -80,13 +83,22 @@ fn guide_ai_incomplete_route_without_service_never_claims_configured() {
 }
 
 #[test]
-fn home_and_ai_page_default_to_question_session() {
+fn home_opens_the_quick_guide_and_ai_page_offers_reading_before_management() {
     for language in [Language::EnUs, Language::ZhCn] {
         let (_guard, _temp, paths) = isolated_fixture();
         let mut session = Session::new(paths, I18n::new(language));
-        assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Ask));
+        assert!(matches!(
+            session.handle(key(KeyCode::Enter)),
+            Flow::Continue
+        ));
+        assert_eq!(session.page, super::super::session::Page::Start);
         session.enter(super::super::session::Page::Ai);
-        assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Ask));
+        assert!(matches!(
+            session.handle(key(KeyCode::Enter)),
+            Flow::Continue
+        ));
+        assert_eq!(session.page, super::super::session::Page::Start);
+        session.enter(super::super::session::Page::Ai);
         session.handle(key(KeyCode::Down));
         assert!(matches!(
             session.handle(key(KeyCode::Enter)),

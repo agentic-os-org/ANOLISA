@@ -12,14 +12,13 @@ use crate::auth::default_id::{
     providers_with_provider_id_field,
 };
 use crate::auth::delete_confirm::{
-    begin_delete_confirmation, focus_delete_confirmation, render_delete_outcome,
-    submit_delete_confirmation, DeleteConfirmationOutcome,
+    begin_delete_confirmation, focus_delete_confirmation, DeleteConfirmationOutcome,
 };
 use crate::auth::menu::{
     has_manageable_entries, hosted_entry, hosted_entry_count, management_entry_index,
     AuthManagementEntry, EcsRamRolePrepare, PrefetchedAliyunPrepare, SysomMenu,
 };
-use crate::auth::navigation::{step_back, BackOutcome};
+use crate::auth::navigation::{step_back_for_host, BackOutcome};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use crate::auth::provider_display::auth_providers_for_display;
 use crate::auth::provider_management::{
@@ -122,6 +121,10 @@ impl RuntimeAuthState {
 #[derive(Debug, Default)]
 pub(crate) struct AuthState {
     pub(crate) state: Option<RuntimeAuthState>,
+    /// Guide-lifetime write gate: an action whose result stayed unknown must
+    /// not be re-submitted by a later management task in the same wizard.
+    pub(crate) blocked_writes:
+        std::collections::BTreeSet<crate::runtime::guide::result::ActionKind>,
     pub(crate) ecs_trial: super::trial::TrialSession,
     pub(super) ecs: Option<super::ecs_poll::EcsFlow>,
     pub(crate) handled_card_events: HashSet<String>,
@@ -137,6 +140,11 @@ pub(crate) struct AuthState {
 }
 
 impl AuthState {
+    /// Whether this action kind is still waiting on an unconfirmed result.
+    pub(crate) fn write_blocked(&self, kind: crate::runtime::guide::result::ActionKind) -> bool {
+        self.host.is_guide() && self.blocked_writes.contains(&kind)
+    }
+
     pub(crate) fn record_fact(
         &mut self,
         kind: crate::runtime::guide::result::ActionKind,
@@ -145,6 +153,9 @@ impl AuthState {
     ) {
         if self.host.is_guide() {
             self.outcome.record(kind, change, verification);
+            if change == crate::runtime::guide::result::ChangeFact::Unknown {
+                self.blocked_writes.insert(kind);
+            }
         }
     }
 }
@@ -273,7 +284,7 @@ pub(super) fn clear_observed_model_after_provider_change(state: &mut InlineState
     state.startup_auth.hint = Default::default();
 }
 
-fn clear_observed_model_after_provider_delete(
+pub(super) fn clear_observed_model_after_provider_delete(
     state: &mut InlineState,
     deleted_provider_was_active: bool,
     outcome: &DeleteConfirmationOutcome,
@@ -397,6 +408,22 @@ pub(super) fn handle_auth_answer<W: std::io::Write>(
     raw_answer: &str,
     output: &mut W,
 ) -> std::io::Result<bool> {
+    if matches!(
+        state.auth.state.as_ref().map(|auth| &auth.phase),
+        Some(AuthPhase::ConfirmDelete { .. })
+    ) && state
+        .auth
+        .state
+        .as_ref()
+        .is_some_and(|auth| matches_auth_capture(auth, id) && auth.selected_provider == 1)
+        && super::standalone::refuse_unconfirmed_write(
+            state,
+            crate::runtime::guide::result::ActionKind::Delete,
+            output,
+        )?
+    {
+        return Ok(true);
+    }
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(false);
     };
@@ -455,6 +482,13 @@ pub(super) fn handle_auth_answer<W: std::io::Write>(
 
             match action {
                 ProviderAction::Activate => {
+                    if super::standalone::refuse_unconfirmed_write(
+                        state,
+                        crate::runtime::guide::result::ActionKind::Activate,
+                        output,
+                    )? {
+                        return Ok(true);
+                    }
                     super::activation::activate_provider(adapter, state, &existing, output)?;
                 }
                 ProviderAction::Edit => {
@@ -476,6 +510,9 @@ pub(super) fn handle_auth_answer<W: std::io::Write>(
                     auth.default_provider_id = false;
                     auth.from_sysom_shortcut = false;
 
+                    if state.auth.host.is_guide() {
+                        auth.collected_values.clear();
+                    }
                     auth.collected_values
                         .insert("provider_id".to_string(), existing.name.clone());
                     if let Some(ref v) = existing.api_key_mask {
@@ -543,44 +580,7 @@ pub(super) fn handle_auth_answer<W: std::io::Write>(
             Ok(true)
         }
         AuthPhase::ConfirmDelete { provider_idx } => {
-            let deleted_provider_was_active = auth
-                .existing_providers
-                .get(provider_idx)
-                .is_some_and(|provider| provider.is_active);
-            let outcome = match submit_delete_confirmation(
-                adapter,
-                auth,
-                provider_idx,
-                state.auth.ecs_trial.auto_use_allowed,
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    // The registry call may already have removed the provider.
-                    state.auth.record_fact(
-                        crate::runtime::guide::result::ActionKind::Delete,
-                        crate::runtime::guide::result::ChangeFact::Unknown,
-                        crate::runtime::guide::result::Verification::Unconfirmed,
-                    );
-                    return Err(std::io::Error::other(error));
-                }
-            };
-            if matches!(outcome, DeleteConfirmationOutcome::Deleted { .. }) {
-                state.auth.record_fact(
-                    crate::runtime::guide::result::ActionKind::Delete,
-                    crate::runtime::guide::result::ChangeFact::Committed,
-                    crate::runtime::guide::result::Verification::Verified,
-                );
-            }
-            clear_observed_model_after_provider_delete(
-                state,
-                deleted_provider_was_active,
-                &outcome,
-            );
-            clear_active_auth_panel(state, output)?;
-            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-            render_delete_outcome(&outcome, &renderer, output)?;
-            render_current_auth_panel(state, output)?;
-            Ok(true)
+            super::delete_confirm::handle_delete_confirmation(adapter, state, provider_idx, output)
         }
         AuthPhase::SelectingProvider => {
             begin_provider_fields(auth);
@@ -703,6 +703,17 @@ pub(super) fn send_auth_response<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    if super::standalone::refuse_unconfirmed_write(
+        state,
+        crate::runtime::guide::result::ActionKind::Configure,
+        output,
+    )? {
+        if let Some(auth) = state.auth.state.as_mut() {
+            restore_after_failed_submission_at(auth, None);
+        }
+        render_current_auth_panel(state, output)?;
+        return Ok(());
+    }
     if state.agent_run.active.is_none()
         && state.auth.state.as_ref().is_some_and(|auth| {
             auth.backend == AuthBackend::CoreRegistry
@@ -772,14 +783,11 @@ pub(super) fn send_auth_response<W: std::io::Write>(
                             crate::runtime::guide::result::ActionKind::Configure,
                         );
                     }
-                    if error.code.is_none() {
-                        // A transport failure leaves the write outcome unknown.
-                        state.auth.record_fact(
-                            crate::runtime::guide::result::ActionKind::Configure,
-                            crate::runtime::guide::result::ChangeFact::Unknown,
-                            crate::runtime::guide::result::Verification::Unconfirmed,
-                        );
-                    }
+                    super::standalone::record_write_result(
+                        state,
+                        crate::runtime::guide::result::ActionKind::Configure,
+                        &Err(error.clone()),
+                    );
                     restore_after_configure_failure(
                         &mut auth,
                         error.code.as_deref(),
@@ -789,10 +797,23 @@ pub(super) fn send_auth_response<W: std::io::Write>(
                     renderer.write_notice_panel(
                         output,
                         NoticePanelModel {
-                            title: "Credentials were not saved",
+                            title: if error.unconfirmed {
+                                "Change unconfirmed"
+                            } else {
+                                "Credentials were not saved"
+                            },
                             body: vec![
                                 error.message,
-                                "Review the highlighted value and try again.".to_string(),
+                                if error.unconfirmed && state.auth.host.is_guide() {
+                                    state
+                                        .i18n()
+                                        .t(crate::i18n::MessageId::GuideWizardAiWritesHeld)
+                                        .to_string()
+                                } else if error.unconfirmed {
+                                    "Check the current configuration before retrying.".to_string()
+                                } else {
+                                    "Review the highlighted value and try again.".to_string()
+                                },
                             ],
                             footer: None,
                         },
@@ -859,10 +880,34 @@ pub(super) fn handle_auth_back<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    if state.auth.host.is_guide() {
+        if state.auth.exit_requested {
+            return Ok(());
+        }
+        let ecs_page = state
+            .auth
+            .state
+            .as_ref()
+            .is_some_and(|a| a.phase != AuthPhase::FillingField);
+        if ecs_page && state.auth.ecs.is_some() {
+            state.auth.menu_reload = true;
+            if !state
+                .auth
+                .ecs
+                .as_ref()
+                .is_some_and(super::ecs_poll::EcsFlow::is_saving)
+            {
+                super::ecs_poll::shutdown(state);
+                clear_active_auth_panel(state, output)?;
+                state.auth.state = None;
+            }
+            return Ok(());
+        }
+    }
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(());
     };
-    match step_back(auth) {
+    match step_back_for_host(auth, state.auth.host) {
         BackOutcome::Redraw => {
             clear_active_auth_panel(state, output)?;
             render_current_auth_panel(state, output)
@@ -875,6 +920,10 @@ pub(super) fn cancel_auth_panel<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    if state.auth.host.is_guide() {
+        state.auth.outcome.reason = crate::runtime::guide::result::EndReason::Cancelled;
+        state.auth.exit_requested = true;
+    }
     crate::runtime::startup::session::cancel_initial_question(state);
     let cancel_run = state.auth.state.as_ref().is_some_and(|auth| {
         auth.backend == AuthBackend::ActiveRun
@@ -911,10 +960,7 @@ pub(super) fn cancel_auth_panel<W: std::io::Write>(
         },
     )?;
 
-    if state.auth.host.is_guide() {
-        state.auth.outcome.reason = crate::runtime::guide::result::EndReason::Cancelled;
-        state.auth.exit_requested = true;
-    } else {
+    if !state.auth.host.is_guide() {
         crate::slash::prompt::write_shell_prompt(state, output)?;
     }
     output.flush()?;

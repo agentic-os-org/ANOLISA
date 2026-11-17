@@ -427,7 +427,7 @@ mod tests {
             MessageId::GuideWizardDetailHint as usize
         );
         assert_eq!(
-            MessageId::GuideWizardPartialSessionRecord as usize + 1,
+            MessageId::GuideWizardCleanupUnconfirmed as usize + 1,
             MessageId::ALL.len()
         );
     }

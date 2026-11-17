@@ -28,7 +28,22 @@ pub(crate) fn reread_message_id(
 }
 
 impl Session {
+    pub(super) fn login_write_held(&mut self) -> bool {
+        if !self.blocked_writes.contains(&ActionKind::LoginShell) {
+            return false;
+        }
+        self.message = Some(
+            self.i18n
+                .t(MessageId::GuideWizardLoginCommitPending)
+                .to_string(),
+        );
+        true
+    }
+
     pub(crate) fn login_choices(&self) -> Vec<LoginChoice> {
+        if self.blocked_writes.contains(&ActionKind::LoginShell) {
+            return vec![LoginChoice::Reread];
+        }
         let status = match &self.snapshot.login {
             Ok(status) => status,
             Err(_) => return vec![LoginChoice::Reread],
@@ -62,7 +77,7 @@ impl Session {
         let status = match &self.snapshot.login {
             Ok(status) => status,
             Err(error) => {
-                return vec![
+                let mut rows = vec![
                     WizardRow::Text(
                         self.i18n
                             .format(MessageId::GuideWizardLoginFailed, &[("error", error)]),
@@ -73,6 +88,17 @@ impl Session {
                         value: String::new(),
                     },
                 ];
+                if self.blocked_writes.contains(&ActionKind::LoginShell) {
+                    rows.insert(
+                        1,
+                        WizardRow::Text(
+                            self.i18n
+                                .t(MessageId::GuideWizardLoginCommitPending)
+                                .to_string(),
+                        ),
+                    );
+                }
+                return rows;
             }
         };
         let original = match &status.original_bash {
@@ -94,6 +120,8 @@ impl Session {
         });
         let choices = self.login_choices();
         let mut rows = vec![
+            WizardRow::Text(self.i18n.t(MessageId::GuideWizardLoginBenefit).to_string()),
+            WizardRow::Blank,
             WizardRow::Text(format!(
                 "{}{} · UID {}",
                 self.i18n.t(MessageId::LoginUser),
@@ -123,6 +151,13 @@ impl Session {
             managed
         )));
         rows.push(WizardRow::Blank);
+        if self.blocked_writes.contains(&ActionKind::LoginShell) {
+            rows.push(WizardRow::Text(
+                self.i18n
+                    .t(MessageId::GuideWizardLoginCommitPending)
+                    .to_string(),
+            ));
+        }
         for choice in &choices {
             rows.push(WizardRow::Choice {
                 label: self.login_choice_label(*choice),
@@ -136,6 +171,11 @@ impl Session {
         {
             rows.push(WizardRow::Text(
                 self.i18n.t(MessageId::GuideWizardLoginSudoNote).to_string(),
+            ));
+            rows.push(WizardRow::Text(
+                self.i18n
+                    .t(MessageId::GuideWizardLoginSudoConfirmNote)
+                    .to_string(),
             ));
         }
         rows.push(WizardRow::Text(
@@ -160,6 +200,82 @@ impl Session {
         rows
     }
 
+    /// Handoff text shown while the terminal is plain: sudo owns the password
+    /// prompt, and the wizard only returns after the supervised change ends.
+    pub(crate) fn login_confirmation_rows(&self, restore: bool) -> Vec<WizardRow> {
+        let mut lines = self.login_handoff_lines(if restore { "restore" } else { "set" });
+        lines.truncate(3);
+        if let Ok(status) = &self.snapshot.login {
+            lines.push(format!(
+                "{}{}",
+                self.i18n.t(MessageId::LoginCurrentShell),
+                status.current_shell
+            ));
+        }
+        lines.push(self.i18n.t(MessageId::LoginNewLoginsOnly).to_string());
+        lines.push(
+            self.i18n
+                .t(MessageId::GuideWizardLoginSudoConfirmNote)
+                .to_string(),
+        );
+        let mut rows: Vec<_> = lines.into_iter().map(WizardRow::Text).collect();
+        rows.push(WizardRow::Blank);
+        for label in [MessageId::GuideWizardConfirm, MessageId::GuideWizardCancel] {
+            rows.push(WizardRow::Choice {
+                label: self.i18n.t(label).to_string(),
+                value: String::new(),
+            });
+        }
+        rows
+    }
+
+    pub(crate) fn login_handoff_lines(&self, action: &str) -> Vec<String> {
+        let Ok(status) = &self.snapshot.login else {
+            return Vec::new();
+        };
+        let target = if action == "set" {
+            COSH_PATH.to_string()
+        } else {
+            match &status.original_bash {
+                Some(path) => path.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let change = if action == "set" {
+            MessageId::GuideWizardSudoHandoffSet
+        } else {
+            MessageId::GuideWizardSudoHandoffRestore
+        };
+        let uid = status.uid.to_string();
+        vec![
+            self.i18n
+                .t(MessageId::GuideWizardSudoHandoffTitle)
+                .to_string(),
+            self.i18n.format(
+                MessageId::GuideWizardSudoHandoffTarget,
+                &[("user", &status.username), ("uid", &uid)],
+            ),
+            self.i18n.format(change, &[("target", &target)]),
+            String::new(),
+            self.i18n
+                .t(MessageId::GuideWizardSudoHandoffPrompt)
+                .to_string(),
+            self.i18n
+                .t(MessageId::GuideWizardSudoHandoffEnter)
+                .to_string(),
+            self.i18n
+                .t(MessageId::GuideWizardSudoHandoffEcho)
+                .to_string(),
+            self.i18n
+                .t(MessageId::GuideWizardSudoHandoffCancel)
+                .to_string(),
+            self.i18n
+                .t(MessageId::GuideWizardSudoHandoffNoPassword)
+                .to_string(),
+            String::new(),
+        ]
+    }
+
     pub(crate) fn run_login(&mut self, action: &str) {
         if action == "other" {
             self.login_guidance = true;
@@ -175,6 +291,9 @@ impl Session {
                     .t(reread_message_id(&self.snapshot.login))
                     .to_string(),
             );
+            return;
+        }
+        if matches!(action, "set" | "restore") && self.login_write_held() {
             return;
         }
         let Ok(status) = &self.snapshot.login else {
@@ -257,6 +376,7 @@ impl Session {
                 task.message(self.i18n)
             }
         };
+        self.blocked_writes.extend(task.unknown_kinds());
         self.message = Some(message);
         self.login_guidance = false;
         self.reload();

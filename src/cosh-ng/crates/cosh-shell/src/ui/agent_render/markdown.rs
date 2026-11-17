@@ -78,6 +78,26 @@ impl MarkdownRenderModel {
         }
         rendered
     }
+
+    /// Guide pages keep one blank row between blocks; chat replies stay compact.
+    pub(crate) fn spaced_styled_lines(&self) -> Vec<Line<'static>> {
+        let i18n = crate::I18n::new(self.language);
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        let mut after_heading = false;
+        for line in self.lines.clone() {
+            let heading = matches!(line, MarkdownLine::Heading { .. });
+            let block = styled_lines_from_markdown_line(&i18n, line, self.width);
+            if block.iter().all(line_is_empty) {
+                continue;
+            }
+            if !rendered.is_empty() && !after_heading {
+                rendered.push(Line::raw(""));
+            }
+            rendered.extend(block);
+            after_heading = heading;
+        }
+        rendered
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

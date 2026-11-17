@@ -38,7 +38,7 @@ pub(crate) enum ActionKind {
 }
 
 impl ActionKind {
-    fn label(self) -> MessageId {
+    pub(crate) fn label(self) -> MessageId {
         match self {
             Self::Configure => MessageId::GuideWizardActionConfigure,
             Self::Activate => MessageId::GuideWizardActionActivate,
@@ -72,6 +72,7 @@ pub(crate) struct TaskOutcome {
     pub(crate) reason: EndReason,
     pub(crate) error: Option<String>,
     actions: BTreeMap<ActionKind, ActionFacts>,
+    failures: BTreeMap<ActionKind, String>,
     unconfirmed: Vec<ActionKind>,
 }
 
@@ -81,6 +82,7 @@ impl Default for TaskOutcome {
             reason: EndReason::Done,
             error: None,
             actions: BTreeMap::new(),
+            failures: BTreeMap::new(),
             unconfirmed: Vec::new(),
         }
     }
@@ -93,15 +95,36 @@ impl TaskOutcome {
         change: ChangeFact,
         verification: Verification,
     ) {
+        if change != ChangeFact::None {
+            self.failures.remove(&kind);
+        }
         self.actions.entry(kind).or_default().record(change);
-        if verification == Verification::Unconfirmed && !self.unconfirmed.contains(&kind) {
+        if verification == Verification::Unconfirmed
+            && change != ChangeFact::Partial
+            && !self.unconfirmed.contains(&kind)
+        {
             self.unconfirmed.push(kind);
         }
+    }
+
+    pub(crate) fn record_failure(&mut self, kind: ActionKind, error: String) {
+        self.failures.insert(kind, error);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failure(&self, kind: ActionKind) -> Option<&str> {
+        self.failures.get(&kind).map(String::as_str)
     }
 
     #[cfg(test)]
     pub(crate) fn facts(&self, kind: ActionKind) -> ActionFacts {
         self.actions.get(&kind).copied().unwrap_or_default()
+    }
+
+    /// Action kinds whose result stayed unknown, so a later task in the same
+    /// wizard must not submit them again.
+    pub(crate) fn unknown_kinds(&self) -> Vec<ActionKind> {
+        self.kinds(|facts| facts.unknown)
     }
 
     pub(crate) fn committed_any(&self) -> bool {
@@ -148,6 +171,10 @@ impl TaskOutcome {
                 MessageId::GuideWizardResultPartial,
                 &[("actions", &Self::joined(i18n, &partial))],
             ));
+            parts.push(
+                i18n.t(MessageId::GuideWizardPartialSessionRecord)
+                    .to_string(),
+            );
         }
         let mut unknown = self.kinds(|facts| facts.unknown);
         for kind in &self.unconfirmed {
@@ -164,20 +191,28 @@ impl TaskOutcome {
         if parts.is_empty() {
             parts.push(i18n.t(MessageId::GuideWizardResultNone).to_string());
         }
+        for (kind, error) in &self.failures {
+            parts.push(i18n.format(
+                MessageId::GuideWizardResultFailed,
+                &[("error", &format!("{}: {error}", i18n.t(kind.label())))],
+            ));
+        }
+        if self.reason == EndReason::Failed || self.error.is_some() {
+            parts.push(i18n.format(
+                MessageId::GuideWizardResultFailed,
+                &[("error", self.error.as_deref().unwrap_or_default())],
+            ));
+        }
         match self.reason {
             EndReason::Cancelled => {
                 parts.push(i18n.t(MessageId::GuideWizardResultCancelled).to_string())
             }
-            EndReason::Failed => parts.push(i18n.format(
-                MessageId::GuideWizardResultFailed,
-                &[("error", self.error.as_deref().unwrap_or_default())],
-            )),
             EndReason::Interrupted => {
                 parts.push(i18n.t(MessageId::GuideWizardResultInterrupted).to_string())
             }
-            EndReason::Done => {}
+            EndReason::Done | EndReason::Failed => {}
         }
-        if self.committed_any() || self.unconfirmed_any() {
+        if self.committed_any() || !partial.is_empty() || self.unconfirmed_any() {
             parts.push(i18n.t(MessageId::GuideWizardResultScope).to_string());
         }
         parts.join(" ")
@@ -273,5 +308,53 @@ mod tests {
         );
         let message = outcome.message(i18n());
         assert!(message.contains("Partly completed"), "{message}");
+    }
+
+    #[test]
+    fn rereview_fix_partial_result_keeps_saved_and_unsaved_facts_in_both_languages() {
+        for language in [Language::EnUs, Language::ZhCn] {
+            let i18n = I18n::new(language);
+            let mut outcome = TaskOutcome::default();
+            outcome.record(
+                ActionKind::Configure,
+                ChangeFact::Partial,
+                Verification::Unconfirmed,
+            );
+            let message = outcome.message(i18n);
+            assert!(
+                message.contains(i18n.t(MessageId::GuideWizardPartialSessionRecord)),
+                "{message}"
+            );
+            assert!(
+                !message.contains(
+                    i18n.t(MessageId::GuideWizardResultUnconfirmed)
+                        .split('{')
+                        .next()
+                        .unwrap()
+                ),
+                "{message}"
+            );
+            assert!(
+                !message.contains(i18n.t(MessageId::GuideWizardResultNone)),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn rereview_fix_unknown_copy_does_not_offer_reread_to_unlock_retry() {
+        for language in [Language::EnUs, Language::ZhCn] {
+            let i18n = I18n::new(language);
+            for id in [
+                MessageId::GuideWizardResultUnconfirmed,
+                MessageId::GuideWizardLoginCommitPending,
+            ] {
+                let text = i18n.t(id);
+                assert!(
+                    !text.contains("whether to retry") && !text.contains("是否重试"),
+                    "{text}"
+                );
+            }
+        }
     }
 }

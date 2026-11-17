@@ -1,6 +1,6 @@
 //! Read-only wizard status. An unreadable value is never reported as off.
 
-use crate::config::guide::{GuideStore, RuntimeState};
+use crate::config::guide::GuideStore;
 use crate::config::{
     parse_language_setting, resolve_language_setting, saved_language_setting, Language,
     LanguageSetting,
@@ -45,7 +45,6 @@ pub(crate) struct LanguageStatus {
 pub(crate) struct Snapshot {
     pub(crate) language: LanguageStatus,
     pub(crate) guide_tip: Reading<bool>,
-    pub(crate) guide_runtime: Reading<bool>,
     pub(crate) health: Reading<bool>,
     pub(crate) login: Result<LoginStatus, String>,
 }
@@ -141,7 +140,6 @@ pub(crate) fn load(paths: &UserPaths) -> Snapshot {
     let snapshot = Snapshot {
         language: language(),
         guide_tip,
-        guide_runtime: guide_runtime(paths),
         health,
         login: query_status(None),
     };
@@ -218,18 +216,5 @@ fn toggles(paths: &UserPaths) -> (Reading<bool>, Reading<bool>) {
         ),
         Ok(None) => (Reading::Value(true), Reading::Value(true)),
         Err(_) => (Reading::Unknown, Reading::Unknown),
-    }
-}
-
-fn guide_runtime(paths: &UserPaths) -> Reading<bool> {
-    let Some(base) = &paths.runtime_base else {
-        return Reading::Unknown;
-    };
-    match RuntimeState::open_existing(base) {
-        Ok(Some(runtime)) => match runtime.read() {
-            Ok(Some(snapshot)) => Reading::Value(snapshot.enabled),
-            _ => Reading::Unknown,
-        },
-        _ => Reading::Unknown,
     }
 }

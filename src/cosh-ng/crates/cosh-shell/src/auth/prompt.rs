@@ -35,9 +35,19 @@ pub(super) fn render_current_auth_panel<W: Write>(
                 state.i18n(),
             );
 
+            let mut question =
+                "\u{1f511} Provider Management \u{2014} Select your AI provider:".to_string();
+            if !state.auth.blocked_writes.is_empty() {
+                question = format!(
+                    "{}\n{question}",
+                    state
+                        .i18n()
+                        .t(crate::i18n::MessageId::GuideWizardAiWritesHeld)
+                );
+            }
             let model = QuestionPanelModel {
                 id: &panel_id,
-                question: "\u{1f511} Provider Management \u{2014} Select your AI provider:",
+                question: &question,
                 options: &options,
                 selected_option: auth.selected_provider,
                 selected_options: &[],

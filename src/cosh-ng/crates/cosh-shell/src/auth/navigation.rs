@@ -18,6 +18,62 @@ pub(super) enum BackOutcome {
     Cancel,
 }
 
+pub(super) fn step_back_for_host(
+    auth: &mut RuntimeAuthState,
+    host: super::host::AuthHost,
+) -> BackOutcome {
+    if !host.is_guide() {
+        return step_back(auth);
+    }
+    match auth.phase {
+        AuthPhase::SelectingProvider => {
+            auth.phase = AuthPhase::ManagingProviders;
+            auth.selected_provider = super::menu::hosted_entry_index(
+                host,
+                &auth.sysom,
+                auth.existing_providers.len(),
+                AuthManagementEntry::AddNew,
+            );
+        }
+        AuthPhase::ProviderAction { provider_idx } => {
+            auth.phase = AuthPhase::ManagingProviders;
+            auth.selected_provider = super::menu::hosted_entry_index(
+                host,
+                &auth.sysom,
+                auth.existing_providers.len(),
+                AuthManagementEntry::Existing(provider_idx),
+            );
+        }
+        AuthPhase::ConfirmDelete { provider_idx } => {
+            return_from_delete(auth, provider_idx);
+        }
+        _ => {
+            let outcome = step_back(auth);
+            if auth.phase != AuthPhase::FillingField {
+                auth.collected_values.clear();
+            }
+            return outcome;
+        }
+    }
+    auth.field_input.clear();
+    auth.field_error = None;
+    auth.collected_values.clear();
+    BackOutcome::Redraw
+}
+
+pub(super) fn return_from_delete(auth: &mut RuntimeAuthState, provider_idx: usize) {
+    auth.phase = AuthPhase::ProviderAction { provider_idx };
+    auth.selected_provider = auth
+        .existing_providers
+        .get(provider_idx)
+        .and_then(|p| {
+            provider_actions(p.is_active, p.editable, p.deletable())
+                .iter()
+                .position(|a| *a == ProviderAction::Delete)
+        })
+        .unwrap_or(0);
+}
+
 /// Moves the flow one step back, reporting whether there was a step left to take.
 pub(super) fn step_back(auth: &mut RuntimeAuthState) -> BackOutcome {
     // Every other phase is a menu the user reaches in one keystroke, so ESC there keeps the

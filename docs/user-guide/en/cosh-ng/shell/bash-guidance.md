@@ -129,8 +129,9 @@ external shell changes, untrusted records, and unavailable authorization do not
 trigger a forced overwrite. Restoring an unmanaged account does not invent an
 original Shell.
 
-Run `cosh guide` for interactive entry, initial questions, independent controls and
-default-login commands. No-argument help accesses no configuration or state.
+Run `cosh guide` for the quick start guide, default login shell and AI service
+settings. Its quick guide explains asking from Bash; the wizard does not start
+a question session. Guidance on/off/status remain separate CLI controls.
 The guide switch covers startup AI suggestions, passive failure help and
 default-login offers; it does not disable direct questions.
 

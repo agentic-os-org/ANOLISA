@@ -817,6 +817,7 @@ fn deleting_the_active_provider_with_a_fallback_discards_the_observed_model() {
     let outcome = DeleteConfirmationOutcome::Deleted {
         provider_name: "deleted-provider".to_string(),
         needs_reselection: false,
+        refresh_error: None,
     };
 
     clear_observed_model_after_provider_delete(&mut state, true, &outcome);
@@ -831,6 +832,7 @@ fn deleting_the_active_provider_without_a_fallback_discards_the_observed_model()
     let outcome = DeleteConfirmationOutcome::Deleted {
         provider_name: "deleted-provider".to_string(),
         needs_reselection: true,
+        refresh_error: None,
     };
 
     clear_observed_model_after_provider_delete(&mut state, true, &outcome);
@@ -859,6 +861,7 @@ fn cancelling_or_deleting_an_inactive_provider_keeps_the_observed_model() {
         &DeleteConfirmationOutcome::Deleted {
             provider_name: "inactive-provider".to_string(),
             needs_reselection: false,
+            refresh_error: None,
         },
     );
     assert_eq!(
@@ -1328,4 +1331,223 @@ fn cancelling_auth_releases_only_the_run_waiting_for_its_control_request() {
         assert_eq!(state.agent_run.active.is_none(), cancelled);
         assert_eq!(state.agent_run.needs_prompt_after_run, cancelled);
     }
+}
+
+fn guide_management_state(saved: bool) -> InlineState {
+    let mut state = InlineState::default();
+    state.auth.host = crate::auth::host::AuthHost::Guide;
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::default());
+    if saved {
+        auth.existing_providers.push(saved_dashscope());
+    }
+    state.auth.state = Some(auth);
+    state
+}
+
+fn record_unknown_write(state: &mut InlineState, kind: crate::runtime::guide::result::ActionKind) {
+    let error = crate::auth::provider_management::AuthConfigureFailure {
+        message: "owner receipt lost".into(),
+        code: None,
+        provider_updated: false,
+        unconfirmed: true,
+    };
+    crate::auth::standalone::record_write_result(state, kind, &Err(error));
+}
+
+#[test]
+fn guide_delete_is_held_while_an_earlier_delete_result_is_unconfirmed() {
+    let mut state = guide_management_state(true);
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Delete,
+    );
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ConfirmDelete { provider_idx: 0 };
+    auth.selected_provider = 1;
+    let id = auth_capture_id(auth);
+    let mut output = Vec::new();
+    assert!(handle_auth_answer(
+        &adapter_without_registry(),
+        &mut state,
+        &id,
+        "",
+        &mut output
+    )
+    .unwrap());
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("unconfirmed"), "{text}");
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(
+        auth.existing_providers.len(),
+        1,
+        "no delete may be submitted"
+    );
+    assert_eq!(auth.phase, AuthPhase::ConfirmDelete { provider_idx: 0 });
+}
+
+#[test]
+fn guide_writes_stay_available_without_an_unconfirmed_result() {
+    let mut state = guide_management_state(false);
+    assert!(!state
+        .auth
+        .write_blocked(crate::runtime::guide::result::ActionKind::Delete));
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Delete,
+    );
+    state.auth.host = crate::auth::host::AuthHost::Shell;
+    assert!(
+        !state
+            .auth
+            .write_blocked(crate::runtime::guide::result::ActionKind::Delete),
+        "an ordinary /auth session keeps its own semantics"
+    );
+}
+
+#[test]
+fn guide_management_list_shows_the_held_writes_before_any_action() {
+    let mut state = guide_management_state(false);
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Configure,
+    );
+    let mut output = Vec::new();
+    crate::auth::prompt::render_current_auth_panel(&mut state, &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("on hold"), "{text}");
+}
+
+#[test]
+fn review_fix_configure_gate_retains_form_for_manual_and_ecs_sources() {
+    use crate::runtime::guide::result::ActionKind;
+    for source in [None, Some("ecs_ram_role")] {
+        let mut state = guide_management_state(false);
+        record_unknown_write(&mut state, ActionKind::Configure);
+        let auth = state.auth.state.as_mut().unwrap();
+        auth.phase = AuthPhase::FillingField;
+        auth.collected_values
+            .insert("model".into(), "draft-model".into());
+        if let Some(source) = source {
+            auth.collected_values
+                .insert("auth_source".into(), source.into());
+        }
+        let mut output = Vec::new();
+        super::send_auth_response(Some(&adapter_without_registry()), &mut state, &mut output)
+            .unwrap();
+        let auth = state
+            .auth
+            .state
+            .as_ref()
+            .expect("refusal must preserve return path");
+        assert_eq!(auth.phase, AuthPhase::FillingField);
+        assert_eq!(
+            auth.collected_values.get("model").map(String::as_str),
+            Some("draft-model")
+        );
+        assert!(state.auth.ecs.is_none(), "no ECS write worker may start");
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("Change unconfirmed"));
+    }
+}
+
+#[test]
+fn review_fix_unknown_fact_immediately_holds_current_management_writes() {
+    use crate::runtime::guide::result::ActionKind;
+    let mut state = guide_management_state(false);
+    record_unknown_write(&mut state, ActionKind::Configure);
+    assert!(state.auth.write_blocked(ActionKind::Configure));
+    crate::auth::standalone::record_write_result(&mut state, ActionKind::Configure, &Ok(()));
+    assert!(
+        state.auth.write_blocked(ActionKind::Configure),
+        "reading/success cannot erase earlier unknown"
+    );
+}
+
+#[test]
+fn review_fix_delete_hold_allows_cancel_without_a_write() {
+    let mut state = guide_management_state(true);
+    record_unknown_write(
+        &mut state,
+        crate::runtime::guide::result::ActionKind::Delete,
+    );
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ConfirmDelete { provider_idx: 0 };
+    auth.selected_provider = 0;
+    let id = auth_capture_id(auth);
+    handle_auth_answer(
+        &adapter_without_registry(),
+        &mut state,
+        &id,
+        "",
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::ProviderAction { provider_idx: 0 });
+    assert_eq!(auth.existing_providers.len(), 1);
+}
+
+#[test]
+fn guide_delete_success_lands_on_finish_and_return() {
+    let mut state = guide_management_state(true);
+    state.personalization.foreground_model = Some("deleted-provider-model".into());
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ManagingProviders;
+    auth.existing_providers[0].name = "other".into();
+    auth.existing_providers[0].is_active = false;
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".into(),
+        needs_reselection: true,
+        refresh_error: None,
+    };
+    crate::auth::delete_confirm::apply_delete_outcome(&mut state, true, &outcome);
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    assert_eq!(
+        crate::auth::menu::hosted_entry(
+            crate::auth::host::AuthHost::Guide,
+            &auth.sysom,
+            auth.existing_providers.len(),
+            auth.selected_provider
+        ),
+        AuthManagementEntry::GuideExit,
+        "the row that shifted into place must not receive the next Enter"
+    );
+    assert!(
+        state
+            .auth
+            .outcome
+            .facts(crate::runtime::guide::result::ActionKind::Delete)
+            .committed
+    );
+    assert!(state.personalization.foreground_model.is_none());
+}
+
+#[test]
+fn publish_fix_delete_refresh_failure_keeps_committed_fact_and_summary_reason() {
+    use crate::runtime::guide::result::ActionKind;
+    let mut state = guide_management_state(true);
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".into(),
+        needs_reselection: true,
+        refresh_error: Some("state read failed".into()),
+    };
+    crate::auth::delete_confirm::apply_delete_outcome(&mut state, true, &outcome);
+    let facts = state.auth.outcome.facts(ActionKind::Delete);
+    assert!(facts.committed && !facts.unknown && !facts.partial);
+    assert!(!state.auth.write_blocked(ActionKind::Delete));
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(
+        crate::auth::menu::hosted_entry(
+            crate::auth::host::AuthHost::Guide,
+            &auth.sysom,
+            auth.existing_providers.len(),
+            auth.selected_provider,
+        ),
+        AuthManagementEntry::GuideExit,
+    );
+    let message = state.auth.outcome.message(state.i18n());
+    assert!(message.contains("state read failed"), "{message}");
+    assert!(message.contains("list refresh failed"), "{message}");
 }

@@ -95,36 +95,47 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::LoginRecoveryMissing => "No trusted login recovery record; no account change made.",
         MessageId::GuideWizardTitle => "Cosh setup and getting started",
         MessageId::GuideWizardStart => concat!(
-            "## Enter the AI Shell\n",
+            "### Ask from Bash when you need it\n",
             "\n",
-            "- Run `cosh` in your terminal, then use commands such as `df -h`.\n",
-            "- `cosh --ask 'one question'` starts an interactive session.\n",
-            "- In a session, `/agent` opens the question editor.\n",
-            "- The first AI use follows the existing sign-in flow.\n",
-            "- `/help` lists session commands; `cosh --help` lists startup options.\n",
-            "- `exit` leaves Cosh and returns to the Bash that started it.\n",
-            "- As a login shell, `exit` may end the login session.\n",
+            "Press Esc to leave the guide one level at a time. In Bash, run:\n",
+            "\n",
+            "`cosh --ask 'Why is my disk full?'`\n",
+            "\n",
+            "Connect an AI service on first use; you stay in Cosh after the answer,\n",
+            "and `exit` returns to the original Bash.\n",
+            "\n",
+            "### Use Cosh day to day\n",
+            "\n",
+            "`cosh`\n",
+            "\n",
+            "Type commands or plain questions at the prompt, such as `df -h`.\n",
+            "Run `/help` inside Cosh for session commands. Already in Cosh? No need\n",
+            "to start it again.\n",
+            "\n",
+            "### Set Cosh as the default login shell\n",
+            "\n",
+            "Every login starts Cosh directly, with no extra step. Set it in\n",
+            "\"Default login shell\" on the home page. Only later logins change; a\n",
+            "trusted record can restore Bash. As a login shell, `exit` ends the login.\n",
         ),
         MessageId::GuideWizardEntryLanguage => "Language",
         MessageId::GuideWizardEntryAi => "AI service",
-        MessageId::GuideWizardEntryTips => "Tips and recommendations",
+        MessageId::GuideWizardEntryTips => "More settings",
         MessageId::GuideWizardEntryHealth => "Login health summary",
         MessageId::GuideWizardEntryLogin => "Default login shell",
-        MessageId::GuideWizardEntryStart => "Getting started",
-        MessageId::GuideWizardStartSummary => "Commands, questions, and exit",
+        MessageId::GuideWizardEntryStart => "Quick start guide",
+        MessageId::GuideWizardStartSummary => "Start from Bash",
         MessageId::GuideWizardLanguageTitle => "Language / 语言",
         MessageId::GuideWizardGuideTipLabel => "Usage tips",
         MessageId::GuideWizardLanguageBody => {
             "Interface language. In a session, `/config language` does the same."
         }
         MessageId::GuideWizardAiBody => {
-            "Start asking questions directly. Run `/auth` in a session to manage AI services."
+            "Ask in your terminal; the first use verifies access."
         }
         MessageId::GuideWizardTipsBody => concat!(
-            "Usage tips, command analysis mode, and question recommendations.\n",
+            "Command analysis mode and recommendation data.\n",
             "\n",
-            "- `cosh guide off` hides usage tips. Manual Cosh use stays available.\n",
-            "- `cosh guide on` enables them; `cosh guide status` shows the preference.\n",
             "- `/mode analysis` changes the analysis mode for this session.\n",
             "- `/recommendations` manages recommendations and local data.\n",
         ),
@@ -174,7 +185,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Shows health and resource state at login; affects later logins."
         }
         MessageId::GuideWizardAiReadonly => {
-            "Ask directly, or manage AI services inside the wizard; you return here when the task ends. Configured is not connected."
+            "Ask from your own terminal; access is verified on first use."
         }
         MessageId::GuideWizardLoginReadonly => {
             "Run cosh login set or cosh login restore in the terminal to change it."
@@ -205,7 +216,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseLine => "Zero-config auto use: {value}",
         MessageId::GuideWizardAiAutoUseOn => "on",
         MessageId::GuideWizardAiAutoUseOff => "off",
-        MessageId::GuideWizardAiManage => "Configure AI service",
+        MessageId::GuideWizardAiManage => "Manage AI services",
         MessageId::GuideWizardTipsAnalysis => "Command analysis",
         MessageId::GuideWizardTipsPersonal => "Personalized prompt recommendations",
         MessageId::GuideWizardTipsData => "Recommendation data & privacy",
@@ -238,13 +249,17 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::GuideWizardDataCleared => "Local recommendation data cleared; the on/off setting was kept.",
         MessageId::GuideWizardDataResetDone => "Damaged data reset; recommendations are off.",
+        MessageId::GuideWizardImportConsent => "Allow Bash history import? A small amount of recent activity may be sent to the current AI service; redaction cannot cover every secret. The first sync only builds a baseline; saving does not import history now.",
+        MessageId::GuideWizardImportScope => "The import preference applies to new Cosh sessions; existing sessions are not updated and existing data is kept.",
+        MessageId::GuideWizardPreferenceDefault => "Preference: {value} (default)",
+        MessageId::GuideWizardPreferenceSaved => "Preference: {value} (saved)",
         MessageId::GuideWizardConfirm => "Confirm",
         MessageId::GuideWizardCancel => "Cancel",
         MessageId::GuideWizardLoginSet => "Set Cosh as login shell",
         MessageId::GuideWizardLoginRestore => "Restore original login shell",
         MessageId::GuideWizardLoginOther => "View other-user management commands",
         MessageId::GuideWizardLoginVerified => "Verified: {value}",
-        MessageId::GuideWizardLoginUnconfirmed => "Change unconfirmed; re-query before retrying.",
+        MessageId::GuideWizardLoginUnconfirmed => "Change unconfirmed. Read the current state or return; do not submit it again in this guide.",
         MessageId::GuideWizardLoginSudoNote => "Changes require administrator authorization; the password is entered in the terminal, not the wizard.",
         MessageId::GuideWizardConfigUnreadable => "Unable to read the config file. Edit it manually, then reopen the wizard.",
         MessageId::GuideWizardDataClearConfirm => "Clear local recommendation data? The on/off setting will be kept.",
@@ -255,7 +270,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardResultSaved => "Saved: {actions}.",
         MessageId::GuideWizardResultPartial => "Partly completed: {actions}.",
         MessageId::GuideWizardResultUnconfirmed => {
-            "Unconfirmed: {actions}. Reread the state before deciding whether to retry."
+            "Unconfirmed: {actions}. Read the current state or finish and return; these writes remain on hold in this guide."
         }
         MessageId::GuideWizardResultNone => "No configuration changed.",
         MessageId::GuideWizardResultCancelled => {
@@ -303,10 +318,45 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Administrator authorization was cancelled; the login shell was not changed."
         }
         MessageId::GuideWizardLoginCommitPending => {
-            "The login shell change may already be committed and is unconfirmed; reread the state before deciding whether to retry."
+            "The login shell change may already be committed and is unconfirmed. Read the current state or return; further login shell changes are on hold in this guide."
         }
         MessageId::GuideWizardPartialSessionRecord => {
             "Model configuration saved, but the session record was not; existing terminals and later sessions are unaffected."
+        }
+        MessageId::GuideWizardTipsSummary => "Analysis mode and recommendation data",
+        MessageId::GuideWizardCleanupUnconfirmed => "Local recommendation data cleanup remains unconfirmed.",
+        MessageId::GuideWizardLoginSummarySet => "Cosh · already the default",
+        MessageId::GuideWizardLoginSummaryBenefit => "Use Cosh at the next login",
+        MessageId::GuideWizardLoginSummaryPending => "Change unconfirmed",
+        MessageId::GuideWizardLoginSummaryConflict => "Login shell and record conflict",
+        MessageId::GuideWizardLoginSummaryRecoveryMissing => "Cosh · no trusted recovery record",
+        MessageId::GuideWizardLoginBenefit => {
+            "Use Cosh at every login. Run commands as usual and ask AI when you need help."
+        }
+        MessageId::GuideWizardLoginSudoConfirmNote => {
+            "After confirming, verify privileges in this terminal as sudo prompts."
+        }
+        MessageId::GuideWizardAiHowTo => "See how to ask",
+        MessageId::GuideWizardSudoHandoffTitle => "Default login shell change",
+        MessageId::GuideWizardSudoHandoffTarget => "Target account: {user} · UID {uid}",
+        MessageId::GuideWizardSudoHandoffSet => "Set the default login shell to {target}",
+        MessageId::GuideWizardSudoHandoffRestore => {
+            "Restore the default login shell to {target}"
+        }
+        MessageId::GuideWizardSudoHandoffPrompt => {
+            "If sudo asks for a password, type it in this terminal."
+        }
+        MessageId::GuideWizardSudoHandoffEnter => "Press Enter to continue.",
+        MessageId::GuideWizardSudoHandoffEcho => "Typing usually shows no characters or stars.",
+        MessageId::GuideWizardSudoHandoffCancel => "Ctrl-C requests cancellation.",
+        MessageId::GuideWizardSudoHandoffNoPassword => {
+            "If no password is required, it continues directly."
+        }
+        MessageId::GuideWizardAiWriteBlocked => {
+            "The last {action} result is unconfirmed, so this kind of write is on hold. Review the current state or finish management and check it."
+        }
+        MessageId::GuideWizardAiWritesHeld => {
+            "An earlier change is unconfirmed; those writes are on hold."
         }
         _ => return None,
     })
