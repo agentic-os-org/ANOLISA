@@ -12,6 +12,7 @@ pub(crate) enum BuildLogFormat {
     Npm,
     Pnpm,
     Maven,
+    Gradle,
     Jest,
     Go,
     Make,
@@ -136,7 +137,10 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
                 || is_c_diagnostic(trimmed),
             is_compiler_command(trimmed),
         ),
-        BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Generic => (false, false),
+        BuildLogFormat::Pnpm
+        | BuildLogFormat::Maven
+        | BuildLogFormat::Gradle
+        | BuildLogFormat::Generic => (false, false),
     };
     Evidence {
         strong: usize::from(strong),
@@ -297,7 +301,7 @@ fn routine_family(
                 None
             }
         }
-        BuildLogFormat::Pnpm | BuildLogFormat::Maven => None,
+        BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle => None,
         BuildLogFormat::Jest => (trimmed.starts_with("PASS ") || trimmed.starts_with('✓'))
             .then_some(RoutineFamily::JestPass),
         BuildLogFormat::Go => {

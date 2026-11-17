@@ -3,6 +3,7 @@
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod gradle;
 mod maven;
 mod pnpm;
 mod template;
@@ -112,15 +113,28 @@ impl BuildLogCompressor {
         let (Some(mut format), sample) = detect_format(&cleaned) else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        if !matches!(format, BuildLogFormat::Pnpm | BuildLogFormat::Maven) && store.is_none() {
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
+        ) && store.is_none()
+        {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
-        let maven_layouts = if format == BuildLogFormat::Maven {
-            maven::plan(&lines)
-        } else {
-            Vec::new()
+        // Preserve already-compacted Gradle results as terminal even when an
+        // oversized preamble pushes the template header out of the sample window.
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
+        ) && gradle::is_compacted(&lines)
+        {
+            format = BuildLogFormat::Gradle;
+        }
+        let (maven_layouts, gradle_layouts) = match format {
+            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new()),
+            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines)),
+            _ => (Vec::new(), Vec::new()),
         };
         let mut maven_transfers = Vec::new();
         if format == BuildLogFormat::Maven
@@ -139,6 +153,13 @@ impl BuildLogCompressor {
             {
                 format = BuildLogFormat::Generic;
             }
+        } else if format == BuildLogFormat::Gradle
+            && gradle_layouts.is_empty()
+            && !gradle::is_compacted(&lines)
+            && store.is_some()
+            && let Some(generic) = detect_generic(&sample)
+        {
+            format = generic;
         }
         let stripped = lines
             .iter()
@@ -152,6 +173,12 @@ impl BuildLogCompressor {
                 vec![LineRole::Summary; lines.len()],
                 HashSet::new(),
                 maven_layouts,
+            )
+        } else if format == BuildLogFormat::Gradle {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                gradle_layouts,
             )
         } else {
             let templates = dominant_generic_templates(format, &stripped);
@@ -371,7 +398,8 @@ fn render_marker(
 fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     let mut sample = sample_lines(input);
     let maven = maven::detect(&sample);
-    // Keep CR visible to Maven, whose layout grammar only handles LF records.
+    let gradle = gradle::detect(&sample);
+    // Keep CR visible to Maven and Gradle, whose layout grammars only handle LF records.
     // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
         if line.ends_with('\r') {
@@ -383,6 +411,9 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     }
     if maven {
         return (Some(BuildLogFormat::Maven), sample);
+    }
+    if gradle {
+        return (Some(BuildLogFormat::Gradle), sample);
     }
     let formats = [
         BuildLogFormat::Cargo,
