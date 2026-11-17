@@ -341,7 +341,8 @@ credentials even on loopback.
 
 - `HEAD /api/ws-ckpt/{kind}/{id}/snapshots`: for `session` and `conversation`,
   the Dashboard can check whether to prompt for a token. Returns an empty
-  `204` for a registered workspace or `404` when unavailable. Normal trajectory
+  `204` for a registered workspace that passes the ws-ckpt compatibility checks,
+  or `404` when unavailable. Normal trajectory
   access rules apply, including read access on loopback.
 - `GET /api/ws-ckpt/{kind}/{id}/snapshots`: `kind` is `session`, `conversation`,
   or `trajectory` (collected ATIF). Session queries prefer captured events, then
@@ -349,29 +350,36 @@ credentials even on loopback.
   omitted parameters use only an explicitly bound plugin configuration. The
   response includes `trajectory`, `scope`, `step_snapshots`, `unassigned`,
   `association` and `completeness`. An unresolved workspace returns `scope: null`.
+  If a compatibility check fails, the response keeps `trajectory`, sets
+  `scope: null` and `restore_enabled: false`, and returns an empty `step_snapshots`.
   Pass `completeness.next_cursor` as `cursor` to continue; all pages retain the
   same Step boundaries and `as_of` cutoff. A changed revision requires a reload.
   Snapshots before the first Step or at/after the cutoff appear only in
   `unassigned` diagnostics, never as a Step action.
 - `POST /api/ws-ckpt/diff`: body `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`.
   Returns existing file-level `changes`, authoritative `scope`, the snapshot ID
-  and comparison time. When rollback is enabled, it also returns `restore_preview`
-  with the workspace generation and the digest of the full file change list.
-  No line-by-line contents are returned.
+  and comparison time. For read-only requests, Sight checks the full ID in the
+  snapshot list before running the CLI diff. When rollback is enabled, Sight
+  uses the guarded CLI preview and includes its `generation` and `diff_digest`
+  in `restore_preview`. No line-by-line contents are returned.
 - `POST /api/ws-ckpt/restore/prepare`: body contains the same `target`,
   `writers_stopped: true` and `expected_preview` copied from `restore_preview`.
   The operator must ensure there are no concurrent writes during rollback.
-  The backend rechecks the workspace generation and diff digest and returns a
-  sealed `confirmation_token` and operation ID. If either value has changed,
-  refresh the file list before confirming again.
+  Sight obtains a fresh guarded preview of the same target and compares its
+  generation and diff digest with the values from the displayed preview. Both
+  must match before it returns a sealed `confirmation_token` and operation ID.
+  A mismatch returns `409` and requires a fresh preview.
 - `POST /api/ws-ckpt/restore/execute`: body `{"confirmation_token":"<TOKEN>"}`.
-  Applies only the bound target after guarded generation/diff validation. Returns
-  `status: "succeeded"` or `"unknown"`; a refusal is non-success. A classified
-  no-effect refusal includes `effect: "known_no_effect"`: discard its confirmation,
-  and prepare a new confirmation if the operator retries. Other HTTP or transport failures do not
-  prove no effect; use the result endpoint with the original token.
+  The daemon locks the workspace, verifies the exact target, generation, and diff,
+  then applies the rollback without creating a protection snapshot. Returns
+  `status: "succeeded"` or `"unknown"`. A refusal with `effect: "known_no_effect"`
+  lets the operator refresh and prepare a new confirmation if they choose to retry.
+  Keep the original token and query the result endpoint when the outcome is
+  uncertain, including when the CLI times out before returning a complete result.
 - `POST /api/ws-ckpt/restore/result`: accepts the same token and returns durable
-  `evidence`. Missing evidence does not establish that restore had no effect.
+  `evidence` recorded by the daemon. This lookup remains available when the
+  snapshot compatibility checks fail. Missing evidence does not establish
+  that restore had no effect.
 
 Snapshots use `[Agent Step start, next Agent Step start)`, with the last interval
 ending at `as_of`. Association does not prove who created the snapshot; automatic
