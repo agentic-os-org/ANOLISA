@@ -7,7 +7,7 @@ import type {
   SubagentTrajectoryRef,
 } from '../types';
 import {
-  ApiRequestError, fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
+  fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
 } from '../utils/apiClient';
 import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
 import { SubagentGraph } from '../components/SubagentGraph';
@@ -23,10 +23,6 @@ import { groupIntoRounds, initialRound, roundStats } from '../utils/roundModel';
 import { compoundedSavingsRate } from '../utils/savings';
 import { OPTIMIZATION_STRATEGIES } from '../utils/optimizationStrategies';
 import { downloadBlob } from '../utils/download';
-import { canUnlockWorkspaceSnapshots, fetchWorkspaceSnapshots, snapshotsMatchDocument } from '../utils/wsCkpt';
-import type { SnapshotBatch, WorkspaceSnapshot } from '../utils/wsCkpt';
-import { WorkspaceSnapshotDialog } from '../components/WorkspaceSnapshotDialog';
-import type { RestoreAttention, SnapshotSelection } from '../components/WorkspaceSnapshotDialog';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -196,11 +192,9 @@ interface StepCardProps {
   onToggleSection: (key: string) => void;
   savingsMap?: Map<string, OptimizationItem>;
   onNavigateSubagent?: (ref: SubagentTrajectoryRef) => void;
-  snapshotBatch?: SnapshotBatch | null;
-  onOpenSnapshot?: (snapshot: WorkspaceSnapshot) => void;
 }
 
-const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap, onNavigateSubagent, snapshotBatch, onOpenSnapshot }) => {
+const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap, onNavigateSubagent }) => {
   const { t } = useI18n();
   const locale = useLocaleTag();
   const style = getSourceStyle(step.source);
@@ -214,7 +208,6 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
   const observationResults = observationResultsOf(step);
   const hasToolCalls = toolCalls.length > 0;
   const hasObservation = observationResults.length > 0;
-  const snapshots = snapshotBatch?.step_snapshots[String(step.step_id)] ?? [];
   const hasMetrics = !!step.metrics && (
     step.metrics.prompt_tokens != null ||
     step.metrics.completion_tokens != null ||
@@ -340,25 +333,6 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 })}
               </div>
             </Collapsible>
-          )}
-
-          {step.source === 'agent' && snapshots.length > 0 && (
-            <div className="mt-3 space-y-2">
-              {snapshots.slice(0, isOpen('snapshots') ? undefined : 3).map(snapshot => (
-                <div key={snapshot.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-green-100 bg-green-50 px-3 py-2 text-xs">
-                  <span className="min-w-0 flex-1 truncate font-medium text-green-700" title={snapshot.meta.message || snapshot.id}>
-                    {t('snapshot.name', { name: snapshot.meta.message || snapshot.id })}
-                  </span>
-                  <span className="text-gray-500">{fmtTimestamp(snapshot.meta.created_at, locale)}</span>
-                  <button type="button" onClick={() => onOpenSnapshot?.(snapshot)} className="rounded-md border border-green-200 bg-white px-2 py-1 text-green-700 hover:bg-green-100">
-                    {t('snapshot.view')}
-                  </button>
-                </div>
-              ))}
-              {snapshots.length > 3 && <button type="button" aria-expanded={isOpen('snapshots')} onClick={() => toggle('snapshots')} className="text-xs text-green-700">
-                {t(isOpen('snapshots') ? 'snapshot.collapse' : 'snapshot.showAll', { n: snapshots.length })}
-              </button>}
-            </div>
           )}
 
           {/* Metrics */}
@@ -492,27 +466,13 @@ interface RoundDetailProps {
   onToggleSection: (key: string) => void;
   savingsMap?: Map<string, OptimizationItem>;
   onNavigateSubagent?: (ref: SubagentTrajectoryRef) => void;
-  snapshotBatch?: SnapshotBatch | null;
-  onOpenSnapshot?: (snapshot: WorkspaceSnapshot) => void;
 }
 
 const RoundDetail: React.FC<RoundDetailProps> = ({
-  round, expandedSections, onToggleSection, savingsMap, onNavigateSubagent, snapshotBatch, onOpenSnapshot,
+  round, expandedSections, onToggleSection, savingsMap, onNavigateSubagent,
 }) => {
   const { t } = useI18n();
-  const locale = useLocaleTag();
   const stats = roundStats(round);
-  const snapshots = round.steps.flatMap(step => snapshotBatch?.step_snapshots[String(step.step_id)] ?? []);
-  const [hoveredRound, setHoveredRound] = useState<Round['key'] | null>(null);
-  const snapshotListKey = `round-snapshots-${round.key}`;
-  const snapshotListPinned = snapshots.length > 1 && expandedSections.has(snapshotListKey);
-  const snapshotListOpen = snapshotListPinned || hoveredRound === round.key;
-
-  const viewSnapshot = (snapshot: WorkspaceSnapshot) => {
-    setHoveredRound(null);
-    if (snapshotListPinned) onToggleSection(snapshotListKey);
-    onOpenSnapshot?.(snapshot);
-  };
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
@@ -522,44 +482,6 @@ const RoundDetail: React.FC<RoundDetailProps> = ({
         <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{t('common.steps', { n: round.steps.length })}</span>
         {stats.toolCallCount > 0 && (
           <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded text-xs">{t('atif.toolCalls', { n: stats.toolCallCount })}</span>
-        )}
-        {snapshots.length > 0 && (
-          <div className="relative"
-            onPointerEnter={event => { if (event.pointerType === 'mouse') setHoveredRound(round.key); }}
-            onPointerLeave={() => setHoveredRound(null)}
-            onKeyDown={event => {
-              if (event.key !== 'Escape' || !snapshotListOpen) return;
-              setHoveredRound(null);
-              if (snapshotListPinned) onToggleSection(snapshotListKey);
-              event.currentTarget.querySelector('button')?.focus();
-            }}>
-            <button type="button" aria-expanded={snapshotListOpen}
-              onClick={() => {
-                if (snapshots.length === 1) viewSnapshot(snapshots[0]);
-                else {
-                  setHoveredRound(null);
-                  onToggleSection(snapshotListKey);
-                }
-              }}
-              className="rounded bg-green-50 px-1.5 py-0.5 text-xs text-green-700 hover:bg-green-100">
-              {snapshots.length === 1 ? t('snapshot.one') : t('snapshot.count', { n: snapshots.length })}
-            </button>
-            {snapshotListOpen && (
-              <div className="absolute left-0 top-full z-20 w-80 max-w-[calc(100vw-3rem)] pt-1">
-                <ul className="max-h-64 divide-y divide-green-100 overflow-y-auto rounded-lg border border-green-100 bg-white shadow-lg">
-                  {snapshots.map(snapshot => (
-                    <li key={snapshot.id}>
-                      <button type="button" onClick={() => viewSnapshot(snapshot)}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-green-50">
-                        <span className="min-w-0 flex-1 truncate font-medium text-green-700" title={snapshot.meta.message || snapshot.id}>{t('snapshot.name', { name: snapshot.meta.message || snapshot.id })}</span>
-                        <span className="shrink-0 whitespace-nowrap tabular-nums text-gray-500">{fmtTimestamp(snapshot.meta.created_at, locale)}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
         )}
         {(stats.promptSum > 0 || stats.completionSum > 0) && (
           <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">
@@ -579,8 +501,6 @@ const RoundDetail: React.FC<RoundDetailProps> = ({
             onToggleSection={onToggleSection}
             savingsMap={savingsMap}
             onNavigateSubagent={onNavigateSubagent}
-            snapshotBatch={snapshotBatch}
-            onOpenSnapshot={onOpenSnapshot}
           />
         ))}
       </div>
@@ -806,45 +726,6 @@ export const AtifViewerPage: React.FC = () => {
   // mount can race an explicit load, and the late response would otherwise
   // replace the document (and attach the wrong savings card).
   const loadRequestIdRef = useRef(0);
-  const requestedQueryRef = useRef<typeof loadedQuery>(null);
-  const snapshotRequestRef = useRef<AbortController | null>(null);
-  useEffect(() => () => {
-    ++loadRequestIdRef.current;
-    requestedQueryRef.current = null;
-    snapshotRequestRef.current?.abort();
-    snapshotRequestRef.current = null;
-  }, []);
-  const [snapshotBatch, setSnapshotBatch] = useState<SnapshotBatch | null>(null);
-  type SnapshotDialogSelection = SnapshotSelection & { key: number };
-  const [snapshotSelection, setSnapshotSelection] = useState<SnapshotDialogSelection | null>(null);
-  const [restoreAttention, setRestoreAttention] = useState<{
-    selection: SnapshotDialogSelection;
-    status: RestoreAttention;
-  } | null>(null);
-  const pendingRestore = restoreAttention?.selection ?? null;
-  const nextSnapshotKey = useRef(0);
-  const activeSnapshots = activeDoc === doc ? snapshotBatch : null;
-  const hasSnapshots = activeSnapshots?.scope && Object.values(activeSnapshots.step_snapshots).some(rows => rows.length > 0);
-  const openSnapshot = (snapshot: WorkspaceSnapshot) => {
-    const scope = activeSnapshots?.scope;
-    if (!scope) return;
-    if (pendingRestore?.snapshot.id === snapshot.id
-      && pendingRestore.scope.ws_id === scope.ws_id && pendingRestore.scope.path === scope.path) {
-      setSnapshotSelection(pendingRestore);
-      return;
-    }
-    setSnapshotSelection({ snapshot, scope, restoreEnabled: !!activeSnapshots.restore_enabled,
-      key: ++nextSnapshotKey.current });
-  };
-  // Keep the pending dialog mounted so closing it retains the original confirmation token.
-  const snapshotDialogs = [
-    pendingRestore?.key !== snapshotSelection?.key ? pendingRestore : null,
-    snapshotSelection,
-  ];
-  const pendingRestoreTitle = pendingRestore && t(restoreAttention?.status === 'failed'
-    ? 'snapshot.failedRestore' : 'snapshot.pendingRestore', {
-    name: pendingRestore.snapshot.meta.message || pendingRestore.snapshot.id,
-  });
 
   // Load data
   const handleLoad = useCallback(async (type?: 'session' | 'conversation', id?: string) => {
@@ -852,9 +733,6 @@ export const AtifViewerPage: React.FC = () => {
     const i = id ?? queryId;
     if (!i.trim()) return;
     const requestId = ++loadRequestIdRef.current;
-    requestedQueryRef.current = { type: qt, id: i.trim() };
-    snapshotRequestRef.current?.abort();
-    snapshotRequestRef.current = null;
 
     const nextParams: Record<string, string> = { type: qt, id: i.trim() };
     const currentSearchParams = searchParamsRef.current;
@@ -883,7 +761,6 @@ export const AtifViewerPage: React.FC = () => {
     // re-requested for a document that names a session: a trajectory without
     // one would otherwise keep showing the previous trajectory's numbers.
     setSavingsDetail(null);
-    setSnapshotBatch(null);
 
     try {
       let data: AtifDocument;
@@ -896,20 +773,6 @@ export const AtifViewerPage: React.FC = () => {
       if (requestId !== loadRequestIdRef.current) return;
       setDoc(data);
       setLoadedQuery({ type: qt, id: i.trim() });
-      // This optional extension must not replace the trajectory or break older servers.
-      const snapshots = new AbortController();
-      snapshotRequestRef.current = snapshots;
-      fetchWorkspaceSnapshots(qt, i.trim(), snapshots.signal).then(batch => {
-        if (requestId === loadRequestIdRef.current && snapshotsMatchDocument(batch, data)) setSnapshotBatch(batch);
-      }).catch(async error => {
-        if (requestId !== loadRequestIdRef.current || !(error instanceof ApiRequestError) || error.status !== 401) return;
-        if (await canUnlockWorkspaceSnapshots(qt, i.trim(), snapshots.signal) && requestId === loadRequestIdRef.current) {
-          const loginParams = new URLSearchParams({ atif: new URLSearchParams(nextParams).toString() });
-          window.location.replace(`#/login?${loginParams}`);
-        }
-      }).finally(() => {
-        if (snapshotRequestRef.current === snapshots) snapshotRequestRef.current = null;
-      });
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
       // Round selection follows the node the URL restored, not always the root.
@@ -950,24 +813,17 @@ export const AtifViewerPage: React.FC = () => {
     setSelectedRound(initialRound(groupIntoRounds(stepsOf(findNodeByPath(tree, urlPath).doc), t), new Set()));
   }, [searchParams, tree, nodePath, t]);
 
-  // Hash navigation can change the target without remounting the viewer.
-  const urlType = searchParams.get('type');
-  const urlId = searchParams.get('id')?.trim();
+  // Auto-load from URL on mount
   useEffect(() => {
-    if ((urlType !== 'session' && urlType !== 'conversation') || !urlId) {
-      requestedQueryRef.current = null;
-      return;
+    const urlType = searchParams.get('type') as 'session' | 'conversation' | null;
+    const urlId = searchParams.get('id');
+    if (urlType && urlId) {
+      setQueryType(urlType);
+      setQueryId(urlId);
+      handleLoad(urlType, urlId);
     }
-    const requested = requestedQueryRef.current;
-    if (requested?.type === urlType && requested.id === urlId) return;
-    if (doc && loadedQuery?.type === urlType && loadedQuery.id === urlId) {
-      requestedQueryRef.current = loadedQuery;
-      return;
-    }
-    setQueryType(urlType);
-    setQueryId(urlId);
-    void handleLoad(urlType, urlId);
-  }, [urlType, urlId, handleLoad, doc, loadedQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // JSON file import
   const handleFileImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -977,11 +833,8 @@ export const AtifViewerPage: React.FC = () => {
     // next request id invalidates any in-flight network response (and any
     // earlier import), and this read is in turn invalidated by a newer load.
     const requestId = ++loadRequestIdRef.current;
-    snapshotRequestRef.current?.abort();
-    snapshotRequestRef.current = null;
     setLoading(true);
     setError(null);
-    setSnapshotBatch(null);
     const reader = new FileReader();
     reader.onload = (ev) => {
       if (requestId !== loadRequestIdRef.current) return;
@@ -1084,19 +937,6 @@ export const AtifViewerPage: React.FC = () => {
       </header>
 
       <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
-        {pendingRestore && (
-          <aside aria-label={t(restoreAttention?.status === 'failed' ? 'snapshot.failedRestoreLabel' : 'snapshot.pendingRestoreLabel')}
-            className="sticky top-3 z-30 ml-auto flex max-w-[22rem] flex-col gap-3 rounded-xl border-2 border-red-400 bg-red-50 p-5 shadow-md">
-            <p role="status" className="break-words text-base font-semibold leading-snug text-red-950">
-              {pendingRestoreTitle}
-            </p>
-            <p title={pendingRestore.scope.path} className="truncate font-mono text-xs text-red-800">{pendingRestore.scope.path}</p>
-            <button type="button" onClick={() => setSnapshotSelection(pendingRestore)}
-              className="rounded-lg border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-900 hover:bg-red-100">
-              {t(restoreAttention?.status === 'failed' ? 'snapshot.viewFailedRestore' : 'snapshot.viewPendingRestore')}
-            </button>
-          </aside>
-        )}
         {/* Input Controls */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Type toggle */}
@@ -1274,9 +1114,6 @@ export const AtifViewerPage: React.FC = () => {
                   <span className="text-indigo-600">{selectedNode.label} · </span>
                 )}
                 {t('atif.interactionTrajectory')}
-                {hasSnapshots && <span className="ml-3 inline-block max-w-full truncate align-middle rounded-md bg-green-50 px-2 py-1 font-mono text-xs font-normal text-green-700" title={activeSnapshots!.scope!.path}>
-                  {t('snapshot.workspace', { path: activeSnapshots!.scope!.path })}
-                </span>}
                 <span className="ml-2 text-sm font-normal text-gray-400">
                   {t('atif.roundsSteps', { rounds: rounds.length, steps: steps.length })}
                 </span>
@@ -1325,8 +1162,6 @@ export const AtifViewerPage: React.FC = () => {
                         onToggleSection={toggleSection}
                         savingsMap={savingsMap}
                         onNavigateSubagent={navigateToSubagent}
-                        snapshotBatch={activeSnapshots}
-                        onOpenSnapshot={openSnapshot}
                       />
                     ) : (
                       <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
@@ -1351,10 +1186,6 @@ export const AtifViewerPage: React.FC = () => {
           </>
         )}
       </main>
-      {snapshotDialogs.map(selection => selection && <WorkspaceSnapshotDialog key={selection.key} selection={selection}
-        open={selection.key === snapshotSelection?.key} onClose={() => setSnapshotSelection(null)}
-        restoreBlocked={pendingRestore !== null && pendingRestore.key !== selection.key}
-        onRestoreAttentionChange={status => setRestoreAttention(status ? { selection, status } : null)} />)}
     </>
   );
 };
