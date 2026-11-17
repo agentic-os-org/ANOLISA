@@ -1,0 +1,20 @@
+{
+  "category": "tabular",
+  "samples": [
+    {
+      "id": "quoted-csv-complete",
+      "content_lines": ["\"id\",\"message\",\"score\"", "\"row-01\",\"完整值-01\",\"1.00\"", "\"row-02\",\"完整值-02\",\"2.00\"", "\"row-03\",\"完整值-03\",\"3.00\"", "\"row-04\",\"完整值-04\",\"4.00\"", "\"row-05\",\"完整值-05\",\"5.00\"", "\"row-06\",\"完整值-06\",\"6.00\"", "\"row-07\",\"完整值-07\",\"7.00\"", "\"row-08\",\"完整值-08\",\"8.00\""],
+      "ground_truth": ["完整值-01", "完整值-08", "1.00", "8.00", "row-05"]
+    },
+    {
+      "id": "quoted-tsv-complete",
+      "content_lines": ["\"id\"\t\"message\"\t\"score\"", "\"row-01\"\t\"完整值-01\"\t\"1.00\"", "\"row-02\"\t\"完整值-02\"\t\"2.00\"", "\"row-03\"\t\"完整值-03\"\t\"3.00\"", "\"row-04\"\t\"完整值-04\"\t\"4.00\""],
+      "ground_truth": ["完整值-01", "完整值-04", "1.00", "4.00"]
+    },
+    {
+      "id": "malformed-table-control",
+      "content_lines": ["id,message,score", "row-1,unbalanced", "row-2,unchanged,2.00"],
+      "ground_truth": ["unbalanced", "row-2,unchanged,2.00"]
+    }
+  ]
+}

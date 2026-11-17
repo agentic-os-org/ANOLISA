@@ -18,9 +18,39 @@
 
 use std::path::PathBuf;
 use tokenless_l2_bench::l2::Category;
+use tokenless_l2_bench::l2::samples;
 use tokenless_l2_bench::l2::samples::{
     load_code_samples, load_command_specs, load_json_samples, load_probe_questions, probe_file_stem,
 };
+
+#[test]
+fn json_command_facts_have_nonempty_and_failing_controls() {
+    use tokenless_l2_bench::l2::retention;
+    for fixture in ["search_results_100.json", "structured_logs_100.json"] {
+        let path = l2_dir().join("fixtures/json").join(fixture);
+        let text = std::fs::read_to_string(path).unwrap();
+        let facts = samples::extract_dynamic_ground_truth(Category::Command, &text).unwrap();
+        assert!(!facts.is_empty(), "{fixture}: empty retention denominator");
+        let original = retention::check(&facts, &text).unwrap();
+        assert_eq!(original.passed, original.total);
+        assert_eq!(
+            retention::check(&facts, "unrelated empty frame")
+                .unwrap()
+                .passed,
+            0
+        );
+    }
+}
+
+#[test]
+fn docker_facts_choose_names_instead_of_container_ids() {
+    let text = "CONTAINER ID  IMAGE  COMMAND  CREATED  STATUS  PORTS  NAMES\n3f2a1b9c8d7e  image  cmd  2 days  Up  80/tcp  fixture-api\naa11bb22cc33  image  cmd  2 days  Up  81/tcp  fixture-worker\n";
+    let facts = samples::extract_dynamic_ground_truth(Category::Command, text).unwrap();
+    let serialized = serde_json::to_string(&facts).unwrap();
+    assert!(serialized.contains("fixture-api"));
+    assert!(serialized.contains("fixture-worker"));
+    assert!(!serialized.contains("3f2a1b9c8d7e"));
+}
 
 fn l2_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
@@ -157,9 +187,19 @@ fn retention_text_is_unescaped_for_wrapped_text() {
 #[test]
 fn command_specs_are_well_formed() {
     let specs = load_command_specs(&l2_dir()).expect("load command specs");
-    // 2 command + 2 grep + 5 diff (two live git ranges, plus one committed
-    // fixture measured through three rtk entry points).
-    assert_eq!(specs.len(), 9);
+    // 15 command (git, ls, docker, find, cargo/pytest builds and tests, JSON
+    // read through cat) + 2 grep + 5 diff (two live git ranges, one committed
+    // fixture on the production path and two explicit rtk entry points).
+    assert_eq!(specs.len(), 22);
+    let explicit: Vec<&str> = specs
+        .iter()
+        .filter(|spec| spec.is_explicit_rtk())
+        .map(|spec| spec.id.as_str())
+        .collect();
+    assert_eq!(
+        explicit,
+        ["static_code_diff_aggressive", "static_code_diff_smart"]
+    );
     for spec in &specs {
         assert!(!spec.id.is_empty());
         assert!(!spec.argv.is_empty(), "spec {} has empty argv", spec.id);
@@ -171,6 +211,10 @@ fn command_specs_are_well_formed() {
             "spec {} resolves to an empty rtk invocation",
             spec.id
         );
+        if let Some(leaf) = &spec.fresh_dir {
+            samples::validate_fresh_leaf(leaf).expect("safe fixture leaf");
+            assert!(spec.argv.iter().any(|word| word == "{{fresh_dir}}"));
+        }
         assert_eq!(spec.ground_truth_source, "dynamic", "spec {}", spec.id);
         assert!(!spec.cwd_rel.is_empty(), "spec {}", spec.id);
         let category = spec.parsed_category().expect("category parses");

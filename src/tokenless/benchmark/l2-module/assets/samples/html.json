@@ -1,0 +1,15 @@
+{
+  "category": "html",
+  "samples": [
+    {
+      "id": "html-renderer-opt-in",
+      "content_lines": ["<!doctype html><html><head><title>Fixture</title><style>body { margin:0; padding:0; color:black; font-family:monospace; background:white; } main { padding:10px; margin:20px; }</style></head><body><nav>navigation menus and redundant presentation</nav><main><h1>Required section</h1><p>Complete paragraph evidence is retained for this offline controlled fixture. Required facts stay visible in the rendered view.</p><code>required_fact = 42</code></main></body></html>"],
+      "ground_truth": ["Required section", "required_fact = 42", "Complete paragraph evidence"]
+    },
+    {
+      "id": "html-fragment-passthrough-control",
+      "content_lines": ["<p>Short fragment</p>"],
+      "ground_truth": ["Short fragment"]
+    }
+  ]
+}

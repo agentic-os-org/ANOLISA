@@ -21,6 +21,7 @@
 //! because the three sides are timed on deliberately different bases and a
 //! bare number table would invite invalid cross-side latency comparisons.
 
+use crate::l2::runtime_side::Mode;
 use crate::l2::stats::LatencyPercentiles;
 use crate::l2::task_sim::TaskSideReplay;
 use crate::l2::{Category, L2Error};
@@ -219,6 +220,10 @@ pub struct RunSummary {
     pub rtk_dirty: Option<bool>,
     /// `os/arch` of the machine that ran the comparison.
     pub platform: String,
+    /// Production Runtime mode the tokenless side ran under.
+    pub mode: Mode,
+    /// 实际生效的 EntryOptions，包含固定开关与运行时 launcher/receipt 路径。
+    pub resolved_entry_options: Value,
     pub headroom_available: bool,
     pub rtk_available: bool,
     /// Probe model id, or `None` when probing was disabled/keyless.
@@ -257,9 +262,88 @@ impl Report {
         Ok(())
     }
 
+    /// 输出独立 Tokenless 结果；不会将未执行的 Headroom 声称为失败或比较结果。
+    pub fn write_tokenless(&self, dir: &Path) -> Result<(), L2Error> {
+        if self.summary.headroom_available
+            || self
+                .categories
+                .iter()
+                .any(|category| category.headroom.is_some())
+        {
+            return Err(L2Error::InvalidSample(
+                "Tokenless-only report contains a measured comparator".to_owned(),
+            ));
+        }
+        std::fs::create_dir_all(dir)?;
+        let mut value = self.to_json();
+        value["report_kind"] = json!("tokenless-only");
+        value["comparison_status"] = json!("not_executed");
+        let recovery_storage = self.summary.mode.recovery_storage();
+        value["coverage"] = json!({"comparator": "not_executed",
+            "semantic": if self.summary.probe_model.is_some() { "requested; see per-category coverage" } else { "not_executed" },
+            "runtime_arbitration": "measured",
+            "host_retrieval_tool": "not_measured"});
+        value["recovery_storage"] = json!(recovery_storage);
+        value["component_modes"] = json!({
+            "entry": "production PreTool/execution/PostTool for commands; production PostTool for static payloads",
+            "runtime_mode": self.summary.mode,
+            "final_acceptance": "production dispatch, arbitration and recovery gate included",
+            "recovery_storage": recovery_storage,
+            "model_visible_output": "accepted output plus additional context"});
+        std::fs::write(
+            dir.join("report.json"),
+            serde_json::to_string_pretty(&value)?,
+        )?;
+        let mut md = format!(
+            "# Tokenless L2 独立报告\n\n- 时间：{}\n- SHA：`{}`{}{}\n- 参考侧：未执行，不构成对比结论\n\n",
+            self.summary.date,
+            self.summary.git_sha,
+            dirty_suffix(self.summary.git_dirty),
+            untracked_suffix(self.summary.untracked_build_inputs)
+        );
+        md.push_str("| 类别 | 独立 N | 重复数 | 压缩率 | 保留项 | 语义得分 | p99 ms |\n|---|---:|---:|---:|---|---|---:|\n");
+        let mut details = String::new();
+        for category in &self.categories {
+            if let Some(side) = &category.tokenless {
+                let semantic = side
+                    .semantic_score
+                    .map(|score| format!("{score:.4}"))
+                    .unwrap_or_else(|| "未测".to_owned());
+                md.push_str(&format!(
+                    "| {} | {} | {} | {:.2}% | {}/{} | {} | {:.4} |\n",
+                    category.category,
+                    side.n,
+                    side.reps,
+                    side.compression_mean * 100.0,
+                    side.retention_passed,
+                    side.retention_total,
+                    semantic,
+                    side.latency_ms.p99
+                ));
+                details.push_str(&format!(
+                    "\n{} 时延口径：{}；丢失项：{:?}\n",
+                    category.category, side.latency_basis, side.retention_missing
+                ));
+            } else {
+                md.push_str(&format!(
+                    "| {} | 未完成 | — | — | — | — | — |\n",
+                    category.category
+                ));
+            }
+        }
+        md.push_str(&details);
+        md.push_str(&format!("\n## 门禁与边界\n\n- 质量信号：{}\n- 降级：{:?}\n- 静态重复不增加独立 N；未探测的语义得分不按零或成功处理。\n- Token 使用 o200k_base 主计数，离线计数不等于百炼账单。\n- 静态输入经生产 PostTool；命令经调用前处理、实际执行和调用后处理，显式 RTK 路径另标。生产分派、最终仲裁与恢复门禁参与测量。\n- 运行模式：{}；原文恢复存储：{}。内存中可取回原文不代表真实宿主的恢复工具已经可用。\n",
+            serde_json::to_string(&self.quality_gate())?, self.summary.degradations,
+            self.summary.mode, recovery_storage));
+        std::fs::write(dir.join("TOKENLESS_L2_REPORT_zh.md"), md)?;
+        Ok(())
+    }
+
     /// The machine-readable report, quality gate included.
     pub fn to_json(&self) -> Value {
         json!({
+            "schema_version": 2,
+            "report_kind": "comparison",
             "summary": self.summary,
             "categories": self.categories,
             "tasks": self.tasks,
@@ -334,7 +418,7 @@ impl Report {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# L2 Module Comparison Report\n\n");
-        md.push_str("tokenless vs headroom on identical one-round tool outputs.\n\n");
+        md.push_str("tokenless vs headroom on paired one-round tool outputs; explicit RTK entries are separate conditions and excluded from the headline pools.\n\n");
 
         md.push_str("## Summary\n\n");
         md.push_str(&format!("- Date: {}\n", self.summary.date));
@@ -363,6 +447,10 @@ impl Report {
         ));
         md.push_str(&format!("- Platform: {}\n", self.summary.platform));
         md.push_str(&format!(
+            "- Runtime mode: {}\n- Resolved EntryOptions: `{}`\n",
+            self.summary.mode, self.summary.resolved_entry_options
+        ));
+        md.push_str(&format!(
             "- Headroom side: {}\n",
             if self.summary.headroom_available {
                 "available"
@@ -389,8 +477,8 @@ impl Report {
         md.push_str("## Latency bases\n\n");
         md.push_str(
             "| Side | Basis |\n|---|---|\n\
-             | tokenless (json/code) | in-process (`Instant` around the compress call) |\n\
-             | tokenless (command/grep/diff) | rtk wrapped-minus-raw wall clock (includes process startup) |\n\
+             | tokenless (static payloads) | production PostTool dispatch and final arbitration, in-process |\n\
+             | tokenless (commands) | production PreTool + PostTool time plus rewritten-minus-raw wall clock when rewritten (includes process startup) |\n\
              | headroom | worker-internal (`perf_counter` around `router.compress`) |\n\n\
              Latency numbers are **not comparable across bases**; compare within a row's basis only.\n\n",
         );

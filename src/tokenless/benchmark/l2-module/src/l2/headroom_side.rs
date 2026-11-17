@@ -24,7 +24,7 @@
 //! around `router.compress` only — pipe and JSON framing excluded).
 
 use crate::l2::L2Error;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -61,6 +61,14 @@ pub struct HeadroomProvenance {
     pub untracked: Option<usize>,
 }
 
+/// One CCR marker in a compressed output and the original Headroom's store holds
+/// for it (`None` when the store no longer has it).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CcrEntry {
+    pub key: String,
+    pub original: Option<String>,
+}
+
 /// One worker response line. `error` is set instead of `compressed` when the
 /// worker caught an exception for that request; the worker stays alive.
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +87,12 @@ pub struct WorkerResponse {
     pub hr_tokens_before: Option<u64>,
     #[serde(default)]
     pub hr_tokens_after: Option<u64>,
+    /// Originals behind the CCR markers, for retrieval-enabled semantic tests.
+    #[serde(default)]
+    pub ccr: Vec<CcrEntry>,
+    /// 可选恢复证据不可用时保留压缩测量，并明确记录原因。
+    #[serde(default)]
+    pub warnings: Vec<String>,
     #[serde(default)]
     pub error: Option<String>,
 }
