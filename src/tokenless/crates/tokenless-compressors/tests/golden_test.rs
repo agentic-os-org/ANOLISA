@@ -30,6 +30,7 @@ const FIXTURES: &[&str] = &[
     "go_failure",
     "shell_success",
     "shell_failure",
+    "gradle/mockito_incremental",
 ];
 
 /// Task facts (§6.1) that must survive compression verbatim: error identity,
@@ -98,6 +99,14 @@ const PROBES: &[(&str, &[&str])] = &[
             "src/util.c:42:5: error: 'foo' undeclared (first use in this function)",
             "make: *** [Makefile:12: build/util.o] Error 1",
             "Exit code: 2",
+        ],
+    ),
+    (
+        "gradle/mockito_incremental",
+        &[
+            "> Task :mockito-core:javadoc FAILED",
+            "Execution failed for task ':mockito-core:javadoc'.",
+            "BUILD FAILED in",
         ],
     ),
 ];
@@ -227,8 +236,11 @@ fn reassemble(output: &str, store: &InMemoryStore) -> String {
             result.push_str(line);
         }
     }
-    result
+    gradle_oracle::decode(&result)
 }
+
+#[path = "common/gradle_oracle.rs"]
+mod gradle_oracle;
 
 fn strip_sgr_for_expected_reassembly(input: &str) -> String {
     let mut output = String::with_capacity(input.len());

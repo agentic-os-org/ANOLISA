@@ -1,0 +1,39 @@
+> Task :buildSrc:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :buildSrc:generateExternalPluginSpecBuilders UP-TO-DATE
+> Task :buildSrc:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+> Task :buildSrc:compilePluginsBlocks UP-TO-DATE
+> Task :buildSrc:generatePrecompiledScriptPluginAccessors UP-TO-DATE
+> Task :buildSrc:generateScriptPluginAdapters UP-TO-DATE
+> Task :buildSrc:compileKotlin UP-TO-DATE
+> Task :buildSrc:compileJava NO-SOURCE
+> Task :buildSrc:compileGroovy NO-SOURCE
+> Task :buildSrc:pluginDescriptors UP-TO-DATE
+> Task :buildSrc:processResources UP-TO-DATE
+> Task :buildSrc:classes UP-TO-DATE
+> Task :buildSrc:jar UP-TO-DATE
+
+> Configure project :
+Building version '0.0.1-SNAPSHOT'
+  - reason: shipkit-auto-version caught an exception, falling back to reasonable default
+  - run with --debug for more info
+
+[Incubating] Problems report is available at: file:///tmp/gradle-cap/mockito-5.24.0/build/reports/problems/problems-report.html
+9 actionable tasks: 9 up-to-date
+
+Publishing Build Scan to Develocity...
+https://gradle.com/s/dh2iaryi7kgdi
+
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Task 'buid' not found in root project 'mockito' and its subprojects. Some candidates are: 'build'.
+
+* Try:
+> Run gradlew tasks to get a list of available tasks.
+> For more on name expansion, please refer to https://docs.gradle.org/8.14.2/userguide/command_line_interface.html#sec:name_abbreviation in the Gradle documentation.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 3s

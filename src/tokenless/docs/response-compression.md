@@ -58,10 +58,11 @@ compress_value(value, depth)
 
 ### Build Log 领域
 
-`BuildLogCompressor` 识别 Cargo/rustc、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C，
-以及具有明确 Shell 边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各 100 行、
-每端最多 32 KiB，不依赖请求中的 command；证据不足时透传。pnpm 需要完整完成行加配套进度、
-完整通知或依赖区段，或者至少三条完整进度加 `Packages:` 行；孤立关键词、加号或框线不足以识别。
+`BuildLogCompressor` 识别 Cargo/rustc、pytest、unittest/Django、npm/Jest、pnpm、Maven、Gradle、Go、
+Make/C，以及具有明确 Shell 边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各
+100 行、每端最多 32 KiB，不依赖请求中的 command；证据不足时透传。pnpm 需要完整完成行加配套
+进度、完整通知或依赖区段，或者至少三条完整进度加 `Packages:` 行；孤立关键词、加号或框线不足
+以识别。Gradle 需要两条连续完整 `> Task :<路径>[ <状态>]` 记录加日志形头部上下文。
 
 处理沿用 SGR 颜色清理，然后在原始行坐标上规划互不重叠的布局替换与进度省略，一次渲染。
 布局压紧和进度缩减可同时生效，共用现有 `build_log_reduction` 标签，每次结果只报告一次。
@@ -70,7 +71,7 @@ compress_value(value, depth)
 | 操作 | 内容 | 恢复要求 |
 |---|---|---|
 | `terminal_cleanup` | 清理已有契约允许的 SGR 颜色序列 | `lossless`，无需 Stash |
-| `build_log_reduction` | pnpm 已识别通知、依赖清单和装饰条的布局压紧，以及连续常规进度中间部分的省略 | 仅布局为语义 `lossless`，无需 Stash/恢复提示，不保证全文字节可逆；包含进度省略时为 `retrievable`，要求 Stash 与恢复路径均可用 |
+| `build_log_reduction` | pnpm 已识别通知、依赖清单和装饰条的布局压紧，Maven 与 Gradle 任务记录的字面模板共享，以及连续常规进度中间部分的省略 | 仅布局为语义 `lossless`，无需 Stash/恢复提示，不保证全文字节可逆；包含进度省略时为 `retrievable`，要求 Stash 与恢复路径均可用 |
 
 pnpm 只处理完整 LF 记录。CRLF、裸 CR、TAB、OSC、光标控制或残缺 ESC 会停用 pnpm 新转换，
 只保留既有 SGR cleanup-only 行为。进度和依赖行必须位于原始顶层列；不把脚本、引用、代码围栏
@@ -224,7 +225,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | ContentType | 前提 | 领域处理 | 默认 |
 |------|------|------|------|
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无；字符串值中的 HTML 另需 HTML 转写开启、来源不是 `file_read`、Stash 与恢复路径可用 | `JsonCompressor`：Record Reduction、截断、Compact JSON、可选 TOON，以及字符串值中 HTML 的就地转写 | 启用 |
-| `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：SGR Cleanup、pnpm 无需恢复的布局压紧、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
+| `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：SGR Cleanup、pnpm/Maven/Gradle 无需恢复的布局压紧、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
 | `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭 |

@@ -3,6 +3,7 @@
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod gradle;
 mod maven;
 mod pnpm;
 mod template;
@@ -112,11 +113,40 @@ impl BuildLogCompressor {
         let (Some(mut format), sample) = detect_format(&cleaned) else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        if !matches!(format, BuildLogFormat::Pnpm | BuildLogFormat::Maven) && store.is_none() {
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
+        ) && store.is_none()
+        {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
+        if format == BuildLogFormat::Gradle {
+            let gradle_lines = lines.as_slice();
+            let layouts = gradle::plan(gradle_lines);
+            if !layouts.is_empty() {
+                // Gradle edits are exact replacements of complete task-line
+                // runs; failure records never enter a run, so no role guard
+                // is needed beyond the strict reassembled savings check.
+                let layout_output = render_reduced(gradle_lines, &[], &[], recovery, &layouts);
+                if saves_both(&cleaned, &layout_output) {
+                    lossless_operations.push(BuildLogOperation::Reduction);
+                    return lossless_outcome(layout_output, lossless_operations, Vec::new(), 0);
+                }
+            }
+            // No-edit or no-savings Gradle logs retain anchored Generic
+            // recovery when Stash plus Shell/Tool recovery are available.
+            // Already encoded results are terminal: never re-route them.
+            if store.is_none() || gradle::is_compacted(gradle_lines) {
+                return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
+            }
+            if let Some(generic) = detect_generic(&sample) {
+                format = generic;
+            } else {
+                return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
+            }
+        }
         let maven_layouts = if format == BuildLogFormat::Maven {
             maven::plan(&lines)
         } else {
@@ -371,8 +401,11 @@ fn render_marker(
 fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     let mut sample = sample_lines(input);
     let maven = maven::detect(&sample);
-    // Keep CR visible to Maven, whose layout grammar only handles LF records.
-    // Existing detectors retain the CRLF normalization previously done by lines().
+    // Maven and the scoring detectors match line-anchored grammars over
+    // normalized records, so strip the trailing CR of CRLF lines. Keep CR
+    // visible to Gradle, whose grammar only handles LF records; CRLF-only
+    // logs stay on the other detectors.
+    let gradle = gradle::detect(&sample);
     for line in &mut sample {
         if line.ends_with('\r') {
             line.pop();
@@ -383,6 +416,9 @@ fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
     }
     if maven {
         return (Some(BuildLogFormat::Maven), sample);
+    }
+    if gradle {
+        return (Some(BuildLogFormat::Gradle), sample);
     }
     let formats = [
         BuildLogFormat::Cargo,

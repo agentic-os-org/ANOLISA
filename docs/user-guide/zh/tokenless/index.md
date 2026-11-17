@@ -384,7 +384,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm 和 Maven 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试/包安装输出路由给 `BuildLogCompressor`，用于 SGR 清理、无需恢复的 pnpm、Maven 和 Gradle 布局压紧和可恢复进度缩减；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
@@ -569,6 +569,41 @@ URL 不在初版下载语法内，保持原样。已经压缩的结果不会再�
 来源及替换保护继续生效，Tool Error 保持原始输出。Maven 命令保留当前 PreTool RTK 行为；
 本功能不新增命令改写豁免，也不从 PostTool 调用 RTK。本地语料与适配层回放结果不能证明
 真实 Agent、完整任务或账单收益。
+
+### Gradle 构建输出
+
+包含 Gradle BuildLog 支持的源码构建通过与 Maven 相同的 PostTool 内容路由压缩已识别的
+原生 Gradle 输出。识别不依赖命令字符串，也不依赖 Daemon 或 configuration-cache 状态；
+结构压缩沿用 `build_log_reduction` 操作，报告 `lossless`，无需恢复能力且不写入 Stash。
+
+识别要求有界首尾样本中存在两条连续完整的 `> Task :<path>[ <status>]` 记录。头部采样预算
+内的可见开头必须符合日志形态，可先有 `$ ` 命令提示、调用 `gradle`／`gradlew` 的 `set -x`
+轨迹、JVM 选项接收或已知 HotSpot／访问告警、Wrapper 发行包下载（`Downloading`／`Unzipping
+https://services.gradle.org/distributions/`）、Daemon 生命周期行、configuration-cache
+输出、`> Configure project :` 前导或 `Welcome to Gradle` 横幅。Markdown 代码围栏内的行
+不提供 Gradle 证据，证据窗口不得跨越围栏或采样缺口，围栏规则与 Maven 一致。仅有任务行而
+没有任何日志形态的头部上下文，不足以确定 Gradle 路由。含 CR 的记录不参与结构识别，因此
+全部采用 CRLF 换行的输出使用其他内容检测器；Gradle 结构压缩仅支持 LF 记录。
+
+连续完整的非失败任务记录通过共享字面量模板压缩：块以 `Gradle templates` 和包含字面量、
+行数的 JSON 头部开始，随后每条记录一行，包含从零开始的模板编号及 TAB 分隔字段。将字段与
+相应模板的字面量交错拼接，再追加 LF，即可还原原始行。所有行保留原有顺序和重复项。当一个
+模板覆盖三条及以上记录时，共享的模块路径前缀会在 `:`／`-`／`_` 边界处并入模板字面量，每行
+只携带尾部。每个任务路径、状态（`UP-TO-DATE`、`FROM-CACHE`、`SKIPPED`、`NO-SOURCE` 及
+无后缀的已执行）与顺序均保留。
+
+警告、弃用提示、测试输出、堆栈跟踪、非 SGR 控制序列（`\r`、`\t`、`\x1b[0K`）、残缺行及
+任何未知输出关闭当前识别范围；`> Task :<path> FAILED` 记录及其诊断逐字保留并维持原有
+邻接。只有出现两条连续完整的非失败任务行后，范围才重新开启。每块上限为 256 条记录、
+64 KiB，超限块整体保留；结果中任何单行超过 64 KiB 时，禁用该结果的 Gradle 编辑。每个结果
+最多应用 256 次编辑；达到上限后保留已完成的编辑，其余后缀保持原样。已经压缩的结果不会
+再次处理。每块及完整候选都必须同时减少字符数和估算 token 数。
+
+`> Task :` 行永远不会进入独立 Generic 进度模板。如果无法规划 Gradle 编辑，带命令／退出
+状态锚点的日志仍可在 Stash 和 Shell/Tool 恢复可用时使用原有 Generic 进度缩减，回退规则
+与 Maven 相同。Runtime 和适配层现有的大小、状态、来源及替换保护继续生效：Tool Error
+保持原始输出，Gradle 命令保留当前 PreTool RTK 行为。捕获语料的来源记录与验证限制见
+`tests/fixtures/build_logs/gradle/README_zh.md`。
 
 ### CSV/TSV 压紧保留完整表格
 

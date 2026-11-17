@@ -1,0 +1,459 @@
+> Task :buildSrc:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :buildSrc:generateExternalPluginSpecBuilders UP-TO-DATE
+> Task :buildSrc:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+> Task :buildSrc:compilePluginsBlocks UP-TO-DATE
+> Task :buildSrc:generatePrecompiledScriptPluginAccessors UP-TO-DATE
+> Task :buildSrc:generateScriptPluginAdapters UP-TO-DATE
+> Task :buildSrc:compileKotlin UP-TO-DATE
+> Task :buildSrc:compileJava NO-SOURCE
+> Task :buildSrc:compileGroovy NO-SOURCE
+> Task :buildSrc:pluginDescriptors UP-TO-DATE
+> Task :buildSrc:processResources UP-TO-DATE
+> Task :buildSrc:classes UP-TO-DATE
+> Task :buildSrc:jar UP-TO-DATE
+
+> Configure project :
+Building version '0.0.1-SNAPSHOT'
+  - reason: shipkit-auto-version caught an exception, falling back to reasonable default
+  - run with --debug for more info
+
+> Task :mockito-bom:assemble UP-TO-DATE
+> Task :mockito-bom:check UP-TO-DATE
+> Task :mockito-bom:build UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:processResources NO-SOURCE
+> Task :mockito-extensions:mockito-errorprone:processResources NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:classes UP-TO-DATE
+> Task :mockito-extensions:mockito-proxy:processResources
+> Task :mockito-extensions:mockito-errorprone:sourcesJar
+> Task :mockito-integration-tests:extensions-tests:jar
+> Task :mockito-extensions:mockito-subclass:processResources
+> Task :mockito-integration-tests:extensions-tests:assemble
+> Task :mockito-extensions:mockito-junit-jupiter:sourcesJar
+> Task :mockito-extensions:mockito-errorprone:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-junit-jupiter:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:licenseMain NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:sourcesJar
+> Task :mockito-extensions:mockito-proxy:sourcesJar
+> Task :mockito-extensions:mockito-subclass:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-proxy:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-proxy:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-subclass:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-proxy:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-subclass:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-subclass:license UP-TO-DATE
+> Task :mockito-extensions:mockito-proxy:license UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:licenseMain UP-TO-DATE
+> Task :mockito-integration-tests:extensions-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:extensions-tests:license UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:license UP-TO-DATE
+> Task :mockito-integration-tests:extensions-tests:processTestResources
+> Task :mockito-integration-tests:graalvm-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:graalvm-tests:licenseMain NO-SOURCE
+> Task :mockito-extensions:mockito-junit-jupiter:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:license UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:compileGroovy NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:groovy-inline-tests:jar
+> Task :mockito-integration-tests:groovy-inline-tests:assemble
+> Task :mockito-integration-tests:groovy-inline-tests:licenseMain NO-SOURCE
+> Task :mockito-extensions:mockito-junit-jupiter:osgiProperties
+> Task :mockito-integration-tests:groovy-inline-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:groovy-inline-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:groovy-inline-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:compileGroovy NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:groovy-tests:jar
+> Task :mockito-integration-tests:groovy-tests:assemble
+> Task :mockito-integration-tests:groovy-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:groovy-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:groovy-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:inline-mocks-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:inline-mocks-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:java-21-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:java-21-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:jar
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:assemble
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:processTestResources
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:jar
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:assemble
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:processTestResources
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:jar
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:assemble
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:processTestResources
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:compileKotlin NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:jar
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:assemble
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:processTestResources
+> Task :mockito-integration-tests:kotlin-tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :mockito-integration-tests:kotlin-tests:compileKotlin NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-tests:jar
+> Task :mockito-integration-tests:kotlin-tests:assemble
+> Task :mockito-integration-tests:kotlin-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-tests:processTestResources
+> Task :mockito-integration-tests:memory-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:memory-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:memory-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:memory-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:memory-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:module-named-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:module-named-tests:licenseMain NO-SOURCE
+Missing header in: mockito-integration-tests/module-named-tests/src/test/java/module-info.java
+> Task :mockito-integration-tests:module-named-tests:licenseTest
+> Task :mockito-integration-tests:module-named-tests:license
+> Task :mockito-integration-tests:module-named-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:module-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:module-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:module-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:module-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:module-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:classes UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:generatePomFileForMockitoLibraryPublication
+> Task :mockito-integration-tests:programmatic-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:programmatic-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:programmatic-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:programmatic-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:programmatic-tests:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-errorprone:generatePomFileForMockitoLibraryPublication
+> Task :mockito-extensions:mockito-proxy:generatePomFileForMockitoLibraryPublication
+> Task :mockito-extensions:mockito-subclass:generatePomFileForMockitoLibraryPublication
+> Task :mockito-integration-tests:osgi-tests:jar
+> Task :mockito-integration-tests:osgi-tests:assemble
+> Task :mockito-integration-tests:osgi-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:licenseOtherBundle UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:licenseTestBundle UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:compileOtherBundleJava
+> Task :mockito-integration-tests:osgi-tests:processOtherBundleResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:otherBundleClasses
+> Task :mockito-integration-tests:osgi-tests:otherBundle
+> Task :mockito-integration-tests:osgi-tests:processTestBundleResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:processTestResources NO-SOURCE
+> Task :mockito-core:compileJava
+
+> Task :mockito-extensions:mockito-proxy:compileJava NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:compileJava NO-SOURCE
+> Task :mockito-extensions:mockito-proxy:classes
+> Task :mockito-extensions:mockito-subclass:classes
+> Task :mockito-extensions:mockito-proxy:javadoc SKIPPED
+> Task :mockito-extensions:mockito-subclass:javadoc SKIPPED
+> Task :mockito-integration-tests:inline-mocks-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:compileJava NO-SOURCE
+> Task :mockito-core:copyMockMethodDispatcher
+> Task :mockito-integration-tests:inline-mocks-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:compileJava NO-SOURCE
+> Task :mockito-core:processResources NO-SOURCE
+> Task :mockito-integration-tests:graalvm-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:inline-mocks-tests:jar
+> Task :mockito-integration-tests:inline-mocks-tests:assemble
+> Task :mockito-integration-tests:graalvm-tests:jar
+> Task :mockito-extensions:mockito-proxy:javadocJar
+> Task :mockito-integration-tests:graalvm-tests:assemble
+> Task :mockito-extensions:mockito-proxy:checkstyleMain NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:javadocJar
+> Task :mockito-core:removeInjectionPackageFromModuleInfo
+> Task :mockito-core:classes
+> Task :mockito-extensions:mockito-subclass:checkstyleMain NO-SOURCE
+> Task :mockito-core:jar
+> Task :mockito-integration-tests:graalvm-tests:compileTestJava
+> Task :mockito-integration-tests:inline-mocks-tests:compileTestJava
+> Task :mockito-integration-tests:graalvm-tests:testClasses
+> Task :mockito-integration-tests:groovy-inline-tests:compileTestJava NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:compileTestJava
+> Task :mockito-extensions:mockito-subclass:jar
+> Task :mockito-extensions:mockito-subclass:assemble
+> Task :mockito-extensions:mockito-subclass:testClasses
+> Task :mockito-extensions:mockito-proxy:compileTestJava
+> Task :mockito-extensions:mockito-proxy:jar
+> Task :mockito-extensions:mockito-proxy:assemble
+> Task :mockito-extensions:mockito-proxy:testClasses
+> Task :mockito-extensions:mockito-errorprone:compileJava
+> Task :mockito-extensions:mockito-errorprone:classes
+> Task :mockito-extensions:mockito-errorprone:jar
+> Task :mockito-extensions:mockito-junit-jupiter:compileJava
+> Task :mockito-extensions:mockito-junit-jupiter:classes
+> Task :mockito-extensions:mockito-junit-jupiter:jar
+> Task :mockito-extensions:mockito-errorprone:javadoc
+> Task :mockito-extensions:mockito-errorprone:javadocJar
+> Task :mockito-extensions:mockito-errorprone:assemble
+> Task :mockito-core:javadoc
+> Task :mockito-integration-tests:groovy-inline-tests:compileTestGroovy
+> Task :mockito-extensions:mockito-errorprone:checkstyleMain
+> Task :mockito-extensions:mockito-proxy:checkstyleTest
+> Task :mockito-extensions:mockito-subclass:checkstyleTest
+
+> Task :mockito-extensions:mockito-proxy:test
+
+
+
+  [0K[32m6 passing [90m(4.6s)[m
+
+
+> Task :mockito-extensions:mockito-proxy:retryTest SKIPPED
+> Task :mockito-extensions:mockito-proxy:check
+> Task :mockito-extensions:mockito-proxy:generateMetadataFileForMockitoLibraryPublication SKIPPED
+
+> Task :mockito-extensions:mockito-subclass:test
+
+
+
+  [0K[32m2 passing [90m(5.3s)[m
+
+
+> Task :mockito-extensions:mockito-proxy:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-extensions:mockito-proxy:publishAllPublicationsToLocalRepository
+> Task :mockito-extensions:mockito-subclass:retryTest SKIPPED
+> Task :mockito-extensions:mockito-proxy:build
+> Task :mockito-integration-tests:groovy-inline-tests:testClasses
+> Task :mockito-extensions:mockito-subclass:check
+> Task :mockito-extensions:mockito-subclass:generateMetadataFileForMockitoLibraryPublication SKIPPED
+> Task :mockito-extensions:mockito-subclass:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-extensions:mockito-subclass:publishAllPublicationsToLocalRepository
+> Task :mockito-extensions:mockito-subclass:build
+> Task :mockito-integration-tests:groovy-tests:compileTestJava NO-SOURCE
+
+> Task :mockito-integration-tests:graalvm-tests:test
+
+
+
+  [0K[32m1 passing [90m(5.5s)[m
+
+
+> Task :mockito-integration-tests:graalvm-tests:check
+> Task :mockito-integration-tests:graalvm-tests:build
+> Task :mockito-integration-tests:inline-mocks-tests:testClasses
+
+> Task :mockito-integration-tests:groovy-inline-tests:test
+
+
+
+> Task :mockito-integration-tests:inline-mocks-tests:premainClinitSuppressionTest
+
+
+
+  [0K[32m1 passing [90m(3.5s)[m
+
+
+> Task :mockito-integration-tests:inline-mocks-tests:test
+
+
+
+> Task :mockito-integration-tests:groovy-tests:compileTestGroovy
+> Task :mockito-integration-tests:groovy-tests:testClasses
+> Task :mockito-extensions:mockito-junit-jupiter:javadoc
+
+
+> Task :mockito-integration-tests:groovy-tests:test
+
+
+
+> Task :mockito-integration-tests:groovy-inline-tests:test
+
+  [0K[32m1 passing [90m(9.1s)[m
+
+
+> Task :mockito-integration-tests:groovy-inline-tests:check
+> Task :mockito-integration-tests:groovy-inline-tests:build
+> Task :mockito-integration-tests:java-21-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:java-21-tests:jar
+> Task :mockito-integration-tests:java-21-tests:assemble
+
+> Task :mockito-extensions:mockito-errorprone:compileTestJava
+
+
+> Task :mockito-integration-tests:java-21-tests:compileTestJava
+> Task :mockito-integration-tests:java-21-tests:testClasses
+
+> Task :mockito-integration-tests:java-21-tests:testWithBytebuddyAgent
+
+
+
+> Task :mockito-extensions:mockito-errorprone:testClasses
+
+> Task :mockito-integration-tests:groovy-tests:test
+
+  [0K[32m1 passing [90m(10.9s)[m
+
+
+> Task :mockito-integration-tests:java-21-tests:testWithBytebuddyAgent
+
+  [0K[32m8 passing [90m(9.1s)[m
+
+
+> Task :mockito-integration-tests:groovy-tests:check
+> Task :mockito-integration-tests:groovy-tests:build
+
+> Task :mockito-integration-tests:java-21-tests:testWithEnableDynamicAgentLoading
+
+
+
+
+> Task :mockito-core:javadoc
+
+> Task :mockito-extensions:mockito-errorprone:checkstyleTest
+
+> Task :mockito-extensions:mockito-errorprone:test
+
+
+
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:compileTestJava
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:testClasses
+
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:test
+
+
+
+> Task :mockito-integration-tests:java-21-tests:testWithEnableDynamicAgentLoading
+
+  [0K[32m8 passing [90m(10.1s)[m
+
+
+> Task :mockito-integration-tests:java-21-tests:testWithMockitoAgent
+
+
+
+
+> Task :mockito-core:javadoc
+
+> Task :mockito-core:javadoc FAILED
+
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:test
+
+  [0K[32m1 passing [90m(14.3s)[m
+
+
+> Task :mockito-integration-tests:java-21-tests:testWithMockitoAgent
+
+  [0K[32m8 passing [90m(11.1s)[m
+
+
+> Task :mockito-extensions:mockito-junit-jupiter:javadoc
+
+> Task :mockito-extensions:mockito-errorprone:test
+
+  [0K[32m14 passing [90m(18.8s)[m
+
+
+> Task :mockito-extensions:mockito-errorprone:retryTest SKIPPED
+
+> Task :mockito-integration-tests:inline-mocks-tests:test
+
+  [0K[32m95 passing [90m(44.7s)[m
+
+
+> Task :mockito-extensions:mockito-junit-jupiter:javadoc
+
+> Task :mockito-extensions:mockito-junit-jupiter:javadoc FAILED
+
+[Incubating] Problems report is available at: file:///tmp/gradle-cap/mockito-5.24.0/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.14.2/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+109 actionable tasks: 75 executed, 34 up-to-date
+
+Publishing Build Scan to Develocity...
+https://gradle.com/s/c453mvhe4ohu2
+
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+Note: /tmp/gradle-cap/mockito-5.24.0/mockito-core/src/main/java/org/mockito/internal/configuration/plugins/DefaultMockitoPlugins.java uses or overrides a deprecated API that is marked for removal.
+Note: Recompile with -Xlint:removal for details.
+Note: Some input files use unchecked or unsafe operations.
+Note: Recompile with -Xlint:unchecked for details.
+Suppressing static class initializer for 'org.mockitoinline.PremainClinitSuppressionTest$ClassWithStaticInit' (see mockito.suppress.clinit system property)
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+error: Error fetching URL: https://junit.org/junit4/javadoc/4.13.2/ (java.net.ConnectException: Connection timed out)
+WARNING: package com.sun.tools.javac.type not in jdk.compiler
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+1 error
+error: Error fetching URL: https://junit.org/junit4/javadoc/4.13.2/ (java.net.ConnectException: Connection timed out)
+error: Error fetching URL: https://docs.junit.org/5.13.4/api/ (java.net.ConnectException: Connection timed out)
+2 errors
+
+FAILURE: Build completed with 2 failures.
+
+1: Task failed with an exception.
+-----------
+* What went wrong:
+Execution failed for task ':mockito-core:javadoc'.
+> Javadoc generation failed. Generated Javadoc options file (useful for troubleshooting): '/tmp/gradle-cap/mockito-5.24.0/mockito-core/build/tmp/javadoc/javadoc.options'
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Get more help at https://help.gradle.org.
+==============================================================================
+
+2: Task failed with an exception.
+-----------
+* What went wrong:
+Execution failed for task ':mockito-extensions:mockito-junit-jupiter:javadoc'.
+> Javadoc generation failed. Generated Javadoc options file (useful for troubleshooting): '/tmp/gradle-cap/mockito-5.24.0/mockito-extensions/mockito-junit-jupiter/build/tmp/javadoc/javadoc.options'
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Get more help at https://help.gradle.org.
+==============================================================================
+
+BUILD FAILED in 4m
