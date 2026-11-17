@@ -74,6 +74,14 @@ def main() -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
+    if not re.search(r"^\s*Class:\s*ELF64\s*$", header, re.MULTILINE) or not re.search(
+        r"^\s*Data:\s*2's complement, little endian\s*$", header, re.MULTILINE
+    ):
+        print(
+            f"ERROR: {args.binary} is not a 64-bit little-endian ELF binary",
+            file=sys.stderr,
+        )
+        return 1
     machine = re.search(r"^\s*Machine:\s*(.+?)\s*$", header, re.MULTILINE)
     actual_machine = machine.group(1) if machine is not None else ""
     if actual_machine != MACHINES[args.arch]:

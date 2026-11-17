@@ -18,7 +18,8 @@ glibc = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(glibc)
 
 HEADER = """ELF Header:
-  Class:                             ELF64
+  Class:                             {elf_class}
+  Data:                              {data}
   Type:                              {kind}
   Machine:                           {machine}
 """
@@ -40,13 +41,20 @@ class GlibcVerifierTests(unittest.TestCase):
         *options: str,
         actual_arch: str = "x86_64",
         expected_arch: str = "x86_64",
+        elf_class: str = "ELF64",
+        data: str = "2's complement, little endian",
         kind: str = "EXEC (Executable file)",
         program_headers: str = PROGRAM_HEADERS,
         dynamic: str = "There is no dynamic section in this file.\n",
         symbols: str = "No version information found in this file.\n",
     ) -> tuple[int, str, list[tuple[str, ...]]]:
         outputs = {
-            ("-h",): HEADER.format(kind=kind, machine=glibc.MACHINES[actual_arch]),
+            ("-h",): HEADER.format(
+                kind=kind,
+                machine=glibc.MACHINES[actual_arch],
+                elf_class=elf_class,
+                data=data,
+            ),
             ("--program-headers", "--wide"): program_headers,
             ("--dynamic", "--wide"): dynamic,
             ("--version-info",): symbols,
@@ -107,6 +115,37 @@ class GlibcVerifierTests(unittest.TestCase):
                 result, output, _ = self.run_verifier("--require-static", **fixture)
                 self.assertEqual(result, 1)
                 self.assertIn(expected, output)
+
+    def test_linkage_modes_require_64_bit_little_endian_elf(self) -> None:
+        for arch in glibc.MACHINES:
+            for mode in (("--require-static",), ("--max", "2.28")):
+                for fixture in (
+                    {"elf_class": "ELF32"},
+                    {"data": "2's complement, big endian"},
+                ):
+                    with self.subTest(arch=arch, mode=mode, fixture=fixture):
+                        result, output, _ = self.run_verifier(
+                            *mode,
+                            actual_arch=arch,
+                            expected_arch=arch,
+                            symbols="GLIBC_2.17",
+                            **fixture,
+                        )
+                        self.assertEqual(result, 1, output)
+                        self.assertIn("64-bit little-endian ELF", output)
+
+    def test_glibc_mode_accepts_64_bit_little_endian_targets(self) -> None:
+        for arch in glibc.MACHINES:
+            with self.subTest(arch=arch):
+                result, output, _ = self.run_verifier(
+                    "--max",
+                    "2.28",
+                    actual_arch=arch,
+                    expected_arch=arch,
+                    symbols="GLIBC_2.17",
+                )
+                self.assertEqual(result, 0, output)
+                self.assertIn("max_glibc=GLIBC_2.17", output)
 
     def test_static_mode_rejects_wrong_architecture_and_relocatable_objects(
         self,
