@@ -79,9 +79,10 @@ Descriptor 仅携带原始字节 `configuration_sha256`、配置目标 `target`�
 
 启用的 `input.submit` 要求输入等待，包括可选且没有步骤的事件；静态准入仍检查
 Profile 是否支持它。`NativeFallback` 与任一全局启用且 required 的事件冲突，
-保持 Service 的可用性检查，即使该事件被选择器排除在当前目标之外。Adapter 或
-调用方负责选择 Profile 所需的更严格可用性要求，并提供能力 Profile；Core 不含
-框架特例。
+保持 Service 的可用性检查，即使该事件被选择器排除在当前目标之外。Adapter 负责
+Profile 身份、能力声明和更严格的服务要求；CLI 从 Adapter 声明生成可选 Profile。
+原生 SDK 接点向公共读取器传入预期身份和服务要求，公共读取器执行通用校验，
+不按框架名称分支；Core 对所有传入的 Profile 执行相同的静态准入。
 
 `descriptor::verify` 根据原始配置字节、目标、能力 Profile 和可用性选择重新编译，
 逐项比较全部提示，用于可信部署产物的生成验证。SDK 启动时须先核对保存的配置摘要

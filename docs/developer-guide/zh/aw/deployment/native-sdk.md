@@ -14,8 +14,9 @@ AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` �
 
 使用 `createQoderBridge` 保留业务原生 Node 入口、daemon、认证、模型、权限和 Hook。
 接入模块读取部署所用的同一份自有 `aw.yaml`，安装 Qoder 公开 Hook 并发布协作监听。
-初始化通过一次有界 CLI 调用，复用 AW 离线 `config show` 解析 YAML／JSON，
-不启动 AW 或 sec-core。
+部署生成的 Descriptor 可让初始化直接读取已验证的接线，无需启动配置解析子进程。
+未传入 `descriptorFile` 时，继续通过一次有界 CLI 调用复用 AW 离线 `config show`
+解析 YAML／JSON。两条路径均不启动 AW 或 sec-core。
 
 ```javascript
 import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
@@ -74,8 +75,55 @@ Source 先安装原生回调，再为每个原生请求创建一个 Admission，
 Source 负责在正确边界调用 `prepare()`，SDK 不从 PID 推断模型派发或工具执行。
 
 Qoder bridge 和[配置式 QwenPaw 插件](python-sdk.md#安装与接入)复用这条生命周期。
-配置加载仍调用 AW 权威 `config show`，这个有界子进程仍计入集成初始化。
-部署 Descriptor 和通用 Source resolver 属于独立后续，当前候选未提供对应 API。
+部署 Descriptor 使用现有已安装能力 Profile；自动 Source 发现和解析仍属后续交付。
+
+## 部署 Descriptor
+
+部署时使用与 SDK 对应的候选 AW 构建，读取应用与 Service 将使用的同一份配置。
+以下命令适用于名为 `sdk`、采用 `adapter: qoder-sdk` 的目标：
+
+```bash
+umask 077
+aw config descriptor --config /absolute/aw.yaml --agent sdk \
+  --profile qoder-public-hooks > /absolute/aw-sdk.json
+```
+
+发布前检查命令退出状态。先生成到暂存位置，成功后将 JSON 与配置一同安装，再启动应用。
+向工厂传入两个绝对路径：
+
+```javascript
+const aw = await createQoderBridge({
+  configFile: "/absolute/aw.yaml",
+  descriptorFile: "/absolute/aw-sdk.json",
+  query,
+});
+```
+
+QwenPaw 选择 `qwenpaw-installed-native-hooks` 及其配置目标，并向
+[Python 工厂](python-sdk.md#安装与接入)传入 `descriptor_file`。
+编译复用现有能力准入，记录目标、Profile、明确的 socket、输入边界与可用性；
+不启动 Service、Provider 或原生应用。QwenPaw Profile 要求服务可用，Qoder 记录
+已启用事件的保护要求。两条加载路径均保留 Qoder 调用方选择的可用性，默认仍为
+`native_fallback`。Descriptor 要求保护时须显式传入 `availability: "required"`；
+冲突选择会在安装监听前失败。
+
+SDK 加载时验证 schema 版本、准确的 Profile 和可选显式目标，再计算配置原始字节的摘要。
+两个输入均须为应用用户持有、不超过 4 MiB 的普通文件，硬链接数为 1，无特殊模式位，
+且 group／world 无写权限。路径须为绝对路径，禁止符号链接和 `..`；直接父目录也须由
+应用用户持有且 group／world 不可写。Descriptor 缺失、格式错误、不匹配或过期均使
+初始化失败；显式指定 Descriptor 后，失败不会转为 `config show` 或原生执行。
+配置仅修改空白也需要重新生成。此加载路径不调用 AW 可执行文件、不解析 YAML。
+
+Descriptor 编译器与两个 SDK 读取器均支持 ext2/3/4、XFS、Btrfs、tmpfs 和 OverlayFS，并检查已打开
+文件及固定父目录的文件系统类型。其他文件系统会被拒绝，部署方可显式选择既有 CLI
+加载 API。Node 接受有效写权限 mask 通过 mode 检查的只读 POSIX ACL；Python 和 CLI
+还会拒绝文件扩展 ACL 及父目录的原生 ACL。部署无扩展 ACL 的普通文件可使两语言
+行为一致。
+
+Descriptor、配置及其父目录须由可信部署方控制。摘要用于发现配置不匹配，不验证发布者
+身份，也无法阻止有写权限者改变接线提示。Service 继续负责权威策略准入和执行。
+接线变化时先排空应用，部署匹配文件对并重启。恢复离线 CLI 加载时，省略
+`descriptorFile`／`descriptor_file`，确保对应 AW 可执行文件可用后重启。
 
 ## 通用应用接入
 

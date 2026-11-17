@@ -3,6 +3,23 @@ import { randomUUID } from "node:crypto";
 import { invoke, callbackTimeoutMs } from "./callback.mjs";
 import { bindSkillQuery, noteSkillRead, resolveSkill } from "./skills.mjs";
 
+export const qoderProfile = Object.freeze({
+  adapter: "qoder-sdk",
+  version: "public-hooks/v1",
+  entrypoint: "sdk-worker",
+});
+
+export function qoderCapabilities(inputEnabled) {
+  return {
+    ...qoderProfile,
+    events: {
+      ...(inputEnabled ? { "input.submit": ["observe", "block"] } : {}),
+      "tool.before": ["observe", "block"],
+      "tool.after": ["observe"],
+    },
+  };
+}
+
 const deny = (reason) => ({
   hookSpecificOutput: {
     hookEventName: "PreToolUse",

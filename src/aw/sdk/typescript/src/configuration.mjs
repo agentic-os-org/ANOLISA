@@ -7,13 +7,25 @@ import { AwError } from "./transport.mjs";
 const execute = promisify(execFile);
 export async function loadConfiguration({
   configFile,
-  adapter,
+  descriptorFile,
+  profile,
+  requiresService = false,
   target,
   executable = "aw",
   environment,
 }) {
   if (typeof configFile !== "string" || !isAbsolute(configFile))
     throw new AwError("sdk_configuration_required");
+  if (descriptorFile !== undefined) {
+    const { loadDescriptor } = await import("./deployment.mjs");
+    return loadDescriptor({
+      configFile,
+      descriptorFile,
+      target,
+      profile,
+      requiresService,
+    });
+  }
   const { stdout } = await execute(
     executable,
     ["config", "show", "--config", configFile],
@@ -21,7 +33,7 @@ export async function loadConfiguration({
   );
   const document = JSON.parse(stdout).spec;
   const candidates = Object.entries(document.agents).filter(
-    ([, agent]) => agent.adapter === adapter,
+    ([, agent]) => agent.adapter === profile.adapter,
   );
   target ??= candidates.length === 1 ? candidates[0][0] : undefined;
   if (!candidates.some(([name]) => name === target))
@@ -31,9 +43,18 @@ export async function loadConfiguration({
     daemon.endpoint !== "auto"
       ? daemon.endpoint
       : daemon.state_dir !== "auto"
-      ? join(daemon.state_dir, "aw.sock")
-      : undefined;
+        ? join(daemon.state_dir, "aw.sock")
+        : undefined;
   if (!endpoint || !isAbsolute(endpoint))
     throw new AwError("sdk_explicit_service_path_required");
-  return { document, target, endpoint };
+  return {
+    target,
+    endpoint,
+    inputEnabled: document.events["input.submit"]?.enabled === true,
+    availability:
+      requiresService ||
+      Object.values(document.events).some((event) => event.enabled && event.required)
+        ? "required"
+        : "native_fallback",
+  };
 }

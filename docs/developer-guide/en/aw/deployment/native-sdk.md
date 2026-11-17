@@ -18,8 +18,10 @@ requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 Use `createQoderBridge` to retain the native Node entrypoint, daemon, authentication,
 model settings, permissions and Hook groups. The bridge reads the same owned
 `aw.yaml` used by deployment, installs public Qoder Hooks and publishes cooperative
-attachment support. AW's offline `config show` parser reads YAML or JSON once
-through a bounded CLI invocation; initialization starts neither AW nor sec-core.
+attachment support. A deployment-generated Descriptor lets initialization read
+validated wiring without starting a configuration-parser subprocess. Without
+`descriptorFile`, AW's offline `config show` parser reads YAML or JSON once through
+a bounded CLI invocation. Neither path starts AW or sec-core.
 
 ```javascript
 import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
@@ -95,10 +97,67 @@ releasing its Task. Sources must call `prepare()` at the appropriate boundary;
 the SDK does not infer model dispatch or tool execution from a PID.
 
 The Qoder bridge and configured [QwenPaw plugin](python-sdk.md#install-and-integrate)
-reuse this common lifecycle. Their configuration loaders invoke AW's canonical
-`config show`; this bounded subprocess remains part of integration initialization.
-Deployment-generated descriptors and a general Source resolver remain separate
-work and are not available APIs in this candidate.
+reuse this common lifecycle. Deployment Descriptors use the existing installed
+capability profiles. Automatic Source discovery and resolution remain planned.
+
+## Deployment Descriptor
+
+Generate a Descriptor during deployment, using the same candidate AW build and
+exact configuration file that the application and Service will use. For a target
+named `sdk` with `adapter: qoder-sdk`, run:
+
+```bash
+umask 077
+aw config descriptor --config /absolute/aw.yaml --agent sdk \
+  --profile qoder-public-hooks > /absolute/aw-sdk.json
+```
+
+Check the command's exit status before publishing the output. Generate into a
+staging location and install the successful JSON together with its configuration
+before starting the application. Pass both absolute paths to the factory:
+
+```javascript
+const aw = await createQoderBridge({
+  configFile: "/absolute/aw.yaml",
+  descriptorFile: "/absolute/aw-sdk.json",
+  query,
+});
+```
+
+For QwenPaw, select `qwenpaw-installed-native-hooks` and its configured target;
+pass `descriptor_file` to [the Python factory](python-sdk.md#install-and-integrate).
+Compilation applies the existing capability admission rules and records the
+target, profile, explicit socket, input boundary and availability. It starts no
+Service, Provider or native application. The QwenPaw profile requires service
+availability; Qoder records whether enabled events require protection. In both
+loading paths, Qoder retains the caller's availability choice and defaults to
+`native_fallback`. Pass `availability: "required"` explicitly when the descriptor
+requires it; a conflicting choice fails before installing the listener.
+
+SDK loading validates the schema version, exact profile and optional explicit
+target, then hashes the raw configuration bytes. Each input must be an application-user-owned regular
+file of at most 4 MiB, with one hard link, no special mode bits and no group/world
+write permission. Use an absolute path without symlinks or `..`; the immediate
+parent must also be application-user-owned and not group/world writable. A missing, malformed, mismatched or stale Descriptor fails
+initialization; an explicit Descriptor never falls back to `config show` or
+native execution. Even a whitespace-only configuration edit requires regeneration.
+The loading path invokes no AW executable and parses no YAML.
+
+The Descriptor compiler and both SDK readers support ext2/3/4, XFS, Btrfs, tmpfs and OverlayFS,
+checking both the open file and its pinned parent. Other filesystems are rejected;
+select the existing CLI-loading API explicitly when deploying there. Node accepts
+read-only POSIX ACL entries when their effective write mask passes the mode check.
+Python and the CLI additionally reject extended file ACLs and native ACLs on the
+parent. Deploy plain files without extended ACLs for the same behavior in both
+languages.
+
+The Descriptor and configuration, including their parent directories, must be
+controlled by the trusted deployment owner. The digest detects a mismatched
+configuration; it does not authenticate the publisher or prevent a writer from
+changing wiring hints. Service still owns policy admission and execution.
+Drain the application, deploy a matching pair and restart when wiring changes.
+To return to offline CLI loading, omit `descriptorFile` / `descriptor_file` and
+restart with the corresponding AW executable available.
 
 ## Framework-free integration
 

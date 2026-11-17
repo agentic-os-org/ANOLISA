@@ -43,6 +43,19 @@ from aw_sdk.qwenpaw import QwenPawPlugin
 plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
 ```
 
+To move configuration parsing into deployment, generate a
+[Descriptor](native-sdk.md#deployment-descriptor) with the
+`qwenpaw-installed-native-hooks` profile and pass its absolute path:
+
+```python
+plugin = QwenPawPlugin.from_config(
+    "/absolute/aw.yaml", descriptor_file="/absolute/aw-qwenpaw.json"
+)
+```
+
+This path validates the exact configuration bytes without invoking `aw`.
+Descriptor errors fail initialization before native middleware registration.
+
 The QwenPaw-specific entry also attempts the Adapter's optional plugin-isolation
 path acceleration for verified QwenPaw `2.1.1b3`. It starts no services, preserves
 native isolation and cleanup, and skips acceleration for other versions or an

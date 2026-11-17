@@ -61,6 +61,32 @@ def main(binary: str) -> None:
         event_consumer = root / "event-consumer.mjs"
         shutil.copyfile(package.parent / "tests/event-consumer.mjs", event_consumer)
         events(binary, ["node", str(event_consumer)], root, environment)
+        deployment = json.loads((package.parent / "tests/fixtures/deployment.json").read_text())[
+            "configuration"
+        ]
+        deployment["spec"]["daemon"]["state_dir"] = str(root / "state")
+        config = root / "deployment-config.json"
+        config.write_text(json.dumps(deployment))
+        config.chmod(0o600)
+        descriptor = root / "deployment.json"
+        descriptor.write_text(
+            run(
+                [
+                    str(Path(binary).resolve()),
+                    "config",
+                    "descriptor",
+                    "--config",
+                    str(config),
+                    "--agent",
+                    "app",
+                    "--profile",
+                    "qoder-public-hooks",
+                ],
+                root,
+                environment,
+            )
+        )
+        descriptor.chmod(0o600)
         consumer = root / "consumer.mjs"
         consumer.write_text("""import assert from 'node:assert/strict';
 import { Instance } from '@anolisa/aw-sdk';
@@ -73,8 +99,16 @@ const task=await instance.task();
 const native={model:'application-model', hooks:{}};
 assert.equal(qoderOptions(task,native).options.model,native.model);
 await task.close(); await instance.close();
+const bridge = await createQoderBridge({configFile:process.argv[3], descriptorFile:process.argv[4],
+  availability:'required', executable:'/missing/aw',
+  query(){ throw new Error('native Query must not start'); }});
+await bridge.close();
 """)
-        run(["node", str(consumer), str(root / "missing.sock")], root, environment)
+        run(
+            ["node", str(consumer), str(root / "missing.sock"), str(config), str(descriptor)],
+            root,
+            environment,
+        )
     print(json.dumps({"status": "passed", "package": "typescript"}))
 
 

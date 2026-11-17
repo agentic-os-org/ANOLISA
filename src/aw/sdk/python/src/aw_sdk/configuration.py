@@ -1,4 +1,4 @@
-"""Read deployment configuration through AW's authoritative offline parser."""
+"""Select native wiring from trusted deployment hints or the offline parser."""
 
 import json
 import os
@@ -12,12 +12,30 @@ from aw_sdk.transport import AwError
 
 
 def load_configuration(
-    config_file: str, adapter: str, target: str | None, executable: str
-) -> tuple[dict, str, str]:
+    config_file: str,
+    profile: dict,
+    target: str | None,
+    executable: str,
+    *,
+    descriptor_file: str | None = None,
+    requires_service: bool = False,
+) -> dict:
     if not isinstance(config_file, str) or not Path(config_file).is_absolute():
         raise AwError("sdk_configuration_required")
+    if descriptor_file is not None:
+        from aw_sdk.deployment import load_descriptor
+
+        return load_descriptor(
+            config_file,
+            descriptor_file,
+            profile,
+            target,
+            requires_service=requires_service,
+        )
     spec = json.loads(_configuration_output(executable, config_file))["spec"]
-    candidates = [name for name, agent in spec["agents"].items() if agent["adapter"] == adapter]
+    candidates = [
+        name for name, agent in spec["agents"].items() if agent["adapter"] == profile["adapter"]
+    ]
     if target is None and len(candidates) == 1:
         target = candidates[0]
     if target not in candidates:
@@ -28,7 +46,17 @@ def load_configuration(
         endpoint = str(Path(daemon["state_dir"]) / "aw.sock")
     if not Path(endpoint).is_absolute():
         raise AwError("sdk_explicit_service_path_required")
-    return spec, target, endpoint
+    return {
+        "target": target,
+        "endpoint": endpoint,
+        "input_enabled": spec["events"].get("input.submit", {}).get("enabled") is True,
+        "availability": (
+            "required"
+            if requires_service
+            or any(event.get("enabled") and event.get("required") for event in spec["events"].values())
+            else "native_fallback"
+        ),
+    }
 
 
 def _configuration_output(executable: str, config_file: str) -> bytes:
