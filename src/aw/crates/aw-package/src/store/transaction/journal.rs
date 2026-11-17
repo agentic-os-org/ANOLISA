@@ -47,6 +47,10 @@ pub(super) struct Journal {
     pub prefix_created: bool,
     pub prefix_identity: Option<Identity>,
     pub workspace_identity: Option<Identity>,
+    /// SHA-256 of the random bytes stored in the workspace marker; recovery
+    /// reclaims the workspace only when that marker hashes to this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_nonce: Option<String>,
     pub lock_created: bool,
     pub lock_identity: Option<Identity>,
     pub directories: BTreeMap<String, Identity>,
@@ -84,8 +88,10 @@ impl Journal {
             !fs::exists(&next)?,
             "unfinished journal replacement needs recovery",
         )?;
-        let (file, _) = fs::write_bytes(&self.directory(), &bytes, 0o600)?;
-        fs::publish(&file, &next)?;
+        let staged = fs::write_bytes(&self.directory(), &self.transaction_id, &bytes, 0o600)?;
+        #[cfg(test)]
+        checkpoint("journal-staged-unpublished");
+        fs::publish(staged, &next)?;
         fs::replace(&next, &self.path())
     }
 

@@ -160,7 +160,12 @@ impl Fixture {
     }
 
     fn kill(&self, phase: &str, existing: bool) {
-        let child = Command::new(std::env::current_exe().unwrap())
+        self.kill_with_env(phase, existing, &[]);
+    }
+
+    fn kill_with_env(&self, phase: &str, existing: bool, extra: &[(&str, &str)]) {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "store::transaction::tests::crash_child",
@@ -179,9 +184,11 @@ impl Fixture {
                 } else {
                     "no"
                 },
-            )
-            .spawn()
-            .unwrap();
+            );
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        let child = command.spawn().unwrap();
         let mut guard = ChildGuard(child);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let status = loop {
@@ -231,6 +238,12 @@ fn crash_child() {
     }
     let existing = std::env::var("LOCAL_PACKAGE_TRANSACTION_EXISTING").unwrap() == "yes";
     let changes = fixture.changes(existing);
+    // Force the named-staging fallback so the crash point below leaves its guard file behind.
+    let _fallback = (std::env::var("AW_PACKAGE_TEST_FORCE_FALLBACK")
+        .ok()
+        .as_deref()
+        == Some("yes"))
+    .then(fs::fail_tmpfile);
     super::apply(&fixture.paths, &changes, &AtomicBool::new(false)).unwrap();
     panic!("requested crash checkpoint was not reached");
 }

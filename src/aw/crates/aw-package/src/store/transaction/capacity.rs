@@ -195,6 +195,7 @@ fn bounded_journal(
         prefix_created: false,
         prefix_identity: Some(identity(true)),
         workspace_identity: Some(identity(true)),
+        workspace_nonce: None,
         lock_created: false,
         lock_identity: Some(identity(false)),
         directories,
