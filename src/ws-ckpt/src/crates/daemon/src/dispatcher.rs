@@ -70,6 +70,7 @@ pub(crate) async fn dispatch_with_context(
         }
         Request::Rollback { to: Some(id), .. }
         | Request::RollbackPreview { to: Some(id), .. }
+        | Request::Fork { snapshot: id, .. }
         | Request::Diff {
             from: id, to: None, ..
         } => {
@@ -289,6 +290,14 @@ pub(crate) async fn dispatch_with_context(
         },
         Request::HealthAdvisory => Ok(handle_health_advisory(state).await),
         Request::WatcherHealth => Ok(handle_watcher_health(state).await),
+        Request::Fork {
+            workspace,
+            snapshot,
+            destination,
+        } => match state.ensure_bootstrapped().await {
+            Err(e) => Err(e),
+            Ok(()) => crate::workspace_mgr::fork(state, &workspace, &snapshot, &destination).await,
+        },
         Request::WorkspaceIdentityV2 { registration_path } => {
             return crate::guarded_checkpoint::workspace_identity(state, &registration_path).await;
         }

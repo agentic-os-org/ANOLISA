@@ -240,6 +240,16 @@ pub enum Request {
     /// positionally, so inserting a field would break older clients and
     /// the cosh-ng mirror of the status layout.
     WatcherHealth,
+    /// Create an independent writable workspace from a snapshot of an
+    /// already registered workspace, then register it at `destination`.
+    Fork {
+        /// Source workspace path or ID.
+        workspace: String,
+        /// Source snapshot ID or unique prefix.
+        snapshot: String,
+        /// New workspace path; it must be absent and its parent must exist.
+        destination: String,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -429,9 +439,19 @@ pub enum Response {
         workspaces_without_watcher: Vec<String>,
         /// Cumulative inotify queue overflows observed on the shared
         /// watcher instance. Each one interrupted event delivery; the
-        /// daemon treats every watched workspace as actively written
+        /// daemon treats every workspace as actively written
         /// across an overflow until quiescence is re-observed.
         watcher_queue_overflows: u64,
+    },
+    /// A forked workspace is published, registered and has its initial
+    /// read-only checkpoint.
+    ForkOk {
+        /// Fresh workspace ID, allocated by the same history as `init`.
+        ws_id: String,
+        /// Registered workspace path (the `destination` the caller asked for).
+        path: String,
+        /// Read-only checkpoint created from the forked content.
+        initial_snapshot_id: String,
     },
 }
 
@@ -2613,6 +2633,37 @@ mod tests {
             size, max: MAX_FRAME_SIZE,
         }) if size == u64::from(MAX_FRAME_SIZE) + 1)
         );
+    }
+
+    #[test]
+    fn fork_request_and_response_round_trip() {
+        let request = Request::Fork {
+            workspace: "/tmp/source".to_string(),
+            snapshot: "snap-1".to_string(),
+            destination: "/tmp/forked".to_string(),
+        };
+        assert!(matches!(
+            round_trip_request(&request),
+            Request::Fork { workspace, snapshot, destination }
+                if workspace == "/tmp/source"
+                    && snapshot == "snap-1"
+                    && destination == "/tmp/forked"
+        ));
+
+        let response = Response::ForkOk {
+            ws_id: "ws-forked".to_string(),
+            path: "/tmp/forked".to_string(),
+            initial_snapshot_id: "fork-initial".to_string(),
+        };
+        let frame = encode_frame(&response).expect("encode_frame failed");
+        let decoded: Response = decode_payload(&frame[4..]).expect("decode_payload failed");
+        assert!(matches!(
+            decoded,
+            Response::ForkOk { ws_id, path, initial_snapshot_id }
+                if ws_id == "ws-forked"
+                    && path == "/tmp/forked"
+                    && initial_snapshot_id == "fork-initial"
+        ));
     }
 
     #[test]

@@ -7,10 +7,28 @@ use tracing::{error, info, warn};
 
 use ws_ckpt_common::{
     escape_terminal_text, load_workspace_policy_with_failsafe, ErrorCode, Response, SnapshotIndex,
+    SnapshotMeta, WorkspacePolicy, LIVE_CHILD,
 };
 
 use crate::index_store;
 use crate::state::{normalize_registration_path, DaemonState};
+
+/// Checkpoint created inside a forked workspace, and the name of the durable
+/// record that ties it back to the snapshot it was forked from.
+const FORK_INITIAL_SNAPSHOT_ID: &str = "fork-initial";
+const FORK_ORIGIN_FILE: &str = "fork-origin.json";
+
+/// Durable provenance of a forked workspace, stored beside its snapshot index.
+///
+/// Kept separate from `state.json` so a manifest rewrite can never lose the
+/// only record of where a workspace came from, and so `init` registration
+/// (which owns the index directory) remains the one writer of `index.json`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+struct ForkOrigin {
+    source_ws_id: String,
+    source_snapshot_id: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
 
 // ── helpers ──
 
@@ -409,27 +427,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // 3. Generate and reserve a ws-id before migrating any user data. The
     // lifecycle lock closes the gap between checking every ownership source and
     // publishing the new registration.
-    let data_root = state.backend.data_root();
-    let base_id = generate_ws_id_base(&abs_path.to_string_lossy());
-    let mut ws_id = base_id.clone();
-    let mut suffix = 2u32;
-    let _wsid_guard = loop {
-        let guard = state.lock_wsid(&ws_id).await;
-        let index_dir = state.index_dir(&ws_id);
-        let occupied = state.get_by_wsid(&ws_id).is_some()
-            || data_root.join(&ws_id).try_exists()?
-            || state.backend.snapshots_root().join(&ws_id).try_exists()?
-            || index_dir.try_exists()?
-            || index_dir
-                .with_file_name(format!("{}.unregistered", ws_id))
-                .try_exists()?;
-        if !occupied {
-            break guard;
-        }
-        drop(guard);
-        ws_id = format!("{}-{}", base_id, suffix);
-        suffix += 1;
-    };
+    let (ws_id, _wsid_guard) = reserve_ws_id(state, &abs_path).await?;
 
     let abs_path_str = abs_path.to_string_lossy().to_string();
 
@@ -514,6 +512,329 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
 
     // 14. Return
     Ok(Response::InitOk { ws_id })
+}
+
+/// Reserve a fresh workspace ID for `workspace_path`.
+///
+/// The returned guard serializes competing reservations of the same ID until
+/// the caller has published its storage, index and registration. IDs are never
+/// reused: a suffix is chosen only when a previous lifecycle left any of the
+/// four ownership sources behind.
+async fn reserve_ws_id(
+    state: &Arc<DaemonState>,
+    workspace_path: &std::path::Path,
+) -> anyhow::Result<(String, tokio::sync::OwnedMutexGuard<()>)> {
+    let data_root = state.backend.data_root();
+    let base_id = generate_ws_id_base(&workspace_path.to_string_lossy());
+    let mut ws_id = base_id.clone();
+    let mut suffix = 2u32;
+    loop {
+        let guard = state.lock_wsid(&ws_id).await;
+        let index_dir = state.index_dir(&ws_id);
+        let occupied = state.get_by_wsid(&ws_id).is_some()
+            || data_root.join(&ws_id).try_exists()?
+            || state.backend.snapshots_root().join(&ws_id).try_exists()?
+            || index_dir.try_exists()?
+            || index_dir
+                .with_file_name(format!("{}.unregistered", ws_id))
+                .try_exists()?;
+        if !occupied {
+            return Ok((ws_id, guard));
+        }
+        drop(guard);
+        ws_id = format!("{}-{}", base_id, suffix);
+        suffix += 1;
+    }
+}
+
+/// Create an independent workspace from `snapshot` of `workspace`.
+///
+/// Publication order is: forked writable subvolume, registration symlink,
+/// initial read-only checkpoint, provenance record, index, registration. Every
+/// step that can fail before the registration has a compensating cleanup, so a
+/// rejected or interrupted fork never exposes a half-registered workspace.
+pub async fn fork(
+    state: &Arc<DaemonState>,
+    workspace: &str,
+    snapshot: &str,
+    destination: &str,
+) -> anyhow::Result<Response> {
+    if workspace.trim().is_empty() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "source workspace path is empty",
+        ));
+    }
+    if destination.trim().is_empty() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "destination path is empty",
+        ));
+    }
+    let destination = strip_trailing_slashes(destination);
+    let destination_path = std::path::Path::new(destination);
+    if !destination_path.is_absolute() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            format!("destination must be an absolute path: {destination}"),
+        ));
+    }
+    if destination_path.file_name().is_none() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            format!("destination must name a new directory: {destination}"),
+        ));
+    }
+    // The parent has to exist already: fork creates a workspace where the user
+    // asked for it and never invents intermediate directories, which would
+    // leave partial trees behind on a later failure.
+    let parent = destination_path.parent().unwrap_or(destination_path);
+    let parent = match tokio::fs::canonicalize(parent).await {
+        Ok(parent) => parent,
+        Err(error) => {
+            return Ok(error_resp(
+                ErrorCode::InvalidPath,
+                format!(
+                    "destination parent does not exist or cannot be resolved: {}: {}",
+                    parent.display(),
+                    error
+                ),
+            ))
+        }
+    };
+    let destination_path = parent.join(destination_path.file_name().unwrap_or_default());
+    if destination_path == std::path::Path::new("/") {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            "destination must not be the root directory",
+        ));
+    }
+    if state.registration_path_is_internal(&destination_path)?
+        || destination_path.starts_with(&state.mount_path)
+    {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            format!(
+                "destination is inside managed storage: {}",
+                destination_path.display()
+            ),
+        ));
+    }
+    match tokio::fs::symlink_metadata(&destination_path).await {
+        Ok(_) => {
+            return Ok(error_resp(
+                ErrorCode::InvalidPath,
+                format!("destination already exists: {}", destination_path.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Ok(error_resp(
+                ErrorCode::InvalidPath,
+                format!(
+                    "cannot inspect destination {}: {}",
+                    destination_path.display(),
+                    error
+                ),
+            ))
+        }
+    }
+    if state.get_by_path(&destination_path).is_some() {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            format!(
+                "destination is already registered: {}",
+                destination_path.display()
+            ),
+        ));
+    }
+
+    let init_guard = state.init_lock.lock().await;
+    let source = match state.resolve_workspace(workspace).await {
+        Some(source) => source,
+        None => {
+            return Ok(error_resp(
+                ErrorCode::WorkspaceNotFound,
+                format!("workspace not found: {workspace}"),
+            ))
+        }
+    };
+    if let Some(response) = state.detached_registration_error(&source).await {
+        return Ok(response);
+    }
+    let (source_ws_id, source_snapshot_id) = {
+        let source = source.read().await;
+        let (id, meta) = match source.index.resolve_by_prefix(snapshot) {
+            Ok(resolved) => resolved,
+            Err(ws_ckpt_common::ResolveError::NotFound) => {
+                return Ok(error_resp(
+                    ErrorCode::SnapshotNotFound,
+                    format!("snapshot not found in {}: {snapshot}", source.ws_id),
+                ))
+            }
+            Err(ws_ckpt_common::ResolveError::Ambiguous(count)) => {
+                return Ok(error_resp(
+                    ErrorCode::InvalidPath,
+                    format!("snapshot reference '{snapshot}' is ambiguous ({count} matches)"),
+                ))
+            }
+            Err(ws_ckpt_common::ResolveError::Unsafe(message)) => {
+                return Ok(error_resp(ErrorCode::InvalidPath, message))
+            }
+        };
+        if meta.missing {
+            return Ok(error_resp(
+                ErrorCode::SnapshotNotFound,
+                format!("snapshot {id} is missing from storage"),
+            ));
+        }
+        (source.ws_id.clone(), id.clone())
+    };
+
+    let data_root = state.backend.data_root().to_path_buf();
+    let (ws_id, _wsid_guard) = reserve_ws_id(state, &destination_path).await?;
+    let subvol_path = data_root.join(&ws_id);
+    let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
+
+    if let Err(error) = state
+        .backend
+        .fork(&source_ws_id, &source_snapshot_id, &ws_id)
+        .await
+    {
+        // A backend refusal before publication leaves nothing behind; a
+        // partially created subvolume is removed so the ID stays reusable.
+        let _ = crate::backends::btrfs_common::delete_subvolume(&subvol_path).await;
+        return Err(error.context(format!(
+            "failed to fork workspace {source_ws_id} at snapshot {source_snapshot_id}"
+        )));
+    }
+
+    // Every failure below must undo the subvolume and the destination, because
+    // neither is user data yet: they were created seconds ago by this request.
+    let rollback_publication = |subvol: std::path::PathBuf,
+                                snapshot_dir: std::path::PathBuf,
+                                index_dir: std::path::PathBuf,
+                                destination: std::path::PathBuf| async move {
+        let _ = tokio::fs::remove_file(&destination).await;
+        let _ = crate::backends::btrfs_common::delete_subvolume(&snapshot_dir).await;
+        if let Some(parent) = snapshot_dir.parent() {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
+        let _ = crate::backends::btrfs_common::delete_subvolume(&subvol).await;
+        let _ = tokio::fs::remove_dir_all(&index_dir).await;
+    };
+
+    if let Err(error) = tokio::fs::symlink(&subvol_path, &destination_path).await {
+        rollback_publication(
+            subvol_path.clone(),
+            snapshot_dir.clone(),
+            state.index_dir(&ws_id),
+            destination_path.clone(),
+        )
+        .await;
+        return Err(error).context(format!(
+            "failed to publish workspace link {}",
+            destination_path.display()
+        ));
+    }
+
+    let index_dir = state.index_dir(&ws_id);
+    let snapshot_file = snapshot_dir.join(FORK_INITIAL_SNAPSHOT_ID);
+
+    let publication = async {
+        tokio::fs::create_dir_all(&index_dir)
+            .await
+            .context("failed to create index directory")?;
+        // `btrfs subvolume snapshot` requires the destination's parent to exist;
+        // the fork already owns this directory because the ws-id is fresh.
+        tokio::fs::create_dir_all(&snapshot_dir)
+            .await
+            .context("failed to create snapshot directory")?;
+        state
+            .backend
+            .create_snapshot(&ws_id, FORK_INITIAL_SNAPSHOT_ID)
+            .await
+            .context("failed to create the initial checkpoint")?;
+
+        let mut index = SnapshotIndex::new(destination_path.clone());
+        index.snapshots.insert(
+            FORK_INITIAL_SNAPSHOT_ID.to_string(),
+            SnapshotMeta {
+                message: Some(format!(
+                    "forked from {source_ws_id} at {source_snapshot_id}"
+                )),
+                metadata: None,
+                // The fork point is the only link back to the source; pinning
+                // keeps automatic retention from deleting the baseline.
+                pinned: true,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![LIVE_CHILD.to_string()],
+            },
+        );
+        index.head = Some(FORK_INITIAL_SNAPSHOT_ID.to_string());
+        index_store::save(&index_dir, &index).await?;
+
+        let origin = ForkOrigin {
+            source_ws_id: source_ws_id.clone(),
+            source_snapshot_id: source_snapshot_id.clone(),
+            created_at: chrono::Utc::now(),
+        };
+        let origin_json =
+            serde_json::to_vec_pretty(&origin).context("failed to serialize fork provenance")?;
+        tokio::fs::write(index_dir.join(FORK_ORIGIN_FILE), origin_json)
+            .await
+            .context("failed to persist fork provenance")?;
+
+        state.register_workspace_with_policy(
+            ws_id.clone(),
+            destination_path.clone(),
+            index,
+            WorkspacePolicy::default(),
+            false,
+        )?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Err(error) = publication {
+        rollback_publication(
+            subvol_path.clone(),
+            snapshot_file.clone(),
+            index_dir.clone(),
+            destination_path.clone(),
+        )
+        .await;
+        return Err(error);
+    }
+
+    drop(_wsid_guard);
+    drop(init_guard);
+
+    if let Err(error) = state.save_manifest().await {
+        warn!("save_manifest failed after fork: {:#}", error);
+    }
+
+    match crate::fs_watcher::WorkspaceWatcher::start(&destination_path) {
+        Ok(watcher) => state.register_watcher(ws_id.clone(), watcher),
+        Err(error) => warn!("Failed to start watcher for {}: {}", ws_id, error),
+    }
+
+    crate::backends::btrfs_common::warmup_snapshot_metadata(&subvol_path).await;
+    info!(
+        "workspace forked: {} -> {} at {} (initial checkpoint {})",
+        source_ws_id,
+        ws_id,
+        destination_path.display(),
+        FORK_INITIAL_SNAPSHOT_ID
+    );
+
+    Ok(Response::ForkOk {
+        ws_id,
+        path: destination_path.to_string_lossy().to_string(),
+        initial_snapshot_id: FORK_INITIAL_SNAPSHOT_ID.to_string(),
+    })
 }
 
 /// Generate a ws-id from a workspace path. Pure logic, extracted for testability.
@@ -2652,12 +2973,224 @@ mod tests {
         assert_eq!(backend.recover_call_count(), 0);
     }
 
+    // ── fork ────────────────────────────────────────────────────────────────
+
+    /// Register a stub-backed source workspace with one snapshot named
+    /// `snap-1` and return (state, backend, source path, destination).
+    async fn fork_fixture(
+        temp: &tempfile::TempDir,
+    ) -> (Arc<DaemonState>, Arc<RecorderStubBackend>, PathBuf, PathBuf) {
+        let backend = Arc::new(RecorderStubBackend {
+            data_root_path: temp.path().join("mount/data"),
+            snapshots_root_path: temp.path().join("mount/snapshots"),
+            ..RecorderStubBackend::new()
+        });
+        let state = Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: temp.path().join("mount"),
+                ..test_config()
+            },
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let source_path = temp.path().join("work/source");
+        tokio::fs::create_dir_all(&source_path).await.unwrap();
+        let subvol = backend.data_root().join("ws-source");
+        tokio::fs::create_dir_all(&subvol).await.unwrap();
+        tokio::fs::write(subvol.join("payload"), "v1")
+            .await
+            .unwrap();
+        tokio::fs::remove_dir(&source_path).await.unwrap();
+        tokio::fs::symlink(&subvol, &source_path).await.unwrap();
+        let snapshot_dir = backend.snapshots_root().join("ws-source/snap-1");
+        tokio::fs::create_dir_all(&snapshot_dir).await.unwrap();
+        tokio::fs::write(snapshot_dir.join("payload"), "v1")
+            .await
+            .unwrap();
+        let mut index = SnapshotIndex::new(source_path.clone());
+        index.snapshots.insert(
+            "snap-1".to_string(),
+            SnapshotMeta {
+                message: None,
+                metadata: None,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![LIVE_CHILD.to_string()],
+            },
+        );
+        index.head = Some("snap-1".to_string());
+        state
+            .register_workspace("ws-source".to_string(), source_path.clone(), index)
+            .unwrap();
+        let destination = temp.path().join("work/forked");
+        (state, backend, source_path, destination)
+    }
+
+    #[tokio::test]
+    async fn fork_publishes_registers_and_seeds_initial_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, backend, source_path, destination) = fork_fixture(&temp).await;
+
+        let response = fork(
+            &state,
+            &source_path.to_string_lossy(),
+            "snap",
+            &destination.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+
+        let (ws_id, path, initial) = match response {
+            Response::ForkOk {
+                ws_id,
+                path,
+                initial_snapshot_id,
+            } => (ws_id, path, initial_snapshot_id),
+            other => panic!("expected ForkOk, got {other:?}"),
+        };
+        assert_ne!(ws_id, "ws-source");
+        assert_eq!(path, destination.to_string_lossy());
+        assert_eq!(initial, FORK_INITIAL_SNAPSHOT_ID);
+        assert_eq!(
+            backend.fork_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(destination.join("payload"))
+                .await
+                .unwrap(),
+            "v1"
+        );
+        assert!(backend
+            .snapshots_root()
+            .join(&ws_id)
+            .join(FORK_INITIAL_SNAPSHOT_ID)
+            .is_dir());
+        assert!(state.get_by_path(&destination).is_some());
+        let index = index_store::load(&state.index_dir(&ws_id)).await.unwrap();
+        assert_eq!(index.head.as_deref(), Some(FORK_INITIAL_SNAPSHOT_ID));
+        assert!(index.snapshots[FORK_INITIAL_SNAPSHOT_ID].pinned);
+        let origin: ForkOrigin = serde_json::from_slice(
+            &tokio::fs::read(state.index_dir(&ws_id).join(FORK_ORIGIN_FILE))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(origin.source_ws_id, "ws-source");
+        assert_eq!(origin.source_snapshot_id, "snap-1");
+    }
+
+    #[tokio::test]
+    async fn fork_rejects_relative_or_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, backend, source_path, destination) = fork_fixture(&temp).await;
+        let source = source_path.to_string_lossy().to_string();
+
+        for bad in ["relative/path", "/", "."] {
+            let response = fork(&state, &source, "snap-1", bad).await.unwrap();
+            assert!(matches!(response, Response::Error { .. }), "{bad}");
+        }
+
+        tokio::fs::create_dir_all(&destination).await.unwrap();
+        let response = fork(&state, &source, "snap-1", &destination.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::InvalidPath,
+                ..
+            }
+        ));
+        assert_eq!(
+            backend.fork_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_reports_unknown_workspace_snapshot_and_ambiguous_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, backend, source_path, destination) = fork_fixture(&temp).await;
+
+        let response = fork(
+            &state,
+            "/does/not/exist",
+            "snap-1",
+            &destination.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::WorkspaceNotFound,
+                ..
+            }
+        ));
+
+        let response = fork(
+            &state,
+            &source_path.to_string_lossy(),
+            "nope",
+            &destination.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::SnapshotNotFound,
+                ..
+            }
+        ));
+
+        {
+            let source_workspace = state.get_by_path(&source_path).unwrap();
+            let mut source = source_workspace.write().await;
+            source.index.snapshots.insert(
+                "snap-11".to_string(),
+                SnapshotMeta {
+                    message: None,
+                    metadata: None,
+                    pinned: false,
+                    created_at: chrono::Utc::now(),
+                    missing: false,
+                    parent_id: None,
+                    child_ids: vec![LIVE_CHILD.to_string()],
+                },
+            );
+        }
+        let response = fork(
+            &state,
+            &source_path.to_string_lossy(),
+            "snap-",
+            &destination.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::InvalidPath,
+                ..
+            }
+        ));
+        assert_eq!(
+            backend.fork_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
     // ── Stub backend: records recover_workspace calls; other methods panic ──
     struct RecorderStubBackend {
         data_root_path: PathBuf,
         snapshots_root_path: PathBuf,
         recover_calls: std::sync::atomic::AtomicUsize,
         init_calls: std::sync::atomic::AtomicUsize,
+        fork_calls: std::sync::atomic::AtomicUsize,
         pause_migration: bool,
         restore_live_directory: bool,
         recover_leftovers: Vec<String>,
@@ -2672,6 +3205,7 @@ mod tests {
                 snapshots_root_path: PathBuf::from("/tmp/stub-snapshots"),
                 recover_calls: std::sync::atomic::AtomicUsize::new(0),
                 init_calls: std::sync::atomic::AtomicUsize::new(0),
+                fork_calls: std::sync::atomic::AtomicUsize::new(0),
                 pause_migration: false,
                 restore_live_directory: false,
                 recover_leftovers: Vec::new(),
@@ -2771,8 +3305,20 @@ mod tests {
         ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
             unimplemented!()
         }
-        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
-            unimplemented!()
+        async fn fork(
+            &self,
+            ws_id: &str,
+            snapshot_id: &str,
+            new_ws_id: &str,
+        ) -> anyhow::Result<()> {
+            self.fork_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let source = self.snapshots_root().join(ws_id).join(snapshot_id);
+            assert!(source.is_dir(), "source snapshot is missing: {source:?}");
+            let target = self.data_root().join(new_ws_id);
+            tokio::fs::create_dir_all(&target).await?;
+            tokio::fs::copy(source.join("payload"), target.join("payload")).await?;
+            Ok(())
         }
         async fn gc_generations(
             &self,
