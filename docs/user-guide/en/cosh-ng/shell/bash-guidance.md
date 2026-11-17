@@ -53,7 +53,13 @@ reinstall a Hook removed from an existing session.
 
 An explicit `cosh health banner --disable kernel.oom` omits that check for the
 invocation. `--disable` is repeatable; it cannot expand the passive check set.
-The login health path has a 500 ms budget and discards late results. Automatic
+The Bash login banner and explicit banner display have an effective budget of
+at most 300 ms. `--budget-ms 1..500` may shorten it; values above 300 are capped.
+Collection, state access, cleanup and output share the original deadline.
+Slow sources can leave a partial display or no display; this is a controlled
+execution budget, not a hard real-time guarantee under arbitrary scheduling or
+uninterruptible I/O. The separate Bash integration budget remains 500 ms.
+Automatic
 enhancements skip noninteractive invocations. Hook conflicts or incompatible module
 protocols stop failure guidance; the login display checks its own conditions
 independently.
@@ -148,6 +154,18 @@ language environment override needs no config read. Native Cosh config loading i
 ## State failures and partial collection
 
 Display controls do not wait on a blocking language config. Cosh health suggestions retain the four-hour warning and thirty-minute critical cooldowns, with worsening conditions eligible again. A suggestion is claimed under a nonblocking lock and saved atomically before display. Corrupt state, lock contention or timeout leaves resource facts visible without a suggestion.
+
+Bash login-health invitations retain their separate 24-hour window. The same
+help and event stay suppressed when an OOM ages into a lower severity band.
+A new event, changed object or severity increase can be evaluated again.
+Existing v1 records and older v2 records without a confirmed event pairing
+remain conservatively suppressed for their original window. Failed output
+can consume an invitation claim; a claim does not prove that it was seen.
+Incomplete OOM fragments or evidence from incomparable clocks do not prove a
+new event. The facts remain visible; filling in missing evidence does not
+reopen an invitation.
+Confirmed OOM age, counting windows and ordering use the kill time; later
+reaper output does not make an old kill recent again.
 
 Existing history is retained. The default Cosh private directory and history permissions are safely tightened to 0700/0600; a custom history path requires a safe private directory. Partial filesystem collection keeps valid facts while marking failed scope. Service suggestions name the known service and ask to verify its current state.
 

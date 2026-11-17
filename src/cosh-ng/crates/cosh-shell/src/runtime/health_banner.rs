@@ -1,6 +1,9 @@
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
+const BANNER_BUDGET_CAP: Duration =
+    Duration::from_millis(crate::diagnostics::health::banner_policy::BUDGET_MS);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
     budget: Duration,
@@ -31,7 +34,7 @@ fn parse_action(args: &[OsString]) -> Result<Action, ()> {
         }
     }
     let mut options = Options {
-        budget: Duration::from_millis(500),
+        budget: BANNER_BUDGET_CAP,
         disabled: Vec::new(),
         absolute_boottime_us: None,
     };
@@ -68,11 +71,12 @@ mod presentation;
 pub(crate) use cli::run_cli;
 
 fn deadline_for(options: &Options, started: Instant) -> Option<Instant> {
-    let mut deadline = started + options.budget;
+    let budget = options.budget.min(BANNER_BUDGET_CAP);
+    let mut deadline = started + budget;
     if let Some(absolute) = options.absolute_boottime_us {
         let before = Instant::now();
         let remaining =
-            crate::diagnostics::health::runtime::bash_budget_remaining(absolute, options.budget)?;
+            crate::diagnostics::health::runtime::bash_budget_remaining(absolute, budget)?;
         deadline = deadline.min(before + remaining);
     }
     (deadline > Instant::now()).then_some(deadline)

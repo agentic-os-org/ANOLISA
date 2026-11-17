@@ -81,8 +81,16 @@ helper_ignored_count="$(
 if [[ "$helper_ignored_count" -ne 3 ]]; then
   fail "expected exactly three supervised private subprocess entries, found $helper_ignored_count"
 fi
-ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count))
-echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries"
+health_matrix_ignored_count="$(
+  rg -U --count-matches '^[ \t]*#\[ignore = "isolated ALinux4 acceptance; requires independently frozen source probes"\]\n[ \t]*fn live_report_matrix\(' \
+    crates/cosh-shell/src/diagnostics/health/runtime/acceptance_tests.rs |
+    awk -F: '{ total += $NF } END { print total + 0 }'
+)"
+if [[ "$health_matrix_ignored_count" -ne 1 ]]; then
+  fail "expected exactly one provisioned health report matrix, found $health_matrix_ignored_count"
+fi
+ordinary_ignored_count=$((ignored_count - uid_ignored_count - helper_ignored_count - health_matrix_ignored_count))
+echo "ignored tests: $ordinary_ignored_count ordinary (ceiling 3), $uid_ignored_count provisioned UID cases, $helper_ignored_count subprocess entries, $health_matrix_ignored_count provisioned health matrix"
 if [[ "$ordinary_ignored_count" -gt 3 ]]; then
   fail "ordinary ignored test inventory increased above 3 to $ordinary_ignored_count"
 fi

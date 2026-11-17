@@ -1,0 +1,243 @@
+version: 1
+suite: health-banner
+defaults:
+  execution: ci
+  adapter: cosh-core
+  shell: bash
+  real_provider: false
+  terminal_rows: 40
+  timeout_ms: 30000
+cases:
+  - id: HEALTH-BANNER-PLAIN-40-EN
+    title: Live health banner retains complete output at 40 columns (en-US, plain)
+    tags: [shell, bash, health, banner, live-local, visual]
+    terminal_cols: 40
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=en-US
+      - COSH_SHELL_HEALTH_SCAN=1
+      - COSH_SHELL_WIDTH=40
+      - TERM=xterm-256color
+      - PS1=HEALTH_READY>
+      - COSH_SHELL_RENDER=plain
+      - /bin/bash
+      - -c
+      - "stty -echo; exec /bin/bash --noprofile --rcfile <(printf \"PS1='HEALTH_READY>'\\n\") -i"
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: "HEALTH_READY>"
+        timeout_ms: 10000
+      - type: line
+        text: "/usr/libexec/anolisa/cosh-ng/cosh-shell health banner; printf '\\nHEALTH_BANNER_DONE\\n'"
+      - id: banner-complete
+        type: wait_for
+        text: HEALTH_BANNER_DONE
+        timeout_ms: 10000
+      - id: banner-settled
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 5000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains: ["Health check", HEALTH_BANNER_DONE]
+      not_contains: [Traceback, "thread 'main' panicked"]
+    evidence:
+      points:
+        - id: banner-settled
+          trigger_event: banner-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: HEALTH-BANNER-NOCOLOR-80-EN
+    title: Live health banner retains complete output at 80 columns (en-US, nocolor)
+    tags: [shell, bash, health, banner, live-local, visual]
+    terminal_cols: 80
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=en-US
+      - COSH_SHELL_HEALTH_SCAN=1
+      - COSH_SHELL_WIDTH=80
+      - TERM=xterm-256color
+      - PS1=HEALTH_READY>
+      - NO_COLOR=1
+      - /bin/bash
+      - -c
+      - "stty -echo; exec /bin/bash --noprofile --rcfile <(printf \"PS1='HEALTH_READY>'\\n\") -i"
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: "HEALTH_READY>"
+        timeout_ms: 10000
+      - type: line
+        text: "/usr/libexec/anolisa/cosh-ng/cosh-shell health banner; printf '\\nHEALTH_BANNER_DONE\\n'"
+      - id: banner-complete
+        type: wait_for
+        text: HEALTH_BANNER_DONE
+        timeout_ms: 10000
+      - id: banner-settled
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 5000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains: ["Health check", HEALTH_BANNER_DONE]
+      not_contains: [Traceback, "thread 'main' panicked"]
+    evidence:
+      points:
+        - id: banner-settled
+          trigger_event: banner-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: HEALTH-BANNER-STYLED-120-ZH
+    title: Live health banner retains complete output at 120 columns (zh-CN, styled)
+    tags: [shell, bash, health, banner, live-local, visual]
+    terminal_cols: 120
+    command:
+      - /usr/bin/env
+      - -u
+      - NO_COLOR
+      - COSH_SHELL_LANG=zh-CN
+      - COSH_SHELL_HEALTH_SCAN=1
+      - COSH_SHELL_WIDTH=120
+      - COSH_SHELL_RENDER=styled
+      - TERM=xterm-256color
+      - PS1=HEALTH_READY>
+      - /bin/bash
+      - -c
+      - "stty -echo; exec /bin/bash --noprofile --rcfile <(printf \"PS1='HEALTH_READY>'\\n\") -i"
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: "HEALTH_READY>"
+        timeout_ms: 10000
+      - type: line
+        text: "/usr/libexec/anolisa/cosh-ng/cosh-shell health banner; printf '\\nHEALTH_BANNER_DONE\\n'"
+      - id: banner-complete
+        type: wait_for
+        text: HEALTH_BANNER_DONE
+        timeout_ms: 10000
+      - id: banner-settled
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 5000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains: ["健康检查", HEALTH_BANNER_DONE]
+      not_contains: [Traceback, "thread 'main' panicked"]
+    evidence:
+      points:
+        - id: banner-settled
+          trigger_event: banner-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: HEALTH-LOGIN-40-EN
+    title: Installed profile prints live health facts before the first Bash prompt (40 columns, en-US)
+    tags: [shell, bash, health, banner, login, installed, visual]
+    terminal_cols: 40
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=en-US
+      - COSH_SHELL_HEALTH_SCAN=1
+      - COSH_SHELL_WIDTH=40
+      - TERM=xterm-256color
+      - "PROMPT_COMMAND=printf '\\nHEALTH_LOGIN_READY\\n'"
+      - /bin/bash
+      - --login
+      - -i
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: HEALTH_LOGIN_READY
+        timeout_ms: 10000
+      - id: login-settled
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 5000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains: ["Health check", HEALTH_LOGIN_READY]
+      not_contains: [Traceback, "thread 'main' panicked"]
+    evidence:
+      points:
+        - id: login-settled
+          trigger_event: login-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: HEALTH-LOGIN-80-ZH
+    title: Installed profile prints live health facts before the first Bash prompt (80 columns, zh-CN)
+    tags: [shell, bash, health, banner, login, installed, visual]
+    terminal_cols: 80
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=zh-CN
+      - COSH_SHELL_HEALTH_SCAN=1
+      - COSH_SHELL_WIDTH=80
+      - TERM=xterm-256color
+      - "PROMPT_COMMAND=printf '\\nHEALTH_LOGIN_READY\\n'"
+      - /bin/bash
+      - --login
+      - -i
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: HEALTH_LOGIN_READY
+        timeout_ms: 10000
+      - id: login-settled
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 5000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains: ["健康检查", HEALTH_LOGIN_READY]
+      not_contains: [Traceback, "thread 'main' panicked"]
+    evidence:
+      points:
+        - id: login-settled
+          trigger_event: login-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: HEALTH-LOGIN-120-EN
+    title: Installed profile prints live health facts before the first Bash prompt (120 columns, en-US)
+    tags: [shell, bash, health, banner, login, installed, visual]
+    terminal_cols: 120
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=en-US
+      - COSH_SHELL_HEALTH_SCAN=1
+      - COSH_SHELL_WIDTH=120
+      - TERM=xterm-256color
+      - "PROMPT_COMMAND=printf '\\nHEALTH_LOGIN_READY\\n'"
+      - /bin/bash
+      - --login
+      - -i
+    input:
+      - id: startup-ready
+        type: wait_for
+        text: HEALTH_LOGIN_READY
+        timeout_ms: 10000
+      - id: login-settled
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 5000
+      - type: line
+        text: exit
+    expect:
+      status: 0
+      contains: ["Health check", HEALTH_LOGIN_READY]
+      not_contains: [Traceback, "thread 'main' panicked"]
+    evidence:
+      points:
+        - id: login-settled
+          trigger_event: login-settled
+          layout_sensitive: true
+          required_types: [screenshot]

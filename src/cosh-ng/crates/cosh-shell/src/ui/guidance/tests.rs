@@ -7,6 +7,64 @@ use crate::insight::guidance::{CommandIdentity, ExecutionScope};
 use std::collections::BTreeMap;
 
 #[test]
+fn bash_output_falls_back_without_truncating_the_primary_object_or_command() {
+    let mut report = report();
+    report
+        .findings
+        .push(crate::diagnostics::health::HealthFinding {
+            id: "J10:/data".into(),
+            severity: HealthSeverity::Critical,
+            category: crate::diagnostics::health::HealthFindingCategory::Anomaly,
+            title_id: HealthMessageId::HealthFindingDiskHigh,
+            detail_id: None,
+            detail_args: BTreeMap::from([("mount".into(), "/data/important".into())]),
+            evidence_fact_ids: vec!["fixture-fact".into()],
+            suggested_try_ids: vec![],
+        });
+    let mut candidate = login_entry(Language::EnUs);
+    candidate.problem = "test".into();
+    candidate.text = format!("  cosh --ask '{}'", "x".repeat(7900));
+    let renderer = RatatuiInlineRenderer::with_width(240);
+    let text = render_health(&renderer, &report, true, Target::Bash, Some(&candidate)).unwrap();
+    assert!(text.len() < crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES);
+    assert!(text.contains("/data/important"));
+    assert!(text.contains(&candidate.text));
+}
+
+#[test]
+fn bash_keeps_the_complete_primary_object_after_the_invitation_is_suppressed() {
+    let mut report = report();
+    let mount = format!("/data/{}", "long-path/".repeat(150));
+    report
+        .findings
+        .push(crate::diagnostics::health::HealthFinding {
+            id: format!("J10:{mount}"),
+            severity: HealthSeverity::Critical,
+            category: crate::diagnostics::health::HealthFindingCategory::Anomaly,
+            title_id: HealthMessageId::HealthFindingDiskHigh,
+            detail_id: None,
+            detail_args: BTreeMap::from([("mount".into(), mount.clone())]),
+            evidence_fact_ids: vec!["fixture-fact".into()],
+            suggested_try_ids: vec![],
+        });
+    for renderer in [
+        RatatuiInlineRenderer::plain_with_width(40),
+        RatatuiInlineRenderer::with_width(40),
+        RatatuiInlineRenderer::with_width(80),
+        RatatuiInlineRenderer::with_width(120),
+    ] {
+        let text = render_health(&renderer, &report, true, Target::Bash, None).unwrap();
+        assert!(
+            text.contains(&mount),
+            "primary object must survive without an invitation"
+        );
+        assert!(!text.contains("cosh --ask"));
+        assert!(text.len() < crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES);
+        assert!(text.ends_with("\n\n"));
+    }
+}
+
+#[test]
 fn startup_entry_has_only_the_shell_and_guide_actions() {
     for language in [Language::EnUs, Language::ZhCn] {
         let text = login_entry(language).text;
@@ -26,8 +84,7 @@ fn health_and_failure_actions_share_the_same_styled_heading() {
             let candidate = health_candidate(&report(), language).unwrap();
             let failure = question_text("Analyze this failure", language).unwrap();
             for styled in [false, true] {
-                let mut renderer =
-                    RatatuiInlineRenderer::with_width(width).with_language(language);
+                let mut renderer = RatatuiInlineRenderer::with_width(width).with_language(language);
                 renderer.styled = styled;
                 let health =
                     render_health(&renderer, &report(), true, Target::Bash, Some(&candidate))
@@ -149,7 +206,9 @@ fn cosh_projection_uses_the_same_question_without_a_nested_cosh_command() {
     let bash = health_candidate(&report, Language::EnUs).unwrap();
     let session = session_health_questions(&report, Language::EnUs);
     assert!(session.iter().any(|item| item.id == bash.problem));
-    assert!(session.iter().all(|item| !item.question.contains("cosh --ask")));
+    assert!(session
+        .iter()
+        .all(|item| !item.question.contains("cosh --ask")));
     assert!(bash.text.contains("cosh --ask"));
 }
 
@@ -456,10 +515,9 @@ fn localization_failure_uses_the_same_user_setting_as_login_and_cosh() {
 fn native_cosh_health_suggests_a_question_instead_of_copying_a_shell_command() {
     for language in [Language::ZhCn, Language::EnUs] {
         let renderer = RatatuiInlineRenderer::with_width(80).with_language(language);
-        let mut bytes =
-            render_health(&renderer, &report(), true, Target::Cosh, None)
-                .unwrap()
-                .into_bytes();
+        let mut bytes = render_health(&renderer, &report(), true, Target::Cosh, None)
+            .unwrap()
+            .into_bytes();
         let items = session_health_questions(&report(), language);
         renderer
             .write_suggestion_list(
@@ -644,8 +702,7 @@ fn native_health_has_no_duplicate_guide_with_or_without_an_invitation() {
             ] {
                 let renderer = renderer.with_language(language);
                 let report = report();
-                let text =
-                    render_health(&renderer, &report, true, Target::Cosh, None).unwrap();
+                let text = render_health(&renderer, &report, true, Target::Cosh, None).unwrap();
                 assert!(!text.contains("cosh guide"), "{text}");
                 assert!(!text.contains("cosh --ask"), "{text}");
                 assert!(text.contains("92%"), "{text}");

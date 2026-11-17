@@ -7,7 +7,7 @@ fn actual_worker_fixture_uses_the_selected_canonical_plan() {
         scan_id: "health-1".into(),
         started_at_ms: 1,
         now_epoch_seconds: 100,
-        deadline: JobDeadline::after(Duration::from_secs(3)).unwrap(),
+        deadline: HealthDeadline::after(Duration::from_secs(3)).unwrap(),
         context: ScanContext::Resources,
         config: crate::config::HealthConfig::default(),
         environment: None,
