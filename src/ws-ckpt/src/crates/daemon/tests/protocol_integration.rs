@@ -13,7 +13,7 @@ use ws_ckpt_common::{
     EffectivePolicy, GlobalPolicySnapshot, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
     GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, PolicyFieldOp, RecoveryPreview, Request,
     Response, SnapshotEntry, SnapshotListItem, SnapshotMeta, StatusReport,
-    WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy,
+    WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy, WorkspaceTreeNode,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -346,6 +346,20 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 caller_uid: 1000,
                 outcome: GuardedRollbackOutcomeV2::Started,
             }),
+        },
+        Request::WorkspaceTree { .. } => Response::WorkspaceTreeOk {
+            target_ws_id: "ws-child".to_string(),
+            root_ws_id: "ws-root".to_string(),
+            nodes: vec![WorkspaceTreeNode {
+                ws_id: "ws-child".to_string(),
+                path: "/tmp/child".to_string(),
+                depth: 1,
+                source_ws_id: Some("ws-root".to_string()),
+                source_snapshot_id: Some("snap-a".to_string()),
+                source_registered: true,
+                target: true,
+            }],
+            warnings: vec![],
         },
     };
 
