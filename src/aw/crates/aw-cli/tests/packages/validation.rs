@@ -156,6 +156,117 @@ fn validation_failures_mask_private_fields_and_keep_the_source() {
 }
 
 #[test]
+fn validation_enforces_the_binding_step_limit_after_target_projection() {
+    let f = Fixture::new();
+    let mut config = aw_config::Validator::new()
+        .unwrap()
+        .parse(include_bytes!(
+            "../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    config["spec"]["agents"] = json!({
+        "sdk":{"adapter":"qoder-sdk", "argv":["/must-not-execute-agent"]},
+        "app":{"adapter":"qwenpaw", "argv":["/must-not-execute-agent"]}
+    });
+    config["spec"]["providers"]["policy"] = json!({
+        "transport":{"type":"stdio", "location":"agent", "argv":["/must-not-execute-provider"]},
+        "timeout_ms":1000, "max_output_bytes":4096
+    });
+    let step = |index: usize| {
+        json!({
+            "id":format!("step-{index}"), "provider":"policy",
+            "effects":["observe"], "on_error":"report"
+        })
+    };
+    for (before, after, disabled, excluded, valid) in [
+        (64, 0, 0, 0, true),
+        (65, 0, 0, 0, false),
+        (66, 0, 0, 0, false),
+        (32, 32, 0, 0, true),
+        (32, 33, 0, 0, false),
+        (64, 0, 2, 0, true),
+        (64, 0, 0, 2, true),
+    ] {
+        let mut before_steps: Vec<Value> = (0..before).map(step).collect();
+        for index in 0..disabled {
+            let mut item = step(before + index);
+            item["enabled"] = json!(false);
+            before_steps.push(item);
+        }
+        for index in 0..excluded {
+            let mut item = step(before + disabled + index);
+            item["match"] = json!({"tools":["file_read"]});
+            before_steps.push(item);
+        }
+        config["spec"]["events"] = json!({
+            "tool.before":{"enabled":true, "match":{"tools":["bash"]}, "steps":before_steps},
+            "tool.after":{"enabled":true, "steps":(0..after).map(step).collect::<Vec<_>>()},
+            "input.submit":{"enabled":false, "steps":(0..65).map(step).collect::<Vec<_>>()}
+        });
+        let bytes = serde_json::to_vec(&config).unwrap();
+        fs::write(&f.config, &bytes).unwrap();
+        for legacy in [false, true] {
+            let mut command = if legacy {
+                let mut command = f.command();
+                command.args(["validate", "--config"]).arg(&f.config);
+                command
+            } else {
+                validate(&f)
+            };
+            for against in [false, true] {
+                if against {
+                    command.arg("--against").arg(&f.config);
+                }
+                let output = invoke(&command);
+                assert_eq!(
+                    output.status.success(),
+                    valid,
+                    "{before}/{after}/{disabled}/{excluded}"
+                );
+                if !valid {
+                    assert!(output.stdout.is_empty());
+                    assert!(String::from_utf8_lossy(&output.stderr)
+                        .contains("maximum_steps_per_binding: 64"));
+                }
+            }
+        }
+        let output = invoke(validate(&f).arg("--json"));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.stderr.is_empty());
+        if valid {
+            assert_eq!(report["status"], "succeeded");
+        } else {
+            assert_eq!(report["status"], "failed");
+            assert_eq!(report["error"]["code"], "invalid_configuration");
+            assert_eq!(
+                report["error"]["message"],
+                "Configured target exceeds the service step limit"
+            );
+        }
+        assert_eq!(fs::read(&f.config).unwrap(), bytes);
+        assert!(!f.state.exists());
+    }
+
+    // A total above 64 remains valid when each target selects at most 64 steps.
+    let mut steps: Vec<Value> = (0..64).map(step).collect();
+    for item in &mut steps {
+        item["match"] = json!({"tools":["native:qoder-sdk:Bash"]});
+    }
+    let mut app = step(64);
+    app["match"] = json!({"tools":["native:qwenpaw:execute_shell_command"]});
+    steps.push(app);
+    config["spec"]["events"] = json!({"tool.before":{"enabled":true, "steps":steps}});
+    fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert!(invoke(&validate(&f)).status.success());
+    config["spec"]["events"]["tool.before"]["steps"][64]["match"] =
+        json!({"tools":["native:qoder-sdk:Bash"]});
+    fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert_eq!(invoke(&validate(&f)).status.code(), Some(1));
+}
+
+#[test]
 fn validation_human_options_and_usage_preserve_local_output_boundaries() {
     let f = Fixture::new();
     success(f.install().output().unwrap());

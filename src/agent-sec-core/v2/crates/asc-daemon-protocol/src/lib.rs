@@ -10,7 +10,8 @@
 
 pub mod authorization;
 pub use authorization::{
-    AuthorizationRequest, ClaimResponse, Decision, DecisionClaim, ExecutionReceipt, ReceiptAck,
+    AuthorizationRequest, ClaimResponse, Decision, DecisionClaim, ExecutionReceipt,
+    OsAuthorizationRequest, ReceiptAck,
 };
 
 mod action;

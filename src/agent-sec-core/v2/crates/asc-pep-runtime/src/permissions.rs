@@ -56,6 +56,42 @@ impl PermissionInput {
         Ok(Self(input))
     }
 
+    /// Adds an explicit Cedar runtime preset before binding the combined request.
+    ///
+    /// Cedar evaluates all forbids together, so a runtime permit cannot erase a candidate
+    /// restriction. No PAP policy or effective permission is changed here.
+    ///
+    /// # Errors
+    /// Rejects non-Cedar inputs, different schemas, invalid sources and oversized combinations.
+    pub fn with_runtime(self, runtime: Self) -> Result<Self, PermissionInputError> {
+        let (Input::Cedar(mut candidate), Input::Cedar(runtime)) = (self.0, runtime.0) else {
+            return Err(PermissionInputError::Unsupported(
+                "command candidates and runtime presets must both use Cedar".into(),
+            ));
+        };
+        if candidate.schema != runtime.schema {
+            return Err(PermissionInputError::Unsupported(
+                "candidate and runtime preset must use the same Cedar schema".into(),
+            ));
+        }
+        if candidate.text.len() + runtime.text.len() + 1 > 4 * 1024 * 1024 {
+            return Err(PermissionInputError::Unsupported(
+                "combined sandbox permissions exceed the 4 MiB input limit".into(),
+            ));
+        }
+        // Validate separately so an unfinished comment cannot consume the other source.
+        let parsed: cedar_policy::PolicySet = candidate.text.parse().map_err(|error| {
+            PermissionInputError::Unsupported(format!("invalid candidate Cedar: {error}"))
+        })?;
+        if parsed.policies().next().is_some() || parsed.templates().next().is_some() {
+            asc_policy_cedar::validate(&candidate)?;
+        }
+        asc_policy_cedar::validate(&runtime)?;
+        candidate.text.push('\n');
+        candidate.text.push_str(&runtime.text);
+        Ok(Self(Input::Cedar(candidate)))
+    }
+
     /// Previews the source's lexical permission regions for a launch.
     ///
     /// File writes include all mutations and reads; program-specific file access becomes

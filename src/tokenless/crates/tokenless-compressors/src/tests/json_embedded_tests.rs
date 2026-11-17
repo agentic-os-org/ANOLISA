@@ -402,3 +402,273 @@ fn bounded_candidates_keep_their_string_limit_and_write_order() {
     assert!(writes[first].created);
     assert_eq!(refresh.previous_generation, Some(writes[first].generation));
 }
+
+#[test]
+fn card_variants_compress_supported_subtrees_and_keep_unsupported_content() {
+    let base = "<div class=\"venue-card\" style=\"padding:16px;border-radius:12px;color:#222222;background:#ffffff\">\
+      <h2 style=\"margin:0 0 8px 0;font-size:18px\">Sushi Zen</h2>\
+      <p style=\"margin:0 0 8px 0\">Rating: <strong>4.8</strong> (320 reviews) · ¥198/person</p>\
+      <p style=\"margin:0 0 8px 0\">Address: 88 Nanjing West Road, Jing'an District</p>\
+      <ul style=\"padding-left:18px;margin:0 0 8px 0\">\
+        <li style=\"margin:0\">Hours: 11:30-22:00</li>\
+        <li style=\"margin:0\"><a href=\"https://maps.example.com/v1\" target=\"_blank\" rel=\"noopener noreferrer\">Directions</a></li>\
+        <li style=\"margin:0\"><img src=\"https://img.example.com/v1.jpg\" alt=\"Salmon platter\" width=\"320\" height=\"180\"></li>\
+      </ul>\
+      <button type=\"button\" class=\"btn\">Book table</button>";
+    let variants = [
+        ("supported", format!("{base}</div>")),
+        (
+            "svg",
+            format!("{base}<svg viewBox=\"0 0 24 24\"><use xlink:href=\"#location-icon\"></use></svg></div>"),
+        ),
+        (
+            "action_payload",
+            format!(
+                "{base}<script type=\"application/json\" data-action-payload=\"true\">{{\"venueId\":\"v1\",\"action\":\"open_map\"}}</script></div>"
+            ),
+        ),
+        (
+            "data_attribute",
+            format!("{base}<button type=\"button\" data-action-type=\"open_map\">Open map</button></div>"),
+        ),
+    ];
+
+    for allow_toon in [false, true] {
+        for (name, html) in &variants {
+            let input = serde_json::to_string(&json!({
+                "code": 0,
+                "card": {"id": "card-1", "html": html},
+            }))
+            .unwrap();
+            let store = CountingStore::default();
+            let outcome = JsonCompressor::default()
+                .compress(
+                    &input,
+                    &JsonCompressionContext {
+                        allow_toon,
+                        min_toon_chars: 0,
+                        ..embedded_context(Some(&store))
+                    },
+                )
+                .unwrap();
+
+            assert!(
+                outcome.operations.contains(&JsonOperation::EmbeddedHtml),
+                "{name} (toon={allow_toon})"
+            );
+            assert_eq!(outcome.metrics.embedded_rewrites, 1, "{name}");
+            assert_eq!(outcome.stash_writes.len(), 1, "{name}");
+            assert_eq!(store.stashes.load(Ordering::Relaxed), 1, "{name}");
+            assert!(
+                estimate_tokens(&input) >= estimate_tokens(&outcome.output) + 16,
+                "{name} (toon={allow_toon})"
+            );
+
+            let mut decoded: Value = if outcome.operations.contains(&JsonOperation::Toon) {
+                toon_format::decode_default(&outcome.output).unwrap()
+            } else {
+                serde_json::from_str(&outcome.output).unwrap()
+            };
+            let rendered = decoded["card"]["html"].as_str().unwrap();
+            assert!(rendered.starts_with(HEADER), "{name}: {rendered}");
+            assert!(rendered.contains("## Sushi Zen"), "{name}: {rendered}");
+            assert!(
+                rendered.contains("Rating: **4.8** (320 reviews) · ¥198/person"),
+                "{name}: {rendered}"
+            );
+            assert!(
+                rendered.contains("[Directions](https://maps.example.com/v1)"),
+                "{name}: {rendered}"
+            );
+            assert!(
+                rendered.contains("![Salmon platter](https://img.example.com/v1.jpg)"),
+                "{name}: {rendered}"
+            );
+            assert!(!rendered.contains("padding:16px"), "{name}: {rendered}");
+            match *name {
+                "svg" => assert!(
+                    rendered.contains(
+                        "<svg viewBox=\"0 0 24 24\"><use xlink:href=\"#location-icon\"></use></svg>"
+                    ),
+                    "{rendered}"
+                ),
+                "action_payload" => assert!(
+                    rendered.contains(
+                        "<script type=\"application/json\" data-action-payload=\"true\">{\"venueId\":\"v1\",\"action\":\"open_map\"}</script>"
+                    ),
+                    "{rendered}"
+                ),
+                "data_attribute" => assert!(
+                    rendered.contains(
+                        "<button type=\"button\" data-action-type=\"open_map\">Open map</button>"
+                    ),
+                    "{rendered}"
+                ),
+                _ => {}
+            }
+
+            assert_eq!(restore(&mut decoded, &store), 1, "{name}");
+            assert_eq!(
+                decoded,
+                serde_json::from_str::<Value>(&input).unwrap(),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn multi_venue_dining_card_payload_saves_tokens_and_recovers_byte_for_byte() {
+    let mut card = String::from(
+        "<div class=\"dining-feed\" style=\"font-family:'PingFang SC',sans-serif;padding:16px;background:#ffffff;color:#222222\" \
+         data-xiaomi-card-click-actions='{\"scene\":\"dining_recommend\",\"cardCount\":15}'>\
+         <style>.venue{border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.08);padding:4px 16px;margin-bottom:12px}</style>\
+         <script type=\"application/json\" data-card-meta=\"true\">{\"feedId\":\"f-99\",\"total\":15}</script>",
+    );
+    for idx in 1..=15 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut card,
+            format_args!(
+                "<article class=\"venue\" style=\"display:flex;flex-direction:column;gap:8px;padding:16px;border:1px solid #eeeeee\">\
+                 <div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px\">\
+                   <h3 style=\"margin:0;font-size:16px;line-height:24px\">Venue #{idx} Bistro</h3>\
+                   <span style=\"font-weight:bold;color:#ff5500\">¥{price}/人</span>\
+                 </div>\
+                 <p style=\"margin:0;font-size:13px;line-height:20px;color:#555555\">\
+                   Rating <strong>4.{rating}</strong> · {reviews} reviews · \
+                   <span style=\"text-decoration:line-through\">¥{orig}</span> set menu\
+                 </p>\
+                 <p style=\"margin:0;font-size:13px;line-height:20px;color:#555555\">\
+                   <svg class=\"ic\" style=\"width:14px;height:14px\" viewBox=\"0 0 24 24\"><use xlink:href=\"#ic-pin\"></use></svg> \
+                   No. {idx} Nanjing West Rd · \
+                   <svg class=\"ic\" style=\"width:14px;height:14px\" viewBox=\"0 0 24 24\"><use xlink:href=\"#ic-clock\"></use></svg> \
+                   11:00-22:00 · \
+                   <svg class=\"ic\" style=\"width:14px;height:14px\" viewBox=\"0 0 24 24\"><use xlink:href=\"#ic-metro\"></use></svg> \
+                   280m · \
+                   <svg class=\"ic\" style=\"width:14px;height:14px\" viewBox=\"0 0 24 24\"><use xlink:href=\"#ic-star\"></use></svg> \
+                   Top pick · \
+                   <svg class=\"ic\" style=\"width:14px;height:14px\" viewBox=\"0 0 24 24\"><use xlink:href=\"#ic-phone\"></use></svg> \
+                   <a href=\"https://dining.example.com/v/{idx}\" target=\"_blank\" rel=\"noopener noreferrer\">Details</a>\
+                 </p>\
+                 <img src=\"https://img.example.com/v/{idx}.jpg\" alt=\"Venue {idx} dish\" data-image-src=\"https://cdn.example.com/hd/{idx}.webp\" width=\"320\" height=\"180\">\
+                 <button type=\"button\" class=\"action-btn\" style=\"padding:6px 12px;border-radius:6px;cursor:pointer\" data-action-type=\"navigate\" data-venue-id=\"v-{idx}\">Navigate</button>\
+                 </article>",
+                price = 120 + idx * 5,
+                rating = idx % 9 + 1,
+                reviews = 200 + idx * 17,
+                orig = 180 + idx * 5,
+            ),
+        );
+    }
+    card.push_str(
+        "<script type=\"application/json\" data-action-payload=\"true\">{\"actions\":[\"navigate\",\"call\",\"book\"]}</script></div>",
+    );
+    assert!(card.len() > 18_000, "card len={}", card.len());
+
+    let input = format!(
+        r#"{{"traceId":18446744073709551617,"status":"ok","cardHtml":{}}}"#,
+        json_str(&card)
+    );
+    let store = CountingStore::default();
+    let outcome = compress(&input, &store);
+
+    assert_eq!(outcome.operations, [JsonOperation::EmbeddedHtml]);
+    assert_eq!(outcome.metrics.embedded_rewrites, 1);
+    assert_eq!(outcome.stash_writes.len(), 1);
+    assert!(outcome.output.contains(r#""traceId":18446744073709551617,"#));
+    assert!(estimate_tokens(&outcome.output) * 100 < estimate_tokens(&input) * 65);
+
+    let mut decoded: Value = serde_json::from_str(&outcome.output).unwrap();
+    let rendered = decoded["cardHtml"].as_str().unwrap();
+    assert!(rendered.contains("data-xiaomi-card-click-actions="));
+    assert!(rendered.contains("<use xlink:href=\"#ic-pin\"></use>"));
+    assert!(rendered.contains("data-image-src=\"https://cdn.example.com/hd/15.webp\""));
+    assert!(rendered.contains("data-action-type=\"navigate\""));
+    assert!(rendered.contains("{\"actions\":[\"navigate\",\"call\",\"book\"]}"));
+    assert_eq!(restore(&mut decoded, &store), 1);
+    assert_eq!(decoded["cardHtml"].as_str().unwrap(), card);
+}
+
+#[test]
+fn hybrid_views_dominated_by_retained_markup_below_sixteen_tokens_pass_through() {
+    let html = format!(
+        "<div><p>Summary</p><script type=\"application/json\">{}</script></div>",
+        serde_json::to_string(&json!({
+            "items": (0..12).map(|i| format!("payload-entry-{i}")).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    );
+    assert!(HtmlExtractor.render_fragment(&html).is_some());
+    let input = serde_json::to_string(&json!({"id": 1, "body": html})).unwrap();
+    let store = CountingStore::default();
+    let outcome = compress(&input, &store);
+
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(store.stashes.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn inherited_whitespace_unset_and_zero_sized_svg_sprites_compress_faithfully() {
+    for (extra, expected) in [
+        (
+            "<p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:unset\">one\n  two</span></span></p>",
+            "<span style=\"white-space:pre\">before\n<span>one\n  two</span></span>",
+        ),
+        (
+            "<p><span style=\"white-space:pre-line\">before\n\
+             <span style=\"white-space:pre\">one   two\nthree</span></span></p>",
+            "<span style=\"white-space:pre-line\">before\n\
+             <span style=\"white-space:pre\">one   two\nthree</span></span>",
+        ),
+        (
+            "<p><span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:pre-line\">one   two\nthree</span></span></p>",
+            "<span style=\"white-space:pre\">before\n\
+             <span style=\"white-space:pre-line\">one   two\nthree</span></span>",
+        ),
+        (
+            "<svg width=\"0\" height=\"0\"><defs><symbol id=\"icon\">\
+             <title>Location</title><path d=\"M0 0\"></path></symbol></defs></svg>\
+             <p><svg viewBox=\"0 0 16 16\"><use xlink:href=\"#icon\"></use></svg> Downtown</p>",
+            "<defs><symbol id=\"icon\"><title>Location</title><path d=\"M0 0\"></path></symbol></defs>",
+        ),
+    ] {
+        let html = format!("{}{extra}", rich("card"));
+        let input = serde_json::to_string(&json!({"id": 1, "html": html})).unwrap();
+        let store = CountingStore::default();
+        let outcome = compress(&input, &store);
+
+        assert_eq!(outcome.operations, [JsonOperation::EmbeddedHtml], "{extra}");
+        let mut decoded: Value = serde_json::from_str(&outcome.output).unwrap();
+        let rendered = decoded["html"].as_str().unwrap();
+        assert!(rendered.starts_with(HEADER), "{rendered}");
+        assert!(rendered.contains(expected), "{rendered}");
+        if extra.contains("xlink:href=\"#icon\"") {
+            assert!(
+                rendered.contains("<use xlink:href=\"#icon\"></use>"),
+                "{rendered}"
+            );
+        }
+        assert_eq!(restore(&mut decoded, &store), 1, "{extra}");
+        assert_eq!(
+            decoded,
+            serde_json::from_str::<Value>(&input).unwrap(),
+            "{extra}"
+        );
+    }
+
+    let hidden_symbol = format!(
+        "{}<svg width=\"100\" height=\"100\"><symbol id=\"icon\">\
+         <svg style=\"font-size:0\"><text x=\"0\" y=\"15\">Hidden instruction</text></svg>\
+         </symbol><use xlink:href=\"#icon\"></use></svg>",
+        rich("card")
+    );
+    let input = serde_json::to_string(&json!({"id": 1, "html": hidden_symbol})).unwrap();
+    let store = CountingStore::default();
+    let outcome = compress(&input, &store);
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(store.stashes.load(Ordering::Relaxed), 0);
+}

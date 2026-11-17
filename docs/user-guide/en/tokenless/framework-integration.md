@@ -95,9 +95,12 @@ onward, so short logs reach the same domain compressors as plain text. Qoder's n
 selects only string `stdout`, including short or empty values. If `stdout` is missing or is
 not a string, the original result is not replaced. `stderr` and other fields stay unchanged;
 error diagnostics can still inspect `stderr`.
-Qoder's native Bash stdout, Claude Code, and QwenWork keep object replacements. Cosh-NG unwraps
-shell JSON carried in `llmContent` and serializes the updated envelope into its required string
-replacement; OpenCode keeps its string output contract.
+Qoder's native Bash stdout and Claude Code keep object replacements. QwenWork replaces
+single-stream native shell `stdout` with text strings, passes through multi-stream, failed, or
+unfamiliar shell envelopes (retaining error diagnostics), and keeps object and array types for
+structured non-shell MCP results. Cosh-NG unwraps shell JSON carried in `llmContent` and
+serializes the updated envelope into its required string replacement; OpenCode keeps its string
+output contract.
 
 The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
 transformations are lossy, so Core passes the tools through unchanged, including OpenCode's V1
@@ -182,8 +185,11 @@ PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results ent
 the shared policy. Metadata-only callbacks from `mcp_list`, `mcp_get`, or `mcp_call`
 pass through because replacing their real output with telemetry would lose content;
 full `mcp_call` responses still use normal compression. Accepted results replace
-the original through `updatedToolOutput`; objects and arrays retain their types,
-while text slots can use TOON. File-content protection, unsupported-content
+the original through `updatedToolOutput`: single-stream native shell `stdout` and
+plain text slots return strings (so text slots can use TOON without serializing
+the shell envelope), while structured non-shell MCP objects and arrays retain
+their types when the delivered replacement decreases both characters and estimated
+tokens. File-content protection, unsupported-content
 passthrough, and RTK deduplication still apply. Statistics use the separate Agent
 ID `qwenwork`. Tool Ready and Schema hooks are not registered.
 

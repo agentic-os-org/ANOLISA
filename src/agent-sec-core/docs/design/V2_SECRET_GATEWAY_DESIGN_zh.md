@@ -38,7 +38,7 @@ revision 与 owner UID 并持续选择进程，Binding 固定一次发现的进�
 | Gateway Plan | `v2/crates/asc-gateway-plan` | 从 Scope 的凭据 Policy 快照编译确定性 plan |
 | Gateway Runtime | `v2/crates/asc-gateway-runtime` | Scope 准备/撤销、Binding 实例接管、generation、systemd 与 nft |
 | 数据面 addon | `v2/gateway/addon/` | mitmproxy 请求判定、替换与响应检查 |
-| CLI | `v2/apps/asc-cli/src/commands/` | 本地 fake 生成、root pair 管理、Policy/Scope 操作、共享公开 CA 查询 |
+| CLI | `v2/apps/asc-cli/src/commands/` | 本地 fake 生成、root pair 管理、Policy/Scope 操作、内置模板一步注入、共享公开 CA 查询 |
 
 ## 2. Cedar Policy 与 Scope
 
@@ -122,6 +122,44 @@ root 通过既有 `scope create` 指定精确 Policy ID/revision、owner UID，�
 启动顺序为：准备 real/fake 文件 → root 提交 Cedar Policy 并登记配对 → 创建 Scope → enable →
 `gateway ca` 查询共享 CA → Agent 自行加载 fake 文件与 CA → 自主启动。
 未满足 §4.1 的 ready 条件时 CA 查询明确失败；不返回 fake、Token 或环境变量映射。
+
+上述分步命令保持不变。对随包内置模板，root 也可用一条命令完成前四步：
+
+```bash
+agent-sec-cli inject-credential --builtin github \
+  --real-token-file /root/github.token \
+  --owner agentuser --executable /usr/local/bin/my-agent
+```
+
+`--builtin` 目前只接受 `github`，对应 `<gateway datadir>/github.cedar`；目录在构建时由
+`GATEWAY_DATADIR` 确定，RPM 为 `/usr/share/anolisa/sec-core/gateway`。模板及其所有父目录
+必须 root 所有且 group/other 不可写，否则拒绝。模板只读不改：命令在内存中按 Cedar
+结构（policy JSON）只替换 `@real_token_file`/`@fake_token_file` 两个注解值，重新解析并
+逐条比对，规则、条件和其余注解不得变化，结果以 `seccore.system@2` 提交。
+
+real 文件须为 root 或 owner 所有的私有单链接文件；`--owner`/`--owner-uid` 二选一且非 root；
+selector 为 `--executable`、`--process-name`、`--cmdline-arg` 三选一，不接受 `--pid`。
+未给 `--fake-token-file` 时按 `--format auto` 生成 fake。每次运行使用随机 ID：real/fake
+副本暂存于 `/run/agent-sec-core/inject-credential/<id>/`（root 0700/0600），`policy create`
+成功后立即删除；Policy 名为 `inject-credential/github/<uid>/<id>`，因此不同运行不会
+复用旧登记。随后 `scope create` 绑定该 Policy revision；最后把生成的 fake 以 owner 所有的 0600
+文件写入 `--output-dir`（默认 `~owner/.config/agent-sec/gateway/github-<id>.fake`），不覆盖
+已有文件。同一 owner、同一 selector 已有 Active 的同模板注入 Scope 时，命令在读取 Token 后、
+任何写入前拒绝；root 目录锁串行化重复检查和 Scope 创建，防止并发命令绕过检查。锁为非阻塞：
+另一次运行持锁时，后到的命令立即以锁冲突失败而不排队，且不创建任何记录，可在前者结束后重试。
+交付到 owner 可写目录之前，CLI 清除补充组并永久降权到 owner；不以 root 对可被替换的
+目录执行 chown。`--output-dir` 必须允许 owner 创建文件。
+
+命令不执行 `gateway enable`，不生成 `agent.env` 或环境变量映射。成功输出 JSON：Policy/Scope
+ID、pair ID、fake 文件路径、网关 `enabled/ready` 与 ready 时的 `caBundlePath`、后续步骤及
+`teardown` 命令；任何输出都不含 Token 或 fake 值。本次运行使用非默认 daemon socket 时，
+撤销、恢复和后续步骤中的命令都带同一 `--socket`，避免对另一 daemon 执行而误报成功。`--wait-seconds` 等待新 Scope 的 Binding
+全部 READY，超时或失败时仍输出 JSON 并以 1 退出。`--dry-run` 只校验模板并打印计划，不读取
+Token、不连接 daemon。`policy create` 失败或结果不确定时不自动重试：保留 root-only 暂存文件和原始 JSON source，
+错误信息给出 Policy 名、恢复文件位置及人工恢复命令。先查找该 Policy；不存在时，排除故障后
+用原 source 手动创建，复用同一登记并获得 pair ID，再按实际 Scope 引用清理，最后删除恢复材料；`scope create` 失败或响应丢失时，先查找引用已知 Policy ID 的 Scope，删除并
+等待清理后再删除 Policy。确认没有创建 Scope 时，可检查并退役新登记的 pair；不得退役
+其他 Scope 共用的 pair。
 
 PCP process discovery 约两秒运行一次。每个匹配进程实例通过既有 Binding 接管，核对 boot ID、
 PID namespace、PID、start time、UID 和组；目标及已有后代快照逐个核验后移入实例 cgroup。
@@ -355,8 +393,14 @@ canonical Scope、固定的 Policy revision 和 Binding，核对 lifecycle 与�
 回滚须先关闭网关并确认撤流，不能直接回退二进制沿用新 Store/plan/投影；canonical
 Scope/Binding、Store 与 tombstone 不属于运行投影的清理范围，不提供本次迁移工具。
 
-当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并在 blocking task 中执行
+指定 `agent-sec-daemon serve --enable-gateway` 后，原有 Gateway 装配路径在启动
+Binding worker 前恢复 file Scope 的删除屏障，并在 blocking task 中执行
 网关构造与 `GatewayService.recover()`；信号监听先启动，恢复期间收到停止请求后不开放 UDS。
+当前 daemon 默认 `disable_gateway=true`，跳过网关构造与恢复。
+仅提供 `--enable-gateway` 恢复管理路径，并保留已保存的数据面 enabled 状态；
+它不替代运行时的 `agent-sec-cli gateway enable`。已有状态的部署可为 systemd 服务的
+`ExecStart` 通过 drop-in 追加该启动选项；未装配时，运行时 `gateway enable` 不可用。
+适用条件、职责检查和验收见[部署契约 DPROC-GW-005](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md)。
 开放 UDS 请求前再执行 `PapService.recover_scopes()`，不设置独立网关恢复 Job。SQLite 在 claim Apply 的同一事务中核对 canonical Scope 仍为 `Active`，
 防止删除中的 Scope 在 discovery 清理前重新部署策略。网关投影不可读、损坏或版本不支持时，
 构造失败先停止代理、撤除 nft 表并清除运行时快照，再返回错误；不依赖损坏投影判断是否撤流。
@@ -476,7 +520,9 @@ raw 升级只更新文件，不因新增网关资产而启用或重启代理；�
 
 安装态 E2E 保留显式 `ASC_GATEWAY_E2E_USER` gate，只在允许修改宿主 systemd/nft 的专用环境
 执行，不增加默认流量引流。测试使用独立 executable 路径与非 root owner，经真实 CLI 创建
-Cedar Policy/Scope，先 enable/共享 CA 查询再启动 worker，等待真实 Binding 接管。用本机
+Cedar Policy/Scope，先 enable/共享 CA 查询再启动 worker，等待真实 Binding 接管。
+`inject-credential` 另以一条命令创建 Policy/Scope，并验证模板字节不变、暂存目录清空、
+fake 文件归属 owner、重复注入被拒绝，以及 enable 后上游收到 real。用本机
 `198.18.0.1`、临时 CA 与 mock REST/Git 上游验证上游收到 real，`true` 的未压缩回显返回
 fake；`false` 与压缩 body 不能使用“Agent 响应必为 fake”的断言。还须验证 clone/fetch/push、
 配对幂等、共享 Scope 删除/最后退役、opaque pair remove、生成/人工 fake 整串 80% 校验、

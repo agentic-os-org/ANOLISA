@@ -2,6 +2,7 @@
 """Exercise source-export and historical-source compatibility without builds."""
 
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -120,6 +121,85 @@ class ContractSourcePublishing(unittest.TestCase):
                     names = archive.getnames()
                 self.assertIn(f"{component}/packaging/anolisa/rpm/component.toml", names)
                 self.assertFalse(any(name.startswith(f"{component}/target") for name in names))
+
+    def test_os_skills_source_archive_uses_the_release_catalog(self) -> None:
+        source = self.work / "src" / "os-skills"
+        packaging = source / "packaging"
+        packaging.mkdir(parents=True)
+        shutil.copyfile(
+            ROOT / "src/os-skills/packaging/release_catalog.py",
+            packaging / "release_catalog.py",
+        )
+        (packaging / "released-skills.txt").write_text("devops/stable\n")
+        shutil.copyfile(ROOT / "src/os-skills/Makefile", source / "Makefile")
+        (source / "cosh-extension.json").write_text(
+            '{"name":"test-skills","skills":["devops/stable"]}'
+        )
+        (source / "component.toml").write_text(
+            '[component]\nname = "os-skills"\nversion = "1.2.3"\n\n'
+            '[[adapters]]\nframework = "openclaw"\n\n'
+            '[[adapters.openclaw.skills]]\nname = "stable"\n'
+            'source = "{datadir}/skills/stable/"\n\n'
+            '[[adapters.openclaw.skills]]\nname = "incubating"\n'
+            'source = "{datadir}/skills/incubating/"\n'
+        )
+        for name in ("stable", "incubating"):
+            skill = source / "devops" / name
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+            (skill / "example.sh").write_text("#!/bin/sh\nexit 0\n")
+        self.environment.update(
+            ARCHIVE_NAME="os-skills-1.2.3",
+            SRC_DIR=str(source),
+            LICENSE_RESOLVED="false",
+        )
+        staging = self.work / "build" / "os-skills-1.2.3"
+        staging.mkdir(parents=True)
+        stale = staging / "stale-skill"
+        stale.touch()
+        script = action_script("Create source archive")
+        result = self.run_script(script.replace("${{ inputs.component }}", "os-skills"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("archive staging directory must be empty", result.stderr)
+        stale.unlink()
+        for action in ("Create source archive", "Create source archive (tar)"):
+            script = action_script(action).replace("${{ inputs.component }}", "os-skills")
+            result = self.run_script(script)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with tarfile.open(self.archives / "source.tar.gz") as archive:
+            root = "os-skills-1.2.3"
+            self.assertIn(f"{root}/skills/stable/example.sh", archive.getnames())
+            self.assertFalse(any("/incubating" in name for name in archive.getnames()))
+            contract = archive.extractfile(f"{root}/component.toml")
+            self.assertIsNotNone(contract)
+            data = tomllib.loads(contract.read().decode())
+            self.assertEqual(
+                [skill["name"] for skill in data["adapters"][0]["openclaw"]["skills"]],
+                ["stable"],
+            )
+            projected = archive.extractfile(f"{root}/packaging/released-skills.txt")
+            self.assertEqual(projected.read().decode(), "skills/stable\n")
+            cosh = archive.extractfile(f"{root}/cosh-extension.json")
+            self.assertEqual(json.load(cosh)["skills"], ["skills/stable"])
+            extracted = self.work / "extracted"
+            archive.extractall(extracted, filter="data")
+        installed = self.work / "installed"
+        result = subprocess.run(
+            [
+                "make",
+                "-C",
+                str(extracted / root),
+                "install",
+                "INSTALL_PROFILE=system",
+                f"DESTDIR={installed}",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        skills = installed / "usr/local/share/anolisa/skills"
+        self.assertEqual({path.name for path in skills.iterdir()}, {"stable"})
 
     def test_memory_source_export_builds_plugin_without_component_owned_metadata(self) -> None:
         source = self.work / "build" / "agent-memory"

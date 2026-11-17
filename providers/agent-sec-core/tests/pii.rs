@@ -83,6 +83,27 @@ fn tool_input_and_output_distinguish_pass_risk_and_backend_error() {
 }
 
 #[test]
+fn final_tool_output_blocks_sensitive_finalized_content() {
+    for sensitive in [false, true] {
+        let d = support::Directory::new(json!({"pii":true}));
+        let mut req = request(true);
+        req["operation"] = json!("check_final_tool_output");
+        req["allowed_effects"] = json!(["observe", "block"]);
+        req["event"]["name"] = json!("security.violation");
+        req["event"]["agent"]["adapter"] = json!("deepseek-harness");
+        if sensitive {
+            req["event"]["tool"]["result"]["content"][0]["text"] = json!("SENSITIVE");
+        }
+        let response = run(req, &d);
+        assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["effects"][0]["type"],
+            if sensitive { "block" } else { "observe" }
+        );
+    }
+}
+
+#[test]
 fn retained_sensitive_fields_and_unsupported_slots_stop_result_delivery() {
     for shape in ["missing", "multiple", "stderr", "metadata"] {
         let d = support::Directory::new(json!({"pii":true}));
@@ -137,6 +158,27 @@ fn qoder_read_projection_allows_replacement_only_with_a_safe_retained_envelope()
         }
         assert!(!response.to_string().contains("SENSITIVE"));
     }
+}
+
+#[test]
+fn codex_whole_mcp_projection_replaces_serialized_result() {
+    let d = support::Directory::new(json!({"pii":true}));
+    let native = json!({"tool_name":"mcp__fixture__echo",
+        "tool_input":{"value":"safe"},
+        "tool_response":{"content":[{"type":"text","text":"SENSITIVE"}],
+            "structuredContent":{"private":"SENSITIVE"},"isError":false}});
+    let mut req = request(true);
+    req["event"]["agent"]["adapter"] = json!("codex");
+    req["event"]["tool"]["result"] = native["tool_response"].clone();
+    req["event"]["tool"]["result_projection"] =
+        aw_adapter::projection::project("codex", &native).unwrap();
+    let response = run(req.clone(), &d);
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(response["effects"][0]["type"], "replace_result");
+    assert!(!response.to_string().contains("SENSITIVE"));
+
+    req["event"]["tool"]["result_projection"]["text"] = json!("SENSITIVE");
+    assert_eq!(run(req, &d)["error_code"], "unsupported_pii_result");
 }
 
 #[test]

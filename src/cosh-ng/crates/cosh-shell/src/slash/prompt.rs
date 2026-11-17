@@ -4,6 +4,12 @@ pub(crate) fn write_shell_prompt<W: Write>(
     state: &mut InlineState,
     _output: &mut W,
 ) -> std::io::Result<()> {
+    // The guide hosts auth as a finite task: a finished action returns to the
+    // management list, never to a working shell prompt.
+    if state.auth.host.is_guide() {
+        state.auth.menu_reload = true;
+        return Ok(());
+    }
     state.trigger_pty_prompt = true;
     Ok(())
 }

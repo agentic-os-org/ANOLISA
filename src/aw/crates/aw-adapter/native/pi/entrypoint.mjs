@@ -46,15 +46,20 @@ export async function runNativeWorker({ application, args = [] }) {
   const resolved = packages(application);
   const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
   const startup = configuration();
+  if (resolved.version !== startup.sdk_version || resolved.coreVersion !== startup.core_version)
+    throw new Error("Pi SDK packages changed after AW admission");
   if (!startup.resident_policy_reload)
     throw new Error("Native Pi startup requires aw instance prepare");
   if (startup.hooks.some(hook => hook.on_error === "withhold_result") &&
-      (resolved.version !== "0.84.2" || resolved.coreVersion !== "0.84.2"))
-    throw new Error("AW strict Pi output requires pi-coding-agent and pi-agent-core 0.84.2");
+      startup.strict_output_supported !== true)
+    throw new Error("AW strict Pi output requires a verified SDK pair");
   const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
   const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
   if (typeof sdk.AgentSession !== "function" || typeof core.Agent !== "function")
     throw new Error("AW Pi SDK requires native AgentSession and Agent");
+  if (startup.strict_output_supported === true &&
+      typeof core.Agent.prototype.processEvents !== "function")
+    throw new Error("AW strict Pi output requires the native event dispatch seam");
   const app = await import(pathToFileURL(application).href);
   if (typeof app.createSession !== "function" ||
       (typeof app.runWorker !== "function" && typeof app.run !== "function"))
@@ -69,7 +74,7 @@ export async function runNativeWorker({ application, args = [] }) {
     },
   };
   const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
-  await runWorker(worker, sdk, core, args, { sdk: resolved.version, core: resolved.coreVersion });
+  await runWorker(worker, sdk, core, args);
 }
 
 if (process.env.AW_PI_PROBE === "1") {
@@ -79,13 +84,19 @@ if (process.env.AW_PI_PROBE === "1") {
   const [application, ...args] = process.argv.slice(2);
   const resolved = packages(application);
   const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
-  if (configuration().hooks.some(hook => hook.on_error === "withhold_result") &&
-      (resolved.version !== "0.84.2" || resolved.coreVersion !== "0.84.2"))
-    throw new Error("AW strict Pi output requires pi-coding-agent and pi-agent-core 0.84.2");
+  const startup = configuration();
+  if (resolved.version !== startup.sdk_version || resolved.coreVersion !== startup.core_version)
+    throw new Error("Pi SDK packages changed after AW admission");
+  if (startup.hooks.some(hook => hook.on_error === "withhold_result") &&
+      startup.strict_output_supported !== true)
+    throw new Error("AW strict Pi output requires a verified SDK pair");
   const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
   const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
   for (const [name, value] of [["AgentSession", sdk.AgentSession], ["Agent", core.Agent]])
     if (typeof value !== "function") throw new Error(`AW Pi SDK requires native ${name}`);
+  if (startup.strict_output_supported === true &&
+      typeof core.Agent.prototype.processEvents !== "function")
+    throw new Error("AW strict Pi output requires the native event dispatch seam");
   const app = await import(pathToFileURL(application).href);
   if (
     typeof app.createSession !== "function" ||
@@ -98,7 +109,7 @@ if (process.env.AW_PI_PROBE === "1") {
   if (typeof app.runWorker === "function") {
     if (typeof app.run === "function") throw new Error("Choose runWorker or run, not both");
     const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
-    await runWorker(app, sdk, core, args, { sdk: resolved.version, core: resolved.coreVersion });
+    await runWorker(app, sdk, core, args);
   } else {
   if (configuration().hooks.some(hook => hook.event === "input.submit"))
     throw new Error("AW Pi input.submit requires the runWorker factory");

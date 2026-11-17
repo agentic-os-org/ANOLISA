@@ -89,7 +89,19 @@ Cedar 文件读写条件中的路径和程序字面量最多为 4,095 个 UTF-8 
 另有 4 MiB 字符串总预算，每个不同路径均在复制前检查。意图候选封装不是权限文件：
 须先处理 unresolved 要求及候选有效性，再选取其中的 Cedar 文本。
 
-Cedar 文件读写条件中的路径字面量必须已经存在。准备时保留全部路径（包括排除项），解析文件、目录及
+已有目录 write 权限覆盖其子树内新文件和多层目录的创建，Cedar 输入中显式列出的缺失路径也适用，
+不再额外要求 `create` 权限。
+
+没有上述覆盖时，Cedar 对不存在路径允许 `create`，才申请其**已存在的直接父目录 write 权限**。
+这会明确扩大权限，包含兄弟文件和后代的读取及全部修改操作，不提供精确文件创建或仅创建限制。
+如果直接父目录缺失，且没有已有可写祖先覆盖目标，准备失败；报错包含目标与父目录路径，以及
+`no existing writable ancestor covers the target`。应授权某个已有祖先目录 write，或先创建父目录再准备权限；
+转换器不会自动为更高层祖先新增授权。准备阶段不创建文件，只绑定已有目录身份，不为不存在的对象
+伪造身份。悬空符号链接及无法表示的排除规则仍会被拒绝。
+已有文件仍按精确路径授权，JSON 路径仍须存在。PDP 使用未改变的 PAP 策略评估扩大后的目录申请；
+直接 `sandbox run` 不经过 PDP，直接安装这份权限。
+
+准备时保留已有路径（包括排除项），解析文件、目录及
 中间路径分量中的符号链接，再按 canonical 路径求值并合并权限。经别名的 allow 不会丢弃
 对其目标的 forbid。可读别名保留给命令使用；若别名存在可写祖先则拒绝，因为祖先目录可被用于
 在安装后重定向链接。后端仍拒绝无法安全安装的重叠别名。Cedar 显式路径指向多硬链接文件时，
@@ -102,8 +114,8 @@ Cedar 文件读写条件中的路径字面量必须已经存在。准备时保�
 准备 PDP 请求的应用可用 `asc_pep_runtime::PermissionInput::parse(text)` 解析当次输入，
 作为现有 `PermissionProvider` 传给 `PepRuntime::authorize` 或 `run`。JSON 与 Cedar 均
 生成 `requested_permissions`；daemon 策略仍决定最终 `effective_permissions`。输入不会
-作为授权策略上传到 PAP。`AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接受相同格式，每次 Hook
-准备请求时重新读取文件。输入变化影响下一次请求，不改变已准备的决定或运行中的沙箱。
+作为授权策略上传到 PAP。Cosh 使用下文的系统默认模板；内部准备入口仍支持当次 JSON/Cedar
+权限输入，供权限提供层接入。输入变化影响下一次请求，不改变已准备的决定或运行中的沙箱。
 两个运行入口均通过 `PermissionProvider::prepare` 先绑定路径，再执行或请求授权。
 `PermissionInput::resolve` 仅用于词法预览，不生成绑定对象的执行计划。
 
@@ -162,27 +174,20 @@ bubblewrap 初始化期间，父进程被终止可能留下尚未启动目标的
 通过现有 `policy create/update` 命令管理 Cedar 策略，策略文件为 Cedar 原文，见
 [Policy 指南](policy-cli.md#cedar-policy-源码)。更新成功后，下一次授权请求使用新版本。
 
-通过 `agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`
-启用授权。此 root 配置设置运行参数，不保存策略 ID 或 Cedar 正文：
+daemon 默认启用授权，无需独立授权文件或启动开关。PAP 中适用策略集为空时返回 DENY。
+申请权限受 Cedar 限制，共用约束通过 PAP 管理的策略表达。
 
-```json
-{
-  "environment_permissions": {
-    "version": 1,
-    "filesystem": {"default": "deny", "rules": [
-      {"effect": "allow", "path": "/", "rights": ["read"]}
-    ]},
-    "execution": {"deny_paths": []},
-    "network": {"mode": "off"}
-  },
-  "ttl_seconds": 60
-}
-```
+升级时，从 daemon 启动命令及 systemd drop-in 中移除 `--authorization-config` 和文件路径，
+旧参数会被拒绝。旧配置中的 `environment_permissions` 和 `ttl_seconds` 不再读取。
+使用新 daemon 前须核对并将必要约束迁移到 Cedar，不会自动转换。修改 unit 后重新加载
+systemd 并重启 daemon。daemon 和授权客户端须同步升级：授权请求改用包含 principal、action、
+resource 和 context 的公共 PARC 信封，旧 OS 载荷会被拒绝。
 
-请求主体只提供可选的 `principal.agent_type`，例如 `{"principal":{"agent_type":"cosh"}}`，
-无需登记 Agent 身份或 UID。类型由调用方提供，用于分类匹配，尚未认证；此阶段不按身份
-隔离单个 Agent。`environment_permissions` 限制每次 OS 请求的权限。
-配置及祖先目录须由 root 管理，不可被组或其他用户写入；调整运行参数后重启 daemon。
+挂载 noexec 仍由请求中的 `execution.deny_paths` 明确指定。Cedar 的 `file.exec` forbid
+约束本次启动，不能代替对子孙进程生效的 noexec 挂载；必要的 noexec 约束须保留在权限请求中。
+
+请求通过 `context.agent.agent_type` 提供可选 Agent 分类，不要求 Agent 身份或 UID 登记。
+类型由调用方自报，未经认证；本阶段不按身份隔离单个 Agent。
 
 PAP 从全部当前策略推导请求策略集，按精确的
 `schema: {schemaId: "seccore.system", revision: 1}` 引用校验。
@@ -207,11 +212,11 @@ principal 不算加入。单份存储策略混用裸 header 与显式约束会�
 不回退旧策略。创建、删除和 header 资格变化在下一次请求生效；空集替换缓存并拒绝请求。
 整个集合中匹配的 forbid 优先于 permit。Scope/Binding 的部署、固定版本和清理独立保持原状。
 
-旧配置项 `baseline_policy`、`task_policy` 会明确报错。调整旧请求策略时必须人工核对原来的
+旧配置项 `baseline_policy`、`task_policy` 不再使用。调整旧请求策略时必须人工核对原来的
 交集语义：新集合中的两份 permit 源码会合并授权。额外限制应表达为 forbid，或收紧所有
 适用的 permit。已有部署策略不会自动改写。
 
-PEP 须在 ttl_seconds 内一次性接收决定；接收后的审批等待、安装和运行不再因该期限失败。
+PEP 须在 60 秒内一次性接收决定；接收后的审批等待、安装和运行不再因该期限失败。
 策略更新影响后续请求，已接收决定仍绑定原命令和权限；拒绝或执行失败后不能复用决定。
 
 `authorization.evaluate` 返回 ALLOW、DENY、MODIFY、STEP_UP 或 DEFER，不执行命令。
@@ -228,18 +233,132 @@ schema、组件分工和验证范围见[实现设计](../../../../src/agent-sec-
 
 ## 在 Cosh NG 中启用授权
 
-先启用上述 daemon 授权配置，并确认 ASC 扩展已在 Cosh 中启用。为目标工作目录准备
-完整的 `OsPermissionSet` 文件，然后在启动 Cosh 的环境中设置：
+安装配套的 Rust V2 运行时与 Cosh extension，启用上述 daemon 授权配置，并在 Cosh NG
+中启用扩展。本源码修订新增全 shell 授权；正式发布前须使用包含本次改动的构建。
+**不要同时开启 Cosh 的 sandbox 与 tokenless 能力**。若 tokenless 已启用，
+先用 `/extensions disable tokenless` 禁用该扩展，再使用 sandbox 授权。tokenless 会改写
+部分 shell 命令，Cosh 当前的 Hook 合并方式可能让该改写覆盖 sandbox 的执行交接。
+本版本不自动检测或强制执行这一互斥要求。
+
+启用全 shell 授权：
 
 ```bash
-export AGENT_SEC_COSH_SANDBOX_PERMISSIONS=/absolute/path/permissions.json
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
 cosh
 ```
 
-这会把现有 guard 命中的 shell 命令切换到 PDP 授权；不扩大命令匹配范围，也不接管原生文件工具。
-未设置该变量时保留原行为。设置后，权限文件无效、daemon 不可用或授权失败均阻断，不回退旧沙箱或无隔离执行。
-请求直接提供 `principal.agent_type: "cosh"`，Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
-会话 ID 不建立授权身份。
+开关默认关闭，接受 `1` / `true` 和 `0` / `false`，忽略大小写与前后空白。
+非法值报告配置错误并阻断 shell 执行。关闭时保留原有危险命令筛选、sudo 处理和沙箱路径。
+开启后，所有已接入的 `shell` / `run_shell_command` 调用，包括 `python3 skill.py` 和
+含 `sudo` 的原始命令，都进入策略授权。明确禁止命令仍可提前阻断；原生文件工具、MCP
+及其他入口不在此 Hook 的覆盖范围内。
+
+默认 `fixed` 模式使用 RPM 核心包自动安装的 `/etc/agent-sec/sandbox/permissions.json.template`，无需权限文件环境变量
+或手工复制。源码安装遵循已有 `CONFIGDIR` 布局，并同步生成 Hook 使用的路径；标准 RPM
+安装使用上述路径。raw 遵循其管理的配置根目录，默认路径为
+`/etc/anolisa/sec-core/sandbox/permissions.json.template`，并按同一布局生成 Hook 路径。
+生成的路径模块属于安装元数据，不提供用户覆盖入口。模板及父目录必须由 root 所有、不可由组或其他用户写入，路径不得含
+符号链接。RPM 使用 `%config(noreplace)`；源码重复安装保留已有配置及权限模式。
+
+默认采用 [Codex workspace-write](https://learn.chatgpt.com/docs/agent-approvals-security#protected-paths-in-writable-roots)
+的可写范围及 Git 保护：允许当前运行身份可读的文件，只允许实际工作目录、`/tmp` 和绝对路径
+`$TMPDIR` 下写入，禁止 IPv4/IPv6 网络。每个可写目录下已有的 `.git` 文件或目录只读，
+包含其后代；`.git` 指针还保护其实际指向的 Git 目录。不会扫描嵌套仓库，也不解析
+`commondir`。不按其他目录名称额外排除路径，也不因工作目录是 `/`、HOME 或 HOME 的祖先
+目录而拒绝申请。PAP/PDP 可进一步收窄申请权限或拒绝执行。默认配置不隔离敏感文件读取、
+继承的环境秘密或共享临时目录。
+
+含符号链接的受保护路径、无效 Git 指针或不可用的绝对路径 `$TMPDIR` 会阻断；
+Git 指针路径中的空白原样保留。这些默认值不能替代策略，也不表示两个沙箱后端完全相同。
+
+管理员编辑该模板修改默认申请。`format_version` 为
+`asc.sandbox.permissions-template.v1`；`permissions` 使用上述 OS 权限对象，仅允许路径
+开头的 `${cwd}` 占位符。
+`include_tmpdir` 控制是否读取命令环境中的 `$TMPDIR`（忽略空值和相对路径）；
+`read_only_subpaths` 列出每个可写根目录下检查的目录名称，其中 `.git` 也支持指针文件，
+缺失路径跳过。不执行 shell 表达式或任意环境变量替换。Rust prepare 每次在内存中展开并校验模板，
+再通过现有权限提供层绑定路径。配置修改影响后续请求，不改变已经接受的调用。
+固定模式不调用意图识别；两种模式均不向 PAP 发布候选策略。
+
+PDP 仍决定允许、拒绝、修改或要求原生审批，有效权限不能超过申请。批准命令不等于开放
+网络或授予宿主 root。不可用的提权能力在沙箱内失败，不剥离 `sudo`、扩大权限或无隔离重试。
+请求提供 `principal.agent_type: "cosh"`；Cedar 策略须允许该类型及 `/bin/bash -c` 调用。
+会话 ID 不建立授权身份。现有 PDP 命令变换仍然支持；Hook 自身不在授权前改写原始命令。
+
+模板缺失、无效或不可信，依赖缺失，daemon 不可用，授权超时及异常响应均报告可见错误并
+阻止执行。交付的前置 Hook 显式设置 `fail_open=false`，并将 `require_output_when_env`
+绑定全 shell 开关，须保持启用并使用支持此字段的配套 Cosh NG 构建。开关关闭时保留
+extension 空输出兼容，开启或非法值时空输出阻断。Hook 在授权前还会检查宿主提供的
+`COSH_HOOK_EMPTY_OUTPUT_POLICY=block` 信号；缺失或值不匹配时阻断并提示升级。这是当次
+调用的内部元数据，不是用户设置，不应通过手工导出来使旧宿主看似兼容。本源码版本同时
+包含检查的两端；相同包版本号的不同 Preview 构建不能仅靠版本字符串区分。
+受管理的扩展安装会检查能力指纹；从系统目录直接加载的扩展在升级后不一定要求重新同意，
+该机制不能替代宿主兼容要求。Cosh NG 必须在
+PreToolUse 启动失败、崩溃、非零退出、空或无效输出、超时时阻断；忽略此类失败的旧宿主
+不能提供该保证。prepare 子进程期限为 55 秒，外层 Hook 为 60 秒；finish 为 10 秒，外层
+为 15 秒。外层超时终止进程组。原生 ask 在 prepare 之后，不占用其期限。运行时权限错误
+作为执行失败返回；回执或 finish 失败报告命令可能已经执行，绝不重跑。其他 Hook 行为不变。
+
+使用 `agent-sec-cli capabilities --agent cosh --capability sandbox --output json`
+查看继承的环境配置；模式为 `all-shell`、`dangerous` 或非法开关对应的 `blocked`。
+该视图不读取模板，也不证明 daemon 就绪、Hook 加载或宿主兼容。重启 Cosh 前将开关设为 `0` 可恢复
+原有筛选。原权限文件覆盖变量已经删除；管理员默认权限改为维护安装的模板。
+
+### 按当前命令生成权限
+
+使用支持 `intent.propose_command` 的配套 CLI/daemon，并按[策略指南](policy-cli.md)
+配置 daemon 的意图模型。启动 Cosh 前选择动态来源及明确的 Cedar 运行预设：
+
+```bash
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
+export AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command
+export AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS=/absolute/path/runtime.cedar
+cosh
+```
+
+来源仅接受 `fixed`（未设置时的默认值）和 `command`，非法值阻断授权。这些设置仅在
+全 shell 授权开启时生效，本身不会开启授权。已删除的
+`AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 在两种模式下均无效。
+
+动态模式使用明确的运行预设，**替代**安装的固定 JSON 模板，不继承模板的 cwd/tmp
+写权限或 Git 保护。所需限制须写入 Cedar 预设或适用的 PAP 策略。预设必须为原始 Cedar
+或源码信封，与候选使用相同 schema，并提供该工作负载已知的 shell/加载器/库访问及
+初始 `/bin/bash -c` 调用许可。目录授权包含后代；整个项目的授权即使在空候选时也已
+申请其内容。不要因脚本内部行为未知而补充推测的写入或网络权限。OS permission JSON
+不能作为动态运行预设，以免合并时丢失 Cedar 调用与网络限制。
+
+Hook 在 sandbox 包装之前，将包含 `sudo` 的原始命令及规范化 cwd 交给
+`intent propose-command --format json`，不传原始用户任务。上游须提前在 PAP 准备任务
+限制，并确认其实际进入上述当前请求策略集。daemon 不再读取独立授权配置及其中旧的
+`task_policy` 选择键。符合条件的策略会合并 permit，任务边界须使用显式 forbid 或约束
+所有适用的 permit；仅创建未进入该集合的策略不会限制执行。
+
+Hook 按 JSON 的 `outcome` 分支，不能仅凭退出码放行：
+
+- `candidate`：展示 `caveats`，将 Cedar 与运行预设合并，复用转换、初始调用校验及
+  路径绑定。任一来源的 forbid 均保留。
+- 空候选不申请业务权限，仅由明确的运行预设提供许可；PDP 仍可拒绝或收窄。
+- `needs_clarification`：说明缺失信息，并在授权前停止。
+- 接口不可用、异常响应、转换失败及超时均阻断，不回退固定权限或无隔离执行。
+  脚本内部行为未知只作为 caveat，不自动扩大权限。
+
+Hook 响应完整保留 caveats；当前 Cosh 原生审批面板可能截短较长的 caveat 行，
+本接入不保证在该面板内可以读到完整文本。
+
+候选只是申请，不写入 PAP。PDP 根据当前策略集决定 `effective_permissions`，结果受申请权限约束。
+仍受上述 Cedar 映射限制约束：候选与运行预设合并后，已有目录 write 覆盖缺失后代；没有覆盖时，
+对不存在文件允许 `create` 才申请其已存在直接父目录的 write 权限。PAP 须授权该目录范围；
+PAP 中的精确文件许可不会被扩大。
+
+意图生成 RPC 期限 38 秒、子进程 40 秒；生成与 prepare 共用 55 秒，外层 Hook 60 秒。
+每次授权 RPC 最多 5 秒，且不超过剩余预算扣除 1 秒预留后的三分之一。
+finish RPC 为 8 秒、子进程 10 秒、外层 Hook 15 秒。原生 ask 与目标执行沿用原生命周期。
+
+每次调用独享 mode 0600 的候选临时文件；prepare 结束、转换失败或子进程超时后均清理。
+daemon 保管已接受的调用，后续审批、执行、finish 不重读候选文件；动态模式的 finish
+无需固定模板，回执失败不重跑目标。将来源设回 `fixed`、确认安装模板有效并重启 Cosh，
+即可恢复固定授权。本功能不采集任务、不自动发布任务策略、不路由多任务，也不接入
+AgentSight/Gateway。
 
 Hook 通过私有 `sandbox hook prepare` 入口准备权限申请。ALLOW/MODIFY 替换为获准命令的执行入口；
 STEP_UP 使用 Cosh 原生 ask，warn 显示为通知。daemon 保管完整请求和决定，包装命令只携带决定 ID。
@@ -264,7 +383,8 @@ STEP_UP 使用 Cosh 原生 ask，warn 显示为通知。daemon 保管完整请�
 code-scanner 仍可针对递归删除请求确认。这类审批应当保留。
 
 本授权接入面向 Cosh NG，其 PostToolUse 在工具成功或失败后均会触发。
-同一次调用只由 sandbox Hook 改写 shell 命令。原版 Cosh 不保证多个改写之间的顺序。
+同一次调用只由 sandbox Hook 改写 shell 命令；使用 sandbox 能力时须保持 tokenless 禁用。
+Cosh 不会自动强制执行该限制。
 若其他前置 Hook 阻断，Cosh NG 不会通知 sandbox，命令也不会启动。名额在同一轮下次申请 sandbox 时释放；若本轮就此结束，名额会保留到 daemon 重启。等待用户审批不设时限。
 工具超时且执行器已领取决定却未提交回执时，daemon 记为“执行结果未知”并释放名额。
 内存中的交接在 daemon 重启后失效；异常退出可能留下未完成交接，受现有每 UID 容量限制。

@@ -7,7 +7,9 @@ use crate::{
 use serde::Serialize;
 use std::{ops::Deref, path::Path, sync::atomic::AtomicBool};
 
-pub use crate::store::plan::{Action, DependencySummary, FileChange, PackageSummary, Problem};
+pub use crate::store::plan::{
+    Action, DependencySummary, FileChange, PackageSummary, PreservedFile, Problem, UninstallOptions,
+};
 
 /// An AW-admitted installation or removal plan with read-only operation details.
 /// The private inner plan prevents executing a generic software plan through AW.
@@ -53,12 +55,26 @@ fn admit_bundle(input: &crate::store::open_bundle::Bundle) -> Result<()> {
 /// # Errors
 /// Rejects unsafe paths, inconsistent package records and duplicate package IDs.
 pub fn uninstall(paths: &DatabasePaths, prefix: &Path, ids: &[String]) -> Result<PackagePlan> {
+    uninstall_with_options(paths, prefix, ids, UninstallOptions::default())
+}
+
+/// Plan selective removal while optionally retaining changed or missing payload paths.
+/// All dependency, database, scope and unselected-file checks remain enforced.
+///
+/// # Errors
+/// Rejects unsafe paths, inconsistent package records and duplicate package IDs.
+pub fn uninstall_with_options(
+    paths: &DatabasePaths,
+    prefix: &Path,
+    ids: &[String],
+    options: UninstallOptions,
+) -> Result<PackagePlan> {
     crate::require_aw_database(paths)?;
     crate::database::reject_legacy_prefix(prefix)?;
     admit(
         paths,
         prefix,
-        crate::store::plan::uninstall(paths, prefix, ids)?,
+        crate::store::plan::uninstall_with_options(paths, prefix, ids, options)?,
     )
     .map(PackagePlan)
 }

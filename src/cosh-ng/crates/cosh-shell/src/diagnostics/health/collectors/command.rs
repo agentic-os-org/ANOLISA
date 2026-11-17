@@ -1,7 +1,8 @@
+use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::thread;
@@ -18,6 +19,9 @@ use super::super::runtime::process::{
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_millis(750);
 const DEFAULT_COMMAND_OUTPUT_LIMIT: usize = 16 * 1024;
+const DEFAULT_RAW_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_MAX_LINE_BYTES: usize = 4096;
+const DEFAULT_MAX_RECORDS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HealthCommandConfig {
@@ -32,6 +36,188 @@ impl Default for HealthCommandConfig {
             output_limit_bytes: DEFAULT_COMMAND_OUTPUT_LIMIT,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HealthLineFilter {
+    pub(crate) max_records: usize,
+    pub(crate) max_line_bytes: usize,
+    pub(crate) retained_bytes: usize,
+    pub(crate) raw_read_limit_bytes: u64,
+    pub(crate) newest_first: bool,
+}
+
+impl Default for HealthLineFilter {
+    fn default() -> Self {
+        Self {
+            max_records: DEFAULT_MAX_RECORDS,
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+            retained_bytes: DEFAULT_COMMAND_OUTPUT_LIMIT,
+            raw_read_limit_bytes: DEFAULT_RAW_READ_LIMIT_BYTES,
+            newest_first: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HealthFilteredLines {
+    pub(crate) lines: Vec<String>,
+    pub(crate) raw_bytes_read: u64,
+    pub(crate) lines_scanned: u64,
+    pub(crate) truncated_lines: u64,
+    pub(crate) complete: bool,
+}
+
+/// Unrelated log volume consumes the read budget, never the retained evidence budget.
+pub(crate) struct HealthLineFilterState {
+    filter: HealthLineFilter,
+    retained: VecDeque<String>,
+    retained_bytes: usize,
+    pending: Vec<u8>,
+    pending_truncated: bool,
+    raw_bytes_read: u64,
+    lines_scanned: u64,
+    truncated_lines: u64,
+    exhausted: bool,
+    eof: bool,
+}
+
+impl HealthLineFilterState {
+    pub(crate) fn new(filter: HealthLineFilter) -> Self {
+        Self {
+            filter,
+            retained: VecDeque::new(),
+            retained_bytes: 0,
+            pending: Vec::new(),
+            pending_truncated: false,
+            raw_bytes_read: 0,
+            lines_scanned: 0,
+            truncated_lines: 0,
+            exhausted: false,
+            eof: false,
+        }
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    pub(crate) fn mark_eof(&mut self, matches: &impl Fn(&str) -> bool) {
+        self.eof = true;
+        let trailing = std::mem::take(&mut self.pending);
+        if !trailing.is_empty() {
+            let truncated = std::mem::replace(&mut self.pending_truncated, false);
+            self.offer_line(&trailing, truncated, matches);
+        }
+    }
+
+    pub(crate) fn push(&mut self, chunk: &[u8], matches: &impl Fn(&str) -> bool) {
+        if self.exhausted {
+            return;
+        }
+        let allowance = self
+            .filter
+            .raw_read_limit_bytes
+            .saturating_sub(self.raw_bytes_read);
+        let accepted = (chunk.len() as u64).min(allowance) as usize;
+        self.raw_bytes_read += accepted as u64;
+        if accepted < chunk.len() {
+            self.exhausted = true;
+        }
+        let mut start = 0;
+        while start < accepted {
+            match chunk[start..accepted]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            {
+                Some(offset) => {
+                    self.pending
+                        .extend_from_slice(&chunk[start..start + offset]);
+                    let line = std::mem::take(&mut self.pending);
+                    let truncated = std::mem::replace(&mut self.pending_truncated, false);
+                    self.offer_line(&line, truncated, matches);
+                    start += offset + 1;
+                }
+                None => {
+                    self.pending.extend_from_slice(&chunk[start..accepted]);
+                    break;
+                }
+            }
+        }
+        if self.pending.len() > self.filter.max_line_bytes {
+            self.pending.truncate(self.filter.max_line_bytes);
+            if !self.pending_truncated {
+                self.pending_truncated = true;
+                self.truncated_lines += 1;
+            }
+        }
+    }
+
+    fn offer_line(
+        &mut self,
+        line: &[u8],
+        already_truncated: bool,
+        matches: &impl Fn(&str) -> bool,
+    ) {
+        self.lines_scanned += 1;
+        let mut text = String::from_utf8_lossy(line).into_owned();
+        if truncate_at_char_boundary(&mut text, self.filter.max_line_bytes) && !already_truncated {
+            self.truncated_lines += 1;
+        }
+        if !matches(&text) {
+            return;
+        }
+        if self.filter.newest_first
+            && (self.retained.len() >= self.filter.max_records
+                || self.retained_bytes + text.len() > self.filter.retained_bytes)
+        {
+            // A newest-first stream has already delivered the most recent evidence.
+            self.exhausted = true;
+            return;
+        }
+        while self.retained.len() >= self.filter.max_records
+            || self.retained_bytes + text.len() > self.filter.retained_bytes
+        {
+            match self.retained.pop_front() {
+                Some(dropped) => self.retained_bytes -= dropped.len(),
+                None => break,
+            }
+        }
+        if text.len() <= self.filter.retained_bytes {
+            self.retained_bytes += text.len();
+            self.retained.push_back(text);
+        }
+    }
+
+    pub(crate) fn finish(self) -> HealthFilteredLines {
+        HealthFilteredLines {
+            lines: self.retained.into_iter().collect(),
+            raw_bytes_read: self.raw_bytes_read,
+            lines_scanned: self.lines_scanned,
+            truncated_lines: self.truncated_lines,
+            complete: self.eof && !self.exhausted,
+        }
+    }
+}
+
+fn truncate_at_char_boundary(text: &mut String, limit: usize) -> bool {
+    if text.len() <= limit {
+        return false;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HealthFilteredCommandOutput {
+    pub(crate) filtered: HealthFilteredLines,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) elapsed_ms: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,18 +310,25 @@ pub(crate) fn run_health_command(
         result,
         Err(HealthCommandError::Timeout | HealthCommandError::Io)
     ) {
-        if let Some(job) = WORKER_JOB.get() {
-            job.stopped.store(true, Ordering::Release);
-        }
+        stop_worker_after_overrun();
     }
     result
 }
 
-fn run_health_command_inner(
+struct SpawnedHealthCommand {
+    child: CommandChild<'static>,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    started: Instant,
+    deadline: Instant,
+    work_deadline: Instant,
+}
+
+fn spawn_health_command(
     program: &str,
     args: &[&str],
     config: HealthCommandConfig,
-) -> Result<HealthCommandOutput, HealthCommandError> {
+) -> Result<SpawnedHealthCommand, HealthCommandError> {
     let started = Instant::now();
     let deadline = started
         .checked_add(config.timeout)
@@ -182,44 +375,70 @@ fn run_health_command_inner(
     } else {
         CleanupScope::OwnedGroup
     };
-    let mut child = permit.register(raw_child, scope, deadline);
-    let mut stdout = stdout.ok_or(HealthCommandError::Io)?;
-    let mut stderr = stderr.ok_or(HealthCommandError::Io)?;
+    let child = permit.register(raw_child, scope, deadline);
+    let stdout = stdout.ok_or(HealthCommandError::Io)?;
+    let stderr = stderr.ok_or(HealthCommandError::Io)?;
     set_nonblocking(stdout.as_raw_fd()).map_err(|_| HealthCommandError::Io)?;
     set_nonblocking(stderr.as_raw_fd()).map_err(|_| HealthCommandError::Io)?;
+    Ok(SpawnedHealthCommand {
+        child,
+        stdout,
+        stderr,
+        started,
+        deadline,
+        work_deadline,
+    })
+}
+
+fn stop_worker_after_overrun() {
+    if let Some(job) = WORKER_JOB.get() {
+        job.stopped.store(true, Ordering::Release);
+    }
+}
+
+fn run_health_command_inner(
+    program: &str,
+    args: &[&str],
+    config: HealthCommandConfig,
+) -> Result<HealthCommandOutput, HealthCommandError> {
+    let mut spawned = spawn_health_command(program, args, config)?;
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
 
     loop {
         read_available(
-            &mut stdout,
+            &mut spawned.stdout,
             &mut stdout_bytes,
             config.output_limit_bytes,
-            work_deadline,
+            spawned.work_deadline,
         )?;
         read_available(
-            &mut stderr,
+            &mut spawned.stderr,
             &mut stderr_bytes,
             config.output_limit_bytes,
-            work_deadline,
+            spawned.work_deadline,
         )?;
-        let exited = child.has_exited().map_err(|_| HealthCommandError::Io)?;
+        let exited = spawned
+            .child
+            .has_exited()
+            .map_err(|_| HealthCommandError::Io)?;
         if exited {
-            let status = child
+            let status = spawned
+                .child
                 .cleanup()
                 .map_err(|_| HealthCommandError::Io)?
                 .ok_or(HealthCommandError::Timeout)?;
             read_available(
-                &mut stdout,
+                &mut spawned.stdout,
                 &mut stdout_bytes,
                 config.output_limit_bytes,
-                deadline,
+                spawned.deadline,
             )?;
             read_available(
-                &mut stderr,
+                &mut spawned.stderr,
                 &mut stderr_bytes,
                 config.output_limit_bytes,
-                deadline,
+                spawned.deadline,
             )?;
             return Ok(HealthCommandOutput {
                 exit_code: status.code(),
@@ -227,15 +446,156 @@ fn run_health_command_inner(
                 stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
                 stdout_truncated: false,
                 stderr_truncated: false,
-                elapsed_ms: started.elapsed().as_millis(),
+                elapsed_ms: spawned.started.elapsed().as_millis(),
             });
         }
-        let remaining = work_deadline.saturating_duration_since(Instant::now());
+        let remaining = spawned
+            .work_deadline
+            .saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(HealthCommandError::Timeout);
         }
         thread::sleep(COMMAND_POLL_INTERVAL.min(remaining));
     }
+}
+
+pub(crate) fn run_health_command_filtered(
+    program: &str,
+    args: &[&str],
+    config: HealthCommandConfig,
+    filter: HealthLineFilter,
+    matches: impl Fn(&str) -> bool,
+) -> Result<HealthFilteredCommandOutput, HealthCommandError> {
+    if worker_command_stopped() {
+        return Err(HealthCommandError::Timeout);
+    }
+    let result = run_health_command_filtered_inner(program, args, config, filter, &matches);
+    if matches!(
+        result,
+        Err(HealthCommandError::Timeout | HealthCommandError::Io)
+    ) {
+        stop_worker_after_overrun();
+    }
+    result
+}
+
+fn run_health_command_filtered_inner(
+    program: &str,
+    args: &[&str],
+    config: HealthCommandConfig,
+    filter: HealthLineFilter,
+    matches: &impl Fn(&str) -> bool,
+) -> Result<HealthFilteredCommandOutput, HealthCommandError> {
+    let mut spawned = spawn_health_command(program, args, config)?;
+    let mut state = HealthLineFilterState::new(filter);
+    let mut stderr_bytes = Vec::new();
+    let mut buffer = [0; 4096];
+    let mut stdout_open = true;
+    let mut exit_code = None;
+    loop {
+        while stdout_open && !state.exhausted() && Instant::now() < spawned.work_deadline {
+            match read_chunk(&mut spawned.stdout, &mut buffer)? {
+                StreamChunk::Bytes(count) => state.push(&buffer[..count], matches),
+                StreamChunk::Closed => {
+                    stdout_open = false;
+                    state.mark_eof(matches);
+                }
+                StreamChunk::Pending => break,
+            }
+        }
+        drain_stderr(
+            &mut spawned.stderr,
+            &mut buffer,
+            &mut stderr_bytes,
+            config.output_limit_bytes,
+        )?;
+        if state.exhausted() {
+            break;
+        }
+        if spawned
+            .child
+            .has_exited()
+            .map_err(|_| HealthCommandError::Io)?
+        {
+            exit_code = spawned
+                .child
+                .cleanup()
+                .map_err(|_| HealthCommandError::Io)?
+                .and_then(|status| status.code());
+            while stdout_open && !state.exhausted() && Instant::now() < spawned.deadline {
+                match read_chunk(&mut spawned.stdout, &mut buffer)? {
+                    StreamChunk::Bytes(count) => state.push(&buffer[..count], matches),
+                    StreamChunk::Closed => {
+                        stdout_open = false;
+                        state.mark_eof(matches);
+                    }
+                    StreamChunk::Pending => break,
+                }
+            }
+            drain_stderr(
+                &mut spawned.stderr,
+                &mut buffer,
+                &mut stderr_bytes,
+                config.output_limit_bytes,
+            )?;
+            break;
+        }
+        let remaining = spawned
+            .work_deadline
+            .saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // A single check budget cut must not cancel the remaining worker checks.
+            break;
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL.min(remaining));
+    }
+    Ok(HealthFilteredCommandOutput {
+        filtered: state.finish(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        exit_code,
+        elapsed_ms: spawned.started.elapsed().as_millis(),
+    })
+}
+
+enum StreamChunk {
+    Bytes(usize),
+    Pending,
+    Closed,
+}
+
+fn read_chunk(
+    stream: &mut impl Read,
+    buffer: &mut [u8],
+) -> Result<StreamChunk, HealthCommandError> {
+    loop {
+        match stream.read(buffer) {
+            Ok(0) => return Ok(StreamChunk::Closed),
+            Ok(count) => return Ok(StreamChunk::Bytes(count)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(StreamChunk::Pending)
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(HealthCommandError::Io),
+        }
+    }
+}
+
+fn drain_stderr(
+    stream: &mut impl Read,
+    buffer: &mut [u8],
+    sink: &mut Vec<u8>,
+    limit: usize,
+) -> Result<(), HealthCommandError> {
+    while sink.len() < limit {
+        match read_chunk(stream, buffer)? {
+            StreamChunk::Bytes(count) => {
+                let capacity = limit - sink.len();
+                sink.extend_from_slice(&buffer[..count.min(capacity)]);
+            }
+            _ => return Ok(()),
+        }
+    }
+    Ok(())
 }
 
 fn classify_spawn_error(error: io::Error) -> HealthCommandError {

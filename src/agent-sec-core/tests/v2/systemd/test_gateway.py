@@ -7,7 +7,8 @@ trusts only a throwaway CA for its upstream connections. Tokens are generated
 dummies. The tests add an address to `lo`, a runtime drop-in for the gateway
 unit, and restart agent-sec-core.service, so they run only when
 ASC_GATEWAY_E2E_USER names the non-root user that owns the test Scopes.
-The gateway must be disabled with no credential Scopes configured beforehand.
+The daemon must be started with --enable-gateway. The proxy must be disabled
+with no credential Scopes configured beforehand.
 """
 
 import base64
@@ -491,7 +492,12 @@ def host():
         pytest.fail("requires root and PID 1 systemd")
     cli = shutil.which("agent-sec-cli")
     assert cli is not None, "agent-sec-cli must be installed or built and on PATH"
-    status = gateway(cli, "status")
+    result = command(cli, "gateway", "status", check=False)
+    assert result.returncode == 0, (
+        "start the daemon service with --enable-gateway before Gateway acceptance: "
+        + result.stderr
+    )
+    status = json.loads(result.stdout)
     # Global import/retirement must never modify operator Scopes or an active key.
     assert not status["enabled"] and not status["scopes"], "requires an unused gateway"
     assert gateway(cli, "key", "list") == {
@@ -969,6 +975,134 @@ def test_rest_requests_carry_the_real_token_upstream(host, upstream):
         assert anonymous.returncode == 0, anonymous.stderr
         assert json.loads(anonymous.stdout)["authorization"] is None
         assert seen[-1] == ("https", "api.github.com", "GET", "/zen", None)
+    assert not any(fake in str(record) for record in seen)
+
+
+def test_inject_credential_shortcut_carries_the_real_token_upstream(host, upstream):
+    """One command replaces generate-fake, render, policy create and scope create."""
+    cli, user = host
+    seen = upstream["seen"]
+    template = Path("/usr/share/anolisa/sec-core/gateway/github.cedar")
+    original = template.read_bytes()
+    staging = Path("/run/agent-sec-core/inject-credential")
+    staged_before = set(staging.iterdir()) if staging.is_dir() else set()
+    alphabet = string.ascii_letters + string.digits
+    real = "ghp_" + "".join(secrets.choice(alphabet) for _ in range(36))
+    owner = pwd.getpwnam(user)
+    with tempfile.TemporaryDirectory(prefix="asc-gw-inject-", dir="/run") as directory:
+        root = Path(directory).resolve(strict=True)
+        root.chmod(0o755)
+        secret_file = root / "github-real"
+        secret_file.write_text(real + "\n")
+        secret_file.chmod(0o600)
+        executable = root / AGENT
+        shutil.copyfile(Path(shutil.which("python3")).resolve(), executable)
+        executable.chmod(0o755)
+        output = root / "out"
+        output.mkdir(mode=0o700)
+        os.chown(output, owner.pw_uid, owner.pw_gid)
+        arguments = (
+            "inject-credential",
+            "--builtin",
+            "github",
+            "--real-token-file",
+            str(secret_file),
+            "--owner",
+            user,
+            "--executable",
+            str(executable),
+            "--output-dir",
+            str(output),
+        )
+        with contextlib.ExitStack() as cleanup:
+            policies_before = cli_json(cli, "policy", "list")["total"]
+            preview_args = list(arguments)
+            preview_args[preview_args.index("--real-token-file") + 1] = str(
+                root / "missing"
+            )
+            preview = json.loads(command(cli, *preview_args, "--dry-run").stdout)
+            assert preview["dryRun"] and preview["rules"] == 8
+            assert not Path(preview["fakeTokenFile"]).exists()
+            invalid_args = list(arguments)
+            invalid_args[invalid_args.index("--executable") + 1] = "relative-agent"
+            invalid = command(cli, *invalid_args, check=False)
+            assert invalid.returncode == 1 and not invalid.stdout
+            assert cli_json(cli, "policy", "list")["total"] == policies_before
+            assert gateway(cli, "key", "list")["pairids"] == []
+            created = command(cli, *arguments)
+            assert real not in created.stdout + created.stderr
+            result = json.loads(created.stdout)
+            cleanup.callback(gateway, cli, "disable")
+            for pair in result["pairIds"]:
+                cleanup.callback(gateway, cli, "key", "remove", pair)
+            cleanup.callback(
+                cli_json,
+                cli,
+                "policy",
+                "delete",
+                "--policy-id",
+                result["policyId"],
+                "--revision",
+                str(result["policyRevision"]),
+            )
+            cleanup.callback(delete_scope, cli, result["scopeId"])
+            assert result["gateway"] == {
+                "enabled": False,
+                "ready": False,
+                "caBundlePath": None,
+            }
+            assert result["teardown"][0].endswith(result["scopeId"])
+            fake_file = Path(result["fakeTokenFile"])
+            assert fake_file.parent == output
+            metadata = fake_file.stat()
+            assert (metadata.st_uid, metadata.st_mode & 0o7777) == (owner.pw_uid, 0o600)
+            assert output.stat().st_uid == owner.pw_uid
+            fake = fake_file.read_text()
+            assert fake != real and len(fake) == len(real) and fake.startswith("ghp_")
+            assert fake not in created.stdout + created.stderr
+            # The packaged template is input only and staged copies never outlive admission.
+            assert template.read_bytes() == original
+            assert set(staging.iterdir()) == staged_before
+            policy = cli_json(
+                cli,
+                "policy",
+                "get",
+                "--policy-id",
+                result["policyId"],
+                "--revision",
+                str(result["policyRevision"]),
+            )
+            assert policy["policyName"].startswith(
+                f"inject-credential/github/{owner.pw_uid}/"
+            )
+            assert real not in json.dumps(policy) and fake not in json.dumps(policy)
+            # A second injection for the same owner and selector is refused before any write.
+            repeated = command(cli, *arguments, check=False)
+            assert repeated.returncode == 1 and repeated.stdout == ""
+            assert "already injects" in repeated.stderr
+            assert sorted(output.iterdir()) == [fake_file]
+
+            assert gateway(cli, "enable") == {}
+            wait_loaded(cli)
+            ca = gateway(cli, "ca")
+            agent = Agent(
+                cli, user, result["scopeId"], executable, agent_environment(ca, fake)
+            )
+            cleanup.callback(agent.close)
+            wait_bindings(cli, result["scopeId"], [agent.ready["pid"]])
+            echoed = curl(agent, "https://api.github.com/user")
+            assert seen[-1] == (
+                "https",
+                "api.github.com",
+                "GET",
+                "/user",
+                f"Bearer {real}",
+            )
+            assert echoed == {
+                "host": "api.github.com",
+                "authorization": f"Bearer {fake}",
+            }
+    assert gateway(cli, "status")["scopes"] == []
     assert not any(fake in str(record) for record in seen)
 
 

@@ -54,6 +54,24 @@ GATEWAY_SOURCE_DIR ?= $(BUILD_DIR)/gateway
 SYSTEM_SEC_CORE_CONFIG_DIR ?= /etc/agent-sec
 SYSTEMD_SKILLSEC_CONFIG ?=
 SYSTEMD_SKILLSEC_CONFIG_ARGS = $(if $(SYSTEMD_SKILLSEC_CONFIG), --skillsec-config "$(SYSTEMD_SKILLSEC_CONFIG)")
+sandbox_shell_quote = '$(subst ','"'"',$(1))'
+
+.PHONY: install-sandbox-permissions
+install-sandbox-permissions: ## Install the administrator-owned default without replacing edits
+	install -d -m 0755 $(call sandbox_shell_quote,$(DESTDIR)$(SYSTEM_SEC_CORE_CONFIG_DIR)/sandbox)
+	@if [ ! -e $(call sandbox_shell_quote,$(DESTDIR)$(SYSTEM_SEC_CORE_CONFIG_DIR)/sandbox/permissions.json.template) ] && \
+		[ ! -L $(call sandbox_shell_quote,$(DESTDIR)$(SYSTEM_SEC_CORE_CONFIG_DIR)/sandbox/permissions.json.template) ]; then \
+		install -m 0644 packaging/sandbox/permissions.json.template \
+			$(call sandbox_shell_quote,$(DESTDIR)$(SYSTEM_SEC_CORE_CONFIG_DIR)/sandbox/permissions.json.template); \
+	fi
+
+define install_cosh_extension
+	install -d -m 0755 $(call sandbox_shell_quote,$(DESTDIR)$(EXTENSIONDIR))
+	cp -rp $(call sandbox_shell_quote,$(BUILD_DIR)/cosh-extension/.) $(call sandbox_shell_quote,$(DESTDIR)$(EXTENSIONDIR)/)
+	python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text("\"\"\"Installation-owned sandbox permission template path.\"\"\"\n\nDEFAULT_PERMISSIONS_TEMPLATE = " + repr(sys.argv[2]) + "\n", encoding="utf-8")' \
+		$(call sandbox_shell_quote,$(DESTDIR)$(EXTENSIONDIR)/hooks/sandbox_paths.py) \
+		$(call sandbox_shell_quote,$(SYSTEM_SEC_CORE_CONFIG_DIR)/sandbox/permissions.json.template)
+endef
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -175,8 +193,7 @@ install-qoder-plugin: ## Install qoder-plugin hooks and install script
 install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -p -m 0755 $(BUILD_DIR)/linux-sandbox $(DESTDIR)$(BINDIR)/
-	install -d -m 0755 $(DESTDIR)$(EXTENSIONDIR)
-	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
+	$(install_cosh_extension)
 
 .PHONY: install-component-manifest
 install-component-manifest: ## Install the selected component contract to DESTDIR
@@ -232,8 +249,7 @@ install-source-v2-host: ## Install V2 host runtime for source builds
 
 .PHONY: install-source-v2-cosh-extension
 install-source-v2-cosh-extension: ## Install the cosh extension for a V2 source build
-	install -d -m 0755 $(DESTDIR)$(EXTENSIONDIR)
-	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
+	$(install_cosh_extension)
 
 .PHONY: install-source-v2-assets
 install-source-v2-assets: install-source-v2-cosh-extension install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills-files ## Install source-build integration assets
@@ -260,7 +276,7 @@ install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: install-cli-v2 $(filter-out install-component-manifest,$(RPM_INSTALL_COMMON_TARGETS)) install-systemd-system install-gateway ## Install all (V2 RPM build)
 
 .PHONY: install-systemd-system
-install-systemd-system: ## Stage V2 system unit and preserve existing settings
+install-systemd-system: install-sandbox-permissions ## Stage V2 system unit and preserve existing settings
 	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)
 	sed -e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' \
 		-e 's|^\(ExecStart=.* serve\)$$|\1$(SYSTEMD_SKILLSEC_CONFIG_ARGS)|' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
@@ -274,7 +290,7 @@ install-systemd-system: ## Stage V2 system unit and preserve existing settings
 	fi
 
 .PHONY: install-systemd-system-source
-install-systemd-system-source: ## Install V2 system unit for source builds
+install-systemd-system-source: install-sandbox-permissions ## Install V2 system unit for source builds
 	install -d -m 0755 $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)
 	sed -e 's|{bindir}|$(BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
 		> $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service

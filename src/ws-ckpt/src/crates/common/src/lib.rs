@@ -11,6 +11,20 @@ pub mod persist;
 
 use backend::BackendType;
 
+/// Render a data field as a single line of terminal text.
+pub fn escape_terminal_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        // Backslashes distinguish literal escape text from encoded controls.
+        if character.is_control() || character == '\\' {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 // ── Constants ──
 
 pub const DEFAULT_MOUNT_PATH: &str = "/mnt/btrfs-workspace";
@@ -385,7 +399,8 @@ pub enum Response {
     RecoverWithWarning {
         /// Restored workspace path.
         workspace: String,
-        /// Locations and reason for retaining additional data.
+        /// Locations and reason for retaining additional data. A leading newline
+        /// marks a formatted warning whose interpolated fields are already escaped.
         warning: String,
     },
     /// Registration removed without restoring data or deleting snapshots.

@@ -291,6 +291,8 @@ struct Hook {
     on_error: String,
     #[arg(long, value_parser = ["true"])]
     close_event: Option<String>,
+    #[arg(long, hide = true, value_parser = ["true"])]
+    event_receipt: Option<String>,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -311,7 +313,7 @@ pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit
     if let Some(protocol) = arguments.first().filter(|name| {
         matches!(
             name.as_str(),
-            "hook" | "bridge" | "scope" | "qoder-bootstrap"
+            "hook" | "bridge" | "scope" | "qoder-bootstrap" | "codex-hook"
         )
     }) {
         // Native callbacks have fail-closed replies and exit codes even for

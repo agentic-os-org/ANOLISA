@@ -61,7 +61,10 @@ pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
             capabilities.adapter.as_str(),
             capabilities.entrypoint.as_str()
         ),
-        ("agentscope", "factory") | ("pi", "sdk") | ("claude-sdk", "sdk-worker")
+        ("agentscope", "factory")
+            | ("pi", "sdk")
+            | ("claude-sdk", "sdk-worker")
+            | ("sdk", "application")
     ) {
         return Ok(());
     }
@@ -99,14 +102,37 @@ pub fn scope_policy(
     if document["spec"]["agents"][target]["adapter"] != capabilities.adapter {
         return Err("resident policy adapter differs from its target".into());
     }
-    let (events, hooks) = match capabilities.adapter.as_str() {
+    if capabilities.adapter == "sdk" {
+        let supported = adapter::catalog::SDK.capabilities("aw-hook-source/v1", "application");
+        if capabilities.version != supported.version
+            || !capabilities.failure_actions.is_empty()
+            || capabilities.events.iter().any(|(event, effects)| {
+                supported
+                    .events
+                    .get(event)
+                    .is_none_or(|allowed| effects.iter().any(|effect| !allowed.contains(effect)))
+            })
+        {
+            return Err("unsupported semantic SDK profile or effect".into());
+        }
+    }
+    let (mut events, mut hooks) = match capabilities.adapter.as_str() {
         "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
+        "sdk" => crate::adapters::sdk_tools::routes(document, steps, "sdk")?,
         "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, true)?,
         "agentscope" => crate::adapters::agentscope::event_routes(document, steps)?,
         "pi" => crate::adapters::pi::routes(document, steps)?,
         "claude-sdk" => crate::adapters::sdk_tools::routes(document, steps, "claude-sdk")?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
+    if capabilities.adapter == "sdk" {
+        events.retain(|event, _| capabilities.events.contains_key(event));
+        hooks.retain(|hook| {
+            hook["event"]
+                .as_str()
+                .is_some_and(|event| capabilities.events.contains_key(event))
+        });
+    }
     Ok(json!({"events": events, "hooks": hooks}))
 }
 

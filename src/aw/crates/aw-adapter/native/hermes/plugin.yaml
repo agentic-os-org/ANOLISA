@@ -4,3 +4,5 @@ description: Connect an AW launch to Hermes native tool hooks
 provides_hooks:
   - pre_tool_call
   - post_tool_call
+  - transform_tool_result
+  - post_compaction

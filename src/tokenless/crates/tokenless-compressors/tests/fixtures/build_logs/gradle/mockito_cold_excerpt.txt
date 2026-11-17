@@ -1,0 +1,789 @@
+Downloading https://services.gradle.org/distributions/gradle-8.14.2-bin.zip
+.............10%.............20%.............30%.............40%.............50%.............60%.............70%.............80%.............90%..............100%
+
+Welcome to Gradle 8.14.2!
+
+Here are the highlights of this release:
+ - Java 24 support
+ - GraalVM Native Image toolchain selection
+ - Enhancements to test reporting
+ - Build Authoring improvements
+
+For more details see https://docs.gradle.org/8.14.2/release-notes.html
+
+Starting a Gradle Daemon (subsequent builds will be faster)
+> Task :buildSrc:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :buildSrc:generateExternalPluginSpecBuilders
+> Task :buildSrc:extractPrecompiledScriptPluginPlugins
+> Task :buildSrc:generateScriptPluginAdapters
+> Task :buildSrc:pluginDescriptors
+> Task :buildSrc:processResources
+
+> Task :buildSrc:compilePluginsBlocks
+
+> Task :buildSrc:generatePrecompiledScriptPluginAccessors
+Building version '0.0.1-SNAPSHOT'
+  - reason: shipkit-auto-version caught an exception, falling back to reasonable default
+  - run with --debug for more info
+
+> Task :buildSrc:compileKotlin
+> Task :buildSrc:compileJava NO-SOURCE
+> Task :buildSrc:compileGroovy NO-SOURCE
+> Task :buildSrc:classes
+> Task :buildSrc:jar
+
+> Configure project :
+Building version '0.0.1-SNAPSHOT'
+  - reason: shipkit-auto-version caught an exception, falling back to reasonable default
+  - run with --debug for more info
+
+> Task :mockito-bom:assemble UP-TO-DATE
+> Task :mockito-bom:check UP-TO-DATE
+> Task :mockito-bom:build UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:processResources NO-SOURCE
+> Task :mockito-extensions:mockito-errorprone:sourcesJar
+> Task :mockito-extensions:mockito-errorprone:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-errorprone:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:license UP-TO-DATE
+> Task :mockito-extensions:mockito-errorprone:generatePomFileForMockitoLibraryPublication
+> Task :mockito-extensions:mockito-junit-jupiter:processResources NO-SOURCE
+> Task :mockito-extensions:mockito-junit-jupiter:sourcesJar
+> Task :mockito-extensions:mockito-junit-jupiter:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-junit-jupiter:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:license UP-TO-DATE
+> Task :mockito-extensions:mockito-junit-jupiter:osgiProperties
+> Task :mockito-extensions:mockito-junit-jupiter:generatePomFileForMockitoLibraryPublication
+> Task :mockito-extensions:mockito-proxy:processResources
+> Task :mockito-extensions:mockito-proxy:sourcesJar
+> Task :mockito-extensions:mockito-proxy:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-proxy:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-proxy:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-proxy:license UP-TO-DATE
+> Task :mockito-extensions:mockito-proxy:generatePomFileForMockitoLibraryPublication
+> Task :mockito-extensions:mockito-subclass:processResources
+> Task :mockito-extensions:mockito-subclass:sourcesJar
+> Task :mockito-extensions:mockito-subclass:processTestResources NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:licenseMain UP-TO-DATE
+> Task :mockito-extensions:mockito-subclass:licenseTest UP-TO-DATE
+> Task :mockito-extensions:mockito-subclass:license UP-TO-DATE
+> Task :mockito-extensions:mockito-subclass:generatePomFileForMockitoLibraryPublication
+> Task :mockito-integration-tests:extensions-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:extensions-tests:jar
+> Task :mockito-integration-tests:extensions-tests:assemble
+> Task :mockito-integration-tests:extensions-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:extensions-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:extensions-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:extensions-tests:processTestResources
+> Task :mockito-integration-tests:graalvm-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:graalvm-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:graalvm-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:compileGroovy NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:groovy-inline-tests:jar
+> Task :mockito-integration-tests:groovy-inline-tests:assemble
+> Task :mockito-integration-tests:groovy-inline-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:groovy-inline-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:groovy-inline-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:compileGroovy NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:groovy-tests:jar
+> Task :mockito-integration-tests:groovy-tests:assemble
+> Task :mockito-integration-tests:groovy-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:groovy-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:groovy-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:inline-mocks-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:inline-mocks-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:java-21-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:java-21-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:jar
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:assemble
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:processTestResources
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:jar
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:assemble
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:processTestResources
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:jar
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:assemble
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:processTestResources
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:compileKotlin NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:jar
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:assemble
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:processTestResources
+> Task :mockito-integration-tests:kotlin-tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :mockito-integration-tests:kotlin-tests:compileKotlin NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-tests:jar
+> Task :mockito-integration-tests:kotlin-tests:assemble
+> Task :mockito-integration-tests:kotlin-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:kotlin-tests:processTestResources
+> Task :mockito-integration-tests:memory-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:memory-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:memory-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:memory-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:memory-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:module-named-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:module-named-tests:licenseMain NO-SOURCE
+Missing header in: mockito-integration-tests/module-named-tests/src/test/java/module-info.java
+> Task :mockito-integration-tests:module-named-tests:licenseTest
+> Task :mockito-integration-tests:module-named-tests:license
+> Task :mockito-integration-tests:module-named-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:module-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:module-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:module-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:module-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:module-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:jar
+> Task :mockito-integration-tests:osgi-tests:assemble
+> Task :mockito-integration-tests:osgi-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:licenseOtherBundle UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:licenseTestBundle UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:osgi-tests:compileOtherBundleJava
+> Task :mockito-integration-tests:osgi-tests:processOtherBundleResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:otherBundleClasses
+> Task :mockito-integration-tests:osgi-tests:otherBundle
+> Task :mockito-integration-tests:osgi-tests:processTestBundleResources NO-SOURCE
+> Task :mockito-integration-tests:osgi-tests:processTestResources NO-SOURCE
+> Task :mockito-integration-tests:programmatic-tests:processResources NO-SOURCE
+> Task :mockito-integration-tests:programmatic-tests:licenseMain NO-SOURCE
+> Task :mockito-integration-tests:programmatic-tests:licenseTest UP-TO-DATE
+> Task :mockito-integration-tests:programmatic-tests:license UP-TO-DATE
+> Task :mockito-integration-tests:programmatic-tests:processTestResources NO-SOURCE
+
+> Task :mockito-core:compileJava
+
+> Task :mockito-core:copyMockMethodDispatcher
+> Task :mockito-core:processResources NO-SOURCE
+> Task :mockito-core:removeInjectionPackageFromModuleInfo
+> Task :mockito-core:classes
+> Task :mockito-core:jar
+> Task :mockito-extensions:mockito-errorprone:compileJava
+> Task :mockito-extensions:mockito-errorprone:classes
+> Task :mockito-extensions:mockito-errorprone:jar
+> Task :mockito-extensions:mockito-errorprone:javadoc
+> Task :mockito-extensions:mockito-errorprone:javadocJar
+> Task :mockito-extensions:mockito-errorprone:assemble
+> Task :mockito-core:javadoc
+> Task :mockito-core:javadocJar
+> Task :mockito-core:sourcesJar
+> Task :mockito-core:assemble
+> Task :mockito-core:animalsnifferMain
+> Task :mockito-extensions:mockito-errorprone:checkstyleMain
+> Task :mockito-core:checkstyleMain
+
+> Task :mockito-core:compileTestFixturesJava
+
+> Task :mockito-extensions:mockito-errorprone:compileTestJava
+
+> Task :mockito-extensions:mockito-errorprone:testClasses
+> Task :mockito-extensions:mockito-errorprone:checkstyleTest
+
+> Task :mockito-extensions:mockito-errorprone:test
+
+
+
+> Task :mockito-core:compileTestJava
+
+> Task :mockito-extensions:mockito-errorprone:test
+
+  [0K[32m14 passing [90m(11.6s)[m
+
+
+> Task :mockito-extensions:mockito-errorprone:retryTest SKIPPED
+> Task :mockito-extensions:mockito-errorprone:check
+> Task :mockito-extensions:mockito-errorprone:generateMetadataFileForMockitoLibraryPublication SKIPPED
+> Task :mockito-extensions:mockito-errorprone:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-extensions:mockito-errorprone:publishAllPublicationsToLocalRepository
+> Task :mockito-extensions:mockito-errorprone:build
+> Task :mockito-extensions:mockito-junit-jupiter:compileJava
+> Task :mockito-extensions:mockito-junit-jupiter:classes
+> Task :mockito-extensions:mockito-junit-jupiter:jar
+
+> Task :mockito-core:compileTestJava
+
+> Task :mockito-core:createTestResources
+> Task :mockito-core:processTestResources NO-SOURCE
+> Task :mockito-core:testClasses
+> Task :mockito-core:checkstyleTest
+> Task :mockito-core:processTestFixturesResources NO-SOURCE
+> Task :mockito-core:testFixturesClasses
+> Task :mockito-extensions:mockito-junit-jupiter:javadoc
+> Task :mockito-core:licenseMain UP-TO-DATE
+> Task :mockito-core:licenseTest UP-TO-DATE
+> Task :mockito-core:licenseTestFixtures UP-TO-DATE
+> Task :mockito-core:license UP-TO-DATE
+> Task :mockito-core:testFixturesJar
+> Task :mockito-core:checkstyleTestFixtures
+> Task :mockito-extensions:mockito-junit-jupiter:javadocJar
+> Task :mockito-extensions:mockito-junit-jupiter:assemble
+> Task :mockito-extensions:mockito-junit-jupiter:checkstyleMain
+
+> Task :mockito-core:test
+
+
+
+
+> Task :mockito-extensions:mockito-junit-jupiter:compileTestJava
+> Task :mockito-extensions:mockito-junit-jupiter:testClasses
+> Task :mockito-extensions:mockito-junit-jupiter:checkstyleTest
+
+> Task :mockito-extensions:mockito-junit-jupiter:test
+
+
+
+
+> Task :mockito-extensions:mockito-junit-jupiter:test
+  [0K[39morg.mockitousage.JunitJupiterSkippedTest > NestedSkipBeforeAllMockitoThenSkip [36m- should_handle_skip_in_before_all()[m
+  [0K[39morg.mockitousage.JunitJupiterSkippedTest > NestedSkipBeforeAllSkipThenMockito [36m- should_handle_skip_in_before_all()[m
+  [0K[39morg.mockitousage.JunitJupiterSkippedTest > NestedSkipBeforeEachMockito [36m- should_handle_skip_after_before_each()[m
+  [0K[39morg.mockitousage.JunitJupiterSkippedTest > NestedSkipBeforeEachMockito [36m- should_handle_skip_in_before_each()[m
+  [0K[39morg.mockitousage.JunitJupiterSkippedTest > NestedSkipBeforeEachMockito [36m- should_handle_skip_in_test()[m
+
+  [0K[32m42 passing [90m(23.8s)
+  [0K[36m5 pending[m
+
+
+> Task :mockito-extensions:mockito-junit-jupiter:retryTest SKIPPED
+> Task :mockito-extensions:mockito-junit-jupiter:verifyOSGi
+> Task :mockito-extensions:mockito-junit-jupiter:check
+> Task :mockito-extensions:mockito-junit-jupiter:generateMetadataFileForMockitoLibraryPublication SKIPPED
+> Task :mockito-extensions:mockito-junit-jupiter:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-extensions:mockito-junit-jupiter:publishAllPublicationsToLocalRepository
+> Task :mockito-extensions:mockito-junit-jupiter:build
+> Task :mockito-extensions:mockito-proxy:compileJava NO-SOURCE
+> Task :mockito-extensions:mockito-proxy:classes
+> Task :mockito-extensions:mockito-proxy:jar
+> Task :mockito-extensions:mockito-proxy:javadoc SKIPPED
+> Task :mockito-extensions:mockito-proxy:javadocJar
+> Task :mockito-extensions:mockito-proxy:assemble
+> Task :mockito-extensions:mockito-proxy:checkstyleMain NO-SOURCE
+> Task :mockito-extensions:mockito-proxy:compileTestJava
+> Task :mockito-extensions:mockito-proxy:testClasses
+> Task :mockito-extensions:mockito-proxy:checkstyleTest
+
+> Task :mockito-extensions:mockito-proxy:test
+
+
+
+  [0K[32m6 passing [90m(3.7s)[m
+
+
+> Task :mockito-extensions:mockito-proxy:retryTest SKIPPED
+> Task :mockito-extensions:mockito-proxy:check
+> Task :mockito-extensions:mockito-proxy:generateMetadataFileForMockitoLibraryPublication SKIPPED
+> Task :mockito-extensions:mockito-proxy:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-extensions:mockito-proxy:publishAllPublicationsToLocalRepository
+> Task :mockito-extensions:mockito-proxy:build
+> Task :mockito-extensions:mockito-subclass:compileJava NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:classes
+> Task :mockito-extensions:mockito-subclass:jar
+> Task :mockito-extensions:mockito-subclass:javadoc SKIPPED
+> Task :mockito-extensions:mockito-subclass:javadocJar
+> Task :mockito-extensions:mockito-subclass:assemble
+> Task :mockito-extensions:mockito-subclass:checkstyleMain NO-SOURCE
+> Task :mockito-extensions:mockito-subclass:compileTestJava
+> Task :mockito-extensions:mockito-subclass:testClasses
+> Task :mockito-extensions:mockito-subclass:checkstyleTest
+
+> Task :mockito-extensions:mockito-subclass:test
+
+
+
+  [0K[32m2 passing [90m(7.1s)[m
+
+
+> Task :mockito-extensions:mockito-subclass:retryTest SKIPPED
+> Task :mockito-extensions:mockito-subclass:check
+> Task :mockito-extensions:mockito-subclass:generateMetadataFileForMockitoLibraryPublication SKIPPED
+> Task :mockito-extensions:mockito-subclass:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-extensions:mockito-subclass:publishAllPublicationsToLocalRepository
+> Task :mockito-extensions:mockito-subclass:build
+> Task :mockito-integration-tests:extensions-tests:compileTestJava
+> Task :mockito-integration-tests:extensions-tests:testClasses
+
+> Task :mockito-core:test
+  [0K[39morg.mockito.AnnotationsAreCopiedFromMockedTypeTest [36m- mock_should_have_annotations_copied_from_mocked_type_at_class_level[m
+  [0K[39morg.mockito.MockTest [36m- should_have_matching_enum_in_strictness_enum[TEST_LEVEL_DEFAULT][m
+  [0K[39morg.mockito.MockitoEnvTest [36m- uses_mock_maker_from_env[m
+  [0K[39morg.mockito.MockitoEnvTest [36m- uses_default_mock_maker_from_env[m
+  [0K[39morg.mockito.MockitoEnvTest [36m- uses_default_member_accessor_from_env[m
+  [0K[39morg.mockito.MockitoEnvTest [36m- uses_member_accessor_from_env[m
+  [0K[39morg.mockito.MockitoTest [36m- shouldGiveExplanationOnConstructionMockingMockMaker[m
+  [0K[39morg.mockito.MockitoTest [36m- shouldGiveExplanationOnStaticMockingMockMaker[m
+  [0K[39morg.mockito.PrematureGarbageCollectionTest [36m- provoke_premature_garbage_collection[m
+
+> Task :mockito-integration-tests:extensions-tests:test
+
+
+
+  [0K[32m14 passing [90m(9.1s)[m
+
+
+> Task :mockito-integration-tests:extensions-tests:check
+> Task :mockito-integration-tests:extensions-tests:build
+> Task :mockito-integration-tests:graalvm-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:graalvm-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:graalvm-tests:jar
+> Task :mockito-integration-tests:graalvm-tests:assemble
+> Task :mockito-integration-tests:graalvm-tests:compileTestJava
+> Task :mockito-integration-tests:graalvm-tests:testClasses
+
+> Task :mockito-integration-tests:graalvm-tests:test
+
+
+
+  [0K[32m1 passing [90m(5.7s)[m
+
+
+> Task :mockito-integration-tests:graalvm-tests:check
+> Task :mockito-integration-tests:graalvm-tests:build
+> Task :mockito-integration-tests:groovy-inline-tests:compileTestJava NO-SOURCE
+> Task :mockito-integration-tests:groovy-inline-tests:compileTestGroovy
+> Task :mockito-integration-tests:groovy-inline-tests:testClasses
+
+> Task :mockito-integration-tests:groovy-inline-tests:test
+
+
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockito.internal.runners.DefaultInternalRunnerTest [36m- does_not_fail_second_test_when_first_test_fail[m
+
+> Task :mockito-integration-tests:groovy-inline-tests:test
+
+  [0K[32m1 passing [90m(9s)[m
+
+
+> Task :mockito-integration-tests:groovy-inline-tests:check
+> Task :mockito-integration-tests:groovy-inline-tests:build
+> Task :mockito-integration-tests:groovy-tests:compileTestJava NO-SOURCE
+> Task :mockito-integration-tests:groovy-tests:compileTestGroovy
+> Task :mockito-integration-tests:groovy-tests:testClasses
+
+> Task :mockito-integration-tests:groovy-tests:test
+
+
+
+
+> Task :mockito-integration-tests:groovy-tests:test
+
+  [0K[32m1 passing [90m(10.2s)[m
+
+
+> Task :mockito-integration-tests:groovy-tests:check
+> Task :mockito-integration-tests:groovy-tests:build
+> Task :mockito-integration-tests:inline-mocks-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:inline-mocks-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:inline-mocks-tests:jar
+> Task :mockito-integration-tests:inline-mocks-tests:assemble
+> Task :mockito-integration-tests:inline-mocks-tests:compileTestJava
+> Task :mockito-integration-tests:inline-mocks-tests:testClasses
+
+> Task :mockito-integration-tests:inline-mocks-tests:premainClinitSuppressionTest
+
+
+
+  [0K[32m1 passing [90m(3.3s)[m
+
+
+> Task :mockito-integration-tests:inline-mocks-tests:test
+
+
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockito.internal.stubbing.defaultanswers.ReturnsMocksTest [36m- should_return_null_for_final_class_if_unsupported[m
+  [0K[39morg.mockitointegration.NoJUnitDependenciesTest [36m- pure_mockito_should_not_depend_JUnit___ByteBuddy[m
+  [0K[39morg.mockitousage.annotation.SpyAnnotationTest [36m- should_report_private_inner_not_supported[m
+  [0K[39morg.mockitousage.bugs.GenericsMockitoAnnotationsTest [36m- should_not_throw_class_cast_exception[m
+  [0K[39morg.mockitousage.bugs.MultithreadedStubbingHalfManualTest [36m- tryToRevealTheProblem[m
+  [0K[39morg.mockitousage.bugs.injection.ParentTestMockInjectionTest$ImplicitTest [36m- noNullPointerException[m
+
+
+> Task :mockito-integration-tests:inline-mocks-tests:test
+
+  [0K[32m95 passing [90m(39.8s)[m
+
+
+> Task :mockito-integration-tests:inline-mocks-tests:check
+> Task :mockito-integration-tests:inline-mocks-tests:build
+> Task :mockito-integration-tests:java-21-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:java-21-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:java-21-tests:jar
+> Task :mockito-integration-tests:java-21-tests:assemble
+> Task :mockito-integration-tests:java-21-tests:compileTestJava
+> Task :mockito-integration-tests:java-21-tests:testClasses
+
+> Task :mockito-integration-tests:java-21-tests:testWithBytebuddyAgent
+
+
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_variable_arg_and_matcher_String_cast[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_single_arg_and_null_Object_reference[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_variable_arg_and_null_Object_array[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_variable_arg_and_matcher_String_array_cast[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_single_arg_and_matcher_cast[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_variable_arg_and_null_Object_arg[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_variable_arg[m
+  [0K[39morg.mockitousage.jls.JLS_15_12_2_5Test [36m- with_single_arg[m
+
+> Task :mockito-integration-tests:java-21-tests:testWithBytebuddyAgent
+
+  [0K[32m8 passing [90m(6.6s)[m
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockitousage.junitrunner.ModellingVerboseMockitoTest [36m- shouldLogUnusedStubbingWarningWhenTestFails[m
+  [0K[39morg.mockitousage.junitrunner.ModellingVerboseMockitoTest [36m- shouldNotLogAnythingWhenNoWarnings[m
+
+
+> Task :mockito-integration-tests:java-21-tests:testWithEnableDynamicAgentLoading
+
+
+
+  [0K[32m8 passing [90m(7.8s)[m
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockitousage.matchers.MatchersMixedWithRawArgumentsTest [36m- shouldAllowMixingRawArgumentsWithMatchers[m
+  [0K[39morg.mockitousage.matchers.VarargsTest [36m- shouldNotVerifyExactlyOneVarArg_any[m
+  [0K[39morg.mockitousage.misuse.DetectingFinalMethodsTest [36m- shouldFailWithUnfinishedVerification[m
+  [0K[39morg.mockitousage.misuse.DetectingFinalMethodsTest [36m- shouldFailWithUnfinishedStubbing[m
+  [0K[39morg.mockitousage.misuse.DetectingMisusedMatchersTest [36m- shouldSayUnfinishedVerificationButNotInvalidUseOfMatchers[m
+  [0K[39morg.mockitousage.misuse.InvalidUsageTest [36m- shouldNotAllowMockingFinalClassesIfDisabled[m
+  [0K[39morg.mockitousage.performance.LoadsOfMocksTest [36m- testSomething[m
+  [0K[39morg.mockitousage.performance.StubOnlyAvoidMemoryConsumptionTest [36m- without_stub_only_mocks_will_store_invocations_leading_to_an_OutOfMemoryError[m
+
+
+> Task :mockito-integration-tests:java-21-tests:testWithMockitoAgent
+
+
+
+  [0K[32m8 passing [90m(5.9s)[m
+
+
+> Task :mockito-integration-tests:java-21-tests:test
+
+
+
+
+> Task :mockito-integration-tests:java-21-tests:test
+
+  [0K[32m8 passing [90m(6.9s)[m
+
+
+> Task :mockito-integration-tests:java-21-tests:check
+> Task :mockito-integration-tests:java-21-tests:build
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:compileTestJava
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:testClasses
+
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:test
+
+
+
+
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:test
+
+  [0K[32m1 passing [90m(7.9s)[m
+
+
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:check
+> Task :mockito-integration-tests:junit-jupiter-extension-tests:build
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:compileTestJava
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:testClasses
+
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:test
+
+
+
+
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:test
+
+  [0K[32m6 passing [90m(7.5s)[m
+
+
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:check
+> Task :mockito-integration-tests:junit-jupiter-inline-mock-maker-extension-tests:build
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:compileTestJava
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:testClasses
+
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:test
+
+
+
+
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:test
+
+  [0K[32m14 passing [90m(6.8s)[m
+
+
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:check
+> Task :mockito-integration-tests:junit-jupiter-parallel-tests:build
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:compileTestKotlin
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:compileTestJava NO-SOURCE
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:testClasses
+
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:test
+
+
+
+
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:test
+
+  [0K[32m5 passing [90m(5s)[m
+
+
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:check
+> Task :mockito-integration-tests:kotlin-release-coroutines-tests:build
+> Task :mockito-integration-tests:kotlin-tests:compileTestKotlin
+> Task :mockito-integration-tests:kotlin-tests:compileTestJava NO-SOURCE
+> Task :mockito-integration-tests:kotlin-tests:testClasses
+
+> Task :mockito-integration-tests:kotlin-tests:test
+
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockitousage.spies.PartialMockingWithSpiesTest [36m- shouldStackTraceGetFilteredOnUserExceptionsReflectionForJava21AndHigher[m
+  [0K[39morg.mockitousage.spies.PartialMockingWithSpiesTest [36m- shouldStackTraceGetFilteredOnUserExceptionsReflectionForJavaOfVersionLessThan21[m
+  [0K[39morg.mockitousage.spies.SpyingOnRealObjectsTest [36m- shouldSayNiceMessageWhenSpyingOnPrivateClass[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldMentionFinalAndObjectMethodsWhenVerifying[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldMentionFinalAndObjectMethodsWhenMissingMockCall[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayNoMoreInteractions[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldScreamWhenNullPassedInsteadOfAnInterface[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- makeSureStateIsValidatedInTheVeryFirstTestThanksToTheRunner[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldScreamWhenExtraInterfacesEmpty[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayTooFewInvocationsInAtLeastMode[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayTooManyInvocations[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayWantedButNotInvoked[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayTooFewInvocations[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldScreamWhenExtraIsTheSame[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayNeverWantedButInvokedHere[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldShowExampleOfCorrectArgumentCapturing[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldScreamWhenExtraInterfacesIsANullArray[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldPointOutUnfinishedStubbing[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldShowActualAndExpected[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayTooManyInvocationsInOrder[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayWantedButNotInvokedInOrder[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayTooFewInvocationsInOrder[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldMentionSpiesWhenVoidMethodIsToldToReturnValue[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayUnstubbedMethodWasInvokedHere[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldMentionFinalAndObjectMethodsWhenMisplacedArgumentMatcher[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldPointOutInteractionsOnMockWhenOrdinaryVerificationFails[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldSayTooFewInvocationsInAtLeastModeInOrder[m
+  [0K[39morg.mockitousage.stacktrace.ModellingDescriptiveMessagesTest [36m- shouldScreamWhenNonInterfacePassed[m
+
+
+> Task :mockito-integration-tests:kotlin-tests:test
+
+  [0K[32m24 passing [90m(24.1s)[m
+
+
+> Task :mockito-integration-tests:kotlin-tests:check
+> Task :mockito-integration-tests:kotlin-tests:build
+> Task :mockito-integration-tests:memory-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:memory-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:memory-tests:jar
+> Task :mockito-integration-tests:memory-tests:assemble
+
+> Task :mockito-integration-tests:memory-tests:compileTestJava
+
+> Task :mockito-integration-tests:memory-tests:testClasses
+
+> Task :mockito-core:test
+  [0K[39morg.mockitousage.verification.DescriptiveMessagesWhenVerificationFailsTest [36m- should_print_method_name_and_arguments_of_other_interactions_of_same_method[m
+  [0K[39morg.mockitousage.verification.DescriptiveMessagesWhenVerificationFailsTest [36m- test1[m
+  [0K[39morg.mockitousage.verification.DescriptiveMessagesWhenVerificationFailsTest [36m- test2[m
+
+
+> Task :mockito-integration-tests:memory-tests:test
+
+
+
+> Task :mockito-core:test
+  [0K[39morg.mockitousage.verification.VerificationWithAfterAndCaptorTest [36m- shouldReturnListOfArgumentsWithSameSizeAsGivenInTimesVerification[m
+  [0K[39morg.mockitousage.verification.VerificationWithAfterAndCaptorTest [36m- shouldReturnListOfArgumentsWithSameSizeAsGivenInAtLeastVerification[m
+  [0K[39morg.mockitousage.verification.VerificationWithAfterTest [36m- should_fail_early_when_only_is_used[m
+  [0K[39morg.mockitousage.verification.VerificationWithAfterTest [36m- should_fail_early_when_time_x_is_used[m
+  [0K[39morg.mockitousage.verification.VerificationWithTimeoutTest [36m- should_verify_with_only_and_fail[m
+  [0K[39morg.mockitousage.verification.VerificationWithTimeoutTest [36m- should_verify_with_only_and_fail_early[m
+  [0K[39morg.mockitousage.verification.VerificationWithTimeoutTest [36m- should_verify_with_timeout_and_fail_early[m
+
+  [0K[32m2288 passing [90m(5m 4s)
+  [0K[36m72 pending[m
+
+
+> Task :mockito-core:retryTest SKIPPED
+> Task :mockito-core:check
+> Task :mockito-core:generateMetadataFileForMockitoLibraryPublication SKIPPED
+> Task :mockito-core:generatePomFileForMockitoLibraryPublication
+> Task :mockito-core:publishMockitoLibraryPublicationToLocalRepository
+> Task :mockito-core:publishAllPublicationsToLocalRepository
+> Task :mockito-core:build
+> Task :mockito-integration-tests:module-named-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:module-named-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:module-named-tests:jar
+> Task :mockito-integration-tests:module-named-tests:assemble
+> Task :mockito-integration-tests:module-named-tests:compileTestJava
+> Task :mockito-integration-tests:module-named-tests:testClasses
+
+> Task :mockito-integration-tests:module-named-tests:test
+
+
+
+
+> Task :mockito-integration-tests:module-named-tests:test
+
+  [0K[32m4 passing [90m(5.1s)[m
+
+
+> Task :mockito-integration-tests:module-named-tests:check
+> Task :mockito-integration-tests:module-named-tests:build
+> Task :mockito-integration-tests:module-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:module-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:module-tests:jar
+> Task :mockito-integration-tests:module-tests:assemble
+> Task :mockito-integration-tests:module-tests:compileTestJava
+> Task :mockito-integration-tests:module-tests:testClasses
+
+> Task :mockito-integration-tests:module-tests:test
+
+
+
+
+> Task :mockito-integration-tests:module-tests:test
+  [0K[39morg.mockito.moduletest.ModuleAccessTest [36m- cannot_read_unopened_private_field_but_exception_includes_cause[m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_java_util_module[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_reading_module[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_non_reading_module[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_closed_module[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_non_opened_non_exported_module_if_unsafe_injection[0][m
+
+
+> Task :mockito-integration-tests:module-tests:test
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_reading_private_module[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_non_reading_non_exporting_module[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- cannot_define_class_in_non_opened_non_exported_module_if_lookup_injection[0][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_java_util_module[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_reading_module[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_non_reading_module[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_closed_module[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_non_opened_non_exported_module_if_unsafe_injection[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_reading_private_module[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- can_define_class_in_open_non_reading_non_exporting_module[1][m
+  [0K[39morg.mockito.moduletest.ModuleHandlingTest [36m- cannot_define_class_in_non_opened_non_exported_module_if_lookup_injection[1][m
+
+  [0K[32m5 passing [90m(6.7s)
+  [0K[36m17 pending[m
+
+
+> Task :mockito-integration-tests:module-tests:check
+> Task :mockito-integration-tests:module-tests:build
+> Task :mockito-integration-tests:osgi-tests:compileTestBundleJava
+> Task :mockito-integration-tests:osgi-tests:testBundleClasses
+> Task :mockito-integration-tests:osgi-tests:testBundle
+> Task :mockito-integration-tests:osgi-tests:compileTestJava
+> Task :mockito-integration-tests:osgi-tests:testClasses
+
+> Task :mockito-integration-tests:osgi-tests:test
+
+
+
+
+> Task :mockito-integration-tests:osgi-tests:test
+
+  [0K[32m3 passing [90m(7.9s)[m
+
+
+> Task :mockito-integration-tests:osgi-tests:check
+> Task :mockito-integration-tests:osgi-tests:build
+> Task :mockito-integration-tests:programmatic-tests:compileJava NO-SOURCE
+> Task :mockito-integration-tests:programmatic-tests:classes UP-TO-DATE
+> Task :mockito-integration-tests:programmatic-tests:jar
+> Task :mockito-integration-tests:programmatic-tests:assemble
+> Task :mockito-integration-tests:programmatic-tests:compileTestJava
+> Task :mockito-integration-tests:programmatic-tests:testClasses
+
+> Task :mockito-integration-tests:programmatic-tests:test
+
+
+
+
+> Task :mockito-integration-tests:memory-tests:test
+
+  [0K[32m2 passing [90m(41.5s)[m
+
+
+> Task :mockito-integration-tests:memory-tests:check
+> Task :mockito-integration-tests:memory-tests:build
+
+> Task :mockito-integration-tests:programmatic-tests:test
+
+  [0K[32m9 passing [90m(9.1s)[m
+
+
+> Task :mockito-integration-tests:programmatic-tests:check
+> Task :mockito-integration-tests:programmatic-tests:build
+
+[Incubating] Problems report is available at: file:///work/source/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.14.2/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 27m 17s
+160 actionable tasks: 132 executed, 28 up-to-date

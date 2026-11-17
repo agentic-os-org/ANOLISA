@@ -217,6 +217,139 @@ fn insert_raw(store: &TrajectoryStore, session_id: &str, atif_json: &str) {
 }
 
 #[test]
+fn unchanged_decision_owned_rows_regain_the_verified_fast_path() {
+    for model_decision in [false, true] {
+        let (trajectories, labels) = stores(if model_decision {
+            "checked-model-decision"
+        } else {
+            "checked-human-decision"
+        });
+        insert(&trajectories, "checked", &substantive_atif());
+        let config = TriageConfig::default();
+        run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        if model_decision {
+            labels
+                .record_judgement(
+                    "checked",
+                    &crate::reuse::judge::JudgeVerdict {
+                        label: TrajectoryLabel::Good,
+                        reason: "fixture".into(),
+                        cited_steps: vec![2],
+                        downgraded: false,
+                    },
+                )
+                .unwrap();
+        } else {
+            labels
+                .apply_decision("checked", LabelAction::Confirm, "fixture", None)
+                .unwrap();
+        }
+        let collected =
+            trajectories.list_summaries(None, None, None, 1).unwrap()[0].collected_at_ns;
+        let before = labels.get_label("checked").unwrap().unwrap();
+        assert!(!is_fresh(&before, &config.version(), collected));
+        let report = run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(report.unchanged, 1);
+        assert_eq!(report.labelled, 0);
+        let after = labels.get_label("checked").unwrap().unwrap();
+        assert_eq!(after.updated_at_ns, before.updated_at_ns);
+        assert_eq!(after.triage_checked_at_ns, Some(collected));
+        assert!(is_fresh(&after, &config.version(), collected));
+        assert!(!is_fresh(&after, &config.version(), collected + 1));
+        assert!(!is_fresh(&after, "different-rules", collected));
+    }
+}
+
+#[test]
+fn decisions_after_recollection_do_not_mark_old_triage_fresh() {
+    for model_decision in [false, true] {
+        let (trajectories, labels) = stores(if model_decision {
+            "model-freshness"
+        } else {
+            "human-freshness"
+        });
+        let config = TriageConfig::default();
+        insert(&trajectories, "s1", &failing_atif());
+        run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        insert(&trajectories, "s1", &substantive_atif());
+        if model_decision {
+            labels
+                .record_judgement(
+                    "s1",
+                    &crate::reuse::judge::JudgeVerdict {
+                        label: TrajectoryLabel::Bad,
+                        reason: "old assessment".into(),
+                        cited_steps: vec![2],
+                        downgraded: false,
+                    },
+                )
+                .unwrap();
+        } else {
+            labels
+                .apply_decision(
+                    "s1",
+                    LabelAction::Override(TrajectoryLabel::Bad),
+                    "fixture",
+                    None,
+                )
+                .unwrap();
+        }
+        let report = run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            report.labelled, 1,
+            "later decisions must not hide changed content"
+        );
+        let stored = labels.get_label("s1").unwrap().unwrap();
+        assert_eq!(stored.auto_label, TrajectoryLabel::Good);
+        assert_eq!(
+            stored.source_content_hash,
+            content_hash(&substantive_atif())
+        );
+        assert!(
+            stored.llm_label.is_none(),
+            "old model judgement is invalidated"
+        );
+        assert_eq!(
+            stored.human_label,
+            (!model_decision).then_some(TrajectoryLabel::Bad)
+        );
+        let repeat = run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(repeat.labelled, 0);
+        assert_eq!(repeat.unchanged, 1);
+    }
+}
+
+#[test]
 fn triage_labels_every_trajectory_and_reports_the_split() {
     let (trajectories, labels) = stores("split");
     insert(&trajectories, "trivial", &trivial_atif());

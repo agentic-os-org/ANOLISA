@@ -34,6 +34,7 @@ pub(super) fn callback(args: &Arguments) -> Exit {
                     .get("--event")
                     .is_some_and(|v| v == "input.submit"))
                 || args.flags.contains_key("--close-event")
+                || args.flags.contains_key("--event-receipt")
                 || args
                     .flags
                     .get("--on-error")
@@ -41,11 +42,12 @@ pub(super) fn callback(args: &Arguments) -> Exit {
             {
                 return Exit::Code(1);
             }
-            let blocked = args
-                .flags
-                .get("--event")
-                .is_some_and(|v| matches!(v.as_str(), "input.submit" | "tool.before"))
-                && args.flags.get("--on-error").is_some_and(|v| v == "block");
+            let blocked = args.flags.get("--event").is_some_and(|v| {
+                matches!(
+                    v.as_str(),
+                    "input.submit" | "tool.before" | "security.violation"
+                )
+            }) && args.flags.get("--on-error").is_some_and(|v| v == "block");
             match emit(adapter.reply(blocked)) {
                 Ok(exit) => exit,
                 Err(error) => {
@@ -73,6 +75,7 @@ fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<Exit> {
             "--step",
             "--on-error",
             "--close-event",
+            "--event-receipt",
         ],
         false,
     )?;
@@ -133,6 +136,11 @@ pub(super) fn invoke_bound(
         }
         _ => return Err("unsupported event cleanup bridge".into()),
     };
+    let receipt = match args.flags.get("--event-receipt").map(String::as_str) {
+        None => false,
+        Some("true") if binding.adapter == "claude-sdk" && !close => true,
+        _ => return Err("unsupported event receipt bridge".into()),
+    };
     let event = args.required("--event")?;
     let step = args.required("--step")?;
     let on_error = args.required("--on-error")?;
@@ -192,7 +200,11 @@ pub(super) fn invoke_bound(
             },
             deadline,
         )?;
-        return emit(adapter.reply(false));
+        let mut output = adapter.reply(false);
+        if receipt {
+            output.stdout = br#"{"event_complete":true}"#.to_vec();
+        }
+        return emit(output);
     }
     let handle: EventHandle = serde_json::from_value(client.call(
         Operation::OpenHookEvent {
@@ -202,29 +214,28 @@ pub(super) fn invoke_bound(
         },
         deadline,
     )?)?;
-    let result: Result<HookOutput> = client
-        .call(
-            Operation::InvokeStep {
-                event_id: handle.event_id.clone(),
-                instance_id: binding.binding.instance_id.clone(),
-                step_id: step.into(),
-                native_environment: Some(std::env::vars_os().collect()),
-            },
-            deadline,
+    let invoked = client.call(
+        Operation::InvokeStep {
+            event_id: handle.event_id.clone(),
+            instance_id: binding.binding.instance_id.clone(),
+            step_id: step.into(),
+            native_environment: Some(std::env::vars_os().collect()),
+        },
+        deadline,
+    );
+    let mut complete = invoked.is_ok() && handle.steps.last().map(String::as_str) == Some(step);
+    let result: Result<HookOutput> = invoked.map_err(Into::into).and_then(|output| {
+        aw_adapter::callback::response(
+            adapter,
+            event,
+            on_error,
+            output,
+            &binding.adapter,
+            &value,
+            &mut std::io::stderr(),
         )
         .map_err(Into::into)
-        .and_then(|output| {
-            aw_adapter::callback::response(
-                adapter,
-                event,
-                on_error,
-                output,
-                &binding.adapter,
-                &value,
-                &mut std::io::stderr(),
-            )
-            .map_err(Into::into)
-        });
+    });
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
     if matches!(event, "input.submit" | "tool.before")
         && handle.steps.last().map(String::as_str) != Some(step)
@@ -239,7 +250,30 @@ pub(super) fn invoke_bound(
         ) {
             // Cleanup failure must not turn a denial into report-mode allow.
             eprintln!("aw hook event close failed: {error}");
+            if receipt {
+                return Err(error.into());
+            }
+        } else {
+            complete = true;
         }
+    }
+    if receipt {
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("aw hook failed: {error}");
+                HookOutput {
+                    exit: Exit::Code(1),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
+            }
+        };
+        if !output.stdout.is_empty() {
+            return Err("event receipt does not support native output rewrites".into());
+        }
+        output.stdout = serde_json::to_vec(&serde_json::json!({"event_complete": complete}))?;
+        return emit(output);
     }
     emit(result?)
 }

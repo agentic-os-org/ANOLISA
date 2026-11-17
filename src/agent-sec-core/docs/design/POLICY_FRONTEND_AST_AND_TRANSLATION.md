@@ -695,13 +695,14 @@ evaluates requests in process. Each request consistently reads all current polic
 and includes Cedar sources whose statements all have explicit principal headers;
 a source mixing bare and constrained headers is rejected as a whole. Updates,
 deletions and eligibility changes affect later requests while Scope/Binding snapshots
-retain their saved revisions. Configuration contains only `environment_permissions`
-and `ttl_seconds`, which set the OS-permission ceiling and decision acceptance deadline.
-The old `baseline_policy` and `task_policy` keys are rejected. When adapting old request
+retain their saved revisions. The daemon always enables authorization without a
+separate configuration file; requested permissions and Cedar determine effective
+permissions. Decisions have a fixed 60-second acceptance window. Remove the old
+`--authorization-config` startup argument and migrate required environment limits
+into Cedar. The old baseline/task snapshot API is removed. When adapting old request
 policies, review their previous intersection semantics: permits in the combined set
 can add grants, and matching forbids override permits across the set. See the
-[sandbox guide](../../../../docs/user-guide/en/agent-sec-core/sandbox.md) for configuration
-and migration, and [sandbox authorization](LINUX_SANDBOX_PEP_DESIGN_zh.md) for decisions
+[sandbox guide](../../../../docs/user-guide/en/agent-sec-core/sandbox.md) for migration, and [sandbox authorization](LINUX_SANDBOX_PEP_DESIGN_zh.md) for decisions
 and receipts.
 
 ### 8.6.1 HTTP injection extension

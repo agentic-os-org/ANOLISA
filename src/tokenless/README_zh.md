@@ -12,6 +12,12 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 
 当解析器无法保留某个 JSON 数字的值时，PostTool 会保持整个响应原样。其他响应仍可进行格式压紧和 Record Reduction；Core 仅在 TOON 解码后保留相同的值与类型时采用它。
 
+进入 PostTool 的 Maven 输出可在保留全部记录的同时共享重复字面量模板及下载 URL 前缀，
+无需 Stash。识别范围、输出还原方法与验证限制参见 [Maven 构建输出](../../docs/user-guide/zh/tokenless/index.md#maven-构建输出)。
+
+进入 PostTool 的 Gradle 输出可在保留全部记录、失败任务与诊断输出的同时共享重复任务后缀与
+模块路径前缀，无需 Stash。识别范围、输出还原方法与验证限制参见 [Gradle 构建输出](../../docs/user-guide/zh/tokenless/index.md#gradle-构建输出)。
+
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
@@ -22,7 +28,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
 | 混合内容区域压缩 | 取决于工作负载 | 通过 `TOKENLESS_MIXED_CONTENT_ENABLED=1` 显式开启：对既非完整结构化文档、也无法被其他领域处理的工具输出，识别显式定界的 typed region——标注 `json`/`csv`/`tsv` 的 fenced code block 与括号平衡的裸 JSON 文档——并用与独立文档相同的压缩器和策略逐段压缩。周围文本逐字节保留，压缩器拒绝的区域逐字节保留，选择 TOON 的 JSON 区域同步更新 fence label。默认关闭 |
-| HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；同类来源中 JSON 字符串值里的 HTML 在不丢失可见文字、链接目标、表单状态以及样式、属性、换行、列表编号或表头所承载的含义，且不暴露屏幕上被隐藏的文字时就地转写，保持 JSON 结构；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
+| HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；同类来源中 JSON 字符串值里的 HTML 就地将受支持的富文本子树转写为混合 Markdown，同时原地保留行内 `<svg>`、JSON 数据 `<script>` 载荷、`data-*`/`aria-*` 属性、表单状态等局部 HTML 语义并保持外层 JSON 结构，对含屏幕隐藏/不可读文字或可执行脚本等全局风险的值保持原样；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |

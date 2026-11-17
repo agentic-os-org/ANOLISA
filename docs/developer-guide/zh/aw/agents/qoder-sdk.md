@@ -2,6 +2,8 @@
 
 [English](../../../en/aw/agents/qoder-sdk.md)
 
+应用原生启动并显式选择故障回退时，使用 [TypeScript SDK](../deployment/native-sdk.md)。
+
 ## 依赖与工厂
 
 已验证基线为 `@qoder-ai/qoder-agent-sdk@1.0.56` 与 bundled Worker 1.1.78 国际版。使用 Node.js 22+，SDK 安装在应用目录，认证沿用 SDK 设置。具备所需原生接口的其他 SDK/Worker 版本也可接入，AW 记录实际版本，并在启动和使用时检查包身份、声明站点、Hook 分发、调用身份和 Query 收尾。
@@ -237,6 +239,33 @@ AW 等待消费者确认完成后才结束有限输入、关闭原生传输，
 原生拒绝发生在发布前时，直接回收未使用票据，不调用 `settle`。
 settle 或清理失败会保留所有权并封锁 worker；排查原因后重启。
 顺序不变量见[执行设计](../../../../../src/aw/docs/design/zh/adapters/private-execution.md#原生-bash-消费者)。
+
+## 最终工具结果检查
+
+Linux arm64、x64 上的 SDK 1.0.57 / Worker 1.1.81 支持单次前台 Bash Query 的
+`security.violation` 检查。启用该事件并设置 `required: true`，结构化 Provider
+步骤使用 `on_error: block`。此模式下 `tool.after` 只支持观察，使用 `on_error: report`。
+通过 `aw run` 启动，使用受管 daemon，传入字符串 prompt，以及
+`settingSources: []`、`persistSession: false`、`tools: ["Bash"]`、`model: "auto"`。
+返回的 Query 提供迭代和 `close()`。
+
+AW 在启动前验证 SDK 和内置 Worker 指纹，通过进程内 Node loader 插桩，并在
+Worker 插桩与原生 Hook 均就绪后释放首个 prompt。安装包文件保持不变。
+应用 Post Hook 完成后，检查点位于序列化的 legacy 请求交给原生编码器之前。
+每份 Bash 结果绑定原生 session、call 和参数，调用已有 AW Provider 链。
+策略拒绝、超时、身份无效或 Provider 失败时，替换为
+`AW withheld the final tool result`；同一调用后续出现不同结果字节也会被阻断。
+
+该模式要求 global 包和原生 legacy 传输。自定义模型或传输、SDK 上下文修改、MCP、
+插件、后台工具请求、额外用户或通知轮次、上下文压缩、策略更新暂不支持。
+原始上下文变化或结果封装超出验证范围时停止模型请求。其他发行版保留普通 Post
+行为；必需最终检查在遇到未验证构建时于应用启动前拒绝准入。
+
+[原生矩阵](../../../../../src/aw/tests/native-matrix.json) 的五项 `final-1.0.57-*`
+测试使用授权 Qoder PAT，覆盖安全输出、AW Post 后改写、超时、Provider 报错及原生 Bash 失败。
+失败用例检查 PostFailure、最终 `is_error` 及模型文本复述受检 stderr；
+断言实际模型回复、策略记录、安装包未变和进程及事件释放。
+网络载荷使用原生编码，检查对象为编码器输入的明文，实际模型回复提供交付证据。
 
 ## 更新与长期运行
 

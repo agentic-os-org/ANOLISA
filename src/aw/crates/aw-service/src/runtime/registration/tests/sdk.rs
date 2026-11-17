@@ -1,0 +1,298 @@
+//! SDK extension negotiation, owner fencing and canonical native callback execution.
+
+use super::*;
+use crate::Availability;
+
+fn fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../../../sdk/tests/fixtures/contract.json"
+    ))
+    .unwrap()
+}
+
+fn command(f: &Fixture, key: &str, mode: Availability) -> RegistrationCommand {
+    let mut value = serde_json::to_value(f.command(key)).unwrap();
+    value["action"] = json!("register_sdk");
+    value["sdk_version"] = fixture()["sdk_protocol"].clone();
+    value["availability"] = json!(mode);
+    // Public callbacks are validated by event contract, without an exact SDK version list.
+    value["capabilities"]["version"] = json!("application-hooks/v1");
+    serde_json::from_value(value).unwrap()
+}
+
+pub(super) fn task(f: &Fixture, key: &str) -> (RegistrationHandle, String) {
+    let snapshot = f.call(command(f, key, Availability::Required)).unwrap();
+    let h = handle(&snapshot);
+    code(f.open(&h.binding.instance_id), "registration_not_ready");
+    f.call(RegistrationCommand::Ready {
+        handle: h.clone(),
+        policy_revision: snapshot["policy_revision"].as_str().unwrap().into(),
+    })
+    .unwrap();
+    let scope = f.open(&h.binding.instance_id).unwrap();
+    let id = scope["instance_id"].as_str().unwrap().to_owned();
+    f.runtime.scope_policy(&id).unwrap();
+    f.runtime
+        .acknowledge_scope(&id, Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    (h, id)
+}
+
+fn callback(f: &Fixture, id: &str) -> Operation {
+    let mut native = fixture()["native_before"].clone();
+    native["cwd"] = json!(f.directory.path());
+    Operation::SdkCallback {
+        instance_id: id.into(),
+        event: "tool.before".into(),
+        step_id: "observe".into(),
+        native_input: native,
+        close: false,
+    }
+}
+
+#[test]
+fn sdk_negotiates_without_relaxing_the_old_registration_shape() {
+    let f = Fixture::new();
+    let mut value =
+        serde_json::to_value(command(&f, "negotiation", Availability::Required)).unwrap();
+    value["sdk_version"] = json!("aw-sdk/v0");
+    code(
+        f.call(serde_json::from_value(value.clone()).unwrap()),
+        "sdk_protocol_version",
+    );
+    value["action"] = json!("register");
+    assert!(serde_json::from_value::<RegistrationCommand>(value).is_err());
+    let snapshot = f
+        .call(command(&f, "negotiation", Availability::Required))
+        .unwrap();
+    assert_eq!(snapshot["sdk_protocol"], fixture()["sdk_protocol"]);
+    assert_eq!(snapshot["availability"], "required");
+    let recovered = f.query("negotiation");
+    assert_eq!(snapshot["handle"], recovered["handle"]);
+    code(
+        f.call(command(&f, "negotiation", Availability::NativeFallback)),
+        "registration_request_conflict",
+    );
+}
+
+#[test]
+fn fallback_rejects_required_events_and_accepts_explicit_optional_policy() {
+    let f = Fixture::new();
+    code(
+        f.call(command(&f, "conflict", Availability::NativeFallback)),
+        "sdk_required_policy_conflict",
+    );
+    let mut document: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    for event in document["spec"]["events"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        event["required"] = json!(false);
+    }
+    let mut cmd = command(&f, "optional", Availability::NativeFallback);
+    if let RegistrationCommand::RegisterSdk { config, .. } = &mut cmd {
+        *config = Some(serde_json::to_string(&document).unwrap());
+    }
+    assert_eq!(f.call(cmd).unwrap()["availability"], "native_fallback");
+}
+
+#[test]
+fn sdk_callbacks_require_ready_owned_scopes_and_execute_once() {
+    let f = Fixture::new();
+    let (root, id) = task(&f, "callback");
+    let peer = Process::read(std::process::id()).unwrap();
+    code(
+        f.runtime
+            .authorize_registration_peer(&callback(&f, &root.binding.instance_id), Some(&peer))
+            .map(|()| json!({})),
+        "registration_requires_scope",
+    );
+    assert!(f
+        .runtime
+        .authorize_registration_peer(&callback(&f, &id), None)
+        .is_err());
+    f.runtime
+        .authorize_registration_peer(&callback(&f, &id), Some(&peer))
+        .unwrap();
+    let result = f
+        .runtime
+        .handle(
+            callback(&f, &id),
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(result, fixture()["neutral_callback"]);
+    assert!(f.directory.path().join("invoked").exists());
+    fs::remove_file(f.directory.path().join("invoked")).unwrap();
+    assert!(f
+        .runtime
+        .handle(
+            callback(&f, &id),
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false)
+        )
+        .is_err());
+    assert!(!f.directory.path().join("invoked").exists());
+    f.call(RegistrationCommand::Release { handle: root })
+        .unwrap();
+}
+
+#[test]
+fn sdk_callback_cannot_replace_the_server_selected_step_or_native_identity() {
+    let f = Fixture::new();
+    let (_, id) = task(&f, "input");
+    for invalid in ["step", "identity"] {
+        let mut op = callback(&f, &id);
+        if let Operation::SdkCallback {
+            step_id,
+            native_input,
+            ..
+        } = &mut op
+        {
+            if invalid == "step" {
+                *step_id = "unadmitted".into();
+            } else {
+                native_input["cwd"] = json!("/not-the-owner-directory");
+            }
+        }
+        assert!(f
+            .runtime
+            .handle(
+                op,
+                Instant::now() + Duration::from_secs(5),
+                &AtomicBool::new(false)
+            )
+            .is_err());
+    }
+    assert!(!f.directory.path().join("invoked").exists());
+}
+
+#[test]
+fn sdk_denial_and_provider_failure_remain_distinct_from_native_fallback() {
+    for fail in [false, true] {
+        let mut f = Fixture::new();
+        let provider = f.directory.path().join("policy.py");
+        fs::write(&provider, r#"import json, sys
+request = json.load(sys.stdin)
+reply = {"api_version": "aw-provider/v1alpha1", "request_id": request["request_id"], "status": "ok"}
+if request["method"] == "describe":
+    reply["operations"] = [{"name":"observe", "events":["tool.before"], "effects":["block"]}]
+elif request["method"] == "invoke":
+    if sys.argv[2] == "fail":
+        sys.exit(42)
+    reply.update(input_digest=request["input_digest"], effects=[{"type":"block", "reason_code":"sdk_policy"}])
+json.dump(reply, sys.stdout)
+"#).unwrap();
+        let mut doc: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+        doc["spec"]["providers"]["policy"]["transport"]["argv"][2] = json!(provider);
+        doc["spec"]["providers"]["policy"]["transport"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(if fail { "fail" } else { "deny" }));
+        doc["spec"]["events"]["tool.before"]["steps"][0]["effects"] = json!(["block"]);
+        f.runtime = Runtime::new(
+            serde_json::to_vec(&doc).unwrap(),
+            &f.directory.path().join("sdk-audit"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        let mut cmd = command(&f, "decision", Availability::Required);
+        if let RegistrationCommand::RegisterSdk { capabilities, .. } = &mut cmd {
+            capabilities
+                .events
+                .insert("tool.before".into(), vec!["observe".into(), "block".into()]);
+        }
+        let registered = f.call(cmd).unwrap();
+        let h = handle(&registered);
+        f.call(RegistrationCommand::Ready {
+            handle: h.clone(),
+            policy_revision: registered["policy_revision"].as_str().unwrap().into(),
+        })
+        .unwrap();
+        let scope = f.open(&h.binding.instance_id).unwrap();
+        let id = scope["instance_id"].as_str().unwrap();
+        f.runtime.scope_policy(id).unwrap();
+        f.runtime
+            .acknowledge_scope(id, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let result = f.runtime.handle(
+            callback(&f, id),
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        );
+        if fail {
+            code(result, "sdk_step_failed");
+        } else {
+            assert_eq!(result.unwrap()["code"], 2);
+        }
+    }
+}
+
+#[test]
+fn fallback_updates_reject_required_policy_and_busy_scopes() {
+    let f = Fixture::new();
+    let mut doc: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    for event in doc["spec"]["events"].as_object_mut().unwrap().values_mut() {
+        event["required"] = json!(false);
+    }
+    let mut cmd = command(&f, "update", Availability::NativeFallback);
+    if let RegistrationCommand::RegisterSdk { config, .. } = &mut cmd {
+        *config = Some(serde_json::to_string(&doc).unwrap());
+    }
+    let snapshot = f.call(cmd).unwrap();
+    let h = handle(&snapshot);
+    let id = &h.binding.instance_id;
+    let pid = std::process::id();
+    f.runtime.enable_reload(id).unwrap();
+    f.call(RegistrationCommand::Ready {
+        handle: h.clone(),
+        policy_revision: snapshot["policy_revision"].as_str().unwrap().into(),
+    })
+    .unwrap();
+    f.runtime.associate_process(id, pid).unwrap();
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::Ready, "")
+        .unwrap();
+    let update = |document: &Value| {
+        let request = crate::Request {
+            api_version: crate::VERSION.into(),
+            identity: Some(f.runtime.identity.clone()),
+            deadline_ns: crate::deadline::encode(Instant::now() + Duration::from_secs(5)).unwrap(),
+            operation: Operation::UpdatePolicy {
+                instance_id: id.clone(),
+                expected_revision: snapshot["policy_revision"].as_str().unwrap().into(),
+                config: serde_json::to_string(document).unwrap(),
+            },
+        };
+        // SAFETY: geteuid only reads this test process's effective UID.
+        f.runtime.update_policy(
+            &request,
+            (unsafe { libc::geteuid() }, pid as i32),
+            &Arc::new(AtomicBool::new(false)),
+        )
+    };
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::RequestStart, "task")
+        .unwrap();
+    let scope = f.open(id).unwrap();
+    assert!(matches!(update(&doc), Err(Error::Attempt { code, .. }) if code == "busy"));
+    f.runtime
+        .release_instance(
+            scope["instance_id"].as_str().unwrap(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::RequestEnd, "task")
+        .unwrap();
+    doc["spec"]["events"]["tool.before"]["required"] = json!(true);
+    assert!(
+        matches!(update(&doc), Err(Error::Attempt { code, .. }) if code == "sdk_required_policy_conflict")
+    );
+    assert_eq!(
+        f.query("update")["policy_revision"],
+        snapshot["policy_revision"]
+    );
+}

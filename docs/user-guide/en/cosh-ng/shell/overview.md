@@ -2,6 +2,48 @@
 
 [中文版](../../../zh/cosh-ng/shell/overview.md)
 
+Use `cosh --help` for launch options and public command entry points; it also works without a terminal.
+It reads the interface language preference without starting a shell or authentication flow.
+Use `cosh --shell bash --help` for Bash help. In an enhanced Cosh session, `/help` shows the existing session command reference.
+`cosh guide on|off|status` controls usage guidance only, not all AI features.
+
+## Configuration wizard and getting started
+
+`cosh guide` opens a full-screen configuration wizard in an interactive terminal, covering five
+settings: interface language, AI service, tips & recommendations (usage tips / command analysis /
+personalized prompt recommendations / recommendation data & privacy), login health summary, and
+default login shell, plus a separate getting-started page. The wizard only saves preferences and
+reuses existing owners: AI service hands off to the existing `/auth`, and the default login shell is
+changed through a private bounded protocol over foreground sudo, so the password never enters the wizard.
+Analysis mode and recommendation switches save new-session defaults; environment overrides (such as
+`COSH_RECOMMENDATIONS_ENABLED=0`) are shown honestly as "saved but overridden" or reject an enable
+request, without misleading you about the current session.
+
+The wizard selects **Start asking questions** by default. It opens a Cosh session; submit your
+question there. **Manage AI service** remains a secondary entry to `/auth`. Opening the wizard
+does not activate a trial, change provider preferences, or call a model. For automatic access,
+the guide invites you with "Zero-config automatic access; ask directly"; the first question
+verifies access. An ECS identity
+check does not prove trial eligibility or remaining quota. Configured services show that their
+connection is unverified, and explicit provider settings keep priority over automatic trial access.
+
+At startup Cosh shows health facts once, followed by a single open suggestion
+area shared by health and personal recommendations (at most three questions).
+One question is shown without a number; several questions are numbered `1.` to
+`3.` with a `›` marker on the active one. `Shift+Tab` cycles the active
+question, `Tab` inserts it for editing, and `Enter` at an empty recommendation
+prompt asks it directly. If the list cannot fit the terminal or the prompt is
+owned by another program, Cosh keeps the printed list as history and shows the
+current number and question at the prompt instead of repainting old rows.
+
+The three entries have distinct roles: `cosh --help` is the static launch-option and public-command
+index; `cosh guide` is interactive configuration and onboarding; in-session `/help` is the existing
+session command reference. On restricted terminals (non-TTY, undersized, or limited TERM) `cosh guide`
+degrades to printing static text instead of entering the interactive UI.
+
+Changing the default login shell requires sudo and only affects new logins; real-account, VNC and
+RPM/release acceptance are verified separately and are not inferred from wizard unit tests.
+
 `cosh` starts in Enhanced Assisted mode and keeps the shell's native prompt
 appearance. Cosh may route natural-language input before bash or zsh executes
 it. Press `Shift+Tab`

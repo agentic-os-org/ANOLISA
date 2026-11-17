@@ -16,7 +16,8 @@ def load(root: Path) -> dict:
     """Reject unaccounted Agents, empty suites and unpinned native runtimes."""
     manifest = json.loads((root / "tests/native-matrix.json").read_text())
     registered = json.loads((root / "tests/regression-matrix.json").read_text())["agents"]
-    if manifest.get("version") != 1 or set(manifest["agents"]) != set(registered):
+    if (manifest.get("version") != 1
+            or set(manifest["agents"]) != set(registered) | {"hermes-0.23.1"}):
         raise ValueError("native acceptance must account for every registered Agent")
     for agent, row in manifest["agents"].items():
         if not row.get("owner"):
@@ -87,13 +88,42 @@ def load(root: Path) -> dict:
                 raise ValueError(f"{agent}: use exact Python dependency versions")
         if "source" in row:
             sha(row["source"]["revision"])
+        if row.get("source_install") and (
+            agent != "hermes-0.23.1"
+            or row["source_install"] != "frozen-no-build-isolation"
+        ):
+            raise ValueError(f"{agent}: unsupported native source install mode")
         if "npm_fixture" in row:
             for name in ("package.json", "package-lock.json"):
                 if not (root / row["npm_fixture"] / name).is_file():
                     raise ValueError(f"{agent}: missing locked npm fixture")
+        for label, fixture in row.get("npm_fixtures", {}).items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", label):
+                raise ValueError(f"{agent}: invalid npm fixture label")
+            for name in ("package.json", "package-lock.json"):
+                if not (root / fixture / name).is_file():
+                    raise ValueError(f"{agent}/{label}: missing locked npm fixture")
+        if agent == "pi":
+            if set(row.get("npm_fixtures", {})) != {"legacy", "latest"}:
+                raise ValueError("pi: retain locked legacy and latest SDK baselines")
+            required = {
+                f"{name}-{label}"
+                for label in ("legacy", "latest")
+                for name in (
+                    "public-factory", "input-submission", "strict-output",
+                    "skill-objects", "skill-input", "native-start",
+                )
+            }
+            if not required.issubset({case["name"] for case in row.get("cases", [])}):
+                raise ValueError("pi: retain release-line native acceptance cases")
         for package in row.get("npm_packages", []):
             if not re.search(r"@\d+\.\d+\.\d+$", package):
                 raise ValueError(f"{agent}: pin the npm package")
+        for key, package in row.get("npm_variants", {}).items():
+            if not re.fullmatch(r"npm_[a-z0-9_]+", key) or not re.search(
+                r"@\d+\.\d+\.\d+$", package
+            ):
+                raise ValueError(f"{agent}: pin and name each npm variant")
         cases = row.get("cases", [])
         if not cases or len({case["name"] for case in cases}) != len(cases):
             raise ValueError(f"{agent}: missing or duplicate native cases")

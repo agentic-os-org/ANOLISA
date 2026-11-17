@@ -7,6 +7,15 @@ callbacks, the local service manages bindings and events, the Host invokes
 Providers, and the Adapter returns results to the Agent. The Agent owns model
 calls, tool scheduling, and permission approval.
 
+DeepSeek Harness adds a launch-scoped plugin for submission and tool events.
+For `security.violation`, the Adapter also installs a Node preload in the Agent
+process. The pinned Agent loop awaits the final Provider decision after native
+result finalization and before Session commit. The preload is removed from
+inherited `NODE_OPTIONS` after registration, and Providers use the original
+launch environment. This path covers the verified headless top-level tool
+delivery on DSH `0.2.1-rc.5`; see [Adapter dispatch](adapters/adapter-dispatch.md#native-startup-evidence)
+for its identity, lifecycle and excluded paths.
+
 Resident SDK support uses the service's owned root and per-task child bindings.
 The root policy stays immutable; each task pins its own cwd and environment,
 keeps replay fences until release, and is reclaimed when its owner exits.
@@ -249,9 +258,13 @@ development environment and checks.
 | Active capability, plan and evidence schemas | `aw-contracts/schemas/` |
 | Configuration | `aw-config/schemas/` |
 | Provider messages and View protocol | `aw-provider/schemas/` |
+| Native bridge data | The Adapter |
 | Provider private configuration and backend data | The concrete Provider directory |
 
-`aw-contracts/schemas/` contains only registered, tested contracts, currently 28.
+`aw-contracts/schemas/` contains only registered, tested contracts. The
+[Registry](../../../crates/aw-contracts/src/registry.rs) lists the active schemas;
+the [inventory test](../../../crates/aw-contracts/tests/schemas.rs) requires every
+schema file to be registered.
 Plan, evidence and other v1 contracts remain active; the four capability profiles
 use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
 in this repository and were removed. Their contents remain in Git history.
@@ -279,6 +292,7 @@ transports lifecycle frames through the existing bridge RPC. See the
 [policy reload contract](runtime/policy-reload.md#qoder-sdk-request-admission).
 
 [Resident SDK lifecycle](adapters/resident-sdk.md) describes per-client task admission, scoped callback routing, fail-close and release for Pi, Claude and ordinary Qoder SDK Queries.
+[Codex CLI Adapter](adapters/codex-adapter.md) uses native command Hooks to run ordered AW steps and checks the original-input boundary before launching a local session.
 
 [Managed Claude MCP handlers](adapters/claude-mcp.md) add an explicit handler source, task-owned invocation identity and success-aware result adoption through the existing Provider path.
 
@@ -301,6 +315,12 @@ Later `aw update` uses the existing idle activation gate. `install --remove`
 uses Unbind to close complete request/tool admission atomically, then removes
 owned native registration and private artifacts. External processes are neither
 launched nor signalled by this path. Ordinary `aw run` keeps child supervision.
+
+Language SDKs own shared Admission over Instance/Task. Native Sources install
+capture and choose the configured input or first-tool boundary. Qoder and the
+configured QwenPaw entry reuse it; QwenPaw additionally retains its resident
+result guard. Service/Host/executor keep policy authority and Provider execution.
+See [SDK ownership](runtime/native-sdk.md#deferred-after-only-task-admission).
 
 Public audit consumers use `aw audit-export` → `aw-service::audit_export` →
 `aw-core::journal::reader`. The reader pins owned storage and verifies bounded

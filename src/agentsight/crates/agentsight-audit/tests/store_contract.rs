@@ -7,9 +7,9 @@ use agentsight_audit::{
     ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity, event_result,
 };
 use agentsight_enforcement_protocol::{
-    DestinationClass, Effect, EventIdentity, FileAction, NetworkAction, NetworkDirection,
-    PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition,
-    TaintTransitionKind,
+    DestinationClass, Effect, EnforcementStateEvent, EventIdentity, FileAction, NetworkAction,
+    NetworkDirection, PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind,
+    TaintTransition, TaintTransitionKind,
 };
 use agentsight_sqlite_lifecycle::MaintenanceStatus;
 use uuid::Uuid;
@@ -139,6 +139,24 @@ fn fixture_taint_transition(occurred_at_ns: u64) -> SecurityEvent {
         target_pid: 4242,
         target_process_start_time: 99,
         reason: "credential source read".into(),
+    });
+    event
+}
+
+fn fixture_enforcement_state(
+    occurred_at_ns: u64,
+    code: &str,
+    ready: bool,
+    dropped_events: Option<u64>,
+) -> SecurityEvent {
+    let mut event = fixture_file_action("~/.ssh/id_rsa", occurred_at_ns);
+    event.kind = SecurityEventKind::EnforcementState(EnforcementStateEvent {
+        policy_id: Some("credential-exfiltration".into()),
+        policy_revision: Some(3),
+        code: code.into(),
+        ready,
+        message: "enforcement state fixture".into(),
+        dropped_events,
     });
     event
 }
@@ -875,6 +893,110 @@ fn summary_counts_one_blocked_decision_for_a_full_blocked_chain() {
 
     assert_eq!(summary.total_events, 4);
     assert_eq!(summary.blocked_events, 1);
+}
+
+#[test]
+fn summary_ignores_an_agent_display_name_that_reads_evidence_loss() {
+    // The loss aggregate reads the serialized event as text, so identity and
+    // policy metadata carrying the state code spelled a ready subscription as
+    // lost evidence. Only the enforcement state code may decide the count.
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let mut restored = fixture_enforcement_state(100, "subscription_restored", true, None);
+    restored.identity.agent_name = Some("evidence_loss".into());
+    store
+        .insert_event(&restored)
+        .expect("state event should insert");
+
+    let summary = store.summary().expect("summary should load");
+
+    assert_eq!(summary.total_events, 1);
+    assert_eq!(summary.evidence_loss_events, 0);
+}
+
+#[test]
+fn filtered_summary_ignores_a_policy_identifier_that_reads_evidence_loss() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let mut restored = fixture_enforcement_state(100, "subscription_restored", true, None);
+    let SecurityEventKind::EnforcementState(state) = &mut restored.kind else {
+        panic!("fixture must be an enforcement state event");
+    };
+    state.policy_id = Some("evidence_loss".into());
+    store
+        .insert_event(&restored)
+        .expect("state event should insert");
+
+    let summary = store
+        .summary_filtered(&SecurityEventFilter {
+            event_type: Some("enforcement_state".into()),
+            result: Some("ready".into()),
+            ..SecurityEventFilter::default()
+        })
+        .expect("filtered summary should load");
+
+    assert_eq!(summary.total_events, 1);
+    assert_eq!(summary.evidence_loss_events, 0);
+}
+
+#[test]
+fn summary_counts_one_evidence_loss_state_event_reporting_many_drops() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let lost = fixture_enforcement_state(100, "evidence_loss", false, Some(7));
+    store
+        .insert_event(&lost)
+        .expect("state event should insert");
+    store
+        .insert_event(&fixture_enforcement_state(
+            200,
+            "subscription_restored",
+            true,
+            None,
+        ))
+        .expect("recovery event should insert");
+
+    let summary = store.summary().expect("summary should load");
+
+    assert_eq!(summary.total_events, 2);
+    assert_eq!(summary.evidence_loss_events, 1);
+}
+
+#[test]
+fn summary_survives_malformed_persisted_event_json() {
+    let path = security_db_path("summary-malformed-event-json");
+    {
+        let store = SecurityStore::open(&path).expect("fixture store should open");
+        store
+            .insert_event(&fixture_enforcement_state(
+                100,
+                "evidence_loss",
+                false,
+                Some(1),
+            ))
+            .expect("state event should insert");
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).expect("fixture database should open");
+        conn.execute(
+            "INSERT INTO security_events (
+                event_id, event_type, occurred_at_ns, observed_at_ns, agent_id, agent_name,
+                session_id, pid, process_start_time, binding_id, policy_id, policy_revision,
+                result, destination_class, event_json
+             ) VALUES ('malformed', 'enforcement_state', 200, 200, 'hermes-test', NULL,
+                       NULL, 4242, 99, '00000000-0000-0000-0000-000000000001', NULL, NULL,
+                       'degraded', NULL, '{truncated')",
+            [],
+        )
+        .expect("malformed fixture row should insert");
+    }
+
+    let store = SecurityStore::open(&path).expect("fixture store should reopen");
+    let summary = store
+        .summary()
+        .expect("malformed JSON must not fail the aggregate");
+
+    assert_eq!(summary.total_events, 2);
+    assert_eq!(summary.evidence_loss_events, 1);
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
 }
 
 #[test]

@@ -341,6 +341,9 @@ pub(super) fn legacy_hook_records(config: &ExtensionConfig) -> Vec<CapabilityRec
                 if hook.fail_open {
                     projection["fail_open"] = Value::Bool(true);
                 }
+                if let Some(name) = &hook.require_output_when_env {
+                    projection["require_output_when_env"] = json!(name);
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
                     projection,
@@ -433,6 +436,9 @@ fn validate_and_convert_hooks(
                 if hook.fail_open {
                     projection["fail_open"] = Value::Bool(true);
                 }
+                if let Some(name) = &hook.require_output_when_env {
+                    projection["require_output_when_env"] = json!(name);
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
                     projection,
@@ -444,6 +450,7 @@ fn validate_and_convert_hooks(
                     description: hook.description,
                     timeout: hook.timeout,
                     fail_open: hook.fail_open,
+                    require_output_when_env: hook.require_output_when_env,
                     env: hook.env,
                 });
             }
@@ -796,6 +803,8 @@ struct CommandHookV1 {
     timeout: Option<u64>,
     #[serde(default)]
     fail_open: bool,
+    #[serde(default)]
+    require_output_when_env: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
 }

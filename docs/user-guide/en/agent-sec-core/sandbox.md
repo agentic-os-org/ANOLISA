@@ -111,8 +111,25 @@ budget, checked before copying each distinct path. Intention
 candidate envelopes are not permission files: select their Cedar text only after
 handling unresolved requirements and candidate validity.
 
-Cedar file read/write path literals must already exist. Preparation retains all paths, including
-exclusions, resolves file and directory symlinks (also in intermediate components),
+An existing directory write grant covers new files and nested directories within
+its subtree, including missing paths explicitly listed in the Cedar input. No
+additional `create` permission is required for that existing coarse write grant.
+
+Without that coverage, Cedar permits for `create` on a missing path request
+**write access to its existing immediate parent directory**. This intentionally expands access to reads and all
+mutations of sibling files and descendants; it does not enforce exact-file or
+create-only access. If the immediate parent is missing and no existing writable
+ancestor covers the target, preparation fails with the target and parent paths and
+`no existing writable ancestor covers the target`. Grant write access to an existing
+ancestor directory or create the parent before preparation; the converter never
+grants a higher ancestor automatically. Preparation creates no files and pins existing
+directories, not nonexistent objects. Dangling symlinks and unrepresentable exclusions
+still fail preparation.
+Existing-file grants remain exact, and JSON paths must still exist. PDP evaluates
+the expanded directory request against unchanged PAP policies; direct `sandbox run`
+installs it without PDP authorization.
+
+Preparation retains existing paths, including exclusions, resolves file and directory symlinks (also in intermediate components),
 then evaluates and compacts permissions using canonical paths. An allow through an
 alias cannot discard a forbid on its target. Readable aliases are retained for the
 command; aliases with a writable ancestor are rejected because that ancestor could
@@ -133,8 +150,8 @@ For applications preparing PDP requests, parse the current source with
 `PermissionProvider` to `PepRuntime::authorize` or `run`. Both JSON and Cedar
 produce `requested_permissions`; the daemon policy still determines the final
 `effective_permissions`. The input is not uploaded to PAP as an authorization
-policy. `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` accepts the same formats and rereads
-its file for each Hook preparation. A changed source affects the next request,
+policy. Cosh uses the installed default template described below; the internal prepare
+entry still accepts per-invocation JSON/Cedar input for permission providers. A changed source affects the next request,
 not an already prepared decision or running sandbox.
 Both runtime entrypoints call `PermissionProvider::prepare` to bind paths before
 execution or authorization. `PermissionInput::resolve` is only a lexical preview;
@@ -215,31 +232,27 @@ Store Cedar policies through the existing `policy create/update` commands. The
 policy file is a raw Cedar file, as shown in the [Policy guide](policy-cli.md#cedar-policy-source).
 Each successful update is available to the next authorization request.
 
-Enable authorization with
-`agent-sec-daemon --authorization-config /etc/agent-sec-core/authorization.json`.
-This root-owned configuration sets runtime limits. It contains no policy IDs or Cedar source:
+The daemon enables authorization by default. No separate authorization file or
+startup switch is required. An empty applicable PAP policy set returns DENY.
+Requested permissions are restricted by Cedar; shared restrictions belong in
+PAP-managed policies.
 
-```json
-{
-  "environment_permissions": {
-    "version": 1,
-    "filesystem": {"default": "deny", "rules": [
-      {"effect": "allow", "path": "/", "rights": ["read"]}
-    ]},
-    "execution": {"deny_paths": []},
-    "network": {"mode": "off"}
-  },
-  "ttl_seconds": 60
-}
-```
+When upgrading, remove `--authorization-config` and its path from the daemon's
+startup command, including any systemd drop-in. The old argument is rejected.
+The old `environment_permissions` and `ttl_seconds` configuration is no longer read.
+Review and migrate required restrictions into Cedar before using the new daemon;
+there is no automatic conversion. Reload systemd after editing a unit and restart
+the daemon. Upgrade the daemon and its authorization clients together: authorization
+requests now carry principal, action, resource and context in a shared PARC envelope;
+the previous OS payload is rejected.
 
-Requests supply only the optional `principal.agent_type`, for example
-`{"principal":{"agent_type":"cosh"}}`. No Agent identity or UID registration is required.
-The type is a caller-supplied classification, not an authenticated identity; this
-stage does not isolate individual Agents by identity. `environment_permissions`
-caps each OS request. Configuration and its parent
-directories must be root-owned and not writable by group or other users; restart
-the daemon after changing runtime limits.
+Mount-level noexec remains an explicit request restriction in `execution.deny_paths`.
+Cedar `file.exec` forbids constrain the initial invocation; they do not replace noexec
+mounts for later descendants. Preserve needed noexec restrictions in permission requests.
+
+Requests carry the optional Agent classification in `context.agent.agent_type`.
+No Agent identity or UID registration is required. The type is caller-supplied,
+not authenticated; this stage does not isolate individual Agents by identity.
 
 PAP derives the request policy set from all current sources using exact
 `schema: {schemaId: "seccore.system", revision: 1}` references. Every statement in
@@ -271,13 +284,13 @@ deletion and eligibility changes take effect on the next request; an empty set
 replaces the cache and denies. Matching forbids override permits across the whole
 set. Scope/Binding deployment, pinned revisions and cleanup remain independent.
 
-The old `baseline_policy` and `task_policy` configuration keys are rejected. Their
+The old `baseline_policy` and `task_policy` configuration is no longer used. Its
 previous intersection semantics must be reviewed explicitly when adapting request
 policies: two permit sources in the new set combine grants. Express additional
 restrictions as forbids or constrain every applicable permit. Legacy deployment
 policies are not rewritten automatically.
 
-The PEP must accept a decision within `ttl_seconds`. Once accepted for that one
+The PEP must accept a decision within 60 seconds. Once accepted for that one
 invocation, approval waiting, installation and execution do not expire with that
 deadline. Policy updates affect subsequent requests; accepted decisions remain
 bound to their original command and permissions. Declined or failed invocations
@@ -303,21 +316,177 @@ for schemas, component responsibilities and validation coverage.
 
 ## Enable authorization in Cosh NG
 
-Enable the daemon authorization configuration above and activate the ASC extension in Cosh.
-Prepare a complete `OsPermissionSet` file for the target workspace, then set this in the
-process environment before starting Cosh:
+Install the matching Rust V2 runtime and Cosh extension, enable the daemon authorization
+configuration above, and activate the extension in Cosh NG. This source revision adds
+all-shell authorization; use a build containing this change until it is released.
+**Do not enable the Cosh sandbox and tokenless capabilities at the same time.**
+If tokenless is active, disable its extension with `/extensions disable tokenless`
+before using sandbox authorization. tokenless can rewrite shell commands, and Cosh's
+current Hook aggregation can let that rewrite replace the sandbox execution handoff.
+This release does not automatically detect or enforce the mutual exclusion.
+
+Enable all-shell authorization with:
 
 ```bash
-export AGENT_SEC_COSH_SANDBOX_PERMISSIONS=/absolute/path/permissions.json
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
 cosh
 ```
 
-Existing guard-matched shell commands now use PDP authorization. This does not broaden
-command matching or cover native file tools. Without this variable the existing behavior
-remains. Once configured, an invalid permission file, unavailable daemon or failed
-authorization blocks execution, without falling back to the legacy sandbox or unsandboxed execution.
-Requests supply `principal.agent_type: "cosh"`. Cedar must allow this type and
-the `/bin/bash -c` invocation. Session IDs do not establish authority.
+The switch defaults off. It accepts `1` / `true` and `0` / `false`, ignoring case
+and surrounding whitespace. Invalid values block shell execution with a configuration
+error. Off preserves the legacy dangerous-command filtering, sudo handling and sandbox
+route. On sends every hooked `shell` / `run_shell_command` call, including
+`python3 skill.py` and the original `sudo` command, through policy authorization.
+Explicitly prohibited commands can still be blocked first. Native file tools, MCP and
+other entry points are outside this Hook's coverage.
+
+In the default `fixed` mode, the RPM core package automatically installs `/etc/agent-sec/sandbox/permissions.json.template`.
+No permission-file environment variable or manual copy is needed. Source installation
+uses its existing `CONFIGDIR` layout and renders the matching path into the Hook; standard
+RPM installation uses the path above. Raw installation uses its owned configuration root,
+`/etc/anolisa/sec-core/sandbox/permissions.json.template` by default, and renders the Hook path
+with the same layout. The generated path module is installation metadata, not a user override.
+The template and its parent directories must be
+root-owned, without group/other writes or symlink components. RPM uses `%config(noreplace)`;
+source reinstallation preserves existing configuration and its mode.
+
+The default uses the writable roots and Git protection from
+[Codex workspace-write](https://learn.chatgpt.com/docs/agent-approvals-security#protected-paths-in-writable-roots):
+reads permitted by the running identity, writes under the actual working directory, `/tmp`
+and an absolute `$TMPDIR`, and no IPv4/IPv6 network access. Each writable directory keeps
+its existing `.git` file/directory read-only, including descendants. A `.git` pointer also
+protects its resolved Git directory; this does not scan nested repositories or resolve
+`commondir`. No other directory names receive implicit exclusions, and cwd is not rejected
+solely because it is `/`, home, or an ancestor of home. PAP/PDP can further narrow the
+request or deny it. This default does not isolate secret-file reads, inherited environment
+secrets or shared temporary directories.
+
+Protected paths containing symlinks, malformed Git pointers and unusable absolute
+`$TMPDIR` values fail closed. Git pointer path whitespace is preserved. These defaults do
+not replace policy or imply that the two sandbox backends are identical.
+
+Administrators edit that template to change the default request. Its
+`format_version` is `asc.sandbox.permissions-template.v1`; `permissions` contains the
+OS permission object above, with `${cwd}` as the only supported leading path placeholder.
+`include_tmpdir` enables the specific `$TMPDIR` input from the command environment (empty or
+relative values are ignored); `read_only_subpaths` lists directory names checked under each
+writable root, with `.git` additionally supporting a pointer file. Missing paths are skipped.
+There is no shell evaluation or arbitrary environment substitution. Rust prepare expands and validates
+the template per invocation, in memory, before the existing permission provider binds paths.
+Changed settings affect later requests, not an accepted invocation. This release does not
+invoke intent recognition in fixed mode or publish candidate policies to PAP.
+
+PDP still decides allow, deny, modification or native approval; effective permissions cannot
+exceed the request. Approving a command does not enable networking or grant host root.
+Unavailable privileges fail inside the sandbox without stripping `sudo`, expanding permissions
+or retrying outside isolation. Requests supply `principal.agent_type: "cosh"`; Cedar policies must allow this type
+and the `/bin/bash -c` invocation. Session IDs do not establish authority. Existing PDP command transformations remain supported;
+the Hook itself does not rewrite the original command before authorization.
+
+Missing/invalid/untrusted templates, missing dependencies, unavailable daemon, authorization
+timeouts and malformed responses block execution with a visible error. The packaged pre-hook
+sets `fail_open=false` and binds `require_output_when_env` to the all-shell switch; keep it
+enabled and use the matching Cosh NG build that supports this field. Empty extension output
+remains compatible when the switch is off; it blocks when enabled or invalid.
+The Hook also checks the host-supplied `COSH_HOOK_EMPTY_OUTPUT_POLICY=block` signal before
+authorization. A missing or different value blocks with an upgrade error. This is invocation
+metadata, not a user setting: do not export it to make an older host appear compatible.
+Builds from this source revision include both sides of this check; a version string alone
+cannot distinguish older Preview builds using the same package version.
+Capability fingerprints are checked on managed extension installations. Extensions loaded
+directly from system directories do not necessarily require renewed consent on upgrade;
+that mechanism does not replace the host compatibility requirement.
+Cosh NG must block failed PreToolUse hooks, including
+spawn errors, crashes, unsuccessful exits, empty/invalid output and timeout. Older hosts that
+ignore failures cannot provide this guarantee. Prepare has 55 seconds inside the 60-second
+outer Hook budget; finish has 10 seconds inside 15 seconds. The outer timeout kills the process
+group. Native ask runs afterwards, outside prepare's deadline. Runtime permission errors are
+returned as execution failures; receipt/finish failures report that execution may already have
+completed and never rerun the command. Other hooks retain their existing behavior.
+
+Inspect the inherited environment using
+`agent-sec-cli capabilities --agent cosh --capability sandbox --output json`.
+It reports `all-shell`, `dangerous`, or `blocked` for an invalid switch, and never reads
+the template or proves daemon readiness, Hook loading, or host compatibility. Set the switch to `0` before
+restarting Cosh to restore legacy filtering. The former permission-file override has been
+removed; administrator defaults now belong in the installed template.
+
+### Generate permissions from the current command
+
+Use matching CLI/daemon builds that support `intent.propose_command`, with the
+daemon's intent model configured as described in the [Policy guide](policy-cli.md).
+Before starting Cosh, select the dynamic source and an explicit Cedar runtime preset:
+
+```bash
+export AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1
+export AGENT_SEC_COSH_SANDBOX_PERMISSION_SOURCE=command
+export AGENT_SEC_COSH_SANDBOX_RUNTIME_PERMISSIONS=/absolute/path/runtime.cedar
+cosh
+```
+
+The source accepts exactly `fixed` (the unset default) or `command`. Invalid values
+block authorization. These settings only apply when all-shell authorization is enabled;
+they do not enable it themselves. The removed `AGENT_SEC_COSH_SANDBOX_PERMISSIONS`
+variable has no effect in either mode.
+
+Command mode uses the explicit runtime preset **instead of** the installed fixed
+JSON template. The template's cwd/tmp writes and Git protections are not inherited.
+Declare any required restrictions in the Cedar preset or applicable PAP policies.
+The preset must be raw Cedar or its source envelope, use the candidate's schema,
+and provide the known shell/loader/library access and initial `/bin/bash -c`
+invocation permit needed by this workload. Directory grants cover descendants;
+a whole-project grant already requests its contents even with an empty candidate.
+Do not add speculative writes or network access for unknown script behavior.
+An OS permission JSON preset is rejected because combining it would lose Cedar
+invocation and network restrictions.
+
+The Hook sends the exact original command, including `sudo`, and canonical cwd
+to `intent propose-command --format json`, before sandbox wrapping. It sends no
+original user task. Upstream must prepare the task restrictions in PAP and verify
+that they enter the current request policy set described above. The daemon no longer
+reads the separate authorization configuration or its former `task_policy` selector.
+Eligible policies combine permits, so use explicit forbids or constrain all applicable
+permits to enforce a task boundary. Merely creating an ineligible policy does not
+constrain execution.
+
+The Hook checks JSON `outcome`, independently of the exit code:
+
+- `candidate`: show `caveats`, combine Cedar with the runtime preset, then reuse
+  conversion, initial invocation validation and path binding. Forbids from either
+  source remain effective.
+- An empty candidate requests no business permissions. Only the explicit runtime
+  preset contributes grants; PDP can deny or narrow them.
+- `needs_clarification`: display the missing information and stop before authorization.
+- Unavailable interfaces, malformed responses, conversion failures and timeouts
+  block execution without a fixed-permission or unsandboxed fallback. Unknown
+  script internals remain caveats and never automatically increase permissions.
+
+Caveats remain complete in the Hook response. The current Cosh native approval
+panel can truncate long caveat lines; this integration does not guarantee that
+their full text is readable in that panel.
+
+Candidates are requests, never PAP writes. PDP determines `effective_permissions`
+from the active policy set, bounded by the requested permissions. The Cedar mapping
+limits above still apply: after merging the candidate and runtime preset, existing
+directory write covers missing descendants. Otherwise, an allowed `create` for a
+missing file requests write access to its existing immediate parent.
+PAP must authorize that directory scope; a precise file permit in PAP is not expanded.
+
+Intent generation has a 38-second CLI RPC budget inside a 40-second subprocess
+limit. Generation and prepare share 55 seconds inside the 60-second Hook budget.
+Each authorization RPC gets at most five seconds, bounded by one third of the
+remaining time after a one-second reserve. Finish uses an eight-second RPC inside
+ten seconds and the existing 15-second outer Hook. Native ask and target execution
+retain their existing lifecycle.
+
+Each candidate file is private to one invocation (mode 0600) and removed after
+prepare, including conversion failures and subprocess timeouts. The daemon keeps
+the accepted invocation; approval, execution and finish do not reread the file.
+Finish does not require a fixed template in command mode, and receipt failures
+never rerun the target. Set the source to `fixed` and ensure the installed template
+is valid before restarting Cosh to restore fixed authorization. Task collection,
+automatic task-policy publication, multi-task routing and AgentSight/Gateway
+integration remain outside this feature.
 
 The hook prepares authorization through the private `sandbox hook prepare` entry point.
 ALLOW/MODIFY replace the command with its authorized execution entry point; STEP_UP uses
@@ -358,8 +527,9 @@ require it: for example, code-scanner can ask about recursive deletion even when
 sandbox-guard allows the command with a warning. Keep those approvals enabled.
 
 The authorization integration targets Cosh NG, which fires PostToolUse after both successful and failed tools.
-Configure the sandbox hook as the only hook that rewrites the shell command. Stock Cosh
-does not enforce that ordering. If another pre-tool hook blocks the command, Cosh NG
+Configure the sandbox hook as the only hook that rewrites the shell command; in particular,
+keep tokenless disabled while using the sandbox capability. Cosh does not enforce this
+restriction. If another pre-tool hook blocks the command, Cosh NG
 skips execution without notifying the sandbox hook. The next sandbox request in the
 same run releases the slot. If the run ends first, the slot remains until the daemon
 restarts. A user waiting for approval has no time limit. If a tool times out after claiming its decision and no

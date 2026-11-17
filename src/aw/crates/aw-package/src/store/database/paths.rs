@@ -157,15 +157,11 @@ pub(crate) fn absolute(path: &Path) -> Result<()> {
     )
 }
 
-fn open_at(parent: &File, name: &std::ffi::OsStr, directory: bool) -> Result<File> {
+fn open_at(parent: &File, name: &std::ffi::OsStr, flags: libc::c_int) -> Result<File> {
     use std::os::unix::ffi::OsStrExt;
     let name =
         CString::new(name.as_bytes()).map_err(|_| Error::Invalid("NUL in package path".into()))?;
-    let flags = libc::O_RDONLY
-        | libc::O_CLOEXEC
-        | libc::O_NOFOLLOW
-        | libc::O_NONBLOCK
-        | if directory { libc::O_DIRECTORY } else { 0 };
+    let flags = flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
     // SAFETY: name is a terminated C string and parent owns a live directory fd.
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
     if fd < 0 {
@@ -180,20 +176,29 @@ pub(crate) fn directory(path: &Path) -> Result<File> {
     let mut held = File::open("/")?;
     for part in path.components() {
         if let Component::Normal(name) = part {
-            held = open_at(&held, name, true)?;
+            held = open_at(&held, name, libc::O_RDONLY | libc::O_DIRECTORY)?;
         }
     }
     Ok(held)
 }
 
 pub(crate) fn opened(path: &Path) -> Result<File> {
+    open(path, libc::O_RDONLY)
+}
+
+pub(crate) fn metadata(path: &Path) -> Result<Metadata> {
+    // O_PATH inspects socket/device/FIFO types without opening their data streams.
+    open(path, libc::O_PATH)?.metadata().map_err(Into::into)
+}
+
+fn open(path: &Path, flags: libc::c_int) -> Result<File> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::Invalid("package file has no parent".into()))?;
     let name = path
         .file_name()
         .ok_or_else(|| Error::Invalid("package file has no name".into()))?;
-    open_at(&directory(parent)?, name, false)
+    open_at(&directory(parent)?, name, flags)
 }
 
 pub(crate) fn regular(path: &Path) -> Result<File> {

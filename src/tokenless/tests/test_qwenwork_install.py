@@ -736,7 +736,7 @@ class QwenWorkInstallTests(unittest.TestCase):
         result = self.replay("PostToolUse", self.payload(response, "Bash"))
         self.assertEqual(
             result["hookSpecificOutput"]["updatedToolOutput"],
-            {**response, "stdout": response["stdout"][:40]},
+            response["stdout"][:40],
         )
 
     def use_contract_mock(self) -> None:
@@ -991,10 +991,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         result = self.replay("PostToolUse", self.payload(response, "Bash"))
         self.assertEqual(
             result["hookSpecificOutput"]["updatedToolOutput"],
-            {
-                **response,
-                "stdout": response["stdout"][:40],
-            },
+            response["stdout"][:40],
         )
         self.assertFalse((self.bin / "spawn_log").exists())
         request = json.loads((private_bin / "request.json").read_text())

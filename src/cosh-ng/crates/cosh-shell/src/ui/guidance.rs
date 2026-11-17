@@ -5,6 +5,11 @@ use crate::insight::guidance::{quote::bash_arg, BashEvent, FailureKind};
 use crate::ui::{primary_health_prompt_suggestion, HealthBannerModel, RatatuiInlineRenderer};
 use crate::Language;
 
+mod suggestions;
+pub(crate) use suggestions::{
+    session_health_questions, suggestion_surface_payload, SuggestionItem, SuggestionListModel,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Invitation {
     pub(crate) problem: String,
@@ -22,28 +27,19 @@ pub(crate) fn health_candidate(
     report: &HealthScanReport,
     language: Language,
 ) -> Option<Invitation> {
-    health_candidate_for(report, language, Target::Bash)
-}
-
-pub(crate) fn health_candidate_for(
-    report: &HealthScanReport,
-    language: Language,
-    target: Target,
-) -> Option<Invitation> {
     let item = sorted_try_items(report).into_iter().next()?;
     if item.kind != HealthTryKind::AskAgent
-        || (matches!(target, Target::Bash)
-            && !matches!(
-                item.prompt_id,
-                Some(
-                    HealthMessageId::HealthPromptAnalyzeMemoryPressure
-                        | HealthMessageId::HealthPromptCheckSwapPressure
-                        | HealthMessageId::HealthPromptCheckRecentOom
-                        | HealthMessageId::HealthPromptInspectProcessMemory
-                        | HealthMessageId::HealthPromptInspectDiskUsage
-                        | HealthMessageId::HealthPromptInspectHighLoad
-                )
-            ))
+        || !matches!(
+            item.prompt_id,
+            Some(
+                HealthMessageId::HealthPromptAnalyzeMemoryPressure
+                    | HealthMessageId::HealthPromptCheckSwapPressure
+                    | HealthMessageId::HealthPromptCheckRecentOom
+                    | HealthMessageId::HealthPromptInspectProcessMemory
+                    | HealthMessageId::HealthPromptInspectDiskUsage
+                    | HealthMessageId::HealthPromptInspectHighLoad
+            )
+        )
     {
         return None;
     }
@@ -51,19 +47,11 @@ pub(crate) fn health_candidate_for(
     if prompt.is_empty() || prompt.len() > 2048 || prompt.chars().any(char::is_control) {
         return None;
     }
-    let text = match target {
-        Target::Bash => format!("  cosh --ask {}", bash_arg(&prompt)?),
-        Target::Cosh => match language {
-            Language::ZhCn => format!("可以直接提问：\n{prompt}"),
-            Language::EnUs => {
-                format!("Try asking:\n{prompt}")
-            }
-        },
-    };
+    let text = format!("  cosh --ask {}", bash_arg(&prompt)?);
     Some(Invitation {
         problem: item.id.clone(),
         text,
-        target,
+        target: Target::Bash,
     })
 }
 
@@ -217,9 +205,6 @@ pub(crate) fn render_health(
                 }
                 text.push_str(entry);
             }
-            text.push('\n');
-        } else if matches!(invitation.target, Target::Cosh) {
-            text.push_str(&invitation.text);
             text.push('\n');
         } else {
             let language = renderer.i18n().language();

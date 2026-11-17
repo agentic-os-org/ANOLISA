@@ -16,6 +16,7 @@ pub(crate) use exec::{exec_gateway, exec_shell};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Invocation {
+    Help,
     /// Allowlist hit: start the interactive TUI.
     Tui(TuiEntry),
     /// Everything else: replace this process with the inner shell.
@@ -28,6 +29,7 @@ pub(crate) enum Invocation {
     LoginInvitationWorker,
     LoginShellPlanWorker,
     LoginEditor,
+    LoginGuideWorker(String),
     LoginLifecycle(Vec<OsString>),
     Health(Vec<OsString>),
 }
@@ -128,6 +130,9 @@ pub(crate) fn classify_invocation(
     stdout_tty: bool,
     stderr_tty: bool,
 ) -> Invocation {
+    if is_cosh_entry(argv0) && matches!(args, [flag] if flag == "--help") {
+        return Invocation::Help;
+    }
     if args.first().and_then(|arg| arg.to_str())
         == Some(crate::diagnostics::health::runtime::PRIVATE_HEALTH_WORKER_FLAG)
     {
@@ -163,6 +168,14 @@ pub(crate) fn classify_invocation(
             Invocation::LoginShellPlanWorker
         } else {
             Invocation::UsageError("private login shell query does not accept arguments")
+        };
+    }
+    if args.first().and_then(|arg| arg.to_str())
+        == Some(crate::runtime::login::guide_protocol::WORKER_FLAG)
+    {
+        return match args.get(1).and_then(|arg| arg.to_str()) {
+            Some(path) if args.len() == 2 => Invocation::LoginGuideWorker(path.to_string()),
+            _ => Invocation::UsageError("private login guide worker requires a request path"),
         };
     }
     if args.first().and_then(|arg| arg.to_str()) == Some("--__cosh-login-lifecycle-v1") {
@@ -366,6 +379,10 @@ fn parse_initial_question(
 }
 
 #[cfg(test)]
+#[path = "invocation/help_tests.rs"]
+mod help_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
@@ -383,6 +400,7 @@ mod tests {
     fn exec_args(invocation: Invocation) -> Vec<OsString> {
         match invocation {
             Invocation::ExecShell(plan) => plan.args,
+            Invocation::Help => panic!("unexpected root help"),
             Invocation::Tui(entry) => panic!("expected ExecShell, got Tui({entry:?})"),
             Invocation::UsageError(error) => panic!("unexpected usage error: {error}"),
             Invocation::Guide(args) => panic!("unexpected guide command: {args:?}"),
@@ -390,6 +408,7 @@ mod tests {
             Invocation::LoginShellPlanWorker => panic!("unexpected login shell plan worker"),
             Invocation::LoginInvitationWorker => panic!("unexpected login invitation worker"),
             Invocation::LoginEditor => panic!("unexpected login editor"),
+            Invocation::LoginGuideWorker(path) => panic!("unexpected login guide worker: {path}"),
             Invocation::LoginLifecycle(args) => panic!("unexpected lifecycle: {args:?}"),
             Invocation::Health(args) => panic!("unexpected health command: {args:?}"),
             Invocation::Login(args) => panic!("unexpected login command: {args:?}"),
@@ -579,8 +598,8 @@ mod tests {
     }
 
     #[test]
-    fn classify_rows_18_20_version_help_and_future_flags_exec_verbatim() {
-        for args in [vec!["--version"], vec!["--help"], vec!["--future-flag"]] {
+    fn classify_rows_18_20_version_and_future_flags_exec_verbatim() {
+        for args in [vec!["--version"], vec!["--future-flag"]] {
             assert_eq!(
                 exec_args(classify("cosh", &args, ALL_TTY)),
                 os(&args),

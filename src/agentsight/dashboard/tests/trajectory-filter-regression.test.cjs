@@ -44,7 +44,7 @@ function viewer({ readFailure = false } = {}) {
   const download = {};
   runInNewContext(readFileSync(process.env.AGENTSIGHT_DOWNLOAD_BUILD, 'utf8'), { exports: download, ...browser });
   runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
-    exports, URLSearchParams, ...browser,
+    exports, URLSearchParams, AbortController, ...browser,
     FileReader: class {
       constructor() { readers.push(this); }
       readAsText() { if (readFailure) throw new Error('read failed'); }
@@ -60,6 +60,7 @@ function viewer({ readFailure = false } = {}) {
         fetchAtifBySession: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
         fetchSessionSavings: async () => ({ items: [], total_compounded_saved: 0 }),
       };
+      if (name === '../utils/wsCkpt') return { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false };
       // The savings card reads its rate through this helper; the search tests do
       // not assert the card, so the pure baseline formula stands in here.
       if (name === '../utils/savings') return {

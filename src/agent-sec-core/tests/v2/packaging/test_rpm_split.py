@@ -255,6 +255,10 @@ class RpmSplitTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("fixture\n")
                 path.chmod(0o755)
+            shutil.copy2(
+                ROOT / "cosh-extension/hooks/sandbox_paths.py",
+                build / "cosh-extension/hooks/sandbox_paths.py",
+            )
             for name in ("agent-sec-gateway.service.in", "gateway.conf"):
                 shutil.copy2(
                     ROOT / "packaging/gateway" / name, build / "gateway" / name

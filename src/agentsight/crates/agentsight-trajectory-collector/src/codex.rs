@@ -288,7 +288,13 @@ pub fn convert_codex_events(
                 }
                 "custom_tool_call" | "function_call" | "local_shell_call" => {
                     let t = ensure_turn(&mut turn, ts, &current_model, &current_effort);
-                    let call = extract_tool_call(payload);
+                    let mut call = extract_tool_call(payload);
+                    if let Some(timestamp) = ts {
+                        call.extra.get_or_insert_with(HashMap::new).insert(
+                            "start_timestamp".into(),
+                            serde_json::Value::String(timestamp.into()),
+                        );
+                    }
                     pending.open_calls.push(call.tool_call_id.clone());
                     t.tool_calls.push(call);
                 }

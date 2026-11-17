@@ -464,6 +464,9 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 封装 SSE 中的 Token 用量交给观测流水线。已有配置的迁移方法和协议覆盖边界
 见[配置指南](../../docs/user-guide/zh/agentsight/configuration.md)。
 
+在 Linux 上，可通过可选的 `ws_ckpt` 配置连接本机的快照守护进程。回滚默认关闭。
+详见[工作区快照配置](../../docs/user-guide/zh/agentsight/configuration.md#工作区快照后端linux)。
+
 ### SQLite 存储（`storage`）
 
 `agentsight.json` schema v5 为每个 AgentSight 自有 SQLite 存储统一使用 `retention_days`、

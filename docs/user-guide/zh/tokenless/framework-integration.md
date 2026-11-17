@@ -88,8 +88,9 @@ Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显
 原生 Shell 包装中的主要 `stdout` 或 `stderr` 字段从 200 字符起进入文本路由，让短日志
 与纯文本使用相同的领域压缩器；Qoder 原生 Bash 只选择字符串 `stdout`，包括较短或为空的值。
 `stdout` 缺失或不是字符串时，不替换原始结果。`stderr` 和其他字段保持不变；错误诊断仍可
-读取 `stderr`。Qoder 原生 Bash 的 stdout、Claude Code
-和千问办公继续返回对象。Cosh-NG 解包 `llmContent` 内的 Shell JSON 后，会把更新后的包装
+读取 `stderr`。Qoder 原生 Bash 的 stdout 和 Claude Code 继续返回对象；千问办公将单流原生 Shell
+的 `stdout` 替换为文本字符串，对包含额外流、失败或未知字段的 Shell 包装保持透传（保留错误诊断），
+并为非 Shell 的结构化 MCP 结果保留对象和数组类型。Cosh-NG 解包 `llmContent` 内的 Shell JSON 后，会把更新后的包装
 序列化为其要求的字符串替换值；OpenCode 继续保留字符串输出契约。
 
 Common BeforeModel Hook 同样没有 Marker 授权恢复路径。当前 Schema 变换均为有损，因此 Core
@@ -164,7 +165,8 @@ PreToolUse 匹配 `Bash`、`mcp__workspace__bash`、
 使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
 符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
 仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
-被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
+被接受的结果通过 `updatedToolOutput` 替换原文：单流原生 Shell 的 `stdout` 与纯文本槽返回字符串
+（文本槽可使用 TOON，不把 Shell 包装序列化进输出），非 Shell 的结构化 MCP 对象和数组在最终交付文本同时减少字符数与估算 Token 数时保留类型。
 文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
 不注册 Tool Ready 或 Schema Hook。
 

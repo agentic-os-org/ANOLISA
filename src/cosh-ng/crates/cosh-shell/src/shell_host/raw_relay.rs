@@ -27,8 +27,9 @@ mod input_events;
 mod input_readiness;
 pub(super) mod interactive_sentinel;
 mod pty_emit;
+pub(super) mod selection_surface;
 mod terminal_recovery;
-mod terminal_size;
+pub(super) mod terminal_size;
 
 use activity::{
     poll_driver_completion, relay_wait_timeout, wait_for_relay_activity, RelayActivity,
@@ -47,7 +48,6 @@ use interactive_sentinel::{
 use pty_emit::restore_prompt_display_before_handoff;
 use pty_emit::{resolve_pty_emit, update_input_mode_and_wake};
 use terminal_recovery::{restore_terminal_after_interrupted_command, PendingTerminalRecovery};
-use terminal_size::sync_outer_terminal_winsize;
 
 // DECSC/DECRC are the terminfo `sc`/`rc` sequences for xterm-compatible
 // terminals. Unlike CSI s/u, they also restore the cursor in macOS Terminal.
@@ -105,7 +105,7 @@ where
     // unsupporting terminals ignore it, RawModeGuard withdraws it on exit.
     output.write_all(b"\x1b[>4;1m")?;
     output.flush()?;
-    sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
+    prompt_presentation.sync_outer_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
     loop {
         if restore_terminal_after_interrupted_command(
             terminal.as_raw_fd(),
@@ -505,7 +505,7 @@ where
             ),
         )?;
         if activity.resize {
-            sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
+            prompt_presentation.sync_outer_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         }
     }
 }
@@ -586,8 +586,21 @@ fn write_pending_display_preserving_prompt_ghost<W: Write>(
 }
 
 fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> io::Result<()> {
+    write_prompt_ghost_labeled(output, text, selection, None)
+}
+
+fn write_prompt_ghost_labeled<W: Write>(
+    output: &mut W,
+    text: &str,
+    selection: bool,
+    label: Option<&str>,
+) -> io::Result<()> {
     let marker = if selection { " ›" } else { "" };
-    write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m{marker} {text}"))
+    let prefix = match label {
+        Some(label) => format!("{marker} {label} "),
+        None => format!("{marker} "),
+    };
+    write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m{prefix}{text}"))
 }
 
 fn drain_observer_until_released<W: Write, F>(

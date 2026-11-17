@@ -17,7 +17,15 @@ pub fn agents() -> Vec<String> {
 pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path) -> Value {
     let before = event == "tool.before";
     let mut native = match adapter {
-        "qoder" | "qoder-sdk" | "claude-sdk" => {
+        "sdk" => {
+            let mut payload = json!({"api_version":"aw-hook-source/v1", "event":event,
+                "session_id":"session","call_id":call,"name":"bash","input":input});
+            if !before {
+                payload["result"] = json!("original");
+            }
+            payload
+        }
+        "qoder" | "qoder-sdk" | "claude-sdk" | "codex" => {
             let response = if adapter == "claude-sdk" {
                 json!({"stdout":"original", "stderr":"", "interrupted":false, "isImage":false})
             } else {
@@ -34,9 +42,11 @@ pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path
         "agentscope" | "qwenpaw" => json!({"event":event,"invocation_id":call,
             "session_id":"session","tool_call":{"name":"exec","id":call,"input":input.to_string()},
             "effective_input":input,"tool_response":{"content":[{"type":"text","text":"original"}],"state":"success"}}),
-        "pi" => json!({"event":event,"invocation_id":call,"session_id":"session",
+        "pi" | "deepseek-harness" => {
+            json!({"event":event,"invocation_id":call,"session_id":"session",
             "tool_call":{"name":"bash","id":call,"input":input},
-            "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false}}),
+            "tool_response":{"content":[{"type":"text","text":"original"}],"isError":false}})
+        }
         "hermes" => json!({"hook_event_name":if before {"pre_tool_call"} else {"post_tool_call"},
             "cwd":cwd,"session_id":"session","tool_name":"terminal","tool_input":input,
             "extra":{"tool_call_id":call,"api_request_id":"api","status":"ok","duration_ms":3,
@@ -54,4 +64,18 @@ pub fn callback(adapter: &str, event: &str, call: &str, input: Value, cwd: &Path
         }
     }
     native
+}
+
+/// Select only Adapters declaring the effect exercised by the shared regression.
+pub fn agents_with_effect(event: &str, effect: &str) -> Vec<String> {
+    let matrix: Value =
+        serde_json::from_str(include_str!("../../../../tests/regression-matrix.json")).unwrap();
+    agents()
+        .into_iter()
+        .filter(|agent| {
+            matrix["agents"][agent]["events"][event]
+                .get(effect)
+                .is_some()
+        })
+        .collect()
 }

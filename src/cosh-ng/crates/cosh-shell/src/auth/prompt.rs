@@ -10,7 +10,7 @@ use crate::runtime::state::InlineState;
 
 use super::capture::auth_capture_id;
 use super::delete_confirm::render_delete_confirmation;
-use super::menu::{existing_provider_label, management_options};
+use super::menu::{existing_provider_label, hosted_options};
 use super::provider_display::provider_option;
 use super::provider_management::provider_action_options;
 use super::runtime::AuthPhase;
@@ -28,7 +28,12 @@ pub(super) fn render_current_auth_panel<W: Write>(
 
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let options = management_options(&auth.sysom, &auth.existing_providers);
+            let options = hosted_options(
+                state.auth.host,
+                &auth.sysom,
+                &auth.existing_providers,
+                state.i18n(),
+            );
 
             let model = QuestionPanelModel {
                 id: &panel_id,

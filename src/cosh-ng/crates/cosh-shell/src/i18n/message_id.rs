@@ -121,4 +121,6 @@ collect_message_ids!([
     health_guidance_ids,
     startup_welcome_ids,
     login_command_ids,
+    cosh_root_help_ids,
+    guide_wizard_ids,
 ],);

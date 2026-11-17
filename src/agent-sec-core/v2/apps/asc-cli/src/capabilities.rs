@@ -31,7 +31,7 @@ use resolve::{EnvValue, ResolvedEnv};
 /// A value that is not valid UTF-8 is decoded the way `CPython` decodes the
 /// environment on Unix: every undecodable byte becomes the escape text V1 would
 /// print for its surrogate. The value therefore stays invalid for every parsed
-/// variable (falling back to the documented default with a diagnostic) and is
+/// variable (using its documented fallback or blocking diagnostic) and is
 /// reported identically to V1 for the one variable echoed close to verbatim.
 #[must_use]
 pub fn process_environment() -> Environment {
@@ -239,7 +239,8 @@ fn normalize(
 }
 
 const AGENT_LIST: &str = "qoder, qwen, codex, cosh, openclaw, hermes";
-const CAPABILITY_LIST: &str = "code-scan, prompt-scan, pii-check, skill-ledger, observability";
+const CAPABILITY_LIST: &str =
+    "code-scan, prompt-scan, pii-check, skill-ledger, observability, sandbox";
 
 /// Builds the capability records selected by the optional filters.
 ///
@@ -273,7 +274,9 @@ pub fn query(
     let mut records = Vec::with_capacity(agents.len() * capabilities.len());
     for agent in agents {
         for capability in &capabilities {
-            records.push(CapabilityRecord::new(agent, capability, env));
+            if manifest::supports(agent, capability) {
+                records.push(CapabilityRecord::new(agent, capability, env));
+            }
         }
     }
     Ok(records)
@@ -304,7 +307,10 @@ mod tests {
     #[test]
     fn default_query_lists_every_pair_in_stable_order() {
         let records = query(&empty(), None, None).expect("no filters");
-        assert_eq!(records.len(), AGENTS.len() * CANONICAL_CAPABILITIES.len());
+        assert_eq!(
+            records.len(),
+            AGENTS.len() * (CANONICAL_CAPABILITIES.len() - 1) + 1
+        );
         let pairs: Vec<(&str, &str)> = records
             .iter()
             .map(|record| (record.agent, record.capability))

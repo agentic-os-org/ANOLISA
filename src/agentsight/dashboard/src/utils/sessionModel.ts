@@ -59,7 +59,7 @@ export function mergeSessions(
   const subagentCount = new Map<string, number>();
   for (const t of logRows) {
     if (!t.is_subagent) continue;
-    const idx = t.session_id.indexOf(':subagent:');
+    const idx = t.session_id.lastIndexOf(':subagent:');
     if (idx > 0) {
       const parent = t.session_id.slice(0, idx);
       subagentCount.set(parent, (subagentCount.get(parent) ?? 0) + 1);
@@ -93,7 +93,7 @@ export function mergeSessions(
     // (breadcrumb navigation). Only keep orphaned subagents whose parent is
     // absent from both sources (e.g. parent outside the selected time range).
     if (t.is_subagent) {
-      const idx = t.session_id.indexOf(':subagent:');
+      const idx = t.session_id.lastIndexOf(':subagent:');
       const parentId = idx > 0 ? t.session_id.slice(0, idx) : null;
       // Resolve the parent through the trailing-UUID alias as well: a Codex
       // parent captured only by eBPF sits in `byId` under the bare UUID while

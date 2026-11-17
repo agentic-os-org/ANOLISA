@@ -67,9 +67,17 @@ pub(super) async fn handle_auth(
     params: &Value,
     config: &mut CoreConfig,
 ) -> OutputMessage {
+    let guarded = params.get("guarded_writes").and_then(Value::as_bool) == Some(true);
+    let persist_candidate = |candidate: &crate::config::CoreConfig| {
+        if guarded {
+            crate::config::persist_config_guarded(candidate)
+        } else {
+            crate::config::persist_config(candidate)
+        }
+    };
     match action {
         "state" => {
-            let (trial_preferences, available) = tokio::join!(
+            let (trial_preferences, probe) = tokio::join!(
                 async {
                     match tokio::task::spawn_blocking(crate::auth::trial_preferences::load).await {
                         Ok(Ok(auto_use)) => serde_json::json!({ "auto_use": auto_use }),
@@ -83,13 +91,16 @@ pub(super) async fn handle_auth(
                     }
                 },
                 async {
-                    params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true)
-                        && ecs_trial::available().await.unwrap_or(false)
+                    if params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true) {
+                        Some(ecs_trial::available().await)
+                    } else {
+                        None
+                    }
                 }
             );
             let ecs_trial = ecs_trial::state(
                 config,
-                available,
+                probe,
                 trial_preferences
                     .get("auto_use")
                     .and_then(Value::as_bool)
@@ -158,6 +169,7 @@ pub(super) async fn handle_auth(
                     "saved_providers": saved_providers,
                     "active_provider": active_provider,
                     "effective_auth_required": effective_auth_required,
+                    "config_write_guard": "v1",
                 })),
                 error: None,
             }
@@ -199,7 +211,7 @@ pub(super) async fn handle_auth(
                 }
             }
         }
-        "activate_trial" => ecs_trial::activate(request_id, config, None).await,
+        "activate_trial" => ecs_trial::activate(request_id, config, None, guarded).await,
         "activate" => {
             let provider_id = params
                 .get("provider_id")
@@ -212,7 +224,7 @@ pub(super) async fn handle_auth(
             if provider.provider_type.as_deref() == Some("aliyun")
                 && provider.auth_source.as_deref() == Some("ecs_identity")
             {
-                return ecs_trial::activate(request_id, config, Some(provider_id)).await;
+                return ecs_trial::activate(request_id, config, Some(provider_id), guarded).await;
             }
             let mut candidate = config.clone();
             candidate.ai.active_provider = Some(provider_id.to_string());
@@ -224,7 +236,7 @@ pub(super) async fn handle_auth(
                 .and_then(|provider| provider.model.clone());
             candidate.ai.active_model.clone_from(&model);
             candidate.user_ai.active_model = model;
-            if let Err(e) = crate::config::persist_config(&candidate) {
+            if let Err(e) = persist_candidate(&candidate) {
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
             *config = candidate;
@@ -248,7 +260,7 @@ pub(super) async fn handle_auth(
                 Ok(removed) => removed,
                 Err(error) => return registry_error(request_id, &error.to_string()),
             };
-            if let Err(error) = crate::config::persist_config(&candidate) {
+            if let Err(error) = persist_candidate(&candidate) {
                 return registry_error(request_id, &format!("failed to persist config: {error}"));
             }
             *config = candidate;
@@ -358,7 +370,11 @@ pub(super) async fn handle_auth(
             let candidate = match crate::auth::prepare_and_persist_auth_candidate(
                 config,
                 &response,
-                crate::config::persist_config,
+                if guarded {
+                    crate::config::persist_config_guarded
+                } else {
+                    crate::config::persist_config
+                },
             )
             .await
             {

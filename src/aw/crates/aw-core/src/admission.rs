@@ -39,7 +39,7 @@ mod selection;
 
 pub use aw_provider::ProviderEvidence;
 pub use rules::{admit, preflight};
-pub use selection::{projected_out_steps, ProjectedOutStep};
+pub use selection::{matches_tool_selectors, projected_out_steps, ProjectedOutStep};
 
 use aw_config::{Configuration, Validator};
 use serde_json::Value;
@@ -97,20 +97,13 @@ impl AdmittedStep {
     /// Adapter ID and retained `tool.native_name`. No aliases or globs are inferred.
     /// A mismatch still consumes the step and participates in ordered completion.
     pub fn matches_tool(&self, event: &Value) -> bool {
-        let matches = |selectors: &[String]| {
-            selectors.iter().any(|selector| {
-                if selector == "*" {
-                    return true;
-                }
-                if let Some(native) = selector.strip_prefix("native:") {
-                    return native.split_once(':').is_some_and(|(adapter, name)| {
-                        event["agent"]["adapter"] == adapter && event["tool"]["native_name"] == name
-                    });
-                }
-                event["tool"]["name"] == *selector
-            })
-        };
-        matches(&self.event_tools) && matches(&self.step_tools)
+        selection::matches_tool_selectors(
+            &self.event_tools,
+            &self.step_tools,
+            event["agent"]["adapter"].as_str(),
+            event["tool"]["name"].as_str(),
+            event["tool"]["native_name"].as_str(),
+        )
     }
 }
 

@@ -170,6 +170,7 @@ impl Protocol {
             for effect in array(&value["allowed_effects"])? {
                 if effect != "observe"
                     && !(before && effect == "block")
+                    && !(value["event"]["name"] == "security.violation" && effect == "block")
                     && !(value["event"]["name"] == "tool.before" && effect == "replace_input")
                     && !(!before
                         && effect == "replace_result"

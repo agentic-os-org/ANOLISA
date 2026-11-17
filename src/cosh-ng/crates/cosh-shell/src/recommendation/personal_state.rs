@@ -99,6 +99,10 @@ impl InlineState {
             self.pending_input_ghost_route,
             PromptGhostRoute::AgentSelection { .. }
         );
+        let route_generation = match &self.pending_input_ghost_route {
+            PromptGhostRoute::AgentSelection { generation, .. } => *generation,
+            _ => 0,
+        };
         let remaining = match self.pending_input_ghost_route.clone() {
             PromptGhostRoute::AgentSelection { candidates, .. } => candidates
                 .into_iter()
@@ -127,6 +131,7 @@ impl InlineState {
             self.pending_input_ghost_route = PromptGhostRoute::AgentSelection {
                 candidates: remaining,
                 active,
+                generation: route_generation,
             };
         } else if had_personal_candidates
             && (selection_route

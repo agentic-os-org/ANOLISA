@@ -151,6 +151,12 @@ AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续�
 
 校验只检查配置和离线更新范围，不确认原生就绪状态、不启用策略。此命令允许相对配置路径。
 
+每个配置目标在全部已启用事件中，最多选择 64 个已启用步骤。
+已禁用的事件和步骤，以及被目标工具选择器排除的步骤，不计入上限。
+此检查沿用服务绑定上限，离线执行，不启动 Agent 或 Provider。
+超限时退出码为 1，JSON 输出报告 `invalid_configuration`。
+旧别名 `aw validate` 执行相同检查。
+
 ### `aw config show`
 
 | 参数 | 必填 / 默认值 | 含义 |
@@ -238,11 +244,13 @@ AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续�
 | `PACKAGE...` | 可选 | 要卸载的精确包 ID；省略则删除此前缀中所有已记录的包 |
 | `--prefix ABS_DIR` | 必填 | 已注册安装目录 |
 | `--dry-run` | 默认关闭 | 预览删除范围和阻碍，不写入、不询问确认 |
+| `--keep-changed` | 默认关闭 | 保持选中包已变化或缺失的 payload 路径原样并移除登记；依赖、读取权限错误及不安全目录仍阻止移除 |
 | `--scope user\|system` | 默认 `user` | 包数据库范围；system 写操作要求 root |
 | `-y`、`--yes` | 默认关闭 | 确认删除，不绕过所有权、完整性或占用检查 |
 | 共用输出选项 | 可选 | 见[输出选项](#输出选项) |
 
 交互卸载会询问确认。JSON 或非终端卸载必须带 `--yes`。外部配置和状态会保留。
+人类视图下的受阻计划只向 stderr 输出问题，stdout 保持为空；JSON 保留计划。变化文件的恢复步骤和保留路径报告见[运行维护](operations.md#升级与卸载)。
 
 ### `aw list`、`aw doctor` 与 `aw recover`
 
@@ -351,6 +359,20 @@ update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deploymen
 
 这些命令沿用现有接入和更新的 JSON 响应。update 也支持链接指南中的已准备原生模式，
 attach 仍限于文档列出的入口。下述业务自管 JSON 协议不能与这些子命令混用。
+
+### 已安装 SDK 的应用
+
+业务先安装 SDK 插件，沿用原生启动命令。配置 `daemon.startup: on_demand` 后，
+按应用 PID 选择监听并按需启动或复用 AW：
+
+```bash
+aw instance attach --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+同一进程有多个 SDK 监听时，使用 `aw instance list --config aw.yaml` 返回的
+`--sdk-instance ID`。指定 `--socket PATH` 时选择已有服务。该命令要求应用已安装接点。
+QwenPaw 先启动、AW 后接入的方式见
+[仅工具后插件](../../../developer-guide/zh/aw/deployment/python-sdk.md#工具后的延迟接入)。
 
 ## `aw instance`
 

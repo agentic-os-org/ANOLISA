@@ -10,6 +10,11 @@ bash or zsh must own the session without Cosh hooks, observation, or insights.
 Structured JSON and JSONL interfaces remain available for automation and
 Agent integration.
 
+Run `cosh --help` for launch options and command entry points, including without a terminal.
+Inside an enhanced Cosh session, `/help` keeps the existing session command reference.
+`cosh guide on|off|status` controls usage guidance only; it is not an AI master switch.
+Use `cosh --shell bash --help` for the inner Bash help.
+
 Bash-default images can preinstall Cosh without changing users' login shells.
 Run `cosh` for an AI Shell or `cosh --ask 'your question'` to start with a question.
 `--ask` explicitly enables AI for that initial question even with `COSH_SHELL_AI=off`; authentication and approvals still apply, and later input retains its disabled state.

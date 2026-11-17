@@ -97,6 +97,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.15.0'
+      - name: Prepare offline SDK packaging tools
+        run: python3 -m pip install setuptools==68.1.2 wheel==0.42.0
       - name: Select trusted Python for native fixtures
         run: |
           # The hosted setup-python cache is writable by other users. Keep it

@@ -47,7 +47,7 @@ scopes are used in commit subjects and PR titles.
 | agentsight | `src/agentsight/` | Linux full eBPF; macOS `trace`/`serve` only | `sight` | `sight` | Linux uses `make build-all`; macOS uses `make build-mac`; Linux runs `make lint`, `make test` |
 | tokenless | `src/tokenless/` | Linux for full development; macOS x64/arm64 for shipped CLI binaries and npm adapters | `tokenless` | `tokenless` | `make build`, `make lint`, `make test` |
 | agent-memory | `src/agent-memory/` | Linux only | `memory` | `memory` | `make build`, `make fmt-check`, `make lint`, `make test`; use `make smoke` for MCP changes |
-| os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | No compilation; run the [component regression tests](#skill-regression-tests-and-path-ownership) |
+| os-skills | `src/os-skills/` | Assets are cross-platform; individual scripts declare limits | `skills` | `skill` | Python 3.6+ for source installation; no compilation; run the [component regression tests](#skill-regression-tests-and-path-ownership) with Python 3.11 |
 | anolisa | `distribution/anolisa/` | Linux and macOS arm64 | n/a | `anolisa` | `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
 | SkillFS | `src/skillfs/` | Linux only | n/a | `skillfs` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; run `scripts/test.sh` for FUSE changes |
 | ws-ckpt | `src/ws-ckpt/` | Linux only | `ws-ckpt` | `ckpt` | `make build`, `make test` |
@@ -65,8 +65,10 @@ The Linux-only components must be built and tested on Linux. `cosh-ng` and
 - The stable Rust toolchain for Rust components. Follow a component's
   `AGENTS.md` when it pins a toolchain or adds native libraries.
 - Python **3.11.6** and [uv](https://docs.astral.sh/uv/) for
-  `agent-sec-core`. `os-skills` is primarily static Markdown and shell data;
-  it does not own the repository Python environment.
+  `agent-sec-core`. The `os-skills` source installer and release-catalog tools
+  require Python **3.6+** with its standard library; select a source-install
+  interpreter with `PYTHON3=/path/to/python3`. Component regression tests use
+  Python **3.11** in a separate virtual environment.
 - `clang` and `libbpf` headers when changing `agentsight` eBPF probes.
 
 ## Fork and create a branch

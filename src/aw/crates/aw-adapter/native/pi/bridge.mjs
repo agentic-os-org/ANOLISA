@@ -280,6 +280,11 @@ export function installSessionBridge(session, scope = null, policy = configurati
     for (const key of ["content", "details", "usage", "terminate"]) {
       result[key] = original?.[key] ?? result[key];
     }
+    // Pi drops stale structured output when a native callback replaces content.
+    const structuredContent = original?.structuredContent ??
+      (original?.content ? undefined : result.structuredContent);
+    if (structuredContent === undefined) delete result.structuredContent;
+    else result.structuredContent = structuredContent;
     const isError = original?.isError ?? context.isError;
     try {
       if (strict) {
@@ -300,10 +305,12 @@ export function installSessionBridge(session, scope = null, policy = configurati
       // Pi's native error path discards the entire unchecked result envelope.
       if (directive?.withhold) throw new WithheldResult();
       if (strict) {
-        if (directive?.replacement)
+        if (directive?.replacement) {
           result.content[0].text = directive.replacement.content[0].text;
+          delete result.structuredContent;
+        }
       } else if (directive?.replacement) {
-        return {
+        const replacement = {
           ...(original ?? {}),
           content: [
             {
@@ -312,6 +319,8 @@ export function installSessionBridge(session, scope = null, policy = configurati
             },
           ],
         };
+        delete replacement.structuredContent;
+        return replacement;
       }
     } finally {
       if (config.scope) await config.scope.finish(identity.invocation_id);

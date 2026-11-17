@@ -1,6 +1,8 @@
-"""Bound admitted strict Post cases against Qoder SDK 1.0.56 / Worker 1.1.78."""
+"""Bound admitted strict Post cases against released Qoder SDK/Worker pairs."""
 
 import argparse
+import hashlib
+import time
 import json
 import os
 from pathlib import Path
@@ -19,7 +21,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--npm", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--case", choices=["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace"])
+parser.add_argument("--expected-target", choices=["linux-x64", "linux-arm64"])
+parser.add_argument("--case", choices=["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace", "late-mutation", "gate-safe", "gate-late", "gate-timeout", "gate-error", "gate-native-error"])
 args = parser.parse_args()
 own_children()
 fixture = Path(__file__).resolve().parent
@@ -27,12 +30,21 @@ evidence = args.output.resolve()
 evidence.mkdir(parents=True, exist_ok=False)
 sdk = args.npm.resolve() / "node_modules/@qoder-ai/qoder-agent-sdk"
 metadata = json.loads((sdk / "package.json").read_text())
-assert metadata["version"] == "1.0.56" and metadata["qoderCliVersion"] == "1.1.78"
+workers = {"1.0.55": "1.1.75", "1.0.56": "1.1.78", "1.0.57": "1.1.81"}
+assert workers.get(metadata["version"]) == metadata["qoderCliVersion"]
 worker = sdk / "dist/_worker/qoder-worker-runtime.obf.mjs"
-assert subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip() == "1.1.78"
+reported_worker = subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip()
+assert reported_worker == metadata["qoderCliVersion"]
 assert os.environ.get("QODER_PERSONAL_ACCESS_TOKEN"), "native Post acceptance requires a PAT"
+target = subprocess.check_output(["node", "-p", "process.platform+'-'+process.arch"], text=True, timeout=10).strip()
+if args.expected_target:
+    assert target == args.expected_target, f"expected {args.expected_target}, got {target}"
+fingerprint = lambda: {name: hashlib.sha256((sdk / name).read_bytes()).hexdigest()
+                       for name in ["dist/index.js", "dist/_worker/qoder-worker-runtime.obf.mjs"]}
+original = fingerprint()
 results = []
-for mode in [args.case] if args.case else ["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace"]:
+for mode in [args.case] if args.case else ["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace", "late-mutation"]:
+    started = time.monotonic()
     output = evidence / mode
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix="post-", dir=evidence.parent) as temporary:
@@ -41,8 +53,11 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
         (case / "home").mkdir()
         (case / "work/node_modules").symlink_to(args.npm.resolve() / "node_modules", target_is_directory=True)
         shutil.copyfile(fixture / "post-native.mjs", case / "work/app.mjs")
+        shutil.copyfile(fixture / "post-evidence.mjs", case / "work/post-evidence.mjs")
         environment = {**os.environ, "HOME": str(case / "home"), "QODER_CONFIG_DIR": str(case / "home/.qoder"),
-                       "QODER_TEST_ROOT": str(case), "QODER_POST_CASE": mode, "XDG_RUNTIME_DIR": str(case)}
+                       "QODER_TEST_ROOT": str(case), "QODER_POST_CASE": mode, "XDG_RUNTIME_DIR": str(case),
+                       "QODER_TEST_SDK_VERSION": metadata["version"],
+                       "QODER_TEST_WORKER_VERSION": metadata["qoderCliVersion"]}
         config = case / "aw.json"
         save(config, {"apiVersion": "aw/v1alpha1", "kind": "AWConfiguration", "metadata": {"name": "qoder-post"},
              "spec": {"daemon": {"startup": "external", "endpoint": "auto", "state_dir": str(case / "state")},
@@ -56,6 +71,13 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
                                  "operation": "check", "effects": ["observe"], "on_error": action}]}
                                  for event, label, action in [("tool.before", "before", "block"),
                                  ("tool.after", "after", "report" if mode == "report" else "withhold_result")]}}})
+        if mode.startswith("gate-"):
+            document = json.loads(config.read_text())
+            document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = "report"
+            document["spec"]["events"]["security.violation"] = {"enabled": True, "required": True,
+                "steps": [{"id": "final", "provider": "policy", "operation": "check",
+                           "effects": ["observe", "block"], "on_error": "block"}]}
+            save(config, document)
         if mode == "replace":
             document = json.loads(config.read_text())
             document["spec"]["events"]["tool.after"]["steps"][0]["effects"] = ["observe", "replace_result"]
@@ -75,7 +97,7 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
             save(output / "status.json", status)
             results.append(json.loads((case / "results.json").read_text()))
         finally:
-            for name in ("events.jsonl", "daemon-process.json", "results.json"):
+            for name in ("events.jsonl", "daemon-process.json", "results.json", "native-messages.json", "native-stderr.log"):
                 if (case / name).exists():
                     shutil.copyfile(case / name, output / name)
             processes.close()
@@ -88,4 +110,7 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
             save(output / "cleanup.json", {"daemon_pids_absent": pids, "reaped": reaped,
                  "processes_stopped": all(item[2].get("pid_absent") for item in processes.items)})
     assert not case.exists()
+    assert fingerprint() == original, "native installed files changed"
+    results[-1].update(target=target, source_sha256=original, package_unchanged=True,
+                       elapsed_ms=round((time.monotonic() - started) * 1000))
 save(evidence / "results.json", results)

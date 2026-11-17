@@ -14,6 +14,8 @@
 ## 部署与验证
 
 - [独立实例](deployment/independent-instances.md) · 业务自管进程的原生启动准备、Ready、策略更新与释放。
+- [应用持有的 SDK](deployment/native-sdk.md) · 安装 TypeScript 客户端并接入原生 Qoder Query。
+- [Python SDK](deployment/python-sdk.md) · 安装异步客户端与原生 QwenPaw 插件。
 - [常驻 SDK](deployment/resident.md) · 任务工厂、MCP 与客户端清理。
 - [服务与容器](deployment/lifecycle.md) · 持久化、退出、升级和容量。
 - [策略更新](deployment/policy-updates.md) · 预热、排空、激活和失败恢复。

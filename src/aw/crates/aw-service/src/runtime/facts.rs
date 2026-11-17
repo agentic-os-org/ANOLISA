@@ -116,7 +116,7 @@ impl Runtime {
         } else {
             let tool = &event["tool"];
             let mut details = json!({"name":tool["name"],"nativeName":tool.get("native_name").unwrap_or(&tool["name"]),"inputDigest":digest(&tool["input"])?});
-            if name == "tool.after" {
+            if matches!(name, "tool.after" | "security.violation") {
                 let Some(status) =
                     aw_adapter::completion::result_status(&host.capabilities().adapter, event)
                 else {

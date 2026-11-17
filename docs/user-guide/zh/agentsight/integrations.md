@@ -270,3 +270,13 @@ JSON 语法错误时，`serve` 使用内嵌默认配置继续运行，但禁用 
 
 通过 API 查询节省量需要批量 POST 接口；请一起升级 AgentSight 与 Tokenless 查询服务。
 原有按单个条件筛选的 GET 查询继续可用。
+
+## ws-ckpt 工作区快照（Linux）
+
+[快照后端](data-and-storage.md#工作区快照-api)在查询时组合现有 ATIF Step 和本机
+ws-ckpt 工作区。由成功的工具/Bash 操作确定工作区；省略参数时需显式绑定宿主插件
+配置。各来源快照统一按创建时间关联，不匹配原生 session ID，也不新增采集链路。
+文件变化使用 `ws-ckpt diff --format json`；恢复复用已有 guarded 客户端，另需启用
+开关，并在同窗确认回滚期间工作区没有其他写入。详见
+[配置](configuration.md#工作区快照后端linux)和
+[Step 快照交互](dashboard.md#在执行-step-中查看工作区快照)。

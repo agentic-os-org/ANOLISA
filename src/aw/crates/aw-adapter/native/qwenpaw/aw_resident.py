@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from agentscope.middleware import MiddlewareBase
 from agentscope._utils._common import _json_loads_with_repair
-from agentscope.tool import ToolResponse, _toolkit
+from agentscope.tool import ToolChunk, ToolResponse, _toolkit
 
 from .aw_private import clear_execution, current_execution, public_execution, validate_execution
 from .aw_scope import Scope
@@ -189,7 +189,7 @@ class ResidentMiddleware(MiddlewareBase):
         self.config = dict(self.root_config)
         self.evaluate = evaluate
         self.context = context
-        self.scope = Scope(self.config)
+        self.scope = self.create_scope(self.config)
         self.scope.probe = self.check_seams
         self.scope.on_failure = self.bridge_failed
         self.active: dict[str, Invocation] = {}
@@ -209,6 +209,9 @@ class ResidentMiddleware(MiddlewareBase):
         self.agent = None
         self.reply_stream = None
         self.reply_task = None
+
+    def create_scope(self, config):
+        return Scope(config)
 
     def check(self) -> None:
         check_cleanup()
@@ -556,4 +559,7 @@ class ResidentMiddleware(MiddlewareBase):
         if terminal is not None:
             if invocation.failure or self.failed:
                 raise ResidentFailure("AW rejected unverified native delivery")
+            if self.withhold(call) and not invocation.offloaded:
+                # Agent events consume chunks; publish only the reviewed final body.
+                yield ToolChunk.model_validate({**terminal.model_dump(mode="json"), "is_last": True})
             yield terminal

@@ -30,11 +30,18 @@ def prepare(arguments):
         if entry is None or entry.handler is not native._skill_view_with_bump:
             return failed
         name = arguments.get("name")
+        path_error = getattr(native, "skill_lookup_path_error", None)
+        if path_error is None:
+            path_error = native._skill_lookup_path_error
         if (not isinstance(name, str) or not name or len(name) > 1024 or ":" in name
-                or arguments.get("file_path") or native._skill_lookup_path_error(name)):
+                or arguments.get("file_path") or path_error(name)):
             return failed
-        project, directories, _ = native._skill_search_dirs()
-        error, directory, path = native._locate_skill(name, None, project, directories)
+        if hasattr(native, "locate_skill"):
+            roots, _ = native.skill_search_dirs()
+            error, directory, path = native.locate_skill(name, None, roots)
+        else:
+            project, directories, _ = native._skill_search_dirs()
+            error, directory, path = native._locate_skill(name, None, project, directories)
         if error is not None or directory is None:
             return failed
         directory, path = directory.resolve(strict=True), path.resolve(strict=True)
@@ -70,15 +77,16 @@ def verify(selection):
 
 
 @contextmanager
-def invocation(tool_name, arguments, dynamic=False):
+def invocation(tool_name, arguments, dynamic=False, selected=None):
     if tool_name != "skill_view" or _selection.get() is not None:
-        yield
+        yield _selection.get()
         return
-    selected = prepare(arguments)
+    selected = selected if selected is not None else prepare(arguments)
+    selected["active"] = True
     selected["checking"] = not dynamic
     token = _selection.set(selected)
     try:
-        yield
+        yield selected
     finally:
         selected["active"] = False
         _selection.reset(token)
@@ -120,7 +128,9 @@ def install():
     """Keep native selection and rendering; substitute only the checked text slot."""
     from tools import skills_tool as native
     from tools.registry import registry
-    locate, read, get_entry = native._locate_skill, native._read_skill_text, registry.get_entry
+    locate_name = "locate_skill" if hasattr(native, "locate_skill") else "_locate_skill"
+    locate = getattr(native, locate_name)
+    read, get_entry = native._read_skill_text, registry.get_entry
 
     @wraps(locate)
     def selected_source(*args, **kwargs):
@@ -154,11 +164,13 @@ def install():
             return copy(selected["entry"])
         return entry
 
-    native._locate_skill, native._read_skill_text = selected_source, selected_text
+    setattr(native, locate_name, selected_source)
+    native._read_skill_text = selected_text
     registry.get_entry = selected_entry
 
     def restore():
-        native._locate_skill, native._read_skill_text = locate, read
+        setattr(native, locate_name, locate)
+        native._read_skill_text = read
         registry.get_entry = get_entry
     return restore
 

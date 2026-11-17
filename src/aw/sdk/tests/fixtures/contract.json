@@ -1,0 +1,10 @@
+{
+  "sdk_protocol": "aw-sdk/v1",
+  "service_protocol": "aw-service/v1alpha7",
+  "registration_protocol": "aw-instance/v1",
+  "availability": ["required", "native_fallback"],
+  "never_fallback": ["sdk_step_failed", "binding_preflight", "sdk_required_policy_conflict", "sdk_protocol_version", "registration_owner_mismatch", "audit_unavailable", "deadline_exceeded"],
+  "terminal_states": ["released", "expired", "failed"],
+  "neutral_callback": {"code": 0, "stdout": [], "stderr": []},
+  "native_before": {"hook_event_name": "PreToolUse", "session_id": "sdk-session", "tool_use_id": "sdk-call", "tool_name": "Bash", "tool_input": {"command": "printf sdk"}}
+}

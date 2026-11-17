@@ -25,6 +25,12 @@ selects the framework.
 
 The verified baseline is CLI 1.1.64. AW records the installed bare SemVer output. Integration requires `--settings`, literal `args` command Hooks, `PreToolUse`/`PostToolUse`, callback identity and exit-code-2 denial.
 
+`PostToolUse` and `PostToolUseFailure` both enter `tool.after`. Public audit
+records derive `resultStatus` from the native callback and its structured
+exit, signal or interruption fields; `resultDigest` covers the normalized
+result. Missing result metadata remains `projection_unavailable` during
+[audit export](../reference/cli.md), identifying the gap for consumers.
+
 For example, name the target `qodercli` and select your installed executable:
 
 ```yaml

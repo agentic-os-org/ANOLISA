@@ -9,8 +9,49 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, time::Instant};
 use support::{Fixture, Service, TIMEOUT};
 
+#[path = "claude_sdk/event_receipt.rs"]
+mod event_receipt;
+
 #[path = "claude_sdk/submission.rs"]
 mod submission;
+
+#[test]
+fn final_runtime_gate_checks_owned_bytes_and_native_identity() {
+    let fixture = Fixture::new();
+    let native = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native");
+    let mut command = std::process::Command::new("node");
+    command
+        .args(["--test", "--test-reporter=tap"])
+        .arg(native.join("shared/js-runtime/fetch-gate.test.mjs"))
+        .arg(native.join("claude-sdk/final-gate.test.mjs"))
+        .arg(native.join("claude-sdk/final-preload.test.mjs"))
+        .arg(native.join("claude-sdk/typescript-bridge.test.mjs"));
+    let output = fixture.run(command);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 12"));
+}
+
+#[test]
+fn final_factory_rejects_uncovered_delivery_paths() {
+    let fixture = Fixture::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(root.join("tests/fixtures/claude-sdk/final_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 4 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
 
 #[test]
 fn native_configuration_preserves_sources_plugins_and_http_mcp() {

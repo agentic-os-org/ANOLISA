@@ -261,53 +261,53 @@ impl LlmClient {
             trimmed
         };
 
-        // Array-rooted responses (e.g. semantic search ranking): the outer
-        // bracket pair is the JSON document itself. The object path below
-        // would otherwise drop the brackets and produce an unparseable
-        // comma-separated list of objects.
+        // Stream decoding identifies the end of the first complete value,
+        // respecting nesting and escaped delimiters inside JSON strings.
+        fn prefix(raw: &str) -> Option<&str> {
+            let mut values =
+                serde_json::Deserializer::from_str(raw).into_iter::<serde_json::Value>();
+            values.next()?.ok()?;
+            Some(&raw[..values.byte_offset()])
+        }
+
+        if stripped.starts_with('{') {
+            // An invalid root goes to the repair path; never silently promote
+            // a valid nested object out of an incomplete outer document.
+            return prefix(stripped).unwrap_or(stripped).to_string();
+        }
         if stripped.starts_with('[') {
-            if let Some(end) = stripped.rfind(']') {
-                if end > 0 {
-                    return stripped[..=end].to_string();
-                }
+            if let Some(value) = prefix(stripped) {
+                return value.to_string();
             }
-            return stripped.to_string();
-        }
-
-        // A text wrapper may precede an array of objects. Keep its outer
-        // array before considering an inner object, but do not mistake
-        // incidental bracketed prose for JSON.
-        if let Some(start) = stripped.find('[') {
-            if let Some(end) = stripped.rfind(']') {
-                let contains_first_object = stripped
-                    .find('{')
-                    .is_none_or(|object| start < object && object < end);
-                if end > start && contains_first_object {
-                    let candidate = &stripped[start..=end];
-                    if serde_json::from_str::<Vec<serde_json::Value>>(candidate).is_ok() {
-                        return candidate.to_string();
-                    }
-                }
+            // A closed prose label can precede the actual object. An opening
+            // object inside the bracket instead belongs to the invalid root.
+            if stripped
+                .find(']')
+                .zip(stripped.find('{'))
+                .is_none_or(|(close, object)| close >= object)
+            {
+                return stripped.to_string();
             }
         }
 
-        // Object-rooted responses (or free text containing an object): use
-        // the outermost { ... } span.
-        if let Some(start) = stripped.find('{') {
-            if let Some(end) = stripped.rfind('}') {
-                if end > start {
-                    return stripped[start..=end].to_string();
-                }
+        let object = stripped.find('{');
+        let array = stripped
+            .find('[')
+            .and_then(|start| prefix(&stripped[start..]).map(|value| (start, value)));
+        if let Some((start, value)) = array {
+            // Preserve the established object preference for incidental
+            // prose such as "Result [1,2]: { ... }", but keep object arrays.
+            if object.is_some_and(|index| start < index && index < start + value.len()) {
+                return value.to_string();
             }
         }
-
-        // Embedded array in otherwise text-only content (e.g. "text [1,2]").
-        if let Some(start) = stripped.find('[') {
-            if let Some(end) = stripped.rfind(']') {
-                if end > start {
-                    return stripped[start..=end].to_string();
-                }
-            }
+        if let Some(start) = object {
+            return prefix(&stripped[start..])
+                .unwrap_or(&stripped[start..])
+                .to_string();
+        }
+        if let Some((_, value)) = array {
+            return value.to_string();
         }
         stripped.to_string()
     }

@@ -6,6 +6,9 @@ license = "Apache-2.0"
 description = "AW Provider bridge to the public sec-core scan-code CLI"
 publish = false
 
+[features]
+testing = []
+
 [dependencies]
 aw-exec = { workspace = true }
 aw-provider = { workspace = true }

@@ -269,10 +269,85 @@ pub struct LatencyMetricsSummary {
 struct CallMetrics {
     agent_name: Option<String>,
     is_sse: bool,
+    latency: CallLatency,
+}
+
+/// Latency and throughput of one recorded call.
+///
+/// Produced by [`call_latency`] alone, so the agent-grouped latency view and
+/// the pid/session-grouped `top` rows cannot drift apart.
+#[derive(Debug, Default)]
+struct CallLatency {
     ttft_ms: Option<f64>,
     tps_tokens_per_second: Option<f64>,
     tpot_ms_per_token: Option<f64>,
     e2e_latency_ms: Option<f64>,
+}
+
+/// Derives TTFT / TPS / TPOT / end-to-end latency for one recorded call.
+///
+/// A sample is left `None` rather than reported when its timestamps are
+/// inconsistent (first token before the call started, or an end at or before
+/// the first token); TPS and TPOT additionally need positive `output_tokens`.
+fn call_latency(
+    start: i64,
+    end: Option<i64>,
+    first: Option<i64>,
+    output_tokens: Option<i64>,
+) -> CallLatency {
+    let e2e_ns = end.filter(|end| *end > start).map(|end| end - start);
+    let stream_ns = match (first, end) {
+        (Some(first), Some(end)) if first >= start && end > first => Some(end - first),
+        _ => None,
+    };
+    let tokens = output_tokens.filter(|tokens| *tokens > 0);
+    CallLatency {
+        ttft_ms: first
+            .filter(|first| {
+                *first >= start && (end.is_none() || end.is_some_and(|end| *first <= end))
+            })
+            .map(|first| (first - start) as f64 / 1_000_000.0),
+        // By #2339 convention, TPS/TPOT use total output_tokens N; do not use N - 1.
+        tps_tokens_per_second: stream_ns
+            .zip(tokens)
+            .map(|(duration, tokens)| tokens as f64 * 1_000_000_000.0 / duration as f64),
+        tpot_ms_per_token: stream_ns
+            .zip(tokens)
+            .map(|(duration, tokens)| duration as f64 / 1_000_000.0 / tokens as f64),
+        e2e_latency_ms: e2e_ns.map(|duration| duration as f64 / 1_000_000.0),
+    }
+}
+
+/// Percentile summaries of every metric over one group of calls.
+struct LatencyPercentiles {
+    ttft_ms: Option<MetricPercentiles>,
+    tps_tokens_per_second: Option<MetricPercentiles>,
+    tpot_ms_per_token: Option<MetricPercentiles>,
+    e2e_latency_ms: Option<MetricPercentiles>,
+}
+
+fn latency_percentiles(latencies: &[CallLatency]) -> LatencyPercentiles {
+    LatencyPercentiles {
+        ttft_ms: percentiles(latencies.iter().filter_map(|call| call.ttft_ms).collect()),
+        tps_tokens_per_second: percentiles(
+            latencies
+                .iter()
+                .filter_map(|call| call.tps_tokens_per_second)
+                .collect(),
+        ),
+        tpot_ms_per_token: percentiles(
+            latencies
+                .iter()
+                .filter_map(|call| call.tpot_ms_per_token)
+                .collect(),
+        ),
+        e2e_latency_ms: percentiles(
+            latencies
+                .iter()
+                .filter_map(|call| call.e2e_latency_ms)
+                .collect(),
+        ),
+    }
 }
 
 fn percentile(sorted: &[f64], pct: f64) -> Option<f64> {
@@ -326,29 +401,11 @@ impl GenAISqliteStore {
             let end: Option<i64> = row.get(2)?;
             let first: Option<i64> = row.get(3)?;
             let output_tokens: Option<i64> = row.get(4)?;
-            let e2e_ns = end.filter(|end| *end > start).map(|end| end - start);
             let is_sse: Option<i64> = row.get(5)?;
-            let stream_ns = match (first, end) {
-                (Some(first), Some(end)) if first >= start && end > first => Some(end - first),
-                _ => None,
-            };
-            let tokens = output_tokens.filter(|tokens| *tokens > 0);
             Ok(CallMetrics {
                 agent_name: row.get(0)?,
-                ttft_ms: first
-                    .filter(|first| {
-                        *first >= start && (end.is_none() || end.is_some_and(|end| *first <= end))
-                    })
-                    .map(|first| (first - start) as f64 / 1_000_000.0),
                 is_sse: is_sse == Some(1),
-                // By #2339 convention, TPS/TPOT use total output_tokens N; do not use N - 1.
-                tps_tokens_per_second: stream_ns
-                    .zip(tokens)
-                    .map(|(duration, tokens)| tokens as f64 * 1_000_000_000.0 / duration as f64),
-                tpot_ms_per_token: stream_ns
-                    .zip(tokens)
-                    .map(|(duration, tokens)| duration as f64 / 1_000_000.0 / tokens as f64),
-                e2e_latency_ms: e2e_ns.map(|duration| duration as f64 / 1_000_000.0),
+                latency: call_latency(start, end, first, output_tokens),
             })
         };
         let calls = if let Some(name) = agent_name {
@@ -362,41 +419,31 @@ impl GenAISqliteStore {
         // Group case-insensitively, like the filtered query (COLLATE NOCASE)
         // and every other agent-attributed view: "Qoder" and "qoder" are one
         // agent, not two. The first name seen labels the group.
-        let mut grouped =
-            std::collections::BTreeMap::<Option<String>, (Option<String>, Vec<CallMetrics>)>::new();
+        type AgentGroup = (Option<String>, usize, Vec<CallLatency>);
+        let mut grouped: std::collections::BTreeMap<Option<String>, AgentGroup> =
+            std::collections::BTreeMap::new();
         for call in calls {
             let key = call.agent_name.as_deref().map(|name| name.to_lowercase());
-            grouped
+            let group = grouped
                 .entry(key)
-                .or_insert_with(|| (call.agent_name.clone(), Vec::new()))
-                .1
-                .push(call);
+                .or_insert_with(|| (call.agent_name.clone(), 0, Vec::new()));
+            group.1 += usize::from(call.is_sse);
+            group.2.push(call.latency);
         }
         Ok(grouped
             .into_iter()
-            .map(|(_, (agent_name, calls))| LatencyMetricsSummary {
-                agent_name,
-                call_count: calls.len(),
-                streaming_call_count: calls.iter().filter(|call| call.is_sse).count(),
-                ttft_ms: percentiles(calls.iter().filter_map(|call| call.ttft_ms).collect()),
-                tps_tokens_per_second: percentiles(
-                    calls
-                        .iter()
-                        .filter_map(|call| call.tps_tokens_per_second)
-                        .collect(),
-                ),
-                tpot_ms_per_token: percentiles(
-                    calls
-                        .iter()
-                        .filter_map(|call| call.tpot_ms_per_token)
-                        .collect(),
-                ),
-                e2e_latency_ms: percentiles(
-                    calls
-                        .iter()
-                        .filter_map(|call| call.e2e_latency_ms)
-                        .collect(),
-                ),
+            .map(|(_, (agent_name, streaming_call_count, latencies))| {
+                let call_count = latencies.len();
+                let percentiles = latency_percentiles(&latencies);
+                LatencyMetricsSummary {
+                    agent_name,
+                    call_count,
+                    streaming_call_count,
+                    ttft_ms: percentiles.ttft_ms,
+                    tps_tokens_per_second: percentiles.tps_tokens_per_second,
+                    tpot_ms_per_token: percentiles.tpot_ms_per_token,
+                    e2e_latency_ms: percentiles.e2e_latency_ms,
+                }
             })
             .collect())
     }

@@ -6,7 +6,7 @@ Pi 和 Claude SDK 可在同一客户端/session 内连续
 执行多轮，不同客户端在同一前台 worker 中并发。一份配置通过
 `aw run --config aw.yaml --agent pi` 或 `--agent claude` 选择目标。SYSOM 接入集中在镜像、
 启动和公共客户端/MCP 工厂，应用继续负责调度、凭据、HTTP/SSE、业务工具及会话存储。
-已验证基线为 Pi 0.84.2 和 Claude SDK 0.2.88 / bundled CLI 2.1.161，其他版本沿用
+已验证 Pi 基线为 0.84.2、1.3.0 和 1.5.2；Claude SDK 为 0.2.88 / bundled CLI 2.1.161，其他版本沿用
 相同的原生工厂、transport 与生命周期检查。
 
 普通 Qoder SDK Query（已验证基线为 SDK 1.0.56 / Worker 1.1.78）复用相同的子 scope 和递增 invocation 服务合同。

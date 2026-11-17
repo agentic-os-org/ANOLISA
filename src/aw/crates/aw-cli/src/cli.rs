@@ -6,6 +6,7 @@ mod bridge;
 pub(crate) mod connection;
 mod dispatch;
 mod hook;
+mod hook_chain;
 pub(crate) mod instance;
 mod native;
 mod native_setup;
@@ -14,6 +15,7 @@ mod qoder_bootstrap;
 mod readiness;
 mod run;
 mod scope;
+mod sdk_control;
 mod update;
 
 use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
@@ -145,8 +147,10 @@ pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
         "update" => update::update(args),
         "bridge" => bridge::lifecycle(args),
         "scope" => scope::run(args),
+        "sdk-control" => sdk_control::run(args),
         "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
+        "codex-hook" => hook_chain::callback(args, "codex", "AW_CODEX_CONFIG"),
         "policy" => {
             args.check(&[], false)?;
             policy::run()?;

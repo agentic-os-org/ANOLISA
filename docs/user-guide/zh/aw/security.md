@@ -55,7 +55,13 @@ cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
 
-模板要求 `PROVIDERS_DIR`、`SEC_CORE_CLI` 和 `SOCKET`。原生包或 Makefile
+模板要求 `PROVIDERS_DIR`、`SEC_CORE_CLI` 和 `SOCKET`。如需在 `scan_code`、
+`scan_prompt`、`scan_user_input`、`scan_tool_input`、`scan_tool_output` 和
+`check_final_tool_output` 中跳过
+每次调用拉起 `agent-sec-cli` 子进程，可在 `aw-provider-sec-core` 的
+`transport.argv` 中加入 `"--transport", "daemon"`（保留 `--socket`；仅使用
+`check_skill` 时仍需 `--cli`，切回 `"--transport", "cli"` 即可回退）。详见
+[sec-core Provider 接入参考](../../../developer-guide/zh/aw/providers/sec-core.md)。原生包或 Makefile
 安装时，`PROVIDERS_DIR` 取实际 Provider 根目录，例如 `/usr/libexec/aw/providers`
 或 `/usr/local/libexec/aw/providers`。同时需要压缩时，安装 Tokenless 后端和
 桥接程序，选择 `sec-core-tokenless.json`，并按 [Tokenless](tokenless.md)提供
@@ -118,6 +124,10 @@ git -c http.sslVerify=false --version
 输入步骤在执行前扫描选中的完整参数，敏感内容会被拒绝，工具不执行。输出步骤扫描实际结果，命中的文本槽替换为 `Sensitive data detected by AW; content withheld.`；替换前再次检查保留的结果结构。检查失败时停止原始输出交付并结束 Query/回复；工具已产生的副作用仍保留。验证时使用合成测试凭证。
 
 各工具阶段明确选择 PII 的检查方。AW 接管时移除原生 PII 的 PreToolUse/PostToolUse 注册，按需保留用户提交检查。[集成参考](../../../developer-guide/zh/aw/providers/sec-core.md#工具-pii-策略)说明配置、不支持的结果结构和原生模式限制。
+
+headless DSH 的 sec-core 示例和接入步骤见
+[DSH 接入指南](../../../developer-guide/zh/aw/agents/deepseek-harness.md)。
+原始结果无法安全替换或后台失败时，严格输出检查只返回通用工具错误。
 
 ## 停止与扩展
 

@@ -129,7 +129,7 @@ pub fn convert_session_to_atif(
     // Group events into conversation turns, preserving order
     let trace_groups = group_by_conversation(&events, &parsed);
 
-    for (trace_events, trace_parsed) in &trace_groups {
+    for (group_idx, (trace_events, trace_parsed)) in trace_groups.iter().enumerate() {
         if trace_events.is_empty() {
             continue;
         }
@@ -175,6 +175,23 @@ pub fn convert_session_to_atif(
                     trace_events[i + 1],
                     trace_parsed.get(i + 1).and_then(|p| p.as_ref()),
                 ))
+            } else if trace_events[i].conversation_id.is_some()
+                && let Some((next_events, next_parsed)) = trace_groups.get(group_idx + 1)
+                && let Some(next_event) = next_events.first()
+                && next_event.conversation_id.is_some()
+                && next_event.start_timestamp_ns
+                    >= trace_events[i]
+                        .end_timestamp_ns
+                        .unwrap_or(trace_events[i].start_timestamp_ns)
+            {
+                // A tool result can be delivered by the first request of the
+                // next turn: a user interjection while the tool runs starts a
+                // new conversation, and that request replays the pending
+                // result. The result still belongs to the step that issued
+                // the call. Both turns need a resolved conversation id; an
+                // unknown turn must not be cross-correlated (it may be an
+                // unrelated replayed request).
+                Some((*next_event, next_parsed.first().and_then(|p| p.as_ref())))
             } else {
                 None
             };
@@ -2764,6 +2781,61 @@ pub(crate) mod tests {
             .expect("calls of one conversation must stay in one group")
             .results;
         assert_eq!(results[0].source_call_id.as_deref(), Some("tc-9"));
+    }
+
+    /// A tool result can arrive after a user interjection starts a new
+    /// conversation: the next request carries the pending call's result plus
+    /// the interjection, so the resolver assigns it a different
+    /// `conversation_id`. The result still belongs to the step that issued the
+    /// call. The file-based converter merges exactly this shape
+    /// (`test_convert_late_tool_result_merges_into_its_calling_step`); the
+    /// session exporter only inspected the next event of the same group, so
+    /// the observation vanished from the export.
+    #[test]
+    fn session_export_merges_a_late_result_across_a_new_conversation() {
+        let events = vec![
+            event_with_ids(
+                1,
+                1_000_000_000,
+                Some("conv-a"),
+                Some("resp-1"),
+                Some("read /tmp/a"),
+                Some(tool_call_turn("tc-late")),
+                None,
+            ),
+            event_with_ids(
+                2,
+                3_000_000_000,
+                Some("conv-b"),
+                Some("resp-2"),
+                Some("actually, hold on"),
+                None,
+                Some(replayed_response("tc-late")),
+            ),
+        ];
+
+        let doc = convert_session_to_atif("session-late", events).unwrap();
+
+        let agent_steps: Vec<&Step> = doc
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::Agent)
+            .collect();
+        assert_eq!(agent_steps.len(), 2);
+
+        let observation = agent_steps[0]
+            .observation
+            .as_ref()
+            .expect("the late result must attach to the step that issued the call");
+        assert_eq!(observation.results.len(), 1);
+        assert_eq!(
+            observation.results[0].source_call_id.as_deref(),
+            Some("tc-late")
+        );
+        assert!(
+            agent_steps[1].observation.is_none(),
+            "the interjection's own turn must not claim the result"
+        );
     }
 
     #[test]

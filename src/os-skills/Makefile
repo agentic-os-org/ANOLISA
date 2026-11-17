@@ -4,6 +4,8 @@
 INSTALL_PROFILE ?= $(if $(filter 0,$(shell id -u)),system,user)
 AWPRJ ?= anolisa
 DESTDIR ?=
+PYTHON3 ?= python3
+RELEASE_CATALOG := packaging/release_catalog.py
 # Unset or 0: install refuses a same-name directory it did not create; 1 takes it over.
 REPLACE_UNOWNED ?=
 empty :=
@@ -36,7 +38,13 @@ COMPONENT_DIR ?= $(DATADIR)/anolisa/components/os-skills
 # Install receipt: one line per skill name written by install, read by uninstall.
 MANIFEST ?= $(COMPONENT_DIR)/install-manifest
 
-.PHONY: build install uninstall check-layout clean help
+.PHONY: build install uninstall check-layout check-python clean help
+
+check-python:
+	@"$(PYTHON3)" -c 'import sys; sys.exit(sys.version_info < (3, 6))' >/dev/null 2>&1 || { \
+		echo 'os-skills source installation requires Python 3.6 or newer; set PYTHON3=/path/to/python3' >&2; \
+		exit 1; \
+	}
 
 check-layout:
 	@case "$(INSTALL_PROFILE)" in system|user) ;; *) echo 'INSTALL_PROFILE must be system or user' >&2; exit 1 ;; esac
@@ -58,13 +66,14 @@ check-layout:
 build:
 	@echo "os-skills has no compile step"
 
-install: check-layout
+install: check-layout check-python
 	@if [ -e "$(DESTDIR)$(MANIFEST)" ] && [ ! -f "$(DESTDIR)$(MANIFEST)" ]; then \
 		echo "error: $(DESTDIR)$(MANIFEST) exists but is not a regular file" >&2; \
 		exit 1; \
 	fi
 # Installing a skill replaces its whole directory, which must not hold the receipt.
-	@find . -name SKILL.md -print | while IFS= read -r skill_file; do \
+	@sources=$$("$(PYTHON3)" "$(RELEASE_CATALOG)" paths .) || exit 1; \
+	printf '%s\n' "$$sources" | while IFS= read -r skill_file; do \
 		skill_name=$$(basename "$$(dirname "$$skill_file")"); \
 		for path in "$(COMPONENT_DIR)" "$(MANIFEST)"; do \
 			case "$$path/" in "$(SKILLS_DIR)/$$skill_name"/*) \
@@ -123,7 +132,8 @@ install: check-layout
 		exit 1; \
 	}; \
 	trap restore HUP INT TERM; \
-	find . -name SKILL.md -print > "$$stage/.sources" || restore; \
+	"$(PYTHON3)" "$(RELEASE_CATALOG)" paths . > "$$stage/.sources" || restore; \
+	"$(PYTHON3)" "$(RELEASE_CATALOG)" manifest . "$$stage/.component.toml" || restore; \
 	: > "$$stage/.names"; \
 	while IFS= read -r skill_file; do \
 		skill_dir=$$(dirname "$$skill_file"); \
@@ -164,7 +174,7 @@ install: check-layout
 	receipt=committing; \
 	mv -f "$(DESTDIR)$(MANIFEST).tmp" "$(DESTDIR)$(MANIFEST)" || restore; \
 	rm -f "$(DESTDIR)$(MANIFEST).new"; \
-	install -p -m 0644 component.toml "$(DESTDIR)$(COMPONENT_DIR)/component.toml" || restore; \
+	install -p -m 0644 "$$stage/.component.toml" "$(DESTDIR)$(COMPONENT_DIR)/component.toml" || restore; \
 	rm -rf "$$stage"
 
 uninstall: check-layout

@@ -2,37 +2,65 @@
 
 [中文版](../../zh/aw/capabilities.md)
 
+Both SDKs support application-confirmed attach/detach; see [cooperative control](../../../developer-guide/en/aw/deployment/native-sdk.md#cooperative-attach-and-detach).
+
+Application-owned QwenPaw Apps can use the [Python SDK](../../../developer-guide/en/aw/deployment/python-sdk.md); its public middleware coverage is documented separately.
+
+Application-owned Qoder Queries can use the [TypeScript SDK](../../../developer-guide/en/aw/deployment/native-sdk.md) with explicit native fallback. Its public-Hook coverage and acceptance are listed separately from resident `aw run`.
+
 AW shares tool checks, result processing and custom rules across Agents. Adapters connect these capabilities to native tool execution. See the [Agent index](../../../developer-guide/en/aw/native-agents.md) for versions and setup.
+
+The `sdk/application` profile accepts framework-free input and tool callbacks in
+both language packages. It supports input/tool-before observation and blocking,
+and tool-after observation. The application must install those boundaries and
+adopt `block` before execution. Candidate package tests cover both languages;
+this does not certify automatic instrumentation or final-result protection for
+arbitrary applications. See [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration).
 
 ## Hook support matrix
 
-✓ Declared with contract coverage; × unsupported. Result replacement is limited to authorized text slots and preserves native envelopes and failure status.
+✓ Declared with contract coverage; × unsupported. Most Adapters replace authorized text slots while preserving native envelopes and failure status. Codex has a narrower model-text contract described below.
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.before` / `replace_input` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` | `security.violation` / `observe` | `security.violation` / `block` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `codex` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | × | × |
+| `deepseek-harness` | ✓ | ✓ | × | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | × | ✓ | ✓ | × | × | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` can observe or block; `tool.after` can observe or replace results through a structured Provider. Boolean scripts and native commands cannot request result replacement.
 Configuration can [select steps by tool](configuration.md#select-tools-for-a-hook-step); native permissions and denial retain precedence.
-Qoder CLI has no failed-tool Post callback integration. See each Agent page for result types and callback limits.
+Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 and
+0.166.0 have been verified for ordinary model-visible text replacement through
+PostToolUse with Code Mode disabled
+and no peer PostToolUse Hooks; this does not protect prior capture, telemetry or
+Hook failures. Local app-server stdio has the same verified effects when its
+trusted client keeps thread and turn cwd and configuration unchanged. See the
+[Codex guide](../../../developer-guide/en/aw/agents/codex.md). See each Agent
+page for result types and callback limits.
+Required Codex `tool.before` rejects other native PreToolUse Hooks because they
+can rewrite arguments after AW checks them. Optional checks cover original input.
 
 `input.submit` supports observation and blocking before model dispatch in ordinary
 resident Qoder SDK and QwenPaw launches, Claude SDK foreground/resident factories,
-Pi workers and AgentScope factory replies. Submission policy uses complete text and session/turn identities.
+Pi workers, AgentScope factory replies DeepSeek Harness and local Codex CLI headless turns.
+Submission policy uses complete text and session/turn identities.
 Claude accepts strings or a single async text message and closes rejected/cancelled
 inputs before reuse. Pi requires a `runWorker` factory and literal interactive text;
 media, `input`/`context`/`before_provider_request` extension handlers, expanded slash
 commands and queued/alternate ingress are rejected when checking is enabled.
 Pi also rejects direct callback rewrites of user messages or serialized provider
-requests. Restricted reloadable mode and other Adapters reject this event.
+requests. DeepSeek rejects submissions with non-text content when this check is
+configured; its Web, SDK and ACP input paths still need native acceptance.
+Restricted reloadable mode and Adapters without this capability reject this event.
 AgentScope 2.0.6 accepts native user `Msg` text via `reply` / `reply_stream`; see its
 [input contract](../../../developer-guide/en/aw/agents/agentscope.md#check-user-input-before-a-reply).
 See [submission checks](security.md#check-user-submissions).
@@ -49,6 +77,8 @@ See [PII policy setup](security.md#check-tool-pii-with-qoder-sdk-or-qwenpaw) and
 
 Qoder SDK foreground `Read` text results support PII replacement of file content while preserving file metadata. Image and other non-text Read results require separate acceptance.
 
+Qoder SDK 1.0.57 / Worker 1.1.81 also supports a required final result gate for one foreground Bash Query on Linux arm64/x64. It checks post-Hook text before native request encoding; unsupported transports, extra context turns and runtime builds fail closed. See [setup and scope](../../../developer-guide/en/aw/agents/qoder-sdk.md#final-tool-result-gate).
+
 ## 16 common Hooks
 
 Public Provider Hook status; see the matrix above for effects supported by each Adapter.
@@ -56,7 +86,7 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | Hook | Status |
 | --- | --- |
 | `session.start` | Planned |
-| `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories, Pi worker text input and AgentScope factory text replies |
+| `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories, Pi worker text input, AgentScope factory text replies DeepSeek Harness headless text turns and local Codex CLI |
 | `tool.before` | Implemented |
 | `tool.after` | Implemented |
 | `permission.request` | Planned |
@@ -69,8 +99,22 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | `model.before_request` | Planned |
 | `runtime.observed` | Planned |
 | `runtime.exited` | Planned |
-| `security.violation` | Planned |
+| `security.violation` | Implemented for pinned DeepSeek Harness 0.2.1-rc.5; experimental for verified OpenClaw 2026.9.5–2026.9.7 Gateway builds with explicit OpenAI-completions; supports observe and block |
 | `coverage.changed` | Planned |
+
+Claude SDK conditionally admits final `security.violation` checks for exact
+Python/TypeScript SDK / bundled CLI builds. The private runtime gate checks serialized
+Anthropic tool results after Post callbacks; required policies reject unknown
+builds. See [Claude final-result limits](../../../developer-guide/en/aw/agents/claude-sdk.md#final-tool-result-security-boundary).
+
+OpenClaw final checking requires an exact build and a foreground, non-reloadable
+Gateway. The static grid above describes ordinary launches. The final check
+inspects the model request after native result and payload transformations;
+unknown builds or paths reject the required policy. See the
+[OpenClaw integration limits](../../../developer-guide/en/aw/agents/openclaw.md#final-tool-result-checks).
+Qoder SDK 1.0.55/1.0.56 retain only the late-Post counterexample and ordinary
+Hook coverage. The verified 1.0.57 / Worker 1.1.81 foreground legacy profile
+provides final checking on Linux arm64/x64 as described above.
 
 ## Skill checks
 
@@ -91,7 +135,7 @@ Hermes local chat supports directory-based `skill_view` through the same
 `tool.before` check. See [Hermes Skill sources](../../../developer-guide/en/aw/agents/hermes.md#skill-trust)
 for native selection and source limits.
 
-Pi Coding Agent/Core 0.84.2 resident factories also check local `/skill:name`
+Pi Coding Agent/Core matching releases from 0.84.2 through 1.5.2 also check local `/skill:name`
 submissions through `input.submit`. The selected directory content is fixed before
 Ledger validation; prompt and PII checks inspect the final expanded text.
 See [Pi setup and limits](../../../developer-guide/en/aw/agents/pi.md#validate-skill-submissions).
@@ -146,12 +190,22 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 - AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
 - Pi managed tool.after steps with `on_error: report` keep the checked original result when a Provider or transport fault occurs, and the same session continues with its next prompt. Before-tool faults, post-tool `block`/`withhold_result` faults, cancellation, identity and cleanup failures still stop the task. Input refusal and blocking input-check faults reject that prompt and allow another prompt after cleanup.
 - Claude SDK resident `tool.after` steps with `on_error: report` keep the original result and continue model calls for audited, recoverable Provider failures. This covers native HTTP MCP text and `structuredContent` results and built-in tools such as Bash; managed SDK MCP retains its existing recovery. The same client accepts another task after callbacks drain. Identity/scope failures, cancellation, lifecycle/cleanup failures, before-Hook failures, invalid native responses, unknown transport details and audit failures remain fail-stop. `on_error: block` and native security denial retain their blocking semantics. See [resident deployment](../../../developer-guide/en/aw/deployment/resident.md) for the recoverable categories. Post checks cannot undo an executed tool.
-- Public Provider Hooks currently cover the two events above. The other 14 event names, common approval, input replacement, guard, Schema/BeforeModel and Retrieve integration are not available.
+- Public Provider execution currently covers `input.submit`, `tool.before`, `tool.after` and `security.violation` where the selected Adapter supports them. The other 12 event names, common approval, guard, Schema/BeforeModel and Retrieve integration are not available; input replacement is limited to the Adapters and effects shown in the matrix above.
 - AW enforces policy through native Hooks. Deploy OS sandbox isolation separately.
 
 The matrix is generated from the [regression manifest](../../../../src/aw/tests/regression-matrix.json). The [native manifest](../../../../src/aw/tests/native-matrix.json) records pinned versions and coverage; see [contributing](../../../../src/aw/CONTRIBUTING.md) for validation.
 
 Framework releases use the [native integration checks](../../../developer-guide/en/aw/native-agents.md). The recorded test baselines identify reproducible validation inputs; other releases can use the same native contracts.
+
+
+The configuration-driven QwenPaw SDK plugin selects input or first-tool
+admission from the AW file. Configured input checks wait before model dispatch;
+tool-only policies let model inference overlap AW attachment, then fix the Scope
+before native tool entry. The required resident path retains result withholding
+and native cleanup. `AfterOnlyPlugin` keeps its narrower compatibility contract.
+Pinned native suites cover after-only, before-only and input-only configurations
+on QwenPaw 2.2.2.post1 / AgentScope 2.0.10. See
+[Python SDK deployment](../../../developer-guide/en/aw/deployment/python-sdk.md#install-and-integrate).
 
 ## Native configuration loading
 
@@ -183,3 +237,9 @@ On the verified SDK 0.2.88 / CLI 2.1.161 baseline, native `disableAllHooks: true
 disables settings Hooks while registered SDK AW callbacks still run. Native rewrite
 cases record the unchecked execution boundary and confirm that an AW deny still
 prevents execution. These cases do not certify final-argument enforcement.
+
+The configuration-driven Qoder SDK bridge uses public native Hooks and cooperative
+PID attachment. Model inference starts without AW when input.submit is disabled;
+first-tool admission fixes its Scope. Supported checks are input/tool-before
+observation and blocking, and tool-after observation. Result replacement/final
+checks retain their managed entrypoints. See [SDK deployment](../../../developer-guide/en/aw/deployment/native-sdk.md#configuration-driven-qoder-integration).

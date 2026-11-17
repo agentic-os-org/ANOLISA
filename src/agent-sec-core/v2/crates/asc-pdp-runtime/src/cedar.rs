@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 
 use asc_policy_cedar::advice::Advice;
-use asc_policy_types::cedar::{AuthorizationPolicy, CedarPolicySource};
+use asc_policy_types::cedar::AuthorizationPolicy;
 use cedar_policy::{Authorizer, Effect, PolicySet};
 
 use crate::{PdpError, path_conditions, request::Query};
 
-pub(crate) struct PolicyLayer {
+pub(crate) struct CompiledPolicySet {
     pub policies: PolicySet,
     pub boundaries: BTreeSet<String>,
 }
@@ -19,7 +19,7 @@ pub(crate) struct Outcome {
     pub advice: Vec<Advice>,
 }
 
-impl PolicyLayer {
+impl CompiledPolicySet {
     pub fn from_members(members: &[AuthorizationPolicy]) -> Result<Self, PdpError> {
         let mut policies = PolicySet::new();
         for member in members {
@@ -45,16 +45,6 @@ impl PolicyLayer {
                     .map_err(|error| PdpError::Evaluation(error.to_string()))?;
             }
         }
-        let boundaries = path_conditions::boundaries(&policies)?;
-        Ok(Self {
-            policies,
-            boundaries,
-        })
-    }
-
-    pub fn new(source: &CedarPolicySource) -> Result<Self, PdpError> {
-        let policies = PolicySet::from_pst(asc_policy_cedar::pst(source)?)
-            .map_err(|error| PdpError::Evaluation(error.to_string()))?;
         let boundaries = path_conditions::boundaries(&policies)?;
         Ok(Self {
             policies,

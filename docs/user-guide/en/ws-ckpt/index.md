@@ -95,11 +95,11 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | Command | Description |
 |---------|-------------|
 | `ws-ckpt init -w <workspace>` | Initialize a workspace for checkpointing |
-| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | Create a new checkpoint |
+| `ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]` | Create a new checkpoint. Omit `-s` to generate the snapshot ID automatically. |
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | Restore workspace to a checkpoint |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | Rollback N ancestors |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | List checkpoints; auto-page by default |
-| `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | Show differences between checkpoints |
+| `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | Show file changes; omit `-t` to compare with the current workspace |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | Delete a specific checkpoint |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | Show current workspace status |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | Remove old checkpoints |
@@ -110,6 +110,13 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | `ws-ckpt unregister -w <workspace> [--force]` | Remove a registration only when its live subvolume is missing; restore no data |
 | `ws-ckpt reload` | Reload daemon configuration |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | Start the daemon process |
+
+New checkpoint IDs must not contain control characters (such as newline or tab).
+Existing snapshots with those IDs remain available for deletion, rollback and diff.
+`list` table output escapes control characters and backslashes in snapshot IDs,
+workspace paths and messages; JSON retains the original field values using JSON
+escaping. The `status` table and command receipts also escape control characters
+and backslashes in displayed workspace paths and IDs.
 
 ### Listing large snapshot histories
 
@@ -274,6 +281,21 @@ it does not permit overwriting conflicting data or unregistering a workspace
 whose live subvolume still exists.
 
 ### diff Output Markers
+
+Text remains the default. Use JSON when consuming file changes programmatically:
+
+```bash
+ws-ckpt diff -w /home/user/projects/my-project -f snap-001 --format json
+```
+
+Successful JSON output is one object containing `changes` and `elapsed_secs`.
+Each change retains the existing `path`, `change_type` (`Added`, `Modified`,
+`Deleted`, or `Renamed`) and `detail` (string or `null`). An empty diff returns
+`"changes": []`. Paths and rename details are JSON-escaped without altering their
+values. This is a file change list, not a line-by-line content diff. The
+comparison runs from `-f` to `-t`, or from `-f` to the current workspace when
+`-t` is omitted. Failures exit non-zero with diagnostics on stderr and no
+successful JSON on stdout; check the exit status before reading `changes`.
 
 | Marker | Meaning | Color |
 |--------|---------|-------|

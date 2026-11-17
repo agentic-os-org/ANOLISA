@@ -229,3 +229,9 @@ macro_rules! bug_report_ids {
         );
     };
 }
+
+macro_rules! cosh_root_help_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!($remaining, $($ids,)* CoshRootHelp,);
+    };
+}

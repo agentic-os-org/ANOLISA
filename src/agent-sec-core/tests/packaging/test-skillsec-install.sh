@@ -31,6 +31,7 @@ test ! -e "$STAGE/usr/lib/systemd/user/agent-sec-core.service"
 test ! -e "$STAGE/usr/lib/systemd/system/multi-user.target.wants/agent-sec-core.service"
 test ! -e "$STAGE/var/lib/agent-sec/skillsec/signing-key.pk8"
 test "$(stat -c %a "$STAGE/etc/agent-sec/skillsec.json")" = 600
+test "$(stat -c %a "$STAGE/etc/agent-sec/sandbox/permissions.json.template")" = 644
 test "$(stat -c %a "$STAGE/usr/lib/systemd/system/agent-sec-core.service")" = 644
 
 # Reinstallation must preserve operator-selected settings and permissions.

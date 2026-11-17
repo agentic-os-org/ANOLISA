@@ -84,3 +84,25 @@ fn native(selector: &str) -> Option<(&str, &str)> {
         .strip_prefix("native:")
         .and_then(|value| value.split_once(':'))
 }
+
+/// Evaluates whether event-level and step-level selectors admit the given tool identity.
+pub fn matches_tool_selectors(
+    event_tools: &[String],
+    step_tools: &[String],
+    adapter: Option<&str>,
+    tool_name: Option<&str>,
+    native_name: Option<&str>,
+) -> bool {
+    let matches = |selectors: &[String]| {
+        selectors.iter().any(|selector| {
+            if selector == "*" {
+                return true;
+            }
+            if let Some((owner, name)) = native(selector) {
+                return adapter == Some(owner) && native_name == Some(name);
+            }
+            tool_name == Some(selector.as_str())
+        })
+    };
+    matches(event_tools) && matches(step_tools)
+}

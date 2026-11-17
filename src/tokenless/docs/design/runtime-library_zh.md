@@ -23,7 +23,8 @@ Tool Ready 在产品范围内硬关闭，不属于该 API。
 
 Python Hook 的宿主协议规则放在各自的
 `adapters/tokenless/<host>/hook_adapter.py`：输入解析、能力检查和返回信封由该宿主负责。
-例如 Cosh-NG 将 Shell 替换结果序列化为文本，Claude Code 和千问办公保留结构化字段，
+例如 Cosh-NG 将 Shell 替换结果序列化为文本，Claude Code 保留结构化字段，千问办公将单流
+Shell 的 `stdout` 替换为文本并保留非 Shell 的结构化 MCP 字段，
 Qoder 保留原生 Bash 的 stdout 对象。`common/hooks` 负责 Protocol v2 通信、归一化结果的
 通用转换和生命周期状态。原有命令文件保留为启动入口，宿主选择位于
 `adapters/tokenless/hook_dispatch.py`。Cosh 扩展随包携带自己的适配器，独立复制的千问办公
@@ -85,8 +86,8 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 
 千问办公的 Hook Adapter 在两个生命周期请求之前，将识别到的工作区 Shell MCP 名称统一为
 `Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
-确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
-及结构化响应处理。插件私有二进制也由 Adapter 解析；macOS 上经验证的 PreTool 桥接将
+确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置，仅将单流 `stdout` 替换进宿主文本槽，对多流、失败或未知
+Shell 包装保持透传，并按最终交付文本核验净节省。插件私有二进制也由 Adapter 解析；macOS 上经验证的 PreTool 桥接将
 独立恢复命令绑定到该二进制及相同的状态、Stash 选择和归属。桥接不可用时，私有运行时
 路径声明 `recovery.kind = none`。桥接和精确恢复识别由千问办公适配器独立负责。
 

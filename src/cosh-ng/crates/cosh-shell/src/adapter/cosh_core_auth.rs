@@ -39,6 +39,72 @@ impl CoshCoreAdapter {
         let value = self.registry_query("auth", "state", serde_json::Value::Null)?;
         auth_state_is_configured(&value)
     }
+
+    /// Read-only AI service summary for the guide wizard.
+    ///
+    /// Uses the same `auth state` query as the startup probe without the ECS
+    /// trial probe, so opening the wizard never triggers an ECS network call.
+    pub(crate) fn guide_auth_summary(&self) -> Result<GuideAuthSummary, String> {
+        let value = self.registry_query("auth", "state", serde_json::Value::Null)?;
+        guide_auth_summary_from_value(&value)
+    }
+}
+
+fn guide_auth_summary_from_value(value: &serde_json::Value) -> Result<GuideAuthSummary, String> {
+    let configured = auth_state_is_configured(value)?;
+    let preference_failed = value["trial_preferences"]["error_code"].as_str().is_some();
+    let active = value
+        .get("active_provider")
+        .and_then(serde_json::Value::as_str);
+    let provider = active.and_then(|id| {
+        value
+            .get("saved_providers")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|providers| {
+                providers.iter().find(|provider| {
+                    provider
+                        .get("provider_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(id)
+                })
+            })
+    });
+    Ok(GuideAuthSummary {
+        configured,
+        service: active.map(str::to_string),
+        source: provider
+            .and_then(|provider| provider.get("source"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        auto_use: (!preference_failed)
+            .then(|| {
+                value
+                    .get("trial_preferences")
+                    .and_then(|prefs| prefs.get("auto_use"))
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .flatten(),
+        preference_failed,
+        legacy_ecs_identity: value["ecs_trial"]["route"].is_null()
+            && provider.is_some_and(|provider| provider["auth_source"] == "ecs_identity"),
+        route: value["ecs_trial"]["route"].as_str().map(str::to_string),
+        identity_status: value["ecs_trial"]["identity_status"]
+            .as_str()
+            .map(str::to_string),
+    })
+}
+
+/// Current AI service facts shown by the guide; never carries credentials.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GuideAuthSummary {
+    pub(crate) configured: bool,
+    pub(crate) service: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) auto_use: Option<bool>,
+    pub(crate) preference_failed: bool,
+    pub(crate) legacy_ecs_identity: bool,
+    pub(crate) route: Option<String>,
+    pub(crate) identity_status: Option<String>,
 }
 
 fn startup_auth_hint(auto_use: Option<bool>, ecs: Option<bool>) -> StartupAuthHint {
@@ -114,6 +180,33 @@ fn auth_state_is_configured(value: &serde_json::Value) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guide_legacy_identity_fact_uses_auth_source_not_provider_name() {
+        for route in [serde_json::Value::Null, serde_json::json!("ecs_identity")] {
+            let summary = guide_auth_summary_from_value(&serde_json::json!({
+                "effective_auth_required": false,
+                "active_provider": "custom-trial-42",
+                "saved_providers": [{"provider_id": "custom-trial-42", "auth_source": "ecs_identity"}],
+                "ecs_trial": {"route": route},
+                "trial_preferences": {"auto_use": false, "error_code": "trial_preferences_invalid"}
+            })).unwrap();
+            assert!(summary.configured);
+            assert_eq!(summary.legacy_ecs_identity, route.is_null());
+            assert!(summary.preference_failed);
+            assert_eq!(summary.auto_use, None);
+        }
+    }
+
+    #[test]
+    fn guide_preference_error_does_not_mean_user_disabled_auto_use() {
+        let summary = guide_auth_summary_from_value(&serde_json::json!({
+            "effective_auth_required": true,
+            "trial_preferences": {"auto_use": false, "error_code": "trial_preferences_invalid"}
+        }))
+        .unwrap();
+        assert_eq!(summary.auto_use, None);
+    }
 
     #[test]
     fn startup_auth_hint_distinguishes_environment_and_auto_access() {
@@ -227,5 +320,38 @@ mod tests {
         });
 
         assert_eq!(auth_state_is_configured(&mock), Ok(true));
+    }
+
+    #[test]
+    fn guide_summary_reports_service_source_and_auto_use_without_credentials() {
+        let value = serde_json::json!({
+            "active_provider": "prod",
+            "saved_providers": [{
+                "provider_id": "prod",
+                "provider_type": "openai_compat",
+                "has_api_key": true,
+                "source": "user"
+            }],
+            "trial_preferences": {"auto_use": true}
+        });
+        let summary = guide_auth_summary_from_value(&value).unwrap();
+        assert!(summary.configured);
+        assert_eq!(summary.service.as_deref(), Some("prod"));
+        assert_eq!(summary.source.as_deref(), Some("user"));
+        assert_eq!(summary.auto_use, Some(true));
+    }
+
+    #[test]
+    fn guide_summary_unconfigured_state_has_no_service() {
+        let value = serde_json::json!({
+            "active_provider": "dashscope",
+            "saved_providers": [],
+            "effective_auth_required": true
+        });
+        let summary = guide_auth_summary_from_value(&value).unwrap();
+        assert!(!summary.configured);
+        assert_eq!(summary.service.as_deref(), Some("dashscope"));
+        assert_eq!(summary.source, None);
+        assert_eq!(summary.auto_use, None);
     }
 }

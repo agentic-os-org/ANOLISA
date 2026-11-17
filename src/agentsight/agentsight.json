@@ -338,6 +338,48 @@
     "schema_version": 1,
     "entries": [
       {
+        "codex_version": "claude-code-2.1.322",
+        "fingerprint": {
+          "file_size": 341914128,
+          "head_64k_sha256": "03427f0bfd929c940072c6404f7101d5ff8c9ed4d89ca887655f16ebabd05ea7"
+        },
+        "offsets": {
+          "ssl_write": 49867088,
+          "ssl_read": 49867504,
+          "ssl_do_handshake": 49868640,
+          "write_is_ex": false,
+          "read_is_ex": false
+        }
+      },
+      {
+        "codex_version": "claude-code-2.1.319",
+        "fingerprint": {
+          "file_size": 340226576,
+          "head_64k_sha256": "40bf115eb299df5a8566445b35d0127db282befc7cf0ad8cb8e2bccfafcc6bae"
+        },
+        "offsets": {
+          "ssl_write": 49867088,
+          "ssl_read": 49867504,
+          "ssl_do_handshake": 49868640,
+          "write_is_ex": false,
+          "read_is_ex": false
+        }
+      },
+      {
+        "codex_version": "claude-code-2.1.301",
+        "fingerprint": {
+          "file_size": 267955384,
+          "head_64k_sha256": "d1b131ee69c9c3bb16b41bce28c1cb73b3faefc4ba151076117f6c602cef52c1"
+        },
+        "offsets": {
+          "ssl_write": 37817008,
+          "ssl_read": 37816000,
+          "ssl_do_handshake": 37815152,
+          "write_is_ex": false,
+          "read_is_ex": false
+        }
+      },
+      {
         "codex_version": "0.162.1",
         "fingerprint": {
           "file_size": 294415048,

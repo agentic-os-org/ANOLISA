@@ -34,6 +34,33 @@ runs commands before and after tools; it installs no security policy. Use the
 same `aw-provider/v1alpha1` policy configuration across supported adapters.
 The native Hook output dialect and event coverage remain framework-specific.
 
+## Final tool result checks
+
+The development implementation supports experimental `security.violation`
+`observe` and `block` for exact OpenClaw 2026.9.5, 2026.9.6 and 2026.9.7 builds,
+verified with Node 24.16.0. Use the owned foreground Gateway, explicitly configure
+its primary model provider as `openai-completions`, and omit model fallbacks.
+The policy must use `on_error: block`. Native package files remain unchanged;
+the launcher installs a private preload only when the final event is configured.
+
+The stream resolver is also fingerprinted and instrumented. Only the native
+`boundary-aware:openai-completions` strategy is admitted; Provider stream
+overrides and custom session streams are rejected before dispatch. Transcript
+records without a native tool identity (`bashExecution`, custom messages,
+branch and compaction summaries) stop projection before conversion. Session
+teardown or request cancellation kills the active callback and skips later
+steps; an interrupted final event is explicitly closed.
+
+The final check uses the serialized text after result middleware, context
+conversion and payload hooks; 2026.9.7 additionally waits for native request
+encoding. Policy denial, error, timeout or invalid identity withholds the tool
+text. Changes to other request fields stop the model request. Already completed
+tool side effects remain. Unknown builds, other model APIs, reloadable policy,
+multimodal results, nested and background delivery are outside this capability.
+Run the [native acceptance fixture](../../../../../src/aw/docs/design/en/js-final-gate-compatibility.md#admission-and-scope)
+against the actual installed package before deployment. Remove the final event
+and restart the owned Gateway to return to ordinary Hook behavior.
+
 ## Prepare native startup and update policy
 
 For the verified OpenClaw 2026.9.6 foreground Gateway, install the startup bridge

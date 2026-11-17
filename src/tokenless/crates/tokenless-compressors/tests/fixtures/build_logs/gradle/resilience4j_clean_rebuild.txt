@@ -1,0 +1,455 @@
+Starting a Gradle Daemon, 1 incompatible and 2 stopped Daemons could not be reused, use --status for details
+> Task :clean
+> Task :resilience4j-all:clean
+> Task :resilience4j-annotations:clean
+> Task :resilience4j-bom:clean UP-TO-DATE
+> Task :resilience4j-bulkhead:clean
+> Task :resilience4j-cache:clean
+> Task :resilience4j-circuitbreaker:clean
+> Task :resilience4j-circularbuffer:clean
+> Task :resilience4j-commons-configuration:clean
+> Task :resilience4j-consumer:clean
+> Task :resilience4j-core:clean
+> Task :resilience4j-feign:clean
+> Task :resilience4j-framework-common:clean
+> Task :resilience4j-hedge:clean
+> Task :resilience4j-kotlin:clean
+> Task :resilience4j-metrics:clean
+> Task :resilience4j-micrometer:clean
+> Task :resilience4j-micronaut:clean
+> Task :resilience4j-micronaut-annotation:clean
+> Task :resilience4j-ratelimiter:clean
+> Task :resilience4j-reactor:clean
+> Task :resilience4j-retry:clean
+> Task :resilience4j-rxjava2:clean
+> Task :resilience4j-rxjava3:clean
+> Task :resilience4j-spring-boot3:clean
+> Task :resilience4j-spring-boot4:clean
+> Task :resilience4j-spring6:clean
+> Task :resilience4j-test:clean
+> Task :resilience4j-timelimiter:clean
+> Task :resilience4j-vavr:clean
+> Task :compileJava NO-SOURCE
+> Task :processResources NO-SOURCE
+> Task :classes UP-TO-DATE
+> Task :jar
+> Task :assemble
+> Task :compileTestJava NO-SOURCE
+> Task :processTestResources NO-SOURCE
+> Task :testClasses UP-TO-DATE
+> Task :test NO-SOURCE
+> Task :resilience4j-core:compileJava FROM-CACHE
+> Task :resilience4j-bulkhead:compileJava FROM-CACHE
+> Task :resilience4j-cache:compileJava FROM-CACHE
+> Task :resilience4j-circuitbreaker:compileJava FROM-CACHE
+> Task :resilience4j-ratelimiter:compileJava FROM-CACHE
+> Task :resilience4j-retry:compileJava FROM-CACHE
+> Task :resilience4j-timelimiter:compileJava FROM-CACHE
+> Task :resilience4j-micrometer:compileJava FROM-CACHE
+> Task :resilience4j-all:compileJava FROM-CACHE
+> Task :resilience4j-all:processResources NO-SOURCE
+> Task :resilience4j-all:classes UP-TO-DATE
+> Task :resilience4j-bulkhead:processResources NO-SOURCE
+> Task :resilience4j-bulkhead:classes UP-TO-DATE
+> Task :resilience4j-core:processResources NO-SOURCE
+> Task :resilience4j-core:classes UP-TO-DATE
+> Task :resilience4j-core:jar
+> Task :resilience4j-bulkhead:jar
+> Task :resilience4j-cache:processResources NO-SOURCE
+> Task :resilience4j-cache:classes UP-TO-DATE
+> Task :resilience4j-cache:jar
+> Task :resilience4j-circuitbreaker:processResources NO-SOURCE
+> Task :resilience4j-circuitbreaker:classes UP-TO-DATE
+> Task :resilience4j-circuitbreaker:jar
+> Task :resilience4j-micrometer:processResources NO-SOURCE
+> Task :resilience4j-micrometer:classes UP-TO-DATE
+> Task :resilience4j-ratelimiter:processResources NO-SOURCE
+> Task :resilience4j-ratelimiter:classes UP-TO-DATE
+> Task :resilience4j-ratelimiter:jar
+> Task :resilience4j-retry:processResources NO-SOURCE
+> Task :resilience4j-retry:classes UP-TO-DATE
+> Task :resilience4j-retry:jar
+> Task :resilience4j-timelimiter:processResources NO-SOURCE
+> Task :resilience4j-timelimiter:classes UP-TO-DATE
+> Task :resilience4j-timelimiter:jar
+> Task :resilience4j-micrometer:jar
+> Task :resilience4j-all:jar
+> Task :resilience4j-all:javadoc FROM-CACHE
+> Task :resilience4j-all:javadocJar
+> Task :resilience4j-all:sourcesJar
+> Task :resilience4j-test:compileJava FROM-CACHE
+> Task :resilience4j-all:compileTestJava FROM-CACHE
+> Task :resilience4j-all:processTestResources
+> Task :resilience4j-all:testClasses
+> Task :resilience4j-test:processResources NO-SOURCE
+> Task :resilience4j-test:classes UP-TO-DATE
+> Task :resilience4j-test:jar
+> Task :resilience4j-all:test FROM-CACHE
+> Task :resilience4j-annotations:compileJava FROM-CACHE
+> Task :resilience4j-annotations:processResources NO-SOURCE
+> Task :resilience4j-annotations:classes UP-TO-DATE
+> Task :resilience4j-annotations:jar
+> Task :resilience4j-annotations:javadoc FROM-CACHE
+> Task :resilience4j-annotations:javadocJar
+> Task :resilience4j-annotations:sourcesJar
+> Task :resilience4j-annotations:compileTestJava NO-SOURCE
+> Task :resilience4j-annotations:processTestResources NO-SOURCE
+> Task :resilience4j-annotations:testClasses UP-TO-DATE
+> Task :resilience4j-annotations:test NO-SOURCE
+> Task :resilience4j-bulkhead:javadoc FROM-CACHE
+> Task :resilience4j-bulkhead:javadocJar
+> Task :resilience4j-bulkhead:sourcesJar
+> Task :resilience4j-bulkhead:compileTestJava FROM-CACHE
+> Task :resilience4j-bulkhead:processTestResources NO-SOURCE
+> Task :resilience4j-bulkhead:testClasses UP-TO-DATE
+> Task :resilience4j-bulkhead:test FROM-CACHE
+> Task :resilience4j-cache:javadoc FROM-CACHE
+> Task :resilience4j-cache:javadocJar
+> Task :resilience4j-cache:sourcesJar
+> Task :resilience4j-rxjava2:compileJava FROM-CACHE
+> Task :resilience4j-cache:compileTestJava FROM-CACHE
+> Task :resilience4j-cache:processTestResources NO-SOURCE
+> Task :resilience4j-cache:testClasses UP-TO-DATE
+> Task :resilience4j-rxjava2:processResources NO-SOURCE
+> Task :resilience4j-rxjava2:classes UP-TO-DATE
+> Task :resilience4j-rxjava2:jar
+> Task :resilience4j-cache:test FROM-CACHE
+> Task :resilience4j-circuitbreaker:javadoc FROM-CACHE
+> Task :resilience4j-circuitbreaker:javadocJar
+> Task :resilience4j-circuitbreaker:sourcesJar
+> Task :resilience4j-circuitbreaker:compileTestJava FROM-CACHE
+> Task :resilience4j-circuitbreaker:processTestResources NO-SOURCE
+> Task :resilience4j-circuitbreaker:testClasses UP-TO-DATE
+> Task :resilience4j-circuitbreaker:test FROM-CACHE
+> Task :resilience4j-circularbuffer:compileJava FROM-CACHE
+> Task :resilience4j-circularbuffer:processResources NO-SOURCE
+> Task :resilience4j-circularbuffer:classes UP-TO-DATE
+> Task :resilience4j-circularbuffer:jar
+> Task :resilience4j-circularbuffer:javadoc FROM-CACHE
+> Task :resilience4j-circularbuffer:javadocJar
+> Task :resilience4j-circularbuffer:sourcesJar
+> Task :resilience4j-circularbuffer:compileTestJava FROM-CACHE
+> Task :resilience4j-circularbuffer:processTestResources NO-SOURCE
+> Task :resilience4j-circularbuffer:testClasses UP-TO-DATE
+> Task :resilience4j-circularbuffer:test FROM-CACHE
+> Task :resilience4j-framework-common:compileJava FROM-CACHE
+> Task :resilience4j-commons-configuration:compileJava FROM-CACHE
+> Task :resilience4j-commons-configuration:processResources NO-SOURCE
+> Task :resilience4j-commons-configuration:classes UP-TO-DATE
+> Task :resilience4j-framework-common:processResources NO-SOURCE
+> Task :resilience4j-framework-common:classes UP-TO-DATE
+> Task :resilience4j-framework-common:jar
+> Task :resilience4j-commons-configuration:jar
+> Task :resilience4j-commons-configuration:javadoc FROM-CACHE
+> Task :resilience4j-commons-configuration:javadocJar
+> Task :resilience4j-commons-configuration:sourcesJar
+> Task :resilience4j-commons-configuration:compileTestJava FROM-CACHE
+> Task :resilience4j-commons-configuration:processTestResources
+> Task :resilience4j-commons-configuration:testClasses
+> Task :resilience4j-commons-configuration:test FROM-CACHE
+> Task :resilience4j-consumer:compileJava FROM-CACHE
+> Task :resilience4j-consumer:processResources NO-SOURCE
+> Task :resilience4j-consumer:classes UP-TO-DATE
+> Task :resilience4j-consumer:jar
+> Task :resilience4j-consumer:javadoc FROM-CACHE
+> Task :resilience4j-consumer:javadocJar
+> Task :resilience4j-consumer:sourcesJar
+> Task :resilience4j-consumer:compileTestJava FROM-CACHE
+> Task :resilience4j-consumer:processTestResources NO-SOURCE
+> Task :resilience4j-consumer:testClasses UP-TO-DATE
+> Task :resilience4j-consumer:test FROM-CACHE
+> Task :resilience4j-core:javadoc FROM-CACHE
+> Task :resilience4j-core:javadocJar
+> Task :resilience4j-core:sourcesJar
+> Task :resilience4j-core:compileTestJava FROM-CACHE
+> Task :resilience4j-core:processTestResources NO-SOURCE
+> Task :resilience4j-core:testClasses UP-TO-DATE
+> Task :resilience4j-core:test FROM-CACHE
+> Task :resilience4j-feign:compileJava FROM-CACHE
+> Task :resilience4j-feign:processResources NO-SOURCE
+> Task :resilience4j-feign:classes UP-TO-DATE
+> Task :resilience4j-feign:jar
+> Task :resilience4j-feign:javadoc FROM-CACHE
+> Task :resilience4j-feign:javadocJar
+> Task :resilience4j-feign:sourcesJar
+> Task :resilience4j-feign:compileTestJava FROM-CACHE
+> Task :resilience4j-feign:processTestResources
+> Task :resilience4j-feign:testClasses
+> Task :resilience4j-feign:test FROM-CACHE
+> Task :resilience4j-framework-common:javadoc FROM-CACHE
+> Task :resilience4j-framework-common:javadocJar
+> Task :resilience4j-framework-common:sourcesJar
+> Task :resilience4j-framework-common:compileTestJava FROM-CACHE
+> Task :resilience4j-framework-common:processTestResources NO-SOURCE
+> Task :resilience4j-framework-common:testClasses UP-TO-DATE
+> Task :resilience4j-framework-common:test FROM-CACHE
+> Task :resilience4j-hedge:compileJava FROM-CACHE
+> Task :resilience4j-hedge:processResources NO-SOURCE
+> Task :resilience4j-hedge:classes UP-TO-DATE
+
+> Task :resilience4j-hedge:jar
+warning: Export io.github.resilience4j.hedge,  has 1,  private references [io.github.resilience4j.hedge.internal]
+
+> Task :resilience4j-hedge:javadoc FROM-CACHE
+> Task :resilience4j-hedge:javadocJar
+> Task :resilience4j-hedge:sourcesJar
+> Task :resilience4j-hedge:compileTestJava FROM-CACHE
+> Task :resilience4j-hedge:processTestResources NO-SOURCE
+> Task :resilience4j-hedge:testClasses UP-TO-DATE
+> Task :resilience4j-hedge:test FROM-CACHE
+> Task :resilience4j-kotlin:checkKotlinGradlePluginConfigurationErrors
+> Task :resilience4j-kotlin:compileKotlin FROM-CACHE
+> Task :resilience4j-kotlin:compileJava NO-SOURCE
+> Task :resilience4j-kotlin:processResources NO-SOURCE
+> Task :resilience4j-kotlin:classes UP-TO-DATE
+> Task :resilience4j-kotlin:jar
+> Task :resilience4j-kotlin:javadoc NO-SOURCE
+> Task :resilience4j-kotlin:javadocJar
+> Task :resilience4j-kotlin:sourcesJar
+> Task :resilience4j-micrometer:compileTestJava FROM-CACHE
+> Task :resilience4j-micrometer:processTestResources NO-SOURCE
+> Task :resilience4j-micrometer:testClasses UP-TO-DATE
+> Task :resilience4j-kotlin:compileTestKotlin FROM-CACHE
+> Task :resilience4j-kotlin:compileTestJava NO-SOURCE
+> Task :resilience4j-kotlin:processTestResources NO-SOURCE
+> Task :resilience4j-kotlin:testClasses UP-TO-DATE
+> Task :resilience4j-kotlin:test FROM-CACHE
+> Task :resilience4j-metrics:compileJava FROM-CACHE
+> Task :resilience4j-metrics:processResources NO-SOURCE
+> Task :resilience4j-metrics:classes UP-TO-DATE
+> Task :resilience4j-metrics:jar
+> Task :resilience4j-metrics:javadoc FROM-CACHE
+> Task :resilience4j-metrics:javadocJar
+> Task :resilience4j-metrics:sourcesJar
+> Task :resilience4j-metrics:compileTestJava FROM-CACHE
+> Task :resilience4j-metrics:processTestResources NO-SOURCE
+> Task :resilience4j-metrics:testClasses UP-TO-DATE
+> Task :resilience4j-metrics:test FROM-CACHE
+> Task :resilience4j-micrometer:javadoc FROM-CACHE
+> Task :resilience4j-micrometer:javadocJar
+> Task :resilience4j-micrometer:sourcesJar
+> Task :resilience4j-micrometer:test FROM-CACHE
+> Task :resilience4j-reactor:compileJava FROM-CACHE
+> Task :resilience4j-reactor:processResources NO-SOURCE
+> Task :resilience4j-reactor:classes UP-TO-DATE
+> Task :resilience4j-reactor:jar
+> Task :resilience4j-rxjava3:compileJava FROM-CACHE
+> Task :resilience4j-rxjava3:processResources NO-SOURCE
+> Task :resilience4j-rxjava3:classes UP-TO-DATE
+> Task :resilience4j-rxjava3:jar
+> Task :resilience4j-micronaut:compileJava FROM-CACHE
+> Task :resilience4j-micronaut:compileGroovy NO-SOURCE
+> Task :resilience4j-micronaut:processResources NO-SOURCE
+> Task :resilience4j-micronaut:classes UP-TO-DATE
+> Task :resilience4j-micronaut:jar
+> Task :resilience4j-micronaut:javadoc FROM-CACHE
+> Task :resilience4j-micronaut:javadocJar
+> Task :resilience4j-micronaut:sourcesJar
+> Task :resilience4j-micronaut-annotation:compileJava FROM-CACHE
+> Task :resilience4j-micronaut-annotation:processResources
+> Task :resilience4j-micronaut-annotation:classes
+> Task :resilience4j-micronaut-annotation:jar
+> Task :resilience4j-micronaut:compileTestJava NO-SOURCE
+> Task :resilience4j-micronaut:compileTestGroovy FROM-CACHE
+> Task :resilience4j-micronaut:processTestResources NO-SOURCE
+> Task :resilience4j-micronaut:testClasses UP-TO-DATE
+> Task :resilience4j-micronaut:test FROM-CACHE
+> Task :resilience4j-micronaut-annotation:javadoc FROM-CACHE
+> Task :resilience4j-micronaut-annotation:javadocJar
+> Task :resilience4j-micronaut-annotation:sourcesJar
+> Task :resilience4j-micronaut-annotation:compileTestJava NO-SOURCE
+> Task :resilience4j-micronaut-annotation:processTestResources NO-SOURCE
+> Task :resilience4j-micronaut-annotation:testClasses UP-TO-DATE
+> Task :resilience4j-micronaut-annotation:test NO-SOURCE
+> Task :resilience4j-ratelimiter:javadoc FROM-CACHE
+> Task :resilience4j-ratelimiter:javadocJar
+> Task :resilience4j-ratelimiter:sourcesJar
+> Task :resilience4j-ratelimiter:compileTestJava FROM-CACHE
+> Task :resilience4j-ratelimiter:processTestResources
+> Task :resilience4j-ratelimiter:testClasses
+> Task :resilience4j-ratelimiter:test FROM-CACHE
+> Task :resilience4j-reactor:javadoc FROM-CACHE
+> Task :resilience4j-reactor:javadocJar
+> Task :resilience4j-reactor:sourcesJar
+> Task :resilience4j-reactor:compileTestJava FROM-CACHE
+> Task :resilience4j-reactor:processTestResources NO-SOURCE
+> Task :resilience4j-reactor:testClasses UP-TO-DATE
+> Task :resilience4j-reactor:test FROM-CACHE
+> Task :resilience4j-retry:javadoc FROM-CACHE
+> Task :resilience4j-retry:javadocJar
+> Task :resilience4j-retry:sourcesJar
+> Task :resilience4j-retry:compileTestJava FROM-CACHE
+> Task :resilience4j-retry:processTestResources NO-SOURCE
+> Task :resilience4j-retry:testClasses UP-TO-DATE
+> Task :resilience4j-retry:test FROM-CACHE
+> Task :resilience4j-rxjava2:javadoc FROM-CACHE
+> Task :resilience4j-rxjava2:javadocJar
+> Task :resilience4j-rxjava2:sourcesJar
+> Task :resilience4j-rxjava2:compileTestJava FROM-CACHE
+> Task :resilience4j-rxjava2:processTestResources NO-SOURCE
+> Task :resilience4j-rxjava2:testClasses UP-TO-DATE
+> Task :resilience4j-rxjava2:test FROM-CACHE
+> Task :resilience4j-rxjava3:javadoc FROM-CACHE
+> Task :resilience4j-rxjava3:javadocJar
+> Task :resilience4j-rxjava3:sourcesJar
+> Task :resilience4j-rxjava3:compileTestJava FROM-CACHE
+> Task :resilience4j-rxjava3:processTestResources NO-SOURCE
+> Task :resilience4j-rxjava3:testClasses UP-TO-DATE
+> Task :resilience4j-rxjava3:test FROM-CACHE
+> Task :resilience4j-spring-boot3:processResources
+> Task :resilience4j-spring6:compileJava FROM-CACHE
+> Task :resilience4j-spring-boot3:compileJava FROM-CACHE
+> Task :resilience4j-spring-boot3:classes
+> Task :resilience4j-spring6:processResources NO-SOURCE
+> Task :resilience4j-spring6:classes UP-TO-DATE
+> Task :resilience4j-spring6:jar
+> Task :resilience4j-spring-boot3:jar
+> Task :resilience4j-spring-boot3:javadoc FROM-CACHE
+> Task :resilience4j-spring-boot3:javadocJar
+> Task :resilience4j-spring-boot3:sourcesJar
+> Task :resilience4j-spring-boot3:compileTestJava FROM-CACHE
+> Task :resilience4j-spring-boot3:processTestResources
+> Task :resilience4j-spring-boot3:testClasses
+> Task :resilience4j-spring-boot3:test FROM-CACHE
+> Task :resilience4j-spring-boot4:processResources
+> Task :resilience4j-spring-boot4:compileJava FROM-CACHE
+> Task :resilience4j-spring-boot4:classes
+> Task :resilience4j-spring-boot4:jar
+> Task :resilience4j-spring-boot4:javadoc FROM-CACHE
+> Task :resilience4j-spring-boot4:javadocJar
+> Task :resilience4j-spring-boot4:sourcesJar
+> Task :resilience4j-spring-boot4:compileTestJava FROM-CACHE
+> Task :resilience4j-spring-boot4:processTestResources
+> Task :resilience4j-spring-boot4:testClasses
+> Task :resilience4j-spring-boot4:test FROM-CACHE
+> Task :resilience4j-spring6:javadoc FROM-CACHE
+> Task :resilience4j-spring6:javadocJar
+> Task :resilience4j-spring6:sourcesJar
+> Task :resilience4j-spring6:compileTestJava FROM-CACHE
+> Task :resilience4j-spring6:processTestResources NO-SOURCE
+> Task :resilience4j-spring6:testClasses UP-TO-DATE
+> Task :resilience4j-spring6:test FROM-CACHE
+> Task :resilience4j-test:javadoc FROM-CACHE
+> Task :resilience4j-test:javadocJar
+> Task :resilience4j-test:sourcesJar
+> Task :resilience4j-test:compileTestJava NO-SOURCE
+> Task :resilience4j-test:processTestResources NO-SOURCE
+> Task :resilience4j-test:testClasses UP-TO-DATE
+> Task :resilience4j-test:test NO-SOURCE
+> Task :resilience4j-timelimiter:javadoc FROM-CACHE
+> Task :resilience4j-timelimiter:javadocJar
+> Task :resilience4j-timelimiter:sourcesJar
+> Task :resilience4j-timelimiter:compileTestJava FROM-CACHE
+> Task :resilience4j-timelimiter:processTestResources NO-SOURCE
+> Task :resilience4j-timelimiter:testClasses UP-TO-DATE
+> Task :resilience4j-timelimiter:test FROM-CACHE
+> Task :resilience4j-vavr:compileJava FROM-CACHE
+> Task :resilience4j-vavr:processResources NO-SOURCE
+> Task :resilience4j-vavr:classes UP-TO-DATE
+> Task :resilience4j-vavr:jar
+> Task :resilience4j-vavr:javadoc FROM-CACHE
+> Task :resilience4j-vavr:javadocJar
+> Task :resilience4j-vavr:sourcesJar
+> Task :resilience4j-vavr:compileTestJava FROM-CACHE
+> Task :resilience4j-vavr:processTestResources NO-SOURCE
+> Task :resilience4j-vavr:testClasses UP-TO-DATE
+> Task :resilience4j-vavr:test FROM-CACHE
+> Task :testCodeCoverageReport FROM-CACHE
+> Task :check UP-TO-DATE
+> Task :build
+> Task :resilience4j-all:assemble
+> Task :resilience4j-all:check UP-TO-DATE
+> Task :resilience4j-all:build
+> Task :resilience4j-annotations:assemble
+> Task :resilience4j-annotations:check UP-TO-DATE
+> Task :resilience4j-annotations:build
+> Task :resilience4j-bom:assemble UP-TO-DATE
+> Task :resilience4j-bom:check UP-TO-DATE
+> Task :resilience4j-bom:build UP-TO-DATE
+> Task :resilience4j-bulkhead:assemble
+> Task :resilience4j-bulkhead:check UP-TO-DATE
+> Task :resilience4j-bulkhead:build
+> Task :resilience4j-cache:assemble
+> Task :resilience4j-cache:check UP-TO-DATE
+> Task :resilience4j-cache:build
+> Task :resilience4j-circuitbreaker:assemble
+> Task :resilience4j-circuitbreaker:check UP-TO-DATE
+> Task :resilience4j-circuitbreaker:build
+> Task :resilience4j-circularbuffer:assemble
+> Task :resilience4j-circularbuffer:check UP-TO-DATE
+> Task :resilience4j-circularbuffer:build
+> Task :resilience4j-commons-configuration:assemble
+> Task :resilience4j-commons-configuration:check UP-TO-DATE
+> Task :resilience4j-commons-configuration:build
+> Task :resilience4j-consumer:assemble
+> Task :resilience4j-consumer:check UP-TO-DATE
+> Task :resilience4j-consumer:build
+> Task :resilience4j-core:assemble
+> Task :resilience4j-core:check UP-TO-DATE
+> Task :resilience4j-core:build
+> Task :resilience4j-feign:assemble
+> Task :resilience4j-feign:check UP-TO-DATE
+> Task :resilience4j-feign:build
+> Task :resilience4j-framework-common:assemble
+> Task :resilience4j-framework-common:check UP-TO-DATE
+> Task :resilience4j-framework-common:build
+> Task :resilience4j-hedge:assemble
+> Task :resilience4j-hedge:check UP-TO-DATE
+> Task :resilience4j-hedge:build
+> Task :resilience4j-kotlin:assemble
+> Task :resilience4j-kotlin:check UP-TO-DATE
+> Task :resilience4j-kotlin:build
+> Task :resilience4j-metrics:assemble
+> Task :resilience4j-metrics:check UP-TO-DATE
+> Task :resilience4j-metrics:build
+> Task :resilience4j-micrometer:assemble
+> Task :resilience4j-micrometer:check UP-TO-DATE
+> Task :resilience4j-micrometer:build
+> Task :resilience4j-micronaut:assemble
+> Task :resilience4j-micronaut:check UP-TO-DATE
+> Task :resilience4j-micronaut:build
+> Task :resilience4j-micronaut-annotation:assemble
+> Task :resilience4j-micronaut-annotation:check UP-TO-DATE
+> Task :resilience4j-micronaut-annotation:build
+> Task :resilience4j-ratelimiter:assemble
+> Task :resilience4j-ratelimiter:check UP-TO-DATE
+> Task :resilience4j-ratelimiter:build
+> Task :resilience4j-reactor:assemble
+> Task :resilience4j-reactor:check UP-TO-DATE
+> Task :resilience4j-reactor:build
+> Task :resilience4j-retry:assemble
+> Task :resilience4j-retry:check UP-TO-DATE
+> Task :resilience4j-retry:build
+> Task :resilience4j-rxjava2:assemble
+> Task :resilience4j-rxjava2:check UP-TO-DATE
+> Task :resilience4j-rxjava2:build
+> Task :resilience4j-rxjava3:assemble
+> Task :resilience4j-rxjava3:check UP-TO-DATE
+> Task :resilience4j-rxjava3:build
+> Task :resilience4j-spring-boot3:assemble
+> Task :resilience4j-spring-boot3:check UP-TO-DATE
+> Task :resilience4j-spring-boot3:build
+> Task :resilience4j-spring-boot4:assemble
+> Task :resilience4j-spring-boot4:check UP-TO-DATE
+> Task :resilience4j-spring-boot4:build
+> Task :resilience4j-spring6:assemble
+> Task :resilience4j-spring6:check UP-TO-DATE
+> Task :resilience4j-spring6:build
+> Task :resilience4j-test:assemble
+> Task :resilience4j-test:check UP-TO-DATE
+> Task :resilience4j-test:build
+> Task :resilience4j-timelimiter:assemble
+> Task :resilience4j-timelimiter:check UP-TO-DATE
+> Task :resilience4j-timelimiter:build
+> Task :resilience4j-vavr:assemble
+> Task :resilience4j-vavr:check UP-TO-DATE
+> Task :resilience4j-vavr:build
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.10/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 58s
+231 actionable tasks: 124 executed, 106 from cache, 1 up-to-date

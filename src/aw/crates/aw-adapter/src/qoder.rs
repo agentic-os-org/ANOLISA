@@ -345,11 +345,8 @@ pub(super) fn generate(
         .as_object_mut()
         .ok_or("Qoder hooks must be an object")?;
     for name in ["input.submit", "tool.before", "tool.after"] {
-        let selected = adapter::native_steps(
-            steps,
-            name,
-            name != "input.submit" && adapter::observation_enabled(document, target),
-        );
+        let observe = name != "input.submit" && adapter::observation_enabled(document, target);
+        let selected = adapter::native_steps(steps, name, observe);
         if selected.is_empty() {
             continue;
         }
@@ -373,16 +370,24 @@ pub(super) fn generate(
                 })
             })
             .collect();
+        // Selector misses still require event validation and their configured failure audit.
         let mut group = json!({"matcher": "*", "hooks": commands});
         if let Some(sequential) = spec["agents"][target]["qoder"].get("sequential") {
             group["sequential"] = sequential.clone();
         }
-        hooks
-            .entry(event_name(name)?)
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .ok_or("Qoder event hooks must be arrays")?
-            .push(group);
+        let native_events: &[&str] = if name == "tool.after" {
+            &["PostToolUse", "PostToolUseFailure"]
+        } else {
+            &[event_name(name)?]
+        };
+        for native in native_events {
+            hooks
+                .entry(*native)
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or("Qoder event hooks must be arrays")?
+                .push(group.clone());
+        }
         events.insert(
             name.into(),
             HookEvent {
@@ -402,7 +407,8 @@ pub(super) fn generate(
 }
 
 pub(super) fn normalize(binding: &NativeContext, name: &str, native: &Value) -> Result<Value> {
-    if native["hook_event_name"] != event_name(name)?
+    let failure = name == "tool.after" && native["hook_event_name"] == "PostToolUseFailure";
+    if (!failure && native["hook_event_name"] != event_name(name)?)
         || native["cwd"].as_str() != binding.cwd.to_str()
     {
         return Err("Qoder callback event or working directory does not match the binding".into());
@@ -430,12 +436,180 @@ pub(super) fn normalize(binding: &NativeContext, name: &str, native: &Value) -> 
     if native.get("tool_input").is_none() {
         return Err("Qoder callback has no tool_input".into());
     }
+    let result = if failure {
+        if !native["error"].is_string() {
+            return Err("Qoder failure callback requires error".into());
+        }
+        json!({"is_error":true,"error":native["error"],"is_interrupt":native["is_interrupt"]})
+    } else {
+        native.get("tool_response").cloned().unwrap_or(Value::Null)
+    };
     Ok(json!({
         "name": name,
         "agent": {"adapter": "qoder", "binding_id": binding.target, "instance_id": binding.instance_id},
         "session_id": session,
         "tool": {"name": tool, "native_name": tool, "call_id": call,
-                 "input": native["tool_input"], "result": native.get("tool_response").cloned().unwrap_or(Value::Null)},
+                 "input": native["tool_input"], "result": result},
         "native": native,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_callbacks_preserve_result_identity_and_register_both_routes() {
+        let document = json!({"spec":{"execution":{"default_event_budget_ms":1000},
+            "observation":{"enabled":true},"agents":{"qoder":{}},"events":{}}});
+        let step = aw_core::admission::AdmittedStep {
+            event: "tool.after".into(),
+            step_id: "record".into(),
+            provider: "fixture".into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["*".into()],
+            on_error: "report".into(),
+            execution: aw_core::admission::StepExecution::Provider {
+                operation: "record".into(),
+                effects: vec!["observe".into()],
+            },
+        };
+        let (settings, _) = generate(
+            json!({}),
+            &document,
+            "qoder",
+            &[step],
+            Path::new("/aw"),
+            Path::new("/binding"),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"],
+            settings["hooks"]["PostToolUse"]
+        );
+        let (reload, _) = reload::generate(
+            json!({}),
+            Path::new("/aw"),
+            Path::new("/binding"),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(
+            reload["hooks"]["PostToolUseFailure"][0]["hooks"][0]["args"][0],
+            "bridge"
+        );
+        let context = NativeContext {
+            target: "qoder".into(),
+            instance_id: "instance".into(),
+            cwd: "/tmp".into(),
+        };
+        let mut native = json!({"hook_event_name":"PostToolUseFailure","cwd":"/tmp",
+            "session_id":"session","tool_use_id":"call","tool_name":"Bash","tool_input":{},
+            "error":"failed","is_interrupt":false});
+        let event = normalize(&context, "tool.after", &native).unwrap();
+        assert_eq!(
+            event["tool"]["result"],
+            json!({"is_error":true,"error":"failed","is_interrupt":false})
+        );
+        assert_eq!(
+            crate::association::association(
+                "qoder",
+                &event,
+                Some(native.to_string().as_bytes()),
+                |bytes| serde_json::from_slice(bytes).ok()
+            )["status"],
+            "verified"
+        );
+        assert!(normalize(&context, "tool.before", &native).is_err());
+        native.as_object_mut().unwrap().remove("error");
+        assert!(normalize(&context, "tool.after", &native).is_err());
+    }
+
+    use aw_core::admission::{AdmittedStep, StepExecution};
+
+    fn qoder_step(event: &str, step_tools: Vec<&str>, on_error: &str) -> AdmittedStep {
+        AdmittedStep {
+            event: event.into(),
+            step_id: "scan-code".into(),
+            provider: "security".into(),
+            event_tools: vec!["*".into()],
+            step_tools: step_tools.into_iter().map(Into::into).collect(),
+            on_error: on_error.into(),
+            execution: StepExecution::Provider {
+                operation: "scan_code".into(),
+                effects: vec!["observe".into(), "block".into()],
+            },
+        }
+    }
+
+    #[test]
+    fn static_qoder_matcher_preserves_wildcard_for_validation_and_failure_audit() {
+        let doc = json!({
+            "spec": {
+                "execution": {"default_event_budget_ms": 2000},
+                "agents": {"qoder": {"adapter": "qoder"}},
+                "events": {}
+            }
+        });
+        let report_exact = [qoder_step(
+            "tool.before",
+            vec!["native:qoder:Bash"],
+            "report",
+        )];
+        let (settings, _) = generate(
+            json!({}),
+            &doc,
+            "qoder",
+            &report_exact,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+
+        let block_exact = [qoder_step(
+            "tool.before",
+            vec!["native:qoder:Bash"],
+            "block",
+        )];
+        let (block_settings, _) = generate(
+            json!({}),
+            &doc,
+            "qoder",
+            &block_exact,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(block_settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+
+        let mut observed_doc = doc.clone();
+        observed_doc["spec"]["agents"]["qoder"]["evidence"] = json!({"mode": "metadata_only"});
+        let (observed_settings, _) = generate(
+            json!({}),
+            &observed_doc,
+            "qoder",
+            &report_exact,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(observed_settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+
+        let wildcard = [qoder_step(
+            "tool.before",
+            vec!["execute_shell_command"],
+            "report",
+        )];
+        let (fallback_settings, _) = generate(
+            json!({}),
+            &doc,
+            "qoder",
+            &wildcard,
+            Path::new("/aw"),
+            Path::new("/binding.json"),
+        )
+        .unwrap();
+        assert_eq!(fallback_settings["hooks"]["PreToolUse"][0]["matcher"], "*");
+    }
 }

@@ -350,6 +350,11 @@ impl AuditStore {
     ///
     /// Pagination fields are ignored because aggregates describe every match.
     ///
+    /// The evidence-loss total reads the persisted enforcement state code, not
+    /// the serialized event text: an Agent display name or a policy identifier
+    /// that happens to spell the code names an identity, not lost evidence.
+    /// Malformed persisted JSON is skipped rather than failing the aggregate.
+    ///
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
@@ -362,7 +367,9 @@ impl AuditStore {
                                           AND result = 'blocked'
                                      THEN 1 ELSE 0 END), 0),
                         COALESCE(SUM(CASE WHEN event_type = 'enforcement_state'
-                                          AND event_json LIKE '%\"evidence_loss\"%'
+                                          AND json_valid(event_json)
+                                          AND json_extract(event_json, '$.event.code')
+                                              = 'evidence_loss'
                                      THEN 1 ELSE 0 END), 0)
                  FROM security_events
                  WHERE (?1 IS NULL OR occurred_at_ns >= ?1)

@@ -4,7 +4,8 @@
 
 本页用于组件接入与维护。安装和日常使用请阅读[用户指南](../../../../user-guide/zh/aw/security.md)。
 
-`aw-provider-sec-core` 让 AW 策略调用公共 `agent-sec-cli scan-code` 与 `scan-pii` 命令。
+`aw-provider-sec-core` 让 AW 策略通过公共 `agent-sec-cli`（`--transport cli`，默认）
+或直接经由本地 V2 daemon Unix Socket（`--transport daemon`）调用 sec-core 安全能力。
 配置指定哪些工具输入包含代码，以及发现风险后返回观察还是阻断候选效果。
 sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调用。
 
@@ -13,8 +14,10 @@ sec-core 提供扫描器与规则，AW 负责配置、协议校验和有界调�
 ## 前置条件与构建
 
 按 [sec-core 指南](../../../../user-guide/zh/agent-sec-core/index.md) 安装 sec-core。
-本桥接要求 Rust V2 CLI 支持 `--socket`、`--timeout-ms` 和
-`scan-code --code --language --mode`，且已有可访问的 sec-core daemon 正在运行。
+两种传输模式均要求已有可访问的 Rust V2 sec-core daemon 正在运行（`--socket`）。
+`--transport daemon` 直接经 Unix Socket 调用 daemon，无需 `agent-sec-cli`（`check_skill` 除外）；
+`--transport cli`（默认）和 `check_skill` 还要求 Rust V2 CLI（`--cli`）支持
+`--socket`、`--timeout-ms` 和 `scan-code --code --language --mode`。
 请核对部署版本的帮助；旧 Python CLI 未通过本桥接验收。
 AW 不向 sec-core 添加命令或依赖。
 
@@ -29,11 +32,12 @@ cargo build --locked -p aw-host --example host
 Provider 二进制位于 `../../providers/agent-sec-core/target/debug/aw-provider-sec-core`，启动参数为：
 
 ```text
-aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
+aw-provider-sec-core [--transport cli|daemon] [--cli ABSOLUTE_PATH] --socket ABSOLUTE_PATH [--wait-for-backend]
 ```
 
-`--cli` 指定公开的 `agent-sec-cli` 可执行文件，`--socket` 指定其已有 daemon。
-两个路径均必填且必须为绝对路径，`--help` 输出用法。进程从 stdin 读取一份以 EOF
+`--transport` 选择 `cli`（默认）或 `daemon`。`--socket` 指定已有 daemon Unix socket，
+始终必填且必须为绝对路径。`--cli` 指定公开的 `agent-sec-cli` 绝对路径，在
+`--transport cli`（默认）或策略调用 `check_skill` 时必填，纯 `--transport daemon` 下可省略。`--help` 输出用法。进程从 stdin 读取一份以 EOF
 结束的 AW Provider JSON 请求，并向 stdout 写入一份响应。通常由 Host 启动。
 
 ## 重叠后端与 Agent 启动
@@ -46,9 +50,12 @@ sec-core 与 Agent 并行启动。受保护工作开始前仍需完成 AW Servic
 aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH --wait-for-backend
 ```
 
+可传入 `--transport daemon`（默认 `cli`），使 `scan_code`、`scan_prompt`、`scan_user_input`、`scan_tool_input`、`scan_tool_output` 和 `check_final_tool_output` 直接通过本地 sec-core V2 daemon Unix Socket 执行（包含 `SO_PEERCRED` UID 0 校验、严格 `DaemonRequest` / `TraceCarrierV1` `version: 1` 协议帧、单次有界超时且不重试）。当使用 `--transport daemon` 且未提供 `--cli` 时，`describe` 省略 `check_skill`，使依赖 `check_skill` 的策略在 Host 准备与准入期即被拒绝；切回 `--transport cli` 即可回退。
+
 能力发现、配置校验和 `observe_tool` 不等待后端。扫描或 Skill 检查仅在配置的 socket
 尚未出现时等待，等待与实际检查共享本次调用的总预算。socket 出现不代表健康或安全判定：
-公开 CLI 仍会验证服务端身份、准备所需能力并执行检查；扫描不会重试。
+`--transport cli` 仍由公开 CLI 验证服务端身份、准备所需能力并执行检查，而 `--transport daemon`
+在发送单帧严格 V2 `DaemonRequest` 前直接校验 `SO_PEERCRED` UID `0`；两种模式均不重试失败扫描。
 到期仍无 socket、路径类型错误及实际检查失败均返回 Provider 错误，由已配置的
 `on_error` 处理。未指定该参数时保留原有的直接 CLI 调用方式。
 
@@ -225,9 +232,11 @@ input.submit:
       on_error: block
 ```
 
-`scan_prompt` 读取 `event.input.text`，调用公共 V2 CLI 的
-`scan-prompt --mode fast --source user_input --format json`，文本通过 stdin 传入。
-CLI 使用配置的 daemon socket 和剩余超时。fast 模式运行 L1 规则；私有配置校验
+`scan_prompt` 读取 `event.input.text` 并执行 fast 提示词扫描：`--transport cli`
+（默认）下调用公共 V2 CLI 的 `scan-prompt --mode fast --source user_input --format json`
+（文本经 stdin 传入）；`--transport daemon` 下直接经 daemon Unix socket 发送
+`action.prompt_scan` RPC（`mode: "fast"`、`source: "user_input"`）。两种模式均使用
+配置的 daemon socket 和剩余超时。fast 模式运行 L1 规则；私有配置校验
 拒绝 `standard`、`strict`、ML 模型选项和 `multi_turn`。全空白文本无需调用扫描器。
 其他响应须表明规则引擎完成了整个去除首尾空白后的输入扫描：截断、缺少检测层、
 降级、空输出、非法输出或 CLI 失败均返回 Provider 错误。Prompt Scanner 的
@@ -235,8 +244,9 @@ CLI 使用配置的 daemon socket 和剩余超时。fast 模式运行 L1 规则�
 观察或阻断；`on_error` 单独决定故障处置。响应只携带 `prompt_pass` 或
 `prompt_risk`，不含原文与发现详情。
 
-`scan_user_input` 将完整 `event.input.text` 交给共用 PII 扫描模块，调用
-`scan-pii --stdin --format json --source user_input`，保留当前 turn 的 trace context
+`scan_user_input` 将完整 `event.input.text` 交给共用 PII 扫描传输路径
+（`--transport cli` 下调用 `scan-pii --stdin --format json --source user_input`，
+`--transport daemon` 下直接发送 `action.pii_scan` RPC），保留当前 turn 的 trace context
 和剩余预算。模块检查来源、字节数和扫描完成状态。`pii.input_mode` 控制风险阻断，
 故障按 `on_error` 处理；响应仅携带 `pii_pass` 或 `pii_risk`。`output_mode` 属于共用
 PII 配置，此操作保留用户原文。
@@ -261,7 +271,7 @@ Qoder 等待公开 `UserPromptSubmit` 快照的检查结果，拒绝时返回原
 
 `pii.output_mode: replace_result` 命中后需要 Adapter 授权的文本投影。Provider 在私有副本中清空唯一对应文本，再用同一预算扫描保留结构。保留结构通过后返回固定安全提示 `Sensitive data detected by AW; content withheld.`，保留原生错误状态和元数据。缺失或歧义文本槽、保留字段仍含敏感信息时返回 `unsupported_pii_result`。后端脱敏文本不参与替换。安全的失败工具结果保留原错误语义；Qoder 的 `PostToolUseFailure` 无法替换错误文本，含 PII 时停止交付。
 
-必需检查使用输入 `on_error: block`、输出 `on_error: withhold_result`。CLI/后端不可用、非零退出、空或损坏响应、来源不符、截断或不完整扫描、字节数不符、自定义规则无效或失败均返回检查错误，与风险命中分开。文本仅经 stdin 传入，Provider 响应不含原文或 findings。共用 `pii::call` 同时提供 `Source::UserInput`，供提交阶段消费者复用。
+必需检查使用输入 `on_error: block`、输出 `on_error: withhold_result`。CLI/后端不可用（含 `--transport daemon` 下非 root peer）、非零退出或 daemon/协议错误、空或损坏响应、来源不符、截断或不完整扫描、字节数不符、自定义规则无效或失败均返回检查错误，与风险命中分开。`--transport cli` 下文本经 stdin 传入，`--transport daemon` 下文本经 root 属主的 daemon Unix socket 传入，Provider 响应均不含原文或 findings。共用 PII 传输同时提供 `Source::UserInput`，供提交阶段消费者复用。
 
 Qoder SDK 普通常驻 Query 返回原生 `updatedToolOutput` 替换指令；受限 `--reloadable` 模式在准入时拒绝替换。QwenPaw 普通 App 回复对选中替换或停止交付的工具流进行缓冲，Coordinator 的公开流同样等待最终采用。生产配置按实际工具选择范围。多文本块、媒体、托管 MCP 和后台结果交付需要分别完成原生验收；Post 回调本身不能证明这些模式采用了替换。
 

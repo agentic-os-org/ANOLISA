@@ -8,8 +8,9 @@
 Pi Adapter 支持公开的 Coding Agent/Core SDK
 `@earendil-works/pi-coding-agent` 和 `@earendil-works/pi-agent-core`，
 使用 Linux 与 Node.js >=22.19.0。入口为 `sdk`：AW 管理的前台 worker 导入应用
-工厂。两个 SDK 的已验证基线均为 0.84.2，其他版本需保留 Agent/AgentSession 与
-工具生命周期接口。原生 Pi CLI 不在这个合同内。
+工厂。公开工厂、输入提交和严格输出验收覆盖 0.84.2–1.5.2 的 24 个已发布同版配对，
+安装条件见 Pi 接入指南；其他版本需保留 Agent/AgentSession 与工具生命周期接口。
+原生 Pi CLI 不在这个合同内。
 
 ## 工厂与生命周期
 
@@ -101,8 +102,10 @@ after 的取消路径。保留 Pi 顺序准备、并行执行的调度：after �
 ## 严格工具输出
 
 为 `scan_tool_output` 配置 `on_error: withhold_result`，要求工具数据进入模型或
-Agent 订阅者前完成检查。此路由要求两个 Pi 包均为 0.84.2，使用已验证的
-`Agent.processEvents` 交付边界。目标包含任一严格 after 路由时，AW 抑制该目标全部
+Agent 订阅者前完成检查。此路由要求两个 Pi 包版本相同且为正式版，处于
+0.84.2–1.5.2 闭区间。24 个已发布配对均通过针对 `Agent.processEvents` 交付边界的
+原生最终事件用例；预发布版、混装版本和后续新版本须另行验收后才能启用严格输出。
+目标包含任一严格 after 路由时，AW 抑制该目标全部
 `tool_execution_update`，包括路由选择器范围外的工具。原生最终事件携带采用后的
 结果，不重放中间 chunk。未配置严格 after 路由的目标保留原生流及 Tokenless report 行为。
 
@@ -111,7 +114,8 @@ Agent 订阅者前完成检查。此路由要求两个 Pi 包均为 0.84.2，使
 原本保留的 execute 额外字段。工具或回调持有的引用在 Provider 调用、清理和最终
 交付期间发生变化，不会改变已检查的结果。
 
-PII 风险复用已校验的文本替换，保留原生状态和 metadata。检查失败或保留字段包含
+原生 after 回调可覆盖 `structuredContent`；只覆盖文本时删除旧结构化字段。
+AW 文本替换同样删除旧字段，并保留其余原生状态和 metadata。检查失败或保留字段包含
 敏感数据时，SDK 错误路径丢弃整个原结果并提供固定占位文本。私有 `aw_withheld`
 回复只由已审计的 Provider 故障产生，原生 Hook 无法伪造。协议、身份、取消和清理
 故障继续沿用受管任务的失败处理。
@@ -178,7 +182,7 @@ python3 crates/aw-cli/tests/fixtures/pi/submission-smoke.py \
   --output target/pi-submission
 ```
 
-此入口运行 Pi 0.84.2、AW 和真实 sec-core Provider，模型使用本地 HTTP 端点，扫描使用
+此入口运行 Pi 1.3.0、AW 和真实 sec-core Provider，模型使用本地 HTTP 端点，扫描使用
 受控 CLI。覆盖原文保留、风险/PII 拒绝与恢复、Provider 非零退出/超时/非法输出的
 block/report 语义、input/context/provider-request 扩展拒绝、其他输入入口、并行会话/并发 prompt、abort/dispose
 及资源回收。模型端点独立断言被拒输入不得到达。扫描夹具不代表 sec-core 规则效果或

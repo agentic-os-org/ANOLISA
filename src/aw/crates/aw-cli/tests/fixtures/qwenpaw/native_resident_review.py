@@ -259,8 +259,10 @@ class ReviewResidentTests(NativeFixture):
             entry.stream.add_subscriber(subscriber)
             release.set()
             results = await asyncio.wait_for(task, 2)
-            self.assertEqual(len(results), 1)
-            self.assertEqual(results[0].content[0].text, "[redacted]")
+            self.assertEqual(len(results), 2)
+            self.assertIsInstance(results[0], ToolChunk)
+            self.assertIsInstance(results[1], ToolResponse)
+            self.assertEqual([item.content[0].text for item in results], ["[redacted]", "[redacted]"])
             self.assertNotIn("split-secret", json.dumps(after))
             self.assertNotIn("split-secret", json.dumps(mw.scope.callbacks))
             while not subscriber.empty():

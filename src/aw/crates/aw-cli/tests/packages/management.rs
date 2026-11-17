@@ -215,3 +215,110 @@ fn recover_on_an_absent_database_is_read_only_and_has_a_stable_report() {
     );
     assert_eq!(before, snapshot(&f.root));
 }
+
+#[test]
+fn blocked_human_plans_only_write_stderr_and_json_retains_the_plan() {
+    let f = Fixture::new();
+    for installed in [false, true] {
+        if installed {
+            success(f.install().output().unwrap());
+            fs::write(f.prefix.join("bin/provider"), b"changed").unwrap();
+        }
+        for execution in ["--dry-run", "--yes"] {
+            for quiet in [false, true] {
+                let mut command = f.command();
+                command
+                    .args(["uninstall", execution, "--prefix"])
+                    .arg(&f.prefix);
+                if quiet {
+                    command.arg("--quiet");
+                }
+                let output = invoke(&command);
+                assert_eq!(output.status.code(), Some(1));
+                assert!(
+                    output.stdout.is_empty(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(if installed {
+                        "file_changed"
+                    } else {
+                        "not_installed"
+                    })
+                );
+            }
+            let output = report(
+                f.command()
+                    .args(["uninstall", execution, "--json", "--prefix"])
+                    .arg(&f.prefix),
+                1,
+            );
+            assert_eq!(output["error"]["code"], "plan_blocked");
+            assert_eq!(output["result"]["kind"], "package_planned");
+        }
+    }
+}
+
+#[test]
+fn keep_changed_previews_and_reports_paths_without_deleting_them() {
+    let f = Fixture::new();
+    success(f.install().output().unwrap());
+    let changed = f.prefix.join("bin/provider");
+    fs::write(&changed, b"user changes").unwrap();
+    let before = snapshot(&f.root);
+    let preview = report(
+        f.command()
+            .args([
+                "uninstall",
+                "--keep-changed",
+                "--dry-run",
+                "--json",
+                "--prefix",
+            ])
+            .arg(&f.prefix),
+        0,
+    );
+    assert_eq!(
+        preview["result"]["plan"]["preserved"][0]["path"],
+        "bin/provider"
+    );
+    assert_eq!(before, snapshot(&f.root));
+    let unconfirmed = report(
+        f.command()
+            .args(["uninstall", "--keep-changed", "--json", "--prefix"])
+            .arg(&f.prefix),
+        1,
+    );
+    assert_eq!(unconfirmed["error"]["code"], "confirmation_required");
+    assert_eq!(before, snapshot(&f.root));
+    let result = report(
+        f.command()
+            .args(["uninstall", "--keep-changed", "--yes", "--json", "--prefix"])
+            .arg(&f.prefix),
+        0,
+    );
+    assert_eq!(result["result"]["kind"], "uninstalled");
+    assert_eq!(
+        result["result"]["preserved"],
+        preview["result"]["plan"]["preserved"]
+    );
+    assert_eq!(fs::read(changed).unwrap(), b"user changes");
+}
+
+#[test]
+fn keep_changed_recovers_a_deleted_prefix_and_allows_reinstallation() {
+    let f = Fixture::new();
+    success(f.install().output().unwrap());
+    fs::remove_dir_all(&f.prefix).unwrap();
+    let result = report(
+        f.command()
+            .args(["uninstall", "--keep-changed", "--yes", "--json", "--prefix"])
+            .arg(&f.prefix),
+        0,
+    );
+    assert_eq!(result["result"]["kind"], "uninstalled");
+    assert!(!result["result"]["preserved"].as_array().unwrap().is_empty());
+    success(f.install().output().unwrap());
+    assert!(f.prefix.join("bin/provider").is_file());
+}

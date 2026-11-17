@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = process.env.FAKE_ROOT;
+writeFileSync(join(root, "business-imported"), "yes");
 let calls = 0;
 let aborts = 0;
 let disposals = 0;
@@ -42,6 +43,13 @@ export async function runWorker({ createSession, args }) {
   await first.session.prompt("risk");
   assert.equal(calls, 1, "empty initial policy must allow dispatch");
   await first.close();
+  if (process.env.PI_REJECT_STRICT === "0") {
+    const strict = update("strict.json");
+    assert.equal(strict.status, 0, strict.stderr);
+    const strictTask = await createSession({ cwd: root });
+    await strictTask.session.prompt("safe");
+    await strictTask.close();
+  }
   const changed = update();
   assert.equal(changed.status, 0, changed.stderr);
   const { Scope } = await import(pathToFileURL(join(dirname(process.env.AW_NATIVE_CONFIG), "scope.mjs")));
@@ -49,15 +57,18 @@ export async function runWorker({ createSession, args }) {
   Scope.prototype.acknowledge = async () => { throw new Error("fixture acknowledgement failure"); };
   try {
     await assert.rejects(createSession({ cwd: root }), /fixture acknowledgement failure/);
-    assert.equal(aborts, 2, "failed acknowledgement must abort the native session");
-    assert.equal(disposals, 2, "failed acknowledgement must dispose the native session");
+    assert.equal(aborts, process.env.PI_REJECT_STRICT === "0" ? 3 : 2,
+      "failed acknowledgement must abort the native session");
+    assert.equal(disposals, process.env.PI_REJECT_STRICT === "0" ? 3 : 2,
+      "failed acknowledgement must dispose the native session");
   } finally { Scope.prototype.acknowledge = acknowledge; }
   assert.equal(update().status, 0, "confirmed failed-start cleanup must release occupancy");
   const second = await createSession({ cwd: root });
   await assert.rejects(second.session.prompt("risk"), /AW|blocked/);
-  assert.equal(calls, 1, "updated denial must precede model dispatch");
+  assert.equal(calls, process.env.PI_REJECT_STRICT === "0" ? 2 : 1,
+    "updated denial must precede model dispatch");
   await second.session.prompt("safe");
-  assert.equal(calls, 2);
+  assert.equal(calls, process.env.PI_REJECT_STRICT === "0" ? 3 : 2);
   await second.close();
   writeFileSync(join(root, "native-result.json"), JSON.stringify({
     passed: true, pid: process.pid, instance_id: binding.instance_id,

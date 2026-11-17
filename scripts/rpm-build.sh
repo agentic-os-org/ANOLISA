@@ -459,19 +459,19 @@ build_agentic_os_skills() {
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"
 
-    # Copy skill directories
-    for dir in ai aliyun devops monitor-perf others security system-admin; do
-        [ -d "${SKILLS_DIR}/${dir}" ] && cp -rp "${SKILLS_DIR}/${dir}" "$pkg_dir/"
-    done
-    
+    # Filter Source0 before packaging, so all RPM inputs contain only released skills.
+    local catalog="${SKILLS_DIR}/packaging/release_catalog.py"
+    if ! python3 "$catalog" stage "$SKILLS_DIR" "$pkg_dir" --layout source ||
+        ! python3 "$catalog" manifest "$SKILLS_DIR" "$pkg_dir/component.toml"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
     if [ -f "${SKILLS_DIR}/LICENSE" ]; then
         cp -L "${SKILLS_DIR}/LICENSE" "$pkg_dir/"
     elif [ -f "${ROOT_DIR}/LICENSE" ]; then
         cp "${ROOT_DIR}/LICENSE" "$pkg_dir/"
     fi
-
-    # component.toml — spec %install installs it to %{_datadir}/anolisa/components/os-skills/
-    [ -f "${SKILLS_DIR}/component.toml" ] && cp "${SKILLS_DIR}/component.toml" "$pkg_dir/"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"

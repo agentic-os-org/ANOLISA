@@ -209,7 +209,7 @@ fn malformed_queries_and_unsupported_output_flags_never_succeed() {
 }
 
 #[test]
-fn missing_uninstall_dry_run_reports_a_plan_without_writes() {
+fn missing_uninstall_dry_run_reports_only_stderr_without_writes() {
     let directory = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
@@ -225,9 +225,7 @@ fn missing_uninstall_dry_run_reports_a_plan_without_writes() {
         directory.path(),
     );
     assert_eq!(output.status.code(), Some(1));
-    let plan = String::from_utf8(output.stdout).unwrap();
-    assert!(plan.starts_with("Removal plan for "));
-    assert!(plan.contains("Plan only; no files were created or changed."));
+    assert!(output.stdout.is_empty());
     assert!(String::from_utf8(output.stderr)
         .unwrap()
         .contains("not_installed"));

@@ -388,6 +388,46 @@ mod tests {
         );
         assert_eq!(
             MessageId::LoginRecoveryMissing as usize + 1,
+            MessageId::CoshRootHelp as usize
+        );
+        assert_eq!(
+            MessageId::CoshRootHelp as usize + 1,
+            MessageId::GuideWizardTitle as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiManage as usize + 1,
+            MessageId::GuideWizardTipsAnalysis as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardCancel as usize + 1,
+            MessageId::GuideWizardLoginSet as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardConfigUnreadable as usize + 1,
+            MessageId::GuideWizardDataClearConfirm as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardDataClearConfirm as usize + 1,
+            MessageId::GuideWizardLoginOtherGuidance as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardLoginRereadDone as usize + 1,
+            MessageId::GuideWizardAiAsk as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiSourceRuntime as usize + 1,
+            MessageId::HealthSessionPromptAnalyzeMemoryPressure as usize
+        );
+        assert_eq!(
+            MessageId::HealthSessionPromptInspectProcessMemory as usize + 1,
+            MessageId::SuggestionListTitle as usize
+        );
+        assert_eq!(
+            MessageId::SuggestionShortcutAsk as usize + 1,
+            MessageId::GuideWizardDetailHint as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardPartialSessionRecord as usize + 1,
             MessageId::ALL.len()
         );
     }

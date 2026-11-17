@@ -153,6 +153,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ("step", Some(value.step)),
                 ("on-error", Some(value.on_error)),
                 ("close-event", value.close_event),
+                ("event-receipt", value.event_receipt),
             ]),
         ),
         Command::Scope(value) => crate::runtime(

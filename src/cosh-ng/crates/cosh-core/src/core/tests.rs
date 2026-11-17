@@ -705,6 +705,7 @@ async fn raw_shell_input_reaches_prompt_hook_without_changing_provider_content()
         timeout: Some(5_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }];
     let mut core = CoshCore::new_legacy(config, Box::new(provider), ToolRegistry::new());
@@ -743,6 +744,7 @@ async fn prompt_hook_falls_back_to_content_without_raw_shell_input() {
         timeout: Some(5_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }];
     let mut core = CoshCore::new_legacy(config, Box::new(provider), ToolRegistry::new());
@@ -846,6 +848,7 @@ fn compress_schema_hook(command: &str) -> crate::config::HookDefinition {
         timeout: Some(10_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }
 }
@@ -2172,6 +2175,7 @@ fn sandbox_bypass_hook(marker: &std::path::Path) -> crate::config::HookDefinitio
         timeout: Some(10_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }
 }
@@ -2819,6 +2823,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             timeout: Some(5000),
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }],
         post_tool_use: vec![config::HookDefinition {
@@ -2829,6 +2834,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             timeout: Some(5000),
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }],
         ..Default::default()
@@ -4029,6 +4035,7 @@ fn ask_hook(name: &str) -> crate::config::HookDefinition {
         timeout: Some(10_000),
         sequential: None,
         fail_open: false,
+        require_output_when_env: None,
         env: Default::default(),
     }
 }
@@ -4473,6 +4480,7 @@ async fn hook_block_releases_staged_call_with_provider_native_result() {
             timeout: Some(5000),
             sequential: None,
             fail_open: false,
+            require_output_when_env: None,
             env: Default::default(),
         }],
         ..Default::default()

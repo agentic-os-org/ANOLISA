@@ -314,7 +314,8 @@ fn externally_managed_installations_reject_raw_install_and_uninstall() {
             let before = snapshot(fixture.directory.path());
             let addition = plan::install(&fixture.paths, &extra, &fixture.prefix).unwrap();
             let removal = plan::uninstall(&fixture.paths, &fixture.prefix, &[]).unwrap();
-            for plan in [&addition, &removal] {
+            let recovery = keep_changed(&fixture, &[]);
+            for plan in [&addition, &removal, &recovery] {
                 assert!(!plan.ready(), "{manager}, empty={empty}");
                 let blocker = if empty && plan.action == plan::Action::Uninstall {
                     "not_installed"
@@ -331,4 +332,263 @@ fn externally_managed_installations_reject_raw_install_and_uninstall() {
             assert!(fixture.prefix.join("bin/base").is_file());
         }
     }
+}
+
+fn keep_changed(fixture: &Fixture, ids: &[String]) -> plan::PackagePlan {
+    plan::uninstall_with_options(
+        &fixture.paths,
+        &fixture.prefix,
+        ids,
+        plan::UninstallOptions { keep_changed: true },
+    )
+    .unwrap()
+}
+
+#[test]
+fn recovery_removes_verified_files_and_records_while_retaining_changed_and_unknown_paths() {
+    for drift in [
+        "content",
+        "mode",
+        "missing",
+        "symlink",
+        "directory",
+        "socket",
+        "parent_symlink",
+    ] {
+        let fixture = Fixture::new();
+        fixture.install(&fixture.bundle("example.base", "1.0.0", "share/base", &[]));
+        fixture.install(&fixture.bundle("example.tool", "1.0.0", "bin/tool", &[]));
+        let changed = fixture.prefix.join("share/base");
+        let outside = fixture.directory.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("base"), b"outside data").unwrap();
+        match drift {
+            "content" => fs::write(&changed, b"user changes").unwrap(),
+            "mode" => fs::set_permissions(&changed, fs::Permissions::from_mode(0o644)).unwrap(),
+            "missing" => fs::remove_file(&changed).unwrap(),
+            "symlink" => {
+                fs::remove_file(&changed).unwrap();
+                symlink(outside.join("base"), &changed).unwrap();
+            }
+            "directory" => {
+                fs::remove_file(&changed).unwrap();
+                fs::create_dir(&changed).unwrap();
+                fs::write(changed.join("user.txt"), b"user changes").unwrap();
+            }
+            "socket" => {
+                fs::remove_file(&changed).unwrap();
+                std::os::unix::net::UnixListener::bind(&changed).unwrap();
+            }
+            "parent_symlink" => {
+                fs::remove_dir_all(fixture.prefix.join("share")).unwrap();
+                symlink(&outside, fixture.prefix.join("share")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        fs::write(fixture.prefix.join("unknown"), b"unknown data").unwrap();
+        assert!(!plan::uninstall(&fixture.paths, &fixture.prefix, &[])
+            .unwrap()
+            .ready());
+        let before = snapshot(fixture.directory.path());
+        let removal = keep_changed(&fixture, &[]);
+        assert!(removal.ready(), "{drift}: {:?}", removal.problems);
+        assert_eq!(removal.preserved.len(), 1);
+        assert_eq!(removal.preserved[0].path, "share/base");
+        assert_eq!(removal.files.len(), 1);
+        assert_eq!(removal.files[0].path, "bin/tool");
+        assert_eq!(before, snapshot(fixture.directory.path()));
+        plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap();
+        assert!(!fixture.prefix.join("bin/tool").exists());
+        assert_eq!(
+            fs::read(fixture.prefix.join("unknown")).unwrap(),
+            b"unknown data"
+        );
+        assert_eq!(fs::read(outside.join("base")).unwrap(), b"outside data");
+        let after = snapshot(fixture.directory.path());
+        for (path, value) in &before {
+            if path.starts_with(fixture.prefix.join("share")) || path.starts_with(&outside) {
+                assert_eq!(after.get(path), Some(value), "{drift}: {}", path.display());
+            }
+        }
+        let inventory = Inventory::read(&fixture.paths, None).unwrap();
+        assert!(inventory.installations[0].packages.is_empty());
+        drop(inventory);
+        let reinstall = plan::install(
+            &fixture.paths,
+            &fixture.directory.path().join("bundle-example.base"),
+            &fixture.prefix,
+        )
+        .unwrap();
+        assert_eq!(reinstall.ready(), drift == "missing");
+    }
+}
+
+#[test]
+fn recovery_of_an_absent_prefix_clears_packages_and_preserves_registration_identity() {
+    let fixture = Fixture::new();
+    let bundle = fixture.bundle("example.base", "1.0.0", "bin/base", &[]);
+    fixture.install(&bundle);
+    let id = RegistrationPointer::read(&fixture.prefix)
+        .unwrap()
+        .unwrap()
+        .installation_id;
+    fs::remove_dir_all(&fixture.prefix).unwrap();
+    assert!(!plan::uninstall(&fixture.paths, &fixture.prefix, &[])
+        .unwrap()
+        .ready());
+    let removal = keep_changed(&fixture, &[]);
+    assert!(removal.ready(), "{:?}", removal.problems);
+    assert_eq!(removal.preserved.len(), 1);
+    assert!(removal.files.is_empty());
+    assert!(!fixture.prefix.exists());
+    plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        RegistrationPointer::read(&fixture.prefix)
+            .unwrap()
+            .unwrap()
+            .installation_id,
+        id
+    );
+    fixture.install(&bundle);
+}
+
+#[test]
+fn recovery_keeps_dependency_unselected_file_and_execution_checks() {
+    let fixture = Fixture::new();
+    fixture.install(&fixture.bundle("example.base", "1.0.0", "bin/base", &[]));
+    fixture.install(&fixture.bundle(
+        "example.tool",
+        "1.0.0",
+        "bin/tool",
+        &[("example.base", "1.0.0")],
+    ));
+    fs::write(fixture.prefix.join("bin/base"), b"user changes").unwrap();
+    let blocked = keep_changed(&fixture, &["example.base".into()]);
+    assert!(blocked
+        .problems
+        .iter()
+        .any(|problem| problem.code == "required_by"));
+    let blocked = keep_changed(&fixture, &["example.tool".into()]);
+    assert!(blocked
+        .problems
+        .iter()
+        .any(|problem| problem.code == "file_changed"));
+    let removal = keep_changed(&fixture, &[]);
+    assert!(removal.ready());
+    fs::write(fixture.prefix.join("bin/tool"), b"changed after planning").unwrap();
+    let before = snapshot(fixture.directory.path());
+    assert!(plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).is_err());
+    assert_eq!(before, snapshot(fixture.directory.path()));
+    let removal = keep_changed(&fixture, &[]);
+    fs::write(fixture.prefix.join("bin/base"), b"further edits").unwrap();
+    plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        fs::read(fixture.prefix.join("bin/base")).unwrap(),
+        b"further edits"
+    );
+    assert_eq!(
+        fs::read(fixture.prefix.join("bin/tool")).unwrap(),
+        b"changed after planning"
+    );
+}
+
+#[test]
+fn recovery_does_not_override_limits_permissions_or_prefix_safety() {
+    let fixture = Fixture::new();
+    fixture.install(&fixture.bundle("example.base", "1.0.0", "bin/base", &[]));
+    let file = fixture.prefix.join("bin/base");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_len(1024 * 1024 * 1024 + 1)
+        .unwrap();
+    let removal = keep_changed(&fixture, &[]);
+    assert!(!removal.ready());
+    assert!(removal.preserved.is_empty());
+    fs::write(&file, b"changed").unwrap();
+    // Root can read mode-000 files; exercise access failure under the ordinary test user.
+    // SAFETY: geteuid only observes process identity.
+    if unsafe { libc::geteuid() } != 0 {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        let removal = keep_changed(&fixture, &[]);
+        assert!(!removal.ready());
+        assert!(removal.preserved.is_empty());
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::set_permissions(&fixture.prefix, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(plan::uninstall_with_options(
+        &fixture.paths,
+        &fixture.prefix,
+        &[],
+        plan::UninstallOptions { keep_changed: true }
+    )
+    .is_err());
+    fs::set_permissions(&fixture.prefix, fs::Permissions::from_mode(0o755)).unwrap();
+    let moved = fixture.directory.path().join("moved");
+    fs::rename(&fixture.prefix, &moved).unwrap();
+    symlink(&moved, &fixture.prefix).unwrap();
+    assert!(plan::uninstall_with_options(
+        &fixture.paths,
+        &fixture.prefix,
+        &[],
+        plan::UninstallOptions { keep_changed: true }
+    )
+    .is_err());
+}
+
+#[test]
+fn recovery_retains_runtime_lock_and_cross_prefix_dependency_protection() {
+    let fixture = Fixture::new();
+    fixture.install(&fixture.bundle("example.base", "1.0.0", "bin/base", &[]));
+    fs::write(fixture.prefix.join("bin/base"), b"user changes").unwrap();
+    let removal = keep_changed(&fixture, &[]);
+    let held = crate::store::filesystem::shared_lock(&fixture.prefix).unwrap();
+    assert!(plan::execute(&fixture.paths, &removal, &AtomicBool::new(false)).is_err());
+    drop(held);
+    let id = removal.installation_id.as_ref().unwrap();
+    let other_prefix = fixture.directory.path().join("second");
+    let bundle = fixture.bundle("example.other", "1.0.0", "bin/other", &[]);
+    let second = plan::install(&fixture.paths, &bundle, &other_prefix).unwrap();
+    plan::execute(&fixture.paths, &second, &AtomicBool::new(false)).unwrap();
+    let mut database: Value =
+        serde_json::from_slice(&fs::read(fixture.paths.installed()).unwrap()).unwrap();
+    let other = database["installations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| item["prefix"] == other_prefix.to_str().unwrap())
+        .unwrap();
+    other["packages"][0]["dependencies"] =
+        json!([{"installation_id":id,"package_id":"example.base","version":"1.0.0"}]);
+    fs::write(
+        fixture.paths.installed(),
+        serde_json::to_vec(&database).unwrap(),
+    )
+    .unwrap();
+    let blocked = keep_changed(&fixture, &[]);
+    assert!(blocked.problems.iter().any(
+        |problem| problem.code == "required_by" && problem.path.as_ref() == Some(&other_prefix)
+    ));
+}
+
+#[test]
+fn changed_file_hashing_consumes_the_shared_budget() {
+    let fixture = Fixture::new();
+    let bundle = fixture.bundle("example.base", "1.0.0", "bin/base", &[]);
+    fixture.install(&bundle);
+    let path = fixture.prefix.join("bin/base");
+    let expected = crate::store::Payload {
+        sha256: digest(&path).unwrap(),
+        mode: 0o755,
+    };
+    fs::write(&path, b"changed").unwrap();
+    let mut budget = 7;
+    assert!(
+        crate::store::open_bundle::drift(&path, &expected, &mut budget)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(budget, 0);
+    assert!(crate::store::open_bundle::drift(&path, &expected, &mut budget).is_err());
 }

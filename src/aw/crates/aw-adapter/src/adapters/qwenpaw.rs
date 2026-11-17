@@ -320,6 +320,10 @@ impl Prepared {
     ) -> Result<LaunchPlan> {
         let mut plan = self.configure_in(context, context.files.directory())?;
         let plugin = self.plugin.as_ref().ok_or("missing staged plugin")?;
+        context.files.write(
+            "aw_paths.py",
+            include_bytes!("../../native/qwenpaw/aw_paths.py"),
+        )?;
         let launcher = context.files.write(
             "qwenpaw-launch.py",
             include_bytes!("../../native/qwenpaw/launch.py"),
@@ -355,7 +359,7 @@ impl Prepared {
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
-                "plugin_id": plugin_id,
+                "plugin_id": plugin_id, "native_version": self.version,
                 "reloadable":self.input.options.reloadable,
                 "resident": !self.input.options.reloadable,
                 "resident_policy_reload": !self.input.options.reloadable,

@@ -6,12 +6,38 @@
 
 ## 启动 Pi SDK worker
 
-高代码 Pi 应用使用 `adapter: pi`、公开 Coding Agent/Core SDK（已验证基线为 0.84.2）与
-Node.js >=22.19.0。AW 管理前台 SDK worker，并接通工具前后两个 Hook 点。
-按应用现有依赖流程安装这些 SDK 包，保留应用模型与认证配置。原生 Pi CLI 是
-独立入口，这个 Adapter 不启动该 CLI。
+高代码 Pi 应用使用 `adapter: pi`、公开 Coding Agent/Core SDK 与 Node.js >=22.19.0。
+0.84.2 至 1.5.2 的 24 个已发布同版配对，在满足下述安装条件后通过公开工厂、输入提交和
+严格输出验收。AW 检查包身份、模块布局和原生 Agent/AgentSession 接口，记录已安装的
+Coding Agent 版本，管理前台 SDK worker 并接通工具前后两个 Hook 点。应用应使用已提交的
+依赖锁文件安装，保留现有模型与认证配置。原生 Pi CLI 是独立入口，这个 Adapter 不启动该 CLI。
 
-其他版本接入时，AW 检查包身份、模块布局和原生 Agent/AgentSession 接口，记录已安装的 Coding Agent 版本。
+已发布的 0.85.0 Coding Agent 导入 `@earendil-works/pi-server`，但未声明依赖；需额外安装
+`@earendil-works/pi-server@0.85.0`。1.0.1–1.1.0 还需将
+`@earendil-works/chord`、`pi-agent-core`、`pi-ai`、`pi-codemode`、`pi-mcp` 和 `pi-tui`
+锁到相同 Pi 版本。npm 不锁定传递依赖时，可能解析到接口不兼容的 `pi-codemode`，使 SDK
+导入失败。保存锁文件后使用 `npm ci` 安装。
+
+0.85.0 安装命令：
+
+```bash
+npm install --save-exact @earendil-works/pi-coding-agent@0.85.0 \
+  @earendil-works/pi-agent-core@0.85.0 @earendil-works/pi-server@0.85.0
+```
+
+1.0.1–1.1.0 选择业务使用的版本并锁定同版 Pi 包；以下以 1.1.0 为例：
+
+```bash
+PI_VERSION=1.1.0
+npm install --save-exact \
+  "@earendil-works/pi-coding-agent@$PI_VERSION" \
+  "@earendil-works/pi-agent-core@$PI_VERSION" \
+  "@earendil-works/pi-ai@$PI_VERSION" \
+  "@earendil-works/pi-codemode@$PI_VERSION" \
+  "@earendil-works/pi-mcp@$PI_VERSION" \
+  "@earendil-works/pi-tui@$PI_VERSION" \
+  "@earendil-works/chord@$PI_VERSION"
+```
 
 在绝对路径的 `.mjs` 应用模块中暴露已有公共工厂与前台任务：
 
@@ -57,10 +83,13 @@ AW 每次生成 invocation UUID 配对，原工具 ID 保留于 `native`，提�
 修改策略前退出 Agent 并停止原服务；审计状态按同样的本地服务清理流程保留或删除。
 
 严格输出检查使用 sec-core `scan_tool_output`，并设置
-`on_error: withhold_result`。两个 Pi 包均须为 0.84.2。配置任一严格 after 路由后，
+`on_error: withhold_result`。两个 Pi 包须为同一正式版，处于 0.84.2–1.5.2 的闭区间。
+后续新版本需重新完成 AW 严格输出验收才能准入。
+配置任一严格 after 路由后，
 目标全部工具的中间更新被抑制，订阅者和模型只收到采用后的最终结果。AW 扫描并交付
 生效结果的独立快照，包含原生 after 回调覆盖值及 metadata；工具或回调随后修改
-保留的原对象，不会改变交付内容。PII 风险替换
+保留的原对象，不会改变交付内容。原生 after 回调可以覆盖 `structuredContent`；
+仅替换文本时会删除不再匹配的旧结构化字段。PII 风险替换
 文本；扫描故障丢弃完整结果并返回固定占位文本，同一会话可继续后续输入。
 未配置严格路由的目标保留原生流及 Tokenless report 行为。
 
@@ -90,7 +119,7 @@ try {
 宿主报告 Ready 后，在配置目录执行 `aw instance update --agent pi`。
 每个会话在 prompt、工具回调与销毁期间保留同一份策略。会话未关闭、工厂正在准备
 或清理尚未确认时，更新会被拒绝；关闭全部会话后再更新。新建会话采用新策略，
-包括输入和 Skill 检查。严格结果控制仍要求两个 Pi 包均为 0.84.2。
+包括输入和 Skill 检查。严格结果控制仍要求两个 Pi 包版本相同且处于上述发布线。
 准备失败时不会开放任务派发，全部会话关闭后才能释放实例。应用导出
 `run(session, context)` 时，原生启动入口创建首个受管会话，并在 `context` 中提供
 `createSession` 和 `closeSession`。更新实例前需要关闭所有活动会话；`run` 返回时
@@ -101,6 +130,9 @@ try {
 [Pi 输入检查示例](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
 使用导出 `runWorker` 的常驻工厂。替换可执行文件及 sec-core socket 路径，保留应用的
 模型与认证配置，再运行 `aw run --config /absolute/aw.pi-submission.yaml --agent pi -- 'Your task'`。
+这份 Pi 配置同时检查输入文本、Skill 和 PII，在执行前扫描 `bash` 参数与命令，
+并扫描最终工具输出；扫描故障按 `withhold_result` 隐去结果。接入其他原生工具时，
+先补充工具映射与匹配规则。需单独启动 sec-core，并授权 worker 使用的 Skill 目录。
 应用保留现有工厂，并导出以下 worker 入口：
 
 ```javascript
@@ -142,7 +174,7 @@ worker。扫描结果迟到不会触发模型请求。
 
 ## 校验 Skill 输入
 
-为 `input.submit/check_skill` 使用独立的 Pi 配置，例如 `aw.pi-submission.yaml`。
+为 `input.submit/check_skill` 使用 Pi 专属配置，例如 `aw.pi-submission.yaml`。
 Provider 声明该事件仅支持 Pi；从同一配置选择 Qoder SDK、QwenPaw 或其他 Adapter，
 会在原生 Hook 就绪前准入失败，`on_error: block` 和 `report` 均如此。
 输入事件不支持 Agent 选择器。其他 Agent 应使用独立配置，移除该输入 Skill 步骤，
@@ -156,7 +188,8 @@ Provider 声明该事件仅支持 Pi；从同一配置选择 Qoder SDK、QwenPaw
 Skill 目录，再通过受管 `session.prompt` 提交 `/skill:name 可选参数`。
 签名通过后指令进入模型；信任拒绝、来源变化或必需检查失败会在模型请求前拒绝 prompt。
 
-Coding Agent 0.84.2 接线从当前会话的 `resourceLoader.getSkills()` 选择原生首个同名对象，
+已验证的 Coding Agent/Core 0.84.2–1.5.2 同版配对，从当前会话的 `resourceLoader.getSkills()`
+选择原生首个同名对象，
 固定其目录中 `SKILL.md` 的文本，复用 SDK frontmatter 解析与原生命令格式。
 包含参数的最终展开文本经过全部输入检查，再以 `expandPromptTemplates: false` 提交，
 原生会话不会二次选择或展开对象。文件上限 1 MiB，策略返回后再次核对来源。

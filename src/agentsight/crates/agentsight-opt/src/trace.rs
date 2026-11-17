@@ -220,12 +220,23 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
             out.push(ToolCallRecord {
                 name: call.display_name(),
                 call_id: call.tool_call_id.clone(),
-                start,
+                start: step
+                    .tool_start_ts(call)
+                    .zip(origin)
+                    .map(|(time, origin)| (time - origin).as_seconds_f64())
+                    .unwrap_or(start),
                 dur: step
                     .tool_result_ts(call)
-                    .zip(step.end_ts())
+                    .zip(step.tool_start_ts(call))
                     .map(|(result, start)| (result - start).as_seconds_f64())
-                    .unwrap_or(per_call.max(0.0)),
+                    .unwrap_or_else(|| {
+                        let offset = step
+                            .tool_start_ts(call)
+                            .zip(step.end_ts())
+                            .map(|(start, end)| (start - end).as_seconds_f64())
+                            .unwrap_or(0.0);
+                        per_call.min((window - offset).max(0.0)).max(0.0)
+                    }),
                 cmd: call.command_summary(cmd_chars),
                 err,
                 target: file_target(call),
@@ -292,9 +303,18 @@ pub(crate) fn tool_busy_secs(traj: &AtifTrajectory) -> f64 {
         .iter()
         .enumerate()
         .filter(|(_, step)| step.is_agent() && !step.calls().is_empty())
-        .filter_map(|(index, step)| {
-            let start = (step.end_ts()? - origin).as_seconds_f64();
-            Some((start, start + tool_window_secs(traj, index)))
+        .flat_map(|(index, step)| {
+            let fallback_end = step
+                .end_ts()
+                .map(|time| (time - origin).as_seconds_f64() + tool_window_secs(traj, index));
+            step.calls().iter().filter_map(move |call| {
+                let start = (step.tool_start_ts(call)? - origin).as_seconds_f64();
+                let end = step
+                    .tool_result_ts(call)
+                    .map(|time| (time - origin).as_seconds_f64())
+                    .or(fallback_end)?;
+                Some((start, end.max(start)))
+            })
         })
         .collect();
     busy_window_secs(windows)

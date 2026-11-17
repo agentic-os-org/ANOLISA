@@ -33,3 +33,11 @@ jobs:
           python3 -m unittest discover -s src/os-skills/tests
           python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
           bash .github/actions/build-os-skills-prebuilt/test.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+      - name: Verify source-install compatibility
+        run: |
+          python3 -m unittest discover -s src/os-skills/tests -p 'test_release_catalog.py'
+          python3 -m unittest discover -s src/os-skills/tests -p 'test_install_layout.py'
+          python3 src/os-skills/packaging/cosh_manifests.py

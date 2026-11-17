@@ -2,13 +2,15 @@
 
 [中文版](../../../zh/providers/sec-core/sec-core-provider.md)
 
-The `aw-provider-sec-core` crate is a concrete AW Provider binary. Its dependency
-on sec-core is a public process interface, not a Rust crate or daemon protocol.
-No sec-core CLI subcommand, source-package inclusion or AW dependency is needed.
+The `aw-provider-sec-core` crate is a concrete AW Provider binary that never links
+sec-core Rust crates and adds no AW dependency to sec-core. By default (`--transport cli`)
+it invokes the public `agent-sec-cli` process interface; optionally (`--transport daemon`)
+it sends single-shot V2 JSON-line requests directly over the local sec-core daemon Unix
+socket via `aw_exec::uds`.
 
 ```text
-AW Host → aw-provider-sec-core → agent-sec-cli scan-code / scan-pii → sec-core daemon
-        ← AW effects/errors   ← scan JSON + exit status ← rules/verdict
+AW Host → aw-provider-sec-core ─┬─(--transport cli, default)─→ agent-sec-cli → sec-core daemon
+        ← AW effects/errors    └─(--transport daemon)────────→ sec-core V2 daemon socket (UDS)
 ```
 
 The AW protocol handles describe, private-config validation, request/digest
@@ -25,8 +27,13 @@ and never forwarded as AW response data. The Host separately applies `on_error`.
 
 Invocation passes literal argv, an absolute CLI path and daemon endpoint, the
 selected language, `--mode regex` and remaining `--timeout-ms`. No shell, local
-scanner, service bootstrap, retry or legacy-CLI fallback is inserted. This first
-implementation targets the public Rust V2 CLI. Future CLI fields should describe
+scanner, service bootstrap, retry or legacy-CLI fallback is inserted. `--transport cli` (default) targets the public Rust V2 CLI. `--transport daemon` targets
+the local sec-core V2 daemon socket via `aw_exec::uds` for `scan_code`, `scan_prompt`,
+`scan_user_input`, `scan_tool_input`, `scan_tool_output`, and
+`check_final_tool_output`—sending strict `DaemonRequest` frames without client `requestId`, enforcing independent `32 KiB` context and `4 MiB`
+business budgets (`4 MiB + 32 KiB` total), attaching `TraceCarrierV1` / `CompatibilityV1`
+(`version: 1`), and verifying `SO_PEERCRED` UID `0`. `check_skill` remains CLI-backed and is
+omitted from `describe` when `--cli` is absent; switch back to `--transport cli` to roll back. Future CLI fields should describe
 general scanner capabilities, without introducing AW request IDs or event types.
 
 `aw-exec` owns the nested CLI's deadline, stream bounds and process-group cleanup.
@@ -57,28 +64,35 @@ aw-provider` command must switch their Provider argv to this standalone bridge.
 
 `scan_prompt` and `scan_user_input` consume the non-tool `input.submit` event. The Adapter owns the
 fresh turn identity and native decision boundary; the Host retains one deadline
-and one claim per step. The Provider sends the complete text on stdin to the
-public V2 `scan-prompt` command with explicit fast mode and user-input origin.
-It checks scan completeness as well as verdict. Prompt `ok=false` with warn/deny
-is risk, while incomplete/error output remains an invocation failure. AW keeps
-backend findings and user text out of effects and metadata audit. User PII calls
-the shared `pii::call` transport with `Source::UserInput`, the same turn context
-and remaining budget. Its risk mode is `pii.input_mode`; failures retain their
-separate Provider error path. Configuration,
-version limits and runnable native evidence are described in the
+and one claim per step. With `--transport cli` (default), `scan_prompt` sends the
+complete text on stdin to the public V2 `scan-prompt` command with explicit fast
+mode and user-input origin; with `--transport daemon`, it dispatches one
+strictly bounded `action.prompt_scan` V2 RPC (`mode: "fast"`, `source: "user_input"`)
+via `aw_exec::uds`. Both transports check scan completeness as well as verdict.
+Prompt `ok=false` with warn/deny is risk, while incomplete/error output remains an
+invocation failure. AW keeps backend findings and user text out of effects and
+metadata audit. User PII uses the shared PII transport (`pii::call` under
+`--transport cli` or `pii::call_daemon` under `--transport daemon`) with
+`Source::UserInput`, the same turn context and remaining budget. Its risk mode is
+`pii.input_mode`; failures retain their separate Provider error path.
+Configuration, version limits and runnable native evidence are described in the
 [Provider reference](../../../../../../../docs/developer-guide/en/aw/providers/sec-core.md#user-submission-checks).
 
 ## PII boundaries
 
-`pii::call` owns the stdin-only CLI request, source label, remaining budget and
-strict scan parsing for both tool phases and user-input consumers. It checks
-source, byte coverage, truncation and reported execution/custom-rule failures.
-`tool_pii` applies private input/output modes. It scans structured values as JSON
-for field/value context, then scans decoded string values and object keys
-individually to preserve whitespace boundaries and custom-rule anchors. Plain
-strings are scanned directly. The same traversal covers arguments, the complete
-native result and its retained envelope; each CLI call receives only the remaining
-invocation budget. On risk, one Adapter-authorized text value is cleared in a private
+The shared PII module owns transport selection (`pii::call` stdin-only CLI
+requests under `--transport cli`, `pii::call_daemon` strict `action.pii_scan` V2
+UDS RPCs under `--transport daemon`), source label, remaining budget and strict
+scan parsing for tool phases, `check_final_tool_output`, and user-input
+consumers. It checks source, byte coverage, truncation and reported
+execution/custom-rule failures. `tool_pii` applies private input/output modes
+(and blocking mode for `check_final_tool_output` on `security.violation`). It
+scans structured values as JSON for field/value context, then scans decoded
+string values and object keys individually to preserve whitespace boundaries and
+custom-rule anchors. Plain strings are scanned directly. The same traversal
+covers arguments, the complete native result and its retained envelope; each
+backend call receives only the remaining invocation budget. On risk, one
+Adapter-authorized text value is cleared in a private
 copy and the retained envelope is scanned again within the same budget. Only a
 clean residual yields the fixed safety-message replacement. Other shapes fail
 through the configured output failure action.
@@ -93,7 +107,7 @@ replacement per event. A PII replacement policy must occupy that final step.
 
 Run from the repository root.
 
-`cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml` exercises public CLI fixtures,
+`cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml` exercises public CLI fixtures, and `--features testing --test daemon_transport --test daemon_e2e` exercises direct V2 daemon transport and real `agent-sec-daemon` end-to-end flows; existing suites also cover
 request binding, offline operations, config rejection, exact argv, decision and
 failure mapping, budget/output limits, Host cancellation of the nested CLI and
 external deadline cleanup while the Provider waits for EOF on an open stdin.

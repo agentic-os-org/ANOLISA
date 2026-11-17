@@ -141,6 +141,7 @@ const atifDoc = (sessionId) => ({
 });
 
 function renderViewerPage() {
+  const snapshotRequests = [];
   const { calls, stubs } = deferredFetchStubs([
     'fetchAtifBySession',
     'fetchAtifByConversation',
@@ -161,6 +162,11 @@ function renderViewerPage() {
     '../utils/roundModel': roundModel,
     '../utils/savings': savingsModule,
     '../utils/apiClient': { ...stubs },
+    '../utils/wsCkpt': {
+      fetchWorkspaceSnapshots: (kind, id, signal) => new Promise((resolve) => snapshotRequests.push({ kind, id, signal, resolve })),
+      snapshotsMatchDocument: (batch, doc) => JSON.stringify(batch.trajectory.steps) === JSON.stringify(doc.steps),
+    },
+    '../components/WorkspaceSnapshotDialog': componentStub('WorkspaceSnapshotDialog'),
     '../components/SubagentGraph': componentStub('SubagentGraph'),
     '../components/CausalAttributionPanel': componentStub('CausalAttributionPanel'),
     '../utils/trajectoryTree': {
@@ -182,7 +188,8 @@ function renderViewerPage() {
   assert.equal(typeof driver.slots[14].value.current, 'number',
     'slot 14 must be the load request-id ref');
   return {
-    calls, driver, rendered, urlParams,
+    calls, driver, rendered, urlParams, snapshotRequests,
+    render: () => driver.render(page),
     handleLoad: rendered.callbacks[3],
     handleFileImport: rendered.callbacks[4],
   };
@@ -244,8 +251,38 @@ function importFile(handleFileImport, name, payload) {
   return FakeFileReader.instances[0];
 }
 
+const snapshotBatch = (doc, id) => ({
+  trajectory: doc,
+  scope: { ws_id: 'ws-1', path: '/workspace', snapshot_count: 1 },
+  step_snapshots: { '1': [{ id, workspace: 'ws-1', meta: { created_at: '2026-01-01T00:00:00Z' } }] },
+});
+const loadedSnapshotBatch = (driver) => driver.slots.find((slot) => slot?.value?.scope?.ws_id === 'ws-1'
+  && slot.value.step_snapshots)?.value;
+
 const completeRead = (reader, payload) =>
   reader.onload({ target: { result: payload } });
+
+test('atif viewer: changing the URL in the same tab loads the new trajectory and its snapshots', async () => {
+  const ctx = renderViewerPage();
+  const changeUrl = (id) => {
+    ctx.urlParams.set('type', 'session');
+    ctx.urlParams.set('id', id);
+    ctx.render().effects.forEach(effect => effect());
+  };
+
+  changeUrl('old-session');
+  ctx.calls.fetchAtifBySession[0].resolve(atifDoc('old-session'));
+  await settle();
+  changeUrl('new-session');
+  assert.equal(ctx.calls.fetchAtifBySession[1].args[0], 'new-session');
+  ctx.calls.fetchAtifBySession[1].resolve(atifDoc('new-session'));
+  await settle();
+  assert.equal(ctx.driver.slots[4].value.session_id, 'new-session');
+  assert.deepEqual(ctx.snapshotRequests.map(({ id }) => id), ['old-session', 'new-session']);
+
+  changeUrl('new-session');
+  assert.equal(ctx.calls.fetchAtifBySession.length, 2);
+});
 
 test('atif viewer: a late network response must not replace an imported document', async () => {
   const ctx = renderViewerPage();
@@ -421,4 +458,59 @@ test("atif viewer: importing a document clears the previous trajectory's savings
   assert.equal(ctx.driver.slots[4].value.session_id, 'imported-doc', 'the import must land');
   assert.equal(ctx.driver.slots[7].value, null,
     "an import must not keep the previous trajectory's savings");
+});
+
+test('atif viewer: snapshot association requires an exact match with the loaded Step document', async () => {
+  const ctx = renderViewerPage();
+  const loaded = { ...atifDoc('loaded'), steps: [{ step_id: 1, source: 'agent', message: 'loaded' }] };
+  const other = { ...atifDoc('other'), steps: [{ step_id: 1, source: 'agent', message: 'other' }] };
+  const request = ctx.handleLoad('session', 'loaded');
+  ctx.calls.fetchAtifBySession[0].resolve(loaded);
+  await request;
+  await settle();
+  assert.equal(ctx.snapshotRequests.length, 1);
+  ctx.snapshotRequests[0].resolve(snapshotBatch(other, 'wrong-document-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined,
+    'snapshots for a different Step document must not attach to the current trajectory');
+});
+
+test('atif viewer: late snapshot batches cannot replace a newer load or attach after local import', async () => {
+  const ctx = renderViewerPage();
+  const older = { ...atifDoc('older'), steps: [{ step_id: 1, source: 'agent', message: 'older' }] };
+  const newer = { ...atifDoc('newer'), steps: [{ step_id: 1, source: 'agent', message: 'newer' }] };
+  const firstLoad = ctx.handleLoad('session', 'older');
+  ctx.calls.fetchAtifBySession[0].resolve(older);
+  await firstLoad;
+  await settle();
+  const secondLoad = ctx.handleLoad('session', 'newer');
+  assert.equal(ctx.snapshotRequests[0].signal.aborted, true);
+  ctx.calls.fetchAtifBySession[1].resolve(newer);
+  await secondLoad;
+  await settle();
+  assert.equal(ctx.snapshotRequests.length, 2);
+
+  ctx.snapshotRequests[1].resolve(snapshotBatch(newer, 'newer-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver)?.step_snapshots['1'][0].id, 'newer-snapshot');
+  ctx.snapshotRequests[0].resolve(snapshotBatch(older, 'stale-snapshot'));
+  await settle();
+  assert.equal(loadedSnapshotBatch(ctx.driver)?.step_snapshots['1'][0].id, 'newer-snapshot',
+    'the batch from the superseded load must not overwrite current associations');
+
+  const pending = ctx.handleLoad('session', 'superseded-by-import');
+  const remote = { ...atifDoc('superseded-by-import'), steps: [{ step_id: 1, source: 'agent', message: 'remote' }] };
+  ctx.calls.fetchAtifBySession[2].resolve(remote);
+  await pending;
+  await settle();
+  assert.equal(ctx.snapshotRequests.length, 3);
+  const local = { ...atifDoc('new-local'), steps: [{ step_id: 1, source: 'agent', message: 'new local' }] };
+  const reader = importFile(ctx.handleFileImport, 'new-local.json', JSON.stringify(local));
+  assert.equal(ctx.snapshotRequests[2].signal.aborted, true);
+  completeRead(reader, JSON.stringify(local));
+  ctx.snapshotRequests[2].resolve(snapshotBatch(remote, 'after-import-snapshot'));
+  await settle();
+  assert.equal(ctx.driver.slots[4].value.session_id, 'new-local');
+  assert.equal(loadedSnapshotBatch(ctx.driver), undefined,
+    'a late matching batch from a network load must not attach to an imported document');
 });

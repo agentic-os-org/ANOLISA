@@ -1,6 +1,6 @@
 //! Maps typed OS requests into schema-checked Cedar request and entity data.
 
-use asc_daemon_protocol::authorization::AuthorizationRequest;
+use asc_daemon_protocol::authorization::OsAuthorizationRequest;
 use cedar_policy::{Context, Entities, EntityUid, Request, Schema};
 use serde_json::{Value, json};
 
@@ -15,13 +15,14 @@ pub(crate) struct Query {
 }
 
 pub(crate) fn invocation(
-    request: &AuthorizationRequest,
+    request: &OsAuthorizationRequest,
     schema: &Schema,
     command: bool,
 ) -> Result<Query, PdpError> {
-    let executable = request.launch.resolved_program.as_str();
-    let cwd = request.launch.cwd.as_str();
+    let executable = request.context.launch.resolved_program.as_str();
+    let cwd = request.context.launch.cwd.as_str();
     let args: Vec<_> = request
+        .context
         .launch
         .args
         .iter()
@@ -35,8 +36,8 @@ pub(crate) fn invocation(
             schema,
             "process.spawn",
             "Process",
-            &request.launch.program,
-            &json!({"program": request.launch.program, "resolved_program": executable}),
+            &request.context.launch.program,
+            &json!({"program": request.context.launch.program, "resolved_program": executable}),
             context,
         )
     } else {
@@ -53,16 +54,16 @@ pub(crate) fn invocation(
 }
 
 pub(crate) fn file(
-    request: &AuthorizationRequest,
+    request: &OsAuthorizationRequest,
     schema: &Schema,
     path: &str,
     write: bool,
 ) -> Result<Query, PdpError> {
     let context = if write {
-        json!({"input": {"program": request.launch.resolved_program,
+        json!({"input": {"program": request.context.launch.resolved_program,
             "operation": {"__entity": {"type": "SecCore::WriteOperation", "id": "write"}}}})
     } else {
-        json!({"input": {"program": request.launch.resolved_program}})
+        json!({"input": {"program": request.context.launch.resolved_program}})
     };
     query(
         request,
@@ -75,7 +76,10 @@ pub(crate) fn file(
     )
 }
 
-pub(crate) fn network(request: &AuthorizationRequest, schema: &Schema) -> Result<Query, PdpError> {
+pub(crate) fn network(
+    request: &OsAuthorizationRequest,
+    schema: &Schema,
+) -> Result<Query, PdpError> {
     query(
         request,
         schema,
@@ -88,7 +92,7 @@ pub(crate) fn network(request: &AuthorizationRequest, schema: &Schema) -> Result
 }
 
 fn query(
-    request: &AuthorizationRequest,
+    request: &OsAuthorizationRequest,
     schema: &Schema,
     action: &str,
     resource_type: &str,
@@ -100,7 +104,7 @@ fn query(
     let context = Context::from_json_value(context, Some((schema, &action)))
         .map_err(|error| PdpError::Evaluation(error.to_string()))?;
     let mut subject_attributes = serde_json::Map::new();
-    if let Some(agent_type) = &request.principal.agent_type {
+    if let Some(agent_type) = &request.context.agent.agent_type {
         subject_attributes.insert("agent_type".into(), json!(agent_type));
     }
     let entities = Entities::from_json_value(

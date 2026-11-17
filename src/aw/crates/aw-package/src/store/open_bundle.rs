@@ -112,4 +112,4 @@ pub fn inspect(bundle: &Path) -> Result<Bundle> {
 /// Maximum verified payload bytes in one raw installation.
 pub(crate) const MAX_PAYLOAD_BYTES: u64 = payload::MAX_TOTAL_BYTES;
 
-pub(crate) use payload::verify;
+pub(crate) use payload::{drift, verify};

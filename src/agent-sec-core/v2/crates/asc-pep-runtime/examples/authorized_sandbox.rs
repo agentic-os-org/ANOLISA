@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use asc_daemon_protocol::authorization::{
-    AgentPrincipal, AuthorizationRequest, Decision, ExecutionReceipt, ReceiptAck,
+    AgentPrincipal, Decision, ExecutionReceipt, OsAuthorizationRequest, ReceiptAck,
 };
 use asc_pep_runtime::{
     ApprovalHandler, AuthorizationClient, DaemonAuthorizationClient, PepError, PepRuntime,
@@ -41,7 +41,7 @@ struct Options {
 struct LocalClient(DaemonAuthorizationClient);
 
 impl AuthorizationClient for LocalClient {
-    fn evaluate(&self, request: &AuthorizationRequest) -> Result<Decision, PepError> {
+    fn evaluate(&self, request: &OsAuthorizationRequest) -> Result<Decision, PepError> {
         let decision = self.0.evaluate(request)?;
         for warning in &decision.warnings {
             eprintln!("POLICY_WARNING {warning}");

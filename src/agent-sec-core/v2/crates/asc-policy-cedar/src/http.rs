@@ -229,7 +229,7 @@ fn lower_predicates<'a>(
     Ok((host, methods, predicates.path))
 }
 
-fn is_token_file(value: &str) -> bool {
+pub(crate) fn is_token_file(value: &str) -> bool {
     value.len() <= 4096
         && value != "/"
         && value.starts_with('/')

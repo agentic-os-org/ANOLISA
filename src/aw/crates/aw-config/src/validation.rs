@@ -182,11 +182,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
         "/spec/events/tool.before/guard",
         "an active tool.before guard cannot reference a disabled event",
     )?;
-    require(
-        guard["enabled"] != true || (linked && before["enabled"] == true),
-        "/spec/events/security.violation/enabled",
-        "security.violation runs only as the guard of an active tool.before event",
-    )
+    Ok(())
 }
 
 fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Result<(), Error> {
@@ -209,10 +205,12 @@ fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Resul
                         "pi" | "qwenpaw"
                             | "qoder"
                             | "openclaw"
+                            | "deepseek-harness"
                             | "hermes"
                             | "claude-sdk"
                             | "qoder-sdk"
                             | "agentscope"
+                            | "codex"
                     )
                 )
                 && parts.next().is_some_and(|name| {

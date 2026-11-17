@@ -91,7 +91,7 @@ const REMOVED_LABELS: [&str; 18] = [
 const REMOVED_CATEGORIES: usize = REMOVED_LABELS.len();
 
 /// Index into `REMOVED_LABELS` and `HtmlView::removed`, in label order.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Removed {
     Script,
     Style,
@@ -215,7 +215,7 @@ impl HtmlExtractor {
                 .count();
             chain = parent;
         }
-        let mut renderer = Renderer::new(&nodes, false);
+        let mut renderer = Renderer::page(&nodes);
         if let Some(head) = head {
             renderer.count_removals(head, false);
         }
@@ -778,6 +778,16 @@ fn collapse(text: &str) -> String {
     text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Joins non-empty lines with single spaces while keeping spacing inside each
+/// line, so retained inline HTML attributes preserve internal space runs.
+fn collapse_line_breaks(text: &str) -> String {
+    text.lines()
+        .map(|line| line.trim_matches(|c: char| c.is_ascii_whitespace()))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// How [`Renderer::text_lines`] reads newlines inside text nodes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WhiteSpace {
@@ -846,14 +856,19 @@ const ADMONITION_LABELS: [&str; 10] = [
     "callout",
 ];
 
+#[derive(Clone, Copy)]
+enum RenderPolicy<'a> {
+    Page,
+    Fragment(&'a fragment::FragmentPlan),
+}
+
 struct Renderer<'a> {
     nodes: &'a [Node],
     removed: [usize; REMOVED_CATEGORIES],
     depth: usize,
-    /// Renders a fragment embedded in data: visible controls keep their
-    /// labels and images or links without text keep their targets, because
-    /// nothing visible may be removed from a fragment.
-    fragment: bool,
+    /// Selects full-page chrome removal (`Page`) or node-by-node hybrid
+    /// fragment rendering (`Fragment`).
+    policy: RenderPolicy<'a>,
     /// Set when structure was flattened (deep nesting, a layout-grid table,
     /// columns past the alignment cap) or, in a fragment, when ordered-list
     /// numbers would differ from a browser's or a table has more header
@@ -863,24 +878,61 @@ struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
-    fn new(nodes: &'a [Node], fragment: bool) -> Self {
+    fn page(nodes: &'a [Node]) -> Self {
         Self {
             nodes,
             removed: [0; REMOVED_CATEGORIES],
             depth: 0,
-            fragment,
+            policy: RenderPolicy::Page,
             lossy: false,
         }
     }
 
+    fn fragment(nodes: &'a [Node], plan: &'a fragment::FragmentPlan) -> Self {
+        Self {
+            nodes,
+            removed: [0; REMOVED_CATEGORIES],
+            depth: 0,
+            policy: RenderPolicy::Fragment(plan),
+            lossy: false,
+        }
+    }
+
+    fn is_fragment(&self) -> bool {
+        matches!(self.policy, RenderPolicy::Fragment(_))
+    }
+
+    fn collapse_inline_block(&self, text: &str) -> String {
+        if self.is_fragment() {
+            collapse_line_breaks(text)
+        } else {
+            collapse(text)
+        }
+    }
+
+    fn renders_as_block(&self, id: usize, node: &Node) -> bool {
+        match self.policy {
+            RenderPolicy::Page => is_block(node),
+            RenderPolicy::Fragment(plan) => match plan.kind(id) {
+                fragment::PlanKind::Verbatim { block, .. } => *block,
+                fragment::PlanKind::Shell { inline, .. } => !*inline,
+                fragment::PlanKind::Markdown | fragment::PlanKind::Removed(_) => is_block(node),
+            },
+        }
+    }
+
     /// Returns the removal category for a node, or `None` when it is content.
-    fn removal(&self, node: &Node, in_sectioning: bool) -> Option<Removed> {
+    fn removal(&self, id: usize, node: &Node, in_sectioning: bool) -> Option<Removed> {
+        if let RenderPolicy::Fragment(plan) = self.policy {
+            return match plan.kind(id) {
+                fragment::PlanKind::Removed(category) => Some(*category),
+                _ => None,
+            };
+        }
         if matches!(node.kind, NodeKind::Comment) {
             return Some(Removed::Comment);
         }
         let category = match node.local_name() {
-            // A button label is visible text; its action has no Markdown form.
-            "button" if self.fragment => return None,
             "script" => Removed::Script,
             "style" => Removed::Style,
             "noscript" => Removed::Noscript,
@@ -912,7 +964,12 @@ impl<'a> Renderer<'a> {
     fn count_removals(&mut self, id: usize, in_sectioning: bool) {
         let mut stack = vec![id];
         while let Some(id) = stack.pop() {
-            if let Some(category) = self.removal(&self.nodes[id], in_sectioning) {
+            if let RenderPolicy::Fragment(plan) = self.policy
+                && matches!(plan.kind(id), fragment::PlanKind::Verbatim { .. })
+            {
+                continue;
+            }
+            if let Some(category) = self.removal(id, &self.nodes[id], in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
@@ -958,7 +1015,7 @@ impl<'a> Renderer<'a> {
                 continue;
             };
             let node = &self.nodes[id];
-            if let Some(category) = self.removal(node, in_sectioning) {
+            if let Some(category) = self.removal(id, node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
@@ -991,11 +1048,11 @@ impl<'a> Renderer<'a> {
         let mut inline_open = false;
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
-            if let Some(category) = self.removal(node, in_sectioning) {
+            if let Some(category) = self.removal(child, node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
-            if is_block(node) {
+            if self.renders_as_block(child, node) {
                 flush_inline(&mut blocks, &mut inline, &mut inline_open);
                 let child_sectioning = in_sectioning || is_sectioning(node);
                 let rendered = self.block(child, child_sectioning);
@@ -1023,13 +1080,42 @@ impl<'a> Renderer<'a> {
     }
 
     fn block_at_depth(&mut self, id: usize, in_sectioning: bool) -> String {
+        if let RenderPolicy::Fragment(plan) = self.policy {
+            match plan.kind(id) {
+                fragment::PlanKind::Verbatim { html, removed, .. } => {
+                    for (dst, &count) in self.removed.iter_mut().zip(removed) {
+                        *dst += count;
+                    }
+                    return html.clone();
+                }
+                fragment::PlanKind::Shell {
+                    open,
+                    close,
+                    structural,
+                    ..
+                } => {
+                    return self.shell_block(
+                        id,
+                        open,
+                        close.as_deref(),
+                        *structural,
+                        in_sectioning,
+                    );
+                }
+                fragment::PlanKind::Removed(category) => {
+                    self.removed[*category as usize] += 1;
+                    return String::new();
+                }
+                fragment::PlanKind::Markdown => {}
+            }
+        }
         let node = &self.nodes[id];
         match node.local_name() {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let level = node.local_name().as_bytes()[1] - b'0';
                 let mut text = String::new();
                 self.inline_children(id, &mut text, in_sectioning);
-                let text = collapse(&text);
+                let text = self.collapse_inline_block(&text);
                 if text.is_empty() {
                     return String::new();
                 }
@@ -1067,7 +1153,7 @@ impl<'a> Renderer<'a> {
             "dt" => {
                 let mut text = String::new();
                 self.inline_children(id, &mut text, in_sectioning);
-                format!("**{}**", collapse(&text))
+                format!("**{}**", self.collapse_inline_block(&text))
             }
             "dd" => indent(&self.blocks(id, in_sectioning), "  "),
             local => {
@@ -1078,6 +1164,53 @@ impl<'a> Renderer<'a> {
                     Some(label) => quote(&inner, Some(label)),
                     None => inner,
                 }
+            }
+        }
+    }
+
+    fn shell_block(
+        &mut self,
+        id: usize,
+        open: &str,
+        close: Option<&str>,
+        structural: bool,
+        in_sectioning: bool,
+    ) -> String {
+        if structural {
+            let mut parts = Vec::new();
+            for &child in &self.nodes[id].children {
+                let child_node = &self.nodes[child];
+                if let Some(category) = self.removal(child, child_node, in_sectioning) {
+                    self.removed[category as usize] += 1;
+                    continue;
+                }
+                if matches!(&child_node.kind, NodeKind::Text(t) if t.trim().is_empty()) {
+                    continue;
+                }
+                let rendered = if self.renders_as_block(child, child_node) {
+                    self.block(child, in_sectioning || is_sectioning(child_node))
+                } else {
+                    let mut text = String::new();
+                    self.inline(child, &mut text, in_sectioning);
+                    text.trim().to_owned()
+                };
+                if !rendered.trim().is_empty() {
+                    parts.push(rendered);
+                }
+            }
+            match (parts.is_empty(), close) {
+                (_, None) => open.to_owned(),
+                (true, Some(close)) => format!("{open}{close}"),
+                (false, Some(close)) => format!("{open}\n{}\n{close}", parts.join("\n")),
+            }
+        } else {
+            let inner = self.blocks(id, in_sectioning);
+            match (inner.trim().is_empty(), close) {
+                (_, None) => open.to_owned(),
+                (true, Some(close)) => format!("{open}{close}"),
+                // Blank lines terminate CommonMark type-6 HTML blocks so interior
+                // headings, lists and emphasis parse as Markdown.
+                (false, Some(close)) => format!("{open}\n\n{inner}\n\n{close}"),
             }
         }
     }
@@ -1119,12 +1252,12 @@ impl<'a> Renderer<'a> {
                 number = number.saturating_add(step);
                 ordinal
             });
-            if let Some(category) = self.removal(node, in_sectioning) {
+            if let Some(category) = self.removal(child, node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
             // Stray inline content between items renders as its own item.
-            let body = if is_item || is_block(node) {
+            let body = if is_item || self.renders_as_block(child, node) {
                 self.blocks(child, in_sectioning)
             } else {
                 let mut text = String::new();
@@ -1133,7 +1266,7 @@ impl<'a> Renderer<'a> {
             };
             // An empty item leaves a gap in the numbers, and content
             // between items has none: a fragment view shows neither.
-            if self.fragment && ordered && is_item == body.is_empty() {
+            if self.is_fragment() && ordered && is_item == body.is_empty() {
                 self.lossy = true;
             }
             let marker = match ordinal {
@@ -1175,7 +1308,7 @@ impl<'a> Renderer<'a> {
         stack.reverse();
         while let Some(child) = stack.pop() {
             let node = &self.nodes[child];
-            if let Some(category) = self.removal(node, in_sectioning) {
+            if let Some(category) = self.removal(child, node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
@@ -1183,7 +1316,7 @@ impl<'a> Renderer<'a> {
                 "caption" => {
                     let mut text = String::new();
                     self.inline_children(child, &mut text, in_sectioning);
-                    caption = Some(collapse(&text));
+                    caption = Some(self.collapse_inline_block(&text));
                 }
                 "thead" | "tbody" | "tfoot" => {
                     // Zero rowspans grow to the group's end; no span crosses groups.
@@ -1207,7 +1340,7 @@ impl<'a> Renderer<'a> {
                     let mut column = 0;
                     for &cell in &node.children {
                         let cell_node = &self.nodes[cell];
-                        if let Some(category) = self.removal(cell_node, in_sectioning) {
+                        if let Some(category) = self.removal(cell, cell_node, in_sectioning) {
                             self.removed[category as usize] += 1;
                             continue;
                         }
@@ -1268,7 +1401,7 @@ impl<'a> Renderer<'a> {
         // GFM has one header row, at the top: any other row of headers,
         // such as a second header line or a section label further down,
         // would read as data.
-        if self.fragment && rows.iter().skip(1).any(|(header, _)| *header) {
+        if self.is_fragment() && rows.iter().skip(1).any(|(header, _)| *header) {
             self.lossy = true;
         }
         // A cell holding block content (a nested table, a list, several
@@ -1315,7 +1448,7 @@ impl<'a> Renderer<'a> {
     fn inline_children(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
-            if let Some(category) = self.removal(node, in_sectioning) {
+            if let Some(category) = self.removal(child, node, in_sectioning) {
                 self.removed[category as usize] += 1;
                 continue;
             }
@@ -1339,6 +1472,88 @@ impl<'a> Renderer<'a> {
 
     fn inline_at_depth(&mut self, id: usize, out: &mut String, in_sectioning: bool) {
         let node = &self.nodes[id];
+        let mut apart = false;
+        if let RenderPolicy::Fragment(plan) = self.policy {
+            match plan.kind(id) {
+                fragment::PlanKind::Removed(category) => {
+                    self.removed[*category as usize] += 1;
+                    return;
+                }
+                fragment::PlanKind::Shell { inline: false, .. } => {
+                    let rendered = self.block(id, in_sectioning || is_sectioning(node));
+                    if !rendered.is_empty() {
+                        if !out.is_empty() && !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        out.push_str(&rendered);
+                        out.push('\n');
+                    }
+                    return;
+                }
+                fragment::PlanKind::Verbatim {
+                    html,
+                    block: true,
+                    removed,
+                } => {
+                    for (dst, &count) in self.removed.iter_mut().zip(removed) {
+                        *dst += count;
+                    }
+                    if !html.is_empty() {
+                        if !out.is_empty() && !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        out.push_str(html);
+                        out.push('\n');
+                    }
+                    return;
+                }
+                fragment::PlanKind::Verbatim {
+                    html,
+                    block: false,
+                    removed,
+                } => {
+                    apart = plan.is_apart_inline(id);
+                    if apart && !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                    for (dst, &count) in self.removed.iter_mut().zip(removed) {
+                        *dst += count;
+                    }
+                    out.push_str(html);
+                    if apart && !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                    return;
+                }
+                fragment::PlanKind::Shell {
+                    open,
+                    close,
+                    inline: true,
+                    ..
+                } => {
+                    apart = plan.is_apart_inline(id);
+                    if apart && !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                    out.push_str(open);
+                    self.inline_children(id, out, in_sectioning);
+                    if let Some(close) = close {
+                        out.push_str(close);
+                    }
+                    if apart && !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                    return;
+                }
+                fragment::PlanKind::Markdown => {
+                    apart = plan.is_apart_inline(id);
+                    if apart && !out.is_empty() && !out.ends_with([' ', '\n']) {
+                        out.push(' ');
+                    }
+                }
+            }
+        }
+        let is_fragment = self.is_fragment();
         match &node.kind {
             NodeKind::Text(text) => push_collapsed(out, text),
             NodeKind::Element { .. } if node.name_in(MATHML_NS) == "math" => {
@@ -1354,25 +1569,23 @@ impl<'a> Renderer<'a> {
                 "br" => out.push('\n'),
                 "img" => {
                     let alt = node.attr("alt").map(collapse).unwrap_or_default();
-                    let title = if self.fragment { tooltip(node) } else { None };
+                    let title = if is_fragment { tooltip(node) } else { None };
                     if alt.is_empty() {
-                        if self.fragment
-                            && let Some(target) = node.attr("src").and_then(destination)
+                        if is_fragment && let Some(target) = node.attr("src").and_then(destination)
                         {
                             let _ = write!(out, "![]{}", link_tail(&target, title.as_deref()));
                         }
-                        return;
-                    }
-                    if !brackets_balanced(&alt) {
+                    } else if !brackets_balanced(&alt) {
                         out.push_str(&alt);
-                        return;
-                    }
-                    match node.attr("src").and_then(destination) {
-                        Some(target) => {
-                            let _ = write!(out, "![{alt}]{}", link_tail(&target, title.as_deref()));
-                        }
-                        None => {
-                            let _ = write!(out, "![{alt}]");
+                    } else {
+                        match node.attr("src").and_then(destination) {
+                            Some(target) => {
+                                let _ =
+                                    write!(out, "![{alt}]{}", link_tail(&target, title.as_deref()));
+                            }
+                            None => {
+                                let _ = write!(out, "![{alt}]");
+                            }
                         }
                     }
                 }
@@ -1387,10 +1600,10 @@ impl<'a> Renderer<'a> {
                     }
                     match node.attr("href").and_then(destination) {
                         Some(target)
-                            if (self.fragment || !trimmed.is_empty())
+                            if (is_fragment || !trimmed.is_empty())
                                 && brackets_balanced(trimmed) =>
                         {
-                            let title = if self.fragment { tooltip(node) } else { None };
+                            let title = if is_fragment { tooltip(node) } else { None };
                             let _ =
                                 write!(out, "[{trimmed}]{}", link_tail(&target, title.as_deref()));
                         }
@@ -1443,6 +1656,9 @@ impl<'a> Renderer<'a> {
                 _ => self.inline_children(id, out, in_sectioning),
             },
             _ => {}
+        }
+        if apart && !out.is_empty() && !out.ends_with([' ', '\n']) {
+            out.push(' ');
         }
     }
 

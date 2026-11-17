@@ -166,24 +166,8 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
-    report_startup("authorization_config", startup_started);
-    let authorization = match cli
-        .authorization_config
-        .as_deref()
-        .map(|path| {
-            asc_daemon::authorization::PapAuthorizationPolicy::load(
-                path,
-                PapService::new(repository.clone()),
-            )
-        })
-        .transpose()
-    {
-        Ok(policy) => policy,
-        Err(error) => {
-            report_error(telemetry, &error);
-            return (ExitCode::FAILURE, None);
-        }
-    };
+    let authorization =
+        asc_daemon::authorization::PapAuthorizationPolicy::new(PapService::new(repository.clone()));
     report_startup("skillsec", startup_started);
     let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
         Ok(service) => service,
@@ -248,29 +232,44 @@ async fn run(
     let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     report_startup("gateway", startup_started);
     let gateway_repository = repository.clone();
-    let gateway = match tokio::task::spawn_blocking(move || {
-        asc_daemon::gateway::GatewayAdapter::system(&gateway_data_dir(), gateway_repository).map(
-            |gateway| {
-                let recovery = gateway.service().recover();
-                (Arc::new(gateway), recovery)
-            },
-        )
-    })
-    .await
-    {
-        Ok(Ok((gateway, recovery))) => {
-            if let Err(error) = recovery {
-                report_error(telemetry, &error);
+    let gateway = if cli.disable_gateway {
+        if let Err(problem) = asc_daemon::gateway::validate_gateway_opt_out(
+            &asc_gateway_runtime::GatewayConfig::system(&gateway_data_dir()),
+            gateway_repository.as_ref(),
+        ) {
+            report_error(telemetry, &problem);
+            let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+            signal_task.abort();
+            return (
+                ExitCode::FAILURE,
+                Some(sinks::ShutdownPlan::full(durable_sinks)),
+            );
+        }
+        None
+    } else {
+        match tokio::task::spawn_blocking(move || {
+            asc_daemon::gateway::GatewayAdapter::system(&gateway_data_dir(), gateway_repository)
+                .map(|gateway| {
+                    let recovery = gateway.service().recover();
+                    (Arc::new(gateway), recovery)
+                })
+        })
+        .await
+        {
+            Ok(Ok((gateway, recovery))) => {
+                if let Err(error) = recovery {
+                    report_error(telemetry, &error);
+                }
+                Some(gateway)
             }
-            Some(gateway)
-        }
-        Ok(Err(problem)) => {
-            report_error(telemetry, &problem);
-            None
-        }
-        Err(problem) => {
-            report_error(telemetry, &problem);
-            None
+            Ok(Err(problem)) => {
+                report_error(telemetry, &problem);
+                None
+            }
+            Err(problem) => {
+                report_error(telemetry, &problem);
+                None
+            }
         }
     };
     if shutdown.is_requested() {
@@ -354,14 +353,10 @@ async fn run(
     if let Some(gateway) = gateway {
         dispatcher = dispatcher.with_gateway(gateway);
     }
-    let dispatcher = if let Some(policy) = authorization {
-        dispatcher.with_authorization(asc_daemon_core::AuthorizationService::new(
-            Arc::new(policy),
-            Arc::new(EventSinkAdapter::new(Arc::clone(&durable_sinks.security))),
-        ))
-    } else {
-        dispatcher
-    };
+    let dispatcher = dispatcher.with_authorization(asc_daemon_core::AuthorizationService::new(
+        Arc::new(authorization),
+        Arc::new(EventSinkAdapter::new(Arc::clone(&durable_sinks.security))),
+    ));
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
         dispatcher,
         skillfs.clone(),

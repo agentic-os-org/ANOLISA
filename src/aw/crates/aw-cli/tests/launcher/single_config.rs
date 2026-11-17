@@ -402,3 +402,58 @@ fn mutable_config_connection_rejects_stale_identity_and_unsafe_receipts() {
     success(update(&fixture));
     success(install(&fixture, pid, true));
 }
+
+#[test]
+fn offline_service_commands_report_stable_diagnostics_without_starting_a_service() {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+    let fixture = Fixture::new();
+    fixture.save(&fixture.document());
+    let state = fixture.root.join("state");
+    let socket = state.join("aw.sock");
+    for stale in [false, true] {
+        if stale {
+            fs::create_dir(&state).unwrap();
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+            drop(UnixListener::bind(&socket).unwrap());
+        }
+        for args in [
+            vec!["service", "status"],
+            vec!["service", "stop"],
+            vec!["update", "--agent", "qoder"],
+            vec!["status"],
+            vec!["stop"],
+        ] {
+            let mut command = fixture.command();
+            command
+                .args(args)
+                .arg("--config")
+                .arg(fixture.root.join("aw.json"));
+            let output = fixture.run(command);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("service_unavailable"), "{error}");
+            assert_eq!(state.exists(), stale);
+            assert_eq!(socket.exists(), stale);
+        }
+        let mut inspect = fixture.command();
+        inspect
+            .args(["inspect", "--json", "--config"])
+            .arg(fixture.root.join("aw.json"));
+        let output = fixture.run(inspect);
+        assert!(output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["service"]["code"], "service_offline");
+        let mut instance = fixture.command();
+        instance
+            .args(["instance", "--connect", "--socket"])
+            .arg(&socket);
+        let output = fixture.run(instance);
+        assert_eq!(output.status.code(), Some(1));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["error"], "transport_unavailable");
+        assert_eq!(state.exists(), stale);
+        assert_eq!(socket.exists(), stale);
+    }
+}

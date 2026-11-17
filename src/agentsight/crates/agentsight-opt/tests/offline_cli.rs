@@ -99,6 +99,30 @@ fn cost_matches_the_public_computation_without_credentials() {
 }
 
 #[test]
+fn utf8_bom_file_matches_plain_input_for_offline_analysis() {
+    let text = fixture(false);
+    let plain = Input::new(&text);
+    // Windows PowerShell 5's UTF-8 file output includes this byte-order mark.
+    let marked = Input::new(&format!("\u{feff}{text}"));
+    for dim in ["perf", "cost"] {
+        let args = ["--dim", dim, "--stats-only"];
+        let expected = decode(plain.command().args(args).output().unwrap());
+        let actual = decode(marked.command().args(args).output().unwrap());
+        assert_eq!(actual, expected, "BOM changed {dim} analysis");
+    }
+}
+
+#[test]
+fn bom_reader_preserves_message_content_and_rejects_invalid_json() {
+    let mut document: Value = serde_json::from_str(&fixture(false)).unwrap();
+    document["steps"][0]["message"] = json!("保留\u{feff}内容");
+    let parsed = AtifTrajectory::from_json(&format!("\u{feff}{document}")).unwrap();
+    assert_eq!(parsed.steps[0].message.as_deref(), Some("保留\u{feff}内容"));
+    assert!(AtifTrajectory::from_json("\u{feff}{broken").is_err());
+    assert!(AtifTrajectory::from_json(&format!("\u{feff}\u{feff}{document}")).is_err());
+}
+
+#[test]
 fn empty_perf_is_valid() {
     check_stats("perf", true);
 }

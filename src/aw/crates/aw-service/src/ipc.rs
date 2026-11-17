@@ -10,7 +10,7 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::{ffi::OsStrExt, net::UnixStream},
+        unix::{ffi::OsStrExt, fs::FileTypeExt, net::UnixStream},
     },
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
@@ -293,6 +293,24 @@ pub(crate) fn connect(path: &Path, deadline: Instant) -> io::Result<UnixStream> 
             continue;
         }
         if error.kind() != io::ErrorKind::WouldBlock {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) && !path.ancestors().any(Path::is_symlink)
+            {
+                // Refusal also covers ordinary files; only missing or stale sockets
+                // represent an unavailable service. Preserve other path diagnostics.
+                let unavailable = match std::fs::symlink_metadata(path) {
+                    Ok(metadata) => metadata.file_type().is_socket(),
+                    Err(missing) => {
+                        missing.kind() == io::ErrorKind::NotFound
+                            && error.kind() == io::ErrorKind::NotFound
+                    }
+                };
+                if unavailable {
+                    return Err(io::Error::new(error.kind(), "service_unavailable"));
+                }
+            }
             return Err(error);
         }
         // Linux AF_UNIX uses EAGAIN for a full backlog, leaving this socket
@@ -391,7 +409,9 @@ fn check_integer_range(bytes: &[u8]) -> io::Result<()> {
                     index += 1;
                 }
                 let token = &bytes[start..index];
-                if !token.iter().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                let digits = token.strip_prefix(b"-").unwrap_or(token);
+                // Leave malformed tokens and floating-point syntax to the JSON parser.
+                if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
                     let token =
                         std::str::from_utf8(token).map_err(|_| invalid("invalid numeric token"))?;
                     let fits = if token.starts_with('-') {
@@ -411,199 +431,4 @@ fn check_integer_range(bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn receive(bytes: &[u8]) -> io::Result<Value> {
-        let (mut sender, mut receiver) = UnixStream::pair()?;
-        sender.write_all(&(bytes.len() as u32).to_be_bytes())?;
-        sender.write_all(bytes)?;
-        read(&mut receiver, Instant::now() + Duration::from_secs(1))
-    }
-
-    #[test]
-    fn accepts_native_numbers_unicode_and_escaped_keys() {
-        let value =
-            receive(br#"{"a":1.25,"b":1e-2,"c":"\u4e2d","d":"18446744073709551616"}"#).unwrap();
-        assert_eq!(value["a"], json!(1.25));
-        assert_eq!(value["b"], json!(0.01));
-        assert_eq!(value["c"], json!("中"));
-    }
-
-    #[test]
-    fn rejects_duplicates_trailing_and_overflowing_integers() {
-        for bytes in [
-            br#"{"a":1,"a":2}"#.as_slice(),
-            br#"{"n":{"a":1,"\u0061":2}}"#,
-            b"{} []",
-            b"18446744073709551616",
-            b"-9223372036854775809",
-            b"",
-        ] {
-            assert_eq!(
-                receive(bytes).unwrap_err().kind(),
-                io::ErrorKind::InvalidData
-            );
-        }
-    }
-
-    #[test]
-    fn enforces_exact_container_depth_limit() {
-        let valid = format!("{}0{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
-        assert!(receive(valid.as_bytes()).is_ok());
-        let invalid = format!("[{valid}]");
-        assert_eq!(
-            receive(invalid.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-    }
-
-    #[test]
-    fn rejects_oversized_prefix_without_waiting_for_payload() {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        sender
-            .write_all(&((MAX_FRAME + 1) as u32).to_be_bytes())
-            .unwrap();
-        let error =
-            read::<Value>(&mut receiver, Instant::now() + Duration::from_secs(1)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn rejects_truncated_prefix_and_payload() {
-        for bytes in [&[0, 0][..], &[0, 0, 0, 5, b'{', b'}'][..]] {
-            let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-            sender.write_all(bytes).unwrap();
-            drop(sender);
-            let error =
-                read::<Value>(&mut receiver, Instant::now() + Duration::from_secs(1)).unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
-        }
-    }
-
-    #[test]
-    fn shares_deadline_between_prefix_and_payload() {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        sender.write_all(&2_u32.to_be_bytes()).unwrap();
-        let start = Instant::now();
-        let error = read::<Value>(&mut receiver, start + Duration::from_millis(25)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn initial_reads_reset_the_stall_budget_on_progress() {
-        let payload = br#"{"a":1}"#;
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        let writer = thread::spawn(move || {
-            sender
-                .write_all(&(payload.len() as u32).to_be_bytes())
-                .unwrap();
-            for chunk in payload.chunks(2) {
-                thread::sleep(Duration::from_millis(300));
-                sender.write_all(chunk).unwrap();
-            }
-        });
-        let value = read_initial::<Value>(
-            &mut receiver,
-            Duration::from_secs(1),
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap();
-        assert_eq!(value, json!({"a": 1}));
-        writer.join().unwrap();
-    }
-
-    #[test]
-    fn initial_reads_shed_idle_senders_and_reject_out_of_range_budgets() {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        sender.write_all(&4_u32.to_be_bytes()).unwrap();
-        let start = Instant::now();
-        let error = read_initial::<Value>(
-            &mut receiver,
-            Duration::from_millis(100),
-            Instant::now() + Duration::from_secs(60),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(1));
-        for stall in [Duration::ZERO, Duration::from_secs(61)] {
-            let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-            sender.write_all(&4_u32.to_be_bytes()).unwrap();
-            assert_eq!(
-                read_initial::<Value>(
-                    &mut receiver,
-                    stall,
-                    Instant::now() + Duration::from_secs(60)
-                )
-                .unwrap_err()
-                .kind(),
-                io::ErrorKind::InvalidData
-            );
-        }
-    }
-
-    #[test]
-    fn initial_reads_bound_never_idle_senders_at_the_absolute_limit() {
-        // However active a sender is, the whole window stays bounded by the
-        // absolute limit: the protocol's maximum remaining call deadline.
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        let writer = thread::spawn(move || {
-            sender.write_all(&1000_u32.to_be_bytes()).unwrap();
-            for _ in 0..20 {
-                thread::sleep(Duration::from_millis(100));
-                sender.write_all(b"x").unwrap();
-            }
-        });
-        let start = Instant::now();
-        let error = read_initial::<Value>(
-            &mut receiver,
-            Duration::from_millis(500),
-            Instant::now() + Duration::from_millis(1200),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        // The limit fires while the writer is still actively sending.
-        assert!(start.elapsed() < Duration::from_millis(1900));
-        writer.join().unwrap();
-    }
-
-    #[test]
-    fn writes_round_trip_and_checks_bounds_before_sending() {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let value = json!({"tool": "read", "value": 1.2});
-        write(&mut sender, &value, deadline).unwrap();
-        assert_eq!(read::<Value>(&mut receiver, deadline).unwrap(), value);
-        let error = write(&mut sender, &"x".repeat(MAX_FRAME), deadline).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        receiver.set_nonblocking(true).unwrap();
-        assert_eq!(
-            receiver.read(&mut [0; 4]).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-    }
-
-    #[test]
-    fn rejects_expired_deadlines_and_invalid_connect_paths() {
-        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
-        let deadline = Instant::now();
-        assert_eq!(
-            write(&mut sender, &json!({}), deadline).unwrap_err().kind(),
-            io::ErrorKind::TimedOut
-        );
-        assert_eq!(
-            read::<Value>(&mut receiver, deadline).unwrap_err().kind(),
-            io::ErrorKind::TimedOut
-        );
-        for path in ["relative", "/has\0nul", &format!("/{}", "a".repeat(200))] {
-            assert_eq!(
-                connect(Path::new(path), Instant::now() + Duration::from_secs(1))
-                    .unwrap_err()
-                    .kind(),
-                io::ErrorKind::InvalidInput
-            );
-        }
-    }
-}
+mod tests;

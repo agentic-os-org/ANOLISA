@@ -33,8 +33,10 @@ export async function createSession(options) {
     onUpdate?.({ content: [{ type: 'text', text: 'SECRET' }], details: {} });
     const mode = existsSync(join(root, 'recover')) ? 'clean' : process.env.PI_STRICT_CASE;
     if (mode === 'tool-error') throw new Error(secret);
-    const output = { content: [{ type: 'text', text: mode === 'risk' ? secret : 'checked clean' }],
+    const output = { content: [{ type: 'text', text: ['risk', 'structured-replacement'].includes(mode) ? secret : 'checked clean' }],
       details: { retained: mode === 'metadata' ? secret : true },
+      ...(['after-structured', 'structured-replacement'].includes(mode) ?
+        { structuredContent: { value: 'native' } } : {}),
       ...(mode === 'extra' ? { addedToolNames: [secret], privateExtra: secret } : {}) };
     if (mode.startsWith('mutation-') && mode !== 'mutation-after') mutateDuringScan(output, mode);
     return output;
@@ -50,6 +52,10 @@ export async function createSession(options) {
     agent.afterToolCall = async () => existsSync(join(root, 'recover')) ? undefined :
       process.env.PI_STRICT_CASE === 'after-metadata' ? { details: { retained: secret } } :
         { privateExtra: secret, addedToolNames: [secret] };
+  }
+  if (process.env.PI_STRICT_CASE === 'after-structured') {
+    agent.afterToolCall = async () => existsSync(join(root, 'recover')) ? undefined :
+      { structuredContent: { value: 'native-after' } };
   }
   if (process.env.PI_STRICT_CASE === 'mutation-after') {
     agent.afterToolCall = async () => {
@@ -96,9 +102,15 @@ export async function runWorker({ withSession }) {
   assert(!observed.some(event => event.type === 'tool_execution_update'));
   const results = observed.filter(event => event.type === 'tool_execution_end');
   assert(results.some(event => JSON.stringify(event.result).includes('checked clean')));
+  if (process.env.PI_STRICT_CASE === 'after-structured')
+    assert.deepEqual(results[0].result.structuredContent, { value: 'native-after' });
+  if (process.env.PI_STRICT_CASE === 'structured-replacement') {
+    assert(!Object.hasOwn(results[0].result, 'structuredContent'));
+    assert(results[0].result.content[0].text.includes('Sensitive data detected by AW'));
+  }
   if (['error', 'invalid', 'timeout', 'metadata', 'extra', 'after-metadata'].includes(process.env.PI_STRICT_CASE))
     assert(JSON.stringify(first).includes('withheld by policy'));
-  if (['risk', 'tool-error'].includes(process.env.PI_STRICT_CASE))
+  if (['risk', 'tool-error', 'structured-replacement'].includes(process.env.PI_STRICT_CASE))
     assert(JSON.stringify(first).includes('Sensitive data detected by AW'));
   writeFileSync(join(root, 'events.json'), JSON.stringify(observed));
   console.log(JSON.stringify({ scenario: process.env.PI_STRICT_CASE, results: results.length }));

@@ -419,6 +419,13 @@ impl GeminiParser {
         let mut merged = GeminiResponse::default();
         let mut saw_gemini = false;
         let mut prompt_block: Option<String> = None;
+        // Gemini repeats a candidate's parts, `functionCall` included, as
+        // whole objects in every chunk. A call is identified by its candidate
+        // and its position in the chunk's `parts` array; the last value per
+        // slot folds the repeats. Keying by value instead would merge two
+        // genuinely distinct calls that happen to share name and arguments.
+        let mut call_slots: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
 
         for chunk in chunks {
             if let Some(reason) = safety_prompt_block_reason(chunk) {
@@ -501,10 +508,19 @@ impl GeminiParser {
                     continue;
                 };
                 let entry = slot.content.get_or_insert_with(GeminiContent::default);
-                for part in parts {
-                    if let Ok(part) = serde_json::from_value::<GeminiPart>(part.clone()) {
-                        entry.parts.push(part);
+                for (part_pos, part) in parts.iter().enumerate() {
+                    let Ok(part) = serde_json::from_value::<GeminiPart>(part.clone()) else {
+                        continue;
+                    };
+                    if part.function_call.is_some() {
+                        if let Some(&existing) = call_slots.get(&(index, part_pos)) {
+                            // The same whole call repeated by this chunk.
+                            entry.parts[existing] = part;
+                            continue;
+                        }
+                        call_slots.insert((index, part_pos), entry.parts.len());
                     }
+                    entry.parts.push(part);
                 }
             }
         }
@@ -799,6 +815,74 @@ mod tests {
             9
         );
         assert_eq!(response.response_id.as_deref(), Some("resp-stream"));
+    }
+
+    /// Gemini's `streamGenerateContent` repeats a candidate's parts as whole
+    /// objects, `functionCall` included: a call that arrives in two chunks is
+    /// the same call, not two. The aggregate appended every copy, so a
+    /// streamed call was described once per chunk; `tool_call_ids_json` then
+    /// persisted the same id several times and tool-result pairing saw
+    /// phantom calls. Fold a call by its candidate and part position, the
+    /// rule the token-side merger already applies to the same stream.
+    #[test]
+    fn a_repeated_function_call_in_a_stream_is_kept_once() {
+        let chunks = serde_json::json!([
+            {"candidates": [{"content": {"role": "model", "parts": [
+                {"text": "calling"},
+                {"functionCall": {"id": "call-1", "name": "lookup", "args": {"q": "x"}}}
+            ]}, "index": 0}]},
+            {"candidates": [{"content": {"role": "model", "parts": [
+                {"text": " the tool"},
+                {"functionCall": {"id": "call-1", "name": "lookup", "args": {"q": "x"}}}
+            ]}, "finishReason": "STOP", "index": 0}]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+        let parts = &response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts;
+
+        let calls: Vec<&GeminiFunctionCall> = parts
+            .iter()
+            .filter_map(|part| part.function_call.as_ref())
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a call repeated by the stream must be recorded once: {parts:?}"
+        );
+        assert_eq!(calls[0].id.as_deref(), Some("call-1"));
+
+        let text: String = parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(text, "calling the tool");
+    }
+
+    /// Folding is positional, not by value: two genuinely distinct calls that
+    /// happen to carry the same name and arguments remain two calls.
+    #[test]
+    fn two_identical_calls_at_different_positions_are_kept() {
+        let call = serde_json::json!({"functionCall": {"name": "lookup", "args": {"q": "x"}}});
+        let chunks = serde_json::json!([
+            {"candidates": [{"content": {"parts": [call, call]}, "index": 0}]},
+            {"candidates": [{"content": {"parts": [call, call]}, "finishReason": "STOP", "index": 0}]}
+        ]);
+
+        let response = GeminiParser::parse_response(&chunks).expect("stream aggregates");
+        let parts = &response.candidates[0]
+            .content
+            .as_ref()
+            .expect("merged content")
+            .parts;
+        let calls = parts
+            .iter()
+            .filter(|part| part.function_call.is_some())
+            .count();
+        assert_eq!(calls, 2, "distinct part positions stay distinct: {parts:?}");
     }
 
     /// A stream candidate's `index` is wire data, not a position this reader

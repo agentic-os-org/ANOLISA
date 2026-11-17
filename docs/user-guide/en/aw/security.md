@@ -56,7 +56,14 @@ cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
 
-The template requires `PROVIDERS_DIR`, `SEC_CORE_CLI` and `SOCKET`.
+The template requires `PROVIDERS_DIR`, `SEC_CORE_CLI` and `SOCKET`. To bypass
+per-call `agent-sec-cli` subprocesses for `scan_code`, `scan_prompt`,
+`scan_user_input`, `scan_tool_input`, `scan_tool_output`, and
+`check_final_tool_output`, add
+`"--transport", "daemon"` to `aw-provider-sec-core`'s `transport.argv` (keep
+`--socket`; `--cli` is only required when `check_skill` is used, and switching
+back to `"--transport", "cli"` restores CLI execution). See the
+[sec-core Provider reference](../../../developer-guide/en/aw/providers/sec-core.md).
 For native or Makefile installations, set `PROVIDERS_DIR` to the actual installed
 Provider root, such as `/usr/libexec/aw/providers` or `/usr/local/libexec/aw/providers`. For compression too, install
 the Tokenless backend and bridge, then select `sec-core-tokenless.json` with the
@@ -141,6 +148,10 @@ Select one owner for PII in each tool phase. Remove native PII PreToolUse/PostTo
 registrations when AW owns those phases; keep user-submit checks as required.
 The [integration reference](../../../developer-guide/en/aw/providers/sec-core.md#tool-pii-policy)
 explains configuration, unsupported result shapes and native mode limits.
+
+For headless DSH, use its [sec-core example and integration guide](../../../developer-guide/en/aw/agents/deepseek-harness.md).
+Its strict output path returns a generic tool error if the original result cannot be
+safely replaced or the backend fails.
 
 ## Stop and extend
 

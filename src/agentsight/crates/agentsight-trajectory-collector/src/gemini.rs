@@ -26,7 +26,8 @@ use agentsight_atif::{
 /// existing negative-fingerprint namespace to invalidate pre-fix byte sizes.
 pub(crate) fn scan_fingerprint(project: &str, file_size: i64, mtime_ns: i64) -> i64 {
     let mut digest = Sha256::new();
-    digest.update(b"agentsight-gemini-project-v1\0");
+    // Refresh stored snapshots that predate tool-input accounting.
+    digest.update(b"agentsight-gemini-project-v2\0");
     digest.update(file_size.to_le_bytes());
     digest.update(mtime_ns.to_le_bytes());
     digest.update(project.as_bytes());
@@ -538,7 +539,13 @@ fn gemini_record_is_empty(msg: &serde_json::Value) -> bool {
 /// is reported as-is, matching the Codex and Claude converters.
 fn token_metrics(tokens: Option<&serde_json::Value>) -> Option<Metrics> {
     let tokens = tokens.filter(|v| v.is_object())?;
-    let prompt = tokens.get("input").and_then(|v| v.as_u64());
+    let input = tokens.get("input").and_then(|v| v.as_u64());
+    // The CLI stores tool-use prompt tokens separately from ordinary input.
+    let tool = tokens.get("tool").and_then(|v| v.as_u64());
+    let prompt = match (input, tool) {
+        (Some(input), Some(tool)) => input.checked_add(tool),
+        (input, tool) => input.or(tool),
+    };
     // Gemini persists visible candidates and billed reasoning separately.
     let visible = tokens.get("output").and_then(|v| v.as_u64());
     let thoughts = tokens.get("thoughts").and_then(|v| v.as_u64());

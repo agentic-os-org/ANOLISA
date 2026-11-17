@@ -106,7 +106,7 @@ impl Runtime {
             "peak_invocations_per_binding":self.resources.peak_invocations.load(Ordering::Relaxed),
             "admission_rejections":self.resources.rejected.load(Ordering::Relaxed),
             "rejection_reasons":*self.resources.reasons.lock().map_err(|_| rejected("state_poisoned"))?,
-            "reserved_control_connections":16, "maximum_steps_per_binding":64}))
+            "reserved_control_connections":16, "maximum_steps_per_binding":crate::MAX_STEPS_PER_BINDING}))
     }
 }
 

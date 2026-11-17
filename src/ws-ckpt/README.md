@@ -127,6 +127,9 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2
 # Diff snapshot vs current working tree (omit --to)
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 
+# Machine-readable file changes (no line-by-line content diff)
+ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --format json
+
 # Cleanup old snapshots, keep latest 5
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```

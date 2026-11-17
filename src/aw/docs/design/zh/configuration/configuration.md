@@ -32,7 +32,9 @@ Host 在本地将效果与 Adapter 能力对照，不执行发现或私有配置
 
 结构化 Provider 使用 `protocol: aw-provider/v1alpha1`，步骤声明 `operation`
 和 `effects`。准备阶段执行 `describe` 与 `validate_config`，再将请求效果与可信
-Adapter 能力对照。当前运行时准入工具前 `observe`/`block`、工具后 `observe`。
+Adapter 能力对照。当前运行时准入输入提交 `observe`/`block`、工具前
+`observe`/`block`/`replace_input`、工具后 `observe`/`replace_result`，以及
+DeepSeek Harness 最终结果的 `observe`/`block`。
 
 现有原生 Hook 命令使用 `protocol: native-hook/v1alpha1`、空 `config` 对象，
 步骤填写 `native: {}`，不填 `operation`、`effects`，混用两种形态会被拒绝。
@@ -45,8 +47,9 @@ Hook 组，属于 Adapter 配置，不属于 Provider 或共享执行策略。�
 
 静态校验拒绝未知公共字段、重复键及步骤 ID、悬空 Provider/guard 引用、非法工具
 选择器、不匹配的事件效果或失败动作、不匹配的步骤协议，以及启用的结构化 `ask`
-步骤。`security.violation` 保留为主动末尾检查设计，当前运行时拒绝 guard，
-不保证全局 Hook 顺序。
+步骤。DeepSeek Harness 在已验证的 Agent loop 提交边界接入独立的
+`security.violation` 最终结果步骤。运行时仍拒绝 `tool.before.guard`，
+也不保证全局 Hook 顺序。
 
 控制效果及失败处置不能通过 `required: false` 丢弃。运行时准入和原生采用分开
 验收。Qoder 启动器接通受支持的工具回调；QwenPaw、OpenClaw、Hermes Adapter、

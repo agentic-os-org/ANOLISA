@@ -23,7 +23,7 @@ from pathlib import Path
 
 def iter_chat_files(logs_dir: Path):
     pattern = os.path.join(glob.escape(str(logs_dir)), "projects", "*", "chats", "*.jsonl")
-    return glob.glob(pattern)
+    return [path for path in glob.glob(pattern) if Path(path).is_file()]
 
 
 def parse_function_calls(file_path):

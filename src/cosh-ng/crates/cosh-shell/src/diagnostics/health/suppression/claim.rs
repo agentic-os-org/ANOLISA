@@ -1,40 +1,21 @@
 use std::collections::BTreeMap;
 use std::path::Path;
-#[cfg(not(test))]
-use std::process::Command;
-use std::time::Duration;
-#[cfg(not(test))]
-use std::time::Instant;
-
-use serde::{Deserialize, Serialize};
 
 use super::{HealthSuppressionStore, SuppressionDecision};
 use crate::config::private_state;
 use crate::diagnostics::health::{HealthFinding, HealthScanReport};
-#[cfg(not(test))]
-use crate::process::BoundedWorker;
-use crate::process::{read_worker_request, write_worker_reply};
 
-pub(crate) const WORKER_FLAG: &str = "--__claim-recommendation-v1";
-const LIMIT: usize = 4096;
-const BUDGET: Duration = Duration::from_millis(100);
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 pub(crate) struct Candidate {
     pub(crate) id: String,
     pub(crate) finding: HealthFinding,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct GuideToken {
     generation: String,
     runtime: bool,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Request {
     guide: Option<GuideToken>,
     host: Option<String>,
@@ -42,19 +23,12 @@ struct Request {
     candidates: Vec<Candidate>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Claim {
-    pub(crate) selected: String,
-    pub(crate) eligible: Vec<String>,
-}
-
 pub(crate) fn claim(
     report: &HealthScanReport,
     candidates: Vec<Candidate>,
     generation: &str,
     runtime: bool,
-) -> Option<Claim> {
+) -> Option<Vec<String>> {
     if candidates.is_empty() {
         return None;
     }
@@ -67,60 +41,8 @@ pub(crate) fn claim(
         metrics: super::metrics_for_report(report),
         candidates,
     };
-    #[cfg(test)]
-    {
-        super::health_suppression_store_path()
-            .and_then(|path| claim_at(&path, &request, super::current_time_ms()))
-    }
-    #[cfg(not(test))]
-    {
-        let bytes = serde_json::to_vec(&request).ok()?;
-        if bytes.len() > LIMIT {
-            return None;
-        }
-        let mut command = Command::new(std::env::current_exe().ok()?);
-        command.args(["health", WORKER_FLAG]);
-        let deadline = Instant::now() + BUDGET;
-        let mut worker = BoundedWorker::spawn(command, &bytes, deadline, LIMIT).ok()?;
-        loop {
-            if let Some(result) = worker.poll_ready() {
-                return serde_json::from_slice::<Option<Claim>>(&result.ok()?)
-                    .ok()?
-                    .filter(|claim| {
-                        claim.eligible.contains(&claim.selected)
-                            && claim.eligible.len() <= request.candidates.len()
-                            && claim.eligible.iter().all(|id| {
-                                request
-                                    .candidates
-                                    .iter()
-                                    .any(|candidate| &candidate.id == id)
-                            })
-                    });
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-}
-
-pub(crate) fn run_worker() -> i32 {
-    let Ok(bytes) = read_worker_request(LIMIT, BUDGET) else {
-        return 1;
-    };
-    let Ok(request) = serde_json::from_slice::<Request>(&bytes) else {
-        return 1;
-    };
-    if request.guide.is_none() {
-        return 1;
-    }
-    let result = super::health_suppression_store_path()
-        .and_then(|path| claim_at(&path, &request, super::current_time_ms()));
-    let Ok(bytes) = serde_json::to_vec(&result) else {
-        return 1;
-    };
-    i32::from(write_worker_reply(&bytes, LIMIT).is_err())
+    super::health_suppression_store_path()
+        .and_then(|path| claim_at(&path, &request, super::current_time_ms()))
 }
 
 fn guide_current(token: &GuideToken) -> bool {
@@ -139,7 +61,7 @@ fn guide_current(token: &GuideToken) -> bool {
     })
 }
 
-fn claim_at(path: &Path, request: &Request, now_ms: u64) -> Option<Claim> {
+fn claim_at(path: &Path, request: &Request, now_ms: u64) -> Option<Vec<String>> {
     if request
         .guide
         .as_ref()
@@ -177,7 +99,21 @@ fn claim_at(path: &Path, request: &Request, now_ms: u64) -> Option<Claim> {
                     == SuppressionDecision::Show
         })
         .collect::<Vec<_>>();
-    let first = *eligible.first()?;
+    let mut claimed = Vec::new();
+    let mut recorded = Vec::new();
+    for candidate in eligible {
+        let fingerprint = super::finding_fingerprint(&candidate.finding);
+        if recorded.contains(&fingerprint) {
+            claimed.push(candidate.id.clone());
+            continue;
+        }
+        recorded.push(fingerprint);
+        claimed.push(candidate.id.clone());
+        store.record_shown(&host, &candidate.finding, request.metrics.clone(), now_ms);
+    }
+    if claimed.is_empty() {
+        return None;
+    }
     if request
         .guide
         .as_ref()
@@ -185,16 +121,8 @@ fn claim_at(path: &Path, request: &Request, now_ms: u64) -> Option<Claim> {
     {
         return None;
     }
-    store
-        .record_and_persist(path, &host, &first.finding, request.metrics.clone(), now_ms)
-        .ok()?;
-    Some(Claim {
-        selected: first.id.clone(),
-        eligible: eligible
-            .iter()
-            .map(|candidate| candidate.id.clone())
-            .collect(),
-    })
+    store.write_to_path(path).ok()?;
+    Some(claimed)
 }
 
 #[cfg(test)]
@@ -224,19 +152,149 @@ mod tests {
         }
     }
 
+    fn claim_inputs() -> (HealthScanReport, Vec<Candidate>) {
+        let mut request = request();
+        let candidate = request.candidates.remove(0);
+        let mut report = HealthScanReport::new("claim", 1000);
+        report.findings.push(candidate.finding.clone());
+        (report, vec![candidate])
+    }
+
+    fn saved_env() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        ["HOME", "COSH_SHELL_HEALTH_SUPPRESSION_STORE"]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect()
+    }
+
+    fn restore_env(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn claim_persists_displayed_findings_without_a_subprocess() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let saved = saved_env();
+        std::env::set_var("HOME", &root);
+        let path = root.join("history");
+        std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", &path);
+        let generation = crate::config::guide::open_user_store()
+            .unwrap()
+            .snapshot(None)
+            .unwrap()
+            .generation;
+        let (report, candidates) = claim_inputs();
+        assert_eq!(
+            claim(&report, candidates.clone(), &generation, false),
+            Some(vec!["memory".to_string()])
+        );
+        assert_eq!(claim(&report, candidates, &generation, false), None);
+        restore_env(saved);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn claim_fails_closed_while_a_concurrent_session_holds_the_lock() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let saved = saved_env();
+        std::env::set_var("HOME", &root);
+        let path = root.join("history");
+        std::env::set_var("COSH_SHELL_HEALTH_SUPPRESSION_STORE", &path);
+        let _lock =
+            private_state::LockGuard::try_acquire(&path.with_file_name("history.lock")).unwrap();
+        let generation = crate::config::guide::open_user_store()
+            .unwrap()
+            .snapshot(None)
+            .unwrap()
+            .generation;
+        let (report, candidates) = claim_inputs();
+        assert_eq!(claim(&report, candidates, &generation, false), None);
+        assert!(!path.exists());
+        restore_env(saved);
+    }
+
     #[test]
     fn health_claim_is_persisted_before_a_second_session_can_display_it() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = dir.path().canonicalize().unwrap().join("history");
         assert_eq!(
-            claim_at(&path, &request(), 1000).map(|claim| claim.selected),
-            Some("memory".into())
+            claim_at(&path, &request(), 1000),
+            Some(vec!["memory".to_string()])
         );
         assert_eq!(claim_at(&path, &request(), 1001), None);
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn batch_claim_fails_closed_when_history_cannot_be_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().canonicalize().unwrap().join("history");
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(claim_at(&path, &request(), 1000), None);
+    }
+
+    #[test]
+    fn batch_claim_keeps_every_winning_id_but_records_each_finding_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().canonicalize().unwrap().join("history");
+        let mut request = request();
+        let mut second = request.candidates[0].clone();
+        second.id = "memory-process".into();
+        request.candidates.push(second);
+        let claimed = claim_at(&path, &request, 1000).unwrap();
+        assert_eq!(
+            claimed,
+            vec!["memory".to_string(), "memory-process".to_string()]
+        );
+        let entries = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            entries
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .count(),
+            1
+        );
+        assert_eq!(claim_at(&path, &request, 1001), None);
+    }
+
+    #[test]
+    fn batch_claim_drops_only_the_candidates_a_concurrent_session_already_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().canonicalize().unwrap().join("history");
+        let mut first = request();
+        first.candidates[0].id = "memory".into();
+        assert!(claim_at(&path, &first, 1000).is_some());
+        let mut second = request();
+        second.candidates[0].id = "memory".into();
+        let mut other = second.candidates[0].clone();
+        other.id = "disk".into();
+        other.finding.id = "J09".into();
+        other.finding.title_id = HealthMessageId::HealthFindingDiskHigh;
+        second.candidates.push(other);
+        assert_eq!(
+            claim_at(&path, &second, 1001),
+            Some(vec!["disk".to_string()])
         );
     }
 

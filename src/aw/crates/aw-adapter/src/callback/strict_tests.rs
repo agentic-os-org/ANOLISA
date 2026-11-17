@@ -61,7 +61,7 @@ fn pi_native_validation_cannot_bypass_early_close_or_inject_replacement() {
         br#"{}"#,
         br#"{"block":true,"reason":"retry"}"#,
     ] {
-        assert!(validate_pi_native("tool.before", &Exit::Code(0), valid).is_ok());
+        assert!(validate_native_block_directive("tool.before", &Exit::Code(0), valid).is_ok());
     }
     for invalid in [
         b" ".as_slice(),
@@ -73,11 +73,14 @@ fn pi_native_validation_cannot_bypass_early_close_or_inject_replacement() {
         br#"{"aw_replacement":{"content":[]}}"#,
         br#"{"approval":true}"#,
     ] {
-        assert!(validate_pi_native("tool.before", &Exit::Code(0), invalid).is_err());
+        assert!(validate_native_block_directive("tool.before", &Exit::Code(0), invalid).is_err());
     }
-    assert!(validate_pi_native("tool.after", &Exit::Code(0), br#"{"block":true}"#).is_err());
-    assert!(validate_pi_native("tool.before", &Exit::Code(2), b"{}").is_err());
-    assert!(validate_pi_native("tool.before", &Exit::Signal(15), b"{}").is_err());
+    assert!(
+        validate_native_block_directive("tool.after", &Exit::Code(0), br#"{"block":true}"#)
+            .is_err()
+    );
+    assert!(validate_native_block_directive("tool.before", &Exit::Code(2), b"{}").is_err());
+    assert!(validate_native_block_directive("tool.before", &Exit::Signal(15), b"{}").is_err());
     let output = json!({"status":"ok","kind":"native","native":{"stdout":br#"{"aw_replacement":{}}"#.to_vec(),"stderr":[],"exit_code":0,"signal":null}});
     assert!(response(
         adapter::select("pi").unwrap(),

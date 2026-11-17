@@ -38,7 +38,8 @@ const records = JSON.stringify(Array.from({ length: 100 }, (_, id) => ({ id, nam
 const jsonResult = { args: { command: 'Write-Output $records' }, output: records, hookFacts: { kind: 'shell', stdout: records, stderr: '', exitCode: 0 } };
 await host['tool.execute.after']({ ...input, callID: 'host-json' }, jsonResult);
 assert.equal(jsonResult.hookEffects?.replacementPresent, true);
-assert.ok(JSON.stringify(jsonResult.hookEffects.replacement).length < records.length);
+assert.equal(typeof jsonResult.hookEffects.replacement, 'string');
+assert.ok(jsonResult.hookEffects.replacement.length < records.length);
 const filePath = path.join(workspace, 'records.json');
 const readResult = { output: records, hookFacts: { filePath, content: records, numLines: 1, startLine: 1, totalLines: 1 } };
 await host['tool.execute.after']({ ...input, tool: 'read', callID: 'host-read', args: { filePath } }, readResult);

@@ -5,8 +5,9 @@
 This reference is for integration and maintenance. For installation and daily use,
 see the [user guide](../../../../user-guide/en/aw/security.md).
 
-`aw-provider-sec-core` lets an AW policy call the public `agent-sec-cli scan-code` and `scan-pii`
-commands. You choose which tool inputs contain code and whether reported risks
+`aw-provider-sec-core` lets an AW policy invoke sec-core via the public `agent-sec-cli`
+commands (`--transport cli`, default) or directly over the local V2 daemon Unix
+socket (`--transport daemon`). You choose which tool inputs contain code and whether reported risks
 produce an observation or a block candidate. sec-core supplies the scanner and
 rules; AW supplies configuration, protocol validation and bounded invocation.
 
@@ -15,10 +16,12 @@ See the [user guide](../../../../user-guide/en/aw/security.md) for installation 
 ## Prerequisites and build
 
 Install sec-core using the [sec-core guide](../../../../user-guide/en/agent-sec-core/index.md).
-This bridge requires the Rust V2 CLI with `--socket`, `--timeout-ms` and
-`scan-code --code --language --mode`, plus an accessible, running sec-core daemon.
-Check the deployed CLI's help; the legacy Python CLI is not certified by this
-bridge. AW adds no command or dependency to sec-core.
+Both transports require an accessible, running Rust V2 sec-core daemon (`--socket`).
+`--transport daemon` connects directly over its Unix socket without `agent-sec-cli`,
+except for `check_skill`. `--transport cli` (default) and `check_skill` also require
+the Rust V2 CLI (`--cli`) supporting `--socket`, `--timeout-ms` and
+`scan-code --code --language --mode`. Check the deployed CLI's help; the legacy
+Python CLI is not certified by this bridge. AW adds no command or dependency to sec-core.
 
 Build the AW Provider and local Host example from source:
 
@@ -31,11 +34,14 @@ cargo build --locked -p aw-host --example host
 The Provider binary is `../../providers/agent-sec-core/target/debug/aw-provider-sec-core`. Its invocation is:
 
 ```text
-aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH
+aw-provider-sec-core [--transport cli|daemon] [--cli ABSOLUTE_PATH] --socket ABSOLUTE_PATH [--wait-for-backend]
 ```
 
-`--cli` selects the public `agent-sec-cli` executable; `--socket` selects its
-existing daemon. Both paths are required and absolute. `--help` prints usage.
+`--transport` selects `cli` (default) or `daemon`. `--socket` selects the existing
+daemon Unix socket and is always required and absolute. `--cli` selects the public
+`agent-sec-cli` executable as an absolute path; it is required for `--transport cli`
+and optional for `--transport daemon` unless the policy calls `check_skill`.
+`--help` prints usage.
 The process reads one EOF-terminated AW Provider JSON request on stdin and writes
 one response on stdout. It is normally launched by the Host, not interactively.
 
@@ -50,11 +56,14 @@ The bridge still leaves daemon startup and shutdown to the external owner.
 aw-provider-sec-core --cli ABSOLUTE_PATH --socket ABSOLUTE_PATH --wait-for-backend
 ```
 
+Pass `--transport daemon` (default `cli`) to execute `scan_code`, `scan_prompt`, `scan_user_input`, `scan_tool_input`, `scan_tool_output`, and `check_final_tool_output` directly over the local sec-core V2 daemon socket (`SO_PEERCRED` UID 0 check, strict `DaemonRequest` / `TraceCarrierV1` `version: 1` framing, and zero retries). When `--transport daemon` is used without `--cli`, `describe` omits `check_skill` so Host preparation rejects `check_skill` policies at admission time; switch back to `--transport cli` to roll back.
+
 Discovery, configuration validation and `observe_tool` do not wait. A scan or
 Skill check waits only while the configured socket is absent, within the same
 invocation budget used by the actual check. Socket appearance does not prove
-health or a safe verdict: the public CLI still authenticates the peer, initializes
-the required capability and performs the check. There is no scan retry.
+health or a safe verdict: `--transport cli` still relies on the public CLI, while
+`--transport daemon` verifies `SO_PEERCRED` UID `0` directly before exchanging one
+strict V2 `DaemonRequest` frame. Neither mode retries failed scans.
 A missing socket at the deadline, an invalid socket path or a failed check remains
 a Provider error, handled by the configured `on_error` action. Without this flag,
 the existing immediate CLI invocation is unchanged.
@@ -256,10 +265,13 @@ input.submit:
       on_error: block
 ```
 
-`scan_prompt` reads `event.input.text` and calls the public V2 CLI
+`scan_prompt` reads `event.input.text` and performs a fast prompt scan using the
+selected transport. With `--transport cli` (default), it calls the public V2 CLI
 `scan-prompt --mode fast --source user_input --format json`, with text on stdin.
-The CLI uses the configured daemon socket and remaining timeout. Fast mode runs
-L1 rules; `standard`, `strict`, ML model options and `multi_turn` are rejected by
+With `--transport daemon`, it sends an `action.prompt_scan` RPC (`mode: "fast"`,
+`source: "user_input"`) directly over the daemon Unix socket. Both modes use the
+configured daemon socket and remaining timeout. Fast mode runs L1 rules;
+`standard`, `strict`, ML model options and `multi_turn` are rejected by
 private-config validation. Whitespace-only text needs no scanner call. All other
 responses must identify a completed rule-engine scan of the entire stripped input:
 truncation, missing layers, degradation, empty/malformed output or CLI failure
@@ -269,12 +281,13 @@ completed risk decision. `prompt.mode` selects observation or blocking on risk;
 `prompt_risk` without findings or raw text.
 
 `scan_user_input` reads the same complete `event.input.text` through the shared
-PII scanner transport: `scan-pii --stdin --format json --source user_input`.
-It checks the scan source, byte count and completion state, retaining the turn's
-trace context and remaining budget. `pii.input_mode` controls risk blocking;
-errors follow `on_error`. Responses contain only `pii_pass` or `pii_risk`.
-The `output_mode` field belongs to the shared PII configuration; this operation
-never replaces user text.
+PII scanner transport. With `--transport cli`, it calls
+`scan-pii --stdin --format json --source user_input`; with `--transport daemon`,
+it sends an `action.pii_scan` RPC directly. It checks the scan source, byte count
+and completion state, retaining the turn's trace context and remaining budget.
+`pii.input_mode` controls risk blocking; errors follow `on_error`. Responses
+contain only `pii_pass` or `pii_risk`. The `output_mode` field belongs to the
+shared PII configuration; this operation never replaces user text.
 
 Qoder awaits the public `UserPromptSubmit` snapshot and returns a native block
 decision on denial. Existing native Hook decisions remain effective. QwenPaw
@@ -317,11 +330,14 @@ Safe failed-tool results retain their original error semantics; a Qoder
 replace the native error text.
 
 Configure input `on_error: block` and output `on_error: withhold_result` for
-required checks. Missing CLI/backend, nonzero exits, empty or malformed responses,
-wrong source, truncated or incomplete scans, byte-count mismatch and invalid or
-failed custom rules produce errors, separately from risk. Text travels only over
-stdin; neither source text nor findings enter Provider responses. The common
-`pii::call` API also accepts `Source::UserInput` for submit consumers.
+required checks. CLI/backend unavailability (including a non-root peer with
+`--transport daemon`), nonzero exits or daemon/protocol errors, empty or malformed
+responses, wrong source, truncated or incomplete scans, byte-count mismatch and
+invalid or failed custom rules produce errors, separately from risk. With
+`--transport cli`, text travels over stdin; with `--transport daemon`, it is sent
+over the root-owned daemon's Unix socket. Provider responses contain neither source
+text nor findings. The shared PII transport also supports `Source::UserInput` for
+submission consumers.
 
 Qoder SDK ordinary resident Queries return the native `updatedToolOutput` directive;
 restricted `--reloadable` mode rejects replacement at admission. QwenPaw ordinary

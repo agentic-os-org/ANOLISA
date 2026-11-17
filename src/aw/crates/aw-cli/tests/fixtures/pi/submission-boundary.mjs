@@ -39,6 +39,25 @@ test('transformed or additional user content never enters the native Agent', asy
   }
 });
 
+test('one native system prefix preserves the authorized user text', async () => {
+  const { session, calls, boundary } = fixture();
+  const system = { role: 'system', content: 'native instructions' };
+  await boundary.run('original', async () => {
+    await session.agent.prompt([system, ...message('original')]);
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], [system, ...message('original')]);
+  for (const messages of [[system, ...message('changed')],
+    [system, ...message('original'), system],
+    [system, system, ...message('original')]]) {
+    const next = fixture();
+    await next.boundary.run('original', async () => {
+      await assert.rejects(next.session.agent.prompt(messages), /AW/);
+    });
+    assert.deepEqual(next.calls, []);
+  }
+});
+
 test('input and post-check transformation handlers are rejected before a scan starts', () => {
   const { session, boundary } = fixture();
   for (const kind of ['input', 'context', 'before_provider_request']) {

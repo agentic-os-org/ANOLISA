@@ -156,6 +156,11 @@ impl PersonalStore {
         Ok(Some(state))
     }
 
+    /// Read-only snapshot for status display: no lock, cleanup, prune, or write.
+    pub(crate) fn peek(&self) -> Result<Option<RecommendationState>, StoreError> {
+        self.load_inner()
+    }
+
     pub(crate) fn commit(
         &self,
         base: &StateVersion,

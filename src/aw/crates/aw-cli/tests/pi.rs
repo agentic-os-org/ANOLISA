@@ -27,7 +27,7 @@ fn setup(fixture: &Fixture) -> Value {
         &application,
     )
     .unwrap();
-    for (name,source) in [("pi-agent-core","export class Agent { subscribe(){ return ()=>{}; } }".to_string()),
+    for (name,source) in [("pi-agent-core","export class Agent { subscribe(){ return ()=>{}; } async processEvents(){} }".to_string()),
         ("pi-coding-agent","import {Agent} from '@earendil-works/pi-agent-core'; export class AgentSession { constructor(){this.agent=new Agent();this.sessionManager={getSessionId:()=> 'session-1'};} dispose(){} }".to_string())] {
         let path=fixture.root.join("node_modules/@earendil-works").join(name);fs::create_dir_all(path.join("dist")).unwrap();
         fs::write(path.join("package.json"),json!({"name":format!("@earendil-works/{name}"),"version":"0.84.2","type":"module","exports":{".":{"import":"./dist/index.js"}}}).to_string()).unwrap();
@@ -373,7 +373,7 @@ fn strict_output_rejects_unverified_versions_before_application_import() {
             .root
             .join(format!("node_modules/@earendil-works/{name}/package.json"));
         let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
-        metadata["version"] = json!("0.84.3");
+        metadata["version"] = json!("0.85.1");
         fs::write(package, metadata.to_string()).unwrap();
         fs::write(
             fixture.root.join("app.mjs"),
@@ -391,4 +391,31 @@ fn strict_output_rejects_unverified_versions_before_application_import() {
         assert!(!stderr.contains("business module imported"), "{stderr}");
         service.released(&fixture);
     }
+}
+
+#[test]
+fn strict_output_requires_event_seam_before_application_import() {
+    let fixture = Fixture::new();
+    let mut document = setup(&fixture);
+    fs::write(
+        fixture
+            .root
+            .join("node_modules/@earendil-works/pi-agent-core/dist/index.js"),
+        "export class Agent { subscribe(){ return ()=>{}; } }",
+    )
+    .unwrap();
+    policy(&fixture, &mut document, "normal");
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    fs::write(
+        fixture.root.join("app.mjs"),
+        "throw new Error('business module imported');",
+    )
+    .unwrap();
+    let service = Service::start(&fixture, &document);
+    let output = fixture.run(launch(&fixture));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("native event dispatch seam"), "{stderr}");
+    assert!(!stderr.contains("business module imported"), "{stderr}");
+    service.released(&fixture);
 }

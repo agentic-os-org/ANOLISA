@@ -558,6 +558,11 @@ impl AgentSight {
         // `ProcTrace::run` / `SslSniff::run` paths read the same global); the
         // poll threads read it via `crate::config::poll_timeout_ms()`.
         crate::config::set_poll_timeout_ms(config.poll_timeout_ms);
+        // Publish the learned static-SSL offset cache location before probes
+        // are built: `SslSniff::build` loads the cache so the first discovery
+        // of a previously scanned binary attaches its uprobes synchronously
+        // instead of racing an asynchronous whole-binary scan (#9762).
+        crate::config::set_ssl_offsets_learned_path(config.storage.ssl_offsets_learned_path());
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
@@ -1546,10 +1551,8 @@ impl AgentSight {
 
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
-            // Rate-limited internally, and deliberately outside the idle branch:
-            // a saturated byte budget keeps the queue non-empty, which is exactly
-            // when the watermarks matter most.
-            self.tick();
+            // try_process ticks before receiving, including on a busy channel.
+            // Publish watermarks even when that channel never becomes idle.
             self.maybe_log_buffer_watermarks();
             self.maybe_export_runtime_metrics();
             if let Some(result) = self.try_process() {

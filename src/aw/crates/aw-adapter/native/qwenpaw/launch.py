@@ -10,6 +10,11 @@ import runpy
 import stat
 import sys
 
+# Load the owned sibling explicitly, including when Python safe-path mode is enabled.
+accelerate_paths = runpy.run_path(str(Path(__file__).with_name("aw_paths.py")))[
+    "accelerate_paths"
+]
+
 READY_TIMEOUT = 30
 
 
@@ -52,6 +57,7 @@ def install(source, config):
     from qwenpaw.plugins.loader import PluginLoader
     from qwenpaw.runtime.builder import AgentBuilder
 
+    accelerate_paths(config.get("native_version"))
     load = PluginLoader.load_all_plugins
 
     module = None

@@ -21,7 +21,8 @@ import sys
 from typing import Any
 
 from sandbox_authorization import (
-    PERMISSIONS_ENV,
+    all_shell_enabled,
+    authorization_error,
     finish_authorized,
     prepare_authorized,
 )
@@ -303,16 +304,28 @@ def detect_patterns(command: str, patterns: list) -> list:
     return reasons
 
 
-def main():
+def main() -> None:
+    flag_error = None
+    try:
+        all_shell = all_shell_enabled()
+    except ValueError as error:
+        all_shell = True
+        flag_error = error
     try:
         input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
+    except (ValueError, EOFError) as error:
         # Preserve legacy passthrough; configured authorization must fail closed.
         print(
             json.dumps(
-                {"decision": "block" if PERMISSIONS_ENV in os.environ else "allow"}
+                authorization_error(f"invalid hook input: {error}")
+                if all_shell
+                else {"decision": "allow"}
             )
         )
+        return
+
+    if not isinstance(input_data, dict):
+        print(json.dumps(authorization_error("hook input must be an object")))
         return
 
     event = input_data.get("hook_event_name", "PreToolUse")
@@ -323,7 +336,20 @@ def main():
         print("{}")
         return
 
+    if flag_error is not None:
+        print(json.dumps(authorization_error(flag_error)))
+        return
+
     tool_input = input_data.get("tool_input", {})
+    if all_shell and (
+        not isinstance(tool_input, dict)
+        or not isinstance(tool_input.get("command"), str)
+        or not tool_input["command"].strip()
+    ):
+        print(
+            json.dumps(authorization_error("hook requires a non-empty shell command"))
+        )
+        return
     command = tool_input.get("command", "")
     cwd = input_data.get("cwd", "/tmp")
 
@@ -332,9 +358,7 @@ def main():
         print(json.dumps({"decision": "allow"}))
         return
 
-    # ── sudo 预处理
-    # 剥离 sudo 前缀后对底层命令做统一的危险性评估，避免把整条命令
-    # 塞进沙箱（沙箱内 sudo 因权限受限必然失败）。
+    # Inspect the underlying command for explicit blocks; only legacy execution strips sudo.
     stripped_command, has_sudo = strip_sudo(command)
     is_root = os.getuid() == 0
 
@@ -362,7 +386,15 @@ def main():
             cwd=cwd,
         )
 
+        if all_shell:
+            message = f"Explicit sandbox policy blocked execution: {reasons_str}"
+            result = authorization_error(message)
         print(json.dumps(result, ensure_ascii=False))
+        return
+
+    if all_shell:
+        # Authorization, native approval and execution must bind the original command.
+        print(json.dumps(prepare_authorized(input_data, command), ensure_ascii=False))
         return
 
     # 第二优先级：替换为沙箱执行（文件系统/权限类风险）
@@ -397,14 +429,6 @@ def main():
     # 沙箱内不支持 sudo/pkexec 等提权机制，因此始终以剥离后的命令入沙箱，
     # 并通过 systemMessage 告知用户 sudo 已被忽略、命令在受限环境中执行。
     sandbox_source = stripped_command if has_sudo else command
-    if PERMISSIONS_ENV in os.environ:
-        print(
-            json.dumps(
-                prepare_authorized(input_data, sandbox_source), ensure_ascii=False
-            )
-        )
-        return
-
     # 判断是否需要放开网络权限
     if network_reasons and not sandbox_reasons:
         # 纯网络命令：放开网络，但保留文件系统隔离

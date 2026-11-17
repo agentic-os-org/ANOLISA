@@ -9,9 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use ws_ckpt_common::{
-    decode_payload, default_auto_cleanup_keep, encode_frame, load_config_file,
-    load_config_file_unvalidated, save_config_file, ChangeType, CleanupRetention, DaemonConfig,
-    ErrorCode, GlobalConfigJson, PolicyFieldOp, RecoveryPreview, Request, Response,
+    decode_payload, default_auto_cleanup_keep, encode_frame, escape_terminal_text,
+    load_config_file, load_config_file_unvalidated, save_config_file, ChangeType, CleanupRetention,
+    DaemonConfig, ErrorCode, GlobalConfigJson, PolicyFieldOp, RecoveryPreview, Request, Response,
     SnapshotListItem, StatusReport, WorkspacePolicyJson, ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH,
     DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
@@ -240,6 +240,10 @@ enum Commands {
         /// Target snapshot (ID or name); omit to diff against current workspace
         #[arg(long, short = 't', value_parser = snapshot_id_value_parser())]
         to: Option<String>,
+
+        /// Output format: text or json (default: text)
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
     },
 
     /// Show daemon and workspace status
@@ -570,6 +574,7 @@ async fn run(cli: Cli) -> Result<()> {
             workspace,
             from,
             to,
+            format,
         } => {
             let request = Request::Diff {
                 workspace: resolve_workspace_arg(&workspace),
@@ -578,7 +583,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
 
             let response = send_request_to_daemon(&request).await?;
-            handle_diff_response(response)?;
+            handle_diff_response(response, &format)?;
         }
         Commands::Status { workspace, format } => {
             let request = Request::Status {
@@ -1085,26 +1090,39 @@ async fn print_health_advisory_if_needed() {
 async fn handle_response(response: Response, original_request: &Request) -> Result<()> {
     match response {
         Response::InitOk { ws_id } => {
-            println!("\x1b[32m✓ Workspace initialized: {}\x1b[0m", ws_id);
+            println!(
+                "\x1b[32m✓ Workspace initialized: {}\x1b[0m",
+                escape_terminal_text(&ws_id)
+            );
         }
         Response::CheckpointOk { snapshot_id } => {
-            println!("\x1b[32m✓ Checkpoint created: {}\x1b[0m", snapshot_id);
+            println!(
+                "\x1b[32m✓ Checkpoint created: {}\x1b[0m",
+                escape_terminal_text(&snapshot_id)
+            );
         }
         Response::RollbackOk { from, to } => {
             println!(
                 "\x1b[32m✓ Rolled back workspace {} to snapshot: {}\x1b[0m",
-                from, to
+                escape_terminal_text(&from),
+                escape_terminal_text(&to)
             );
         }
         Response::DeleteOk { target } => {
-            println!("\x1b[32m✓ Deleted: {}\x1b[0m", target);
+            println!(
+                "\x1b[32m✓ Deleted: {}\x1b[0m",
+                escape_terminal_text(&target)
+            );
         }
         Response::RecoverWithWarning { workspace, warning } => {
-            eprintln!("WARNING: {}", warning);
-            println!("Workspace recovered: {}", workspace);
+            print_recovery_warning(&warning);
+            println!("Workspace recovered: {}", escape_terminal_text(&workspace));
         }
         Response::RecoverOk { workspace } => {
-            println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
+            println!(
+                "\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m",
+                escape_terminal_text(&workspace)
+            );
         }
         Response::Error {
             code: ErrorCode::ConfirmationRequired,
@@ -1239,13 +1257,6 @@ fn snapshot_item_json(item: &SnapshotListItem) -> Result<serde_json::Value> {
     }
 }
 
-fn list_item_workspace(item: &SnapshotListItem) -> &str {
-    match item {
-        SnapshotListItem::Full(entry) => &entry.workspace,
-        SnapshotListItem::Summary(summary) => &summary.workspace,
-    }
-}
-
 fn render_snapshot_list(
     snapshots: Vec<SnapshotListItem>,
     next_cursor: Option<String>,
@@ -1268,10 +1279,18 @@ fn render_snapshot_list(
         return Ok(());
     }
 
+    write_snapshot_table(&mut io::stdout().lock(), &snapshots, next_cursor.as_deref())
+}
+
+fn write_snapshot_table(
+    writer: &mut impl Write,
+    snapshots: &[SnapshotListItem],
+    next_cursor: Option<&str>,
+) -> Result<()> {
     if snapshots.is_empty() {
-        println!("No snapshots found.");
+        writeln!(writer, "No snapshots found.")?;
         if let Some(cursor) = next_cursor {
-            println!("Next cursor: {cursor}");
+            writeln!(writer, "Next cursor: {cursor}")?;
         }
         return Ok(());
     }
@@ -1290,63 +1309,68 @@ fn render_snapshot_list(
     let hdr_date_owned = format!("CREATED (UTC{local_offset})");
     let hdr_date = hdr_date_owned.as_str();
     let hdr_msg = "MESSAGE";
-    let id_len = |item: &SnapshotListItem| match item {
-        SnapshotListItem::Full(entry) => {
-            entry.id.len() + usize::from(entry.meta.missing) * " [MISSING]".len()
-        }
-        SnapshotListItem::Summary(summary) => {
-            summary.id.len()
-                + usize::from(summary.missing) * " [MISSING]".len()
-                + " [SUMMARY]".len()
-        }
-    };
-    let w_ws = snapshots
+    let rows: Vec<_> = snapshots
         .iter()
-        .map(|item| list_item_workspace(item).len())
+        .map(|item| {
+            let (workspace, id, created_at, pinned, message) = match item {
+                SnapshotListItem::Full(entry) => (
+                    entry.workspace.as_str(),
+                    if entry.meta.missing {
+                        format!("{} [MISSING]", entry.id)
+                    } else {
+                        entry.id.clone()
+                    },
+                    entry.meta.created_at,
+                    entry.meta.pinned,
+                    entry.meta.message.as_deref().unwrap_or("-").to_string(),
+                ),
+                SnapshotListItem::Summary(summary) => (
+                    summary.workspace.as_str(),
+                    format!(
+                        "{}{} [SUMMARY]",
+                        summary.id,
+                        if summary.missing { " [MISSING]" } else { "" }
+                    ),
+                    summary.created_at,
+                    summary.pinned,
+                    format!("details omitted: {}", summary.omitted_fields.join(", ")),
+                ),
+            };
+            (
+                escape_terminal_text(workspace),
+                escape_terminal_text(&id),
+                created_at,
+                pinned,
+                escape_terminal_text(&message),
+            )
+        })
+        .collect();
+    let w_ws = rows
+        .iter()
+        .map(|row| row.0.chars().count())
         .max()
         .unwrap_or(0)
         .max(hdr_ws.len());
-    let w_snap = snapshots
+    let w_snap = rows
         .iter()
-        .map(id_len)
+        .map(|row| row.1.chars().count())
         .max()
         .unwrap_or(0)
         .max(hdr_snap.len());
     let w_date = 19_usize.max(hdr_date.len());
-    println!(
+    writeln!(
+        writer,
         "{:<w_ws$} {:<w_snap$} {:<w_date$} PINNED {}",
         hdr_ws, hdr_snap, hdr_date, hdr_msg,
-    );
-    println!(
+    )?;
+    writeln!(
+        writer,
         "{}",
         "-".repeat(w_ws + w_snap + w_date + hdr_msg.len() + 10)
-    );
-    for item in &snapshots {
-        let (workspace, id, created_at, pinned, message) = match item {
-            SnapshotListItem::Full(entry) => (
-                entry.workspace.as_str(),
-                if entry.meta.missing {
-                    format!("{} [MISSING]", entry.id)
-                } else {
-                    entry.id.clone()
-                },
-                entry.meta.created_at,
-                entry.meta.pinned,
-                entry.meta.message.as_deref().unwrap_or("-").to_string(),
-            ),
-            SnapshotListItem::Summary(summary) => (
-                summary.workspace.as_str(),
-                format!(
-                    "{}{} [SUMMARY]",
-                    summary.id,
-                    if summary.missing { " [MISSING]" } else { "" }
-                ),
-                summary.created_at,
-                summary.pinned,
-                format!("details omitted: {}", summary.omitted_fields.join(", ")),
-            ),
-        };
-        println!(
+    )?;
+    for (workspace, id, created_at, pinned, message) in &rows {
+        writeln!(
+            writer,
             "{:<w_ws$} {:<w_snap$} {:<w_date$} {:<6} {}",
             workspace,
             id,
@@ -1355,11 +1379,14 @@ fn render_snapshot_list(
                 .format("%Y-%m-%d %H:%M:%S"),
             pinned,
             message,
-        );
+        )?;
     }
-    println!("\nTotal: {} snapshot(s)", snapshots.len());
+    writeln!(writer, "\nTotal: {} snapshot(s)", snapshots.len())?;
     if let Some(cursor) = next_cursor {
-        println!("More snapshots are available. Next cursor: {cursor}");
+        writeln!(
+            writer,
+            "More snapshots are available. Next cursor: {cursor}"
+        )?;
     }
     Ok(())
 }
@@ -1376,18 +1403,20 @@ fn handle_list_page_response(response: Response, format: &str, explicit_page: bo
 }
 
 /// Handle DiffOk response, formatting diff entries.
-fn handle_diff_response(response: Response) -> Result<()> {
+fn handle_diff_response(response: Response, format: &str) -> Result<()> {
     match response {
         Response::DiffOk { changes } => {
-            print_diff_entries(&changes);
+            if format == "json" {
+                emit_json(serde_json::json!({ "changes": changes }));
+            } else {
+                print_diff_entries(&changes);
+            }
         }
         Response::Error { code, message } => {
             eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
             process::exit(1);
         }
-        _ => {
-            eprintln!("\x1b[33mUnexpected response type\x1b[0m");
-        }
+        _ => anyhow::bail!("unexpected response type while reading diff"),
     }
     Ok(())
 }
@@ -1434,27 +1463,23 @@ fn format_diff_entry(entry: &ws_ckpt_common::DiffEntry) -> String {
     let detail = entry
         .detail
         .as_deref()
-        .map(|detail| format!(" ({})", escape_diff_text(detail)))
+        .map(|detail| format!(" ({})", escape_terminal_text(detail)))
         .unwrap_or_default();
     format!(
         "{}  {}{}\x1b[0m",
         marker,
-        escape_diff_text(&entry.path),
+        escape_terminal_text(&entry.path),
         detail
     )
 }
 
-fn escape_diff_text(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        // Backslashes distinguish literal escape text from encoded controls.
-        if character.is_control() || character == '\\' {
-            escaped.extend(character.escape_default());
-        } else {
-            escaped.push(character);
-        }
+fn print_recovery_warning(warning: &str) {
+    if let Some(formatted) = warning.strip_prefix('\n') {
+        eprintln!("WARNING: {formatted}");
+    } else {
+        // Older daemons may interpolate raw paths into the warning.
+        eprintln!("WARNING: {}", escape_terminal_text(warning));
     }
-    escaped
 }
 
 /// Handle StatusOk response, formatting the status report.
@@ -1540,7 +1565,12 @@ fn handle_status_response(
                     println!("  {:<25} {:<40} SNAPSHOTS", "WORKSPACE", "PATH");
                     println!("  {}", "-".repeat(75));
                     for ws in &report.workspaces {
-                        println!("  {:<25} {:<40} {}", ws.ws_id, ws.path, ws.snapshot_count);
+                        println!(
+                            "  {:<25} {:<40} {}",
+                            escape_terminal_text(&ws.ws_id),
+                            escape_terminal_text(&ws.path),
+                            ws.snapshot_count
+                        );
                     }
                     println!("\n  Total: {} workspace(s)", report.workspaces.len());
                 }
@@ -1551,7 +1581,7 @@ fn handle_status_response(
                             "\x1b[33m  Watcher: {} workspace(s) run without a live file \
                              watcher (change detection degraded): {}\x1b[0m",
                             workspaces_without_watcher.len(),
-                            workspaces_without_watcher.join(", ")
+                            escape_terminal_text(&workspaces_without_watcher.join(", "))
                         );
                     }
                     if *watcher_queue_overflows > 0 {
@@ -2461,11 +2491,11 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             let resp = send_request_to_daemon(&req).await?;
             match resp {
                 Response::RecoverWithWarning { workspace, warning } => {
-                    eprintln!("WARNING: {}", warning);
-                    println!("Workspace recovered: {}", workspace);
+                    print_recovery_warning(&warning);
+                    println!("Workspace recovered: {}", escape_terminal_text(&workspace));
                 }
                 Response::RecoverOk { workspace } => {
-                    println!("Workspace recovered: {}", workspace);
+                    println!("Workspace recovered: {}", escape_terminal_text(&workspace));
                 }
                 Response::Error { code, message } => {
                     eprintln!(
@@ -2529,11 +2559,14 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
         let resp = send_request_to_daemon(&req).await?;
         match resp {
             Response::RecoverWithWarning { workspace, warning } => {
-                eprintln!("WARNING: {}", warning);
-                println!("Workspace recovered: {}", workspace);
+                print_recovery_warning(&warning);
+                println!("Workspace recovered: {}", escape_terminal_text(&workspace));
             }
             Response::RecoverOk { workspace } => {
-                println!("\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m", workspace);
+                println!(
+                    "\x1b[32m\u{2713} Workspace recovered: {}\x1b[0m",
+                    escape_terminal_text(&workspace)
+                );
             }
             Response::Error { code, message } => {
                 eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
@@ -3696,6 +3729,112 @@ mod tests {
         ));
     }
 
+    fn control_snapshot_items() -> Vec<SnapshotListItem> {
+        let created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        vec![
+            SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                id: "evil\nINJECTED-ROW\t\u{1b}[31m\u{85}".into(),
+                workspace: "/tmp/工作区\nforged\tpath\\n".into(),
+                meta: ws_ckpt_common::SnapshotMeta {
+                    created_at,
+                    pinned: false,
+                    missing: true,
+                    message: Some("note\r\nforged\t\u{7f}\\n".into()),
+                    metadata: None,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            }),
+            SnapshotListItem::Summary(ws_ckpt_common::SnapshotSummary {
+                id: "tab\there".into(),
+                workspace: "/tmp/short".into(),
+                created_at,
+                pinned: true,
+                missing: true,
+                omitted_fields: vec!["message\nforged".into()],
+            }),
+            SnapshotListItem::Full(ws_ckpt_common::SnapshotEntry {
+                id: "normal".into(),
+                workspace: "/tmp/normal".into(),
+                meta: ws_ckpt_common::SnapshotMeta {
+                    created_at,
+                    pinned: false,
+                    missing: false,
+                    message: None,
+                    metadata: None,
+                    parent_id: None,
+                    child_ids: vec![],
+                },
+            }),
+        ]
+    }
+
+    #[test]
+    fn list_table_escapes_controls_and_aligns_escaped_columns() {
+        let mut output = Vec::new();
+        write_snapshot_table(&mut output, &control_snapshot_items(), Some("next-page")).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.chars().any(|c| c.is_control() && c != '\n'));
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 8, "{output}");
+        assert!(lines[2].contains(r"/tmp/工作区\nforged\tpath\\n"));
+        assert!(lines[2].contains(r"evil\nINJECTED-ROW\t\u{1b}[31m\u{85} [MISSING]"));
+        assert!(lines[2].ends_with(r"note\r\nforged\t\u{7f}\\n"));
+        assert!(lines[3].contains(r"tab\there [MISSING] [SUMMARY]"));
+        assert!(lines[3].ends_with(r"details omitted: message\nforged"));
+        assert!(lines[4].ends_with("false  -"));
+        assert_eq!(lines[6], "Total: 3 snapshot(s)");
+        assert_eq!(
+            lines[7],
+            "More snapshots are available. Next cursor: next-page"
+        );
+
+        let snapshot_column = lines[0].find("SNAPSHOT").unwrap();
+        let date_column = lines[0].find("CREATED").unwrap();
+        for (row, id) in lines[2..5].iter().zip([r"evil\n", r"tab\there", "normal"]) {
+            let snapshot_text: String = row.chars().skip(snapshot_column).collect();
+            assert!(snapshot_text.starts_with(id), "{row}");
+            let date_start = row
+                .find(
+                    &chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                        .unwrap()
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                )
+                .unwrap();
+            assert_eq!(row[..date_start].chars().count(), date_column);
+        }
+    }
+
+    #[test]
+    fn list_json_preserves_control_fields_in_full_and_summary_entries() {
+        for explicit_page in [false, true] {
+            let _ = take_json_output();
+            let snapshots = control_snapshot_items();
+            let expected: Vec<_> = snapshots
+                .iter()
+                .map(|item| snapshot_item_json(item).unwrap())
+                .collect();
+            render_snapshot_list(snapshots, Some("next".into()), "json", explicit_page).unwrap();
+            let output = take_json_output().unwrap();
+            let entries = if explicit_page {
+                assert_eq!(output["next_cursor"], "next");
+                &output["snapshots"]
+            } else {
+                &output
+            };
+            assert_eq!(entries, &serde_json::Value::Array(expected));
+            assert_eq!(entries[0]["id"], "evil\nINJECTED-ROW\t\u{1b}[31m\u{85}");
+            assert_eq!(entries[0]["workspace"], "/tmp/工作区\nforged\tpath\\n");
+            assert_eq!(entries[0]["meta"]["message"], "note\r\nforged\t\u{7f}\\n");
+            assert_eq!(entries[1]["id"], "tab\there");
+            let encoded = serde_json::to_string(&output).unwrap();
+            assert!(!encoded.contains('\n'));
+            assert!(encoded.contains(r"evil\nINJECTED-ROW\t"));
+        }
+    }
+
     #[test]
     fn aggregate_list_combines_pages_into_one_json_array() {
         let _ = take_json_output();
@@ -3881,13 +4020,48 @@ mod tests {
                 workspace,
                 from,
                 to,
+                format,
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(from, "msg1-step0");
                 assert_eq!(to, Some("msg2-step0".to_string()));
+                assert_eq!(format, "text");
             }
             _ => panic!("expected Diff"),
         }
+    }
+
+    #[test]
+    fn parse_diff_json_against_live() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "-w",
+            "/tmp/test",
+            "--from",
+            "snapshot-1",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Diff { to: None, format, .. } if format == "json"));
+    }
+
+    #[test]
+    fn parse_diff_rejects_invalid_format() {
+        let error = Cli::try_parse_from([
+            "ws-ckpt",
+            "diff",
+            "-w",
+            "/tmp/test",
+            "--from",
+            "snapshot-1",
+            "--format",
+            "jso",
+        ])
+        .err()
+        .expect("invalid diff format must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]

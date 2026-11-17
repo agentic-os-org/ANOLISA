@@ -134,6 +134,7 @@ pub(crate) struct InlineState {
     pub(crate) pending_input_ghost_route: PromptGhostRoute,
     pub(crate) pending_input_ghost_binding: Option<PendingInputGhostBinding>,
     pub(crate) pending_prompt_suggestion_bindings: HashMap<String, PendingInputGhostBinding>,
+    pub(crate) suggestion_snapshot_generation: u64,
     pub(crate) shown_shell_rewrite_guidance: bool,
     pub(crate) shown_agent_prompt_guidance: bool,
     /// Multi-line prompt entry discoverability (#1721 tip, #1932 hint).

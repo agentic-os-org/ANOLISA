@@ -1,4 +1,4 @@
-//! Authorization contracts for a fixed sandbox invocation.
+//! Shared PARC request envelope and typed OS authorization contracts.
 
 pub use asc_sandbox_types::*;
 use serde::{Deserialize, Serialize};
@@ -13,12 +13,39 @@ pub struct AgentPrincipal {
     pub agent_type: Option<String>,
 }
 
-/// Request family; future families use separate payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestType {
-    /// Fixed OS process-tree permissions.
-    Os,
+/// Cedar entity reference shared by principals, actions and resources.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntityReference {
+    /// Fully qualified Cedar entity type.
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    /// Identifier within the entity type.
+    pub id: String,
+}
+
+impl EntityReference {
+    /// Pairs an entity type with its identifier without interpreting application semantics.
+    pub fn new(entity_type: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            entity_type: entity_type.into(),
+            id: id.into(),
+        }
+    }
+}
+
+impl Validate for EntityReference {
+    fn validate(&self) -> Result<(), ValidationError> {
+        for (value, limit) in [(&self.entity_type, 256), (&self.id, 4096)] {
+            if value.is_empty() || value.len() > limit || value.contains('\0') {
+                return Err(ValidationError::new(
+                    "entity",
+                    "expected a nonempty bounded entity reference",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Command facts used by Cedar. The executor retains the environment and object identities.
@@ -66,20 +93,47 @@ impl Validate for CommandRequest {
 /// One upper-PEP authorization request, never a policy upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuthorizationRequest {
-    /// Dispatches to the OS Cedar request adapter.
-    #[serde(rename = "type")]
-    pub request_type: RequestType,
+pub struct AuthorizationRequest<C> {
     /// Identifier of this preparation attempt.
     pub request_id: String,
+    /// Logical subject; attributes and their trust requirements belong to the action contract.
+    pub principal: EntityReference,
+    /// Action selecting a supported context and evaluator.
+    pub action: EntityReference,
+    /// Resource addressed by this operation.
+    pub resource: EntityReference,
+    /// Action-specific facts; the shared envelope has no OS dependency.
+    pub context: C,
+}
+
+/// Facts required by the OS process authorization adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsAuthorizationContext {
     /// Identifier of the invocation across authorization and execution.
     pub execution_id: String,
-    /// Agent classification supplied by the caller.
-    pub principal: AgentPrincipal,
+    /// Caller-declared classification, never an authenticated identity.
+    pub agent: AgentPrincipal,
     /// Fully prepared launch.
     pub launch: CommandRequest,
     /// Explicit permissions including runtime dependencies.
     pub requested_permissions: OsPermissionSet,
+}
+
+/// OS adapter specialization of the public PARC request envelope.
+pub type OsAuthorizationRequest = AuthorizationRequest<OsAuthorizationContext>;
+
+impl OsAuthorizationRequest {
+    /// Binds one OS invocation to the supported action and synthetic subject.
+    pub fn new(request_id: String, context: OsAuthorizationContext) -> Self {
+        Self {
+            request_id,
+            principal: EntityReference::new("SecCore::Subject", "request"),
+            action: EntityReference::new("SecCore::Action", "process.spawn"),
+            resource: EntityReference::new("SecCore::Process", context.launch.program.clone()),
+            context,
+        }
+    }
 }
 
 /// AARM decision states.
@@ -286,7 +340,7 @@ pub struct AcceptedAuthorization {
     /// Pinned by the PEP before presenting any approval.
     pub execution: ExecutionSpec,
     /// Original request bound to the decision.
-    pub request: AuthorizationRequest,
+    pub request: OsAuthorizationRequest,
     /// Final decision; callers cannot replace it during handoff.
     pub decision: Decision,
     /// Time at which the PEP accepted the decision before asking the user.
@@ -303,19 +357,29 @@ pub struct ClaimResponse {
     pub authorization: Option<AcceptedAuthorization>,
 }
 
-impl Validate for AuthorizationRequest {
+impl Validate for OsAuthorizationRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        for id in [&self.request_id, &self.execution_id] {
-            if id.is_empty() || id.len() > 256 || id.contains('\0') {
-                return Err(ValidationError::new(
-                    "identity",
-                    "expected a nonempty bounded identifier",
-                ));
-            }
+        self.validate_envelope()?;
+        if self.principal != EntityReference::new("SecCore::Subject", "request")
+            || self.action != EntityReference::new("SecCore::Action", "process.spawn")
+            || self.resource
+                != EntityReference::new("SecCore::Process", &self.context.launch.program)
+        {
+            return Err(ValidationError::new(
+                "request",
+                "unsupported OS subject/action or mismatched resource",
+            ));
         }
-        self.principal.validate()?;
-        self.launch.validate()?;
-        self.requested_permissions.validate()
+        let id = &self.context.execution_id;
+        if id.is_empty() || id.len() > 256 || id.contains('\0') {
+            return Err(ValidationError::new(
+                "context.execution_id",
+                "expected a nonempty bounded identifier",
+            ));
+        }
+        self.context.agent.validate()?;
+        self.context.launch.validate()?;
+        self.context.requested_permissions.validate()
     }
 }
 
@@ -333,8 +397,29 @@ impl Validate for AgentPrincipal {
     }
 }
 
-impl AuthorizationRequest {
-    /// Hashes every field used to prepare the launch and authorize permissions.
+impl<C> AuthorizationRequest<C> {
+    /// Validates shared metadata; consumers must also validate their action and context.
+    ///
+    /// # Errors
+    /// Rejects malformed identifiers and invalid entity references.
+    pub fn validate_envelope(&self) -> Result<(), ValidationError> {
+        if self.request_id.is_empty()
+            || self.request_id.len() > 256
+            || self.request_id.contains('\0')
+        {
+            return Err(ValidationError::new(
+                "request",
+                "invalid request identifier",
+            ));
+        }
+        self.principal.validate()?;
+        self.action.validate()?;
+        self.resource.validate()
+    }
+}
+
+impl<C: Serialize> AuthorizationRequest<C> {
+    /// Hashes the complete request envelope, including the consumer-specific context.
     ///
     /// # Errors
     /// Returns a serialization error rather than producing a partial binding.

@@ -41,7 +41,8 @@ def main():
     results = []
     for scenario in ['clean', 'risk', 'error', 'invalid', 'timeout', 'metadata', 'extra',
                      'tool-error', 'native-error', 'cancel', 'after-metadata', 'after-extra',
-                     'mutation-content', 'mutation-metadata', 'mutation-extra', 'mutation-after']:
+                     'mutation-content', 'mutation-metadata', 'mutation-extra', 'mutation-after',
+                     'after-structured', 'structured-replacement']:
         with tempfile.TemporaryDirectory(prefix='aw-pi-strict-') as temporary:
             root = Path(temporary)
             (root / 'node_modules').symlink_to(args.root.resolve() / 'node_modules')

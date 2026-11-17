@@ -52,7 +52,18 @@ AW 保留旧记录和文件。检查新安装时使用 `--prefix "$AW_EXTENSION_
 aw uninstall --prefix "$AW_EXTENSION_PREFIX" --yes
 ```
 
-root 管理的扩展需要 `sudo` 和显式 `--scope system`。卸载保留外部配置、审计和 Agent 数据，不移除 AW CLI、后端或其服务。包文件被修改、缺失或仍在使用时，按错误处理后重试。
+root 管理的扩展需要 `sudo` 和显式 `--scope system`。卸载保留外部配置、审计和 Agent 数据，不移除 AW CLI、后端或其服务。包文件仍在使用时，先停止持有文件的 AW 进程再重试。
+如果 `doctor` 或卸载报告文件被修改或缺失，先检查受影响路径，再使用 `--keep-changed` 预览移除：
+
+```bash
+aw uninstall --prefix "$AW_EXTENSION_PREFIX" --keep-changed --dry-run
+aw uninstall --prefix "$AW_EXTENSION_PREFIX" --keep-changed --yes
+```
+
+这会移除选中包的登记和未变化文件。内容、权限模式、文件类型发生变化的路径及符号链接保持原样，缺失路径继续保持缺失。预览中的 `KEEP PATH` 和成功移除后的 `KEPT PATH` 列出这些路径。可在 `uninstall` 后追加包 ID 选择包；省略 ID 时选择该 prefix 内的全部包。剩余依赖、读取权限错误和不安全的安装目录仍会阻止移除。
+
+空登记和锁继续保留。整个 prefix 已缺失时，AW 会重建这些元数据文件并清空包记录。保留文件转为用户管理；重新安装前先移动或删除冲突路径，也可选择新的 prefix。
+
 出现 `needs_recovery` 时，停止包写入操作，按[包恢复步骤](../../../developer-guide/zh/aw/reference/packages.md)处理。
 
 ## 数据与排错

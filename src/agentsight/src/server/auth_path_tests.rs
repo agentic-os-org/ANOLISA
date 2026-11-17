@@ -16,6 +16,61 @@ const REVIEW_ROUTE: &str = "/api/audit/cases/{case_id}/review";
 const REVIEW: &str = "/api/audit/cases/case-1/review";
 
 #[actix_web::test]
+async fn workspace_snapshot_routes_require_credentials_on_loopback() {
+    let fixture = AuthFixture::new();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/ws-ckpt/{kind}/{id}/snapshots",
+                web::head().to(|| async { HttpResponse::NoContent().finish() }),
+            )
+            .default_service(web::to(|| async { HttpResponse::Ok().finish() })),
+    )
+    .await;
+    for uri in [
+        "/api/ws-ckpt/diff",
+        "/api/ws-ckpt/restore/prepare",
+        "/api/ws-ckpt/restore/execute",
+        "/api/ws-ckpt/restore/result",
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(uri)
+                .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::get()
+            .uri("/api/ws-ckpt/session/fixture/snapshots")
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    for (ip, expected) in [
+        (Ipv4Addr::LOCALHOST, StatusCode::NO_CONTENT),
+        (Ipv4Addr::new(192, 0, 2, 1), StatusCode::UNAUTHORIZED),
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::default()
+                .method(actix_web::http::Method::HEAD)
+                .uri("/api/ws-ckpt/session/fixture/snapshots")
+                .peer_addr(SocketAddr::new(IpAddr::V4(ip), 12345))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[actix_web::test]
 async fn containment_mutation_variants_fail_closed_without_credentials() {
     let fixture = AuthFixture::new();
     let app = awtest::init_service(

@@ -11,7 +11,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 SPEC = importlib.util.spec_from_file_location(
     "verify_glibc", Path(__file__).with_name("verify-glibc.py")
 )
@@ -57,8 +56,13 @@ class GlibcVerifierTests(unittest.TestCase):
             binary = Path(directory) / "binary"
             binary.touch()
             with (
-                patch("sys.argv", ["verify-glibc.py", "--arch", expected_arch, *options, str(binary)]),
-                patch.object(glibc, "readelf", side_effect=lambda _, *args: outputs[args]) as reader,
+                patch(
+                    "sys.argv",
+                    ["verify-glibc.py", "--arch", expected_arch, *options, str(binary)],
+                ),
+                patch.object(
+                    glibc, "readelf", side_effect=lambda _, *args: outputs[args]
+                ) as reader,
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(output),
             ):
@@ -72,7 +76,10 @@ class GlibcVerifierTests(unittest.TestCase):
     def test_static_executable_and_static_pie_on_both_architectures(self) -> None:
         for arch in glibc.MACHINES:
             for kind, dynamic in (
-                ("EXEC (Executable file)", "There is no dynamic section in this file.\n"),
+                (
+                    "EXEC (Executable file)",
+                    "There is no dynamic section in this file.\n",
+                ),
                 ("DYN (Position-Independent Executable file)", STATIC_PIE_DYNAMIC),
             ):
                 with self.subTest(arch=arch, kind=kind):
@@ -90,7 +97,10 @@ class GlibcVerifierTests(unittest.TestCase):
     def test_static_mode_rejects_interpreter_or_needed_independently(self) -> None:
         cases = (
             {"program_headers": PROGRAM_HEADERS + "  INTERP         0x001000 0x0\n"},
-            {"dynamic": STATIC_PIE_DYNAMIC + " 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n"},
+            {
+                "dynamic": STATIC_PIE_DYNAMIC
+                + " 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n"
+            },
         )
         for fixture, expected in zip(cases, ("PT_INTERP", "DT_NEEDED")):
             with self.subTest(expected=expected):
@@ -98,7 +108,9 @@ class GlibcVerifierTests(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertIn(expected, output)
 
-    def test_static_mode_rejects_wrong_architecture_and_relocatable_objects(self) -> None:
+    def test_static_mode_rejects_wrong_architecture_and_relocatable_objects(
+        self,
+    ) -> None:
         for fixture, expected in (
             ({"actual_arch": "aarch64"}, "expected 'Advanced Micro Devices X86-64'"),
             ({"kind": "REL (Relocatable file)"}, "not an ELF executable"),
@@ -112,13 +124,58 @@ class GlibcVerifierTests(unittest.TestCase):
         for symbols, status, expected in (
             ("GLIBC_2.17 GLIBC_2.28", 0, "max_glibc=GLIBC_2.28"),
             ("GLIBC_2.29", 1, "above GLIBC_2.28"),
-            ("No version information found in this file.", 1, "no GLIBC symbol versions"),
+            (
+                "No version information found in this file.",
+                1,
+                "no GLIBC symbol versions",
+            ),
         ):
             with self.subTest(symbols=symbols):
-                result, output, calls = self.run_verifier("--max", "2.28", symbols=symbols)
+                result, output, calls = self.run_verifier(
+                    "--max", "2.28", symbols=symbols
+                )
                 self.assertEqual(result, status, output)
                 self.assertIn(expected, output)
                 self.assertEqual(calls, [("-h",), ("--version-info",)])
+
+    def test_relr_requirement_sets_a_glibc_236_floor(self) -> None:
+        for arch in glibc.MACHINES:
+            for symbols in (
+                "Name: GLIBC_ABI_DT_RELR  Flags: none",
+                "Name: GLIBC_2.17  Flags: none\nName: GLIBC_ABI_DT_RELR  Flags: none",
+            ):
+                for limit, status, expected in (
+                    ("2.28", 1, "requires GLIBC_2.36"),
+                    ("2.35", 1, "requires GLIBC_2.36"),
+                    ("2.36", 0, "max_glibc=GLIBC_2.36"),
+                    ("2.37", 0, "max_glibc=GLIBC_2.36"),
+                ):
+                    with self.subTest(arch=arch, symbols=symbols, limit=limit):
+                        result, output, _ = self.run_verifier(
+                            "--max",
+                            limit,
+                            symbols=symbols,
+                            actual_arch=arch,
+                            expected_arch=arch,
+                        )
+                        self.assertEqual(result, status, output)
+                        self.assertIn(expected, output)
+
+    def test_relr_floor_preserves_newer_numeric_requirements(self) -> None:
+        result, output, _ = self.run_verifier(
+            "--max", "2.36", symbols="GLIBC_ABI_DT_RELR GLIBC_2.38"
+        )
+        self.assertEqual(result, 1, output)
+        self.assertIn("requires GLIBC_2.38", output)
+
+    def test_relr_marker_is_a_complete_version_token(self) -> None:
+        for marker in ("GLIBC_ABI_DT_RELR_EXTRA", "NOT_GLIBC_ABI_DT_RELR"):
+            with self.subTest(marker=marker):
+                result, output, _ = self.run_verifier(
+                    "--max", "2.28", symbols=f"GLIBC_2.17 {marker}"
+                )
+                self.assertEqual(result, 0, output)
+                self.assertIn("max_glibc=GLIBC_2.17", output)
 
     def test_linkage_mode_must_be_explicit_and_unique(self) -> None:
         for options in ((), ("--require-static", "--max", "2.28")):
@@ -128,12 +185,18 @@ class GlibcVerifierTests(unittest.TestCase):
                 self.assertEqual(calls, [])
 
     def test_only_sandbox_release_check_opts_into_static(self) -> None:
-        build = Path(__file__).resolve().parent.parent / "build-sec-core-prebuilt" / "build.sh"
+        build = (
+            Path(__file__).resolve().parent.parent
+            / "build-sec-core-prebuilt"
+            / "build.sh"
+        )
         source = build.read_text()
         self.assertEqual(source.count("--require-static"), 1)
         self.assertIn('--require-static \\\n    "$BUILD_DIR/linux-sandbox"', source)
         self.assertIn('--max 2.28 \\\n        "$BUILD_DIR/v2/bin/$binary"', source)
-        self.assertIn('--max 2.28 \\\n    "$BUILD_DIR/python-runtime/bin/python3.11"', source)
+        self.assertIn(
+            '--max 2.28 \\\n    "$BUILD_DIR/python-runtime/bin/python3.11"', source
+        )
 
 
 if __name__ == "__main__":

@@ -207,6 +207,7 @@ fn prompt_ghost_timeout_refreshes_the_validated_snapshot() {
                 suggestion_id: "suggestion-1".to_string(),
             }],
             active: 0,
+            generation: 0,
         },
     };
     let input_mode = Arc::new(Mutex::new(observed.clone()));
@@ -295,6 +296,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
         route: PromptGhostRoute::AgentSelection {
             candidates: vec![candidate],
             active: 0,
+            generation: 0,
         },
     }));
     let classifier = InputClassifier::default();

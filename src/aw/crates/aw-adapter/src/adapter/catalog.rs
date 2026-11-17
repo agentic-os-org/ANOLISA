@@ -35,6 +35,16 @@ impl Profile {
     }
 }
 
+pub(crate) const SDK: Profile = Profile {
+    name: "sdk",
+    adapter: &super::super::adapters::sdk::Sdk,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe"]),
+    ],
+};
+
 pub(crate) const QODER: Profile = Profile {
     name: "qoder",
     adapter: &super::super::qoder::Qoder,
@@ -59,6 +69,17 @@ pub(crate) const OPENCLAW: Profile = Profile {
     name: "openclaw",
     adapter: &super::super::adapters::openclaw::OpenClaw,
     events: TOOL_EVENTS,
+};
+
+pub(crate) const DEEPSEEK: Profile = Profile {
+    name: "deepseek-harness",
+    adapter: &super::super::adapters::deepseek::DeepSeek,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+        ("security.violation", &["observe", "block"]),
+    ],
 };
 
 pub(crate) const HERMES: Profile = Profile {
@@ -111,8 +132,18 @@ pub(crate) const AGENTSCOPE: Profile = Profile {
     ],
 };
 
+pub(crate) const CODEX: Profile = Profile {
+    name: "codex",
+    adapter: &super::super::adapters::codex::Codex,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
+};
+
 pub(crate) const PROFILES: &[Profile] = &[
-    QODER, QODER_SDK, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
+    SDK, QODER, QODER_SDK, OPENCLAW, DEEPSEEK, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE, CODEX,
 ];
 
 #[cfg(test)]

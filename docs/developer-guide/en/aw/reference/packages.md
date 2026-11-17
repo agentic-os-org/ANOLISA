@@ -25,7 +25,7 @@ Provider IDs and versions are independent of AW core. Upgrade an existing Provid
 Build AW, Providers and backends through their Makefiles and distribution scripts; RPM installation and ownership stay with the native package manager.
 These installations need no AW package record: configure Providers through explicit `transport.argv`. See the [build instructions](../../../../../contribute/en/aw/building.md).
 
-Plans list files, dependencies and blockers; blocked plans exit 1. Execution rechecks inputs. Limits are 1 GiB per file, 4 GiB and 32767 owned files per prefix, plus bounded recovery records.
+Plans list files, dependencies and blockers; blocked plans exit 1. Human output sends blockers to stderr with empty stdout; JSON retains the complete plan in its existing failure envelope. Execution rechecks inputs. Limits are 1 GiB per file, 4 GiB and 32767 owned files per prefix, plus bounded recovery records.
 The filesystem must support `O_TMPFILE`, hard links, atomic rename and durable directory synchronization.
 
 ## Database and ownership
@@ -51,6 +51,10 @@ sudo aw recover --scope system --json
 
 Recovery finishes cleanup after database commit, or restores prior files and records before commit. Conflicting files and backups are retained with reported paths; keep them until resolved.
 `doctor` checks owned files and lists failures in JSON `result.report.issues`; it does not repair them.
-Uninstall rejects modified, missing, reverse-dependent or AW-held files. Empty registration, locator and lock remain after the final package is removed.
+Default uninstall rejects modified, missing, reverse-dependent or AW-held files. Explicit `--keep-changed` removes selected package records and verified unchanged files while leaving changed or missing payload paths untouched. Content, mode, type and missing-path differences can be retained; I/O access errors, verification limits, unsafe prefix/database paths and remaining dependencies still block removal. Unselected package files remain strictly verified.
+
+Preview with `aw uninstall --prefix "$AW_PREFIX" --scope user --keep-changed --dry-run`, then replace `--dry-run` with `--yes` to execute. JSON lists retained relative paths and observed reasons in `result.plan.preserved` for previews and `result.preserved` after success; empty lists are omitted. Human output names these paths as `KEEP PATH` and `KEPT PATH`. These paths never enter deletion or rollback actions, even if their contents change again after planning.
+
+Empty registration, locator and lock remain after the final package is removed. An absent prefix is recreated with these metadata files. Preserved payloads become user-owned and may conflict with reinstall; move them aside or use a new prefix. `aw recover` handles interrupted transactions; use `--keep-changed` for payload drift. See [operations](../../../../user-guide/en/aw/operations.md#upgrade-and-uninstall) for the recovery steps.
 
 See [CLI automation](cli.md) for reports, [package design](../../../../../src/aw/docs/design/en/packaging/package-management.md) for transactions and lock ordering, and [contributing](../../../../../src/aw/CONTRIBUTING.md) for builds and release acceptance.

@@ -94,11 +94,11 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | 命令 | 说明 |
 |------|------|
 | `ws-ckpt init -w <workspace>` | 初始化工作区 |
-| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | 创建新检查点 |
+| `ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]` | 创建新检查点。省略 `-s` 时自动生成快照 ID。 |
 | `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | 回滚到指定检查点 |
 | `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | 回滚 N 个祖先版本 |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | 列出检查点；默认自动翻页 |
-| `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | 显示检查点间差异 |
+| `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | 显示文件变化；省略 `-t` 时与当前工作区比较 |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | 查看工作区状态 |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | 清理旧检查点 |
@@ -109,6 +109,11 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt unregister -w <workspace> [--force]` | 仅在子卷丢失时解除注册；不恢复数据 |
 | `ws-ckpt reload` | 重载 daemon 配置 |
 | `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | 启动 daemon 进程 |
+
+新建 checkpoint 的 ID 不得包含控制字符（例如换行或制表符）。已有此类 ID 的快照
+仍可删除、回滚或 diff。`list` 表格会转义快照 ID、工作区路径和备注中的控制字符及
+反斜杠；JSON 保留原始字段值，使用 JSON 转义。`status` 表格和命令回执也会转义
+所显示的工作区路径及 ID 中的控制字符和反斜杠。
 
 ### 查询大量快照
 
@@ -247,6 +252,19 @@ ws-ckpt init -w /path/to/workspace
 `unregister` 接受仍有 live 子卷的工作区。
 
 ### diff 输出标记
+
+默认仍为文本输出。程序读取文件变化时可使用 JSON：
+
+```bash
+ws-ckpt diff -w /home/user/projects/my-project -f snap-001 --format json
+```
+
+成功时只输出一个 JSON 对象，包含 `changes` 和 `elapsed_secs`。每项变化沿用已有
+`path`、`change_type`（`Added`、`Modified`、`Deleted` 或 `Renamed`）和 `detail`
+（字符串或 `null`）；没有差异时返回 `"changes": []`。路径和重命名说明按 JSON
+规则转义，解码后的值保持不变。这里只返回文件变化列表，不包含逐行内容差异。
+比较方向为 `-f` 到 `-t`；省略 `-t` 时为 `-f` 到当前工作区。失败时退出码非零，
+诊断写入 stderr，stdout 不输出成功 JSON；读取 `changes` 前应先检查退出码。
 
 | 标记 | 含义 | 颜色 |
 |------|------|------|

@@ -17,6 +17,7 @@ pub(crate) struct Pi;
 struct Prepared {
     input: LaunchInput,
     version: String,
+    core_version: String,
     strict_output: bool,
     application: PathBuf,
 }
@@ -64,7 +65,7 @@ impl Adapter for Pi {
             .ok_or("Pi SDK metadata probe did not identify both required packages")?;
         let version = crate::version::reported(sdk, "Pi SDK")?;
         let core_version = crate::version::reported(core, "Pi Core")?;
-        let strict_output = version == "0.84.2" && core_version == "0.84.2";
+        let strict_output = strict_output_release(&version, &core_version);
         input
             .command
             .environment
@@ -73,6 +74,7 @@ impl Adapter for Pi {
             input,
             application,
             version,
+            core_version,
             strict_output,
         }))
     }
@@ -130,6 +132,21 @@ impl Adapter for Pi {
         }
     }
 }
+
+fn strict_output_release(sdk: &str, core: &str) -> bool {
+    if sdk != core {
+        return false;
+    }
+    let Ok(version) = semver::Version::parse(sdk) else {
+        return false;
+    };
+    if !version.pre.is_empty() || !version.build.is_empty() {
+        return false;
+    }
+    // Bound admission to published releases covered by native acceptance.
+    version >= semver::Version::new(0, 84, 2) && version <= semver::Version::new(1, 5, 2)
+}
+
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
         let mut capabilities =
@@ -151,7 +168,7 @@ impl PreparedLaunch for Prepared {
             .to_owned();
         let ready = context.files.directory().join("pi-ready.json");
         let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
-        let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"observation_enabled":observe,"resident_policy_reload":self.input.options.resident_policy_reload,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
+        let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"observation_enabled":observe,"resident_policy_reload":self.input.options.resident_policy_reload,"sdk_version":self.version,"core_version":self.core_version,"strict_output_supported":self.strict_output,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
         let entrypoint = context.files.write(
             "pi-entrypoint.mjs",
             include_bytes!("../../native/pi/entrypoint.mjs"),

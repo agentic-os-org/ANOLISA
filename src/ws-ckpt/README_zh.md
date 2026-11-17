@@ -123,6 +123,9 @@ ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --to msg1-step2
 # 查看快照与当前工作区的差异（省略 --to）
 ws-ckpt diff --workspace ~/my-workspace --from msg1-step1
 
+# 以 JSON 输出文件变化列表（不包含逐行内容差异）
+ws-ckpt diff --workspace ~/my-workspace --from msg1-step1 --format json
+
 # 清理旧快照，保留最近 5 个
 ws-ckpt cleanup --workspace ~/my-workspace --keep 5
 ```

@@ -154,19 +154,20 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
         commands.run(["git", "checkout", "--detach", "FETCH_HEAD"], source)
         if commands.run(["git", "rev-parse", "HEAD"], source).strip() != row["source"]["revision"]:
             raise ValueError("native source checkout does not match its pin")
-        commands.run(
-            [
-                "uv",
-                "sync",
-                "--locked",
-                "--no-dev",
-                "--link-mode",
-                "copy",
-                "--python",
-                sys.executable,
-            ],
-            source,
-        )
+        sync = ["uv", "sync", "--locked", "--no-dev", "--link-mode", "copy",
+                "--python", sys.executable]
+        if row.get("source_install") == "frozen-no-build-isolation":
+            # Hermes 0.23.1's relative exclude-newer filters its own build
+            # requirement on public mirrors. The committed lock still owns runtime deps.
+            commands.run([*sync[:2], "--frozen", *sync[3:], "--no-install-project"], source)
+            commands.run(["uv", "pip", "install", "--no-config", "--link-mode", "copy", "--python",
+                          str(source / ".venv/bin/python"), "setuptools==84.2.1",
+                          "wheel==0.48.0"], source)
+            commands.run(["uv", "pip", "install", "--no-config", "--link-mode", "copy", "--python",
+                          str(source / ".venv/bin/python"), "--no-deps",
+                          "--no-build-isolation", "-e", "."], source)
+        else:
+            commands.run(sync, source)
         # Own the copies before tightening permissions; never chmod shared cache hardlinks.
         for directory, _children, files in os.walk(source / ".venv"):
             path = Path(directory)
@@ -231,15 +232,47 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
         )
     if "@qoder-ai/qoder-agent-sdk@1.0.56" in row.get("npm_packages", []):
         commands.run(["node", str(npm / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")], AW)
+    npm_variants = {}
+    for key, package in row.get("npm_variants", {}).items():
+        directory = work / key
+        commands.run(
+            ["npm", "install", "--prefix", str(directory), "--ignore-scripts", "--no-audit",
+             "--no-fund", package],
+            AW,
+        )
+        if package.startswith("@qoder-ai/qoder-agent-sdk@"):
+            install = directory / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs"
+            commands.run(["node", str(install)], AW)
+        shutil.copyfile(directory / "package-lock.json", commands.evidence / f"{key}-lock.json")
+        npm_variants[key] = str(directory)
     if (npm / "package-lock.json").exists():
         shutil.copyfile(npm / "package-lock.json", commands.evidence / "npm-lock.json")
+    extra_npm = {}
+    for label, fixture in row.get("npm_fixtures", {}).items():
+        directory = work / f"npm_{label}"
+        directory.mkdir()
+        for name in ("package.json", "package-lock.json"):
+            shutil.copyfile(AW / fixture / name, directory / name)
+        commands.run(
+            [
+                "npm", "ci", "--prefix", str(directory),
+                "--ignore-scripts", "--no-audit", "--no-fund",
+            ],
+            AW,
+        )
+        shutil.copyfile(
+            directory / "package-lock.json", commands.evidence / f"npm-lock-{label}.json"
+        )
+        extra_npm[f"npm_{label}"] = str(directory)
     values = {
         "python": str(python),
         "source": str(source),
         "npm": str(npm),
         "aw_root": str(AW),
         "qwenpaw": str(python.parent / "qwenpaw"),
+        **extra_npm,
     }
+    values.update(npm_variants)
     if "qoder_cli" in row:
         commands.run(
             [
@@ -334,7 +367,7 @@ def main() -> None:
             if args.agent in {"qoder", "qoder-sdk"}:
                 environment["QODER_PERSONAL_ACCESS_TOKEN"] = token
             values.update(bin=str(args.bin), output=str(output))
-            if args.agent == "hermes":
+            if args.agent in {"hermes", "hermes-0.23.1"}:
                 # Hosted runners configure Git LFS filters globally; the fixture needs none.
                 environment.update(
                     PATH=hermes_path(work, values["python"], args.bin, environment),
@@ -365,10 +398,11 @@ def main() -> None:
             redact_logs(args.output, token)
             shutil.copytree(output, args.output / "fixtures", dirs_exist_ok=True)
             # Preserve the same relative result paths for aggregation after upload.
-            for path in (work / "npm").glob("*.json"):
-                if path.name not in {"package.json", "package-lock.json"}:
-                    (args.output / "npm").mkdir(exist_ok=True)
-                    shutil.copyfile(path, args.output / "npm" / path.name)
+            for name in ("npm", *(f"npm_{label}" for label in row.get("npm_fixtures", {}))):
+                for path in (work / name).glob("*.json"):
+                    if path.name not in {"package.json", "package-lock.json"}:
+                        (args.output / name).mkdir(exist_ok=True)
+                        shutil.copyfile(path, args.output / name / path.name)
             (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"{args.agent}: {len(result['cases'])} native suites passed")
 

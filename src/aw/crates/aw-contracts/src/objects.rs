@@ -70,7 +70,7 @@ fn subject_for_event(name: &Value, subject: &Value) -> Result<(), Error> {
                 && subject["toolCallId"].is_null(),
             "turn event identity mismatch",
         ),
-        "tool.before" | "tool.after" => require(
+        "tool.before" | "tool.after" | "security.violation" => require(
             subject["toolCallId"].is_string(),
             "tool event identity missing",
         ),
@@ -130,7 +130,10 @@ fn coverage(coverage: &Value, subject: &Value) -> Result<(), Error> {
 fn provider_result(data: &Value) -> Result<(), Error> {
     let name = data["eventName"].as_str().ok_or(Error::InvalidDocument)?;
     require(
-        matches!(name, "input.submit" | "tool.before" | "tool.after"),
+        matches!(
+            name,
+            "input.submit" | "tool.before" | "tool.after" | "security.violation"
+        ),
         "provider result has no policy boundary",
     )?;
     let details = &data["details"];
@@ -142,7 +145,7 @@ fn provider_result(data: &Value) -> Result<(), Error> {
     } else {
         require(
             details["failureAction"] != "withhold_result",
-            "pre-execution result claims output withholding",
+            "event does not support output withholding",
         )?;
     }
     Ok(())

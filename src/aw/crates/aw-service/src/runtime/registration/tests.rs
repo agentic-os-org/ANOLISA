@@ -4,7 +4,10 @@ use super::*;
 use crate::{Capabilities, Operation, RegistrationOwner};
 use std::{collections::BTreeMap, fs, path::Path};
 
+mod control;
+mod descriptors;
 mod native;
+mod sdk;
 
 struct Fixture {
     runtime: Arc<Runtime>,

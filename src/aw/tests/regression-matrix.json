@@ -49,7 +49,10 @@
     "aw-host/test/tool_matching",
     "aw-provider-sec-core/test/pii",
     "aw-provider-sec-core/test/pii_transport",
-    "aw-cli/test/native_setup"
+    "aw-cli/test/native_setup",
+    "aw-cli/test/deepseek",
+    "aw-cli/test/codex",
+    "aw-cli/test/sdk_protocol"
   ],
   "cases": {
     "package-doctor-files": {
@@ -114,7 +117,7 @@
     },
     "hermes-lifecycle": {
       "target": "aw-cli/test/launcher",
-      "test": "hermes_probes_and_install_writers_cancel_and_reap_on_signals"
+      "test": "hermes_trust::signals::hermes_probes_and_install_writers_cancel_and_reap_on_signals"
     },
     "qwenpaw-lifecycle": {
       "target": "aw-cli/test/qwenpaw",
@@ -696,6 +699,10 @@
       "target": "aw-adapter/lib/aw_adapter",
       "test": "association::tests::qwenpaw_dispatch_identity_keeps_native_call_and_exact_input"
     },
+    "qwenpaw-resident-checked-output": {
+      "target": "aw-cli/test/qwenpaw",
+      "test": "resident::checked_after_only_publishes_one_chunk_per_tool"
+    },
     "qwenpaw-resident-withhold": {
       "target": "aw-cli/test/qwenpaw",
       "test": "resident::withhold_failure_blocks_result_and_next_dispatch_through_launcher"
@@ -1207,6 +1214,70 @@
     "input-rewrite": {
       "target": "aw-cli/test/pretool",
       "test": "input_rewrite::same_call_rewrite_is_checked_before_native_adoption_for_supported_adapters"
+    },
+    "deepseek-lifecycle": {
+      "target": "aw-cli/test/deepseek",
+      "test": "profile_overlay_blocks_tools_and_releases_binding"
+    },
+    "deepseek-final-check": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::deepseek::tests::final_security_check_is_an_independent_route"
+    },
+    "submit-deepseek": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::deepseek::tests::submission_uses_the_shared_input_contract"
+    },
+    "codex-launch": {
+      "target": "aw-cli/test/codex",
+      "test": "native_launch_preserves_config_serializes_steps_and_cleans_instances"
+    },
+    "codex-admission": {
+      "target": "aw-cli/test/codex",
+      "test": "untrusted_disabled_and_unsupported_launches_never_start_tools"
+    },
+    "codex-interruption": {
+      "target": "aw-cli/test/codex",
+      "test": "interrupted_native_launch_releases_binding_and_owned_process"
+    },
+    "codex-submission": {
+      "target": "aw-cli/test/codex",
+      "test": "submission_denial_prevents_tool_execution_and_releases_event"
+    },
+    "codex-large-denial": {
+      "target": "aw-cli/test/codex",
+      "test": "report_cannot_override_a_large_native_denial"
+    },
+    "codex-capacity": {
+      "target": "aw-cli/test/codex",
+      "test": "app_server_legacy_capacity_blocks_and_recovers_on_relaunch"
+    },
+    "codex-replacement": {
+      "target": "aw-cli/test/codex",
+      "test": "native_replacement_returns_feedback_to_codex"
+    },
+    "claude-final-runtime": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "final_runtime_gate_checks_owned_bytes_and_native_identity"
+    },
+    "claude-final-factory": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "final_factory_rejects_uncovered_delivery_paths"
+    },
+    "native-sdk-contract": {
+      "target": "aw-cli/test/sdk_protocol",
+      "test": "direct_sdk_consumer_registers_executes_and_exports_native_facts"
+    },
+    "typescript-sdk-package": {
+      "target": "aw-cli/test/sdk_protocol",
+      "test": "typescript_sdk_contracts_and_out_of_tree_package"
+    },
+    "python-sdk-package": {
+      "target": "aw-cli/test/sdk_protocol",
+      "test": "python_sdk_contracts_and_out_of_tree_wheel"
+    },
+    "semantic-sdk-normalization": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::sdk::tests::semantic_events_bind_server_identity_and_reject_private_fields"
     }
   },
   "agents": {
@@ -1350,7 +1421,9 @@
         "scope-native-skips",
         "coverage-native-identity",
         "claude-submission",
-        "input-rewrite"
+        "input-rewrite",
+        "claude-final-runtime",
+        "claude-final-factory"
       ],
       "tokenless": [
         "final-replacement",
@@ -1707,6 +1780,7 @@
         "sdk-scope-process-cli",
         "qwenpaw-resident-observation",
         "qwenpaw-managed-association",
+        "qwenpaw-resident-checked-output",
         "qwenpaw-resident-withhold",
         "qwenpaw-resident-boolean-withhold",
         "qwenpaw-resident-native-denial",
@@ -1741,6 +1815,7 @@
         "scope-native-skips",
         "qwenpaw-resident-observation",
         "qwenpaw-managed-association",
+        "qwenpaw-resident-checked-output",
         "qwenpaw-resident-withhold",
         "qwenpaw-resident-boolean-withhold",
         "qwenpaw-resident-native-denial",
@@ -1860,6 +1935,149 @@
         "security-retry",
         "final-replacement",
         "input-rewrite"
+      ]
+    },
+    "deepseek-harness": {
+      "events": {
+        "input.submit": {
+          "observe": [
+            "submit-deepseek"
+          ],
+          "block": [
+            "submit-deepseek"
+          ]
+        },
+        "tool.before": {
+          "observe": [
+            "security-retry"
+          ],
+          "block": [
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "final-replacement"
+          ],
+          "replace_result": [
+            "final-replacement"
+          ]
+        },
+        "security.violation": {
+          "observe": [
+            "deepseek-final-check"
+          ],
+          "block": [
+            "deepseek-final-check"
+          ]
+        }
+      },
+      "lifecycle": [
+        "deepseek-lifecycle",
+        "cancel-initialization"
+      ],
+      "security": [
+        "security-retry"
+      ],
+      "tokenless": [
+        "final-replacement",
+        "security-retry"
+      ]
+    },
+    "codex": {
+      "events": {
+        "input.submit": {
+          "observe": [
+            "codex-submission"
+          ],
+          "block": [
+            "codex-submission",
+            "security-retry"
+          ]
+        },
+        "tool.before": {
+          "observe": [
+            "codex-launch"
+          ],
+          "block": [
+            "codex-launch",
+            "security-retry"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "codex-launch"
+          ],
+          "replace_result": [
+            "final-replacement",
+            "codex-replacement"
+          ]
+        }
+      },
+      "lifecycle": [
+        "codex-launch",
+        "codex-admission",
+        "codex-interruption",
+        "codex-capacity",
+        "codex-submission"
+      ],
+      "security": [
+        "security-retry",
+        "codex-large-denial",
+        "codex-submission"
+      ],
+      "tokenless": [
+        "codex-launch",
+        "codex-admission",
+        "final-replacement"
+      ],
+      "admission": [
+        "codex-admission"
+      ],
+      "unsupported": {}
+    },
+    "sdk": {
+      "events": {
+        "input.submit": {
+          "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ],
+          "block": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ]
+        },
+        "tool.before": {
+          "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ],
+          "block": [
+            "security-retry",
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ]
+        },
+        "tool.after": {
+          "observe": [
+            "typescript-sdk-package",
+            "python-sdk-package"
+          ]
+        }
+      },
+      "lifecycle": [
+        "typescript-sdk-package",
+        "python-sdk-package"
+      ],
+      "security": [
+        "security-retry",
+        "semantic-sdk-normalization",
+        "typescript-sdk-package",
+        "python-sdk-package"
+      ],
+      "tokenless": [
+        "security-retry"
       ]
     }
   },

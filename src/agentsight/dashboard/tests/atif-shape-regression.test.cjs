@@ -43,7 +43,7 @@ function viewer(locale = 'en-US') {
   function load(file, extra = '') {
     const exports = {};
     runInNewContext(readFileSync(file, 'utf8') + extra, {
-      exports, URLSearchParams, Blob, setTimeout: () => 0,
+      exports, URLSearchParams, Blob, AbortController, setTimeout: () => 0,
       URL: { createObjectURL(blob) { downloads.push(blob); return 'blob:private'; }, revokeObjectURL() {} },
       document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
       FileReader: class { constructor() { readers.push(this); } readAsText() {} },
@@ -64,8 +64,10 @@ function viewer(locale = 'en-US') {
           fetchAtifByConversation: (...args) => new Promise((resolve, reject) => requests.push({ kind: 'conversation', args, resolve, reject })),
           fetchSessionSavings: async () => ({ items: [], total_compounded_saved: 0 }),
         };
+        if (name === '../utils/wsCkpt') return { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false };
         if (modules[name]) return modules[name];
         if (name === '../components/CausalAttributionPanel') return { CausalAttributionPanel: () => null };
+        if (name === '../components/WorkspaceSnapshotDialog') return { WorkspaceSnapshotDialog: () => null };
         throw new Error(`Unexpected ATIF dependency ${name}`);
       },
     });

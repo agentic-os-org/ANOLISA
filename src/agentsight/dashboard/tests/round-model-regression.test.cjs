@@ -354,8 +354,10 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
     '../utils/trajectoryTree': trajectoryTree,
     '../utils/trajectoryTextFilter': trajectoryTextFilter,
     '../utils/optimizationStrategies': optimizationStrategies,
+    '../utils/wsCkpt': { fetchWorkspaceSnapshots: async () => ({}), snapshotsMatchDocument: () => false },
     '../components/SubagentGraph': { SubagentGraph: () => null },
     '../components/CausalAttributionPanel': { CausalAttributionPanel: () => null },
+    '../components/WorkspaceSnapshotDialog': { WorkspaceSnapshotDialog: () => null },
   };
   // The page module needs the driver's React hooks; loadModuleFromCode above
   // has no driver, so bind react through the driver here.

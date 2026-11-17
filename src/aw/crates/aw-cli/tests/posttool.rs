@@ -253,7 +253,7 @@ fn qoder_callback_delivers_one_replacement_and_keeps_audit_metadata_only() {
 fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
     use aw_service::{Binding, Capabilities, Operation};
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
-    for agent in native::agents() {
+    for agent in native::agents_with_effect("tool.after", "replace_result") {
         let adapter = agent.as_str();
         let fixture = Fixture::new();
         let mut document = fixture.document();

@@ -150,6 +150,38 @@ for (const mode of ["clean", "replace"])
     assert.equal(f.context.result.extra.value, "unchecked");
   });
 
+for (const [mode, expected] of [["clean", "native-after"], ["replace", undefined]])
+  test(`strict ${mode} adopts native structured output without stale fields`, async (t) => {
+    const f = fixture(t, { strict: true, mode });
+    f.context.result.structuredContent = { value: "executed" };
+    f.original.structuredContent = { value: "native-after" };
+    await f.agent.beforeToolCall(f.context);
+    const override = await f.agent.afterToolCall(f.context);
+    const delivered = { ...f.context.result, ...override };
+    await f.agent.processEvents({ type: "tool_execution_end", toolCallId: f.context.toolCall.id,
+      result: delivered });
+    assert.deepEqual(delivered.structuredContent,
+      expected === undefined ? undefined : { value: expected });
+    assert.equal(Object.hasOwn(delivered, "structuredContent"), expected !== undefined);
+  });
+
+test("strict native content override drops executed structured output", async (t) => {
+  const f = fixture(t, { strict: true, mode: "clean" });
+  f.context.result.structuredContent = { value: "executed" };
+  await f.agent.beforeToolCall(f.context);
+  const override = await f.agent.afterToolCall(f.context);
+  assert.equal(Object.hasOwn(override, "structuredContent"), false);
+});
+
+test("report-mode text replacement drops native structured output", async (t) => {
+  const f = fixture(t);
+  f.original.structuredContent = { value: "native-after" };
+  await f.agent.beforeToolCall(f.context);
+  const override = await f.agent.afterToolCall(f.context);
+  assert.equal(override.content[0].text, "compact");
+  assert.equal(Object.hasOwn(override, "structuredContent"), false);
+});
+
 test("strict snapshot errors do not expose the uncloneable value", async (t) => {
   const f = fixture(t, { strict: true, mode: "clean" });
   f.original.details = { callback: function PRIVATE_OUTPUT_SECRET() {} };

@@ -1,5 +1,18 @@
 # 更新日志
 
+## 0.16.2
+
+### 修复
+- 抓取启动后很快完成的首次 TLS 调用（如热启动的 Claude Code）：内置 Claude Code 2.1.301、2.1.319、2.1.322 的静态 SSL 偏移，重启后复用此前扫描得到的偏移（保存在存储目录的 `ssl_offsets_learned.json`），并在每轮取完所有已完成的扫描结果。
+- 内存压力下保留进行中的 SSE 响应：达到字节预算时拒绝新的 HTTP/1 连接和 HTTP/2 流，不再淘汰最早保留的连接。该修复在 0.16.1 版本提交之前已合入 `main`，但 `sight/v0.16.1` tag 及其安装包不包含它，因此自 0.16.2 起发布。
+- 被 `SAFETY`、`BLOCKLIST`、`PROHIBITED_CONTENT` 或 `IMAGE_SAFETY` 拦截的 Gemini 提示词记为 `safety_filter` 中断，Gemini 工具提示词 token 计入输入，并保留 Gemini 原始工具 ID。
+- 导出 Anthropic 服务端工具在同一响应中返回的工具结果，并保留 Codex rollout 末尾的工具完成时间。
+- 成本分析按顺序重放变化的系统提示词，不再累加所有快照，并统计 argv 形式 Codex shell 调用中的回退。
+- 会话新增轮次后使缓存的因果分析失效。
+
+### 文档
+- 更正 0.16.1 关于 ActPlane 的说明：策略仍可在容器默认 PID 命名空间中应用，仅在 BPF LSM 未启用时拒绝拦截策略。
+
 ## 0.16.1
 
 ### 安全
@@ -11,7 +24,7 @@
 
 ### 变更
 - `agentsight` 兼容 RPM 弱依赖同版本的 `agentsight-plugins`，默认 `dnf install agentsight` 会一并安装 DSH 插件资源。
-- ActPlane 在初始 PID 命名空间之外拒绝应用策略并返回专用 RPC 错误，BPF LSM 未启用时拒绝拦截策略，且拒绝发生在修改 BPF 状态之前。
+- ActPlane 在 BPF LSM 未启用时拒绝拦截策略，且拒绝发生在修改 BPF 状态之前。
 
 ### 修复
 - Bun 2026 年重建 BoringSSL 调整了 SSL 函数顺序，恢复对此类 Claude Code 的抓取；每个新 PID 重新挂载 SSL 探针，并重试延迟加载的 SSL 库。

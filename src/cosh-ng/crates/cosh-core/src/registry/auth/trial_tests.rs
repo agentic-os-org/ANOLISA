@@ -63,6 +63,56 @@ fn configured() -> CoreConfig {
 }
 
 #[test]
+fn guide_access_summary_keeps_candidate_without_probing() {
+    isolated(|home| {
+        run(async {
+            let mut config = CoreConfig::default();
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            TEST_ECS_PROBE
+                .scope((Ok(true), Arc::clone(&requests)), async {
+                    let state = query(&mut config, "state", Value::Null).await;
+                    assert_eq!(state["data"]["ecs_trial"]["route"], "ecs_identity");
+                    assert_eq!(
+                        state["data"]["ecs_trial"]["identity_status"],
+                        if cfg!(target_os = "macos") {
+                            "unsupported"
+                        } else {
+                            "not_checked"
+                        }
+                    );
+                    assert_eq!(state["data"]["effective_auth_required"], true);
+                    assert_eq!(requests.load(Ordering::SeqCst), 0);
+                    assert!(!home.join(".copilot-shell/config.toml").exists());
+                })
+                .await;
+        });
+    });
+}
+
+#[test]
+fn guide_access_summary_preserves_explicit_intent_and_probe_failure() {
+    isolated(|_| {
+        run(async {
+            let mut config = configured();
+            TEST_ECS_PROBE
+                .scope((Err(ProbeError::Timeout), Arc::default()), async {
+                    let state = query(
+                        &mut config,
+                        "state",
+                        serde_json::json!({"probe_ecs_trial":true}),
+                    )
+                    .await;
+                    assert_eq!(state["data"]["ecs_trial"]["route"], "existing");
+                    assert_eq!(state["data"]["ecs_trial"]["identity_status"], "failed");
+                    assert_eq!(state["data"]["ecs_trial"]["error_code"], "metadata_timeout");
+                    assert_eq!(state["data"]["ecs_trial"]["available"], false);
+                })
+                .await;
+        });
+    });
+}
+
+#[test]
 fn ecs_builtin_project_model_cannot_become_a_persistent_user_choice() {
     isolated(|home| {
         run(async {

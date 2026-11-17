@@ -23,6 +23,47 @@ or grant permissions.
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## Built-in credential injection (unreleased V2)
+
+`agent-sec-cli inject-credential` combines fake generation, Policy creation and
+Scope assignment for the packaged GitHub Cedar template. Existing step-by-step
+commands remain available. This source-tree feature is not a released Gateway
+installation path; it requires a matching V2 CLI/daemon and installed gateway assets.
+
+```bash
+sudo agent-sec-cli inject-credential --builtin github \
+  --real-token-file /root/github.token \
+  --owner agentuser --cmdline-arg /usr/local/bin/my-agent
+```
+
+Run as root, select a non-root Agent owner (`--owner` or `--owner-uid`), and target
+that Agent with exactly one of `--cmdline-arg`, `--executable` or `--process-name`.
+For script Agents, use their full command path, not a shared interpreter selector.
+The real token file must be private and owned by root or the owner; every ancestor
+must be trusted and non-writable by group/others. Keep the real token inaccessible
+to the Agent. The root-owned packaged template is never changed or embedded in the CLI.
+
+The JSON result contains IDs, `fakeTokenFile`, gateway status and teardown commands,
+never token values. When the run used a non-default daemon socket, every returned
+teardown, recovery and next-step command includes the same `--socket`. A second
+concurrent run fails immediately with a lock error and creates no records; retry after
+the first finishes. Generated fakes default to the owner's
+`.config/agent-sec/gateway/`; `--output-dir` selects another owner-writable directory.
+`--fake-token-file` instead uses an existing private fake. The original real file
+is unchanged; staged copies are removed after successful registration. Admission
+failure retains root-only recovery files; follow the error's manual recovery and
+cleanup commands. Keep the delivered fake for Agent startup. Configure `GH_TOKEN`/`GITHUB_TOKEN` yourself; no `agent.env` is written.
+
+The command never enables the gateway. Enable it separately with
+`sudo agent-sec-cli gateway enable`, then obtain the shared CA with
+`agent-sec-cli gateway ca` and configure the Agent's TLS trust. Binding acceptance
+alone does not establish traffic protection. `--wait-seconds N` waits for existing
+matching processes to reach READY; timeout still prints the result and exits 1.
+`--dry-run` reads only the template, without token reads or daemon calls.
+To revoke injection, execute the returned Scope deletion command, wait for cleanup,
+then delete the Policy. See the [Gateway contract (Chinese)](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)
+for readiness, response-rewrite limits and partial-failure recovery.
+
 ## Policy database location
 
 With no nonempty `AGENT_SEC_DATA_DIR`, the daemon checks two Policy database paths:
@@ -302,9 +343,8 @@ would reject exits `2` without a request.
 The `--format cedar` output is the unapproved candidate text; approval and execution stay
 outside this subcommand. The candidate covers only the command's own demand, so the program,
 cwd and loader paths are not included and a caller must add them explicitly; the CLI adds
-nothing implicitly. Enforcement still comes from the PDP intersecting the request with the
-published `environment_permissions` and the policy layers, i.e.
-`effective = request ∩ environment_permissions ∩ policies`.
+nothing implicitly. The PDP restricts the request to the PAP-managed Cedar policy set:
+`effective = request ∩ PAP policy grants`, with matching forbids taking precedence.
 
 This path does not read or rewrite base policies, does not compute `effective` locally, and
 does not execute the command.
@@ -533,9 +573,10 @@ use administrator-reviewed policies rather than untrusted generated input.
 
 Sandbox runtime authorization uses the same Policy objects with
 `schema: {schemaId: "seccore.system", revision: 1}`. The OS authorization PDP evaluates
-Agent subjects, `process.spawn` and supported permit advice. Configure the daemon's
-permission ceiling and decision lifetime as shown in the
-[sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads current
+Agent subjects, `process.spawn` and supported permit advice. Authorization is enabled
+by default, without a separate permission-ceiling configuration. Decisions must be
+accepted within 60 seconds; accepted approval waits and execution may finish later.
+See the [sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads current
 PAP policies together and includes Cedar sources whose statements all have explicit
 principal headers; no Policy IDs are configured. Use `principal is SecCore::Subject`
 with the optional `agent_type` attribute to match requests. Updates and deletions

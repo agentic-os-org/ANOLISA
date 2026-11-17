@@ -812,6 +812,15 @@ pub async fn get_session_savings(
         .unwrap_or_default();
 
     let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+    // The turn map skips a NULL call_id row, so `request_count` — which counts
+    // that row — is not the session's horizon. Take it from the map, falling
+    // back to the count when no call is mapped.
+    let session_total_turns = turn_indices
+        .values()
+        .filter(|info| info.session_id == session_id)
+        .map(|info| info.turn_index as i64)
+        .max()
+        .unwrap_or(request_count);
     // The per-session endpoint's denominator spans the session's whole
     // history, so its numerator stays unbounded to match.
     let (stats_available, rows) =
@@ -844,7 +853,7 @@ pub async fn get_session_savings(
                 .get(&row.tool_use_id)
                 .map(|info| info.turn_index)
                 .unwrap_or(1) as i64;
-            let compounding_turns = (request_count - turn_index).max(1);
+            let compounding_turns = (session_total_turns - turn_index).max(1);
             let compounded = saved * compounding_turns;
             total_compounded_saved += compounded;
 
@@ -1842,6 +1851,65 @@ mod tests {
         assert!((rate - 2200.0 / 2700.0).abs() < 1e-9, "got {rate}");
 
         // Restore HOME
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The per-session horizon must come from the turn map, not from the raw
+    /// row count: the turn reader skips a NULL `call_id` row, so counting that
+    /// row as a turn gave every item one extra compounding turn.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn session_savings_horizon_ignores_a_null_call_id_row() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_sess_null_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let _stats_path = setup_stats_db(&tmp);
+        {
+            // Fixture-only raw insert: a foreign writer's malformed row,
+            // timestamped before both real calls.
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json)
+                 VALUES ('llm_call', 'sess-1', NULL, 'test-agent', 'gpt-4', 0, 0, 50000000, '{}')",
+                [],
+            )
+            .unwrap();
+        }
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_session_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings/session/sess-1")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+        // Two real calls: tc-1 compounds over one later turn, tc-2 over none.
+        // Counting the skipped row as a turn reported 3700 instead.
+        assert_eq!(body["total_compounded_saved"], 2200);
+
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },

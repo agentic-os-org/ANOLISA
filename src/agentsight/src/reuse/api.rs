@@ -466,18 +466,21 @@ fn tolerate_removed_label(result: std::result::Result<(), ReuseStoreError>) -> R
 ///
 /// The content digest cannot be recomputed from a payload-free summary, so
 /// `collected_at_ns` is the next best signal: the collector bumps it on every
-/// upsert, so a record written after the label's last verdict (or after the
-/// last batch check that verified its bytes unchanged) is spotted here and
-/// goes on to the exact hash comparison. A decision recorded after a
-/// re-collection can move `updated_at_ns` past `collected_at_ns` and postpone
-/// the recompute until the next re-collection; postponing leaves the stored
-/// verdict in place, so a skip can never surface a different one.
+/// upsert. Human/model decisions also update the label, but do not establish
+/// that automatic triage read the latest source. Only use that write time when
+/// neither decision owns it; a coincident timestamp forces a safe hash check.
+/// An unchanged batch check records its source timestamp separately, so later
+/// batches can skip verified decision-owned rows without repeated parsing.
 fn is_fresh(label: &SessionLabel, version: &str, collected_at_ns: i64) -> bool {
-    let verified_at_ns = match label.triage_checked_at_ns {
-        Some(checked) => label.updated_at_ns.max(checked),
-        None => label.updated_at_ns,
-    };
-    label.triage_version == version && collected_at_ns <= verified_at_ns
+    let automatic_update = (label.decided_at_ns != Some(label.updated_at_ns)
+        && label.llm_at_ns != Some(label.updated_at_ns))
+    .then_some(label.updated_at_ns);
+    let verified_at_ns = automatic_update
+        .into_iter()
+        .chain(label.triage_checked_at_ns)
+        .max();
+    label.triage_version == version
+        && verified_at_ns.is_some_and(|verified| collected_at_ns <= verified)
 }
 
 /// Counts a row whose human decision is in force and contradicts the rules.

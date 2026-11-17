@@ -92,9 +92,27 @@ fn render_raw_inline_event_view<W: Write>(
     }
     if inline_state.trigger_pty_prompt {
         inline_state.trigger_pty_prompt = false;
+        let ghost_route = std::mem::take(&mut inline_state.pending_input_ghost_route);
+        let suggestion_surface = match &ghost_route {
+            crate::raw_input::PromptGhostRoute::AgentSelection { candidates, .. } => {
+                let items = candidates
+                    .iter()
+                    .map(|candidate| crate::ui::guidance::SuggestionItem {
+                        id: candidate.suggestion_id.clone(),
+                        question: candidate.text.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 0));
+                Some(crate::ui::guidance::suggestion_surface_payload(
+                    &items, width, height,
+                ))
+            }
+            _ => None,
+        };
         return Ok(RawObserverAction::RestorePrompt {
             ghost_text: inline_state.pending_input_ghost.take(),
-            ghost_route: std::mem::take(&mut inline_state.pending_input_ghost_route),
+            ghost_route,
+            suggestion_surface,
         });
     }
     let shell_busy = inline_state.control.shell_busy();
@@ -170,6 +188,7 @@ fn shell_handoff_timeout_recovery_action_with_timeout<W: Write>(
             return Ok(Some(RawObserverAction::RestorePrompt {
                 ghost_text: None,
                 ghost_route: Default::default(),
+                suggestion_surface: None,
             }));
         }
         return Ok(None);

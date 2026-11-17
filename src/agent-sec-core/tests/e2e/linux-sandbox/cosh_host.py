@@ -129,7 +129,7 @@ def run_host(
                     assert case in {"approved", "declined"}, msg
                     approvals += 1
                     if case == "approved":
-                        time.sleep(3)  # Longer than this PDP's two-second decision TTL.
+                        time.sleep(3)  # Simulate approval delay.
                     response = (
                         {"behavior": "allow"}
                         if case == "approved"
@@ -196,7 +196,10 @@ def run_host(
             messages,
         )
     replay = subprocess.run(
-        [str(cli), "sandbox", "hook", "execute", decision], env=env, capture_output=True
+        [str(cli), "sandbox", "hook", "execute", decision],
+        env=env,
+        capture_output=True,
+        check=False,
     )
     assert replay.returncode != 0, case
     print(f"PASS stock Cosh {case}", flush=True)

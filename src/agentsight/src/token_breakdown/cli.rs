@@ -780,7 +780,18 @@ impl AnalyzeChatmlCommand {
                                             part.get("text").and_then(|v| v.as_str())
                                         {
                                             if !text.is_empty() {
-                                                content_parts.push(text.to_string());
+                                                // Gemini marks thinking parts
+                                                // with `"thought": true`; the
+                                                // live parser and the shared
+                                                // mergers keep them out of the
+                                                // visible answer.
+                                                if part.get("thought").and_then(|v| v.as_bool())
+                                                    == Some(true)
+                                                {
+                                                    reasoning_parts.push(text.to_string());
+                                                } else {
+                                                    content_parts.push(text.to_string());
+                                                }
                                             }
                                         }
                                         if let Some(call) = part.get("functionCall") {
@@ -1791,6 +1802,37 @@ mod tests {
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
         assert_eq!(resp.content, vec!["hello there".to_string()]);
         assert_eq!(resp.tool_calls, vec![r#"lookup: {"q":"x"}"#.to_string()]);
+    }
+
+    /// Gemini marks thinking parts with `"thought": true`. The breakdown read
+    /// every part's text as the visible answer, so the thinking was reported
+    /// as answer content and `reasoning_content` stayed empty.
+    #[test]
+    fn gemini_thought_parts_are_reasoning_not_answer() {
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "think first", "thought": true},
+                    {"text": "hello there"}
+                ]},
+                "finishReason": "STOP"
+            }]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("think first"));
+
+        let streamed = vec![
+            sse(
+                r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"think first","thought":true}]}}]}"#,
+            ),
+            sse(
+                r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hello there"}]},"finishReason":"STOP"}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&streamed);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("think first"));
     }
 
     #[test]

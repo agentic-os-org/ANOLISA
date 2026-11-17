@@ -52,7 +52,7 @@ export async function runWorker({ createSession }) {
       let accepted;
       await session.prompt('native options', { streamingBehavior: 'steer', images: [],
         source: 'interactive', preflightResult: value => { accepted = value; } });
-      assert.equal(accepted, true);
+      assert([true, 'started'].includes(accepted));
       for (const [text, options] of [['x', { images: [{ type: 'image', data: 'x' }] }],
         ['/template', {}], ['x', { source: 'extension' }], ['x', { streamingBehavior: 'invalid' }]])
         await reject(() => session.prompt(text, options));

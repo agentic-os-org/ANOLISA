@@ -2,6 +2,8 @@
 
 #[path = "hermes_trust/checkout.rs"]
 mod checkout;
+#[path = "hermes_trust/signals.rs"]
+mod signals;
 #[path = "hermes_trust/startup_cleanup.rs"]
 mod startup_cleanup;
 
@@ -173,7 +175,13 @@ fn installed_hermes_fixture() -> (Fixture, PathBuf) {
     fs::create_dir_all(&plugin).unwrap();
     let source =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native/hermes");
-    for name in ["plugin.yaml", "__init__.py"] {
+    for name in [
+        "plugin.yaml",
+        "__init__.py",
+        "aw_gateway.py",
+        "aw_gateway_lifecycle.py",
+        "aw_skill.py",
+    ] {
         fs::copy(source.join(name), plugin.join(name)).unwrap();
         fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -434,7 +442,13 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
     }
     let source =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native/hermes");
-    for name in ["plugin.yaml", "__init__.py"] {
+    for name in [
+        "plugin.yaml",
+        "__init__.py",
+        "aw_gateway.py",
+        "aw_gateway_lifecycle.py",
+        "aw_skill.py",
+    ] {
         fs::copy(source.join(name), plugin.join(name)).unwrap();
         fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();
     }

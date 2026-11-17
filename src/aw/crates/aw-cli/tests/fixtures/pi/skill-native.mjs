@@ -24,7 +24,7 @@ export async function runWorker({ createSession }) {
       await session.abort();
     }
     await result;
-    assert.equal(accepted, pass);
+    assert.equal([true, 'started'].includes(accepted), pass);
     const calls = evidence.get(session);
     assert.equal(calls.length, pass ? 1 : 0);
     if (scenario === 'signed') {

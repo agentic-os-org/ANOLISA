@@ -381,6 +381,26 @@ fn parses_kernel_signals_from_short_unix_logs() {
         .facts
         .iter()
         .any(|fact| fact.key == "kernel.oom_latest_pid"));
+
+    let facts = parse_kernel_signals("", "journalctl", 2_000_000);
+    let mut builder = HealthReportBuilder::for_started_at(1);
+    facts.record(&mut builder, 0);
+    let report = builder.finish(1);
+
+    assert_eq!(facts.oom_latest_age_seconds, None);
+    assert_eq!(facts.oom_latest_pid, None);
+    assert_eq!(facts.oom_killed_process, None);
+    assert_eq!(facts.oom_event_count_last_1h, 0);
+    assert_eq!(facts.oom_event_count_last_24h, 0);
+    assert!(!facts.panic_recent);
+    assert!(report.unavailable.is_empty());
+    assert!(!report
+        .facts
+        .iter()
+        .any(|fact| fact.key.starts_with("kernel.oom_")));
+    assert!(report.facts.iter().any(|fact| {
+        fact.key == "kernel.panic_recent" && fact.value == HealthFactValue::Bool(false)
+    }));
 }
 
 #[test]
@@ -442,6 +462,96 @@ fn parses_kernel_signals_keep_latest_oom_details_together() {
     assert_eq!(facts.oom_event_count_last_1h, 2);
     assert_eq!(facts.oom_event_count_last_24h, 2);
     assert_eq!(facts.oom_latest_source_line_count, 2);
+
+    let chronological = "1999900.572060 kernel: worker invoked oom-killer: gfp_mask=0xcc0\n1999900.573398 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,oom_memcg=/cosh,task_memcg=/cosh/session,task=worker,pid=222\n";
+    for killed in [
+        "",
+        "1999900.574000 kernel: Memory cgroup out of memory: Killed process 222 (worker) total-vm:2048kB\n",
+    ] {
+        let reverse = format!("{chronological}{killed}")
+            .lines()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let facts = kernel::parse_reverse_journal_signals(&reverse, 2_000_000);
+        assert_eq!(facts.oom_event_count_last_1h, 1);
+        assert_eq!(facts.oom_event_count_last_24h, 1);
+        assert_eq!(facts.oom_latest_pid, Some(222));
+        assert_eq!(facts.oom_killed_process.as_deref(), Some("worker"));
+        assert_eq!(facts.oom_latest_oom_cgroup.as_deref(), Some("/cosh"));
+        assert_eq!(facts.oom_latest_task_cgroup.as_deref(), Some("/cosh/session"));
+        assert_eq!(facts.oom_latest_source_line_count, if killed.is_empty() { 2 } else { 3 });
+    }
+
+    let facts = parse_kernel_signals(
+        r#"
+1999900.100 kernel: first invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0
+1999900.200 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,oom_memcg=/first,task_memcg=/first/task,task=first,pid=12
+1999900.300 kernel: Memory cgroup out of memory: Killed process 12 (first) total-vm:1024kB
+1999901.100 kernel: second invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0
+1999901.200 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,oom_memcg=/second,task_memcg=/second/task,task=second,pid=13
+1999901.300 kernel: Memory cgroup out of memory: Killed process 13 (second) total-vm:1024kB
+"#,
+        "journalctl",
+        2_000_000,
+    );
+
+    assert_eq!(
+        (
+            facts.oom_latest_pid,
+            facts.oom_killed_process.as_deref(),
+            facts.oom_event_count_last_1h,
+            facts.oom_event_count_last_24h,
+        ),
+        (Some(13), Some("second"), 2, 2)
+    );
+    assert_eq!(facts.oom_latest_oom_cgroup.as_deref(), Some("/second"));
+    assert_eq!(
+        facts.oom_latest_task_cgroup.as_deref(),
+        Some("/second/task")
+    );
+
+    let facts = parse_kernel_signals(
+        r#"
+1999900.000 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,oom_memcg=/first,task_memcg=/first/task,task=first,pid=12
+1999901.000 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,oom_memcg=/second,task_memcg=/second/task,task=second,pid=13
+"#,
+        "journalctl",
+        2_000_000,
+    );
+
+    assert_eq!(
+        (
+            facts.oom_latest_pid,
+            facts.oom_killed_process.as_deref(),
+            facts.oom_event_count_last_1h,
+            facts.oom_event_count_last_24h,
+        ),
+        (Some(13), Some("second"), 2, 2)
+    );
+    assert_eq!(facts.oom_latest_oom_cgroup.as_deref(), Some("/second"));
+    assert_eq!(
+        facts.oom_latest_task_cgroup.as_deref(),
+        Some("/second/task")
+    );
+
+    let facts = parse_kernel_signals(
+        r#"
+1999900.100 kernel: oom-kill:constraint=CONSTRAINT_NONE,task=first
+1999900.200 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,task=second
+"#,
+        "journalctl",
+        2_000_000,
+    );
+
+    assert_eq!(
+        (
+            facts.oom_latest_constraint.as_deref(),
+            facts.oom_killed_process.as_deref(),
+            facts.oom_event_count_last_1h,
+        ),
+        (Some("CONSTRAINT_MEMCG"), Some("second"), 2)
+    );
 }
 
 #[test]

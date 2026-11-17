@@ -80,6 +80,8 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
         for obligation in ("lifecycle", "security", "tokenless"):
             covered(row.get(obligation), f"{agent}/{obligation}")
         for obligation, case in shared.items():
+            if obligation == "tokenless" and "replace_result" not in row["events"].get("tool.after", {}):
+                continue
             if case not in row[obligation]:
                 raise ValueError(f"{agent}: shared {obligation} regression is required")
         if not row.get("events"):

@@ -1332,9 +1332,12 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
         }
     }
 
-    // 2. trace_id — genai_events
-    let genai_candidate = base_dir.join("genai_events.db");
-    if let Ok(conn) = open_existing_read_only(DatabaseId::GenAi, &genai_candidate) {
+    // 2. trace_id — genai_events. `db_path` is the database the server was
+    // told to serve (`--db`, else storage.genai_path()), so a custom filename
+    // must be queried as itself. Joining the default name onto the directory
+    // opened a different (often absent) file and every trace id from a custom
+    // database fell through to a 404.
+    if let Ok(conn) = open_existing_read_only(DatabaseId::GenAi, db_path) {
         let sql = "SELECT session_id FROM genai_events \
                    WHERE trace_id = ?1 AND session_id IS NOT NULL \
                    LIMIT 1";

@@ -9,5 +9,5 @@ publish = false
 [dependencies]
 thiserror = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

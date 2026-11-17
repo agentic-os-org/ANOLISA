@@ -108,6 +108,38 @@ fn check_withhold_failure(boolean: bool) {
 }
 
 #[test]
+fn checked_after_only_publishes_one_chunk_per_tool() {
+    let fixture = Fixture::new();
+    let mut document = resident(&fixture, "withhold_result");
+    document["spec"]["events"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tool.before");
+    let service = Service::start(&fixture, &document);
+    let result = fixture.successful(launch(&fixture));
+    assert_eq!(result["failure"], Value::Null);
+    let output = result["results"].as_array().unwrap();
+    assert_eq!(output.len(), 4);
+    for pair in output.chunks_exact(2) {
+        assert_eq!(pair[0]["is_last"], true);
+        assert_eq!(pair[0]["content"], pair[1]["content"]);
+        assert_eq!(pair[0]["state"], pair[1]["state"]);
+        assert_eq!(pair[0]["content"][0]["text"], "protected tool output");
+        assert!(pair[1].get("is_last").is_none());
+    }
+    let callbacks = events(&fixture);
+    assert_eq!(callbacks.len(), 2);
+    assert!(callbacks.iter().all(|event| event["name"] == "tool.after"));
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("tool-executed")).unwrap(),
+        "call-0\ncall-1\n"
+    );
+    assert!(!fixture.root.join("native-chunks.jsonl").exists());
+    preserved(&fixture);
+    service.released(&fixture);
+}
+
+#[test]
 fn report_failure_preserves_results_and_next_dispatch_through_launcher() {
     let fixture = Fixture::new();
     let document = resident(&fixture, "report");
@@ -225,7 +257,15 @@ fn native_early_terminal_consumer_observes_completed_finalizers() {
     command.env("FAKE_QWENPAW_EARLY_TERMINAL", "1");
     let result = fixture.successful(command);
     assert_eq!(result["failure"], Value::Null);
-    assert_eq!(result["results"].as_array().unwrap().len(), 2);
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|item| item["is_last"] == true)
+            .count(),
+        2
+    );
     for index in 0..2 {
         assert_eq!(
             fs::read_to_string(fixture.root.join(format!("call-{index}-finalized"))).unwrap(),
