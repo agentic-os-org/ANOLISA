@@ -17,8 +17,8 @@ struct OffsetEntry {
     offsets: Option<StaticSslOffsets>,
 }
 
-#[derive(Debug)]
-struct Fingerprint {
+#[derive(Debug, Clone)]
+pub(super) struct Fingerprint {
     build_id: Option<String>,
     file_size: u64,
     head_64k_sha256: String,
@@ -171,11 +171,26 @@ impl LearnedOffsets {
 
     /// Persist offsets verified for the file at `path` (a pinned `/proc/self/fd`
     /// descriptor is acceptable). A no-op when the fingerprint is known.
+    #[cfg(test)]
     pub(super) fn record(&mut self, path: &str, offsets: &StaticSslOffsets) {
         let Some(fingerprint) = fingerprint_of(path) else {
             log::debug!("Cannot fingerprint SSL scan input {path}; not persisting offsets");
             return;
         };
+        self.record_fingerprint(fingerprint, offsets);
+    }
+
+    /// Persist offsets under an already-computed fingerprint. The runtime
+    /// self-verify captures the fingerprint at attach time (when the scan's
+    /// revision was just confirmed unchanged) and passes it here, so a binary
+    /// replaced between attach and verification cannot pair a new-file
+    /// fingerprint with offsets resolved from the old contents (#10203). A no-op
+    /// when the fingerprint is already cached.
+    pub(super) fn record_fingerprint(
+        &mut self,
+        fingerprint: Fingerprint,
+        offsets: &StaticSslOffsets,
+    ) {
         if self.entries.iter().any(|entry| {
             entry.fingerprint.file_size == fingerprint.file_size
                 && entry.fingerprint.head_64k_sha256 == fingerprint.head_64k_sha256
@@ -190,8 +205,7 @@ impl LearnedOffsets {
             offsets: Some(offsets.clone()),
         });
         log::info!(
-            "Learned static SSL offsets for {} ({} entries cached)",
-            path,
+            "Learned static SSL offsets ({} entries cached)",
             self.entries.len()
         );
         self.save();
@@ -259,7 +273,7 @@ impl LearnedOffsets {
 
 /// Exact-content fingerprint of the file at `path`, matching the shipped
 /// table's entry schema.
-fn fingerprint_of(path: &str) -> Option<Fingerprint> {
+pub(super) fn fingerprint_of(path: &str) -> Option<Fingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     Some(Fingerprint {
         build_id: elf_buildid::read_buildid(path),
