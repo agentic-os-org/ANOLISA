@@ -1,8 +1,43 @@
 import type { DatabaseSync } from "node:sqlite";
 
+const FTS_UPDATE_TRIGGER_SQL = `CREATE TRIGGER messages_au AFTER UPDATE ON messages
+  WHEN old.message_id IS NOT new.message_id OR old.content IS NOT new.content
+  BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+      VALUES('delete', old.message_id, old.content);
+    INSERT INTO messages_fts(rowid, content)
+      VALUES (new.message_id, new.content);
+  END`;
+
 function columnExists(db: DatabaseSync, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   return rows.some((r) => r.name === column);
+}
+
+function upgradeFtsUpdateTrigger(db: DatabaseSync): void {
+  const trigger = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_au'",
+  ).get() as { sql: string } | undefined;
+  // Keep ordinary archive opens read-only with respect to the trigger schema.
+  if (trigger?.sql === FTS_UPDATE_TRIGGER_SQL) return;
+
+  db.exec("SAVEPOINT selective_claw_fts_update");
+  try {
+    db.exec("DROP TRIGGER IF EXISTS messages_au");
+    db.exec(FTS_UPDATE_TRIGGER_SQL);
+    db.exec("RELEASE selective_claw_fts_update");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK TO selective_claw_fts_update");
+      db.exec("RELEASE selective_claw_fts_update");
+    } catch (cleanupError) {
+      console.warn(
+        "[selective-claw] FTS trigger upgrade failed; cleanup also failed",
+        cleanupError,
+      );
+    }
+    throw error;
+  }
 }
 
 export function runMigrations(db: DatabaseSync): void {
@@ -44,16 +79,15 @@ export function runMigrations(db: DatabaseSync): void {
           INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
         END;
 
-        CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
-          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
-          INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
-        END;
+        ${FTS_UPDATE_TRIGGER_SQL};
 
         INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
       `);
     } catch {
       // FTS5 not available in this SQLite build — full-text search will be unavailable
     }
+  } else {
+    upgradeFtsUpdateTrigger(db);
   }
 
   if (!columnExists(db, "messages", "turn_seq")) {
