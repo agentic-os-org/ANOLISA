@@ -8,5 +8,7 @@ mod ecs_probe;
 mod provider_activation;
 #[path = "protocol/provider_lifecycle.rs"]
 mod provider_lifecycle;
+#[path = "protocol/registry_receipts.rs"]
+mod registry_receipts;
 #[path = "protocol/session_management.rs"]
 mod session_management;
