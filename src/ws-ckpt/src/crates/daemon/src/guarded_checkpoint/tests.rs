@@ -212,10 +212,14 @@ impl Fixture {
     }
 
     async fn add_target_snapshot(&self) {
+        self.add_snapshot(TARGET_ID).await;
+    }
+
+    async fn add_snapshot(&self, id: &str) {
         let workspace = self.state.get_by_wsid(WS_ID).expect("registered workspace");
         let mut workspace = workspace.write().await;
         workspace.insert_snapshot(
-            TARGET_ID.to_string(),
+            id.to_string(),
             SnapshotMeta {
                 message: Some("target".to_string()),
                 metadata: None,
@@ -226,7 +230,7 @@ impl Fixture {
                 child_ids: vec![],
             },
         );
-        workspace.index.head = Some(TARGET_ID.to_string());
+        workspace.index.head = Some(id.to_string());
     }
 }
 
@@ -1008,6 +1012,51 @@ async fn guarded_rollback_succeeds_with_exact_preview_and_durable_bindings() {
         Response::GuardedRollbackEvidenceV2Ok { evidence: Some(_) }
     ));
     assert_snapshot_page(&fixture.state, &[TARGET_ID]).await;
+}
+
+#[tokio::test]
+async fn guarded_rollback_accepts_legacy_snapshot_id_without_prefix_matching() {
+    let fixture = Fixture::new(true);
+    let target = "重构前 baseline";
+    fixture.add_snapshot(target).await;
+    let path = fixture.workspace_path.to_str().expect("utf8 path");
+    let generation = fixture.backend.generation;
+    let preview = |id| rollback_preview(&fixture.state, Some(1000), path, WS_ID, generation, id);
+
+    assert_rollback_rejected(
+        preview("重构前").await,
+        GuardedRollbackRejectionCodeV2::SnapshotNotFound,
+    );
+    assert_rollback_rejected(
+        preview("../重构前 baseline").await,
+        GuardedRollbackRejectionCodeV2::InvalidSnapshotId,
+    );
+    let Response::GuardedRollbackPreviewV2Ok {
+        target_snapshot_id,
+        diff_digest,
+        ..
+    } = preview(target).await
+    else {
+        panic!("expected a preview for the complete legacy snapshot ID");
+    };
+    assert_eq!(target_snapshot_id, target);
+    let response = rollback(
+        &fixture.state,
+        Some(1000),
+        path,
+        WS_ID,
+        generation,
+        target,
+        diff_digest,
+        OPERATION_ID,
+        OPERATION_DIGEST,
+    )
+    .await;
+    assert!(
+        matches!(response, Response::GuardedRollbackV2Ok { evidence }
+        if evidence.target_snapshot_id == target)
+    );
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

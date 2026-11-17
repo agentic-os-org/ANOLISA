@@ -6,10 +6,10 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError};
 use ws_ckpt_common::{
-    validate_checkpoint_id_v2, validate_workspace_id_v2, ErrorCode, GuardedCheckpointEvidenceV2,
-    GuardedCheckpointOutcomeV2, GuardedCheckpointRejectionCodeV2, GuardedRollbackEvidenceV2,
-    GuardedRollbackOutcomeV2, GuardedRollbackRejectionCodeV2, Response, SnapshotMeta,
-    WorkspaceGenerationTokenV2, GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2,
+    validate_checkpoint_id_v2, validate_snapshot_id, validate_workspace_id_v2, ErrorCode,
+    GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, GuardedCheckpointRejectionCodeV2,
+    GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, GuardedRollbackRejectionCodeV2, Response,
+    SnapshotMeta, WorkspaceGenerationTokenV2, GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2,
     GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2, LIVE_CHILD,
 };
 
@@ -750,7 +750,7 @@ fn validate_rollback_request(
             message,
         )));
     }
-    if let Err(message) = validate_checkpoint_id_v2(target_snapshot_id) {
+    if let Err(message) = validate_snapshot_id(target_snapshot_id) {
         return Err(Box::new(rollback_rejected(
             GuardedRollbackRejectionCodeV2::InvalidSnapshotId,
             message,
