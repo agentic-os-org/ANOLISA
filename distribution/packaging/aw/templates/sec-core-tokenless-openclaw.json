@@ -32,10 +32,6 @@
         "mode": "block",
         "unmapped_tool": "error",
         "tools": {
-          "Bash": {
-            "language": "bash",
-            "input_pointer": "/command"
-          },
           "exec": {
             "language": "bash",
             "input_pointer": "/command"
@@ -88,7 +84,6 @@
           "id": "scan-code",
           "match": {
             "tools": [
-              "native:qoder:Bash",
               "native:openclaw:exec"
             ]
           },
@@ -119,7 +114,6 @@
           "id": "observe-completion",
           "match": {
             "tools": [
-              "native:qoder:Bash",
               "native:openclaw:exec"
             ]
           },

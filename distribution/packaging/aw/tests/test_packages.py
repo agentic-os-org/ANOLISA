@@ -242,13 +242,15 @@ class ArchiveTests(Fixture):
                 expected_tools = {
                     "sec-core": ["native:qoder:Bash", "native:openclaw:exec"],
                     "sec-core-tokenless": ["native:qoder:Bash", "native:openclaw:exec"],
-                    "sec-core-tokenless-openclaw": [
-                        "native:qoder:Bash",
-                        "native:openclaw:exec",
-                    ],
+                    "sec-core-tokenless-openclaw": ["native:openclaw:exec"],
                 }[name]
                 self.assertEqual(scan["match"]["tools"], expected_tools)
-                self.assertEqual(set(config["tools"]), {"Bash", "exec"})
+                expected_mapped = {
+                    "sec-core": {"Bash", "exec"},
+                    "sec-core-tokenless": {"Bash", "exec"},
+                    "sec-core-tokenless-openclaw": {"exec"},
+                }[name]
+                self.assertEqual(set(config["tools"]), expected_mapped)
                 self.assertEqual(scan["on_error"], "block")
                 after = template["events"]["tool.after"]
                 observe = next(
@@ -292,6 +294,27 @@ class ArchiveTests(Fixture):
                 self.assertEqual(steps[-1]["id"], "rewrite-command")
                 self.assertEqual(steps[-1]["effects"], ["block"])
                 self.assertEqual(steps[-1]["on_error"], "report")
+
+    def test_single_adapter_templates_carry_only_their_own_selectors(self) -> None:
+        # `aw config init` only declares the adapters passed on the command
+        # line, so every native selector must name a declared adapter.
+        adapter_tools = {"qoder": "Bash", "openclaw": "exec"}
+        single_adapter = {
+            "sec-core-tokenless-openclaw": {"openclaw"},
+            "tokenless-openclaw": {"openclaw"},
+            "tokenless": {"qoder", "openclaw"},
+        }
+        for name, adapters in single_adapter.items():
+            with self.subTest(template=name):
+                text = (package.TEMPLATES / f"{name}.json").read_text()
+                template = json.loads(text)
+                declared = {agent["adapter"] for agent in template.get("agents", [])}
+                for selector in re.findall(r"native:([a-z0-9]+):([A-Za-z0-9]+)", text):
+                    adapter, tool = selector
+                    self.assertIn(adapter, adapters)
+                    self.assertEqual(tool, adapter_tools[adapter])
+                    if declared:
+                        self.assertIn(adapter, declared)
 
     def test_invalid_architecture_or_missing_inputs_publish_nothing(self) -> None:
         self.prepare("core")
