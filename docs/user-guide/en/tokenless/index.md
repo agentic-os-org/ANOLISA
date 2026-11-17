@@ -399,7 +399,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm and Maven layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm, Maven, and Gradle layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Rewrites with RTK and submits shell input that runs through `tokenless rtk` when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
@@ -625,6 +625,24 @@ apply: Tool Errors keep their original output. Maven commands retain their curre
 PreTool RTK behavior; this feature does not add a command-rewriting exemption or
 invoke RTK from PostTool. Local corpus and adapter replay results are not evidence
 of live-Agent, whole-task or billing savings.
+
+### Gradle build output
+
+Recognized successful Gradle output compacts repeated task headers through the
+existing PostTool content route under `build_log_reduction` (`lossless`), without
+requiring recovery or writing to Stash. A compact block starts with
+`Gradle templates (id<TAB>fields; interleave with literals): ` and a JSON header of
+template literals and row count; interleaving each row's TAB-separated field with its
+template literals restores every task path, duplicate, order, and status (`executed`,
+`UP-TO-DATE`, `FROM-CACHE`, `SKIPPED`, `NO-SOURCE`) after SGR color cleanup.
+
+`> Task :... FAILED` headers, compiler or build warnings, deprecations, and stack
+traces remain plain text in place. CRLF-only output, non-SGR control characters,
+Markdown-fenced snippets, and blocks without net character and estimated-token
+savings stay unchanged; if no Gradle layout edits apply, command/exit-anchored logs
+can still use retrievable Generic progress reduction when Stash and recovery are
+available. Tool Errors keep their original output, and PreTool RTK rewriting is
+unchanged.
 
 ### CSV/TSV compaction preserves complete tables
 

@@ -5399,3 +5399,141 @@ fn maven_post_tool_preserves_v2_lossless_contract_without_stash() {
         }
     }
 }
+
+#[test]
+fn gradle_post_tool_preserves_v2_lossless_contract_without_stash() {
+    let input = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/gradle/resilience4j_incremental.txt"
+    );
+    for recovery in [
+        serde_json::json!({"kind":"none"}),
+        serde_json::json!({"kind":"shell"}),
+        serde_json::json!({"kind":"tool", "name":"tokenless_retrieve"}),
+    ] {
+        let fixture = TempDataDir::new().unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(input, "success", "gradle")).unwrap();
+        request["input"]["capabilities"]["recovery"] = recovery;
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["protocol_version"], 2);
+        let result = &response["result"];
+        assert_eq!(result["disposition"], "applied");
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["recoverability"], "lossless");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert_eq!(result["stash_keys"], serde_json::json!([]));
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains("tokenless retrieve")
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let database = fixture.data_dir.join("stash.db");
+        if database.exists() {
+            assert_eq!(SqliteStore::new(database).unwrap().len(), 0);
+        }
+    }
+
+    let failed = include_str!(
+        "../../tokenless-compressors/tests/fixtures/build_logs/gradle/caffeine_failure.txt"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(failed, "error", "gradle-error");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "tool_error");
+    assert_eq!(result["output"], failed);
+    assert_eq!(result["applied_operations"], serde_json::json!([]));
+    assert_eq!(result["stash_keys"], serde_json::json!([]));
+}
+
+#[test]
+fn gradle_post_tool_retains_generic_recovery_when_no_task_layout_saves_tokens() {
+    let progress = (1..=20)
+        .map(|index| {
+            format!("processing generated gradle resource file {index} of 20 in sample module\n")
+        })
+        .collect::<String>();
+    let input = format!(
+        "$ ./gradlew customTask\n\
+         > Task :app:compilingStep1\n\
+         {progress}\
+         > Task :app:runningStep2\n\
+         BUILD SUCCESSFUL in 2s\n\
+         2 actionable tasks: 2 executed\n\
+         exit code: 0\n"
+    );
+    let fixture = TempDataDir::new().unwrap();
+    let request = build_log_request(&input, "success", "gradle-recovery");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["protocol_version"], 2);
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "build_log");
+    assert_eq!(result["recoverability"], "retrievable");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let compressed = result["output"].as_str().unwrap();
+    let marker = compressed
+        .split_inclusive('\n')
+        .find(|line| line.contains("lines omitted."))
+        .unwrap();
+    let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = store
+        .retrieve(result["stash_keys"][0].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(compressed.replacen(marker, &payload, 1), input);
+}

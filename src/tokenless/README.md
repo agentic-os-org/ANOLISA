@@ -43,6 +43,11 @@ Maven output reaching PostTool can share repeated literal templates and download
 prefixes without Stash while retaining every record. See [Maven build output](../../docs/user-guide/en/tokenless/index.md#maven-build-output)
 for scope boundaries, output reconstruction and validation limits.
 
+Gradle output reaching PostTool can share repeated task suffixes and module path
+prefixes without Stash while preserving failed tasks, warnings, and record order. See
+[Gradle build output](../../docs/user-guide/en/tokenless/index.md#gradle-build-output)
+for scope boundaries, output reconstruction, and validation limits.
+
 ## Features
 
 | Capability | Savings indicator | Details |
