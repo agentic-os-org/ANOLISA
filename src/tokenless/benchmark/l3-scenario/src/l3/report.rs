@@ -38,6 +38,8 @@ pub struct ScenarioRow {
     pub size_label: Option<String>,
     /// False for assets this repo adds on top of the reference's fixtures.
     pub headroom_native: bool,
+    /// 新能力补充样本，不混入原始参考资产的聚合。
+    pub capability_overlay: bool,
     /// Authoritative token count before compression.
     pub tokens_before: usize,
     /// Latency target the reference sets for this scenario, when it sets one.
@@ -55,11 +57,15 @@ pub struct ScenarioRow {
     pub tokenless_missing: Vec<String>,
     /// tokenless compression time, in-process.
     pub tokenless_ms: f64,
+    /// 生产入口的处置、保留形态与算子，解释该行压缩率从何而来。
+    pub tokenless_lifecycle: LifecycleSummary,
 
     /// The reference rate under its own benchmark's pipeline assembly.
     pub headroom_pure_rate: Option<f64>,
     /// The reference rate with ContentRouter, its recommended entry point.
     pub headroom_router_rate: Option<f64>,
+    /// CCR markers the router output carries, each exported with its original.
+    pub headroom_ccr_entries: Option<usize>,
     /// The reference retention under the router variant.
     pub headroom_retention: Option<(usize, usize)>,
     /// Critical items the reference dropped.
@@ -83,11 +89,28 @@ pub struct ScenarioRow {
     pub headroom_probe: Option<super::probe::ProbeScore>,
 }
 
+/// 一个场景内全部 tool 消息经生产 PostTool 后的处置汇总（去重、按字典序）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct LifecycleSummary {
+    /// PostTool dispositions, e.g. `applied`, `passthrough`, `no_savings`.
+    pub dispositions: Vec<String>,
+    /// Recoverability of the emitted outputs: `lossless` keeps everything
+    /// inline, `retrievable` offloads behind Stash markers, `unrecoverable`
+    /// deletes without a recovery path.
+    pub recoverability: Vec<String>,
+    /// Operations that shaped the outputs, in wire names.
+    pub operations: Vec<String>,
+    /// Stash references the emitted conversation carries.
+    pub stash_entries: usize,
+}
+
 /// Aggregate of one content-type group.
 #[derive(Debug, Clone, Serialize)]
 pub struct GroupRow {
     /// The reference's content type.
     pub content_type: String,
+    /// 明确区分参考资产主干与新增能力叠加样本。
+    pub capability_overlay: bool,
     /// Scenarios in the group.
     pub scenarios: usize,
     /// Scenarios where tokenless has an entry point.
@@ -135,6 +158,12 @@ pub struct RunSummary {
     pub headroom: Option<HeadroomProvenance>,
     /// Probe model, when the semantic probe ran.
     pub probe_model: Option<String>,
+    /// 恢复模式直接随主产物发布，避免跨配置合并测量。
+    pub tokenless_mode: String,
+    /// 比较侧是否明确执行。
+    pub comparison_status: String,
+    /// 静态模拟声明的 schema 检索工具，不认证真实宿主实现。
+    pub schema_recovery_tool: Option<String>,
     /// Anything that degraded rather than failed the run.
     pub degradations: Vec<String>,
     /// Latency of each side, for the summary table.
@@ -310,6 +339,7 @@ mod tests {
             scenario: "structured_5000".into(),
             size_label: None,
             headroom_native: true,
+            capability_overlay: false,
             tokens_before: 1000,
             headroom_target_ms: None,
             tokenless_rate: rate,
@@ -318,8 +348,10 @@ mod tests {
             tokenless_retention: retention,
             tokenless_missing: vec!["error_entry: disk full".into()],
             tokenless_ms: 0.0,
+            tokenless_lifecycle: LifecycleSummary::default(),
             headroom_pure_rate: None,
             headroom_router_rate: None,
+            headroom_ccr_entries: None,
             headroom_retention: None,
             headroom_missing: vec![],
             headroom_ms: None,
@@ -341,6 +373,9 @@ mod tests {
                 untracked_build_inputs: None,
                 headroom: None,
                 probe_model: None,
+                tokenless_mode: "no-recovery".into(),
+                comparison_status: "not_executed".into(),
+                schema_recovery_tool: None,
                 degradations: vec![],
                 tokenless_latency: None,
                 headroom_latency: None,
@@ -380,6 +415,7 @@ mod tests {
     fn a_content_type_with_no_entry_point_is_a_capability_gap() {
         let group = GroupRow {
             content_type: "text".into(),
+            capability_overlay: false,
             scenarios: 4,
             tokenless_applicable: 0,
             tokenless: None,

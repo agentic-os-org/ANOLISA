@@ -1,0 +1,17 @@
+{
+  "suite": "scenario",
+  "scenario": "search_runtime",
+  "display_name": "Search sharing capability overlay",
+  "content_type": "agentic",
+  "size_label": "16 complete numbered search results",
+  "source": {"reference": "Tokenless current SearchResults runtime capability overlay", "headroom_native": false, "headroom_revision": null, "headroom_dirty": null},
+  "model_limit": 200000,
+  "critical_facts": ["required_fact_alpha", "required_fact_middle", "required_fact_omega"],
+  "messages": [
+    {"role": "system", "content": "Use each original numbered search match as evidence."},
+    {"role": "user", "content": "Inspect every match, including the middle observation."},
+    {"role": "assistant", "content": null, "tool_calls": [{"id": "search-overlay-call", "type": "function", "function": {"name": "Grep", "arguments": "{\"pattern\":\"required_fact\"}"}}]},
+    {"role": "tool", "tool_call_id": "search-overlay-call", "content": "fixtures/repeated_directory/src/service.rs:1:required_fact_alpha\nfixtures/repeated_directory/src/service.rs:2:complete_value_02\nfixtures/repeated_directory/src/service.rs:3:complete_value_03\nfixtures/repeated_directory/src/service.rs:4:complete_value_04\nfixtures/repeated_directory/src/service.rs:5:complete_value_05\nfixtures/repeated_directory/src/service.rs:6:complete_value_06\nfixtures/repeated_directory/src/service.rs:7:complete_value_07\nfixtures/repeated_directory/src/service.rs:8:required_fact_middle\nfixtures/repeated_directory/src/service.rs:9:complete_value_09\nfixtures/repeated_directory/src/service.rs:10:complete_value_10\nfixtures/repeated_directory/src/service.rs:11:complete_value_11\nfixtures/repeated_directory/src/service.rs:12:complete_value_12\nfixtures/repeated_directory/src/service.rs:13:complete_value_13\nfixtures/repeated_directory/src/service.rs:14:complete_value_14\nfixtures/repeated_directory/src/service.rs:15:complete_value_15\nfixtures/repeated_directory/src/service.rs:16:required_fact_omega\n"},
+    {"role": "user", "content": "State the first, middle and final matched facts."}
+  ]
+}

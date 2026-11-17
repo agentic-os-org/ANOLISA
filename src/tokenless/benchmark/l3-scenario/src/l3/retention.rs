@@ -88,12 +88,19 @@ impl RetentionScore {
 const MAX_MISSING_REPORTED: usize = 5;
 
 /// Check every critical item against the compressed conversation.
+///
+/// A text needle not found verbatim in the serialized conversation is retried
+/// on the normalized form of each decoded message text (`normalize_format`):
+/// JSON string escaping, Markdown backslash escapes (`required\_heading`) and
+/// re-wrapped whitespace change the format, not the content, and must not
+/// score as a loss. Content that is actually gone still fails.
 pub fn check(
     items: &[CriticalItem],
     messages: &[Message],
     tools: Option<&[Value]>,
 ) -> RetentionScore {
     let haystack = haystack(messages, tools);
+    let mut normalized: Option<Vec<String>> = None;
     // Numbers are scanned once: a payload can hold thousands of them and each
     // item would otherwise rescan the whole text.
     let numbers = if items.iter().any(|i| matches!(i.check, Check::Number(_))) {
@@ -108,7 +115,18 @@ pub fn check(
     };
     for item in items {
         let found = match &item.check {
-            Check::Text(needle) => haystack.contains(needle.as_str()),
+            Check::Text(needle) => {
+                haystack.contains(needle.as_str())
+                    || normalized
+                        .get_or_insert_with(|| {
+                            decoded_text(messages, tools)
+                                .iter()
+                                .map(|unit| normalize_format(unit))
+                                .collect()
+                        })
+                        .iter()
+                        .any(|unit| unit.contains(normalize_format(needle).as_str()))
+            }
             Check::Number(value) => numbers.iter().any(|n| close_enough(*n, *value)),
         };
         if found {
@@ -187,13 +205,61 @@ fn haystack(messages: &[Message], tools: Option<&[Value]>) -> String {
     out
 }
 
+/// The conversation as the model reads it: each string `content` decoded from
+/// its JSON string form, followed by the remaining fields and the tools array
+/// serialized. Only used for the normalized retry, never for token counts.
+fn decoded_text(messages: &[Message], tools: Option<&[Value]>) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in messages {
+        let mut rest = m.clone();
+        if let Some(Value::String(content)) = rest.remove("content") {
+            out.push(content);
+        }
+        if let Ok(text) = serde_json::to_string(&Value::Object(rest)) {
+            out.push(text);
+        }
+    }
+    for tool in tools.unwrap_or(&[]) {
+        if let Ok(text) = serde_json::to_string(tool) {
+            out.push(text);
+        }
+    }
+    out
+}
+
+/// 仅规范化单个证据块的 Markdown 转义与空白，不拼接不同消息生成新事实。
+/// Case and every other character are kept, so no content can appear that was
+/// not there.
+pub(crate) fn normalize_format(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\'
+            && chars
+                .peek()
+                .is_some_and(|next| "\\`*_{}[]()#+-.!|<>~".contains(*next))
+        {
+            continue;
+        }
+        unescaped.push(character);
+    }
+    unescaped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Derive the critical items of a scenario from its own payload.
 ///
 /// Selection is deliberately conservative: only facts an agent would plausibly
 /// need and that can be located unambiguously in the original. Anything fuzzier
 /// belongs to the semantic probe, not here.
 pub fn critical_items(scenario: &Scenario) -> Vec<CriticalItem> {
-    let mut items = Vec::new();
+    let mut items: Vec<CriticalItem> = scenario
+        .critical_facts
+        .iter()
+        .map(|fact| CriticalItem {
+            kind: "capability_overlay_fact",
+            check: Check::Text(fact.clone()),
+        })
+        .collect();
 
     // The date CacheAligner is meant to stabilise. Losing it changes the
     // model's answer outright, so it is critical wherever it appears.
@@ -466,6 +532,7 @@ mod tests {
             model_limit: 200_000,
             messages,
             tools,
+            critical_facts: Vec::new(),
         }
     }
 
@@ -710,5 +777,64 @@ mod tests {
         let text = "\u{4f60}\u{597d}".repeat(40);
         let needle = truncate_needle(&text);
         assert!(text.starts_with(&needle));
+    }
+
+    #[test]
+    fn markdown_escaping_json_escaping_and_rewrapping_are_not_losses() {
+        let items = vec![
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("required_heading".into()),
+            },
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("said \"stop\" twice".into()),
+            },
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("complete explanatory evidence".into()),
+            },
+        ];
+        let rendered = vec![msg(
+            "tool",
+            "# required\\_heading\n\nThe operator said \"stop\" twice.\nComplete\n  complete\n explanatory   evidence",
+        )];
+        let score = check(&items, &rendered, None);
+        assert_eq!(score.passed, score.total, "missing: {:?}", score.missing);
+    }
+
+    #[test]
+    fn normalization_does_not_create_facts_across_message_boundaries() {
+        let items = vec![CriticalItem {
+            kind: "text",
+            check: Check::Text("required {} evidence".into()),
+        }];
+        let split = vec![
+            serde_json::from_value::<Message>(serde_json::json!({"content": "required"})).unwrap(),
+            serde_json::from_value::<Message>(serde_json::json!({"content": "evidence"})).unwrap(),
+        ];
+        assert_eq!(check(&items, &split, None).passed, 0);
+        let present = vec![msg("tool", "required {}\n evidence")];
+        assert_eq!(check(&items, &present, None).passed, 1);
+    }
+
+    #[test]
+    fn normalization_still_reports_removed_content() {
+        // Reverse control: the normalized retry must not invent a fact the
+        // compressed text no longer carries, nor match across a case change.
+        let items = vec![
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("required_heading".into()),
+            },
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("Disk Full".into()),
+            },
+        ];
+        let frame = vec![msg("tool", "# required\\_section\n\ndisk full on /var")];
+        let score = check(&items, &frame, None);
+        assert_eq!(score.passed, 0, "{score:?}");
+        assert_eq!(score.missing.len(), 2);
     }
 }

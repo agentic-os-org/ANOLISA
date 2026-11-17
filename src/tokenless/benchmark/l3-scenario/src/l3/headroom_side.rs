@@ -97,6 +97,16 @@ struct Handshake {
     variants: Vec<String>,
 }
 
+/// One CCR marker in the compressed conversation and the original the reference's
+/// store holds for it (`None` when the store no longer has it).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CcrEntry {
+    /// Hash the marker names.
+    pub key: String,
+    /// Bytes a retrieve would return.
+    pub original: Option<String>,
+}
+
 /// Per-request response from the worker.
 #[derive(Debug, Deserialize)]
 struct Response {
@@ -115,6 +125,8 @@ struct Response {
     transforms_applied: Vec<String>,
     #[serde(default)]
     warnings: Vec<String>,
+    #[serde(default)]
+    ccr: Vec<CcrEntry>,
 }
 
 /// What the reference did to one scenario under one variant.
@@ -142,6 +154,9 @@ pub struct HeadroomResult {
     pub transforms_applied: Vec<String>,
     /// Advisory warnings the reference raised.
     pub warnings: Vec<String>,
+    /// Originals behind every CCR marker in `messages`, for retrieval-enabled
+    /// semantic tests.
+    pub ccr: Vec<CcrEntry>,
 }
 
 /// A running worker.
@@ -299,6 +314,7 @@ impl HeadroomWorker {
             self_tokens_after: response.tokens_after,
             transforms_applied: response.transforms_applied,
             warnings: response.warnings,
+            ccr: response.ccr,
         }))
     }
 }
@@ -393,6 +409,20 @@ mod tests {
         assert!(r.ok);
         assert_eq!(r.transforms_applied.len(), 1);
         assert!(r.transforms_applied[0].contains("lossless"));
+    }
+
+    #[test]
+    fn response_keeps_ccr_originals_and_missing_entries() {
+        let line = r#"{"ok": true, "messages": [], "compress_ms": 1.0,
+                       "ccr": [{"key": "0123456789abcdef", "original": "[1,2,3]"},
+                               {"key": "fedcba9876543210", "original": null}]}"#;
+        let r: Response = serde_json::from_str(line).expect("parses");
+        assert_eq!(r.ccr.len(), 2);
+        assert_eq!(r.ccr[0].original.as_deref(), Some("[1,2,3]"));
+        assert!(r.ccr[1].original.is_none());
+        let legacy: Response =
+            serde_json::from_str(r#"{"ok": true, "messages": []}"#).expect("parses");
+        assert!(legacy.ccr.is_empty());
     }
 
     #[test]

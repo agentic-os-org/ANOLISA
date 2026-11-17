@@ -64,6 +64,23 @@ pub struct EntryStats {
     pub(crate) unrecoverable_truncations: Option<usize>,
 }
 
+impl EntryStats {
+    /// 返回实际 Runtime 仲裁结论，避免测量工具依据输入形状重新推断。
+    pub fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
+    /// 返回当前测量结果的恢复约束，不暴露原始输入或候选文本。
+    pub fn recoverability(&self) -> Recoverability {
+        self.recoverability
+    }
+
+    /// 返回参与本次测量的算子顺序。
+    pub fn applied_operations(&self) -> &[AppliedOperation] {
+        &self.applied_operations
+    }
+}
+
 /// One protocol response plus compression artifact facts.
 pub struct EntryOutcome {
     /// Response to emit across the transport boundary.
