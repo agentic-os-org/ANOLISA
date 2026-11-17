@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use asc_policy_types::authoring::HttpMethod;
-use cedar_policy::PolicySet;
+use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
 use cedar_policy::pst::{
     ActionConstraint, BinaryOp, Clause, Effect, Expr, Literal, PatternElem, PrincipalConstraint,
     ResourceConstraint, Var,
@@ -62,48 +62,91 @@ pub(crate) fn is_annotation(name: &str) -> bool {
     ANNOTATIONS.contains(&name)
 }
 
-pub(crate) fn lower(
-    policies: &PolicySet,
-    revision: u32,
-) -> Result<Vec<CredentialRule>, CedarError> {
-    if !policies
-        .policies()
-        .any(|policy| policy.annotations().any(|(name, _)| is_annotation(name)))
-    {
+/// Compiles credential instructions for registration and HTTP-specific source utilities.
+///
+/// Non-credential sources return no instructions. Once execution annotations occur,
+/// the complete network view must lower, including unannotated network restrictions.
+///
+/// # Errors
+/// Rejects invalid source, misplaced annotations and unsupported network semantics.
+pub fn compile(source: &CedarPolicySource) -> Result<Vec<CredentialRule>, CedarError> {
+    let syntax = crate::pst(source)?;
+    let annotated: Vec<_> = syntax
+        .policies
+        .iter()
+        .filter(|(_, policy)| {
+            policy
+                .body()
+                .annotations
+                .keys()
+                .any(|name| is_annotation(name.as_str()))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    if annotated.is_empty() {
         return Ok(Vec::new());
     }
+    let misplaced = || CedarError::Unsupported {
+        policy_id: "policy-set".into(),
+        reason: "credential annotations must belong to the network policy view",
+    };
+    let network =
+        crate::project_pst(&syntax, crate::PolicyDomain::Network).ok_or_else(misplaced)?;
+    if annotated
+        .iter()
+        .any(|id| !network.policies.contains_key(id))
+    {
+        return Err(misplaced());
+    }
+    lower(&network, &source.schema)
+}
+
+/// Lowers a complete network PST view to the supported HTTP credential instructions.
+///
+/// Consumes validated PST from [`crate::project_pst`] without repeating common admission.
+/// A nonempty view is never treated as irrelevant merely because it lacks credential
+/// annotations. Unsupported actions, forbids and conditions reject the whole view.
+///
+/// # Errors
+/// Rejects an unsupported schema or any statement outside the bounded HTTP subset.
+pub fn lower(
+    syntax: &cedar_policy::pst::PolicySet,
+    schema: &CedarSchemaReference,
+) -> Result<Vec<CredentialRule>, CedarError> {
     let reject = |id: &str, reason| CedarError::Unsupported {
         policy_id: id.into(),
         reason,
     };
-    if revision != 2 {
+    if schema.schema_id.as_str() != crate::schema::SCHEMA_ID || schema.revision.get() != 2 {
         return Err(reject(
             "policy-set",
             "credential HTTP policies require schema revision 2",
         ));
     }
-    if policies.policies().count() > MAX_RULES {
+    if syntax.policies.len() > MAX_RULES {
         return Err(reject(
             "policy-set",
             "credential policy set exceeds 256 rules",
         ));
     }
-    let syntax = policies.to_pst().map_err(Box::new)?;
     let mut nodes = 0;
     let mut ids = BTreeSet::new();
     let mut rules = Vec::new();
-    // PST and SDK iterators have different orders. Resolve annotations by identity,
-    // then sort effective rule IDs instead of pairing unrelated iterator positions.
-    for policy in policies.policies() {
-        rules.push(lower_rule(policy, &syntax, &mut ids, &mut nodes)?);
+    for (id, policy) in &syntax.policies {
+        rules.push(lower_rule(
+            &id.to_string(),
+            policy.body(),
+            &mut ids,
+            &mut nodes,
+        )?);
     }
     rules.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
     Ok(rules)
 }
 
 fn lower_rule(
-    policy: &cedar_policy::Policy,
-    syntax: &cedar_policy::pst::PolicySet,
+    sdk_id: &str,
+    body: &cedar_policy::pst::Template,
     ids: &mut BTreeSet<String>,
     nodes: &mut usize,
 ) -> Result<CredentialRule, CedarError> {
@@ -111,35 +154,27 @@ fn lower_rule(
         policy_id: id.into(),
         reason,
     };
-    let sdk_id = policy.id().to_string();
-    let body = syntax
-        .policies
-        .iter()
-        .find(|(id, _)| id.to_string() == sdk_id)
-        .map(|(_, policy)| policy.body())
-        .ok_or_else(|| reject(&sdk_id, "missing SDK policy identity in PST"))?;
     let annotation = |name: &str| {
-        policy
-            .annotations()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| value)
+        body.annotations
+            .get(name)
+            .map(cedar_policy::pst::SmolStr::as_str)
     };
     let required = |name: &str| {
         annotation(name)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 reject(
-                    &sdk_id,
+                    sdk_id,
                     "credential annotations must all be present and non-empty",
                 )
             })
     };
-    let rule_id = annotation("id").unwrap_or(&sdk_id).to_owned();
+    let rule_id = annotation("id").unwrap_or(sdk_id).to_owned();
     if asc_policy_types::identifiers::ResourceId::new(&rule_id).is_err()
         || !ids.insert(rule_id.clone())
     {
         return Err(reject(
-            &sdk_id,
+            sdk_id,
             "credential rule identities must be bounded and unique",
         ));
     }
@@ -148,7 +183,7 @@ fn lower_rule(
         || annotation("advice").is_some()
     {
         return Err(reject(
-            &sdk_id,
+            sdk_id,
             "credential rules require permit without principal constraints or advice",
         ));
     }
@@ -156,12 +191,12 @@ fn lower_rule(
         || !matches!(&body.resource, ResourceConstraint::Is(ty) if ty.to_string() == "SecCore::HttpEndpoint")
     {
         return Err(reject(
-            &sdk_id,
+            sdk_id,
             "credential rules require network.send and resource is SecCore::HttpEndpoint",
         ));
     }
     if required("modify")? != "inject_credential" {
-        return Err(reject(&sdk_id, "modify must be inject_credential"));
+        return Err(reject(sdk_id, "modify must be inject_credential"));
     }
     let real_token_file = required("real_token_file")?;
     let fake_token_file = required("fake_token_file")?;
@@ -170,20 +205,20 @@ fn lower_rule(
         || real_token_file == fake_token_file
     {
         return Err(reject(
-            &sdk_id,
+            sdk_id,
             "token files must be distinct canonical absolute file paths without expansion",
         ));
     }
     let header = required("inject_header")?;
     let format = required("inject_format")?;
-    validate_injection(header, format).map_err(|reason| reject(&sdk_id, reason))?;
+    validate_injection(header, format).map_err(|reason| reject(sdk_id, reason))?;
     let response_rewrite = match required("response_rewrite")? {
         "true" => true,
         "false" => false,
-        _ => return Err(reject(&sdk_id, "response_rewrite must be true or false")),
+        _ => return Err(reject(sdk_id, "response_rewrite must be true or false")),
     };
     let (host, methods, path) =
-        lower_predicates(body.clauses(), nodes).map_err(|reason| reject(&sdk_id, reason))?;
+        lower_predicates(body.clauses(), nodes).map_err(|reason| reject(sdk_id, reason))?;
     Ok(CredentialRule {
         rule_id,
         real_token_file: real_token_file.into(),

@@ -7,7 +7,7 @@ use asc_agentsight_protocol::{
     FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
     FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
 };
-use asc_policy_types::{cedar::CedarPolicySource, target::TranslationRejection};
+use asc_policy_types::target::TranslationRejection;
 use cedar_policy::pst::{
     ActionConstraint, Clause, Effect, PrincipalConstraint, ResourceConstraint,
 };
@@ -19,11 +19,16 @@ pub(super) const MAX_TARGETS: usize = 64;
 type Result<T> = std::result::Result<T, &'static str>;
 
 pub(super) fn translate(
-    source: &CedarPolicySource,
+    policies: &cedar_policy::pst::PolicySet,
 ) -> std::result::Result<FileProtectionPolicy, TranslationRejection> {
-    let policies = asc_policy_cedar::pst(source).map_err(|_| reject("INVALID_CEDAR_POLICY"))?;
     let mut targets = Vec::new();
-    for (index, policy) in policies.policies.values().enumerate() {
+    for (index, (id, policy)) in policies.policies.iter().enumerate() {
+        // Projection retains SDK statement identities even when HTTP statements precede them.
+        let index = id
+            .to_string()
+            .strip_prefix("policy")
+            .and_then(|position| position.parse::<usize>().ok())
+            .unwrap_or(index);
         let body = policy.body();
         let translated = (|| {
             if body.principal != PrincipalConstraint::Any {

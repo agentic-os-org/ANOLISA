@@ -38,8 +38,13 @@ preserving existing version-1 payloads. Read denial requires a target advertisin
 This target consumes **additional forbid constraints**. A matching rule blocks
 the covered operation; otherwise this policy adds no restriction. It does not
 execute Cedar Authorizer's default-deny algorithm. `permit` is rejected by this
-Translator, including in mixed sets; the common Cedar frontend still accepts it
-for other consumers. There is no implicit permit-all, permit-to-exclusion rewrite,
+Translator in its file view. A revision 2 source may also contain validated HTTP
+credential permits: `project_pst(&syntax, PolicyDomain::File)` preserves complete
+independent file forbids, while the network PST is consumed by Gateway lowering.
+The composition calls `pst(source)?` once and passes the file view to
+`AgentSightTranslator::translate_cedar_pst`, retaining the canonical Binding metadata.
+No unrecognized statement
+or file condition is omitted. There is no implicit permit-all, permit-to-exclusion rewrite,
 or general Cedar authorization service in this path.
 
 ## 2. Supported fields and expressions

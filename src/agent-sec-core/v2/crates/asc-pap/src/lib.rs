@@ -37,7 +37,7 @@ pub fn validate_policy_snapshot(
     use asc_policy_types::{Validate, authoring::PolicySource};
     policy.validate().map_err(PapError::InvalidPolicy)?;
     let rules = match &policy.template {
-        PolicySource::Cedar(source) => asc_policy_cedar::credential_rules(source)
+        PolicySource::Cedar(source) => asc_policy_cedar::http::compile(source)
             .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?,
         PolicySource::SecCore(source) if source.uses_credentials() => {
             return Err(PapError::InvalidCedar(

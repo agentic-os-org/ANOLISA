@@ -465,7 +465,7 @@ impl asc_pap::CredentialRegistration for ScopeLifecycle {
         if let Some(bindings) = self.registration_override.lock().unwrap().clone() {
             return Ok(bindings);
         }
-        Ok(asc_policy_cedar::credential_rules(source)
+        Ok(asc_policy_cedar::http::compile(source)
             .unwrap()
             .into_iter()
             .map(|rule| asc_policy_types::policy::CredentialBinding {
@@ -633,6 +633,41 @@ fn credential_scope_service() -> (
         .create_policy("credential", &credential_template())
         .unwrap();
     (pap, repo, lifecycle, policy)
+}
+
+#[test]
+fn http_contract_rejection_still_precedes_registration_and_persistence() {
+    let (pap, repo, lifecycle, first) = credential_scope_service();
+    let PolicySource::Cedar(source) = &first.template else {
+        unreachable!()
+    };
+    for text in [
+        source.text.replace("Authorization", "Host"),
+        source.text.replace("inject_credential", "unsupported"),
+        source
+            .text
+            .replace("principal,", "principal is SecCore::Subject,"),
+        format!(
+            "{}\nforbid(principal, action == SecCore::Action::\"network.send\", resource);",
+            source.text
+        ),
+    ] {
+        let mut invalid = source.clone();
+        invalid.text = text;
+        asc_policy_cedar::validate(&invalid).unwrap();
+        let invalid = PolicySource::Cedar(invalid);
+        for result in [
+            pap.create_policy("invalid", &invalid),
+            pap.update_policy(&first.policy_id, "invalid", &invalid),
+        ] {
+            assert!(matches!(result, Err(PapError::InvalidCedar(_))));
+        }
+        assert_eq!(
+            repo.list_policies(100, 0).unwrap().items,
+            vec![first.clone()]
+        );
+        assert_eq!(*lifecycle.registrations.lock().unwrap(), 1);
+    }
 }
 
 #[test]
@@ -929,6 +964,23 @@ fn credential_admission_validates_before_persistence_and_file_scopes_ignore_exec
         ["validate", "prepare", "start"]
     );
     assert!(pap.delete_scope(&scope.scope_id).unwrap().completed);
+    let mut mixed = policy.template.clone();
+    let PolicySource::Cedar(source) = &mut mixed else {
+        unreachable!()
+    };
+    source.text.push_str(
+        "\nforbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/secret\" };",
+    );
+    let mixed = pap.create_policy("mixed", &mixed).unwrap();
+    assert_eq!(
+        unavailable_file.create_scope_assignment(
+            &process_selector(),
+            &references(&mixed),
+            Some(1000)
+        ),
+        Err(PapError::Unavailable),
+        "a mixed Policy must require file enforcement readiness as well as Gateway",
+    );
     let file = pap
         .create_policy("file", &policy_template("/file"))
         .unwrap();

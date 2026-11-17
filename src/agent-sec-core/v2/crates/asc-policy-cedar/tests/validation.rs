@@ -1,7 +1,8 @@
+use asc_policy_cedar::http::compile as credential_rules;
 use asc_policy_cedar::schema::{
     HTTP_SCHEMA_REVISION, HTTP_SCHEMA_TEXT, SCHEMA_ID, SCHEMA_REVISION, SCHEMA_TEXT,
 };
-use asc_policy_cedar::{CedarError, credential_rules, pst, validate};
+use asc_policy_cedar::{CedarError, PolicyDomain, project_pst, pst, validate};
 use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use cedar_policy::{
@@ -525,7 +526,7 @@ fn method_constraints_and_custom_authentication_formats_lower_exactly() {
 }
 
 #[test]
-fn credential_annotation_combinations_and_paths_are_checked_by_every_frontend() {
+fn http_lowering_checks_annotation_contracts_after_common_validation() {
     let mut annotations = Vec::new();
     for name in [
         "modify",
@@ -621,15 +622,14 @@ fn credential_annotation_combinations_and_paths_are_checked_by_every_frontend() 
         ));
     }
     for annotations in annotations {
-        let input = http_source(&annotations, HTTP_CONDITION);
-        assert!(validate(&input).is_err(), "{annotations}");
-        assert!(pst(&input).is_err(), "{annotations}");
+        let input = http_source(&annotations.replace(r"\u0000", r"\u{0}"), HTTP_CONDITION);
+        validate(&input).unwrap();
         assert!(credential_rules(&input).is_err(), "{annotations}");
     }
 }
 
 #[test]
-fn credentials_reject_mixed_rules_principals_and_every_unconsumed_condition() {
+fn credentials_reject_overlapping_rules_principals_and_every_unconsumed_condition() {
     let valid = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
     let variants = [
         valid.text.replace("permit(", "forbid("),
@@ -645,8 +645,12 @@ fn credentials_reject_mixed_rules_principals_and_every_unconsumed_condition() {
             .replace("resource is SecCore::HttpEndpoint", "resource"),
         valid.text.replace("when", "unless"),
         format!(r#"@advice("{{\"verdict\":\"warn\"}}") {}"#, valid.text),
-        format!("{}\n{DELETE_POLICY}", valid.text),
+        format!(
+            "{}\nforbid(principal, action == SecCore::Action::\"network.send\", resource);",
+            valid.text
+        ),
         format!("{}\npermit(principal, action, resource);", valid.text),
+        format!("{}\nforbid(principal, action, resource);", valid.text),
         valid.text.replace("api.example.com", "Api.example.com"),
         valid.text.replace("api.example.com", "*.example.com"),
         valid.text.replace("api.example.com", "127.0.0.1"),
@@ -655,8 +659,6 @@ fn credentials_reject_mixed_rules_principals_and_every_unconsumed_condition() {
     for text in variants {
         let mut input = valid.clone();
         input.text = text;
-        assert!(validate(&input).is_err(), "{}", input.text);
-        assert!(pst(&input).is_err(), "{}", input.text);
         assert!(credential_rules(&input).is_err(), "{}", input.text);
     }
     for extra in [
@@ -692,8 +694,6 @@ fn credentials_reject_mixed_rules_principals_and_every_unconsumed_condition() {
             &format!("{HTTP_CONDITION} && {extra}"),
         );
         assert!(credential_rules(&input).is_err(), "{extra}");
-        assert!(validate(&input).is_err(), "{extra}");
-        assert!(pst(&input).is_err(), "{extra}");
     }
     assert!(
         credential_rules(&http_source(
@@ -710,6 +710,99 @@ fn credentials_reject_mixed_rules_principals_and_every_unconsumed_condition() {
         .unwrap(),
         credential_rules(&valid).unwrap(),
     );
+}
+
+#[test]
+fn mixed_credentials_and_file_forbids_preserve_both_complete_views() {
+    let http = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    let expected = credential_rules(&http).unwrap();
+    assert!(project_pst(&pst(&http).unwrap(), PolicyDomain::File).is_none());
+    for text in [
+        format!("{}\n{DELETE_POLICY}", http.text),
+        format!("{DELETE_POLICY}\n{}", http.text),
+    ] {
+        let mut mixed = http.clone();
+        mixed.text = text.clone();
+        validate(&mixed).unwrap();
+        let complete = pst(&mixed).unwrap();
+        let original_syntax = complete.clone();
+        assert_eq!(complete.policies.len(), 2);
+        let rules = credential_rules(&mixed).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].host, expected[0].host);
+        let files = project_pst(&complete, PolicyDomain::File).unwrap();
+        let network = project_pst(&complete, PolicyDomain::Network).unwrap();
+        assert_eq!(files.policies.len(), 1);
+        assert_eq!(network.policies.len(), 1);
+        assert_eq!(
+            asc_policy_cedar::http::lower(&network, &mixed.schema).unwrap(),
+            rules
+        );
+        for view in [&files, &network] {
+            for (id, statement) in &view.policies {
+                assert_eq!(complete.policies.get(id), Some(statement));
+            }
+        }
+        assert_eq!(
+            complete, original_syntax,
+            "both views borrow the same unchanged PST"
+        );
+        let files = PolicySet::from_pst(files).unwrap();
+        let original: PolicySet = mixed.text.parse().unwrap();
+        let http = original
+            .policies()
+            .find(|policy| policy.annotation("modify").is_some())
+            .unwrap();
+        assert_eq!(rules[0].rule_id, http.id().as_ref());
+        let file = files.policies().next().unwrap();
+        assert_eq!(file, original.policy(file.id()).unwrap());
+        assert_eq!(mixed.text, text);
+    }
+}
+
+#[test]
+fn network_views_include_permissions_and_restrictions_without_credentials() {
+    for text in [
+        r#"permit(principal, action == SecCore::Action::"network.use", resource == SecCore::Network::"all");"#,
+        r#"forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+           when { resource.host == "api.example.com" };"#,
+    ] {
+        let mut input = source(text);
+        input.schema.revision = Revision::new(HTTP_SCHEMA_REVISION).unwrap();
+        let syntax = pst(&input).unwrap();
+        let view = project_pst(&syntax, PolicyDomain::Network).unwrap();
+        assert_eq!(view, syntax);
+        assert!(project_pst(&syntax, PolicyDomain::File).is_none());
+        assert!(credential_rules(&input).unwrap().is_empty());
+        assert!(asc_policy_cedar::http::lower(&view, &input.schema).is_err());
+    }
+}
+
+#[test]
+fn ambiguous_actions_preserve_restrictions_in_both_domain_views() {
+    for text in [
+        "forbid(principal, action, resource);",
+        r#"forbid(principal, action in [SecCore::Action::"file.read", SecCore::Action::"network.use"], resource);"#,
+    ] {
+        let input = source(text);
+        let complete = pst(&input).unwrap();
+        for domain in [PolicyDomain::File, PolicyDomain::Network] {
+            assert_eq!(project_pst(&complete, domain).unwrap(), complete);
+        }
+    }
+}
+
+#[test]
+fn http_annotations_cannot_escape_through_file_or_request_authorization_views() {
+    let input = source(&format!("{CREDENTIAL_ANNOTATIONS}\n{DELETE_POLICY}"));
+    assert!(project_pst(&pst(&input).unwrap(), PolicyDomain::Network).is_none());
+    assert!(credential_rules(&input).is_err());
+    let mut input = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
+    input.text = input
+        .text
+        .replace("principal,", "principal is SecCore::Subject,");
+    validate(&input).unwrap();
+    assert!(asc_policy_cedar::request_authorization_eligible(&input).is_err());
 }
 
 #[test]

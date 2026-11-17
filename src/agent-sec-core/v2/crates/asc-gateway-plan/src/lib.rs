@@ -3,12 +3,16 @@
 //! Plans contain credential identifiers, never real values or fakes. The gateway
 //! resolves issued fakes through the separately materialized secrets snapshot.
 
+mod binding;
 mod compile;
 mod credential;
 mod error;
 mod plan;
 
-pub use compile::compile_scope;
+pub use binding::{
+    GATEWAY_BINDING_FORMAT, GatewayBindingPlan, GatewayBindingSource, GatewayBindingView,
+};
+pub use compile::{compile_binding, compile_scope};
 pub use error::PlanError;
 pub use plan::{
     CredentialPath, Method, PLAN_FORMAT, Plan, PlanFormat, PolicySource, RequestMatch, Rule,

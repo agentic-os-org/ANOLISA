@@ -542,7 +542,7 @@ fn render(template: &CedarPolicySource, real: &Path, fake: &Path) -> io::Result<
 }
 
 fn rule_count(source: &CedarPolicySource) -> usize {
-    asc_policy_cedar::credential_rules(source).map_or(0, |rules| rules.len())
+    asc_policy_cedar::http::compile(source).map_or(0, |rules| rules.len())
 }
 
 fn fake_name(builtin: Builtin, id: &str) -> String {

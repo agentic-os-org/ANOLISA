@@ -102,7 +102,7 @@ where
     /// Rejects malformed Cedar and retired native credential policies.
     pub fn source_uses_credentials(template: &PolicySource) -> Result<bool, PapError> {
         match template {
-            PolicySource::Cedar(source) => asc_policy_cedar::credential_rules(source)
+            PolicySource::Cedar(source) => asc_policy_cedar::http::compile(source)
                 .map(|rules| !rules.is_empty())
                 .map_err(|error| PapError::InvalidCedar(error.diagnostic())),
             PolicySource::SecCore(source) if source.uses_credentials() => {
@@ -465,11 +465,20 @@ where
         let credential = candidate.uses_credentials();
         // File admission retains its own readiness contract; credential-only scopes
         // must not depend on a disabled file enforcement backend.
-        if candidate
-            .policy_snapshots
-            .iter()
-            .any(|p| !p.uses_credentials())
-        {
+        let mut requires_file = false;
+        for policy in &candidate.policy_snapshots {
+            requires_file |= if !policy.uses_credentials() {
+                true
+            } else if let PolicySource::Cedar(source) = &policy.template {
+                let syntax = asc_policy_cedar::pst(source)
+                    .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
+                asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File)
+                    .is_some()
+            } else {
+                false
+            };
+        }
+        if requires_file {
             self.check_ready()?;
         }
         if credential {

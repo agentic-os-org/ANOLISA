@@ -1,5 +1,7 @@
 //! Execution and retirement contracts through real PAP persistence and public deployment ports.
 
+mod mixed_delivery;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -486,7 +488,7 @@ impl Fixture {
             let PolicySource::Cedar(source) = &template else {
                 unreachable!()
             };
-            let credential_bindings = asc_policy_cedar::credential_rules(source)
+            let credential_bindings = asc_policy_cedar::http::compile(source)
                 .unwrap()
                 .into_iter()
                 .map(|rule| asc_policy_types::policy::CredentialBinding {
@@ -558,13 +560,28 @@ impl Fixture {
             WriteResult::Applied(_)
         ));
     }
+    fn target_plan(binding: &PreparedBinding) -> TargetBindingPlan {
+        let PolicySource::Cedar(source) = &binding.policy.template else {
+            unreachable!()
+        };
+        let syntax = asc_policy_cedar::pst(source).unwrap();
+        let network =
+            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network)
+                .unwrap();
+        let plan = asc_gateway_plan::compile_binding(asc_gateway_plan::GatewayBindingView {
+            source: asc_gateway_plan::GatewayBindingSource::from_binding(binding),
+            schema: &source.schema,
+            credential_bindings: &binding.policy.credential_bindings,
+            network: &network,
+        })
+        .unwrap();
+        TargetBindingPlan {
+            format: GATEWAY_BINDING_FORMAT.into(),
+            content: serde_json::to_vec(&plan).unwrap(),
+        }
+    }
     fn prepared(client: &GatewayBindingClient, binding: &PreparedBinding) -> PreparedApply {
-        client
-            .prepare_apply(&TargetBindingPlan {
-                format: GATEWAY_BINDING_FORMAT.into(),
-                content: serde_json::to_vec(binding).unwrap(),
-            })
-            .unwrap()
+        client.prepare_apply(&Self::target_plan(binding)).unwrap()
     }
     fn remove_record(&self, binding: &PreparedBinding) {
         let current = self
@@ -1100,6 +1117,97 @@ fn canonical_snapshot_and_applying_phase_fence_side_effects() {
     stale.policy_snapshots[0].revision = Revision::new(2).unwrap();
     assert!(service.prepare_scope(&stale).is_err());
 }
+
+#[test]
+fn translated_network_content_and_source_identity_are_fenced_before_attachment() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let scope = fixture.scope("network-plan-fence", 1);
+    service.prepare_scope(&scope).unwrap();
+    let binding = fixture.instance(&scope, 77, &[]).remove(0);
+    let client = GatewayBindingClient::new(service);
+    let plan = Fixture::target_plan(&binding);
+    for fault in ["host", "header", "revision", "process"] {
+        let mut input: asc_gateway_plan::GatewayBindingPlan =
+            serde_json::from_slice(&plan.content).unwrap();
+        match fault {
+            "host" => input.network.rules[0].matcher.host = "other.example.com".into(),
+            "header" => input.network.rules[0].header = "X-Api-Key".into(),
+            "revision" => input.source.binding_revision = Revision::new(2).unwrap(),
+            "process" => input.source.scope.process.start_time += 1,
+            _ => unreachable!(),
+        }
+        let mut tampered = plan.clone();
+        tampered.content = serde_json::to_vec(&input).unwrap();
+        assert!(client.prepare_apply(&tampered).is_err(), "{fault}");
+        let mut prepared = Fixture::prepared(&client, &binding);
+        prepared.content = tampered.content;
+        assert!(client.create(&prepared).error.is_some(), "{fault}");
+        assert!(fixture.host.log().moves.is_empty());
+    }
+    let unprojected = TargetBindingPlan {
+        format: GATEWAY_BINDING_FORMAT.into(),
+        content: serde_json::to_vec(&binding).unwrap(),
+    };
+    assert!(client.prepare_apply(&unprojected).is_err());
+}
+
+#[test]
+fn one_mixed_policy_keeps_its_canonical_binding_through_gateway_deployment() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let template = fixture.source();
+    let PolicySource::Cedar(mut source) = template else {
+        unreachable!()
+    };
+    let credentials = asc_policy_cedar::http::compile(&source).unwrap();
+    source.text.push_str(
+        "\nforbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/secret\" };",
+    );
+    let policy = fixture
+        .repository
+        .put_policy(&PreparedPolicy {
+            policy_id: ResourceId::new("policy:mixed").unwrap(),
+            policy_name: "mixed".into(),
+            revision: Revision::new(1).unwrap(),
+            template: PolicySource::Cedar(source),
+            credential_bindings: credentials
+                .iter()
+                .map(|rule| asc_policy_types::policy::CredentialBinding {
+                    rule_id: rule.rule_id.clone(),
+                    pair_id: fixture.pair_id().as_str().into(),
+                })
+                .collect(),
+        })
+        .unwrap();
+    let scope = fixture
+        .repository
+        .put_scope(&PreparedScope {
+            scope_id: ResourceId::new("mixed").unwrap(),
+            selector: ScopeSelector::Process {
+                matcher: ProcessMatcher::Name {
+                    process_name: "worker".into(),
+                },
+            },
+            policy_snapshots: vec![policy.clone()],
+            owner_uid: Some(UID),
+            status: ScopeStatus::Active,
+        })
+        .unwrap();
+    service.prepare_scope(&scope).unwrap();
+    service.enable().unwrap();
+    let bindings = fixture.instance(&scope, 77, &[]);
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].policy, policy);
+    let client = GatewayBindingClient::new(service);
+    let prepared = Fixture::prepared(&client, &bindings[0]);
+    assert!(client.create(&prepared).error.is_none());
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+    assert!(client.delete(&[prepared.target]).error.is_none());
+    assert!(!fixture.rules().contains("counter redirect"));
+}
 #[test]
 fn boot_namespace_start_uid_and_descendant_groups_are_verified_before_moves() {
     for fault in ["boot", "namespace", "start", "uid", "groups"] {
@@ -1130,10 +1238,7 @@ fn boot_namespace_start_uid_and_descendant_groups_are_verified_before_moves() {
             _ => unreachable!(),
         }
         let client = GatewayBindingClient::new(service);
-        let plan = TargetBindingPlan {
-            format: GATEWAY_BINDING_FORMAT.into(),
-            content: serde_json::to_vec(&binding).unwrap(),
-        };
+        let plan = Fixture::target_plan(&binding);
         let prepared = client.prepare_apply(&plan).unwrap();
         assert!(client.create(&prepared).error.is_some());
         assert!(fixture.host.log().moves.is_empty(), "{fault}");
@@ -2825,7 +2930,7 @@ fn prepare_mixed_scope_with_failed_file_binding(
     let PolicySource::Cedar(source) = &template else {
         unreachable!()
     };
-    let credential_bindings = asc_policy_cedar::credential_rules(source)
+    let credential_bindings = asc_policy_cedar::http::compile(source)
         .unwrap()
         .into_iter()
         .map(|rule| asc_policy_types::policy::CredentialBinding {

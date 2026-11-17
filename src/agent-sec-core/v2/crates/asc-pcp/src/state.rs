@@ -316,9 +316,11 @@ fn finish(
         return Ok((record, true));
     }
     if outcome.next_status == BindingStatus::Ready
-        && !(record.deployments.len() == 1
-            && record.deployments[0].revision == outcome.expected.revision
-            && record.deployments[0].presence == Presence::Present)
+        && (record.deployments.is_empty()
+            || record.deployments.iter().any(|deployment| {
+                deployment.revision != outcome.expected.revision
+                    || deployment.presence != Presence::Present
+            }))
     {
         return Err(StoreError::Invalid);
     }

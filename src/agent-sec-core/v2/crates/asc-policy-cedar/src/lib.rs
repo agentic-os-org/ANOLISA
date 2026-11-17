@@ -19,15 +19,14 @@ use cedar_policy::ValidationWarning;
 
 /// Validates source for policy creation and returns non-blocking SDK warnings.
 ///
-/// Accepts schema-valid subjects and supported permit advice. Credential-annotated
-/// sets additionally require exact, bounded HTTP lowering; other translators
-/// check which rules their targets can enforce.
+/// Checks the common authoring contract without lowering backend execution rules.
+/// Target Translators validate the complete projected view they consume.
 ///
 /// # Errors
 /// Returns envelope, schema-resolution, parse, common-subset or validation errors.
 /// Action applicability warnings also reject the entire policy set.
 pub fn validate(source: &CedarPolicySource) -> Result<Vec<ValidationWarning>, CedarError> {
-    let (_, warnings, _) = validation::parse_and_validate(source)?;
+    let (_, warnings) = validation::parse_and_validate(source)?;
     Ok(warnings)
 }
 
@@ -35,9 +34,10 @@ pub fn validate(source: &CedarPolicySource) -> Result<Vec<ValidationWarning>, Ce
 /// Bare headers stay on the deployment path, even when conditions mention principal.
 ///
 /// # Errors
-/// Rejects invalid source or a stored policy mixing bare and constrained headers.
+/// Rejects invalid source, mixed bare/constrained headers or HTTP execution annotations
+/// on an explicit-principal request policy.
 pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool, CedarError> {
-    let (policies, _, _) = validation::parse_and_validate(source)?;
+    let (policies, _) = validation::parse_and_validate(source)?;
     let mut bare = false;
     let mut explicit = false;
     for policy in policies.policies() {
@@ -57,6 +57,18 @@ pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool
                      explicit principal headers on every permit and forbid",
         });
     }
+    if explicit
+        && policies.policies().any(|policy| {
+            policy
+                .annotations()
+                .any(|(name, _)| http::is_annotation(name))
+        })
+    {
+        return Err(CedarError::Unsupported {
+            policy_id: "policy-set".into(),
+            reason: "OS request authorization cannot discharge HTTP execution annotations",
+        });
+    }
     Ok(explicit)
 }
 
@@ -69,22 +81,56 @@ pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool
 /// # Errors
 /// Returns the same admission errors as [`validate`], or an SDK PST conversion error.
 pub fn pst(source: &CedarPolicySource) -> Result<cedar_policy::pst::PolicySet, CedarError> {
-    let (policies, _, _) = validation::parse_and_validate(source)?;
+    let (policies, _) = validation::parse_and_validate(source)?;
     Ok(policies.try_into_pst().map_err(Box::new)?)
 }
 
-/// Lowers credential-annotated HTTP rules in canonical rule-ID order without file I/O.
+/// Action domains used to project the same Cedar representation for deployment consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyDomain {
+    /// File access and executable invocation actions.
+    File,
+    /// Network permission and HTTP request actions, independent of credential use.
+    Network,
+}
+
+/// Projects a domain view while preserving statement identities, effects and conditions.
 ///
-/// Non-credential Cedar returns an empty vector. Admission rejects an entire
-/// credential set if any statement cannot be consumed exactly by the HTTP model.
+/// Only statements provably confined to the other domain are excluded. Unconstrained,
+/// cross-domain and unclassified actions remain in both views for explicit consumer
+/// validation; projection never silently drops a restriction. Empty views return `None`.
 ///
-/// # Errors
-/// Returns the admission errors of [`validate`], including unsupported HTTP constructs.
-pub fn credential_rules(
-    source: &CedarPolicySource,
-) -> Result<Vec<http::CredentialRule>, CedarError> {
-    let (_, _, rules) = validation::parse_and_validate(source)?;
-    Ok(rules)
+/// Borrows validated output from [`pst`], without parsing or validating source again.
+/// Only selected statements are cloned; the input remains available to other consumers.
+pub fn project_pst(
+    syntax: &cedar_policy::pst::PolicySet,
+    domain: PolicyDomain,
+) -> Option<cedar_policy::pst::PolicySet> {
+    use cedar_policy::pst::ActionConstraint;
+    let other_domain = |id: &cedar_policy::pst::EntityUID| {
+        id.ty.to_string() == "SecCore::Action"
+            && match domain {
+                PolicyDomain::File => matches!(id.eid.as_str(), "network.use" | "network.send"),
+                PolicyDomain::Network => {
+                    matches!(id.eid.as_str(), "file.read" | "file.write" | "file.exec")
+                }
+            }
+    };
+    let projected = cedar_policy::pst::PolicySet {
+        policies: syntax
+            .policies
+            .iter()
+            .filter(|(_, policy)| !match &policy.body().action {
+                ActionConstraint::Eq(id) => other_domain(id),
+                ActionConstraint::In(ids) => !ids.is_empty() && ids.iter().all(other_domain),
+                ActionConstraint::Any => false,
+            })
+            .map(|(id, policy)| (id.clone(), policy.clone()))
+            .collect(),
+        templates: syntax.templates.clone(),
+        template_links: syntax.template_links.clone(),
+    };
+    (!projected.policies.is_empty()).then_some(projected)
 }
 
 /// Failures before a Cedar source can become a validated policy representation.

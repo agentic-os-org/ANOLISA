@@ -88,6 +88,11 @@ Binding 的 Apply/清理意图来自 Scope 生命周期及实例发现，不来�
 完整 Scope 再复制到每条 Binding，造成每个策略重复携带同 Scope 的所有其他策略。
 具体存储布局应保持执行输入自洽，并在 Scope 清理期间保留完成部署清理所需的内容。
 
+Binding 不按后端拆分。revision 2 的 HTTP/文件混合 Policy 为同一实例创建一个 Binding，
+其下分别保存 Gateway 和 AgentSight 的部署责任，所有必要目标均确认当前版本存在才
+报告 `READY`。任一端失败不能用另一端成功替代；删除按各自 Client 清理，未确认移除
+的目标继续保留。Sandbox 启动授权仍独立于此部署聚合。
+
 进程名称/path 是选择条件，具体执行实例是另一个字段。PID 实例至少区分 boot、PID
 namespace、PID、start time；发现、入队、重试和实际下发必须保持同一实例，不能在
 重试时重新解释为复用同一 PID 的新进程。进程退出或不再匹配由系统发起清理；局部

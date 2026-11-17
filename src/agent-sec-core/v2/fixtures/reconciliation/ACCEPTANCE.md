@@ -340,3 +340,15 @@ PendingApply/PendingDelete 允许因入队拒绝直接进入 ApplyFailed/DeleteF
 当前 V2 契约修订：移除 Repository RuntimeState，重试次数和 deadline 仅由 WorkQueue
 持有，重建队列时重置。fixture 的 initialSchedule 是测试调用方的内存进度输入，
 不属于 initial/expected Repository 记录；旧跨重启预算保持要求已被 CR-020 取代。
+
+## 混合 file/network 投递
+
+`mixed-file-network.json` 固定同一份混合 Binding、预期 Gateway network Plan 与 AgentSight
+文件防护载荷。`asc-gateway-plan` 和 AgentSight Translator 使用该 fixture 核对各自视图；
+daemon 的 `reconciliation::mixed_tests` 核对生产分流、共同就绪、预登记责任、重试及两端清理。
+
+`asc-gateway-runtime::tests::mixed_delivery::mixed_fixture_delivers_both_clients_and_cleans_both_deployments`
+将同一 fixture 经 PCP 交给两个生产 Client，捕获 AgentSight POST、Gateway 实际发布的 Plan，
+核对两条当前版本的部署记录及双端清理。Host 与 HTTP transport 为受控端口替身，这覆盖
+投递契约集成，不宣称 CLI/daemon 进程 E2E 或真实内核执行。网络内容及来源身份篡改另由
+`translated_network_content_and_source_identity_are_fenced_before_attachment` 在 prepare 和执行阶段验证。

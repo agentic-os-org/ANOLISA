@@ -87,7 +87,14 @@ path 字面相等或 Cedar like。host 必须精确小写 DNS 名且最多 253 �
 执行层强制 HTTPS。method 集合为 1–6 个不重复的大写 GET/HEAD/POST/PUT/PATCH/DELETE，
 省略 method 仅放宽至这六种方法；省略 path 不增加限制，不补写 GET 或 `/`。
 path 字面量/模式最多 512 字节，Cedar `*` 跨 `/`，不是旧分段 glob；实际 path 必须绝对且
-通过歧义检查。不同 file/credential Policy 可在同一个 Scope 分别执行，单 Policy 不混合。
+通过歧义检查。file 与 network 是策略动作域，凭据注入是 network 的一个执行子集。
+不同 file/network Policy 可在同一个 Scope 分别执行；revision 2 单份
+Policy 也允许凭据注入语句与独立文件 forbid 混写。完整快照仍由同一个 Binding 持有，
+`project_pst` 统一返回 file/network PST 视图，再分别由 AgentSight 翻译和 Gateway
+HTTP lowering 消费；两端均为必要部署。先完成两端准备并
+保存清理责任，再先应用文件防护、后开启 Gateway 路由，全部确认成功才报告 `READY`。
+无注解 HTTP 规则、未限定或跨域 action 及无法实施的文件条件仍明确拒绝，不能部分部署
+后报告成功。Sandbox 不参与该混合部署链路。
 
 标准资产仅保留 `v2/crates/asc-gateway-plan/policies/github.cedar`；source/raw/RPM 按安装
 布局交付 `gateway/github.cedar`（RPM 位于 `/usr/share/anolisa/sec-core/gateway/`），
@@ -384,6 +391,13 @@ framing。固定依赖不支持 HTTP/1 trailers，遇到此类协议错误仍中
 预算都是固定实现保护，不开放新参数；fail-closed 不等于能撤回已发出的安全前缀。
 
 ## 5. 执行投影、发布与清理
+
+Binding Translator 接收 `GatewayBindingView`，其中只有 network PST、精确 schema、
+原 Binding/Policy 身份和已登记凭据关联。`agent-sec-gateway-binding/v2` 载荷包含来源
+身份和已降低的 network Plan，不再序列化完整混合 Policy。Client 从 Repository 取回
+规范快照，核对来源身份及该 Policy 在 Scope 中的网络贡献后执行挂接；不能用篡改的
+规则、版本或进程身份替代规范授权。Scope 聚合及代理 `agent-sec-gateway-plan/v2` 发布
+格式不变。旧内部 Binding v1 输入拒绝；已有清理引用仍可使用，无需 SQL schema 迁移。
 
 `<数据目录>/gateway/state.json` 只保存 enabled、generation 与 Scope 执行投影：owner UID、端口、
 撤销 fence、Binding 责任与完整实例身份。它不保存另一套授权规则。恢复必须从 PAP 读取
