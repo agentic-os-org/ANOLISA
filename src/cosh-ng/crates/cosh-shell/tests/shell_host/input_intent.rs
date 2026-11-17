@@ -238,6 +238,7 @@ fn matched_tail_glob_keeps_the_line_native() {
     std::fs::write(dir.join("match.log"), b"x").expect("write fixture");
     std::fs::write(dir.join("文件.log"), b"x").expect("write fixture");
     std::fs::write(dir.join("a"), b"x").expect("write fixture");
+    std::fs::write(dir.join("a\\b.log"), b"x").expect("write fixture");
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.join("missing.log"), dir.join("dang.log"))
         .expect("write dangling symlink");
@@ -299,6 +300,14 @@ fn matched_tail_glob_keeps_the_line_native() {
             !arguments_have_no_unquoted_expansion(shell, "说明 \"match\"*.log", &dir),
             "{shell}: a quoted prefix must not hide the unquoted glob"
         );
+        // A quoted backslash is content, not an escape: both hosts expand
+        // `'a\'*.log` and `"a\\"*.log` to `a\b.log`, so the line stays native.
+        for input in ["说明 'a\\'*.log", "说明 \"a\\\\\"*.log"] {
+            assert!(
+                !arguments_have_no_unquoted_expansion(shell, input, &dir),
+                "{shell}: a quoted backslash must not escape the probe's glob for {input:?}"
+            );
+        }
         let Some(locale) = locale else {
             continue;
         };
