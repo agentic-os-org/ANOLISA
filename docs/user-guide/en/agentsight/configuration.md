@@ -392,21 +392,48 @@ journalctl -u agentsight.service -n 30 --no-pager
 
 ## Workspace snapshot backend (Linux)
 
-The optional `ws_ckpt` section connects the server to a local ws-ckpt instance:
+The optional `ws_ckpt` section configures how AgentSight invokes the local
+ws-ckpt CLI:
 
 ```json
-{"ws_ckpt":{"binary":"/usr/local/bin/ws-ckpt","socket":"/run/ws-ckpt/ws-ckpt.sock","restore_enabled":false,"plugins":{"example-agent":{"runtime":"openclaw","config_path":"/home/example/.openclaw/ws-ckpt.json"}}}}
+{
+  "ws_ckpt": {
+    "binary": "/usr/bin/ws-ckpt",
+    "restore_enabled": false,
+    "plugins": {
+      "example-openclaw": {
+        "runtime": "openclaw",
+        "config_path": "/home/example/.openclaw/ws-ckpt.json"
+      },
+      "example-hermes": {
+        "runtime": "hermes",
+        "config_path": "/home/example/.hermes/config.yaml"
+      }
+    }
+  }
+}
 ```
 
-`binary` defaults to `ws-ckpt` on PATH. `socket` defaults to `WS_CKPT_SOCKET`,
-then `/run/ws-ckpt/ws-ckpt.sock`. CLI queries and guarded operations use the same
-socket. Settings are read per request; the optional section does not change
-existing deployments. Omit `plugins` when tool calls carry explicit workspace
+`binary` defaults to `ws-ckpt` on PATH. AgentSight uses the CLI to list snapshots,
+view file changes, and request guarded rollback when restore is enabled. The CLI
+connects to the daemon and verifies the peer UID.
+
+If the daemon uses a custom socket address, set `socket` to pass that address to
+the CLI through its `WS_CKPT_SOCKET` environment variable. AgentSight chooses the
+address from `socket`, its own `WS_CKPT_SOCKET` environment variable, or
+`/run/ws-ckpt/ws-ckpt.sock`, in that order.
+
+Settings are read per request. Sight shows workspace snapshots only when
+`rollback --guarded --json --check` confirms the registered workspace and the
+CLI supports `diff --format json`. This also applies in read-only mode. If either
+check fails, the snapshot and restore controls are hidden and the ATIF trace
+remains available. Omit `plugins` when tool calls carry explicit workspace
 arguments. No workspace is inferred from process cwd.
 
 Each `plugins` key must match the recorded ATIF agent name and identify its actual
 host instance. `runtime` is `openclaw` (persisted JSON) or `hermes` (YAML section
-`plugins.ws-ckpt`). An optional `workspace_override` records that instance's known
+`plugins.ws-ckpt`). If the Hermes instance sets `HERMES_HOME`, point `config_path`
+to that instance's `config.yaml`. An optional `workspace_override` records its known
 environment override or host default. Do not substitute the server's HOME or
 environment. A config modified after the recorded call is not used to infer that
 call's historical workspace; unknown bindings remain unresolved.

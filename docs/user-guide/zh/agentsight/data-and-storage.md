@@ -301,30 +301,34 @@ sudo systemctl start agentsight.service
 包括回环地址。
 
 - `HEAD /api/ws-ckpt/{kind}/{id}/snapshots`：对 `session` 或 `conversation` 查询
-  是否有可用工作区。存在注册工作区时返回空的 `204`，不可用时返回 `404`。
+  是否有可用工作区。注册工作区通过 ws-ckpt 兼容性检查时返回空的 `204`，不可用时返回 `404`。
   沿用普通轨迹的访问规则，供 Dashboard 决定是否提示登录。
 - `GET /api/ws-ckpt/{kind}/{id}/snapshots`：`kind` 为 `session`、`conversation` 或
   `trajectory`（已采集 ATIF）。session 优先读取捕获事件，再回退到已采集轨迹。
   由已确认成功的 ws-ckpt 操作确定工作区；省略参数时仅使用已明确绑定的插件配置。
   返回 `trajectory`、`scope`、`step_snapshots`、`unassigned`、`association` 与
-  `completeness`；未解析工作区时 `scope: null`。把 `completeness.next_cursor` 作为
+  `completeness`；未解析工作区时 `scope: null`。兼容性检查失败时保留 `trajectory`，
+  返回 `scope: null`、`restore_enabled: false` 和空的 `step_snapshots`。把 `completeness.next_cursor` 作为
   `cursor` 继续读取，各页共享 Step 边界和 `as_of`；轨迹版本变化时需重新查询。
   首 Step 之前或截止时刻及之后的快照仅保留在 `unassigned` 诊断中，不生成 Step 按钮。
 - `POST /api/ws-ckpt/diff`：请求体为
   `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`。返回文件级 `changes`、权威
-  `scope`、快照 ID 和比较时间。开启回滚时还返回 `restore_preview`，包含工作区版本和
-  完整文件变化列表的摘要。不返回逐行文件内容。
+  `scope`、快照 ID 和比较时间。只读查询先在列表中核对完整快照 ID，再调用 CLI diff。
+  开启回滚时，Sight 调用 guarded CLI 预览，并在 `restore_preview` 中返回该预览的
+  `generation` 和 `diff_digest`。
+  不返回逐行文件内容。
 - `POST /api/ws-ckpt/restore/prepare`：请求体包含上述目标 `target`、
   `writers_stopped: true`，以及从 `restore_preview` 复制的 `expected_preview`。
-  操作者必须确保回滚期间没有其他写入。后台重新核对工作区版本和差异摘要，返回密封的
-  `confirmation_token` 和操作 ID。任一值发生变化时，需刷新文件列表后重新确认。
+  操作者必须确保回滚期间没有其他写入。Sight 获取同一目标的新 guarded 预览，核对代际
+  和差异摘要是否均与已显示的预览一致，通过后返回密封的 `confirmation_token` 和操作 ID。
+  任一字段变化时返回 `409`，需刷新预览后重新确认。
 - `POST /api/ws-ckpt/restore/execute`：请求体为 `{"confirmation_token":"<TOKEN>"}`。
-  使用已绑定目标，经过 guarded generation/diff 校验后执行。返回
-  `status: "succeeded"` 或 `"unknown"`；拒绝时返回非成功状态。确定未执行的拒绝包含
-  `effect: "known_no_effect"`，此时丢弃旧确认。操作者选择重试时需重新准备确认。其他 HTTP
-  或传输错误不能证明未执行，应保留原 token 查询结果，不盲目重发执行请求。
-- `POST /api/ws-ckpt/restore/result`：使用同一 token 查询持久化 `evidence`。
-  evidence 缺失不能证明恢复未发生。
+  守护进程在工作区锁内核对完整目标、工作区代际和差异，然后执行回滚，无需创建保护快照。
+  返回 `status: "succeeded"` 或 `"unknown"`。拒绝若带有 `effect: "known_no_effect"`，
+  操作者可在刷新后重新准备确认。CLI 超时且未返回完整结果等情况，保留原 token，
+  使用结果接口查询。
+- `POST /api/ws-ckpt/restore/result`：使用同一 token 查询守护进程记录的持久化 `evidence`。
+  快照兼容性检查失败时仍可查询。evidence 缺失不能证明恢复未发生。
 
 关联区间为 `[当前 Agent Step 开始, 下一个 Agent Step 开始)`，最后一段截至
 `as_of`。这不证明创建者；同工作区的自动 hook、独立 CLI 和其他会话快照也会包含在内。
