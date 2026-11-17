@@ -111,8 +111,25 @@ budget, checked before copying each distinct path. Intention
 candidate envelopes are not permission files: select their Cedar text only after
 handling unresolved requirements and candidate validity.
 
-Cedar file read/write path literals must already exist. Preparation retains all paths, including
-exclusions, resolves file and directory symlinks (also in intermediate components),
+An existing directory write grant covers new files and nested directories within
+its subtree, including missing paths explicitly listed in the Cedar input. No
+additional `create` permission is required for that existing coarse write grant.
+
+Without that coverage, Cedar permits for `create` on a missing path request
+**write access to its existing immediate parent directory**. This intentionally expands access to reads and all
+mutations of sibling files and descendants; it does not enforce exact-file or
+create-only access. If the immediate parent is missing and no existing writable
+ancestor covers the target, preparation fails with the target and parent paths and
+`no existing writable ancestor covers the target`. Grant write access to an existing
+ancestor directory or create the parent before preparation; the converter never
+grants a higher ancestor automatically. Preparation creates no files and pins existing
+directories, not nonexistent objects. Dangling symlinks and unrepresentable exclusions
+still fail preparation.
+Existing-file grants remain exact, and JSON paths must still exist. PDP evaluates
+the expanded directory request against unchanged PAP policies; direct `sandbox run`
+installs it without PDP authorization.
+
+Preparation retains existing paths, including exclusions, resolves file and directory symlinks (also in intermediate components),
 then evaluates and compacts permissions using canonical paths. An allow through an
 alias cannot discard a forbid on its target. Readable aliases are retained for the
 command; aliases with a writable ancestor are rejected because that ancestor could
@@ -450,8 +467,10 @@ their full text is readable in that panel.
 
 Candidates are requests, never PAP writes. PDP determines `effective_permissions`
 from the active policy set, bounded by the requested permissions. The Cedar mapping
-limits above still apply: a nonexistent file literal fails preparation rather than implicitly
-granting write access to its parent directory.
+limits above still apply: after merging the candidate and runtime preset, existing
+directory write covers missing descendants. Otherwise, an allowed `create` for a
+missing file requests write access to its existing immediate parent.
+PAP must authorize that directory scope; a precise file permit in PAP is not expanded.
 
 Intent generation has a 38-second CLI RPC budget inside a 40-second subprocess
 limit. Generation and prepare share 55 seconds inside the 60-second Hook budget.

@@ -21,12 +21,14 @@ use serde_json::{Value, json};
 use super::PermissionInputError as Error;
 
 type Result<T> = std::result::Result<T, Error>;
-type Facts<'a> = BTreeMap<&'a str, &'a PathFact>;
+type Paths = BTreeMap<String, String>;
 const OPERATIONS: [&str; 5] = ["write", "create", "delete", "rename", "setattr"];
 const REGION_BUDGET: usize = 16_384;
 const PATH_BYTE_LIMIT: usize = 4095;
 const CAPTURE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 
+// Keep the ordered capture, projection and alias checks together for boundary auditing.
+#[allow(clippy::too_many_lines)]
 pub(super) fn bind(
     source: &CedarPolicySource,
     launch: &LaunchSpec,
@@ -50,6 +52,13 @@ pub(super) fn bind(
             }
         }
     }
+    let mut missing = BTreeSet::new();
+    for path in &capture {
+        if is_missing(path)? {
+            missing.insert(path.clone());
+        }
+    }
+    capture.retain(|path| !missing.contains(path));
     let empty = OsPermissionSet {
         version: 1,
         filesystem: FilesystemPermissions {
@@ -72,6 +81,9 @@ pub(super) fn bind(
         }
     }
     for path in &paths {
+        if missing.contains(path) {
+            continue;
+        }
         let metadata = std::fs::metadata(path)?;
         // Canonicalization cannot identify other hardlink names. Reject before a
         // redundant exclusion disappears and bypasses the backend's hardlink check.
@@ -82,6 +94,16 @@ pub(super) fn bind(
     let permissions = project_parsed(source, launch, parsed, Some(&facts))?;
     permissions.validate()?;
     let mut mount_aliases: Vec<String> = Vec::new();
+    let paths = paths
+        .into_iter()
+        .map(|path| {
+            if missing.contains(&path) {
+                existing_ancestor(&path, Some(&facts)).map(str::to_owned)
+            } else {
+                Ok(path)
+            }
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
     for path in paths {
         let target = canonical(&path, &index)?;
         if path != target {
@@ -136,15 +158,19 @@ pub(super) fn project(
     project_parsed(source, launch, parse(source)?, facts)
 }
 
+// Keep scope widening and exclusion retention in the same projection pipeline for review.
+#[allow(clippy::too_many_lines)]
 fn project_parsed(
     source: &CedarPolicySource,
     launch: &LaunchSpec,
     mut parsed: Parsed,
     facts: Option<&[PathFact]>,
 ) -> Result<OsPermissionSet> {
-    if let Some(facts) = facts {
-        normalize_policy_paths(&mut parsed, facts)?;
-    }
+    let mut missing = if let Some(facts) = facts {
+        normalize_policy_paths(&mut parsed, facts)?
+    } else {
+        BTreeSet::new()
+    };
     let policies =
         PolicySet::from_pst(parsed.pst).map_err(|error| unsupported(error.to_string()))?;
     let evaluator = Evaluator {
@@ -154,8 +180,58 @@ fn project_parsed(
     if parsed.invocation {
         evaluator.check_invocation(launch)?;
     }
-    let paths = parsed.paths;
+    let mut paths = parsed.paths;
     let programs = parsed.programs;
+    let mut create_parents = BTreeSet::new();
+    for path in &paths {
+        // Lexical previews only inspect point boundaries, as before; tree previews need no objects.
+        if facts.is_none()
+            && evaluator.access(path, &programs)?.0
+                != evaluator.access(&probe(path, &paths)?, &programs)?.0
+            && is_missing(path)?
+        {
+            missing.insert(path.clone());
+        }
+        if missing.contains(path) {
+            let ancestor = existing_ancestor(path, facts)?;
+            // Existing coarse directory write already permits creation at any depth.
+            // Check the original input, never a grant inferred for another missing path.
+            if evaluator.access(ancestor, &programs)?.0.write
+                && evaluator
+                    .access(&probe(ancestor, &paths)?, &programs)?
+                    .0
+                    .write
+                && evaluator.access(path, &programs)?.0.write
+            {
+                continue;
+            }
+            let parent = parent(path)?;
+            if ancestor != parent {
+                return Err(unsupported(format!(
+                    "cannot prepare missing path {path}: parent directory {parent} does not exist \
+                     and no existing writable ancestor covers the target; grant write access to \
+                     an existing ancestor directory or create the parent before preparation"
+                )));
+            }
+            if !evaluator.can_create(path, &programs)? {
+                return Err(unsupported(format!(
+                    "missing permission path does not allow creation: {path}"
+                )));
+            }
+            create_parents.insert(parent.to_owned());
+        }
+    }
+    paths.extend(create_parents.iter().cloned());
+    if paths
+        .len()
+        .saturating_mul(programs.len())
+        .saturating_mul(parsed.terms)
+        > REGION_BUDGET
+    {
+        return Err(unsupported(
+            "Cedar permission projection exceeds its region budget",
+        ));
+    }
     let network = evaluator.query("network.use", "Network", "all", &json!({}), json!({}))?;
     let mut permissions = OsPermissionSet {
         version: 1,
@@ -178,8 +254,9 @@ fn project_parsed(
     let mut readable = BTreeSet::new();
     let mut writable = BTreeSet::new();
     for path in ordered {
-        let (access, mut forbidden) = evaluator.access(path, &programs)?;
-        let (children, child_forbidden) = evaluator.access(&probe(path, &paths)?, &programs)?;
+        let (access, mut forbidden) = evaluator.project_access(path, &programs, &create_parents)?;
+        let (children, child_forbidden) =
+            evaluator.project_access(&probe(path, &paths)?, &programs, &create_parents)?;
         if access != children && !is_file(path, facts)? {
             return Err(unsupported(format!(
                 "point-only or descendants-only directory permissions at {path}"
@@ -230,11 +307,44 @@ fn project_parsed(
         &readable,
         &writable,
     );
+    for path in &create_parents {
+        if !rules_allow(&permissions.filesystem.rules, path, FileRight::Write) {
+            return Err(unsupported(format!(
+                "creation conflicts with parent directory restrictions: {path}"
+            )));
+        }
+    }
+    if let Some(rule) = permissions
+        .filesystem
+        .rules
+        .iter()
+        .find(|rule| missing.contains(&rule.path))
+    {
+        return Err(unsupported(format!(
+            "cannot enforce a missing path boundary: {}",
+            rule.path
+        )));
+    }
     Ok(permissions)
 }
 
-fn normalize_policy_paths(parsed: &mut Parsed, facts: &[PathFact]) -> Result<()> {
-    let index = fact_index(facts);
+fn normalize_policy_paths(parsed: &mut Parsed, facts: &[PathFact]) -> Result<BTreeSet<String>> {
+    let mut index = fact_index(facts);
+    let mut missing = BTreeSet::new();
+    for path in &parsed.paths {
+        if !index.contains_key(path) {
+            let ancestor = existing_ancestor(path, Some(facts))?;
+            let suffix = path
+                .strip_prefix(ancestor.trim_end_matches('/'))
+                .ok_or_else(|| unsupported(format!("invalid creation target: {path}")))?;
+            let target = format!(
+                "{}{suffix}",
+                canonical(ancestor, &index)?.trim_end_matches('/')
+            );
+            missing.insert(target.clone());
+            index.insert(path.clone(), target);
+        }
+    }
     for (_, policy) in &mut parsed.pst.policies {
         let body = policy.body().clone();
         if !file_actions(&body.action) {
@@ -256,7 +366,7 @@ fn normalize_policy_paths(parsed: &mut Parsed, facts: &[PathFact]) -> Result<()>
         .iter()
         .map(|path| canonical(path, &index).map(str::to_owned))
         .collect::<Result<_>>()?;
-    Ok(())
+    Ok(missing)
 }
 
 fn retain_exclusions(
@@ -301,6 +411,7 @@ struct Parsed {
     paths: BTreeSet<String>,
     programs: BTreeSet<String>,
     invocation: bool,
+    terms: usize,
 }
 
 fn file_actions(action: &ActionConstraint) -> bool {
@@ -395,7 +506,53 @@ fn parse(source: &CedarPolicySource) -> Result<Parsed> {
         paths,
         programs,
         invocation,
+        terms,
     })
+}
+
+fn parent(path: &str) -> Result<&str> {
+    Path::new(path)
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or_else(|| unsupported(format!("permission path has no parent: {path}")))
+}
+
+fn is_missing(path: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn existing_ancestor<'a>(path: &'a str, facts: Option<&[PathFact]>) -> Result<&'a str> {
+    for ancestor in Path::new(path).ancestors().skip(1) {
+        let ancestor = ancestor
+            .to_str()
+            .ok_or_else(|| unsupported("non-UTF-8 parent"))?;
+        let directory = if let Some(facts) = facts {
+            facts
+                .iter()
+                .find(|fact| fact.path == ancestor)
+                .map(|fact| fact.is_directory)
+        } else if is_missing(ancestor)? {
+            None
+        } else {
+            Some(std::fs::metadata(ancestor)?.is_dir())
+        };
+        match directory {
+            Some(true) => return Ok(ancestor),
+            Some(false) => {
+                return Err(unsupported(format!(
+                    "permission ancestor is not a directory: {ancestor}"
+                )));
+            }
+            None => {}
+        }
+    }
+    Err(unsupported(format!(
+        "missing permission path lacks an existing directory ancestor: {path}"
+    )))
 }
 
 fn is_file(path: &str, facts: Option<&[PathFact]>) -> Result<bool> {
@@ -410,23 +567,23 @@ fn is_file(path: &str, facts: Option<&[PathFact]>) -> Result<bool> {
     Ok(std::fs::metadata(path)?.is_file())
 }
 
-fn fact_index(facts: &[PathFact]) -> Facts<'_> {
+fn fact_index(facts: &[PathFact]) -> Paths {
     facts
         .iter()
-        .map(|fact| (fact.path.as_str(), fact))
+        .map(|fact| (fact.path.clone(), fact.canonical_path.clone()))
         .collect()
 }
 
-fn canonical<'a>(path: &str, facts: &Facts<'a>) -> Result<&'a str> {
+fn canonical<'a>(path: &str, facts: &'a Paths) -> Result<&'a str> {
     facts
         .get(path)
-        .map(|fact| fact.canonical_path.as_str())
+        .map(String::as_str)
         .ok_or_else(|| unsupported(format!("permission path lacks a pinned object: {path}")))
 }
 
 // Substitute only the already validated file-path literals in Cedar's own syntax tree.
 // Boolean logic, permit/forbid precedence and conditions stay with the official evaluator.
-fn normalize(expr: &mut Expr, facts: &Facts<'_>) -> Result<()> {
+fn normalize(expr: &mut Expr, facts: &Paths) -> Result<()> {
     match expr {
         Expr::UnaryOp { expr, .. } => normalize(Arc::make_mut(expr), facts)?,
         Expr::BinaryOp {
@@ -487,7 +644,7 @@ fn normalize(expr: &mut Expr, facts: &Facts<'_>) -> Result<()> {
     Ok(())
 }
 
-fn normalize_literal(expr: &mut Expr, facts: &Facts<'_>) -> Result<()> {
+fn normalize_literal(expr: &mut Expr, facts: &Paths) -> Result<()> {
     if let Expr::Literal(Literal::String(value)) = expr {
         *value = canonical(value, facts)?.into();
     }
@@ -645,6 +802,34 @@ struct Access {
 }
 
 impl Evaluator {
+    fn can_create(&self, path: &str, programs: &BTreeSet<String>) -> Result<bool> {
+        for program in programs {
+            if self.query("file.write", "File", path, &json!({"path": path}), json!({"input": {
+                "program": program, "operation": {"__entity": {"type": "SecCore::WriteOperation", "id": "create"}}
+            }}))?.allowed {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn project_access(
+        &self,
+        path: &str,
+        programs: &BTreeSet<String>,
+        create_parents: &BTreeSet<String>,
+    ) -> Result<(Access, Access)> {
+        let (mut access, forbidden) = self.access(path, programs)?;
+        if create_parents.iter().any(|parent| contains(parent, path)) {
+            // A missing creation target intentionally widens to read/write access to its
+            // parent and descendants, including sibling files, not create-only access.
+            // The PDP checks this widened request when used; direct execution installs it.
+            access.read |= !forbidden.read;
+            access.write |= !forbidden.read && !forbidden.write;
+        }
+        Ok((access, forbidden))
+    }
+
     fn query(
         &self,
         action: &str,
