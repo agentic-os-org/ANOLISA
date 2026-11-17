@@ -175,13 +175,10 @@ fn root_of(
     let mut chain = vec![target_ws_id.to_string()];
     let mut current = target_ws_id.to_string();
     let mut visited = BTreeSet::from([current.clone()]);
-    loop {
-        let Some(origin) = registry
-            .get(&current)
-            .and_then(|entry| entry.origin.as_ref())
-        else {
-            break;
-        };
+    while let Some(origin) = registry
+        .get(&current)
+        .and_then(|entry| entry.origin.as_ref())
+    {
         let parent = origin.source_ws_id.clone();
         if !visited.insert(parent.clone()) {
             chain.push(parent);
