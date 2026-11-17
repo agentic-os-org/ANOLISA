@@ -84,6 +84,50 @@ fn literal_first_word_matches(shell: &str, input: &str, attempt: &str, command: 
         .is_ok_and(|status| status.success())
 }
 
+fn arguments_have_no_unquoted_expansion(shell: &str, input: &str, dir: &std::path::Path) -> bool {
+    arguments_have_no_unquoted_expansion_in(shell, input, dir, None)
+}
+
+fn arguments_have_no_unquoted_expansion_in(
+    shell: &str,
+    input: &str,
+    dir: &std::path::Path,
+    locale: Option<&str>,
+) -> bool {
+    let mut process = Process::new(shell);
+    if shell == "bash" {
+        process.args(["--noprofile", "--norc"]);
+    } else {
+        process.arg("-f");
+    }
+    if let Some(locale) = locale {
+        process.env("LANG", locale).env("LC_ALL", locale);
+    }
+    let script = format!(
+        "{}\n_cosh_arguments_have_no_unquoted_expansion \"$1\"",
+        shell_intent_helpers(),
+    );
+    process
+        .args(["-c", &script, "cosh-expansion-test", input])
+        .current_dir(dir)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// `C.UTF-8` is where `?` matches one character instead of one byte, which is
+/// what an interactive shell on a UTF-8 terminal does. It is not present
+/// everywhere (macOS ships `UTF-8` instead), so the locale-sensitive cases skip
+/// instead of failing on those hosts.
+fn utf8_locale() -> Option<&'static str> {
+    let probe = Process::new("bash")
+        .args(["--noprofile", "--norc", "-c", "locale charmap"])
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .output()
+        .ok()?;
+    (String::from_utf8_lossy(&probe.stdout).trim() == "UTF-8").then_some("C.UTF-8")
+}
+
 #[test]
 fn routing_c2_matcher_table_covers_supported_quote_removal_subset() {
     let accepted = [
@@ -122,6 +166,174 @@ fn routing_c2_matcher_table_covers_supported_quote_removal_subset() {
             assert!(
                 !literal_first_word_matches(shell, input, attempt, command),
                 "{shell}: rejected {input:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unquoted_expansion_guard_matrix() {
+    let dir = std::env::temp_dir().join(format!("cosh-guard-{}", super::unique_suffix()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let clean = [
+        // First word is a command; glob carriers after it are ordinary text.
+        "ls *.log",
+        "ls ~",
+        // Han sentences whose carrier trails the first word.
+        "查看 ~ 目录下的文件",
+        "列出所有 *.log 文件",
+        "有没有名字带 [abc] 的文件",
+        "看看 {a,b} 哪个大",
+        "what is 2+2?",
+        // A question mark closing a Han word is punctuation, not a glob.
+        "你好你是谁?",
+        "你还好吗? 我想问问",
+        "这个是干什么的?",
+        // Quoting suppresses expansion, so a quoted carrier never reaches the
+        // classifier as a rewritten word.
+        "解释 \"文?.log\" 好吗",
+        "这个 \"文?\" 是什么意思",
+        "解释一下 \"why?\" 这个词",
+        "\"你好吗?\" 我想问",
+        "他问 '你好吗?'",
+        // The `$` carrier is refused by the classifier, not by this guard.
+        "打印 $HOME 环境变量",
+    ];
+    let bails = [
+        // Carriers in the command position still reach the shell.
+        "*.log",
+        "~/run.sh",
+        "  *.log",
+        "\"列\"*.log",
+        "列*?",
+        "中文?abc",
+        // Documented boundary: an ASCII word cannot be told apart from a glob
+        // and `_cosh_literal_first_word_matches` rejects the same carriers.
+        "why?",
+    ];
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for input in clean {
+            assert!(
+                arguments_have_no_unquoted_expansion(shell, input, &dir),
+                "{shell}: expected clean guard for {input:?}"
+            );
+        }
+        for input in bails {
+            assert!(
+                !arguments_have_no_unquoted_expansion(shell, input, &dir),
+                "{shell}: expected bailing guard for {input:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn matched_tail_glob_keeps_the_line_native() {
+    let dir = std::env::temp_dir().join(format!("cosh-guard-match-{}", super::unique_suffix()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("match.log"), b"x").expect("write fixture");
+    std::fs::write(dir.join("文件.log"), b"x").expect("write fixture");
+    std::fs::write(dir.join("a"), b"x").expect("write fixture");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("missing.log"), dir.join("dang.log"))
+        .expect("write dangling symlink");
+    let locale = utf8_locale();
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        // The shell expands the tail before the classifier reads the line, so
+        // the literal line would not be judged: stay native.
+        for input in ["说明 *.log", "列出所有 *.log 文件"] {
+            assert!(
+                !arguments_have_no_unquoted_expansion(shell, input, &dir),
+                "{shell}: expected native routing for {input:?} once the glob matches"
+            );
+        }
+        // A carrier that matches nothing keeps the literal line intact.
+        assert!(
+            arguments_have_no_unquoted_expansion(shell, "列出所有 *.none", &dir),
+            "{shell}: unmatched glob should keep the line literal"
+        );
+        // A brace pair alone is punctuation of the sentence even when one
+        // literal names a file: there is no carrier, so the word never leaves
+        // the classifier.
+        assert!(
+            arguments_have_no_unquoted_expansion(shell, "看看 {a,b} 哪个大", &dir),
+            "{shell}: braces alone should stay punctuation with `a` present"
+        );
+        // The shell brace-expands before it globs, so `{a,b}*.log` is really
+        // `a*.log b*.log` and the literal line would already be rewritten.
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "说明 {a,b}*.log", &dir),
+            "{shell}: a brace pair next to an unquoted glob must stay native"
+        );
+        // Quoted braces never brace-expand, and the quoted `?` is literal, so
+        // neither of these matches the fixtures.
+        for input in ["解释 \"{a,b}\"*.log 是什么意思", "说明 \"文?\"*.log"] {
+            assert!(
+                arguments_have_no_unquoted_expansion(shell, input, &dir),
+                "{shell}: quoting must keep the probe as narrow as the shell for {input:?}"
+            );
+        }
+        #[cfg(unix)]
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "说明 dang.*", &dir),
+            "{shell}: a dangling symlink is still a glob match"
+        );
+        // Quoting suppresses expansion, so these stay literal and reach the
+        // classifier.
+        for input in ["解释 \"文?.log\" 好吗", "解释一下 \"why?\" 这个词"] {
+            assert!(
+                arguments_have_no_unquoted_expansion(shell, input, &dir),
+                "{shell}: quoted carriers should stay literal for {input:?}"
+            );
+        }
+        // The shell removes the quotes before expanding, so the unquoted `*`
+        // here names `match.log` and the line stays native.
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "说明 \"match\"*.log", &dir),
+            "{shell}: a quoted prefix must not hide the unquoted glob"
+        );
+        let Some(locale) = locale else {
+            continue;
+        };
+        // `?` is one character in the interactive shell, so this names
+        // `文件.log` there; a byte-wise probe would report no match.
+        assert!(
+            !arguments_have_no_unquoted_expansion_in(shell, "说明 文?.log", &dir, Some(locale)),
+            "{shell}: expected native routing for `说明 文?.log` under {locale}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn glob_tail_han_sentences_reach_the_classifier() {
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (input, top_token, expected) in [
+            ("列出所有 *.log 文件", "列出所有", "natural_language"),
+            ("查看 ~ 目录下的文件", "查看", "natural_language"),
+            (
+                "有没有名字带 [abc] 的文件",
+                "有没有名字带",
+                "natural_language",
+            ),
+            // A real command with a glob still stays with the shell.
+            ("ls *.log", "ls", "command"),
+            ("ls ~", "ls", "command"),
+        ] {
+            assert_eq!(
+                classify(shell, input, top_token).as_deref(),
+                Some(expected),
+                "{shell}: {input:?}"
             );
         }
     }

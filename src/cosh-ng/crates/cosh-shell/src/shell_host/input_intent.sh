@@ -138,13 +138,23 @@ _cosh_literal_first_word_matches() {
 
 _cosh_arguments_have_no_unquoted_expansion() {
   local input="$1"
+  # The word probe below must predict the shell's own expansion, so it keeps the
+  # caller's locale; only this byte-wise scan needs C. Capture before the
+  # override shadows them.
+  local _cosh_caller_lc_all="${LC_ALL-}"
+  local _cosh_caller_lang="${LANG-}"
   local LC_ALL=C
   local quote=""
   local escaped=0
   local after_first_word=0
+  local started=0
   local index=0
   local length="${#input}"
   local byte
+  local next
+  local previous
+  local word_start=0
+  local word_carrier=0
 
   while (( index < length )); do
     byte="${input:$index:1}"
@@ -155,21 +165,170 @@ _cosh_arguments_have_no_unquoted_expansion() {
     fi
     if (( escaped == 1 )); then
       escaped=0
+      started=1
+      continue
+    fi
+    case "$byte" in
+      '\') escaped=1; started=1 ;;
+      "'") quote="'"; started=1 ;;
+      '"')
+        if [[ "$quote" == '"' ]]; then quote=""; elif [[ -z "$quote" ]]; then quote='"'; fi
+        started=1
+        ;;
+      ' '|$'\t')
+        if [[ -z "$quote" && "$started" == 1 ]]; then
+          if (( word_carrier == 1 )) \
+             && _cosh_word_globs_to_files \
+                  "${input:$word_start:$((index - 1 - word_start))}" \
+                  "$_cosh_caller_lc_all" "$_cosh_caller_lang"; then
+            return 1
+          fi
+          word_carrier=0
+          word_start=$index
+          after_first_word=1
+        fi
+        ;;
+      '?')
+        if [[ -n "$quote" || "$after_first_word" == 1 ]]; then
+          word_carrier=1
+          started=1
+          continue
+        fi
+        # A `?` that closes a word after non-ASCII text is the question mark of
+        # a Han sentence (`你好你是谁?`, `你还好吗? 我想问问`), not a glob: a
+        # one-character glob would have to match a file, and the question mark
+        # of an ASCII question (`why?`) stays a carrier because that word can
+        # glob (`why1`) as readily as it can be a question.
+        next="${input:$index:1}"
+        previous="${input:$((index - 2)):1}"
+        if [[ -z "$next" || "$next" == ' ' || "$next" == $'\t' ]] \
+           && [[ "$previous" == [!\ -~] ]]; then
+          started=1
+          continue
+        fi
+        return 1
+        ;;
+      '*'|'~'|'{'|'}'|'['|']')
+        # In the command position the shell expands the character before the
+        # line reaches the classifier, so the literal line cannot be judged and
+        # the shell keeps the line. After the first word the same characters are
+        # ordinary punctuation of a Han sentence, unless the tail word expands
+        # to files: then the classifier would read a line the shell has already
+        # rewritten, so the line stays native.
+        #
+        # `started` keeps leading whitespace from being mistaken for the end of
+        # the first word, and a word that begins with a closing quote is still
+        # the command position. A single word such as `why?` stays here: it can
+        # glob (`why1`) as readily as it can be an English question, and
+        # `_cosh_literal_first_word_matches` rejects the same carriers, so this
+        # boundary cannot be moved inside one function.
+        if (( after_first_word == 0 )); then
+          [[ -z "$quote" ]] && return 1
+        else
+          [[ -z "$quote" && "$byte" != '~' ]] && word_carrier=1
+        fi
+        ;;
+      *) started=1 ;;
+    esac
+  done
+  if (( escaped == 0 )) && [[ -z "$quote" ]]; then
+    if (( word_carrier == 1 )) \
+       && _cosh_word_globs_to_files "${input:$word_start}" \
+            "$_cosh_caller_lc_all" "$_cosh_caller_lang"; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+
+_cosh_word_globs_to_files() {
+  local word="$1"
+  # Locale comes from the caller as an argument, not from its scope: the probe
+  # must match the way the interactive shell does (`?` is one character, not
+  # one byte), while the guard's own scan runs in C.
+  local caller_lc_all="${2-}"
+  local caller_lang="${3-}"
+  [[ -n "$word" ]] || return 1
+  local quote=""
+  local escaped=0
+  local index=0
+  local length="${#word}"
+  local byte
+  local effective=""
+  local unquoted_carrier=0
+  local unquoted_brace=0
+  # Remove quoting the way the shell does, then probe what actually reaches the
+  # command. A carrier inside quotes or behind a backslash never expands, so it
+  # is escaped in the probe pattern: `解释 "文?.log" 好吗` stays literal, while
+  # the unquoted `*` in `说明 "match"*.log` still names `match.log`.
+  while (( index < length )); do
+    byte="${word:$index:1}"
+    (( index += 1 ))
+    if [[ "$quote" == "'" ]]; then
+      if [[ "$byte" == "'" ]]; then
+        quote=""
+      else
+        case "$byte" in
+          '*'|'?'|'['|']') effective+="\\$byte" ;;
+          *) effective+="$byte" ;;
+        esac
+      fi
+      continue
+    fi
+    if [[ "$quote" == '"' ]]; then
+      if [[ "$byte" == '"' ]]; then
+        quote=""
+      else
+        case "$byte" in
+          '*'|'?'|'['|']') effective+="\\$byte" ;;
+          *) effective+="$byte" ;;
+        esac
+      fi
+      continue
+    fi
+    if (( escaped == 1 )); then
+      escaped=0
+      case "$byte" in
+        '*'|'?'|'['|']') effective+="\\$byte" ;;
+        *) effective+="$byte" ;;
+      esac
       continue
     fi
     case "$byte" in
       '\') escaped=1 ;;
       "'") quote="'" ;;
-      '"')
-        if [[ "$quote" == '"' ]]; then quote=""; elif [[ -z "$quote" ]]; then quote='"'; fi
-        ;;
-      ' '|$'\t') [[ -z "$quote" ]] && after_first_word=1 ;;
-      '*'|'?'|'~'|'{'|'}'|'['|']')
-        (( after_first_word == 1 )) && [[ -z "$quote" ]] && return 1
-        ;;
+      '"') quote='"' ;;
+      '*'|'?'|'['|']') unquoted_carrier=1; effective+="$byte" ;;
+      '{'|'}') unquoted_brace=1; effective+="$byte" ;;
+      *) effective+="$byte" ;;
     esac
   done
-  (( escaped == 0 )) && [[ -z "$quote" ]]
+  [[ -z "$quote" ]] || return 1
+  (( unquoted_carrier == 1 )) || return 1
+  # The shell expands braces before it globs, so `{a,b}*.log` is really the two
+  # words `a*.log b*.log`. Neither host can replay that expansion here, so a
+  # word that carries both keeps the line native instead of guessing.
+  (( unquoted_brace == 0 )) || return 0
+  if [[ -n "${ZSH_VERSION:-}" ]]; then
+    local -a candidates
+    local candidate
+    setopt local_options null_glob
+    local LC_ALL="$caller_lc_all"
+    local LANG="$caller_lang"
+    candidates=( ${~effective} )
+    for candidate in "${candidates[@]}"; do
+      # Real zsh globbing keeps a dangling symlink, and `-e` alone would follow
+      # the link and miss it; both hosts have to agree on that match.
+      [[ -e "$candidate" || -L "$candidate" ]] && return 0
+    done
+    return 1
+  fi
+  local matched
+  matched="$(
+    LC_ALL="$caller_lc_all" LANG="$caller_lang" command compgen -G "$effective" 2>/dev/null
+  )" || return 1
+  [[ -n "$matched" ]]
 }
 
 _cosh_command_veto() {
