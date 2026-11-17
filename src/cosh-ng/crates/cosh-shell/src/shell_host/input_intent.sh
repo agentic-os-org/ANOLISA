@@ -255,13 +255,16 @@ _cosh_word_globs_to_files() {
   local index=0
   local length="${#word}"
   local byte
+  local next
   local effective=""
   local unquoted_carrier=0
   local unquoted_brace=0
   # Remove quoting the way the shell does, then probe what actually reaches the
   # command. A carrier inside quotes or behind a backslash never expands, so it
   # is escaped in the probe pattern: `解释 "文?.log" 好吗` stays literal, while
-  # the unquoted `*` in `说明 "match"*.log` still names `match.log`.
+  # the unquoted `*` in `说明 "match"*.log` still names `match.log`. A literal
+  # backslash needs the same treatment: `compgen -G 'a\'*.log` reads the `\` as
+  # an escape and misses `a\b.log`, which both hosts do match.
   while (( index < length )); do
     byte="${word:$index:1}"
     (( index += 1 ))
@@ -270,7 +273,7 @@ _cosh_word_globs_to_files() {
         quote=""
       else
         case "$byte" in
-          '*'|'?'|'['|']') effective+="\\$byte" ;;
+          '\'|'*'|'?'|'['|']') effective+="\\$byte" ;;
           *) effective+="$byte" ;;
         esac
       fi
@@ -279,18 +282,41 @@ _cosh_word_globs_to_files() {
     if [[ "$quote" == '"' ]]; then
       if [[ "$byte" == '"' ]]; then
         quote=""
-      else
-        case "$byte" in
-          '*'|'?'|'['|']') effective+="\\$byte" ;;
-          *) effective+="$byte" ;;
-        esac
+        continue
       fi
+      # Inside double quotes a backslash only quotes `$`, `` ` ``, `"`, `\`
+      # and newline; every other backslash is plain content. Either way the
+      # character that survives must be escaped in the probe pattern.
+      if [[ "$byte" == '\' ]]; then
+        next="${word:$index:1}"
+        case "$next" in
+          '\'|'$'|'`'|'"'|$'\n')
+            (( index += 1 ))
+            if [[ "$next" == '\' ]]; then
+              effective+="\\\\"
+            else
+              case "$next" in
+                '*'|'?'|'['|']') effective+="\\$next" ;;
+                *) effective+="$next" ;;
+              esac
+            fi
+            ;;
+          *)
+            effective+="\\\\"
+            ;;
+        esac
+        continue
+      fi
+      case "$byte" in
+        '\'|'*'|'?'|'['|']') effective+="\\$byte" ;;
+        *) effective+="$byte" ;;
+      esac
       continue
     fi
     if (( escaped == 1 )); then
       escaped=0
       case "$byte" in
-        '*'|'?'|'['|']') effective+="\\$byte" ;;
+        '\'|'*'|'?'|'['|']') effective+="\\$byte" ;;
         *) effective+="$byte" ;;
       esac
       continue
