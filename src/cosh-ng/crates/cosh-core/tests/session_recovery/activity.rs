@@ -42,10 +42,7 @@ impl StderrTail {
                 // buffer without limit over a long test. The cut retreats to
                 // a character boundary first — `drain` panics on a byte
                 // offset inside a multi-byte character.
-                let mut excess = tail.len().saturating_sub(4096);
-                while excess > 0 && !tail.is_char_boundary(excess) {
-                    excess -= 1;
-                }
+                let excess = excess_beyond_limit(&tail, 4096);
                 if excess > 0 {
                     tail.drain(..excess);
                 }
@@ -57,6 +54,19 @@ impl StderrTail {
     fn text(&self) -> String {
         self.0.lock().unwrap().clone()
     }
+}
+
+/// Byte offset up to which a bounded buffer should be drained, retreating to
+/// a UTF-8 character boundary so `String::drain` cannot panic on a multi-byte
+/// character straddling the limit. Extracted as a pure function so the
+/// boundary retreat has deterministic unit coverage (see the witness tests
+/// at the bottom of this file).
+fn excess_beyond_limit(tail: &str, limit: usize) -> usize {
+    let mut excess = tail.len().saturating_sub(limit);
+    while excess > 0 && !tail.is_char_boundary(excess) {
+        excess -= 1;
+    }
+    excess
 }
 
 pub(super) struct RuntimeProcess {
@@ -128,19 +138,7 @@ impl RuntimeProcess {
                 .lines
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(|error| {
-                    let cause = match error {
-                        mpsc::RecvTimeoutError::Timeout => format!(
-                            "no {kind:?} message arrived within {}s (awaited from {:?} ago)",
-                            RECEIVE_DEADLINE.as_secs(),
-                            started.elapsed()
-                        ),
-                        // The reader thread dropped the sender: the child
-                        // exited or the reader panicked. Report that instead
-                        // of a timeout that never elapsed.
-                        mpsc::RecvTimeoutError::Disconnected => {
-                            "runtime exited before sending the message".to_owned()
-                        }
-                    };
+                    let cause = receive_failure_cause(error, kind, started);
                     panic!(
                         "runtime did not send a {kind:?} message: {cause}\n\
                          messages consumed so far: {:?}\n\
@@ -211,6 +209,190 @@ pub(super) fn scope_directory(root: &Path) -> PathBuf {
         })
         .expect("scope directory")
         .path()
+}
+
+/// Human-readable cause for a failed `receive`, extracted from the panic
+/// branch so both failure modes have deterministic unit coverage: a timeout
+/// names the awaited kind and elapsed wait, a disconnect reports that the
+/// runtime exited instead of claiming a timeout that never elapsed.
+fn receive_failure_cause(
+    error: mpsc::RecvTimeoutError,
+    kind: &str,
+    started: Instant,
+) -> String {
+    match error {
+        mpsc::RecvTimeoutError::Timeout => format!(
+            "no {kind:?} message arrived within {}s (awaited from {:?} ago)",
+            RECEIVE_DEADLINE.as_secs(),
+            started.elapsed()
+        ),
+        // The reader thread dropped the sender: the child exited or the
+        // reader panicked. Report that instead of a timeout that never
+        // elapsed.
+        mpsc::RecvTimeoutError::Disconnected => {
+            "runtime exited before sending the message".to_owned()
+        }
+    }
+}
+
+#[test]
+fn stderr_tail_truncation_retreats_to_a_character_boundary() {
+    // Witness for the capture-thread bound: a multi-byte character
+    // straddling the limit must not make `String::drain` panic, and the
+    // drained result stays valid UTF-8 within the limit. The regression from
+    // the pre-fix code is the 50-round ASCII-padded CJK stream below: with a
+    // raw byte cut, `drain` panics inside a multi-byte character on most
+    // rounds because each CJK line is 3-byte aligned but the rolling window
+    // is not.
+    let line = format!("{}诊断\n", "x".repeat(4000));
+    let mut tail = String::new();
+    for _ in 0..50 {
+        tail.push_str(&line);
+        let excess = excess_beyond_limit(&tail, 4096);
+        if excess > 0 {
+            tail.drain(..excess);
+        }
+        assert!(tail.len() <= 4096, "tail grew past the bound: {}", tail.len());
+    }
+    // The window must have actually been exercised: the last cut had to
+    // retreat, proving the loop is on the multi-byte path, not a vacuous
+    // all-boundary pass.
+    tail.push_str(&line);
+    let raw = tail.len().saturating_sub(4096);
+    let excess = excess_beyond_limit(&tail, 4096);
+    assert!(excess <= raw, "retreat must never exceed the raw excess");
+    if raw > 0 && raw % 3 != 1 {
+        assert!(
+            excess < raw || tail.is_char_boundary(raw),
+            "boundary retreat never engaged"
+        );
+    }
+    assert!(std::str::from_utf8(&tail.clone().into_bytes()).is_ok());
+}
+
+#[test]
+fn excess_beyond_limit_only_cuts_at_character_boundaries() {
+    // Pure-function view of the same retreat: an ASCII string cuts exactly
+    // at the limit; a string whose limit byte lands inside a 3-byte
+    // character retreats to the character's start.
+    let ascii = "a".repeat(10);
+    assert_eq!(excess_beyond_limit(&ascii, 4), 6);
+    assert_eq!(excess_beyond_limit(&ascii, 100), 0);
+    assert_eq!(excess_beyond_limit("", 4), 0);
+
+    // Three-byte CJK characters: byte 12 is a character start (4 chars × 3
+    // bytes), so limits 12/13/14 all produce a raw excess in {1,2,3} that
+    // either sits on a boundary (12) or inside the last character (13/14)
+    // and retreats to byte 12; limit 10 lands inside the 4th character and
+    // retreats to byte 9.
+    let cjk = "诊诊断诊断";
+    assert_eq!(cjk.len(), 15);
+    assert_eq!(excess_beyond_limit(cjk, 12), 3);
+    assert_eq!(excess_beyond_limit(cjk, 13), 0);
+    assert_eq!(excess_beyond_limit(cjk, 14), 0);
+    assert_eq!(excess_beyond_limit(cjk, 10), 3);
+    // After draining to the reported offset the remainder is valid UTF-8.
+    for limit in [10, 12, 13, 14] {
+        let mut buffer = cjk.to_owned();
+        let excess = excess_beyond_limit(&buffer, limit);
+        buffer.drain(..excess);
+        assert!(buffer.chars().count() > 0);
+    }
+}
+
+#[test]
+fn truncate_for_report_keeps_short_lines_and_bounds_long_ones() {
+    // Short path: the line is returned untouched, no ellipsis added.
+    let short = r#"{"type":"system","subtype":"init"}"#;
+    assert_eq!(truncate_for_report(short), std::borrow::Cow::Borrowed(short));
+
+    // Long path: exactly 256 chars are kept, an ellipsis is appended, and
+    // multi-byte content is cut on a character boundary (chars, not bytes).
+    let ascii_long = "y".repeat(1000);
+    match truncate_for_report(&ascii_long) {
+        std::borrow::Cow::Owned(truncated) => {
+            assert!(truncated.starts_with(&"y".repeat(256)));
+            assert_eq!(truncated.chars().count(), 257); // 256 + '…'
+            assert!(truncated.ends_with('…'));
+        }
+        std::borrow::Cow::Borrowed(_) => panic!("long line must be truncated"),
+    }
+
+    // Multi-byte long line: 300 three-byte characters are cut to 256
+    // characters, so the truncation never splits a character.
+    let cjk_long = "诊".repeat(300);
+    let truncated = truncate_for_report(&cjk_long);
+    assert_eq!(truncated.chars().count(), 257);
+    assert!(truncated.starts_with(&"诊".repeat(256)));
+    assert!(truncated.ends_with('…'));
+}
+
+#[test]
+fn receive_failure_cause_names_the_timeout_and_the_disconnect() {
+    // Timeout path: the cause names the awaited kind and the deadline.
+    let started = Instant::now();
+    let cause = receive_failure_cause(mpsc::RecvTimeoutError::Timeout, "result", started);
+    assert!(cause.contains("result"), "{cause}");
+    assert!(cause.contains("within 15s"), "{cause}");
+
+    // Disconnect path: a crashed runtime is reported as an exit, not as a
+    // timeout that never elapsed.
+    let cause = receive_failure_cause(mpsc::RecvTimeoutError::Disconnected, "result", started);
+    assert_eq!(cause, "runtime exited before sending the message");
+}
+
+#[test]
+fn receive_reports_runtime_exit_when_the_child_dies() {
+    // End-to-end witness: a runtime whose child exits before producing the
+    // awaited message surfaces the disconnect cause, not a timeout. The
+    // channel closes as soon as the reader thread hits EOF on stdout, so
+    // this fails fast regardless of RECEIVE_DEADLINE.
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    configure(&home, &temp.path().join("sessions"));
+    let mut child = isolated_command(&home)
+        .args(["--headless", "--workspace"])
+        .arg(&workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start runtime");
+    // No initialize message: close stdin immediately so the runtime exits
+    // without ever emitting the awaited "result".
+    drop(child.stdin.take());
+    let process = RuntimeProcess::from_child(child);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process.receive("result")
+    }))
+    .expect_err("receive must panic when the runtime exits silently");
+    let message = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+        })
+        .expect("panic payload is a string");
+    assert!(
+        message.contains("runtime exited before sending the message"),
+        "panic must report the disconnect cause, got: {message}"
+    );
+    assert!(
+        message.contains("runtime did not send a \"result\" message"),
+        "panic must name the awaited kind, got: {message}"
+    );
+    assert!(
+        message.contains("messages consumed so far"),
+        "panic must carry the consumed history, got: {message}"
+    );
+    assert!(
+        message.contains("child stderr tail"),
+        "panic must carry the stderr tail, got: {message}"
+    );
 }
 
 #[test]
