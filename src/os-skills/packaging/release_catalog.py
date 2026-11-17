@@ -68,6 +68,7 @@ def release_manifest(text: str, released: List[Path]) -> str:
     if SKILLS_KEY.search(output[0]):
         raise ValueError("unsupported top-level OS Skills adapter declaration")
     seen = set()
+    covered = set()
     framework = None
     for start, end in zip(starts, starts[1:] + [len(text)]):
         section = text[start:end]
@@ -113,9 +114,15 @@ def release_manifest(text: str, released: List[Path]) -> str:
             seen.add(key)
             if entry_names[0] not in names:
                 continue
+            covered.add(entry_names[0])
         elif "adapters" in header or SKILLS_KEY.search(contents):
             raise ValueError(f"unsupported OS Skills adapter declaration in {header}")
         output.append(section)
+    missing = sorted(names - covered)
+    if missing:
+        raise ValueError(
+            f"released Skill has no adapter entry in the OS Skills catalog: {missing[0]}"
+        )
     return "".join(output)
 
 

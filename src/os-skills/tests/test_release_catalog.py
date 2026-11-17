@@ -67,6 +67,24 @@ class ReleaseCatalogCliTest(unittest.TestCase):
                 list(destination.rglob("SKILL.md")), [destination / manifest]
             )
 
+    def test_manifest_rejects_released_skill_without_adapter_entry(self) -> None:
+        # A released Skill whose adapter entries were dropped from
+        # component.toml must fail the manifest instead of being shipped
+        # under share/anolisa/skills without a registering entry.
+        text = (self.source / "component.toml").read_text(encoding="utf-8")
+        text = text.replace(
+            '[[adapters.hermes.skills]]\nname = "released"\n'
+            'source = "{datadir}/skills/released/"\n',
+            "",
+        )
+        (self.source / "component.toml").write_text(text, encoding="utf-8")
+        output = self.source / "missing.toml"
+        result = self.run_catalog("manifest", str(self.source), str(output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("released", result.stderr)
+        self.assertIn("no adapter entry", result.stderr)
+        self.assertFalse(output.exists())
+
     def test_missing_action_reports_usage(self) -> None:
         result = self.run_catalog()
         self.assertEqual(result.returncode, 2)
