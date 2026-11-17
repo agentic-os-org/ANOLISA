@@ -5,7 +5,7 @@
 [Design index](README.md) · [Architecture](architecture.md)
 
 `aw_core::admission` owns Hook policy admission rules, admitted plan types and
-tool selector intersection. It binds configuration parsing, the exact-byte
+target-specific requirements supplied by `aw_config::requirements`. It binds configuration parsing, the exact-byte
 SHA-256 revision, the target Agent, trusted Adapter capabilities and admitted
 Hook steps into immutable Core types while exposing pure rule helpers for
 callers that already hold a validated `aw_config::Configuration`.
@@ -47,6 +47,31 @@ carrier (`Description` and `ValidatedConfig`) and is re-exported by
 `AdmissionError` wraps `aw_config::Error` and carries
 `AdmissionError::Rejected` for Core-owned admission rule rejections without
 changing `aw_core::Error` used by `Core::prepare` and `Core::execute`.
+
+## Desired requirement projection
+
+`aw_config::requirements::project(&configuration, target)` returns borrowed
+`HookRequirement` events and their ordered `StepRequirement` entries. It exposes
+the effective event budget, availability requirement, event and step selectors,
+Provider reference, effects and separate failure action. The original validated
+event and step fields remain accessible for admission checks of guards,
+protocols, operations and native steps. Projection requires no entry mode,
+Provider evidence, process, socket or installation.
+
+Static admission consumes this projection. Disabled events and steps are omitted;
+selector intersections proven disjoint for the configured Adapter are excluded.
+Exact foreign native selectors cannot match. Normalized/native alias pairs stay
+applicable until the Adapter supplies an actual tool identity. Filtering preserves
+step order and does not change the runtime intersection of event and step
+selectors. An enabled event with no enabled steps still requires capability
+admission, even with `required: false`; an event whose enabled steps are all
+projected out is omitted. Event budgets use `execution.default_event_budget_ms`
+when no event override is present. Native steps retain their raw semantics and
+have no invented Provider effects.
+
+The projection describes desired policy and carries no capability proof. Source
+resolution and deployment compilation can consume it alongside the existing
+Admission API; runtime registration and execution still use admitted policy.
 
 ## Invariants and runtime boundaries
 

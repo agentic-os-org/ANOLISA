@@ -1,8 +1,6 @@
 //! Pure capability admission rules for structured Providers and native hook steps.
 
-use super::{
-    selection, AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence, StepExecution,
-};
+use super::{AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence, StepExecution};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -92,35 +90,15 @@ pub fn preflight(
         spec["execution"]["guarantee"] == "native_hook",
         "only native_hook execution can be admitted",
     )?;
-    let events = spec["events"].as_object().ok_or(AdmissionError::Rejected(
-        "configuration events must be an object",
-    ))?;
     let mut candidates = Vec::new();
-    for (event_name, event) in events {
-        if event["enabled"] != true {
-            continue;
-        }
-        let event_tools = tool_selectors(event)?;
-        if !selection::overlap(&event_tools, &["*".into()], &capabilities.adapter) {
-            continue;
-        }
-        let mut enabled = Vec::new();
-        let mut has_enabled_steps = false;
-        for step in event["steps"]
-            .as_array()
-            .ok_or(AdmissionError::Rejected("event steps must be an array"))?
-        {
-            if step["enabled"] == false {
-                continue;
-            }
-            has_enabled_steps = true;
-            if selection::overlap(&event_tools, &tool_selectors(step)?, &capabilities.adapter) {
-                enabled.push(step);
-            }
-        }
-        if has_enabled_steps && enabled.is_empty() {
-            continue;
-        }
+    for requirement in aw_config::requirements::project(config, target)? {
+        let event_name = requirement.event;
+        let event = requirement.configuration();
+        let enabled: Vec<_> = requirement
+            .steps
+            .iter()
+            .map(aw_config::requirements::StepRequirement::configuration)
+            .collect();
         require(
             supported_event(event_name),
             "enabled event is not supported",

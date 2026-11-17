@@ -6,6 +6,7 @@
 //! to the service and adapter layers; this crate never starts those components.
 
 pub mod native;
+pub mod requirements;
 
 mod parsing;
 mod policy_update;

@@ -4,8 +4,8 @@
 
 [设计索引](README.md) · [架构总览](architecture.md)
 
-`aw_core::admission` 统一持有 Hook 策略准入规则、已准入步骤类型与工具选择器交集
-实现。该模块把配置解析结果、原始字节 SHA-256 版本号、目标 Agent、可信 Adapter
+`aw_core::admission` 统一持有 Hook 策略准入规则和已准入步骤类型，并消费
+`aw_config::requirements` 提供的目标需求投影。该模块把配置解析结果、原始字节 SHA-256 版本号、目标 Agent、可信 Adapter
 能力声明与准入后的 Hook 步骤绑定为不可变 Core 类型，同时为已持有
 `aw_config::Configuration` 的调用方提供纯函数规则入口。
 
@@ -42,6 +42,25 @@
 `AdmissionError` 封装 `aw_config::Error`，并通过 `AdmissionError::Rejected` 表达
 Core 准入规则拒绝原因，保持 `Core::prepare` 和 `Core::execute` 使用的
 `aw_core::Error` 不变。
+
+## 配置需求投影
+
+`aw_config::requirements::project(&configuration, target)` 返回借用配置的
+`HookRequirement` 事件及其有序 `StepRequirement` 步骤，提供生效的事件预算、
+可用性要求、事件与步骤选择器、Provider 引用、效果及独立的失败动作。调用方仍可
+读取原始事件和步骤字段，继续检查 guard、协议、operation 和原生步骤。投影无需
+入口模式、Provider 证据、进程、socket 或安装操作。
+
+静态准入直接消费此投影。禁用的事件和步骤被略过；已证明无法匹配目标 Adapter 的
+选择器交集被排除。属于其他 Adapter 的精确原生选择器无法匹配；标准工具名与原生
+工具名之间的未知别名关系保留适用，等待 Adapter 提供实际工具身份。过滤保留步骤
+顺序，运行时仍取事件与步骤选择器的交集。启用事件没有启用步骤时仍须能力准入，
+包括 `required: false`；若所有启用步骤均被选择器排除，则该事件被略过。事件预算
+未配置时使用 `execution.default_event_budget_ms`。原生步骤保留原始语义，不补造
+Provider 效果。
+
+投影描述期望策略，不携带能力证明。Source 求解和部署编译可结合现有 Admission API
+消费投影；运行时登记与执行继续使用已准入策略。
 
 ## 不变量与运行时边界
 
