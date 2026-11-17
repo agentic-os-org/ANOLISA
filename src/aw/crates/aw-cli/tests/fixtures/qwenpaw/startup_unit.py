@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import signal
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -164,6 +165,14 @@ class PathTests(unittest.TestCase):
             "qwenpaw.plugins": plugins,
             "qwenpaw.plugins.module_isolation": isolation,
         }
+
+    def test_owned_helper_loads_with_isolated_python(self):
+        subprocess.run(
+            [sys.executable, "-I", "-c",
+             f"import runpy; runtime=runpy.run_path({str(LAUNCH_SPEC.origin)!r}); "
+             "assert callable(runtime['accelerate_paths'])"],
+            check=True, capture_output=True, timeout=5,
+        )
 
     def test_only_the_verified_version_uses_native_path_resolution(self):
         original, isolation, modules = self.normalized()

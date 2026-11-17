@@ -320,6 +320,10 @@ impl Prepared {
     ) -> Result<LaunchPlan> {
         let mut plan = self.configure_in(context, context.files.directory())?;
         let plugin = self.plugin.as_ref().ok_or("missing staged plugin")?;
+        context.files.write(
+            "aw_paths.py",
+            include_bytes!("../../native/qwenpaw/aw_paths.py"),
+        )?;
         let launcher = context.files.write(
             "qwenpaw-launch.py",
             include_bytes!("../../native/qwenpaw/launch.py"),

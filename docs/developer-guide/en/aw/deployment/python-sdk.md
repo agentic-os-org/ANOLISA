@@ -43,6 +43,25 @@ from aw_sdk.qwenpaw import QwenPawPlugin
 plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
 ```
 
+The QwenPaw-specific entry also attempts the Adapter's optional plugin-isolation
+path acceleration for verified QwenPaw `2.1.1b3`. It starts no services, preserves
+native isolation and cleanup, and skips acceleration for other versions or an
+unavailable seam. Importing the plugin installs it for subsequent loading;
+plugins loaded earlier keep their original startup cost. An application with an
+early Python startup entry can cover all plugin loading by calling:
+
+```python
+from aw_sdk.qwenpaw import prepare_runtime
+
+accelerated = prepare_runtime()  # Before QwenPaw starts loading plugins.
+```
+
+The boolean reports whether acceleration is installed. Repeated calls are safe;
+the patch lasts until process exit. This optional Adapter optimization changes
+neither SDK capability admission nor the later cooperative PID attachment.
+`aw run` uses the same implementation. Disable the AW plugin and remove an
+explicit preparation call, then restart the App to restore the original resolver.
+
 A single `qwenpaw` target is selected automatically; pass `target` for multiple
 targets. Set an explicit private `daemon.endpoint` or `daemon.state_dir`.
 The configuration selects the earliest protected boundary. With `input.submit`

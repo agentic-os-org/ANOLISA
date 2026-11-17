@@ -35,6 +35,21 @@ from aw_sdk.qwenpaw import QwenPawPlugin
 plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
 ```
 
+QwenPaw 专用入口同时尝试安装 Adapter 的插件隔离路径加速，仅适用于已验证的
+QwenPaw `2.1.1b3`。安装不启动服务，保留原生隔离与清理；其他版本或接点不可用时
+跳过加速。通过插件导入时，从安装后的加载过程开始生效，已经加载的插件保留此前耗时。
+业务有早期 Python 启动入口时，可在 QwenPaw 加载插件前调用，让后续全部插件受益：
+
+```python
+from aw_sdk.qwenpaw import prepare_runtime
+
+accelerated = prepare_runtime()  # Before QwenPaw starts loading plugins.
+```
+
+返回值表示加速是否已安装。重复调用安全，补丁持续到进程退出。这项 Adapter 可选优化
+不改变 SDK 能力准入及后续 PID 协作 attach；`aw run` 复用同一实现。关闭 AW 插件并移除
+显式初始化调用后，重启 App 即恢复原生解析。
+
 只有一个 `qwenpaw` 目标时自动选择，多个目标时传入 `target`。
 `daemon.endpoint` 或 `daemon.state_dir` 采用明确的私有路径。
 配置决定最早保护边界：启用 `input.submit` 时，每个 reply 在模型派发前等待 Ready 和 Scope；

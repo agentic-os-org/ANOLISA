@@ -22,6 +22,7 @@ class Build(build_py):
         (native / "__init__.py").write_text("")
         for name in (
             "sdk.py",
+            "aw_paths.py",
             "configured.py",
             "deferred.py",
             "plugin.py",
