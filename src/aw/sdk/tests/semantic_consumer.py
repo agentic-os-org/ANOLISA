@@ -1,6 +1,7 @@
 """Adopt semantic decisions using only the installed public Python package."""
 
 import asyncio
+import os
 import sys
 from aw_sdk import AwError, Instance
 
@@ -28,6 +29,14 @@ async def main() -> None:
     )
     try:
         assert await instance.connect()
+        if os.environ.get("AW_SEMANTIC_EMPTY") == "1":
+            async with await instance.task() as task:
+                payload = {"session_id": "session", "call_id": "empty", "name": "bash", "input": {}}
+                for event in ("tool.before", "tool.after"):
+                    assert await task.emit(
+                        event, {**payload, **({"result": "done"} if event == "tool.after" else {})}
+                    ) == {"decision": "continue", "coverage": "checked"}
+            return
         async with await instance.task() as task:
             assert await task.emit(
                 "input.submit", {"session_id": "session", "turn_id": "turn", "text": "deny"}

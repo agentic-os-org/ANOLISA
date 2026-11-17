@@ -44,6 +44,20 @@ fn matches_native(
     let after = event["name"] == "tool.after";
     let tool = &event["tool"];
     let (session, call, name, input, result, seam) = match adapter {
+        "sdk" => (
+            native["session_id"].clone(),
+            native["call_id"].clone(),
+            native["name"].clone(),
+            native["input"].clone(),
+            if after {
+                native["result"].clone()
+            } else {
+                Value::Null
+            },
+            native["api_version"] == "aw-hook-source/v1"
+                && matches!(event["name"].as_str(), Some("tool.before" | "tool.after"))
+                && native["event"] == event["name"],
+        ),
         "qoder" | "qoder-sdk" => (
             native["session_id"].clone(),
             native["tool_use_id"].clone(),

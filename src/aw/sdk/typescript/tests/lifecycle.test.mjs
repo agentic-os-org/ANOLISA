@@ -173,6 +173,47 @@ async function until(check) {
 }
 
 test(
+  "fallback detach releases retained tasks",
+  { timeout: 15000 },
+  async () => {
+    const server = await setup();
+    const client = instance(server.endpoint);
+    let moved = false;
+    try {
+      await server.start();
+      await client.connect();
+      const task = await client.task();
+      await rename(server.endpoint, `${server.endpoint}.held`);
+      moved = true;
+      assert.equal(
+        (await task.invoke(task.routes.hooks[0], payload())).code,
+        0,
+      );
+      await rename(`${server.endpoint}.held`, server.endpoint);
+      moved = false;
+      assert(task.fallback);
+      await client.detachControl();
+      await task.close();
+      assert(task.closed);
+      assert(!client.tasks.has(task));
+      await client.close();
+      assert.equal(
+        (await rpc(server.endpoint, null, { method: "status" }, 500)).result
+          .bindings,
+        0,
+      );
+    } finally {
+      if (moved) await rename(`${server.endpoint}.held`, server.endpoint);
+      try {
+        await client.close();
+      } finally {
+        await server.close();
+      }
+    }
+  },
+);
+
+test(
   "required background recovery retires the generation without fallback",
   { timeout: 15000 },
   async () => {
@@ -371,6 +412,46 @@ test(
     } finally {
       await Promise.all([tool.close(), gate.close()]);
       await Promise.all([client.close(), required.close()]);
+    }
+  },
+);
+
+test(
+  "fallback close joins detach before root removal",
+  { timeout: 15000 },
+  async () => {
+    const server = await setup();
+    const client = instance(server.endpoint);
+    try {
+      await server.start();
+      await client.connect();
+      const task = await client.task();
+      client.lost(task.connection);
+      let released = false;
+      let concurrentClose;
+      Object.defineProperty(task.connection, "released", {
+        get() {
+          return released;
+        },
+        set(value) {
+          // The root is removed remotely, before its local completion flag is set.
+          concurrentClose = task.close();
+          void concurrentClose.catch(() => {});
+          released = value;
+        },
+      });
+      await client.detachControl();
+      await concurrentClose;
+      assert(task.closed);
+      assert(!client.tasks.has(task));
+      assert.equal(
+        (await rpc(server.endpoint, null, { method: "status" }, 500)).result
+          .bindings,
+        0,
+      );
+    } finally {
+      await client.close();
+      await server.close();
     }
   },
 );

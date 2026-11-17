@@ -135,9 +135,13 @@ class Acting:
 
     async def evaluate(self, event: str, payload: dict) -> ToolResponse | dict | None:
         result = None
-        for hook in self.config["hooks"]:
-            if hook["event"] != event or self.task.fallback:
-                continue
+        payload = dict(payload)
+        hooks = [hook for hook in self.config["hooks"] if hook["event"] == event]
+        if event == "tool.after":
+            hooks.reverse()
+        for hook in hooks:
+            if self.task.fallback:
+                break
             middleware = Evaluation(self.config, hook)
             middleware.scope = self.task
             current = await middleware._run(payload)
@@ -145,6 +149,8 @@ class Acting:
                 result = current
                 if event == "tool.before" and isinstance(current, ToolResponse):
                     return current
+                if event == "tool.after":
+                    payload["tool_response"] = current.model_dump(mode="json")
         return None if self.task.fallback else result
 
     @skill_context
