@@ -278,6 +278,12 @@ fn matched_tail_glob_keeps_the_line_native() {
             !arguments_have_no_unquoted_expansion(shell, "说明 {a,b}*.log", &dir),
             "{shell}: a brace pair next to an unquoted glob must stay native"
         );
+        // The bail runs before any file probe, so a brace pair whose glob
+        // matches nothing still stays native: conservative, not a match.
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "说明 {a,b}*.none", &dir),
+            "{shell}: a brace pair keeps the line native even without a match"
+        );
         // Quoted braces never brace-expand, and the quoted `?` is literal, so
         // neither of these matches the fixtures.
         for input in ["解释 \"{a,b}\"*.log 是什么意思", "说明 \"文?\"*.log"] {
