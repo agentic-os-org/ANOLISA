@@ -188,7 +188,11 @@ fn unquoted_expansion_guard_matrix() {
         // A question mark closing a Han word is punctuation, not a glob.
         "你好你是谁?",
         "你还好吗? 我想问问",
+        "你还好吗?我想问问",
         "这个是干什么的?",
+        // The whole `?` run is consumed at once, so a double question mark
+        // after Han text is punctuation, not two command-position carriers.
+        "什么是mutex??",
         // Quoting suppresses expansion, so a quoted carrier never reaches the
         // classifier as a rewritten word.
         "解释 \"文?.log\" 好吗",

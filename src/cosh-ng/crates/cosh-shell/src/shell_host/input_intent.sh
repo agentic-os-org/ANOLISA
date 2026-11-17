@@ -152,7 +152,7 @@ _cosh_arguments_have_no_unquoted_expansion() {
   local length="${#input}"
   local byte
   local next
-  local previous
+  local probe
   local word_start=0
   local word_carrier=0
 
@@ -194,15 +194,25 @@ _cosh_arguments_have_no_unquoted_expansion() {
           started=1
           continue
         fi
-        # A `?` that closes a word after non-ASCII text is the question mark of
-        # a Han sentence (`你好你是谁?`, `你还好吗? 我想问问`), not a glob: a
-        # one-character glob would have to match a file, and the question mark
-        # of an ASCII question (`why?`) stays a carrier because that word can
-        # glob (`why1`) as readily as it can be a question.
-        next="${input:$index:1}"
-        previous="${input:$((index - 2)):1}"
-        if [[ -z "$next" || "$next" == ' ' || "$next" == $'\t' ]] \
-           && [[ "$previous" == [!\ -~] ]]; then
+        # Judge the whole `?` run at once: the second mark of `什么是mutex??`
+        # must not be re-read as another command-position carrier.
+        probe=$index
+        while [[ "${input:$probe:1}" == '?' ]]; do
+          (( probe += 1 ))
+        done
+        # A `?` run that closes a word after non-ASCII text is the question mark
+        # of a Han sentence (`你好你是谁?`, `你还好吗? 我想问问`,
+        # `你还好吗?我想问问`), not a glob: a one-character glob would have to
+        # match a file. The run may be followed by more Han text, not only by
+        # whitespace. The question mark of an ASCII question (`why?`) stays a
+        # carrier because that word can glob (`why1`) as readily as it can be a
+        # question, and ASCII text after the run (`中文?abc`) keeps the line a
+        # glob candidate.
+        next="${input:$probe:1}"
+        if [[ "${input:$word_start:$((index - 1 - word_start))}" == *[!\ -~]* ]] \
+           && { [[ -z "$next" || "$next" == ' ' || "$next" == $'\t' ]] \
+                || [[ "$next" == [!\ -~] ]]; }; then
+          index=$probe
           started=1
           continue
         fi
