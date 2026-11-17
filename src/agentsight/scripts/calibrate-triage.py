@@ -25,6 +25,7 @@ import json
 import sqlite3
 import sys
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 #: Default answer-length ceiling below which a tool-less single-turn session is
@@ -89,39 +90,39 @@ def main():
     ap.add_argument("--samples", type=int, default=25, help="excluded rows to print")
     args = ap.parse_args()
 
-    try:
-        uri = Path(args.db).resolve().as_uri() + "?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
-        rows = conn.execute(
-            "SELECT session_id, first_user_message, atif_json FROM collected_trajectories"
-        ).fetchall()
-    except sqlite3.Error as e:
-        print(f"cannot read {args.db}: {e}", file=sys.stderr)
-        return 1
-
     buckets = Counter()
     excluded = []
     tool_dist = Counter()
     unparsable = 0
+    total = 0
 
-    for _session_id, first_msg, atif_json in rows:
-        try:
-            m = measure(atif_json)
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            unparsable += 1
-            continue
+    try:
+        uri = Path(args.db).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            rows = conn.execute(
+                "SELECT session_id, first_user_message, atif_json FROM collected_trajectories"
+            )
+            for _session_id, first_msg, atif_json in rows:
+                total += 1
+                try:
+                    m = measure(atif_json)
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    unparsable += 1
+                    continue
 
-        bucket = classify(m, args.max_agent_len)
-        buckets[bucket] += 1
-        if bucket != "substantive":
-            excluded.append((bucket, m, (first_msg or "")[:70]))
+                bucket = classify(m, args.max_agent_len)
+                buckets[bucket] += 1
+                if bucket != "substantive":
+                    excluded.append((bucket, m, (first_msg or "")[:70]))
 
-        n = m["n_tool_calls"]
-        tool_dist[
-            "0" if n == 0 else "1-5" if n <= 5 else "6-20" if n <= 20 else "20+"
-        ] += 1
+                n = m["n_tool_calls"]
+                tool_dist[
+                    "0" if n == 0 else "1-5" if n <= 5 else "6-20" if n <= 20 else "20+"
+                ] += 1
+    except sqlite3.Error as e:
+        print(f"cannot read {args.db}: {e}", file=sys.stderr)
+        return 1
 
-    total = len(rows)
     if total == 0:
         print("database has no collected trajectories", file=sys.stderr)
         return 1
