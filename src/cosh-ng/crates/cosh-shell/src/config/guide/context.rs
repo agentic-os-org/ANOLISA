@@ -78,7 +78,7 @@ impl GuideStore {
         if request.kind != super::InviteKind::Failure {
             return Err(Error::InvalidRequest);
         }
-        self.claim_prepared(Some(runtime), snapshot, request, now_ms, || {
+        self.claim_prepared(Some(runtime), snapshot, request, now_ms, None, || {
             self.save_failure_context_unlocked(id, event, now_ms)
         })
     }

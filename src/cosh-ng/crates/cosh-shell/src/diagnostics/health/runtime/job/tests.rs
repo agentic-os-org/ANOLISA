@@ -1,3 +1,4 @@
+use super::super::clock::HealthDeadline;
 use super::*;
 use nix::libc;
 use std::io;
@@ -76,9 +77,38 @@ fn deadline_covers_slow_exec_before_handler() {
 fn deadline_job_child() {
     install_worker_timeout_handler().expect("worker deadline handler");
     let marker = std::env::var("COSH_HEALTH_DEADLINE_TEST_MARKER").expect("test marker");
+    if std::env::var_os("COSH_HEALTH_TEST_TIMER_HANDOFF").is_some() {
+        super::super::clock::arm_alarm(HealthDeadline::after(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        fs::write(&marker, "ready").unwrap();
+        thread::sleep(Duration::from_millis(200));
+        fs::write(&marker, "survived").unwrap();
+        return;
+    }
+    if std::env::var_os("COSH_HEALTH_TEST_CLAMPED_COMMAND").is_some() {
+        use crate::diagnostics::health::collectors;
+        collectors::enter_worker_job(HealthDeadline::after(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        collectors::begin_worker_check(Duration::from_millis(20)).unwrap();
+        let result = collectors::run_health_command(
+            "/bin/sh",
+            &["-c", "printf command-ok"],
+            collectors::HealthCommandConfig::default(),
+        );
+        fs::write(
+            &marker,
+            match result {
+                Ok(output) => format!("{};exit={:?}", output.stdout, output.exit_code),
+                Err(error) => format!("{error:?}"),
+            },
+        )
+        .unwrap();
+        return;
+    }
     if std::env::var_os("COSH_HEALTH_TEST_OUTPUT_LIMIT").is_some() {
         use crate::diagnostics::health::collectors;
-        collectors::enter_worker_job(JobDeadline::after(Duration::from_secs(2)).unwrap()).unwrap();
+        collectors::enter_worker_job(HealthDeadline::after(Duration::from_secs(2)).unwrap())
+            .unwrap();
         let result = collectors::run_health_command(
             "/bin/sh",
             &["-c", "printf 1234567890"],
@@ -99,7 +129,8 @@ fn deadline_job_child() {
     }
     if std::env::var_os("COSH_HEALTH_TEST_FILTERED_DEADLINE").is_some() {
         use crate::diagnostics::health::collectors;
-        collectors::enter_worker_job(JobDeadline::after(Duration::from_secs(5)).unwrap()).unwrap();
+        collectors::enter_worker_job(HealthDeadline::after(Duration::from_secs(5)).unwrap())
+            .unwrap();
         collectors::begin_worker_check(Duration::from_millis(60)).unwrap();
         let result = collectors::run_health_command_filtered(
             "/bin/sh",
@@ -127,7 +158,7 @@ fn deadline_job_child() {
     }
     if std::env::var_os("COSH_HEALTH_DEADLINE_TEST_COMMAND").is_some() {
         crate::diagnostics::health::collectors::enter_worker_job(
-            JobDeadline::after(Duration::from_secs(2)).expect("command scope"),
+            HealthDeadline::after(Duration::from_secs(2)).expect("command scope"),
         )
         .expect("inherited group scope");
         fs::write(&marker, "ready").expect("ready marker");
@@ -182,6 +213,40 @@ fn one_command_output_limit_does_not_cancel_unrelated_worker_checks() {
         fs::read_to_string(&marker).unwrap(),
         "Err(OutputLimit);stopped=false"
     );
+}
+
+library_tests! {
+    #[test]
+    fn a_clamped_short_check_keeps_a_command_work_window() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("clamped-command");
+        let deadline = JobDeadline::after(Duration::from_secs(2)).unwrap();
+        let mut command = helper_command(&marker, deadline);
+        command.env("COSH_HEALTH_TEST_CLAMPED_COMMAND", "1");
+        let mut child = own_child(&mut command, deadline);
+        wait_exit(&child);
+        let _ = child.cleanup();
+        assert_eq!(fs::read_to_string(marker).unwrap(), "command-ok;exit=Some(0)");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn boottime_alarm_replaces_the_short_preexec_timer_after_initialization() {
+    let _guard = crate::diagnostics::test_env::env_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("timer-handoff");
+    let preexec = JobDeadline::after(Duration::from_millis(100)).unwrap();
+    let mut command = helper_command(&marker, preexec);
+    command.env("COSH_HEALTH_TEST_TIMER_HANDOFF", "1");
+    let mut child = own_child(
+        &mut command,
+        JobDeadline::after(Duration::from_secs(2)).unwrap(),
+    );
+    wait_exit(&child);
+    let _ = child.cleanup();
+    assert_eq!(fs::read_to_string(marker).unwrap(), "survived");
 }
 
 #[test]

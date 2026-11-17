@@ -263,7 +263,14 @@ pub(crate) fn primary_health_prompt_suggestion(
     report: &HealthScanReport,
     i18n: crate::I18n,
 ) -> Option<String> {
-    let item = sorted_try_items(report).into_iter().next()?;
+    let item = crate::diagnostics::health::select_try_items(
+        report,
+        &report.try_items,
+        crate::diagnostics::health::AdviceSurface::Bash,
+        1,
+    )
+    .into_iter()
+    .next()?;
     let prompt_id = item.prompt_id.unwrap_or(item.label_id);
     let prompt_args = if item.prompt_id.is_some() {
         &item.prompt_args
@@ -373,7 +380,12 @@ fn try_lines(
             spans: vec![Span::styled(intro, Style::default().fg(Color::Gray))],
         });
     }
-    for item in sorted_try_items(report).into_iter().take(limit) {
+    for item in crate::diagnostics::health::select_try_items(
+        report,
+        &report.try_items,
+        crate::diagnostics::health::AdviceSurface::Cosh,
+        limit,
+    ) {
         let prompt_id = item.prompt_id.unwrap_or(item.label_id);
         let prompt_args = if item.prompt_id.is_some() {
             &item.prompt_args

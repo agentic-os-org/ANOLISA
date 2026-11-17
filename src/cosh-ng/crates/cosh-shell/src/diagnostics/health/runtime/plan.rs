@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::super::model::{HealthCollector, HealthFactCoverage, HealthFactScope};
-use super::job::JobDeadline;
+use super::clock::HealthDeadline;
 use crate::config::{ConsentedProjectHook, CoshConfig, HealthConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +73,7 @@ pub(super) struct WorkerRequest {
     pub(super) scan_id: String,
     pub(super) started_at_ms: u128,
     pub(super) now_epoch_seconds: u64,
-    pub(super) deadline: JobDeadline,
+    pub(super) deadline: HealthDeadline,
     pub(super) context: ScanContext,
     pub(super) config: HealthConfig,
     pub(super) environment: Option<EnvironmentSnapshot>,
@@ -189,7 +189,7 @@ pub(super) fn checks(request: &WorkerRequest) -> Vec<CheckSpec> {
                 collector,
                 source: definition.source,
                 budget_ms: if request.context.passive() {
-                    definition.budget_ms
+                    super::super::plan::source_definition(definition.source).passive_budget_ms
                 } else if collector == ConfiguredService {
                     800
                 } else {
@@ -224,7 +224,7 @@ mod tests {
             scan_id: "health-1".into(),
             started_at_ms: 1,
             now_epoch_seconds: 1,
-            deadline: JobDeadline::after(Duration::from_secs(1)).unwrap(),
+            deadline: HealthDeadline::after(Duration::from_secs(1)).unwrap(),
             context: ScanContext::Resources,
             config: HealthConfig::default(),
             environment: None,
@@ -247,7 +247,7 @@ mod tests {
             scan_id: "health-1".into(),
             started_at_ms: 1,
             now_epoch_seconds: 1,
-            deadline: JobDeadline::after(Duration::from_secs(1)).unwrap(),
+            deadline: HealthDeadline::after(Duration::from_secs(1)).unwrap(),
             context: ScanContext::Resources,
             config: HealthConfig {
                 scan_mounts: Some(vec!["/data".into()]),

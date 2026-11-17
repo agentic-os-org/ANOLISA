@@ -47,9 +47,9 @@ case $- in
                             \builtin break
                         }
                         __cosh_bash_profile_start=$((10#${__cosh_bash_profile_up/./} * 10000))
-                        __cosh_bash_profile_deadline=$((__cosh_bash_profile_start + 450000 - __cosh_bash_profile_spent))
-                        if [[ $__cosh_bash_profile_deadline -gt $((__cosh_bash_profile_start + 350000)) ]]; then
-                            __cosh_bash_profile_deadline=$((__cosh_bash_profile_start + 350000))
+                        __cosh_bash_profile_deadline=$((__cosh_bash_profile_start + 400000 - __cosh_bash_profile_spent))
+                        if [[ $__cosh_bash_profile_deadline -gt $((__cosh_bash_profile_start + 300000)) ]]; then
+                            __cosh_bash_profile_deadline=$((__cosh_bash_profile_start + 300000))
                         fi
                         [[ -z $(\builtin trap -p DEBUG RETURN) &&
                            -x /usr/bin/timeout && -x /usr/bin/printf &&
@@ -62,17 +62,17 @@ case $- in
                            $__cosh_bash_profile_up != .* && ${#__cosh_bash_profile_up} -le 15 &&
                            ${__cosh_bash_profile_up//[0123456789]/} == . ]] || \builtin break
                         __cosh_bash_profile_now=$((10#${__cosh_bash_profile_up/./} * 10000))
-                        __cosh_bash_profile_helper_deadline=$((__cosh_bash_profile_deadline - 20000))
+                        __cosh_bash_profile_helper_deadline=$((__cosh_bash_profile_deadline - 40000))
                         __cosh_bash_profile_ms=$(((__cosh_bash_profile_helper_deadline - __cosh_bash_profile_now) / 1000))
                         [[ $__cosh_bash_profile_now -ge $__cosh_bash_profile_start &&
-                           $__cosh_bash_profile_ms -gt 0 && $__cosh_bash_profile_ms -le 350 ]] || \builtin break
+                           $__cosh_bash_profile_ms -gt 0 && $__cosh_bash_profile_ms -le 300 ]] || \builtin break
                         \builtin printf -v __cosh_bash_profile_timeout '0.%03d' "$__cosh_bash_profile_ms"
                         if ! __cosh_bash_profile_text=$(
                             {
                             /usr/bin/timeout --kill-after=0.005 "$__cosh_bash_profile_timeout" \
                                 /usr/libexec/anolisa/cosh-ng/cosh-shell health banner \
-                                --budget-ms "$__cosh_bash_profile_ms" \
-                                --bash-deadline-boottime-us "$__cosh_bash_profile_helper_deadline" </dev/null |
+                                --budget-ms 300 \
+                                --bash-deadline-boottime-us "$__cosh_bash_profile_deadline" </dev/null |
                                 (
                                     [[ ${LC_ALL-} == C || ${LC_ALL-} == POSIX ]] || LC_ALL=C
                                     __cosh_bash_profile_buffer=
@@ -98,9 +98,9 @@ case $- in
                            $__cosh_bash_profile_up != .* && ${#__cosh_bash_profile_up} -le 15 &&
                            ${__cosh_bash_profile_up//[0123456789]/} == . ]] || \builtin break
                         __cosh_bash_profile_now=$((10#${__cosh_bash_profile_up/./} * 10000))
-                        __cosh_bash_profile_ms=$(((__cosh_bash_profile_deadline - __cosh_bash_profile_now - 10000) / 1000))
+                        __cosh_bash_profile_ms=$(((__cosh_bash_profile_deadline - __cosh_bash_profile_now - 20000) / 1000))
                         [[ $__cosh_bash_profile_now -ge $__cosh_bash_profile_start &&
-                           $__cosh_bash_profile_ms -gt 0 && $__cosh_bash_profile_ms -le 350 ]] || \builtin break
+                           $__cosh_bash_profile_ms -gt 0 && $__cosh_bash_profile_ms -le 300 ]] || \builtin break
                         \builtin printf -v __cosh_bash_profile_timeout '0.%03d' "$__cosh_bash_profile_ms"
                         /usr/bin/timeout --kill-after=0.005 "$__cosh_bash_profile_timeout" \
                             /usr/bin/printf '%s' "$__cosh_bash_profile_text" </dev/null 2>/dev/null || \builtin :

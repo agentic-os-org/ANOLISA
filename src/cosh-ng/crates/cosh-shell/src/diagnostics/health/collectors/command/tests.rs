@@ -3,6 +3,31 @@ use crate::diagnostics::health::runtime::process::*;
 use std::process::Child;
 use std::sync::atomic::Ordering;
 
+library_tests! {
+    #[test]
+    fn command_cleanup_reserve_uses_the_effective_budget() {
+        let started = Instant::now();
+        for (budget_us, work_us) in [
+            (1_000, 750),
+            (10_000, 7_500),
+            (20_000, 15_000),
+            (30_000, 22_500),
+            (90_000, 67_500),
+            (120_000, 95_000),
+            (750_000, 725_000),
+        ] {
+            assert_eq!(
+                command_work_deadline(started, started + Duration::from_micros(budget_us)),
+                started + Duration::from_micros(work_us),
+                "effective budget {budget_us}us"
+            );
+        }
+        for deadline in [started, started - Duration::from_millis(1)] {
+            assert_eq!(command_work_deadline(started, deadline), deadline);
+        }
+    }
+}
+
 #[test]
 fn output_limit_stops_running_command_before_timeout() {
     let _guard = crate::diagnostics::test_env::env_guard();

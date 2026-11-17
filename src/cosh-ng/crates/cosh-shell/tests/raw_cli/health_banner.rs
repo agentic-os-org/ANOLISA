@@ -8,7 +8,7 @@ use wait_timeout::ChildExt;
 
 #[test]
 fn actual_health_banner_accepts_only_a_valid_automatic_deadline_with_captured_stdio() {
-    for mode in ["manual", "expired", "valid"] {
+    for mode in ["manual", "expired", "overwide", "valid"] {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().canonicalize().unwrap();
         let runtime = home.join("runtime");
@@ -35,10 +35,10 @@ fn actual_health_banner_accepts_only_a_valid_automatic_deadline_with_captured_st
                 unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut now) },
                 0
             );
-            let deadline = if mode == "valid" {
-                now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000 + 450_000
-            } else {
-                1
+            let deadline = match mode {
+                "valid" => now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000 + 250_000,
+                "overwide" => now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000 + 450_000,
+                _ => 1,
             };
             command.args(["--bash-deadline-boottime-us", &deadline.to_string()]);
         }
@@ -184,15 +184,14 @@ fn login_health_banner_frames_one_blank_line_above_and_below() {
             .stderr(Stdio::null());
         cmd
     };
-    // Warm the binary page cache so execve latency does not consume the
-    // worker's 350ms scan budget on loaded hosts.
-    if let Ok(mut warm) = command(boottime_us() + 450_000, Stdio::null()).spawn() {
+    // Warm the page cache before checking framing within the login budget.
+    if let Ok(mut warm) = command(boottime_us() + 250_000, Stdio::null()).spawn() {
         if warm.wait_timeout(Duration::from_secs(3)).unwrap().is_none() {
             let _ = warm.kill();
             let _ = warm.wait();
         }
     }
-    let mut child = command(boottime_us() + 450_000, Stdio::piped())
+    let mut child = command(boottime_us() + 250_000, Stdio::piped())
         .spawn()
         .unwrap();
     let status = child

@@ -15,15 +15,20 @@ pub(crate) fn session_health_questions(
     language: Language,
 ) -> Vec<SuggestionItem> {
     let i18n = crate::I18n::new(language);
-    sorted_try_items(report)
-        .into_iter()
-        .filter_map(|item| {
-            session_question(item, &i18n).map(|question| SuggestionItem {
-                id: item.id.clone(),
-                question,
-            })
+    crate::diagnostics::health::select_try_items(
+        report,
+        &report.try_items,
+        crate::diagnostics::health::AdviceSurface::Cosh,
+        3,
+    )
+    .into_iter()
+    .filter_map(|item| {
+        session_question(item, &i18n).map(|question| SuggestionItem {
+            id: item.id.clone(),
+            question,
         })
-        .collect()
+    })
+    .collect()
 }
 
 fn session_question(item: &HealthTryItem, i18n: &crate::I18n) -> Option<String> {

@@ -1,6 +1,8 @@
-use super::model::HealthCollector;
+use super::model::{HealthCollector, HealthMessageId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(super) enum SampleSource {
     Load,
     Meminfo,
@@ -11,6 +13,18 @@ pub(super) enum SampleSource {
     Environment,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FinishPolicy {
+    ReuseOnSuccess,
+    RetireAfterSource,
+}
+
+pub(super) struct SourceDefinition {
+    pub(super) source: SampleSource,
+    pub(super) passive_budget_ms: u64,
+    pub(super) finish_policy: FinishPolicy,
+}
+
 pub(super) struct CheckDefinition {
     pub(super) id: &'static str,
     pub(super) collector: HealthCollector,
@@ -18,7 +32,6 @@ pub(super) struct CheckDefinition {
     pub(super) judgement_dependencies: &'static [SampleSource],
     pub(super) fact_keys: &'static [&'static str],
     pub(super) passive: bool,
-    pub(super) budget_ms: u64,
 }
 
 const fn check(
@@ -28,7 +41,6 @@ const fn check(
     judgement_dependencies: &'static [SampleSource],
     fact_keys: &'static [&'static str],
     passive: bool,
-    budget_ms: u64,
 ) -> CheckDefinition {
     CheckDefinition {
         id,
@@ -37,15 +49,58 @@ const fn check(
         judgement_dependencies,
         fact_keys,
         passive,
-        budget_ms,
     }
 }
 
 use HealthCollector as C;
 use SampleSource as S;
 
+const fn source(
+    source: SampleSource,
+    passive_budget_ms: u64,
+    finish_policy: FinishPolicy,
+) -> SourceDefinition {
+    SourceDefinition {
+        source,
+        passive_budget_ms,
+        finish_policy,
+    }
+}
+
+const LOAD_SOURCE: SourceDefinition = source(S::Load, 30, FinishPolicy::ReuseOnSuccess);
+const MEMINFO_SOURCE: SourceDefinition = source(S::Meminfo, 30, FinishPolicy::ReuseOnSuccess);
+const HOST_SOURCE: SourceDefinition = source(S::Host, 30, FinishPolicy::ReuseOnSuccess);
+const FILESYSTEMS_SOURCE: SourceDefinition =
+    source(S::Filesystems, 100, FinishPolicy::RetireAfterSource);
+const KERNEL_SOURCE: SourceDefinition = source(S::Kernel, 120, FinishPolicy::RetireAfterSource);
+const SERVICES_SOURCE: SourceDefinition = source(S::Services, 800, FinishPolicy::RetireAfterSource);
+const ENVIRONMENT_SOURCE: SourceDefinition =
+    source(S::Environment, 100, FinishPolicy::ReuseOnSuccess);
+
+pub(super) const SOURCES: &[SourceDefinition] = &[
+    LOAD_SOURCE,
+    MEMINFO_SOURCE,
+    HOST_SOURCE,
+    FILESYSTEMS_SOURCE,
+    KERNEL_SOURCE,
+    SERVICES_SOURCE,
+    ENVIRONMENT_SOURCE,
+];
+
+pub(super) fn source_definition(source: SampleSource) -> &'static SourceDefinition {
+    match source {
+        S::Load => &LOAD_SOURCE,
+        S::Meminfo => &MEMINFO_SOURCE,
+        S::Host => &HOST_SOURCE,
+        S::Filesystems => &FILESYSTEMS_SOURCE,
+        S::Kernel => &KERNEL_SOURCE,
+        S::Services => &SERVICES_SOURCE,
+        S::Environment => &ENVIRONMENT_SOURCE,
+    }
+}
+
 pub(super) const CHECKS: &[CheckDefinition] = &[
-    check("resource.load", C::Cpu, S::Load, &[], &["cpu.*"], true, 30),
+    check("resource.load", C::Cpu, S::Load, &[], &["cpu.*"], true),
     check(
         "resource.memory",
         C::Memory,
@@ -58,7 +113,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
             "memory.used_ratio",
         ],
         true,
-        30,
     ),
     check(
         "host.uptime",
@@ -67,7 +121,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["host.*", "os.*"],
         true,
-        30,
     ),
     check(
         "filesystem.root",
@@ -76,7 +129,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         ROOT_FILESYSTEM_KEYS,
         true,
-        100,
     ),
     check(
         "filesystem.mounts",
@@ -85,7 +137,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["filesystem.*"],
         true,
-        100,
     ),
     check(
         "kernel.oom",
@@ -94,7 +145,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["kernel.*"],
         true,
-        120,
     ),
     check(
         "service.status",
@@ -103,7 +153,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["service.*"],
         false,
-        800,
     ),
     check(
         "resource.swap",
@@ -112,7 +161,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[S::Meminfo, S::Kernel, S::Services],
         &["memory.swap_*"],
         true,
-        30,
     ),
     check(
         "environment.provider",
@@ -121,7 +169,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["provider.*"],
         false,
-        100,
     ),
     check(
         "environment.config",
@@ -130,7 +177,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["config.*"],
         false,
-        100,
     ),
     check(
         "environment.hooks",
@@ -139,7 +185,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["hooks.*"],
         false,
-        100,
     ),
     check(
         "environment.pty",
@@ -148,7 +193,6 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["pty.*"],
         false,
-        100,
     ),
     check(
         "environment.permissions",
@@ -157,12 +201,155 @@ pub(super) const CHECKS: &[CheckDefinition] = &[
         &[],
         &["permissions.*"],
         false,
-        100,
     ),
 ];
 
 pub(super) fn definition(id: &str) -> Option<&'static CheckDefinition> {
     CHECKS.iter().find(|check| check.id == id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdviceKind {
+    MemoryPressure,
+    SwapPressure,
+    RecentOom,
+    DiskUsage,
+    ServiceStatus,
+    HighLoad,
+    ProcessMemory,
+    UnavailableChecks,
+}
+
+pub(crate) struct AdviceDefinition {
+    pub(crate) kind: AdviceKind,
+    pub(crate) legacy_id: &'static str,
+    pub(crate) prompt_id: HealthMessageId,
+    pub(crate) label_id: HealthMessageId,
+    pub(crate) reason_id: HealthMessageId,
+    pub(crate) bash_surface: bool,
+}
+
+const MEMORY_PRESSURE_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::MemoryPressure,
+    legacy_id: "T01",
+    prompt_id: HealthMessageId::HealthPromptAnalyzeMemoryPressure,
+    label_id: HealthMessageId::HealthTryAnalyzeMemoryPressure,
+    reason_id: HealthMessageId::HealthTryReasonMemoryLow,
+    bash_surface: true,
+};
+const SWAP_PRESSURE_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::SwapPressure,
+    legacy_id: "T02",
+    prompt_id: HealthMessageId::HealthPromptCheckSwapPressure,
+    label_id: HealthMessageId::HealthTryCheckSwapPressure,
+    reason_id: HealthMessageId::HealthTryReasonSwapWithContext,
+    bash_surface: true,
+};
+const RECENT_OOM_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::RecentOom,
+    legacy_id: "T03",
+    prompt_id: HealthMessageId::HealthPromptCheckRecentOom,
+    label_id: HealthMessageId::HealthTryCheckRecentOom,
+    reason_id: HealthMessageId::HealthTryReasonRecentOom,
+    bash_surface: true,
+};
+const DISK_USAGE_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::DiskUsage,
+    legacy_id: "T04",
+    prompt_id: HealthMessageId::HealthPromptInspectDiskUsage,
+    label_id: HealthMessageId::HealthTryInspectDiskUsage,
+    reason_id: HealthMessageId::HealthTryReasonDiskHigh,
+    bash_surface: true,
+};
+const SERVICE_STATUS_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::ServiceStatus,
+    legacy_id: "T05",
+    prompt_id: HealthMessageId::HealthPromptInspectServiceStatus,
+    label_id: HealthMessageId::HealthTryInspectServiceStatus,
+    reason_id: HealthMessageId::HealthTryReasonServiceState,
+    bash_surface: false,
+};
+const HIGH_LOAD_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::HighLoad,
+    legacy_id: "T06",
+    prompt_id: HealthMessageId::HealthPromptInspectHighLoad,
+    label_id: HealthMessageId::HealthTryInspectHighLoad,
+    reason_id: HealthMessageId::HealthTryReasonHighLoad,
+    bash_surface: true,
+};
+const PROCESS_MEMORY_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::ProcessMemory,
+    legacy_id: "T07",
+    prompt_id: HealthMessageId::HealthPromptInspectProcessMemory,
+    label_id: HealthMessageId::HealthTryInspectProcessMemory,
+    reason_id: HealthMessageId::HealthTryReasonRecentOom,
+    bash_surface: true,
+};
+const UNAVAILABLE_CHECKS_ADVICE: AdviceDefinition = AdviceDefinition {
+    kind: AdviceKind::UnavailableChecks,
+    legacy_id: "T08",
+    prompt_id: HealthMessageId::HealthPromptReviewUnavailableChecks,
+    label_id: HealthMessageId::HealthTryReviewUnavailableChecks,
+    reason_id: HealthMessageId::HealthTryReasonMissingCoreCheck,
+    bash_surface: false,
+};
+
+pub(crate) const ADVICE_DEFINITIONS: &[AdviceDefinition] = &[
+    MEMORY_PRESSURE_ADVICE,
+    SWAP_PRESSURE_ADVICE,
+    RECENT_OOM_ADVICE,
+    DISK_USAGE_ADVICE,
+    SERVICE_STATUS_ADVICE,
+    HIGH_LOAD_ADVICE,
+    PROCESS_MEMORY_ADVICE,
+    UNAVAILABLE_CHECKS_ADVICE,
+];
+
+pub(crate) fn advice_definition(kind: AdviceKind) -> &'static AdviceDefinition {
+    match kind {
+        AdviceKind::MemoryPressure => &MEMORY_PRESSURE_ADVICE,
+        AdviceKind::SwapPressure => &SWAP_PRESSURE_ADVICE,
+        AdviceKind::RecentOom => &RECENT_OOM_ADVICE,
+        AdviceKind::DiskUsage => &DISK_USAGE_ADVICE,
+        AdviceKind::ServiceStatus => &SERVICE_STATUS_ADVICE,
+        AdviceKind::HighLoad => &HIGH_LOAD_ADVICE,
+        AdviceKind::ProcessMemory => &PROCESS_MEMORY_ADVICE,
+        AdviceKind::UnavailableChecks => &UNAVAILABLE_CHECKS_ADVICE,
+    }
+}
+
+pub(crate) const RULE_ADVICE: &[(&str, &[AdviceKind])] = &[
+    ("J01", &[]),
+    ("J02", &[AdviceKind::UnavailableChecks]),
+    ("J03", &[AdviceKind::HighLoad]),
+    ("J04", &[AdviceKind::HighLoad]),
+    ("J05", &[AdviceKind::MemoryPressure]),
+    ("J06", &[AdviceKind::MemoryPressure]),
+    ("J07", &[AdviceKind::SwapPressure]),
+    ("J08", &[AdviceKind::SwapPressure]),
+    ("J09", &[AdviceKind::DiskUsage]),
+    ("J10", &[AdviceKind::DiskUsage]),
+    ("J11", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
+    ("J12", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
+    ("J13", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
+    ("J14", &[]),
+    ("J15", &[AdviceKind::ServiceStatus]),
+    ("J16", &[AdviceKind::ServiceStatus]),
+];
+
+pub(crate) fn advice_for_rule(finding_id: &str) -> &'static [AdviceKind] {
+    let base = finding_id.split(':').next().unwrap_or(finding_id);
+    RULE_ADVICE
+        .iter()
+        .find(|(rule, _)| *rule == base)
+        .map(|(_, kinds)| *kinds)
+        .unwrap_or(&[])
+}
+
+pub(crate) fn advice_for_prompt(prompt_id: HealthMessageId) -> Option<&'static AdviceDefinition> {
+    ADVICE_DEFINITIONS
+        .iter()
+        .find(|definition| definition.prompt_id == prompt_id)
 }
 
 const ROOT_FILESYSTEM_KEYS: &[&str] = &[
@@ -232,6 +419,7 @@ pub(super) fn judgement_context_available(
 }
 
 #[cfg(test)]
+library_tests! {
 mod tests {
     #[test]
     fn root_mount_facts_do_not_overlap_hidden_mount_paths() {
@@ -258,6 +446,118 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_definitions_cover_every_sample_source_once() {
+        for source in [
+            S::Load,
+            S::Meminfo,
+            S::Host,
+            S::Filesystems,
+            S::Kernel,
+            S::Services,
+            S::Environment,
+        ] {
+            let count = SOURCES.iter().filter(|item| item.source == source).count();
+            assert_eq!(count, 1, "{source:?}");
+        }
+        assert_eq!(SOURCES.len(), 7);
+    }
+
+    #[test]
+    fn passive_budgets_derive_from_source_definitions() {
+        for check in CHECKS {
+            let budget = source_definition(check.source).passive_budget_ms;
+            let expected = match check.source {
+                S::Load | S::Meminfo | S::Host => 30,
+                S::Filesystems => 100,
+                S::Kernel => 120,
+                S::Services => 800,
+                S::Environment => 100,
+            };
+            assert_eq!(budget, expected, "{}", check.id);
+        }
+    }
+
+    #[test]
+    fn command_sources_retire_and_file_sources_reuse() {
+        for source in [S::Filesystems, S::Kernel, S::Services] {
+            assert_eq!(
+                source_definition(source).finish_policy,
+                FinishPolicy::RetireAfterSource,
+                "{source:?}"
+            );
+        }
+        for source in [S::Load, S::Meminfo, S::Host, S::Environment] {
+            assert_eq!(
+                source_definition(source).finish_policy,
+                FinishPolicy::ReuseOnSuccess,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_advice_declares_every_rule_exactly_once() {
+        let mut declared: Vec<&str> = RULE_ADVICE.iter().map(|(rule, _)| *rule).collect();
+        declared.sort_unstable();
+        let expected: Vec<String> = (1..=16).map(|index| format!("J{index:02}")).collect();
+        assert_eq!(declared, expected);
+        assert!(advice_for_rule("J01").is_empty());
+        assert!(advice_for_rule("J14").is_empty());
+        assert!(advice_for_rule("J99").is_empty());
+    }
+
+    #[test]
+    fn dynamic_rule_ids_resolve_base_associations() {
+        assert_eq!(advice_for_rule("J09:/data"), &[AdviceKind::DiskUsage]);
+        assert_eq!(advice_for_rule("J10:/"), &[AdviceKind::DiskUsage]);
+        assert_eq!(advice_for_rule("J15:nginx"), &[AdviceKind::ServiceStatus]);
+        assert_eq!(advice_for_rule("J16:sshd"), &[AdviceKind::ServiceStatus]);
+        assert_eq!(
+            advice_for_rule("J11"),
+            &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]
+        );
+    }
+
+    #[test]
+    fn advice_definitions_keep_legacy_ids_and_bash_scope() {
+        let ids: Vec<&str> = ADVICE_DEFINITIONS
+            .iter()
+            .map(|item| item.legacy_id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08"]
+        );
+        let bash: Vec<&str> = ADVICE_DEFINITIONS
+            .iter()
+            .filter(|item| item.bash_surface)
+            .map(|item| item.legacy_id)
+            .collect();
+        assert_eq!(bash, ["T01", "T02", "T03", "T04", "T06", "T07"]);
+        for definition in ADVICE_DEFINITIONS {
+            assert_eq!(
+                advice_definition(definition.kind).legacy_id,
+                definition.legacy_id
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_ids_resolve_advice_definitions() {
+        assert_eq!(
+            advice_for_prompt(HealthMessageId::HealthPromptAnalyzeMemoryPressure)
+                .unwrap()
+                .legacy_id,
+            "T01"
+        );
+        assert!(
+            advice_for_prompt(HealthMessageId::HealthPromptInspectServiceStatus)
+                .is_some_and(|definition| !definition.bash_surface)
+        );
+        assert!(advice_for_prompt(HealthMessageId::HealthFindingRecentOom).is_none());
+    }
+
+    #[test]
     fn public_fact_ownership_is_disjoint_and_rejects_unknown_checks() {
         assert!(!owns_fact("unknown", "memory.available_mib"));
         for key in [
@@ -275,4 +575,5 @@ mod tests {
         assert!(!owns_fact("resource.swap", "memory.available_mib"));
         assert!(!owns_fact("resource.memory", "memory.swap_used_mib"));
     }
+}
 }

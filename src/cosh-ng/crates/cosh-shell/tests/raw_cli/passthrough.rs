@@ -1860,7 +1860,7 @@ fn raw_cli_ask_preserves_an_empty_native_prompt_and_keeps_shell() {
 
 #[test]
 fn raw_cli_private_health_worker_dispatches_before_configuration_without_tui() {
-    let flag = "--__cosh-health-worker-v1";
+    let flag = "--__cosh-health-worker-v2";
     for argv0 in ["cosh", "cosh-shell"] {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join(".copilot-shell")).unwrap();
@@ -1901,7 +1901,7 @@ fn raw_cli_private_health_worker_dispatches_before_configuration_without_tui() {
 
 #[test]
 fn raw_cli_private_health_worker_flag_in_shell_owned_tail_stays_shell_data() {
-    let flag = "--__cosh-health-worker-v1";
+    let flag = "--__cosh-health-worker-v2";
     let home = tempfile::tempdir().unwrap();
     let script = home.path().join("shell-owned.sh");
     fs::write(

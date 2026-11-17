@@ -2,6 +2,256 @@ use super::*;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn review_sidecar_pair_requires_full_v1_identity() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s1"),
+            1000,
+            "event1",
+        )
+        .unwrap();
+    let mut claims = store.read_claims().unwrap();
+    claims.entries[0].scope = digest(&["host", "legacy-session"]);
+    private_state::atomic_write(
+        &store.root.join("claims.json"),
+        &serde_json::to_vec(&claims).unwrap(),
+        MAX_BYTES,
+    )
+    .unwrap();
+    let decision = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s2"),
+            2000,
+            "event2",
+        )
+        .unwrap();
+    assert!(
+        matches!(decision, ClaimDecision::Suppressed),
+        "changed v1 scope still pairs with old sidecar"
+    );
+}
+
+#[test]
+fn old_v2_entry_without_full_identity_stays_conservatively_suppressed() {
+    assert_unpaired_v2_entry_keeps_its_window("identity");
+}
+
+library_tests! {
+    #[test]
+    fn old_v2_entry_without_confirmed_event_keeps_its_original_window() {
+        assert_unpaired_v2_entry_keeps_its_window("event");
+    }
+
+    #[test]
+    fn event_metadata_keeps_the_v2_wire_shape_unchanged() {
+        let (_temp, store, runtime) = fixture();
+        let snapshot = store.snapshot(Some(&runtime)).unwrap();
+        let decision = store
+            .claim_login_health(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "T03:J11", "s1"),
+                1000,
+                "event1",
+            )
+            .unwrap();
+        assert!(matches!(decision, ClaimDecision::Claimed(_)));
+        let legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.root.join("health-exposures-v2.json")).unwrap())
+                .unwrap();
+        let current: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.root.join("health-exposures-v3.json")).unwrap())
+                .unwrap();
+        assert_eq!(legacy["version"], 2);
+        assert_eq!(current["version"], 3);
+        assert!(current["entries"][0]["event"].is_object());
+        assert!(legacy["entries"][0].as_object().unwrap().keys().all(|key| [
+            "problem",
+            "shown_at_ms",
+            "evidence",
+            "identity",
+            "severity"
+        ]
+        .contains(&key.as_str())));
+        assert!(legacy["entries"][0].get("event").is_none());
+        let mut expected = current.clone();
+        expected["version"] = serde_json::json!(2);
+        expected["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("event");
+        assert_eq!(legacy, expected);
+    }
+
+    #[test]
+    fn changed_legacy_evidence_cannot_reuse_stale_event_metadata() {
+        let (_temp, store, runtime) = fixture();
+        let snapshot = store.snapshot(Some(&runtime)).unwrap();
+        store
+            .claim_login_health(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "T03:J11", "s1"),
+                1000,
+                "event1",
+            )
+            .unwrap();
+        let path = store.root.join("health-exposures-v2.json");
+        let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        legacy["entries"][0]["evidence"] = serde_json::json!(digest(&["old-reader-event"]));
+        write_sidecar(&store, &serde_json::to_vec(&legacy).unwrap());
+        let decision = store
+            .claim_login_health(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "T03:J11", "s2"),
+                2000,
+                "event2",
+            )
+            .unwrap();
+        assert!(matches!(decision, ClaimDecision::Suppressed));
+    }
+
+    #[test]
+    fn old_v2_writer_entries_survive_a_new_reader_commit() {
+        let (_temp, store, runtime) = fixture();
+        let snapshot = store.snapshot(Some(&runtime)).unwrap();
+        store
+            .claim_login_health(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "help-a", "s1"),
+                1000,
+                "event-a",
+            )
+            .unwrap();
+        let current_path = store.root.join("health-exposures-v3.json");
+        let previous_current = fs::read(&current_path).unwrap();
+        store
+            .claim_login_health(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "help-b", "s2"),
+                2000,
+                "event-b",
+            )
+            .unwrap();
+        private_state::atomic_write(&current_path, &previous_current, MAX_BYTES).unwrap();
+        let decision = store
+            .claim_login_health(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "help-c", "s3"),
+                3000,
+                "event-c",
+            )
+            .unwrap();
+        assert!(matches!(decision, ClaimDecision::Claimed(_)));
+        let legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.root.join("health-exposures-v2.json")).unwrap())
+                .unwrap();
+        let current: serde_json::Value =
+            serde_json::from_slice(&fs::read(current_path).unwrap()).unwrap();
+        assert_eq!(legacy["entries"].as_array().unwrap().len(), 3);
+        assert_eq!(current["entries"].as_array().unwrap().len(), 3);
+        let old_entry = current["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["problem"] == digest(&["host", "help-b"]))
+            .unwrap();
+        assert!(old_entry.get("event").is_none());
+        assert!(legacy["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["problem"] == old_entry["problem"]
+                && entry["identity"] == old_entry["identity"]
+                && entry["evidence"] == old_entry["evidence"]));
+    }
+
+    #[test]
+    fn event_metadata_write_failure_keeps_the_claim_without_display() {
+        let (_temp, store, runtime) = fixture();
+        let snapshot = store.snapshot(Some(&runtime)).unwrap();
+        let current_path = store.root.join("health-exposures-v3.json");
+        let decision = store
+            .claim_prepared(
+                Some(&runtime),
+                &snapshot,
+                request(InviteKind::LoginHealth, "T03:J11", "s1"),
+                1000,
+                Some(HealthExposure {
+                    evidence: "event1",
+                    event: Some(("fixture-v1", "event1")),
+                    severity: None,
+                    legacy_problems: &[],
+                }),
+                || {
+                    fs::create_dir(&current_path).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(matches!(decision, ClaimDecision::Suppressed));
+        assert_eq!(store.read_claims().unwrap().entries.len(), 1);
+        let legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.root.join("health-exposures-v2.json")).unwrap())
+                .unwrap();
+        assert_eq!(legacy["entries"].as_array().unwrap().len(), 1);
+        assert!(legacy["entries"][0].get("event").is_none());
+        assert!(current_path.is_dir());
+    }
+}
+
+fn assert_unpaired_v2_entry_keeps_its_window(missing: &str) {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s1"),
+            1000,
+            "event1",
+        )
+        .unwrap();
+    let path = store.root.join("health-exposures-v2.json");
+    if missing == "event" {
+        fs::remove_file(store.root.join("health-exposures-v3.json")).unwrap();
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["entries"][0].as_object_mut().unwrap().remove(missing);
+    write_sidecar(&store, &serde_json::to_vec(&value).unwrap());
+    let decision = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s2"),
+            2000,
+            "event2",
+        )
+        .unwrap();
+    assert!(matches!(decision, ClaimDecision::Suppressed));
+    let decision = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s3"),
+            DAY_MS + 1001,
+            "event3",
+        )
+        .unwrap();
+    assert!(matches!(decision, ClaimDecision::Claimed(_)));
+}
+
 fn fixture() -> (tempfile::TempDir, GuideStore, RuntimeState) {
     let (temp, store, runtime) = uninitialized_fixture();
     store.initialize_runtime(&runtime).unwrap();
@@ -18,6 +268,12 @@ fn uninitialized_fixture() -> (tempfile::TempDir, GuideStore, RuntimeState) {
     let store = GuideStore::open(root.join("persistent")).unwrap();
     let runtime = RuntimeState::open(&root).unwrap();
     (temp, store, runtime)
+}
+
+fn write_sidecar(store: &GuideStore, bytes: &[u8]) {
+    let path = store.root.join("health-exposures-v2.json");
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn request<'a>(kind: InviteKind, problem: &'a str, session: &'a str) -> ClaimRequest<'a> {
@@ -833,4 +1089,232 @@ fn failure_context_capacity_is_bounded_and_busy_or_unsafe_state_fails_quietly() 
     );
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(store.save_failure_context(&first, &event, 1000).is_err());
+}
+
+#[test]
+fn login_health_same_evidence_is_suppressed_within_window() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    let first = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            1000,
+            "evidence-a",
+        )
+        .unwrap();
+    assert!(matches!(first, ClaimDecision::Claimed(_)));
+    assert!(store.root.join("health-exposures-v2.json").exists());
+    let second = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s2"),
+            2000,
+            "evidence-a",
+        )
+        .unwrap();
+    assert!(matches!(second, ClaimDecision::Suppressed));
+}
+
+#[test]
+fn login_health_new_event_reexposes_within_window() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    let first = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s1"),
+            1000,
+            "oom-event-1",
+        )
+        .unwrap();
+    assert!(matches!(first, ClaimDecision::Claimed(_)));
+    let second = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s2"),
+            2000,
+            "oom-event-2",
+        )
+        .unwrap();
+    assert!(
+        matches!(second, ClaimDecision::Claimed(_)),
+        "new event re-exposes"
+    );
+    let third = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T03:J11", "s3"),
+            3000,
+            "oom-event-2",
+        )
+        .unwrap();
+    assert!(matches!(third, ClaimDecision::Suppressed));
+}
+
+#[test]
+fn legacy_v1_entry_without_pair_stays_suppressed() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    let first = store
+        .claim(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            1000,
+        )
+        .unwrap();
+    assert!(matches!(first, ClaimDecision::Claimed(_)));
+    assert!(!store.root.join("health-exposures-v2.json").exists());
+    let second = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s2"),
+            2000,
+            "evidence-a",
+        )
+        .unwrap();
+    assert!(matches!(second, ClaimDecision::Suppressed));
+}
+
+#[test]
+fn unknown_v2_version_suppresses_and_preserves_file() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            1000,
+            "evidence-a",
+        )
+        .unwrap();
+    let path = store.root.join("health-exposures-v2.json");
+    write_sidecar(&store, br#"{"version":3,"entries":[]}"#);
+    let second = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s2"),
+            2000,
+            "evidence-b",
+        )
+        .unwrap();
+    assert!(matches!(second, ClaimDecision::Suppressed));
+    assert_eq!(fs::read(&path).unwrap(), br#"{"version":3,"entries":[]}"#);
+}
+
+#[test]
+fn corrupt_v2_suppresses_login_health_only() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    write_sidecar(&store, b"broken");
+    let health = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            1000,
+            "evidence-a",
+        )
+        .unwrap();
+    assert!(matches!(health, ClaimDecision::Suppressed));
+    let failure = store
+        .claim(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::Failure, "cmd", "s1"),
+            1000,
+        )
+        .unwrap();
+    assert!(matches!(failure, ClaimDecision::Claimed(_)));
+}
+
+#[test]
+fn mismatched_pair_timestamp_stays_suppressed() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            1000,
+            "evidence-a",
+        )
+        .unwrap();
+    let path = store.root.join("health-exposures-v2.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["entries"][0]["shown_at_ms"] = serde_json::json!(999);
+    write_sidecar(&store, &serde_json::to_vec(&value).unwrap());
+    let second = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s2"),
+            2000,
+            "evidence-b",
+        )
+        .unwrap();
+    assert!(matches!(second, ClaimDecision::Suppressed));
+}
+
+#[test]
+fn unreadable_v2_sidecar_suppresses_before_commit() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    fs::create_dir(store.root.join("health-exposures-v2.json")).unwrap();
+    let decision = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            1000,
+            "evidence-a",
+        )
+        .unwrap();
+    assert!(matches!(decision, ClaimDecision::Suppressed));
+    assert!(!store.root.join("claims.json").exists());
+}
+
+#[test]
+fn v2_capacity_overflow_suppresses_after_v1_commit() {
+    let (_temp, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    let digest = "a".repeat(64);
+    let entries: Vec<serde_json::Value> = (0..256)
+        .map(|index| {
+            serde_json::json!({
+                "problem": digest,
+                "shown_at_ms": 1000 + index,
+                "evidence": digest,
+            })
+        })
+        .collect();
+    write_sidecar(
+        &store,
+        &serde_json::to_vec(&serde_json::json!({"version": 2, "entries": entries})).unwrap(),
+    );
+    let decision = store
+        .claim_login_health(
+            Some(&runtime),
+            &snapshot,
+            request(InviteKind::LoginHealth, "T01:J06", "s1"),
+            2000,
+            "evidence-a",
+        )
+        .unwrap();
+    assert!(matches!(decision, ClaimDecision::Suppressed));
+    let claims = fs::read_to_string(store.root.join("claims.json")).unwrap();
+    assert!(
+        claims.contains("login_health"),
+        "v1 claim committed before v2 failure"
+    );
 }

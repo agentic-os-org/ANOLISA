@@ -39,7 +39,7 @@ fn parser_accepts_only_banner_management_and_budget_narrowing() {
     assert_eq!(
         parse_action(&args(&["banner"])),
         Ok(Action::Render(Options {
-            budget: Duration::from_millis(500),
+            budget: Duration::from_millis(300),
             disabled: vec![],
             absolute_boottime_us: None,
         }))
@@ -246,7 +246,7 @@ fn private_absolute_budget_rejects_expired_or_invalid_deadlines_without_rearming
     let now = Instant::now();
     assert_eq!(
         deadline_for(&options, now),
-        Some(now + Duration::from_millis(500))
+        Some(now + Duration::from_millis(300))
     );
     assert!(deadline_for(&options, now - Duration::from_secs(1)).is_none());
     for absolute in [1, u64::MAX] {

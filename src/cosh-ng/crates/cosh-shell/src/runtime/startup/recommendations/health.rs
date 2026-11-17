@@ -50,10 +50,15 @@ pub(super) fn prepare_session(
         return PreparedHealth::empty();
     }
     PreparedHealth {
-        candidates: crate::diagnostics::health::sorted_try_items(report)
-            .into_iter()
-            .cloned()
-            .collect(),
+        candidates: crate::diagnostics::health::select_try_items(
+            report,
+            &report.try_items,
+            crate::diagnostics::health::AdviceSurface::Cosh,
+            3,
+        )
+        .into_iter()
+        .cloned()
+        .collect(),
         guide: Some((store, runtime, snapshot)),
     }
 }

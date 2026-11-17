@@ -21,6 +21,8 @@ const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct KernelSignalFacts {
+    pub(crate) oom_latest_event_epoch: Option<u64>,
+    pub(crate) oom_latest_event_identity: Option<String>,
     pub(crate) oom_latest_age_seconds: Option<u64>,
     pub(crate) oom_killed_process: Option<String>,
     pub(crate) oom_latest_pid: Option<u64>,
@@ -58,6 +60,26 @@ impl KernelSignalFacts {
                 _ => HealthFactScope::Unknown,
             };
             builder.set_scope(scope);
+        }
+        if let Some(identity) = &self.oom_latest_event_identity {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_latest_event_identity",
+                HealthFactValue::String(identity.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(epoch) = self.oom_latest_event_epoch {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_latest_event_epoch",
+                HealthFactValue::Unsigned(epoch),
+                Some("seconds".to_string()),
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
         }
         if let Some(age) = self.oom_latest_age_seconds {
             builder.add_fact(
@@ -191,6 +213,23 @@ impl KernelSignalFacts {
 }
 
 pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoch_seconds: u64) {
+    if let Ok(boot) = fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+        let boot = boot.trim();
+        if boot.len() == 36
+            && boot
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.boot_id",
+                HealthFactValue::String(boot.into()),
+                None,
+                HealthFactSource::Derived,
+                0,
+            );
+        }
+    }
     let started = Instant::now();
     match system_program("journalctl") {
         Ok(program) => match read_journal_signals(HealthCommandConfig::default(), |args, config| {
@@ -364,10 +403,10 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
             panic_recent = true;
         }
     }
-    let latest_oom = oom_events.iter().max_by_key(|event| event.epoch);
+    let latest_oom = oom_events.iter().max_by_key(|event| event.event_epoch());
     let oom_latest_age_seconds = latest_oom
         .as_ref()
-        .map(|signal| now_epoch_seconds.saturating_sub(signal.epoch));
+        .map(|signal| now_epoch_seconds.saturating_sub(signal.event_epoch()));
     let confidence = if latest_oom.is_some() {
         Some("high".to_string())
     } else if unclocked_oom_lines > 0 {
@@ -376,6 +415,16 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
         None
     };
     KernelSignalFacts {
+        oom_latest_event_epoch: latest_oom.as_ref().map(|signal| signal.event_epoch()),
+        oom_latest_event_identity: latest_oom
+            .as_ref()
+            .filter(|signal| signal.has_event_anchor)
+            .map(|signal| {
+                signal.monotonic_ns.map_or_else(
+                    || format!("epoch:{}", signal.identity_epoch),
+                    |time| format!("uptime-ns:{time}"),
+                )
+            }),
         oom_latest_age_seconds,
         oom_killed_process: latest_oom
             .as_ref()
@@ -523,5 +572,9 @@ fn read_proc_uptime_seconds(builder: &HealthReportBuilder) -> Option<u64> {
     super::parse_proc_uptime_seconds(&content)
 }
 
+#[cfg(test)]
+library_tests! {
+    mod identity_tests;
+}
 #[cfg(test)]
 mod tests;

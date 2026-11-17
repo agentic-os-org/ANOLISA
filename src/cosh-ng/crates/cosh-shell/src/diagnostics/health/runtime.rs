@@ -1,3 +1,9 @@
+#[cfg(all(test, target_os = "linux"))]
+library_tests! {
+    mod acceptance_tests;
+}
+mod cleanup;
+pub(crate) mod clock;
 mod fixtures;
 pub(super) mod job;
 mod plan;
@@ -108,17 +114,24 @@ pub(crate) fn bash_budget_remaining(
 
 pub(crate) fn start_login_health_scan_config_entry_until(
     absolute: Instant,
+    boottime_expires_us: Option<u64>,
     disabled: &[String],
 ) -> Result<Option<HealthScanHandle>, String> {
     validate_health_check_ids(disabled)?;
     let mut options = HealthScanOptions::from_env();
     options.total_budget = absolute
         .saturating_duration_since(Instant::now())
-        .min(Duration::from_millis(350));
+        .min(Duration::from_millis(300));
     if options.mode == HealthScanMode::Disabled || options.total_budget.is_zero() {
         return Ok(None);
     }
-    let deadline = job::JobDeadline::at_instant(absolute, options.total_budget)
+    let mut deadline = match boottime_expires_us {
+        Some(expires_us) => clock::HealthDeadline::at_boottime(expires_us.saturating_mul(1000)),
+        None => clock::HealthDeadline::after(options.total_budget),
+    }
+    .map_err(|error| error.to_string())?;
+    deadline
+        .clamp_remaining(options.total_budget)
         .map_err(|error| error.to_string())?;
     if deadline.remaining().unwrap_or_default().is_zero() {
         return Ok(None);
@@ -161,7 +174,7 @@ fn start_scan_with_context(
         )));
     }
     let deadline =
-        match job::JobDeadline::after(options.total_budget.min(worker::MAX_WORKER_BUDGET)) {
+        match clock::HealthDeadline::after(options.total_budget.min(worker::MAX_WORKER_BUDGET)) {
             Ok(deadline) => deadline,
             Err(_) => return None,
         };
@@ -319,7 +332,7 @@ mod tests {
             scan_id: "health-1".into(),
             started_at_ms: 1,
             now_epoch_seconds: 100,
-            deadline: job::JobDeadline::after(Duration::from_secs(3)).unwrap(),
+            deadline: clock::HealthDeadline::after(Duration::from_secs(3)).unwrap(),
             context: plan::ScanContext::LoginBanner,
             config: HealthConfig::default(),
             environment: None,
@@ -535,5 +548,15 @@ mod tests {
             .iter()
             .any(|check| check.id == "environment.provider"
                 && check.status == super::super::model::HealthCheckStatus::Ok));
+    }
+
+    #[test]
+    fn supervised_doctor_keeps_environment_remediation_findings() {
+        let _guard = crate::diagnostics::test_env::env_guard();
+        let mut config = crate::config::CoshConfig::default();
+        config.adapter_default = "unknown-health-adapter".into();
+        let report = run_supervised_doctor_report(&config, std::path::Path::new("/tmp"));
+        assert!(report.findings.iter().any(|finding| finding.title_id
+            == super::super::HealthMessageId::HealthFindingProviderUnconfigured));
     }
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use nix::libc;
 
 use super::super::model::HealthUnavailableReason;
-use super::super::runtime::job::JobDeadline;
+use super::super::runtime::clock::HealthDeadline;
 use super::super::runtime::process::{
     child_has_exited, ensure_waitable_children, set_nonblocking, CleanupScope, CommandChild,
     ReapOwner, COMMAND_CLEANUP_BUDGET, COMMAND_POLL_INTERVAL,
@@ -251,14 +251,14 @@ impl HealthCommandError {
 }
 
 struct WorkerCommandJob {
-    deadline: JobDeadline,
+    deadline: HealthDeadline,
     check_expires_ns: AtomicU64,
     stopped: AtomicBool,
 }
 static WORKER_JOB: OnceLock<WorkerCommandJob> = OnceLock::new();
 
 pub(in crate::diagnostics::health) fn enter_worker_job(
-    deadline: JobDeadline,
+    deadline: HealthDeadline,
 ) -> Result<(), HealthCommandError> {
     let pid = unsafe { libc::getpid() };
     if unsafe { libc::getsid(0) } != pid || unsafe { libc::getpgrp() } != pid {
@@ -277,7 +277,7 @@ pub(in crate::diagnostics::health) fn begin_worker_check(
     budget: Duration,
 ) -> Result<(), HealthCommandError> {
     let job = WORKER_JOB.get().ok_or(HealthCommandError::Io)?;
-    let check = JobDeadline::after(budget).map_err(|_| HealthCommandError::Io)?;
+    let check = HealthDeadline::after(budget).map_err(|_| HealthCommandError::Io)?;
     job.check_expires_ns.store(
         check.expires_ns.min(job.deadline.expires_ns),
         Ordering::Release,
@@ -324,6 +324,11 @@ struct SpawnedHealthCommand {
     work_deadline: Instant,
 }
 
+fn command_work_deadline(started: Instant, deadline: Instant) -> Instant {
+    let effective_budget = deadline.saturating_duration_since(started);
+    deadline - COMMAND_CLEANUP_BUDGET.min(effective_budget / 4)
+}
+
 fn spawn_health_command(
     program: &str,
     args: &[&str],
@@ -334,18 +339,18 @@ fn spawn_health_command(
         .checked_add(config.timeout)
         .ok_or(HealthCommandError::Io)?;
     let deadline = if let Some(job) = WORKER_JOB.get() {
-        let check = JobDeadline {
+        let check = HealthDeadline {
             started_ns: job.deadline.started_ns,
             expires_ns: job
                 .check_expires_ns
                 .load(Ordering::Acquire)
                 .min(job.deadline.expires_ns),
         };
-        deadline.min(check.instant().map_err(|_| HealthCommandError::Io)?)
+        deadline.min(check.local_instant().map_err(|_| HealthCommandError::Io)?)
     } else {
         deadline
     };
-    let work_deadline = deadline - COMMAND_CLEANUP_BUDGET.min(config.timeout / 4);
+    let work_deadline = command_work_deadline(started, deadline);
     check_deadline(work_deadline)?;
     let owner = ReapOwner::global().map_err(|_| HealthCommandError::Io)?;
     let permit = owner.reserve().ok_or(HealthCommandError::Io)?;

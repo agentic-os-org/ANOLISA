@@ -40,24 +40,14 @@ impl JobDeadline {
         })
     }
 
-    pub(crate) fn shorten_within(&mut self, budget: Duration) -> io::Result<()> {
-        let earlier = Self::after(budget)?;
-        self.expires_ns = self.expires_ns.min(earlier.expires_ns);
-        Ok(())
-    }
-
-    pub(crate) fn elapsed(self) -> io::Result<Duration> {
-        Ok(Duration::from_nanos(
-            monotonic_ns()?.saturating_sub(self.started_ns),
-        ))
-    }
-
     pub(crate) fn remaining(self) -> io::Result<Duration> {
         Ok(Duration::from_nanos(
             self.expires_ns.saturating_sub(monotonic_ns()?),
         ))
     }
 
+    // Non-test callers use HealthDeadline; guide/editor integration tests still convert via instant().
+    #[allow(dead_code)]
     pub(crate) fn instant(self) -> io::Result<Instant> {
         let before = Instant::now();
         before
@@ -131,7 +121,7 @@ pub(crate) fn timer_remaining() -> io::Result<Duration> {
         + Duration::from_micros(timer.it_value.tv_usec as u64))
 }
 
-fn arm_deadline(deadline: JobDeadline) -> io::Result<()> {
+pub(crate) fn arm_deadline(deadline: JobDeadline) -> io::Result<()> {
     let remaining = deadline.remaining()?;
     if remaining < Duration::from_micros(1) {
         unsafe {
