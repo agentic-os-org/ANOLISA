@@ -219,6 +219,51 @@ fn write_only_and_overlapping_targets_lower_independent_operation_masks() {
 }
 
 #[test]
+fn tree_reads_lower_to_read_mask_while_exact_reads_stay_inode_guarded() {
+    let fixture = Fixture::new();
+    let tree = fixture.path("secrets");
+    let exact = fixture.path("token");
+    fs::create_dir(&tree).expect("create read tree");
+    fs::write(&exact, b"token").expect("write exact read target");
+    let mut tree_target = target_with(
+        tree,
+        FileProtectionTargetKind::DirectoryTree,
+        false,
+        false,
+        Vec::new(),
+    );
+    tree_target.protections.read = true;
+    let mut exact_target = target_with(
+        exact,
+        FileProtectionTargetKind::ExactFile,
+        false,
+        false,
+        Vec::new(),
+    );
+    exact_target.protections.read = true;
+    let prepared = match prepare(vec![tree_target, exact_target]) {
+        Ok(prepared) => prepared,
+        Err(BackendError::CompileFailure(message)) if message.contains("lacks openat2") => return,
+        Err(error) => panic!("prepare read policy: {error}"),
+    };
+
+    let lowered = lower(&prepared, Uuid::nil()).expect("lower read policy");
+
+    // Normalization sorts targets by path: "secrets" (1) before "token" (2).
+    assert_eq!(lowered.activation.tree_mask, 1);
+    assert_eq!(lowered.activation.read_mask, 1);
+    assert_eq!(lowered.activation.delete_mask, 0);
+    assert_eq!(lowered.activation.ordinary_write_mask, 0);
+    assert_eq!(lowered.targets[0].flags, TARGET_TREE | TARGET_READ);
+    assert_eq!(lowered.targets[1].flags, TARGET_READ);
+    assert_eq!(
+        lowered.roots.len(),
+        1,
+        "the read tree is anchored by identity"
+    );
+}
+
+#[test]
 fn write_only_policy_lowers_without_a_delete_fallback() {
     let fixture = Fixture::new();
     let exact = fixture.path("config.json");

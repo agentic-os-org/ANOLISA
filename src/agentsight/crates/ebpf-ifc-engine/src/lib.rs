@@ -32,6 +32,8 @@ mod file_protection_pinned_maps;
 #[cfg(test)]
 mod file_protection_rename_tests;
 #[cfg(test)]
+mod file_protection_tree_read_tests;
+#[cfg(test)]
 mod file_protection_write_tests;
 mod target_identity;
 use capability::{
@@ -109,13 +111,13 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
 // the marker check loudly instead of being silently reused with mismatched
 // links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v7_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v8_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v8_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v9_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v8_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v9_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v10_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -322,6 +324,7 @@ struct PolicyDomainVal {
     tree_mask: u64,
     delete_mask: u64,
     ordinary_write_mask: u64,
+    read_mask: u64,
     protection_set_id: u64,
     guard: InodeGuardVal,
 }
@@ -339,7 +342,7 @@ const _: () = assert!(std::mem::align_of::<PolicySlotKey>() == 8);
 const _: () = assert!(std::mem::size_of::<PolicySlotVal>() == 24);
 const _: () = assert!(std::mem::size_of::<PolicyTargetKey>() == 16);
 const _: () = assert!(std::mem::size_of::<PolicyTargetVal>() == 24);
-const _: () = assert!(std::mem::size_of::<PolicyDomainVal>() == 56);
+const _: () = assert!(std::mem::size_of::<PolicyDomainVal>() == 64);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -2054,6 +2057,7 @@ const LSM_PROGS: &[(&str, &str)] = &[
     ("enforce_path_rmdir", "path_rmdir"),
     ("enforce_path_rename", "path_rename"),
     ("enforce_path_rename_legacy", "path_rename"),
+    ("enforce_path_link", "path_link"),
     ("enforce_socket_connect", "socket_connect"),
     ("enforce_socket_recvmsg", "socket_recvmsg"),
     ("enforce_task_kill", "task_kill"),
@@ -2268,7 +2272,7 @@ fn lsm_needed(
         // mapping mediation. lsm_needed_for_budget decides whether the hook
         // set can actually carry it (verifier stack budget on the validated
         // kernels); do not read this arm as the production gate.
-        "enforce_mmap_file" | "enforce_file_mprotect" => block_file,
+        "enforce_mmap_file" | "enforce_file_mprotect" | "enforce_path_link" => block_file,
         "enforce_file_open"
         | "enforce_file_truncate"
         | "enforce_path_truncate"
@@ -2300,8 +2304,12 @@ fn lsm_needed_for_budget(
     }
     // Mapping mediation ships only with the advanced tracepoint budget: the
     // inode-only profile denies writable opens instead, which keeps these
-    // hooks out of its verifier stack budget.
-    if matches!(name, "enforce_mmap_file" | "enforce_file_mprotect") {
+    // hooks out of its verifier stack budget. The link guard only serves
+    // directory-tree reads, which also require the mapping hooks.
+    if matches!(
+        name,
+        "enforce_mmap_file" | "enforce_file_mprotect" | "enforce_path_link"
+    ) {
         return (budget.advanced_tracepoints
             || budget.features == HookReserve::agent_file_guard().policy_features)
             && block_file;
@@ -4682,7 +4690,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<PolicySlotVal>(), 24);
         assert_eq!(std::mem::size_of::<PolicyTargetKey>(), 16);
         assert_eq!(std::mem::size_of::<PolicyTargetVal>(), 24);
-        assert_eq!(std::mem::size_of::<PolicyDomainVal>(), 56);
+        assert_eq!(std::mem::size_of::<PolicyDomainVal>(), 64);
         assert_eq!(std::mem::size_of::<InodePathVal>(), 127);
         assert_eq!(std::mem::size_of::<ProcState>(), 16);
         assert_eq!(std::mem::size_of::<CapState>(), 56);
@@ -4793,6 +4801,7 @@ mod tests {
             tree_mask: covered,
             delete_mask: covered,
             ordinary_write_mask: 0,
+            read_mask: 0,
             protection_set_id: 7,
             guard: InodeGuardVal {
                 flags: INODE_GUARD_UNLINK,
@@ -5038,7 +5047,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v7"));
+        assert!(marker.contains("file_v8"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -5070,13 +5079,14 @@ mod tests {
         assert!(lsm_link_expected("enforce_path_unlink", budget, true));
         assert!(lsm_link_expected("enforce_mmap_file", budget, true));
         assert!(lsm_link_expected("enforce_file_mprotect", budget, true));
+        assert!(lsm_link_expected("enforce_path_link", budget, true));
         assert!(budget.suppress_dataflow_tracepoints);
     }
 
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v9"));
+        assert!(marker.contains("agent_file_guard_v10"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -5128,7 +5138,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v8"));
+        assert!(marker.contains("credential_exfiltration_v9"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -5171,7 +5181,11 @@ mod tests {
             false
         ));
         let file_flow_budget = HookBudget::for_pinned_reserve(HookReserve::runtime_file_delta());
-        for hook in ["enforce_mmap_file", "enforce_file_mprotect"] {
+        for hook in [
+            "enforce_mmap_file",
+            "enforce_file_mprotect",
+            "enforce_path_link",
+        ] {
             assert!(!lsm_link_expected(hook, file_flow_budget, true));
         }
         assert!(lsm_needed(
@@ -6529,6 +6543,23 @@ os.execv({hit:?}, [{hit:?}])
             (
                 HookReserve::agent_file_guard(),
                 "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            // Pre-tree-read layouts carry a 56-byte te_policy_domains value.
+            (
+                HookReserve::file_enforcement(),
+                "agentsight_profile_file_v7_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::credential_exfiltration(),
+                "agentsight_profile_credential_exfiltration_v8_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::full_profile(),
+                "agentsight_profile_full_v8_a62e5d9d96f91101cda019519053e950d532380a",
+            ),
+            (
+                HookReserve::agent_file_guard(),
+                "agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a",
             ),
         ] {
             let paths = PinnedEnginePaths::new(root.join(old));

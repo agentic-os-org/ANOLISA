@@ -59,10 +59,15 @@ fn read_only_targets_normalize_and_merge_without_affecting_write_semantics() {
     assert!(normalized.targets[0].read);
     assert!(normalized.targets[0].ordinary_write);
     read.kind = FileProtectionTargetKind::DirectoryTree;
-    assert!(
-        normalize(&policy(vec![read])).is_err(),
-        "tree reads must not silently become a no-op"
-    );
+    read.exclusions = vec![exclusion(
+        "/srv/secret.key/public",
+        FileProtectionExclusionKind::DirectorySubtree,
+    )];
+    let tree = normalize(&policy(vec![read])).expect("tree read target");
+    let tree = &tree.targets[0];
+    assert_eq!(tree.kind, FileProtectionTargetKind::DirectoryTree);
+    assert!(tree.read && !tree.delete && !tree.ordinary_write);
+    assert_eq!(tree.exclusions[0].path, "/srv/secret.key/public");
 }
 
 #[test]

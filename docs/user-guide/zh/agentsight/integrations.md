@@ -175,15 +175,63 @@ block feature bit 的规则仍保留降级报告行为：例如 `block recv` 规
   `O_PATH` 只持有文件身份，允许使用。未绑定进程不受影响，解除策略后恢复读取。
 - 下发前已有的私有或共享文件映射会导致下发被拒绝，需重启相关进程；已经读取到内存中的内容无法撤回。
   Apply 期间需暂停目标进程的文件访问及进程树变化，不提供并发下发的原子隔离保证。
-- 禁读按 Apply 时的普通文件身份生效，不保护整个目录树；外部程序替换文件或轮换密钥后需重新 Apply。
+- 禁读按 Apply 时的普通文件身份生效；需要覆盖整个目录时使用[目录树禁读](#禁止读取目录树)。
+  外部程序替换文件或轮换密钥后需重新 Apply。
   禁读不自动禁止写入或删除，需要时可独立组合 `ordinary_write` 和 `delete`。
 - 这不是完整沙箱：io_uring/AIO、进程内存访问及动态挂载不在覆盖保证内。
+
+### 禁止读取目录树
+
+密钥存放在内容会变化的目录中（例如挂载的密钥卷）时使用。一个 Binding 即可覆盖已有文件、
+深层子目录，以及 Apply 之后新建、替换或移入的文件，无需重新 Apply。
+
+向 `POST /api/enforcement/file-read-bindings` 发送相同请求，并加上 `"kind": "directory_tree"`
+和目录绝对路径。生成的策略为只设置 `protections.read: true` 的结构化 `directory_tree` 目标：
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent_id":"demo-agent","root_pid":<PID>,"path":"/run/asc-demo/secrets","kind":"directory_tree"}' \
+  http://127.0.0.1:7396/api/enforcement/file-read-bindings
+```
+
+需要排除项，或要把禁读与 `delete`、`ordinary_write` 组合时，通过
+`POST /api/enforcement/bindings` 提交结构化目标：
+
+```json
+{
+  "path": "/run/asc-demo/secrets",
+  "kind": "directory_tree",
+  "protections": { "delete": false, "ordinary_write": false, "read": true },
+  "exclusions": []
+}
+```
+
+- 健康接口必须报告 `directory_tree_read_protection: true`，即 `agent-file-guard` profile 已挂载
+  文件读取相关钩子和硬链接钩子。旧 enforcer 会拒绝目录树禁读目标；旧版 `agentsight serve` 会忽略
+  `kind`，并因目录不是普通文件而拒绝请求，二者都不会静默下发范围更小的策略。文件拦截接口收到
+  `directory_tree` 时返回 `file_read_route_required`。
+- 绑定进程树无法读取、映射通过目录树内路径访问到的任何普通文件，也无法通过已打开的 FD 读取；
+  目录树的 bind mount 别名及其下层挂载同样受保护。列目录、`stat` 和写入不受影响。未绑定进程不受
+  影响，解除策略后恢复读取。拒绝事件记录为 `read`，事件原因包含受保护的目录树根路径。
+- 覆盖范围以实际打开的文件位置为准：目录树内指向外部的软链接不受保护，从外部指向目录树内的
+  软链接受保护。排除项的行为与删除、写入保护一致。
+- 受保护文件若在目录树外另有硬链接，就能通过外部名称读取，因此目录树中存在链接数大于 1 的普通
+  文件时 Apply 会被拒绝；请删除多余链接或排除该目录项。需要检查的目录项超过 100,000 个时 Apply
+  也会被拒绝。
+- 绑定期间，进程树不能把受保护文件硬链接到保护范围外的名称（记录为 `link`），不能把受保护目录项
+  移出目录树或移入被排除的子树，也不能重命名、替换或交换目录树根及其祖先目录（记录为 `rename`）。
+  未绑定进程之后创建的硬链接不在覆盖范围内。未绑定进程替换目录树根目录本身后，需要重新 Apply。
+- 与精确文件相同，目录树下已有文件映射会导致下发被拒绝，通过 bind mount 别名或其他路径映射同一文件
+  也会被识别；生效前已读入内存的数据无法撤回。
+- 在 256 步祖先遍历预算内无法确定文件位置时允许读取。与目录树相交的 overlay 文件系统会导致 Apply
+  被拒绝。io_uring/AIO 和进程内存访问仍不在覆盖范围内。
 
 ### 结构化文件保护：一期边界
 
 `file_protection_policy` 支持保护精确文件目录项或整个目录树（含未来子项），并按目标排除精确目录项
-或子目录树。`delete` 与 `ordinary_write` 独立选择。下发前通过 `/api/enforcement/health` 检查
-`file_entry_delete_protection`、`directory_tree_delete_protection`、`ordinary_write_protection`
+或子目录树。`delete` 与 `ordinary_write` 独立选择；`read` 见上文两节禁读说明。下发前通过
+`/api/enforcement/health` 检查 `file_entry_delete_protection`、`directory_tree_delete_protection`、
+`ordinary_write_protection`、`file_read_protection`、`directory_tree_read_protection`
 和 `static_mount_topology` 是否支持相应能力。ActPlane 后端要求结构化策略显式设置
 `policy_mode: "enforce"`；省略模式或设置 `audit/observe` 会在拓扑准备和内核修改前被拒绝，
 不改变旧 DSL 的处理方式。

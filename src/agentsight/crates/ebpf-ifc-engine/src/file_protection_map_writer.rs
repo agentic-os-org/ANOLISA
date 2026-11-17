@@ -140,6 +140,8 @@ pub struct FileProtectionDomainValue {
     pub delete_mask: u64,
     /// Targets requesting ordinary write protection.
     pub ordinary_write_mask: u64,
+    /// Directory-tree targets requesting read protection; exact-file reads use inode guards.
+    pub read_mask: u64,
     /// Stable logical policy-set identity selected by userspace.
     pub protection_set_id: u64,
     /// Fail-closed fallback event identity.
@@ -419,6 +421,7 @@ mod tests {
             tree_mask: 0b1,
             delete_mask: 0b1,
             ordinary_write_mask: 0,
+            read_mask: 0,
             protection_set_id: 77,
             guard: TreeGuard {
                 flags: target.guard.flags,

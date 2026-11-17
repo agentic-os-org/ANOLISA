@@ -209,18 +209,77 @@ Apply and detach retain Dashboard authentication: even loopback calls require a 
 - Existing private or shared file mappings reject activation; restart the affected processes. Previously
   read memory cannot be revoked. Keep file access and process-tree changes quiescent during Apply;
   atomic isolation for concurrent activation is not guaranteed.
-- Protects the regular-file identity held at Apply, not a directory tree. Re-apply after external file
+- Protects the regular-file identity held at Apply. To cover a whole directory, use
+  [directory-tree read denial](#deny-reads-below-a-directory-tree). Re-apply after external file
   replacement or secret rotation. Read protection does not imply write or delete protection; combine
   `ordinary_write` and `delete` independently when needed.
 - This is not a complete sandbox: io_uring/AIO, process-memory access, and dynamic mounts are outside coverage.
+
+### Deny reads below a directory tree
+
+Use this when secrets live in a directory whose contents change, such as a mounted secret volume.
+One binding covers existing files, deeper subdirectories, and files created, replaced, or moved in
+after Apply, without re-applying.
+
+Send the same request to `POST /api/enforcement/file-read-bindings` with `"kind": "directory_tree"`
+and an absolute directory path. The binding carries a structured `directory_tree` target with only
+`protections.read: true`:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent_id":"demo-agent","root_pid":<PID>,"path":"/run/asc-demo/secrets","kind":"directory_tree"}' \
+  http://127.0.0.1:7396/api/enforcement/file-read-bindings
+```
+
+To add exclusions, or to combine read denial with `delete` or `ordinary_write`, submit the
+structured target through `POST /api/enforcement/bindings`:
+
+```json
+{
+  "path": "/run/asc-demo/secrets",
+  "kind": "directory_tree",
+  "protections": { "delete": false, "ordinary_write": false, "read": true },
+  "exclusions": []
+}
+```
+
+- Health must report `directory_tree_read_protection: true`: the `agent-file-guard` profile with
+  the file read hooks and the hard-link hook. Older enforcers reject a directory-tree read target,
+  and an older `agentsight serve` ignores `kind` and rejects the directory as not a regular file;
+  neither applies a narrower policy silently. The file-binding route rejects `directory_tree` with
+  `file_read_route_required`.
+- The bound process tree cannot read, map, or read through previously opened descriptors any regular
+  file reached through a path inside the tree, including bind-mount aliases of the tree and mounts
+  below it. Directory listings, `stat`, and writes keep working. Unbound processes are unaffected,
+  and detaching restores reads. Denials are recorded as `read`; the event reason names the protected
+  tree root.
+- Coverage follows the location of the opened file: a symlink inside the tree that points outside
+  it is not protected, while a symlink from outside into the tree is. Exclusions work as they do for
+  delete and write protection.
+- A protected file that also has a hard link outside the tree could be read through that name, so
+  Apply rejects a tree holding a regular file with more than one link; remove the extra links or
+  exclude the entry. Apply also rejects trees with more than 100,000 entries to check.
+- While bound, the process tree cannot hard-link protected files to a name outside the protected
+  scope (recorded as `link`), move protected entries out of the tree or into an excluded subtree, or
+  rename, replace, or exchange the tree root or its ancestor directories (recorded as `rename`). Hard
+  links created later by unbound processes are not covered. If an unbound process replaces the tree
+  root directory itself, re-apply the binding.
+- Existing file mappings under the tree reject activation, as for exact files, including mappings
+  made through a bind-mount alias or another path to the same file; data read into memory before
+  activation cannot be revoked.
+- If a file's position cannot be established within the 256-step ancestry budget, the read is
+  allowed. Overlay filesystems that intersect the tree reject Apply. io_uring/AIO and process-memory
+  access remain outside coverage.
 
 ### Structured file protection: phase-one boundaries
 
 The `file_protection_policy` payload protects exact file entries or directory trees, including
 future children, with per-target exact-entry and directory-subtree exclusions. `delete` and
-`ordinary_write` are independent protections. Check `/api/enforcement/health` for
+`ordinary_write` are independent protections; `read` is described in the two read-denial
+sections above. Check `/api/enforcement/health` for
 `file_entry_delete_protection`, `directory_tree_delete_protection`, `ordinary_write_protection`,
-and `static_mount_topology` before applying the corresponding policy. The ActPlane backend
+`file_read_protection`, `directory_tree_read_protection`, and `static_mount_topology` before
+applying the corresponding policy. The ActPlane backend
 requires explicit `policy_mode: "enforce"` for structured policies; omitted mode, `audit`, and
 `observe` are rejected before topology preparation or kernel changes. This restriction does not
 change legacy DSL handling.

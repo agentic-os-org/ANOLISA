@@ -58,7 +58,8 @@ pub struct FileProtections {
     pub delete: bool,
     /// Requests protection from ordinary content-writing operations.
     pub ordinary_write: bool,
-    /// Denies reads of the exact regular file; omission preserves existing policy semantics.
+    /// Denies reads of the exact regular file, or of regular files below a
+    /// directory tree; omission preserves existing policy semantics.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read: bool,
 }

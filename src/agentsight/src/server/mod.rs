@@ -586,7 +586,7 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     (
         "POST",
         "/api/enforcement/file-read-bindings",
-        "Apply file read-denial binding (token required)",
+        "Apply file or directory-tree read-denial binding (token required)",
     ),
     (
         "POST",

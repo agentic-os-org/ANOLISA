@@ -279,6 +279,7 @@ fn domain() -> FileProtectionDomainValue {
         tree_mask: 1,
         delete_mask: 1,
         ordinary_write_mask: 1,
+        read_mask: 0,
         protection_set_id: 77,
         guard: guard(1),
     }

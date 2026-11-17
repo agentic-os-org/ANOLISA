@@ -341,6 +341,8 @@ struct te_policy_domain_val {
 	__u64 tree_mask;
 	__u64 delete_mask;
 	__u64 ordinary_write_mask;
+	/* Directory-tree read targets only; exact-file reads use inode guards. */
+	__u64 read_mask;
 	__u64 protection_set_id;
 	struct inode_guard_val guard;
 };
@@ -3331,6 +3333,13 @@ static __always_inline int te_guard_rename(const struct path *old_dir,
 				return -EPERM;
 			}
 		}
+		if (policy_domain && policy_domain->read_mask) {
+			int rc = te_guard_tree_read_rename(pid, policy_domain,
+				old_dir, old_dentry, new_dir, new_dentry,
+				flags, flags_valid);
+			if (rc)
+				return rc;
+		}
 	}
 
 	/* Existing path-based rule evaluation */
@@ -3368,6 +3377,15 @@ int BPF_PROG(enforce_path_rename_legacy, const struct path *old_dir,
 	bool valid = value && bpf_ktime_get_ns() - value->entered_ns < 30000000000ULL;
 	unsigned int flags = valid ? value->flags : 0;
 	return te_guard_rename(old_dir, old_dentry, new_dir, new_dentry, flags, valid);
+}
+
+SEC("lsm/path_link")
+int BPF_PROG(enforce_path_link, struct dentry *old_dentry,
+	     const struct path *new_dir, struct dentry *new_dentry, int ret)
+{
+	if (ret)
+		return ret;
+	return te_guard_tree_read_link(old_dentry, new_dir, new_dentry);
 }
 
 SEC("lsm/socket_connect")

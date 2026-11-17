@@ -245,6 +245,7 @@ fn lower(
     let mut tree_mask = 0;
     let mut delete_mask = 0;
     let mut ordinary_write_mask = 0;
+    let mut read_mask = 0;
 
     for (index, target) in prepared.policy.targets.iter().enumerate() {
         let target_id =
@@ -258,6 +259,11 @@ fn lower(
         }
         if target.kind == FileProtectionTargetKind::DirectoryTree {
             tree_mask |= bit;
+            // Exact-file reads stay on inode guards; only trees need the
+            // per-access classification that this mask enables.
+            if target.read {
+                read_mask |= bit;
+            }
         }
         targets.push(FileProtectionTargetValue {
             flags: (u32::from(target.delete) * TARGET_DELETE)
@@ -324,6 +330,7 @@ fn lower(
             tree_mask,
             delete_mask,
             ordinary_write_mask,
+            read_mask,
             protection_set_id: stable_hash64(binding_id.as_bytes()),
             guard: TreeGuard {
                 flags: DELETE_GUARD_FLAGS,

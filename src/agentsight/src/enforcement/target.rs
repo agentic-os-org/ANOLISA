@@ -64,6 +64,15 @@ fn validate_stat(pid: i32, stat: &str) -> Result<u64, TargetValidationError> {
 
 /// Resolves an existing regular file that is safe to embed in the policy lexer.
 pub(crate) fn canonical_policy_file(path: &Path) -> Result<PathBuf, TargetValidationError> {
+    canonical_policy_path(path, false)
+}
+
+/// Resolves an existing directory for a directory-tree protection target.
+pub(crate) fn canonical_policy_directory(path: &Path) -> Result<PathBuf, TargetValidationError> {
+    canonical_policy_path(path, true)
+}
+
+fn canonical_policy_path(path: &Path, directory: bool) -> Result<PathBuf, TargetValidationError> {
     if !path.is_absolute() {
         return Err(invalid_path(path, "path must be absolute"));
     }
@@ -80,7 +89,13 @@ pub(crate) fn canonical_policy_file(path: &Path) -> Result<PathBuf, TargetValida
             format!("cannot inspect path {}: {error}", canonical.display()),
         )
     })?;
-    if !metadata.is_file() {
+    if directory && !metadata.is_dir() {
+        return Err(invalid_path(
+            &canonical,
+            "path must identify an existing directory",
+        ));
+    }
+    if !directory && !metadata.is_file() {
         return Err(invalid_path(
             &canonical,
             "path must identify an existing regular file",
@@ -179,6 +194,18 @@ mod tests {
             canonical_policy_file(file.path()).unwrap(),
             file.path().canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn directory_targets_require_a_directory_and_files_require_a_file() {
+        let file = TemporaryRegularFile::create();
+        let directory = std::env::temp_dir();
+        assert_eq!(
+            canonical_policy_directory(&directory).unwrap(),
+            directory.canonicalize().unwrap()
+        );
+        assert!(canonical_policy_directory(file.path()).is_err());
+        assert!(canonical_policy_file(&directory).is_err());
     }
 
     #[test]
