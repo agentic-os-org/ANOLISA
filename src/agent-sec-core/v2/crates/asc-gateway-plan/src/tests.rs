@@ -21,7 +21,7 @@ fn github_policy() -> PreparedPolicy {
         },
         text: GITHUB_CEDAR.into(),
     };
-    let credential_bindings = asc_policy_cedar::credential_rules(&source)
+    let credential_bindings = asc_policy_cedar::http::compile(&source)
         .unwrap()
         .into_iter()
         .map(|rule| CredentialBinding {
@@ -257,7 +257,60 @@ fn independent_noncredential_sources_are_skipped_but_cedar_still_validates() {
 }
 
 #[test]
-fn invalid_or_mixed_policy_never_compiles_a_partial_plan() {
+fn mixed_fixture_projects_network_only_and_retains_canonical_source_identity() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reconciliation/mixed-file-network.json"
+    ))
+    .unwrap();
+    let binding: asc_policy_types::binding::PreparedBinding =
+        serde_json::from_value(fixture["binding"].clone()).unwrap();
+    let AuthoredPolicySource::Cedar(source) = &binding.policy.template else {
+        unreachable!()
+    };
+    let syntax = asc_policy_cedar::pst(source).unwrap();
+    let network =
+        asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network).unwrap();
+    let plan = crate::compile_binding(crate::GatewayBindingView {
+        source: crate::GatewayBindingSource::from_binding(&binding),
+        schema: &source.schema,
+        credential_bindings: &binding.policy.credential_bindings,
+        network: &network,
+    })
+    .unwrap();
+    assert!(plan.source.matches(&binding));
+    assert_eq!(
+        serde_json::to_value(&plan.network).unwrap(),
+        fixture["expectedGatewayNetwork"]
+    );
+    let wire = serde_json::to_value(&plan).unwrap();
+    assert!(wire.get("policy").is_none());
+    assert!(!wire.to_string().contains("/work/data"));
+    assert_eq!(
+        crate::GATEWAY_BINDING_FORMAT,
+        fixture["expectedFormats"]["gateway"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn unsupported_network_without_credentials_is_not_skipped() {
+    for text in [
+        r#"permit(principal, action == SecCore::Action::"network.use", resource == SecCore::Network::"all");"#,
+        r#"forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint);"#,
+        "forbid(principal, action, resource);",
+    ] {
+        let mut network = github_policy();
+        network.policy_id = ResourceId::new("policy:network").unwrap();
+        network.credential_bindings.clear();
+        cedar_mut(&mut network).text = text.into();
+        assert!(matches!(
+            compile_scope(&scope(&[network, github_policy()])),
+            Err(PlanError::Cedar(_))
+        ));
+    }
+}
+
+#[test]
+fn invalid_or_overlapping_policy_never_compiles_a_partial_plan() {
     for (from, to) in [
         ("permit(", "forbid("),
         ("network.send", "file.read"),
@@ -278,10 +331,7 @@ fn invalid_or_mixed_policy_never_compiles_a_partial_plan() {
     cedar_mut(&mut policy)
         .text
         .push_str("\nforbid(principal, action == SecCore::Action::\"file.read\", resource);");
-    assert!(matches!(
-        compile_scope(&scope(&[policy])),
-        Err(PlanError::Cedar(_))
-    ));
+    assert_eq!(compile_scope(&scope(&[policy])).unwrap(), github_plan());
     let mut selected = scope(&[github_policy()]);
     selected.selector = asc_policy_types::scope::ScopeSelector::Pid { pid: 4242 };
     assert!(matches!(
@@ -339,7 +389,7 @@ fn repeated_policy(count: usize, policy_index: usize, unique_pairs: bool) -> Pre
     policy.policy_id = ResourceId::new(format!("policy:{policy_index}")).unwrap();
     let annotations = "@modify(\"inject_credential\") @real_token_file(\"/secure/real\") @fake_token_file(\"/secure/fake\") @inject_header(\"Authorization\") @inject_format(\"auto\") @response_rewrite(\"true\")";
     cedar_mut(&mut policy).text = format!("{annotations} permit(principal, action == SecCore::Action::\"network.send\", resource is SecCore::HttpEndpoint) when {{ resource.host == \"api.example.com\" && context.input.scheme == \"https\" }};").repeat(count);
-    let rules = asc_policy_cedar::credential_rules(cedar_mut(&mut policy)).unwrap();
+    let rules = asc_policy_cedar::http::compile(cedar_mut(&mut policy)).unwrap();
     policy.credential_bindings = rules
         .into_iter()
         .enumerate()

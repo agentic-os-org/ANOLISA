@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use asc_credential_store::ScopeId;
+use asc_gateway_plan::{GatewayBindingPlan, Plan};
 use asc_pap::{PapError, ScopeExecution};
 use asc_policy_target_contracts::TargetDeploymentClient;
 use asc_policy_types::binding::{BindingStatus, PreparedBinding};
@@ -19,8 +20,7 @@ use crate::service::{Inner, diagnose};
 use crate::state::{Attachment, State};
 use crate::{GatewayError, GatewayErrorKind, GatewayService, ProcessIdentity};
 
-/// Complete `PreparedBinding` wire format accepted by this deployment client.
-pub const GATEWAY_BINDING_FORMAT: &str = "agent-sec-gateway-binding/v1";
+pub use asc_gateway_plan::GATEWAY_BINDING_FORMAT;
 const MAX_BINDING_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +55,10 @@ impl GatewayService {
                 .iter()
                 .any(|policy| *policy == binding.policy && policy.uses_credentials())
     }
-    fn admitted_binding(&self, binding: &PreparedBinding) -> Result<PreparedScope, GatewayError> {
+    fn admitted_binding(
+        &self,
+        binding: &PreparedBinding,
+    ) -> Result<(PreparedScope, Plan), GatewayError> {
         let view = self.repository.get_binding(&binding.binding_id)?;
         if view.spec != *binding || view.status.phase != BindingStatus::Applying {
             return Err(GatewayError::new(
@@ -65,7 +68,7 @@ impl GatewayService {
         }
         let scope = self.repository.get_scope(&binding.scope.scope_id)?;
         self.canonical(&scope)?;
-        self.check_scope(&scope)?;
+        let plan = self.check_scope(&scope)?;
         if binding.scope.selector != scope.selector
             || !scope.policy_snapshots.contains(&binding.policy)
             || !binding.policy.uses_credentials()
@@ -75,7 +78,42 @@ impl GatewayService {
                 "Binding does not match the canonical Scope policy snapshot",
             ));
         }
-        Ok(scope)
+        Ok((scope, plan))
+    }
+
+    fn admitted_plan(
+        &self,
+        plan: &GatewayBindingPlan,
+    ) -> Result<(PreparedBinding, PreparedScope), GatewayError> {
+        let view = self.repository.get_binding(&plan.source.binding_id)?;
+        if !plan.source.matches(&view.spec) {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "network plan does not match the canonical Binding identity",
+            ));
+        }
+        let (scope, mut expected) = self.admitted_binding(&view.spec)?;
+        expected.policies.retain(|policy| {
+            policy.id == plan.source.policy_id && policy.revision == plan.source.policy_revision
+        });
+        expected.rules.retain(|rule| {
+            rule.source.policy_id == plan.source.policy_id
+                && rule.source.policy_revision == plan.source.policy_revision
+        });
+        expected.credentials = expected
+            .rules
+            .iter()
+            .map(|rule| rule.matcher.credential_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if expected != plan.network {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "network plan differs from the canonical Scope policy contribution",
+            ));
+        }
+        Ok((view.spec, scope))
     }
     fn verify_instance(
         &self,
@@ -398,7 +436,8 @@ impl GatewayService {
         Ok(())
     }
     fn deploy(&self, prepared: &PreparedApply) -> Result<(), GatewayError> {
-        let binding = decode_binding(&prepared.format, &prepared.content)?;
+        let plan = decode_binding_plan(&prepared.format, &prepared.content)?;
+        let (binding, scope) = self.admitted_plan(&plan)?;
         let cleanup = cleanup_of(&binding)?;
         if prepared.target != target_of(&cleanup)? {
             return Err(GatewayError::invalid(
@@ -406,7 +445,6 @@ impl GatewayService {
             ));
         }
         let mut inner = self.lock();
-        let scope = self.admitted_binding(&binding)?;
         let mut plan = self.gather_attachment(&inner, &scope, &cleanup)?;
         let mut attached = self
             .gather_shared_attachments(&inner, &binding, &scope, &mut plan)
@@ -875,11 +913,12 @@ impl GatewayBindingClient {
 }
 impl TargetDeploymentClient for GatewayBindingClient {
     fn prepare_apply(&self, plan: &TargetBindingPlan) -> Result<PreparedApply, Failure> {
-        let binding =
-            decode_binding(&plan.format, &plan.content).map_err(|error| failure(&error))?;
+        let input =
+            decode_binding_plan(&plan.format, &plan.content).map_err(|error| failure(&error))?;
         // Preparation is side-effect-free, but still rejects obsolete canonical snapshots.
-        self.0
-            .admitted_binding(&binding)
+        let (binding, _) = self
+            .0
+            .admitted_plan(&input)
             .map_err(|error| failure(&error))?;
         let cleanup = cleanup_of(&binding).map_err(|error| failure(&error))?;
         Ok(PreparedApply {
@@ -967,19 +1006,18 @@ fn pap_failure(error: &GatewayError) -> PapError {
         | GatewayErrorKind::Internal => PapError::Unavailable,
     }
 }
-fn decode_binding(format: &str, content: &[u8]) -> Result<PreparedBinding, GatewayError> {
-    use asc_policy_types::error::Validate;
+fn decode_binding_plan(format: &str, content: &[u8]) -> Result<GatewayBindingPlan, GatewayError> {
     if format != GATEWAY_BINDING_FORMAT || content.len() > MAX_BINDING_BYTES {
         return Err(GatewayError::invalid(
             "unsupported or oversized gateway Binding payload",
         ));
     }
-    let binding: PreparedBinding = serde_json::from_slice(content)
+    let plan: GatewayBindingPlan = serde_json::from_slice(content)
         .map_err(|_| GatewayError::invalid("invalid gateway Binding payload"))?;
-    binding
+    plan.network
         .validate()
-        .map_err(|_| GatewayError::invalid("invalid gateway Binding specification"))?;
-    Ok(binding)
+        .map_err(|_| GatewayError::invalid("invalid gateway network plan"))?;
+    Ok(plan)
 }
 fn cleanup_of(binding: &PreparedBinding) -> Result<Cleanup, GatewayError> {
     Ok(Cleanup {

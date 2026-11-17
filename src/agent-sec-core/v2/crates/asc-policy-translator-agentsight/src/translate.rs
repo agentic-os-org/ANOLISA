@@ -35,6 +35,28 @@ impl AgentSightTranslator {
     /// Returns an internal translation fault. A deterministic semantic mismatch is
     /// represented by [`TranslationOutcome::Rejected`].
     pub fn translate(&self, binding: &PreparedBinding) -> Result<TranslationOutcome, AdapterFault> {
+        Self::translate_binding(binding, None)
+    }
+
+    /// Translates a file PST view already validated and projected from this Binding's source.
+    ///
+    /// The composition caller must supply the view of this exact immutable snapshot.
+    /// This trusted in-process path does not parse or schema-validate source again.
+    ///
+    /// # Errors
+    /// Returns an internal fault; unsupported target semantics return a rejected outcome.
+    pub fn translate_cedar_pst(
+        &self,
+        binding: &PreparedBinding,
+        syntax: &cedar_policy::pst::PolicySet,
+    ) -> Result<TranslationOutcome, AdapterFault> {
+        Self::translate_binding(binding, Some(syntax))
+    }
+
+    fn translate_binding(
+        binding: &PreparedBinding,
+        syntax: Option<&cedar_policy::pst::PolicySet>,
+    ) -> Result<TranslationOutcome, AdapterFault> {
         if binding.validate().is_err() {
             return Ok(rejected("INVALID_BINDING"));
         }
@@ -43,7 +65,7 @@ impl AgentSightTranslator {
             Ok(scope) => scope,
             Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
         };
-        let policy = match compile_policy(binding) {
+        let policy = match compile_policy(binding, syntax) {
             Ok(policy_dsl) => policy_dsl,
             Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
         };
@@ -82,10 +104,22 @@ fn translate_scope(scope: &BindingScope) -> Result<AgentSightScopePlan, Translat
     })
 }
 
-fn compile_policy(binding: &PreparedBinding) -> Result<AgentSightPolicyPlan, TranslationRejection> {
+fn compile_policy(
+    binding: &PreparedBinding,
+    syntax: Option<&cedar_policy::pst::PolicySet>,
+) -> Result<AgentSightPolicyPlan, TranslationRejection> {
     match &binding.policy.template {
         PolicySource::Cedar(source) => {
-            let policy = crate::cedar::translate(source)?;
+            let policy = if let Some(syntax) = syntax {
+                crate::cedar::translate(syntax)?
+            } else {
+                let syntax =
+                    asc_policy_cedar::pst(source).map_err(|_| rejection("INVALID_CEDAR_POLICY"))?;
+                let files =
+                    asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File)
+                        .ok_or_else(|| rejection("CEDAR_EMPTY_EFFECTIVE_POLICY"))?;
+                crate::cedar::translate(&files)?
+            };
             let content = serde_json::to_string(&policy)
                 .map_err(|_| rejection("POLICY_SERIALIZATION_FAILED"))?;
             Ok(AgentSightPolicyPlan {
@@ -93,10 +127,15 @@ fn compile_policy(binding: &PreparedBinding) -> Result<AgentSightPolicyPlan, Tra
                 content,
             })
         }
-        PolicySource::SecCore(template) => Ok(AgentSightPolicyPlan {
-            media_type: ACTPLANE_POLICY_MEDIA_TYPE.into(),
-            content: compile_native(template)?,
-        }),
+        PolicySource::SecCore(template) => {
+            if syntax.is_some() {
+                return Err(rejection("INVALID_CEDAR_POLICY"));
+            }
+            Ok(AgentSightPolicyPlan {
+                media_type: ACTPLANE_POLICY_MEDIA_TYPE.into(),
+                content: compile_native(template)?,
+            })
+        }
     }
 }
 

@@ -5,22 +5,16 @@ use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::cedar::CedarPolicySource;
 use cedar_policy::{PolicySet, ValidationMode, ValidationWarning, Validator};
 
-use crate::{
-    CedarError,
-    advice::Advice,
-    http::{self, CredentialRule},
-    schema::load_schema,
-};
+use crate::{CedarError, advice::Advice, http, schema::load_schema};
 
 pub(super) fn parse_and_validate(
     source: &CedarPolicySource,
-) -> Result<(PolicySet, Vec<ValidationWarning>, Vec<CredentialRule>), CedarError> {
+) -> Result<(PolicySet, Vec<ValidationWarning>), CedarError> {
     PolicySource::Cedar(source.clone()).validate()?;
     check_source_budget(&source.text)?;
     let schema = load_schema(&source.schema)?;
     let policies: PolicySet = source.text.parse().map_err(Box::new)?;
     check_subset(&policies)?;
-    let rules = http::lower(&policies, source.schema.revision.get())?;
 
     let validation = Validator::new(schema).validate(&policies, ValidationMode::Strict);
     // The SDK reports action applicability as a warning; admission rejects it.
@@ -39,7 +33,6 @@ pub(super) fn parse_and_validate(
     Ok((
         policies,
         validation.validation_warnings().cloned().collect(),
-        rules,
     ))
 }
 

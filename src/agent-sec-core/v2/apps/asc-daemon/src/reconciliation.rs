@@ -9,7 +9,6 @@ use asc_policy_runtime::reconciliation::{
     MonotonicClock, ReconcileAttempt, ReconciliationRuntime, RuntimeConfig,
 };
 use asc_policy_translator_agentsight::AgentSightTranslator;
-use asc_policy_types::Validate;
 use asc_policy_types::binding::PreparedBinding;
 use asc_policy_types::target::{
     AdapterFault, Failure, FailureKind, TargetBindingPlan, TranslationOutcome,
@@ -101,48 +100,12 @@ fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 's
     file_factory: Arc<dyn TargetDeploymentClientFactory>,
     gateway_factory: Option<Arc<dyn TargetDeploymentClientFactory>>,
 ) -> Result<ReconciliationRuntime, StoreError> {
-    let clock = Arc::new(MonotonicClock::default());
-    let mut factories = BTreeMap::from([("agentsight".into(), file_factory)]);
-    if let Some(factory) = gateway_factory {
-        factories.insert("gateway".into(), factory);
-    }
-    let adapter = |binding: &PreparedBinding| {
-        if binding.policy.uses_credentials() {
-            binding.validate().map_err(|_| AdapterFault {
-                code: "GATEWAY_INVALID_BINDING".into(),
-            })?;
-            let content = serde_json::to_vec(binding).map_err(|_| AdapterFault {
-                code: "GATEWAY_ENCODING_FAILED".into(),
-            })?;
-            Ok(TranslationOutcome::Translated(TargetBindingPlan {
-                format: "agent-sec-gateway-binding/v1".into(),
-                content,
-            }))
-        } else {
-            AgentSightTranslator.translate(binding)
-        }
-    };
-    let core = Arc::new(
-        BindingReconciler::new(
-            repository.clone(),
-            Arc::new(adapter),
-            factories,
-            "agentsight".into(),
-            clock,
-            RetryPolicy {
-                max_attempts: 5,
-                base_delay_ms: 1000,
-                max_delay_ms: 30_000,
-            },
-        )?
-        .with_route_selector(|binding| {
-            if binding.policy.uses_credentials() {
-                "gateway".into()
-            } else {
-                "agentsight".into()
-            }
-        }),
-    );
+    let core = Arc::new(build_reconciler(
+        repository.clone(),
+        file_factory,
+        gateway_factory,
+        Arc::new(MonotonicClock::default()),
+    )?);
     let attempt = Arc::new(GatewayAdmission {
         repository: repository.clone(),
         core,
@@ -150,6 +113,89 @@ fn start_with_factories<R: BindingStateRepository + BindingReconcileCatalog + 's
     });
     ReconciliationRuntime::start(repository, attempt, RuntimeConfig::default())
 }
+
+fn build_reconciler<R: BindingStateRepository + 'static>(
+    repository: Arc<R>,
+    file_factory: Arc<dyn TargetDeploymentClientFactory>,
+    gateway_factory: Option<Arc<dyn TargetDeploymentClientFactory>>,
+    clock: Arc<dyn Clock>,
+) -> Result<BindingReconciler, StoreError> {
+    let mut factories = BTreeMap::from([("agentsight".into(), file_factory)]);
+    if let Some(factory) = gateway_factory {
+        factories.insert("gateway".into(), factory);
+    }
+    Ok(BindingReconciler::new(
+        repository,
+        Arc::new(|binding: &PreparedBinding| AgentSightTranslator.translate(binding)),
+        factories,
+        "agentsight".into(),
+        clock,
+        RetryPolicy {
+            max_attempts: 5,
+            base_delay_ms: 1000,
+            max_delay_ms: 30_000,
+        },
+    )?
+    .with_plan_builder(target_plans))
+}
+
+fn translated_plan(
+    outcome: Result<TranslationOutcome, AdapterFault>,
+) -> Result<TargetBindingPlan, Failure> {
+    match outcome {
+        Ok(TranslationOutcome::Translated(plan)) => Ok(plan),
+        Ok(TranslationOutcome::Rejected(rejection)) => {
+            Err(Failure::new(FailureKind::Rejected, &rejection.code))
+        }
+        Err(fault) => Err(Failure::new(FailureKind::Retryable, &fault.code)),
+    }
+}
+
+fn target_plans(binding: &PreparedBinding) -> Result<Vec<(String, TargetBindingPlan)>, Failure> {
+    let asc_policy_types::authoring::PolicySource::Cedar(source) = &binding.policy.template else {
+        return Ok(vec![(
+            "agentsight".into(),
+            translated_plan(AgentSightTranslator.translate(binding))?,
+        )]);
+    };
+    let syntax = asc_policy_cedar::pst(source)
+        .map_err(|_| Failure::new(FailureKind::Rejected, "INVALID_CEDAR_POLICY"))?;
+    let mut plans = Vec::new();
+    // Share one validated PST across target plans; order file protections before routing.
+    if let Some(files) =
+        asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File)
+    {
+        plans.push((
+            "agentsight".into(),
+            translated_plan(AgentSightTranslator.translate_cedar_pst(binding, &files))?,
+        ));
+    }
+    if let Some(network) =
+        asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network)
+    {
+        let plan = asc_gateway_plan::compile_binding(asc_gateway_plan::GatewayBindingView {
+            source: asc_gateway_plan::GatewayBindingSource::from_binding(binding),
+            schema: &source.schema,
+            credential_bindings: &binding.policy.credential_bindings,
+            network: &network,
+        })
+        .map_err(|_| Failure::new(FailureKind::Rejected, "GATEWAY_UNSUPPORTED_NETWORK_POLICY"))?;
+        let content = serde_json::to_vec(&plan)
+            .map_err(|_| Failure::new(FailureKind::Retryable, "GATEWAY_ENCODING_FAILED"))?;
+        plans.push((
+            "gateway".into(),
+            TargetBindingPlan {
+                format: asc_gateway_plan::GATEWAY_BINDING_FORMAT.into(),
+                content,
+            },
+        ));
+    }
+    Ok(plans)
+}
+
+#[cfg(test)]
+#[path = "reconciliation/mixed_tests.rs"]
+mod mixed_tests;
 
 #[cfg(test)]
 mod tests {

@@ -359,7 +359,7 @@ Translator 表示纯翻译组件；Adapter 包括 Translator 和 Deployment Clie
 | 设计问题 | 对应阶段 | 已确定与待定边界 |
 |---|---|---|
 | D1：系统防护语义映射 | 前端 schema、运行时请求构造、Translator | 文件/程序调用/整体网络字段已定义；删除/普通写翻译已接入现有 PEP Adapter；运行时字段可信来源、请求映射和授权结果到约束的接口待实现；Hook 契约另议 |
-| D2：多 PEP 选择与协同 | 目标规划、部署编排、PEP 实施 | 按 Scope 与策略要求匹配能力；替代/协同关系、必需目标集合及回执汇总待定 |
+| D2：多 PEP 选择与协同 | 目标规划、部署编排、PEP 实施 | HTTP/文件混合部署要求 Gateway 与 AgentSight，并汇总就绪状态；通用能力选择、替代关系及 Sandbox 协同仍待设计 |
 | D3：基础与运行时策略叠加 | PAP 组织策略、PDP 加载与决策 | 权限上限、组合方式、冲突、有效期、撤销后的恢复仍需单独设计；动态策略不能默认扩权 |
 | D4：AST 与检查位置 | 前端准入、加载、Translator | 原生 `PolicyTemplate` 与 Cedar PST；PAP 校验并保存源码，`pst` 重新解析保存的 Cedar 源码；Cedar 文件翻译已接入现有 PEP Adapter |
 
@@ -472,14 +472,15 @@ Dogwood 事件派生，`events.dwschema` 属于该时序扩展。SecCore 需要�
 
 ### 8.6 Cedar 前端库
 
-[`asc-policy-cedar`](../../v2/crates/asc-policy-cedar/src/lib.rs)提供两个接收源码的接口：
+[`asc-policy-cedar`](../../v2/crates/asc-policy-cedar/src/lib.rs)提供以下源码校验与 PST 投影接口：
 
 | 接口 | 调用场景 | 成功结果 |
 |---|---|---|
 | `validate(&CedarPolicySource) -> Result<Vec<ValidationWarning>, CedarError>` | 创建/更新策略 | 非阻断的 SDK warnings；不生成 PST |
 | `pst(&CedarPolicySource) -> Result<cedar_policy::pst::PolicySet, CedarError>` | 为 Translator 加载策略 | 通过相同准入校验后的 SDK 官方 PST |
+| `project_pst(&PolicySet, PolicyDomain) -> Option<PolicySet>` | 动作域规划与翻译 | file 或 network SDK PST 视图；为空时返回 `None` |
 
-两个接口都要求原始文本和精确 schema 引用，均解析 schema 和源码、检查公共支持范围，
+`validate` 和 `pst` 要求原始文本和精确 schema 引用，解析 schema 和源码、检查公共支持范围，
 并执行 SDK 严格校验。`pst` 独立完成校验，调用方无需先调用 `validate`。
 `pst` 仅返回 PST；需要展示 warnings 的调用方使用 `validate`。
 新增公共 validator 放在这条共享校验流程内部。
@@ -489,14 +490,44 @@ Dogwood 事件派生，`events.dwschema` 属于该时序扩展。SecCore 需要�
 非阻断的 SDK warnings 在 `validate` 成功时返回。错误枚举区分失败类别，SDK 诊断保留
 可获得的策略 ID 和源码位置。失败时不返回部分 PST。Translator 检查语义支持范围，Client 检查运行时能力。
 
-仅 `pst` 将校验后的策略集转换为 SDK 的公共语法树，供后端使用。
+`pst` 返回完整 SDK 公共语法树；`project_pst` 对 `PolicyDomain::File` 和
+`PolicyDomain::Network` 返回相同的 PST 表达，保留语句身份、注解、effect 和完整条件。
+只有能证明完全属于另一域的语句才被排除；未限定、跨域或未分类 action 保留在两个视图中，
+由消费方明确校验。network 包含 `network.use` 和 `network.send`，不依赖是否带凭据注解。
+投影借用 `pst(source)?` 的成功值，只复制被选中的语句，原输入可继续复用；不重新解析或校验源码。
+投影签名中的 `PolicySet` 指 `cedar_policy::pst::PolicySet`。
+
+目标 lowering 位于视图抽取之后：AgentSight 翻译 file PST；
+`http::lower(&network_pst, &schema_ref)` 生成当前 Gateway 支持的 HTTP 凭据指令。
+任何不支持的语句都使整个视图被拒绝。`http::compile(&source)` 是凭据登记和源码工具使用的
+HTTP 专用便捷入口：无凭据源码返回空指令，带执行注解的源码必须完整降低其 network 视图；
+它不是 network 视图接口。公共 `validate`/`pst` 不调用 HTTP lowering；PAP 在登记凭据前
+显式检查指令，并拒绝 OS 请求策略中的 HTTP 执行注解。
+
+Binding reconciliation 通过一次 `with_plan_builder` 调用生成全部 route 的目标计划。
+组合层对每份 Cedar 快照只解析和校验一次，域投影、AgentSight 的 `translate_cedar_pst`
+和 Gateway 翻译共用这一份 PST。HTTP lowering 直接读取 PST 语句，不再重建 SDK policy set。
+独立消费者的源码入口仍校验自己的输入。`compile_binding(GatewayBindingView)` 接收 network
+PST、schema、来源身份及已登记的凭据关联，不接收策略源码；输出的 `GatewayBindingPlan`
+只包含来源元数据和已降低的 network 贡献。Client 接收 `agent-sec-gateway-binding/v2`，
+拒绝原始混合 Binding 和旧内部 v1 载荷。保存的 Binding 快照及 cleanup 引用形状不变，
+prepared request 字节本就不持久化。
+
+Gateway 仍分两层处理：Scope execution 保留 `compile_scope`，按现有代理格式发布聚合 network
+Plan；Binding deployment 核对收到的网络贡献与该 Policy 在规范 Scope 中的编译结果一致，
+再挂接对应进程实例。运行时 Scope 检查仍独立编译规范存储快照。
+
+`fixtures/reconciliation/mixed-file-network.json` 固定同一份混合源码和两端预期目标载荷。
+daemon 测试覆盖生产分流、重试和清理；Gateway Runtime 的混合投递测试使用两端生产 Client，
+捕获 AgentSight 请求和实际发布的 Gateway Plan，并核对两条部署记录及清理。Host 和 HTTP
+transport 使用受控替身；这不等于 CLI/daemon 进程 E2E 或内核防护证据。
 
 | 文件 | 职责 |
 |---|---|
 | `schema/seccore.cedarschema` | revision 1 实体、动作及各动作 input 字段定义 |
 | `src/schema.rs` | 精确解析内置 schema 标识及版本 |
 | `src/validation.rs` | 共用的解析、schema 校验及公共子集检查 |
-| `src/lib.rs` | `validate`、`pst` 公开函数、PST 转换与类型化诊断 |
+| `src/lib.rs` | 源码校验、完整 PST 与目标视图接口、类型化诊断 |
 
 revision 1 schema 覆盖文件访问、程序调用和整体网络权限，保留 `SecCore::File` 与
 `file.read/write/exec` 命名。`file.exec` 继续表示程序调用，不是 Linux 文件系统 X 权限检查。
@@ -606,6 +637,20 @@ V2 HTTP 前端保留 `seccore.system@1`，
 `HttpRequestContext.input` 和 `SecCore::Action::"network.send"`。两个 revision 精确解析，
 不得静默升级保存的 revision 1 引用。HTTP 注入降低为 Gateway plan，不进入 OS PDP，
 也不提供通用网络 allow/deny 服务。
+
+revision 2 部署源码允许凭据注入 permit 与独立的 `file.read`/`file.write` forbid 混写。
+完整源码统一校验并保存；`project_pst` 返回 file 和 network PST 视图，部署按动作域分流。
+AgentSight 翻译 file 视图，Gateway 通过 `http::lower` 降低 network 视图。
+凭据集合中的无注解 HTTP 规则、未限定或跨域
+action，以及其他非文件语句不能被静默忽略。各 Translator 仍检查自己的支持子集。
+
+一个 Binding 保留完整 Policy 快照，拥有两端必要部署。所有目标在修改前完成翻译和
+prepare，并在 I/O 前保存清理责任；先实施文件防护，再允许 Gateway 开启路由。
+全部必要目标均确认在当前 Binding revision 存在，才进入 `READY`；部分失败保留观察
+结果和清理责任。重试可能重新应用已成功目标；Delete 按目标原 Client 清理，保留未确认
+移除的目标。这不是分布式原子事务，也不构成运行时防护证据。已支持的纯文件和纯凭据源码保持原行为，
+Sandbox 请求授权不变，无需 SQL schema 迁移。回滚到不支持混合部署的版本前，先删除
+混合 Scope 并确认清理完成，再删除对应混合 Policy 记录，恢复所需旧策略及分配。
 
 每条注入 permit 必须含六个注解：
 

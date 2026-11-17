@@ -40,7 +40,7 @@ pub fn rewrite_token_files(
             "token files must be distinct canonical absolute file paths without expansion",
         ));
     }
-    let original_rules = crate::credential_rules(source)?;
+    let original_rules = crate::http::compile(source)?;
     let original = statements(&source.text)?;
     if original_rules.is_empty() || original_rules.len() != original.len() {
         return Err(reject("every statement must be a credential rule"));
@@ -76,7 +76,7 @@ pub fn rewrite_token_files(
             return Err(reject("rewritten policy differs beyond token-file paths"));
         }
     }
-    let rules = crate::credential_rules(&rewritten)?;
+    let rules = crate::http::compile(&rewritten)?;
     if !same_except_paths(&original_rules, &rules, real_token_file, fake_token_file) {
         return Err(reject(
             "rewritten credential rules differ beyond token-file paths",
@@ -165,8 +165,8 @@ mod tests {
             "the packaged source is never modified"
         );
         crate::validate(&rewritten).unwrap();
-        let before = crate::credential_rules(&original).unwrap();
-        let after = crate::credential_rules(&rewritten).unwrap();
+        let before = crate::http::compile(&original).unwrap();
+        let after = crate::http::compile(&rewritten).unwrap();
         assert_eq!(after.len(), 8);
         for (before, after) in before.iter().zip(&after) {
             assert_eq!(after.real_token_file, REAL_PATH);

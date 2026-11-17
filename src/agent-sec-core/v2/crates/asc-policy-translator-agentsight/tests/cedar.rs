@@ -40,6 +40,64 @@ fn translate(text: &str) -> Value {
 }
 
 #[test]
+fn mixed_fixture_projects_file_only_with_the_same_binding_identity() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reconciliation/mixed-file-network.json"
+    ))
+    .unwrap();
+    let binding: PreparedBinding = serde_json::from_value(fixture["binding"].clone()).unwrap();
+    let TranslationOutcome::Translated(plan) = AgentSightTranslator.translate(&binding).unwrap()
+    else {
+        panic!("mixed file view must translate")
+    };
+    assert_eq!(
+        plan.format,
+        fixture["expectedFormats"]["agentsight"].as_str().unwrap()
+    );
+    let plan: AgentSightBindingPlan = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(plan.source.binding_id, binding.binding_id);
+    assert_eq!(plan.source.binding_revision, binding.binding_revision);
+    assert_eq!(plan.source.policy_id, binding.policy.policy_id);
+    assert_eq!(plan.source.policy_revision, binding.policy.revision);
+    assert_eq!(plan.source.scope_id, binding.scope.scope_id);
+    assert_eq!(
+        serde_json::from_str::<Value>(&plan.policy.content).unwrap(),
+        fixture["expectedFileProtection"]
+    );
+    assert!(!plan.policy.content.contains("api.github.com"));
+}
+
+#[test]
+fn projected_pst_preserves_source_translation_results_and_binding_metadata() {
+    for text in [
+        read_rule(r#"resource.path == "/secret""#),
+        read_rule(r#"resource.path == "/secret" && context.input.program == "/bin/cat""#),
+        read_rule(r#"resource.path == "/secret""#).replace("forbid(", "permit("),
+    ] {
+        let binding = binding(&text);
+        let asc_policy_types::authoring::PolicySource::Cedar(source) = &binding.policy.template
+        else {
+            unreachable!()
+        };
+        let syntax = asc_policy_cedar::pst(source).unwrap();
+        let files =
+            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File).unwrap();
+        assert_eq!(
+            AgentSightTranslator
+                .translate_cedar_pst(&binding, &files)
+                .unwrap(),
+            AgentSightTranslator.translate(&binding).unwrap(),
+        );
+        let mut invalid = binding.clone();
+        invalid.scope.process.pid = 0;
+        assert!(matches!(
+            AgentSightTranslator.translate_cedar_pst(&invalid, &files).unwrap(),
+            TranslationOutcome::Rejected(error) if error.code == "INVALID_BINDING"
+        ));
+    }
+}
+
+#[test]
 fn delete_and_write_keep_independent_scopes_and_merge_identical_targets() {
     let text = format!(
         "{}{}{}",

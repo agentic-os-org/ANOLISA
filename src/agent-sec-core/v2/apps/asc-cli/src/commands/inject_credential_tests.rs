@@ -619,7 +619,7 @@ fn existing_fake_run_and_dry_run_preserve_packaged_asset_and_never_enable_gatewa
                 let PolicySource::Cedar(source) = params.template else {
                     panic!("expected Cedar");
                 };
-                for rule in asc_policy_cedar::credential_rules(&source).unwrap() {
+                for rule in asc_policy_cedar::http::compile(&source).unwrap() {
                     assert_eq!(
                         read_token_file(Path::new(&rule.real_token_file), 0)
                             .unwrap()
@@ -738,8 +738,8 @@ fn rendering_preserves_rules_and_rejects_non_utf8_paths() {
     let real = Path::new("/run/test/real");
     let fake = Path::new("/run/test/fake");
     let rendered = render(&template, real, fake).unwrap();
-    let before = asc_policy_cedar::credential_rules(&template).unwrap();
-    let after = asc_policy_cedar::credential_rules(&rendered).unwrap();
+    let before = asc_policy_cedar::http::compile(&template).unwrap();
+    let after = asc_policy_cedar::http::compile(&rendered).unwrap();
     assert_eq!(rule_count(&rendered), before.len());
     for (mut expected, actual) in before.into_iter().zip(after) {
         expected.real_token_file = real.to_str().unwrap().into();

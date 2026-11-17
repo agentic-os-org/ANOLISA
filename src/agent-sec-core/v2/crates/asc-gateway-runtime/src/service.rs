@@ -988,7 +988,7 @@ impl asc_pap::CredentialRegistration for GatewayService {
     ) -> Result<Vec<asc_policy_types::policy::CredentialBinding>, asc_pap::PapError> {
         use sha2::{Digest as _, Sha256};
 
-        let rules = asc_policy_cedar::credential_rules(source)
+        let rules = asc_policy_cedar::http::compile(source)
             .map_err(|error| asc_pap::PapError::InvalidCedar(error.diagnostic()))?;
         let source_bytes =
             serde_json::to_vec(source).map_err(|_| asc_pap::PapError::Persistence)?;

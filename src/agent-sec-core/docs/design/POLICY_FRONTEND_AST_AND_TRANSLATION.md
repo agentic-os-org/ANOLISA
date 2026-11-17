@@ -425,7 +425,7 @@ Unsupported semantics must reject the unit as a whole, not disappear during depl
 | Design question | Processing stages | Decisions and remaining boundaries |
 |---|---|---|
 | D1: System protection semantics | Frontend schema, runtime request construction, Translator | File/invocation/coarse-network fields exist; file deletion/ordinary-write translation is connected to the existing PEP Adapter; trusted runtime field sources, request mapping and approved-constraint mapping remain open; Hook contracts are deferred |
-| D2: Multiple PEP selection and cooperation | Target planning, deployment orchestration, PEP enforcement | Match capabilities to Scope and policy needs; alternatives/cooperation, required targets and receipt aggregation remain open |
+| D2: Multiple PEP selection and cooperation | Target planning, deployment orchestration, PEP enforcement | Mixed HTTP/file deployment requires Gateway and AgentSight, with aggregate readiness; general capability selection, alternatives and Sandbox coordination remain open |
 | D3: Base and runtime composition | PAP policy assembly, PDP loading and decisions | Permission ceiling, composition, conflicts, lifetime and recovery after revocation need separate design; dynamic policies must not implicitly expand permissions |
 | D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; PAP validates and saves source, `pst` reparses saved Cedar source; Cedar file translation is connected to the existing PEP Adapter |
 
@@ -553,15 +553,16 @@ runtime uses a Cedar PDP, integration code supplies a schema-compatible principa
 
 ### 8.6 Cedar frontend library
 
-[`asc-policy-cedar`](../../v2/crates/asc-policy-cedar/src/lib.rs) exposes two
-source-based interfaces:
+[`asc-policy-cedar`](../../v2/crates/asc-policy-cedar/src/lib.rs) exposes these
+source validation and PST projection interfaces:
 
 | Interface | Intended caller | Success result |
 |---|---|---|
 | `validate(&CedarPolicySource) -> Result<Vec<ValidationWarning>, CedarError>` | Policy creation/update | Non-blocking SDK warnings; no PST is generated |
 | `pst(&CedarPolicySource) -> Result<cedar_policy::pst::PolicySet, CedarError>` | Policy loading for Translator | Official SDK PST after the same admission checks |
+| `project_pst(&PolicySet, PolicyDomain) -> Option<PolicySet>` | Domain planning and translation | File or network SDK PST view; `None` when empty |
 
-Both require original text and an exact schema reference. Both resolve the schema,
+`validate` and `pst` require original text and an exact schema reference. They resolve the schema,
 parse the source, check the common supported subset and run strict SDK validation.
 `pst` validates independently; the caller need not call `validate` first. Its return
 value contains only the PST; callers displaying warnings use `validate`.
@@ -572,16 +573,58 @@ SDK schema-validation errors and rejected `InvalidActionApplication` warnings
 are collected in `CedarError::Validation`. Non-blocking SDK warnings are returned
 on successful `validate`. Error variants identify the failure class;
 SDK diagnostics retain policy IDs and source locations where available. A failed
-call returns no partial PST. Neither interface checks target backend capabilities.
+call returns no partial PST. These interfaces do not check live backend capabilities.
 
-Only `pst` converts a validated policy set to the SDK public syntax tree for a consumer.
+`pst` returns the full SDK public syntax tree. `project_pst` returns the same
+representation for `PolicyDomain::File` and `PolicyDomain::Network`, preserving
+statement identities, annotations, effects and conditions. Only statements proven
+to belong wholly to the other domain are excluded. Unconstrained, cross-domain
+and unclassified actions remain in both views for explicit consumer validation.
+Network includes `network.use` and `network.send`, regardless of credential annotations.
+Projection borrows the successful result of `pst(source)?`, clones only selected
+statements and leaves that input reusable. It does not parse or validate source.
+`PolicySet` in the projection signature means `cedar_policy::pst::PolicySet`.
+
+Target lowering follows projection. AgentSight translates the file PST;
+`http::lower(&network_pst, &schema_ref)` produces the currently supported Gateway
+HTTP credential instructions. Any unsupported statement rejects that complete view.
+`http::compile(&source)` is an HTTP-specific convenience for credential registration
+and source utilities: non-credential sources return no instructions, while annotated
+sources must lower their complete network view. It is not the network projection API.
+Common `validate`/`pst` do not invoke HTTP lowering. PAP explicitly checks credential
+instructions before registration and rejects HTTP annotations on OS request policies.
+
+Binding reconciliation builds all routed plans in one `with_plan_builder` call.
+The composition parses and validates each Cedar snapshot once, then shares that
+PST across domain projection, AgentSight's `translate_cedar_pst` and Gateway translation.
+HTTP lowering reads PST statements directly without reconstructing an SDK policy set.
+Source entrypoints in standalone consumers still validate their own inputs;
+`compile_binding(GatewayBindingView)` consumes network PST, schema, source identity
+and persisted credential associations, without receiving authored Policy text.
+Its `GatewayBindingPlan` contains source metadata and the lowered network contribution.
+The Client accepts `agent-sec-gateway-binding/v2`; raw mixed Bindings and the old
+internal v1 payload are rejected. Stored Binding snapshots and cleanup references
+retain their existing shape; prepared request bytes are not persisted.
+
+Gateway uses two lifecycle inputs. Scope execution retains `compile_scope` and
+publishes the aggregate network Plan in the existing proxy format. Binding deployment
+checks the incoming network contribution against that Policy's canonical Scope
+contribution before attaching its process instance. Runtime Scope checks still
+compile canonical stored snapshots independently.
+
+`fixtures/reconciliation/mixed-file-network.json` pins the common mixed source and
+both expected target payloads. Daemon tests check production dispatch, retries and
+cleanup. Gateway Runtime's mixed delivery test uses both production Clients,
+captures the AgentSight request and published Gateway Plan, and confirms both
+deployment records and cleanup. Host and HTTP transport ports are controlled;
+this is not CLI/daemon process E2E or kernel enforcement evidence.
 
 | File | Responsibility |
 |---|---|
 | `schema/seccore.cedarschema` | Revision 1 entity, action and per-action input definitions |
 | `src/schema.rs` | Resolve the exact built-in schema identity and revision |
 | `src/validation.rs` | Shared parsing, schema validation and common-subset checks |
-| `src/lib.rs` | Public `validate` and `pst` functions, PST conversion and typed diagnostics |
+| `src/lib.rs` | Source validation, full PST and target-view interfaces, typed diagnostics |
 
 The revision 1 schema covers file access, executable invocation and whole-network permission.
 It retains `SecCore::File` and `file.read/write/exec`; `file.exec` continues to mean
@@ -713,6 +756,27 @@ existing OS PDP. Revision 2 (`schema/seccore-v2.cedarschema`) adds
 `scheme/method/path`, and `SecCore::Action::"network.send"`. Resolve both revisions
 exactly; never silently upgrade saved revision 1 references. HTTP injection lowers
 to Gateway plans, not the OS PDP or a general network allow/deny service.
+
+Revision 2 deployment source may mix credential injection permits with independent
+`file.read`/`file.write` forbids. The full source is validated and persisted once.
+`project_pst` produces file and network PST views; deployment dispatch follows these
+domains. AgentSight translates the file view, and Gateway lowers the network view
+with `http::lower`. Unannotated HTTP
+rules, unconstrained or cross-domain actions and non-file statements cannot be
+silently omitted from a credential set. Each Translator still checks its own subset.
+
+One Binding retains the full Policy snapshot and owns both required deployments.
+All targets are translated and prepared before mutation, and their cleanup
+responsibilities are saved before I/O. File protections are applied before Gateway
+can enable routing. `READY` requires every required target to be confirmed present
+at the Binding revision; partial failure retains observations and cleanup ownership.
+Retries may reapply already successful targets. Delete dispatches each target to
+its own Client and retains unresolved targets. This is not an atomic distributed
+transaction or proof of live enforcement. Supported file-only and credential-only
+sources retain their behavior; Sandbox request authorization is unchanged. No SQL
+schema migration is needed. Before rolling back to a runtime without mixed deployment support, delete
+mixed Scopes and confirm cleanup, remove their mixed Policy records, then restore
+the intended older policies and assignments.
 
 Each injection permit requires these six annotations:
 

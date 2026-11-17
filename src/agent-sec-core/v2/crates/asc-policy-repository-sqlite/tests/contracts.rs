@@ -224,7 +224,7 @@ fn credential_scope_release_responsibility_survives_restart_with_zero_or_last_bi
 permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
 when { resource.host == "api.github.com" && context.input.method == "GET" && context.input.path like "/repos/*" };"#.into(),
         };
-        policy.credential_bindings = asc_policy_cedar::credential_rules(&source)
+        policy.credential_bindings = asc_policy_cedar::http::compile(&source)
             .unwrap()
             .into_iter()
             .map(|rule| asc_policy_types::policy::CredentialBinding {

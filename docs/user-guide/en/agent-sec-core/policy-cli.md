@@ -557,6 +557,15 @@ syntax, schema or common-subset constructs return `invalid_argument` without
 changing stored policy content or revisions. Unknown schema revisions are rejected
 without fallback. Native templates remain supported in their existing shape.
 
+Policies describe file and network requirements through `file.*` and `network.*`
+actions. Network actions cover whole-network permissions and HTTP requests;
+credential injection is one network capability. Mixed deployment currently supports
+independent file-protection `forbid` rules and HTTP credential-injection `permit`
+rules. These HTTP rules require `--schema-revision 2`; credential administration
+requires root. Before downgrading to a version without mixed-policy support, delete
+mixed Scopes, confirm cleanup and remove their mixed Policy records before restoring
+older policies and assignments.
+
 Policy creation success does not establish target PEP support. The current PEP
 Translator supports a Cedar `forbid` subset for deletion, ordinary-write
 restrictions and exact-file read denial. Read denial uses `file.read` with an

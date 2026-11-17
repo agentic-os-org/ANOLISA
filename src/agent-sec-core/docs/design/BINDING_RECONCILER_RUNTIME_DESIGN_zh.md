@@ -443,6 +443,14 @@ Delete 使用已登记的 cleanup，不要求原进程存活。源码见
 首版在该处注册 `AgentSightClientFactory::default()`，注册时不读凭据、不连接目标。
 每次到期尝试通过 factory 创建 Client；Apply 在 prepare 与 create/update 之间复用同一实例，
 Delete 按保存的 route 各创建一个实例，同路由的目标共用它。实例随本次调用结束释放。
+HTTP/文件混合 Policy 使用同一个 Binding 的 Gateway 与 AgentSight 两条必要 route。
+一次 `with_plan_builder` 回调生成全部 route 的目标计划，域投影及翻译复用同一份已校验 PST。
+Gateway route 的计划是原 Binding 身份及已降低的 network 贡献，不携带混合策略原文；
+Client 在 prepare 和执行时核对规范身份和网络贡献，再挂接进程。Scope 级 network Plan
+由 Gateway Scope execution 独立聚合并在启用时按现有格式发布给代理。
+所有计划及 Client prepare 成功后，先持久化全部目标
+责任，再依序实施文件防护和 Gateway 路由。`READY` 要求所有关联部署属于当前 revision
+且确认存在；部分结果保留，未确认目标继续负责清理。旧单 route 入口仍可使用。
 未来按环境变量选择启用哪些 PEP 也属于该初始化模块；首版尚未实现环境变量选择。
 目标地址、默认 token 文件及凭据读取由 Client 所有，不暴露到 daemon/CLI 参数或 CRUD request。
 凭据缺失、暂时不可读或内容无效作为本次 Binding 的 retryable failure，下一次尝试重新读文件；

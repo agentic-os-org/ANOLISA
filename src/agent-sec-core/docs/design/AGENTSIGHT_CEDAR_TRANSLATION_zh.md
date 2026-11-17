@@ -29,9 +29,13 @@ Client 共用。该 crate 只依赖 `serde`，固定 JSON 样例用于检查序�
 禁读要求目标报告 `file_read_protection`；旧目标会在更新清理前被拒绝。
 
 此目标接收**附加 forbid 限制**：命中时阻止对应操作，未命中时本策略不增加限制。
-这里不执行 Cedar Authorizer 的默认拒绝算法。Translator 拒绝 permit，包括混合策略集中的
-permit；通用前端仍保留 permit 供其他消费者使用。不补隐含 permit-all，不把 permit 转成
-排除项，也不在此链路实现通用 Cedar 请求授权服务。
+这里不执行 Cedar Authorizer 的默认拒绝算法。Translator 拒绝文件视图中的 permit。
+revision 2 源码还可包含 HTTP 凭据 permit；`project_pst(&syntax, PolicyDomain::File)`
+保留独立文件 forbid 的完整条件，network PST 交给 Gateway lowering。
+组合层只调用一次 `pst(source)?`，将 file 视图传给 `AgentSightTranslator::translate_cedar_pst`，
+保留规范 Binding 的元数据。
+未知语句或文件条件不能被忽略。
+不补隐含 permit-all，不把 permit 转成排除项，也不在此链路实现通用 Cedar 请求授权服务。
 
 ## 2. 字段和表达式支持范围
 

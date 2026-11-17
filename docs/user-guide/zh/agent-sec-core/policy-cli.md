@@ -461,6 +461,12 @@ Get/list 返回保存的原文及精确 schema 引用。语法、schema 或公�
 `invalid_argument`，不修改已保存的策略内容及 revision。未知 schema revision 直接拒绝，
 不回退到其他版本。原生模板继续使用原有形状。
 
+策略通过 `file.*` 和 `network.*` 动作描述文件和网络要求。网络动作涵盖整体网络权限和
+HTTP 请求，凭据注入只是其中一项能力。当前混合部署支持独立文件防护 `forbid` 规则与
+HTTP 凭据注入 `permit` 规则；这些 HTTP 规则要求 `--schema-revision 2`，凭据管理要求
+root。降级到不支持混合策略的版本前，先删除混合 Scope 并确认清理完成，再删除对应
+混合 Policy 记录，恢复旧策略及分配。
+
 策略创建成功不代表目标 PEP 支持该策略。当前 PEP Translator 支持限制删除、普通写入和精确文件禁读的
 Cedar `forbid` 子集。禁读使用 `file.read` 和精确文件路径，要求 AgentSight 报告
 `file_read_protection` 能力；不支持目录树禁读。参见 [AgentSight 禁读边界](../agentsight/integrations.md#禁止读取密钥文件)。

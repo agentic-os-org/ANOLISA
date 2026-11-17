@@ -25,6 +25,9 @@ tempfile = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+asc-agentsight-client = { workspace = true }
+asc-pcp = { workspace = true }
+asc-policy-translator-agentsight = { workspace = true }
 asc-policy-repository = { workspace = true }
 asc-policy-repository-sqlite = { workspace = true }
 tracing-subscriber = { workspace = true }
