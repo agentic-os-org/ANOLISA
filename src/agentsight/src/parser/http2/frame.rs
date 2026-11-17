@@ -506,36 +506,36 @@ impl ParsedHttp2Frame {
             29 => Some(("content-location", "")),
             30 => Some(("content-range", "")),
             31 => Some(("content-type", "")),
-            32 => Some(("date", "")),
-            33 => Some(("etag", "")),
-            34 => Some(("expect", "")),
-            35 => Some(("expires", "")),
-            36 => Some(("from", "")),
-            37 => Some(("host", "")),
-            38 => Some(("if-match", "")),
-            39 => Some(("if-modified-since", "")),
-            40 => Some(("if-none-match", "")),
-            41 => Some(("if-range", "")),
-            42 => Some(("if-unmodified-since", "")),
-            43 => Some(("last-modified", "")),
-            44 => Some(("link", "")),
-            45 => Some(("location", "")),
-            46 => Some(("max-forwards", "")),
-            47 => Some(("proxy-authenticate", "")),
-            48 => Some(("proxy-authorization", "")),
-            49 => Some(("range", "")),
-            50 => Some(("referer", "")),
-            51 => Some(("refresh", "")),
-            52 => Some(("retry-after", "")),
-            53 => Some(("server", "")),
-            54 => Some(("set-cookie", "")),
-            55 => Some(("strict-transport-security", "")),
-            56 => Some(("transfer-encoding", "")),
-            57 => Some(("user-agent", "")),
-            58 => Some(("vary", "")),
-            59 => Some(("via", "")),
-            60 => Some(("www-authenticate", "")),
-            61 => Some(("x-forwarded-for", "")),
+            32 => Some(("cookie", "")),
+            33 => Some(("date", "")),
+            34 => Some(("etag", "")),
+            35 => Some(("expect", "")),
+            36 => Some(("expires", "")),
+            37 => Some(("from", "")),
+            38 => Some(("host", "")),
+            39 => Some(("if-match", "")),
+            40 => Some(("if-modified-since", "")),
+            41 => Some(("if-none-match", "")),
+            42 => Some(("if-range", "")),
+            43 => Some(("if-unmodified-since", "")),
+            44 => Some(("last-modified", "")),
+            45 => Some(("link", "")),
+            46 => Some(("location", "")),
+            47 => Some(("max-forwards", "")),
+            48 => Some(("proxy-authenticate", "")),
+            49 => Some(("proxy-authorization", "")),
+            50 => Some(("range", "")),
+            51 => Some(("referer", "")),
+            52 => Some(("refresh", "")),
+            53 => Some(("retry-after", "")),
+            54 => Some(("server", "")),
+            55 => Some(("set-cookie", "")),
+            56 => Some(("strict-transport-security", "")),
+            57 => Some(("transfer-encoding", "")),
+            58 => Some(("user-agent", "")),
+            59 => Some(("vary", "")),
+            60 => Some(("via", "")),
+            61 => Some(("www-authenticate", "")),
             _ => None,
         }
     }
@@ -689,6 +689,110 @@ mod tests {
         // return the old "<huffman:N bytes>" placeholder.
         let out = ParsedHttp2Frame::huffman_decode(&[0x00]);
         assert!(!out.starts_with("<huffman:"));
+    }
+
+    /// RFC 7541 Appendix A defines 61 static entries and index 32 is `cookie`.
+    /// Omitting it shifted every later name one entry early (`date` at 32,
+    /// `www-authenticate` at 60) and invented `x-forwarded-for` at 61, so
+    /// trace headers and the stateless fallback mislabelled every name from
+    /// index 32 onwards.
+    #[test]
+    fn stateless_static_table_matches_rfc7541_appendix_a() {
+        let expected = [
+            ":authority",
+            ":method",
+            ":method",
+            ":path",
+            ":path",
+            ":scheme",
+            ":scheme",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            ":status",
+            "accept-charset",
+            "accept-encoding",
+            "accept-language",
+            "accept-ranges",
+            "accept",
+            "access-control-allow-origin",
+            "age",
+            "allow",
+            "authorization",
+            "cache-control",
+            "content-disposition",
+            "content-encoding",
+            "content-language",
+            "content-length",
+            "content-location",
+            "content-range",
+            "content-type",
+            "cookie",
+            "date",
+            "etag",
+            "expect",
+            "expires",
+            "from",
+            "host",
+            "if-match",
+            "if-modified-since",
+            "if-none-match",
+            "if-range",
+            "if-unmodified-since",
+            "last-modified",
+            "link",
+            "location",
+            "max-forwards",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "range",
+            "referer",
+            "refresh",
+            "retry-after",
+            "server",
+            "set-cookie",
+            "strict-transport-security",
+            "transfer-encoding",
+            "user-agent",
+            "vary",
+            "via",
+            "www-authenticate",
+        ];
+        assert_eq!(expected.len(), 61, "RFC 7541 Appendix A has 61 entries");
+        for (offset, name) in expected.iter().enumerate() {
+            let index = offset + 1;
+            let (actual, _) = ParsedHttp2Frame::get_static_table_entry(index)
+                .unwrap_or_else(|| panic!("static index {index} must be defined"));
+            assert_eq!(actual, *name, "static index {index} must name {name}");
+        }
+        assert_eq!(
+            ParsedHttp2Frame::get_static_table_entry(32),
+            Some(("cookie", "")),
+            "static index 32 must name cookie"
+        );
+        assert!(
+            ParsedHttp2Frame::get_static_table_entry(62).is_none(),
+            "the static table ends at 61; index 62 is the first dynamic slot"
+        );
+
+        // An indexed field past the table is dynamic state this stateless
+        // walk cannot resolve, so it must not borrow a static name.
+        assert_eq!(
+            headers_frame(vec![0x80 | 62]).decode_headers_stateless(),
+            vec![("<dynamic:62>".to_string(), None)]
+        );
+
+        // A literal header whose name references static index 58 must decode
+        // as `user-agent`; the shifted table called it `vary`.
+        let mut payload = vec![0x0F, 58 - 15, 1];
+        payload.push(b'*');
+        assert_eq!(
+            headers_frame(payload).decode_headers_stateless(),
+            vec![("user-agent".to_string(), Some("*".to_string()))]
+        );
     }
 
     fn data_frame(payload: Vec<u8>) -> ParsedHttp2Frame {
