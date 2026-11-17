@@ -399,7 +399,7 @@ the [Python SDK guide](../../../developer-guide/en/sdk/tokenless/index.md) for b
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm and Maven layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test/package-install output is routed to `BuildLogCompressor` for SGR cleanup, pnpm, Maven and Gradle layout compaction without recovery, and retrievable progress reduction; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | Search path sharing | Shares consecutive paths in numbered API search records and recognized native shell searches, including native Claude Grep, or a directory prefix in pure path lists from commands and APIs; retains every received record | Enabled by default; requires text replacement and a smaller byte-reversible view; file reads skip the path-list strategy |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Rewrites with RTK and submits shell input that runs through `tokenless rtk` when a rule is available | Recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native; disabling search path sharing does not restore rewriting for those calls; custom RTK wrapper prefixes are outside this protection |
@@ -625,6 +625,59 @@ apply: Tool Errors keep their original output. Maven commands retain their curre
 PreTool RTK behavior; this feature does not add a command-rewriting exemption or
 invoke RTK from PostTool. Local corpus and adapter replay results are not evidence
 of live-Agent, whole-task or billing savings.
+
+### Gradle build output
+
+Source builds with Gradle BuildLog support compact recognized native Gradle
+output through the same PostTool content route as Maven. Recognition is
+independent of the command string and daemon or configuration-cache state; the
+existing `build_log_reduction` operation reports `lossless`, needs no recovery
+capability and never writes to Stash.
+
+Detection requires two consecutive complete `> Task :<path>[ <status>]` records
+inside a bounded head/tail sample. The visible beginning within the head sample
+budget must look like a log, optionally after a `$ ` prompt, a `gradle`/`gradlew`
+`set -x` trace, JVM option pickups or known HotSpot/access warnings, wrapper
+distribution downloads (`Downloading`/`Unzipping
+https://services.gradle.org/distributions/`), daemon lifecycle lines,
+configuration-cache output, `> Configure project :` preambles, or a
+`Welcome to Gradle` banner. Markdown-fenced lines cannot supply Gradle evidence
+and evidence windows never cross fences or sample gaps, following the same
+fence rules as Maven. Task lines alone — without any log-shaped head context —
+do not establish a Gradle route. CR-containing records are excluded from
+structural detection, so CRLF-only output uses the other content detectors, and
+Gradle structural compaction supports LF records only.
+
+Consecutive complete non-failure task records are compacted by sharing literal
+templates: a block starts with `Gradle templates` and a JSON header containing
+the literal strings and a row count, followed by one row per record with a
+zero-based template index and TAB-separated fields. Reconstruct each original
+line by interleaving that row's fields with its template literals and appending
+LF. Rows retain their original order and duplicates. When a template covers
+three or more rows, the shared module-path prefix is factored into the template
+literal at `:`/`-`/`_` boundaries so each row carries only its tail. This
+preserves every task path, status (`UP-TO-DATE`, `FROM-CACHE`, `SKIPPED`,
+`NO-SOURCE` and executed-without-suffix) and ordering.
+
+Warnings, deprecations, test output, stack traces, non-SGR control sequences
+(`\r`, `\t`, `\x1b[0K`), unterminated lines and any unknown output close the
+active run; `> Task :<path> FAILED` records and their diagnostics stay verbatim
+and adjacent. A run reopens only after two consecutive complete non-failure
+task lines. Each block is limited to 256 records and 64 KiB; an oversized block
+stays whole, and any single line exceeding 64 KiB suppresses Gradle edits for
+that result. At most 256 edits are applied per result; once reached, completed
+edits are retained and the suffix stays intact. Already compacted results are
+left alone. Each block and the complete candidate must save both characters and
+estimated tokens.
+
+`> Task :` lines never enter standalone Generic progress templates. If no
+Gradle edits can be planned, command/exit-anchored logs can still use the
+existing Generic progress reduction when Stash and Shell/Tool recovery are
+available, following the same fallback rules as Maven. Runtime and adapter
+size, status, source and replacement guards still apply: Tool Errors keep their
+original output, and Gradle commands retain their current PreTool RTK behavior.
+Captured-fixture provenance and verification limits live in
+`tests/fixtures/build_logs/gradle/README.md`.
 
 ### CSV/TSV compaction preserves complete tables
 

@@ -30,6 +30,7 @@ const FIXTURES: &[&str] = &[
     "go_failure",
     "shell_success",
     "shell_failure",
+    "gradle/mockito_incremental",
 ];
 
 /// Task facts (§6.1) that must survive compression verbatim: error identity,
@@ -98,6 +99,14 @@ const PROBES: &[(&str, &[&str])] = &[
             "src/util.c:42:5: error: 'foo' undeclared (first use in this function)",
             "make: *** [Makefile:12: build/util.o] Error 1",
             "Exit code: 2",
+        ],
+    ),
+    (
+        "gradle/mockito_incremental",
+        &[
+            "> Task :mockito-core:javadoc FAILED",
+            "Execution failed for task ':mockito-core:javadoc'.",
+            "BUILD FAILED in",
         ],
     ),
 ];
@@ -227,7 +236,38 @@ fn reassemble(output: &str, store: &InMemoryStore) -> String {
             result.push_str(line);
         }
     }
-    result
+    decode_gradle_templates(&result)
+}
+
+/// Reverse the Gradle literal-template encoding exactly like the
+/// independent oracle in `tests/common/gradle_oracle.rs`.
+fn decode_gradle_templates(input: &str) -> String {
+    const HEADER: &str = "Gradle templates (id<TAB>fields; interleave with literals): ";
+    let mut output = String::new();
+    let mut lines = input.split_inclusive('\n');
+    while let Some(line) = lines.next() {
+        let Some(header) = line.strip_prefix(HEADER) else {
+            output.push_str(line);
+            continue;
+        };
+        let header: serde_json::Value = serde_json::from_str(header).unwrap();
+        let literals = header["literals"].as_array().unwrap();
+        for _ in 0..header["rows"].as_u64().unwrap() {
+            let row = lines.next().unwrap().strip_suffix('\n').unwrap();
+            let mut fields = row.split('\t');
+            let id: usize = fields.next().unwrap().parse().unwrap();
+            let parts = literals[id].as_array().unwrap();
+            output.push_str(parts[0].as_str().unwrap());
+            let fields = fields.collect::<Vec<_>>();
+            assert_eq!(fields.len() + 1, parts.len());
+            for (field, literal) in fields.iter().zip(&parts[1..]) {
+                output.push_str(field);
+                output.push_str(literal.as_str().unwrap());
+            }
+            output.push('\n');
+        }
+    }
+    output
 }
 
 fn strip_sgr_for_expected_reassembly(input: &str) -> String {

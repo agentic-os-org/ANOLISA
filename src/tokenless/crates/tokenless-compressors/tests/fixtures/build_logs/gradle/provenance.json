@@ -1,0 +1,106 @@
+[
+  {
+    "file": "mockito_cold.txt",
+    "environment": {
+      "repository": "mockito/mockito",
+      "tag": "v5.24.0",
+      "gradle": "8.14.2 (Gradle Wrapper, sha256-verified distribution)",
+      "jdk": "OpenJDK 21.0.13+9-LTS (Eclipse Temurin, native host install)",
+      "os": "linux x86_64",
+      "note": "Captured natively (no container): docker registry blob redirects are blocked on this network; wrapper distribution and dependency downloads went through the site HTTP proxy configured in gradle.properties."
+    },
+    "capture": {
+      "command": [
+        "./gradlew",
+        "build"
+      ],
+      "mode": "cold",
+      "exit_code": 1,
+      "sha256": {
+        "stdout": "51549ee4647dcce838a586d8001f760a6c90c017939c1fcafd006a47d15131ac",
+        "stderr": "c0497c9cf6e2287d837fc57ce8f7a7a043e5b33d0f3d6b0b99b4c83ab07f6978",
+        "observed": "b5d0426818a26c4bea357404d2211ca7d8f1702309c580e7fd9a8fe4fbec886d"
+      }
+    },
+    "stream": "observed",
+    "sha256": "b5d0426818a26c4bea357404d2211ca7d8f1702309c580e7fd9a8fe4fbec886d"
+  },
+  {
+    "file": "mockito_incremental.txt",
+    "environment": {
+      "repository": "mockito/mockito",
+      "tag": "v5.24.0",
+      "gradle": "8.14.2 (Gradle Wrapper, sha256-verified distribution)",
+      "jdk": "OpenJDK 21.0.13+9-LTS (Eclipse Temurin, native host install)",
+      "os": "linux x86_64",
+      "note": "Captured natively (no container): docker registry blob redirects are blocked on this network; wrapper distribution and dependency downloads went through the site HTTP proxy configured in gradle.properties."
+    },
+    "capture": {
+      "command": [
+        "./gradlew",
+        "build"
+      ],
+      "mode": "incremental",
+      "exit_code": 1,
+      "sha256": {
+        "stdout": "4c42e1619df52b1d31803cce1fc9bd69dd928ccbe6b7142990777a9c920f1c21",
+        "stderr": "51bb2b14c69ca9f4e863973d86958ceddcbbf7447f63903cccbd1ae104b4e26a",
+        "observed": "f8ca411069746664338a65d79feb9296d4555a419f4566585b206c36df43fa56"
+      }
+    },
+    "stream": "observed",
+    "sha256": "f8ca411069746664338a65d79feb9296d4555a419f4566585b206c36df43fa56"
+  },
+  {
+    "file": "mockito_clean_rebuild.txt",
+    "environment": {
+      "repository": "mockito/mockito",
+      "tag": "v5.24.0",
+      "gradle": "8.14.2 (Gradle Wrapper, sha256-verified distribution)",
+      "jdk": "OpenJDK 21.0.13+9-LTS (Eclipse Temurin, native host install)",
+      "os": "linux x86_64",
+      "note": "Captured natively (no container): docker registry blob redirects are blocked on this network; wrapper distribution and dependency downloads went through the site HTTP proxy configured in gradle.properties."
+    },
+    "capture": {
+      "command": [
+        "./gradlew",
+        "build"
+      ],
+      "mode": "clean_rebuild",
+      "exit_code": 1,
+      "sha256": {
+        "stdout": "730725c1f49360db98a0ddcd20a2dd78ee58616bb0472b448151cbc8b1819744",
+        "stderr": "909209ef206c030580410277a05873e0fd03375eb0479c337c8ccf7268c99373",
+        "observed": "86cba542589acfba1378124758c9074a2509378ca744a5807e2564ad92f93c5d"
+      }
+    },
+    "stream": "observed",
+    "sha256": "86cba542589acfba1378124758c9074a2509378ca744a5807e2564ad92f93c5d"
+  },
+  {
+    "file": "mockito_unknown_task.txt",
+    "environment": {
+      "repository": "mockito/mockito",
+      "tag": "v5.24.0",
+      "gradle": "8.14.2 (Gradle Wrapper, sha256-verified distribution)",
+      "jdk": "OpenJDK 21.0.13+9-LTS (Eclipse Temurin, native host install)",
+      "os": "linux x86_64",
+      "note": "Captured natively (no container): docker registry blob redirects are blocked on this network; wrapper distribution and dependency downloads went through the site HTTP proxy configured in gradle.properties."
+    },
+    "capture": {
+      "command": [
+        "./gradlew",
+        "build"
+      ],
+      "mode": "failure_unknown_task",
+      "exit_code": 1,
+      "sha256": {
+        "stdout": "2c180269d410fbc35d918bcb3d663c021f542e288032e5e279d90b983e81c63d",
+        "stderr": "6e8f5bc6d39f9b4a62f912fbbfe0ed2e2e2224aecb53f7147a6e9e986659d7dc",
+        "observed": "3a74519791a50d2526f06dde6590d962b8a187842d62e2471a506b94a7243d96"
+      }
+    },
+    "stream": "observed",
+    "sha256": "3a74519791a50d2526f06dde6590d962b8a187842d62e2471a506b94a7243d96"
+  }
+]

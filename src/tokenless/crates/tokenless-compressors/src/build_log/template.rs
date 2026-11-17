@@ -22,6 +22,7 @@ pub(crate) fn generic_progress_template(line: &str) -> Option<String> {
     if trimmed.contains('\r')
         || trimmed.starts_with("Progress (")
         || super::maven::is_download_line(trimmed)
+        || super::gradle::is_task_evidence(trimmed)
     {
         return None;
     }
