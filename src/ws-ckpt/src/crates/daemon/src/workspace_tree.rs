@@ -51,7 +51,10 @@ pub async fn tree(
     for workspace in state.all_workspaces() {
         let (ws_id, path) = {
             let workspace = workspace.read().await;
-            (workspace.ws_id.clone(), workspace.path.display().to_string())
+            (
+                workspace.ws_id.clone(),
+                workspace.path.display().to_string(),
+            )
         };
         let origin = match tokio::fs::read(state.index_dir(&ws_id).join(FORK_ORIGIN_FILE)).await {
             Ok(bytes) => match serde_json::from_slice::<ForkOrigin>(&bytes) {
@@ -173,7 +176,10 @@ fn root_of(
     let mut current = target_ws_id.to_string();
     let mut visited = BTreeSet::from([current.clone()]);
     loop {
-        let Some(origin) = registry.get(&current).and_then(|entry| entry.origin.as_ref()) else {
+        let Some(origin) = registry
+            .get(&current)
+            .and_then(|entry| entry.origin.as_ref())
+        else {
             break;
         };
         let parent = origin.source_ws_id.clone();

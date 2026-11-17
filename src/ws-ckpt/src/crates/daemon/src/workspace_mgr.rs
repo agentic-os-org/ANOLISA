@@ -659,10 +659,7 @@ pub async fn fork(
         Ok(_) => {
             return Ok(error_resp(
                 ErrorCode::InvalidPath,
-                format!(
-                    "destination already exists: {}",
-                    destination_path.display()
-                ),
+                format!("destination already exists: {}", destination_path.display()),
             ))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -3275,7 +3272,9 @@ mod tests {
         // Both forks start from the same snapshot contents...
         for path in [&first_path, &second_path] {
             assert_eq!(
-                tokio::fs::read_to_string(path.join("payload")).await.unwrap(),
+                tokio::fs::read_to_string(path.join("payload"))
+                    .await
+                    .unwrap(),
                 "v1"
             );
         }
@@ -3357,7 +3356,10 @@ mod tests {
         let workspace = workspace.read().await;
         assert_eq!(workspace.path, destination);
         assert_eq!(workspace.index.workspace_path, destination);
-        assert_eq!(workspace.index.head.as_deref(), Some(FORK_INITIAL_SNAPSHOT_ID));
+        assert_eq!(
+            workspace.index.head.as_deref(),
+            Some(FORK_INITIAL_SNAPSHOT_ID)
+        );
         let initial = &workspace.index.snapshots[FORK_INITIAL_SNAPSHOT_ID];
         assert!(initial.pinned);
         assert!(!initial.missing);
@@ -3469,9 +3471,11 @@ mod tests {
         assert!(tokio::fs::symlink_metadata(&destination).await.is_err());
         assert!(state.get_by_path(&destination).is_none());
         assert_eq!(state.all_workspaces().len(), 1);
-        assert!(read_dir_names(&state.state_dir.join(ws_ckpt_common::INDEXES_DIR))
-            .await
-            .is_empty());
+        assert!(
+            read_dir_names(&state.state_dir.join(ws_ckpt_common::INDEXES_DIR))
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -3214,8 +3214,7 @@ mod tests {
 
     #[test]
     fn parse_tree() {
-        let cli = Cli::try_parse_from(["ws-ckpt", "tree", "-w", "/tmp/forked", "--all"])
-            .unwrap();
+        let cli = Cli::try_parse_from(["ws-ckpt", "tree", "-w", "/tmp/forked", "--all"]).unwrap();
         match cli.command {
             Commands::Tree {
                 workspace,
@@ -3229,15 +3228,8 @@ mod tests {
             _ => panic!("expected Tree"),
         }
 
-        let cli = Cli::try_parse_from([
-            "ws-ckpt",
-            "tree",
-            "-w",
-            "/tmp/forked",
-            "--format",
-            "json",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["ws-ckpt", "tree", "-w", "/tmp/forked", "--format", "json"])
+            .unwrap();
         match cli.command {
             Commands::Tree { all, format, .. } => {
                 assert!(!all);
