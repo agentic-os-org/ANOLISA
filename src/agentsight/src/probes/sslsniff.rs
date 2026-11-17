@@ -31,6 +31,7 @@ use std::{
 mod late_retry;
 mod scan;
 mod scan_jobs;
+mod self_verify;
 use crate::utils::cpu_budget::{CpuBudget, CpuPermit, WorkClass};
 pub(crate) use late_retry::IdentityStatus;
 use late_retry::{LateRetries, ProcessIdentity};
@@ -38,6 +39,13 @@ use scan::{collect_pattern_hits, fill_buf};
 #[cfg(test)]
 use scan::{file_has_ssl_markers, ssl_exe_markers};
 use scan_jobs::{ScanMode, SubmitError};
+pub(crate) use self_verify::PlaintextSignals;
+#[cfg(test)]
+use self_verify::VERIFY_WINDOW;
+use self_verify::{
+    PendingVerify, SignalBacklog, Verdict, classify_pending_verdicts, file_revision,
+    open_rotation_target, pinned_path,
+};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -92,67 +100,6 @@ struct InodeAttach {
     /// Held for Drop (detaches the uprobes); never read directly.
     _links: Vec<Link>,
     attached_at: Instant,
-}
-
-/// A static-SSL inode whose offsets are attached but not yet confirmed to
-/// capture plaintext. Offsets are persisted to the learned cache only after a
-/// captured buffer decodes as HTTP, so a mis-resolved offset (a byte-pattern
-/// match on a non-SSL function, #10080) is never cached into silent zero
-/// collection.
-struct PendingVerify {
-    offsets: StaticSslOffsets,
-    path: String,
-    attached_at: Instant,
-}
-
-/// Window to observe plaintext before declaring an attached offset unverified.
-const VERIFY_WINDOW: Duration = Duration::from_secs(30);
-
-/// Does a captured SSL buffer begin with an HTTP request or response?
-///
-/// The runtime self-verify keeps a candidate offset only once its buffer decodes
-/// as HTTP plaintext; a wrong candidate (a non-SSL function that merely matches
-/// a byte prologue) yields bytes that never look like HTTP. PoC-verified on
-/// Claude Code 2.1.323: of 7 `WRITE_PAT` candidates only the real `SSL_write`
-/// produced `POST /v1/messages HTTP/1.1`.
-pub(crate) fn ssl_payload_looks_like_http(buf: &[u8]) -> bool {
-    const METHODS: &[&[u8]] = &[
-        b"GET ",
-        b"POST ",
-        b"PUT ",
-        b"DELETE ",
-        b"HEAD ",
-        b"PATCH ",
-        b"OPTIONS ",
-    ];
-    METHODS.iter().any(|m| buf.starts_with(m)) || buf.starts_with(b"HTTP/")
-}
-
-/// Classify pending inodes into those verified by a plaintext-capturing pid and
-/// those that expired without plaintext. Pure (no `self`) so the attribution
-/// logic is unit-testable without a BPF-backed [`SslSniff`].
-fn classify_pending_verdicts(
-    pending: &HashMap<FileKey, PendingVerify>,
-    pid_inodes: &HashMap<u32, Vec<FileKey>>,
-    verified: &HashSet<u32>,
-    now: Instant,
-) -> (Vec<FileKey>, Vec<FileKey>) {
-    // A verified pid confirms every static-SSL inode it has attached.
-    let verified_inodes: HashSet<FileKey> = pid_inodes
-        .iter()
-        .filter(|(pid, _)| verified.contains(pid))
-        .flat_map(|(_, files)| files.iter().copied())
-        .collect();
-    let mut resolved = Vec::new();
-    let mut expired = Vec::new();
-    for (file, p) in pending {
-        if verified_inodes.contains(file) {
-            resolved.push(*file);
-        } else if now.duration_since(p.attached_at) >= VERIFY_WINDOW {
-            expired.push(*file);
-        }
-    }
-    (resolved, expired)
 }
 
 fn should_reattach(
@@ -451,14 +398,19 @@ pub struct SslSniff {
     late_retries: LateRetries,
     /// Rate-limits procfs liveness sweeps to once per second.
     last_pid_prune: Instant,
-    /// Pids whose captured SSL buffer decoded as HTTP plaintext. Shared with the
-    /// ring-buffer poll thread (`run`); drained by `verify_pending_plaintext` to
-    /// confirm an attached inode's offsets before persisting them.
-    plaintext_pids: Arc<Mutex<HashSet<u32>>>,
+    /// Direction-tagged plaintext capture signal. Shared with the ring-buffer
+    /// poll thread (`run`); drained by `verify_pending_plaintext` to confirm an
+    /// attached inode's write offset (request side) before persisting it and to
+    /// drive candidate rotation (#10080).
+    plaintext_signals: Arc<Mutex<PlaintextSignals>>,
+    /// 尚未建立 exec 归因的明文信号，按身份和 TTL 有界结转。
+    signal_backlog: SignalBacklog,
     /// Static-SSL inodes attached but not yet plaintext-verified. Offsets persist
     /// to the learned cache only after verification, so a mis-resolved offset is
     /// never cached into silent zero collection (#10080).
     pending_verify: HashMap<FileKey, PendingVerify>,
+    /// Whether startup warm-up (proactive attach of known agent binaries) has run.
+    warmed_up: bool,
     // Channel for user-space SslEvent (lightweight, no need for Box)
     tx: crossbeam_channel::Sender<SslEvent>,
     rx: crossbeam_channel::Receiver<SslEvent>,
@@ -526,8 +478,10 @@ impl SslSniff {
             pending_pid_admissions: HashMap::default(),
             late_retries: LateRetries::default(),
             last_pid_prune: Instant::now(),
-            plaintext_pids: Arc::new(Mutex::new(HashSet::new())),
+            plaintext_signals: Arc::new(Mutex::new(PlaintextSignals::default())),
+            signal_backlog: SignalBacklog::default(),
             pending_verify: HashMap::default(),
+            warmed_up: false,
             tx,
             rx,
         })
@@ -806,11 +760,18 @@ impl SslSniff {
                 // binary is then captured without re-racing the scan. Discarding
                 // here made every short-lived agent re-scan and lose its first
                 // call under load (#9762).
-                if let ExecutableScan::Offsets(offsets) = &scanned.outcome {
+                if let ExecutableScan::Offsets(candidates) = &scanned.outcome {
                     if scanned.unchanged_at_attach() {
+                        let Some(first) = candidates.first().cloned() else {
+                            log::warn!(
+                                "SSL scan returned an empty candidate list; skipping inode {file:?}"
+                            );
+                            self.traced_files.remove(&file);
+                            continue;
+                        };
                         self.static_attach_offsets
-                            .insert(file, (offsets.clone(), false));
-                        match attach_static_ssl_by_offset(&mut self.skel, &path, offsets, false, -1)
+                            .insert(file, (first.clone(), false));
+                        match attach_static_ssl_by_offset(&mut self.skel, &path, &first, false, -1)
                         {
                             Ok(links) => {
                                 log::debug!(
@@ -830,15 +791,24 @@ impl SslSniff {
                                 self.pending_verify.insert(
                                     file,
                                     PendingVerify {
-                                        offsets: offsets.clone(),
+                                        candidates: candidates.clone(),
+                                        index: 0,
                                         // scanned.path() is a pinned /proc/self/fd/N
                                         // that dies with the scan descriptor; resolve
-                                        // the real path now so verification can
-                                        // fingerprint it on a later poll.
+                                        // the real path for the record/rotate fallback.
                                         path: fs::read_link(&path)
                                             .map(|p| p.to_string_lossy().into_owned())
                                             .unwrap_or_else(|_| path.clone()),
                                         attached_at: Instant::now(),
+                                        saw_request: false,
+                                        saw_response: false,
+                                        // Fingerprint the pinned descriptor now, while
+                                        // its revision is confirmed unchanged, so verify
+                                        // persists these offsets under this exact content
+                                        // (#10203 review).
+                                        fingerprint: fingerprint_of(&path),
+                                        revision: file_revision(&path),
+                                        exhausted: false,
                                     },
                                 );
                             }
@@ -883,12 +853,20 @@ impl SslSniff {
                 continue;
             }
             match scanned.outcome {
-                ExecutableScan::Offsets(offsets) => {
+                ExecutableScan::Offsets(candidates) => {
                     // Offsets belong to this verified inode revision, not to the
                     // process or to a successful uprobe attach.
+                    let Some(first) = candidates.first().cloned() else {
+                        log::warn!(
+                            "SSL scan returned an empty candidate list; rediscovering inode {file:?}"
+                        );
+                        self.traced_files.remove(&file);
+                        self.forget_owners_unless_attached(file);
+                        continue;
+                    };
                     self.static_attach_offsets
-                        .insert(file, (offsets.clone(), false));
-                    match attach_static_ssl_by_offset(&mut self.skel, &path, &offsets, false, -1) {
+                        .insert(file, (first.clone(), false));
+                    match attach_static_ssl_by_offset(&mut self.skel, &path, &first, false, -1) {
                         Ok(links) => {
                             if self.attachments.contains_key(&file) {
                                 self.stale_reattachs += 1;
@@ -904,14 +882,22 @@ impl SslSniff {
                             self.pending_verify.insert(
                                 file,
                                 PendingVerify {
-                                    offsets: offsets.clone(),
+                                    candidates,
+                                    index: 0,
                                     // scanned.path() is a pinned /proc/self/fd/N that
                                     // dies with the scan descriptor; resolve the real
-                                    // path now so verification can fingerprint it later.
+                                    // path for the record/rotate fallback.
                                     path: fs::read_link(&path)
                                         .map(|p| p.to_string_lossy().into_owned())
                                         .unwrap_or_else(|_| path.clone()),
                                     attached_at: Instant::now(),
+                                    saw_request: false,
+                                    saw_response: false,
+                                    // Fingerprint the pinned descriptor now, while its
+                                    // revision is confirmed unchanged (#10203 review).
+                                    fingerprint: fingerprint_of(&path),
+                                    revision: file_revision(&path),
+                                    exhausted: false,
                                 },
                             );
                         }
@@ -1075,44 +1061,146 @@ impl SslSniff {
         );
     }
 
-    /// Persist offsets for inodes proven to capture plaintext, and surface those
-    /// that attached but saw no HTTP within [`VERIFY_WINDOW`].
+    /// Persist the write offset for inodes proven to capture request-direction
+    /// plaintext, rotate a write candidate that saw a response but no request,
+    /// and surface inodes whose every candidate failed.
     ///
-    /// The ring-buffer poll thread records a pid whenever a captured buffer
-    /// decodes as HTTP; here each such pid is attributed to the static-SSL inode
-    /// it maps, confirming that inode's offsets are the real entry points rather
-    /// than a byte-pattern false positive (#10080). Only then are the offsets
-    /// written to the learned cache. An inode that never captures plaintext
-    /// within the window is dropped from the pending set with a loud warning
-    /// instead of being silently persisted.
+    /// 每轮排空生产侧信号；尚未完成 exec 关联的信号交给有界结转队列。
+    /// 只把当前候选挂载之后的流量折叠到证据中，避免跨轮换误确认。
     fn verify_pending_plaintext(&mut self) {
-        if self.pending_verify.is_empty() {
-            return;
-        }
-        // Take the pids whose captured buffer decoded as HTTP since the last poll.
-        let verified: HashSet<u32> = match self.plaintext_pids.lock() {
-            Ok(mut set) => mem::take(&mut *set),
+        let incoming = match self.plaintext_signals.lock() {
+            Ok(mut signals) => mem::take(&mut *signals),
             Err(_) => return,
         };
+        // 所有释放探针的路径都不能遗留验证状态。
+        self.pending_verify
+            .retain(|file, _| self.attachments.contains_key(file));
         let now = Instant::now();
-        let (resolved, expired) =
-            classify_pending_verdicts(&self.pending_verify, &self.pid_inodes, &verified, now);
-        for file in resolved {
-            if let Some(pending) = self.pending_verify.remove(&file) {
-                self.learned_offsets.record(&pending.path, &pending.offsets);
-                log::info!(
-                    "Static SSL offsets for inode {file:?} verified by captured plaintext; persisted"
-                );
+        self.signal_backlog.fold(
+            incoming,
+            &mut self.pending_verify,
+            &self.pid_inodes,
+            &self.pid_identities,
+            now,
+            |pid| ProcessIdentity::read(pid as i32).ok(),
+        );
+        let verdicts = classify_pending_verdicts(&self.pending_verify, now);
+        for (file, verdict) in verdicts {
+            match verdict {
+                Verdict::Verified => {
+                    if let Some(pending) = self.pending_verify.remove(&file) {
+                        let Some(confirmed) = pending.candidates.get(pending.index) else {
+                            log::warn!(
+                                "SSL verify candidate index out of range; skipping inode {file:?}"
+                            );
+                            continue;
+                        };
+                        // Persist under the fingerprint captured at attach time so
+                        // a self-update between attach and verify cannot pair a
+                        // new-file fingerprint with old offsets (#10203 review).
+                        match pending.fingerprint {
+                            Some(fingerprint) => self
+                                .learned_offsets
+                                .record_fingerprint(fingerprint, confirmed),
+                            None => {
+                                log::warn!(
+                                    "No fingerprint captured at attach; not caching offsets for inode {file:?}"
+                                );
+                                continue;
+                            }
+                        }
+                        log::info!(
+                            "Static SSL offsets for inode {file:?} verified by request-direction \
+                             plaintext (write candidate {}/{}); persisted",
+                            pending.index + 1,
+                            pending.candidates.len()
+                        );
+                    }
+                }
+                Verdict::Rotate => self.rotate_write_candidate(file, now),
+                Verdict::Exhausted => {
+                    if let Some(pending) = self.pending_verify.get_mut(&file) {
+                        pending.exhausted = true;
+                        log::warn!(
+                            "Static SSL for {} attached but all {} write candidate(s) captured a \
+                             response and no request within {:?}; write offsets NOT persisted \
+                             (request side uncaptured, #10080)",
+                            pending.path,
+                            pending.candidates.len(),
+                            self_verify::VERIFY_WINDOW
+                        );
+                    }
+                }
+                Verdict::Idle => {} // no traffic yet; keep the candidate attached
             }
         }
-        for file in expired {
-            if let Some(pending) = self.pending_verify.remove(&file) {
+    }
+
+    /// Detach the current write candidate for `file` and attach the next one.
+    ///
+    /// The response side proved SSL_read is correct but no request plaintext
+    /// confirmed SSL_write, so the current write offset is a byte-pattern false
+    /// positive; walk to the next-ranked candidate and restart the verify window.
+    /// The read/handshake probes are re-attached with the new candidate (a
+    /// momentary gap on the response side is acceptable during rotation).
+    fn rotate_write_candidate(&mut self, file: FileKey, now: Instant) {
+        let Some((next, path, candidate, revision)) =
+            self.pending_verify.get(&file).and_then(|p| {
+                let next = p.index + 1;
+                p.candidates
+                    .get(next)
+                    .cloned()
+                    .map(|candidate| (next, p.path.clone(), candidate, p.revision))
+            })
+        else {
+            return;
+        };
+        let target = match open_rotation_target(&path, file, revision) {
+            Ok(target) => target,
+            Err(error) => {
+                self.pending_verify.remove(&file);
                 log::warn!(
-                    "Static SSL offsets for {} attached but captured no HTTP plaintext within {:?}; \
-                     NOT persisted (likely a mis-resolved byte-pattern match, #10080)",
-                    pending.path,
-                    VERIFY_WINDOW
+                    "SSL rotation target {path} changed or is unavailable; stopping stale-candidate verification: {error}"
                 );
+                return;
+            }
+        };
+        let attach_path = pinned_path(&target);
+        let handshake = self
+            .static_attach_offsets
+            .get(&file)
+            .is_some_and(|(_, handshake)| *handshake);
+        match attach_static_ssl_by_offset(&mut self.skel, &attach_path, &candidate, handshake, -1) {
+            Ok(links) => {
+                log::warn!(
+                    "Static SSL for {}: a write candidate captured a response but no request; \
+                     rotating to candidate {} (write {:#x})",
+                    path,
+                    next + 1,
+                    candidate.ssl_write
+                );
+                self.static_attach_offsets
+                    .insert(file, (candidate, handshake));
+                self.record_attach(file, links);
+                if let Some(pending) = self.pending_verify.get_mut(&file) {
+                    pending.index = next;
+                    pending.attached_at = Instant::now();
+                    pending.exhausted = false;
+                    // Fresh candidate: clear the prior candidate's evidence so the
+                    // new write offset gets its own observation window.
+                    pending.saw_request = false;
+                    pending.saw_response = false;
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "Rotating SSL write candidate for {path} failed to attach: {error:#}; \
+                     retrying after the next window"
+                );
+                // Keep the current attachment; re-arm the window to retry rotation.
+                if let Some(pending) = self.pending_verify.get_mut(&file) {
+                    pending.attached_at = now;
+                }
             }
         }
     }
@@ -1467,6 +1555,10 @@ impl SslSniff {
     /// prematurely would cause the scanner to re-attach on the next sweep,
     /// producing duplicate uprobe fds.
     pub fn detach_process(&mut self, pid: u32) {
+        self.signal_backlog.forget(pid);
+        if let Ok(mut signals) = self.plaintext_signals.lock() {
+            signals.forget(pid);
+        }
         self.pending_pid_admissions.remove(&pid);
         self.late_retries.remove(pid);
         self.pid_identities.remove(&pid);
@@ -1488,6 +1580,7 @@ impl SslSniff {
                     // this file re-attaches through the fresh-attach path.
                     self.attachments.remove(file);
                     self.static_attach_offsets.remove(file);
+                    self.pending_verify.remove(file);
                     removed += 1;
                 }
             }
@@ -1499,12 +1592,114 @@ impl SslSniff {
         }
     }
 
-    /// Handle to the set of pids whose captured SSL buffer decoded as HTTP
-    /// plaintext. The unified ring-buffer consumer (`Probes::run`) records into
-    /// it; `verify_pending_plaintext` drains it to confirm an inode's attached
-    /// offsets before persisting them (#10080).
-    pub(crate) fn plaintext_signal(&self) -> Arc<Mutex<HashSet<u32>>> {
-        Arc::clone(&self.plaintext_pids)
+    /// Handle to the direction-tagged plaintext signal. The unified ring-buffer
+    /// consumer (`Probes::run`) records request/response pids into it;
+    /// `verify_pending_plaintext` drains it to confirm an inode's write offset
+    /// and drive candidate rotation (#10080).
+    pub(crate) fn plaintext_signal(&self) -> Arc<Mutex<PlaintextSignals>> {
+        Arc::clone(&self.plaintext_signals)
+    }
+
+    /// Proactively attach known agent binaries once, at startup, so the first
+    /// process is covered before it issues its first TLS call.
+    ///
+    /// A short-lived `claude -p` sends its opening request before a reactive
+    /// discovery + whole-binary scan can attach, losing that first utterance
+    /// (the first-call race). Warm-up resolves the common agent launchers via
+    /// PATH and attaches their inodes globally (pid=-1) ahead of any process: a
+    /// known version re-attaches instantly from the learned/shipped table, an
+    /// unknown one queues a budgeted scan the poll loop installs.
+    pub(crate) fn warm_up_once(&mut self) {
+        if self.warmed_up {
+            return;
+        }
+        self.warmed_up = true;
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        for path in resolve_warm_up_paths(WARM_UP_NAMES, &path_env) {
+            self.warm_up_attach(&path);
+        }
+    }
+
+    /// Attach one warm-up binary: known offsets attach synchronously, otherwise
+    /// queue a scan. Skips anything already traced, attached, or in flight.
+    fn warm_up_attach(&mut self, path: &str) {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = fs::metadata(path) else {
+            return;
+        };
+        let file = (stat_dev_to_key(meta.dev()), meta.ino());
+        if self.traced_files.contains(&file)
+            || self.attachments.contains_key(&file)
+            || self.scans.is_pending(file)
+        {
+            return;
+        }
+        // A previously verified (learned) or shipped (table) offset attaches with
+        // no scan, closing the race for a version seen before this restart.
+        let Some(revision) = file_revision(path) else {
+            return;
+        };
+        let Ok(target) = open_rotation_target(path, file, Some(revision)) else {
+            return;
+        };
+        let attach_path = pinned_path(&target);
+        // 与响应式挂载保持相同来源优先级和 handshake 标志。
+        let known = CODEX_OFFSET_TABLE
+            .as_ref()
+            .and_then(|t| t.lookup(&attach_path))
+            .map(|off| (off, true))
+            .or_else(|| {
+                self.learned_offsets
+                    .lookup(&attach_path)
+                    .map(|off| (off, false))
+            });
+        if let Some((off, handshake)) = known {
+            match attach_static_ssl_by_offset(&mut self.skel, &attach_path, &off, handshake, -1) {
+                Ok(links) => {
+                    log::info!("Warm-up pre-attached known SSL offsets for {path}");
+                    self.static_attach_offsets
+                        .insert(file, (off.clone(), handshake));
+                    self.record_attach(file, links);
+                    self.traced_files.insert(file);
+                    self.pending_verify.insert(
+                        file,
+                        PendingVerify {
+                            candidates: vec![off],
+                            index: 0,
+                            path: path.to_string(),
+                            attached_at: Instant::now(),
+                            saw_request: false,
+                            saw_response: false,
+                            fingerprint: fingerprint_of(&attach_path),
+                            revision: Some(revision),
+                            exhausted: false,
+                        },
+                    );
+                }
+                Err(error) => {
+                    log::debug!("Warm-up attach for {path} failed: {error:#}");
+                }
+            }
+            return;
+        }
+        // Unknown version: queue a budgeted scan (KnownStatic skips the BoringSSL
+        // marker prefilter, so a static-OpenSSL codex is scanned too); the poll
+        // loop installs the global uprobe via its no-owner branch.
+        match self.scans.submit(path, file, ScanMode::KnownStatic) {
+            Ok(()) => {
+                self.traced_files.insert(file);
+                log::info!("Warm-up queued an SSL scan for {path}");
+            }
+            Err(SubmitError::QueueFull) => {
+                log::debug!("Warm-up scan queue full for {path}; reactive discovery will retry")
+            }
+            Err(SubmitError::Replaced) => {
+                log::debug!("Warm-up path {path} was replaced before the scan could open it")
+            }
+            Err(SubmitError::Failed(error)) => {
+                log::debug!("Warm-up scan submit failed for {path}: {error:#}")
+            }
+        }
     }
 
     /// Spawn a background thread that polls the BPF ring buffer and sends
@@ -1518,7 +1713,7 @@ impl SslSniff {
         // Shared with the poll callback so plaintext capture can confirm an
         // inode's attached offsets before they are persisted (drained by
         // verify_pending_plaintext).
-        let plaintext_pids = Arc::clone(&self.plaintext_pids);
+        let plaintext_signals = Arc::clone(&self.plaintext_signals);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
 
@@ -1532,13 +1727,18 @@ impl SslSniff {
                 // SSL records are variable-length (tiered reservation): decode by
                 // header prefix + buf_size, not a full-struct cast.
                 if let Some(event) = SslEvent::from_bytes(data) {
-                    // Plaintext self-verify signal: a buffer decoding as HTTP
-                    // proves the offsets attached for this pid's inode are the
-                    // real SSL_write/SSL_read, not a byte-pattern false positive
-                    // (#10080). verify_pending_plaintext drains this set.
-                    if ssl_payload_looks_like_http(&event.buf) {
-                        if let Ok(mut verified) = plaintext_pids.lock() {
-                            verified.insert(event.pid);
+                    // Direction-aware plaintext self-verify (#10080): a request
+                    // line confirms the SSL_write offset, a response line confirms
+                    // SSL_read. A request OR an HTTP/2 client preface (PRI *
+                    // HTTP/2.0) is write-direction, so HTTP/2-only agents verify
+                    // too (#10203 review). verify_pending_plaintext drains these
+                    // to gate caching and rotate a write candidate seeing no
+                    // request.
+                    let is_request = event.is_http_request() || event.is_http2_preface();
+                    let is_response = event.is_http_response();
+                    if is_request || is_response {
+                        if let Ok(mut signals) = plaintext_signals.lock() {
+                            signals.record(event.pid, is_request, is_response);
                         }
                     }
                     let _ = tx.send(event);
@@ -1696,7 +1896,7 @@ fn scan_file_patterns_admitted<G>(
 #[cfg(test)]
 pub(super) fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     match find_static_ssl_offsets_with(path, scan_file_patterns) {
-        StaticSslScan::Offsets(offsets) => Some(offsets),
+        StaticSslScan::Offsets(candidates) => candidates.into_iter().next(),
         StaticSslScan::NoOffsets | StaticSslScan::Failed => None,
     }
 }
@@ -1708,14 +1908,15 @@ pub(super) enum ExecutableScan {
     NoMarkers,
     /// Markers exist but no complete signature set was found.
     NoOffsets,
-    /// The complete signature set was resolved.
-    Offsets(StaticSslOffsets),
+    /// Ranked offset sets: candidate 0 is the nearest-write resolution, the rest
+    /// are fallbacks the runtime plaintext self-verify rotates through (#10080).
+    Offsets(Vec<StaticSslOffsets>),
     /// The file could not be read; retry on a later discovery.
     Failed,
 }
 
 enum StaticSslScan {
-    Offsets(StaticSslOffsets),
+    Offsets(Vec<StaticSslOffsets>),
     NoOffsets,
     Failed,
 }
@@ -1772,7 +1973,7 @@ pub(super) fn scan_static_ssl_executable_paced(
         scan_file_patterns_admitted(path, patterns, || admit_probe(path, budget, stop))
     });
     match result {
-        StaticSslScan::Offsets(offsets) => Some(ExecutableScan::Offsets(offsets)),
+        StaticSslScan::Offsets(candidates) => Some(ExecutableScan::Offsets(candidates)),
         StaticSslScan::NoOffsets => Some(ExecutableScan::NoOffsets),
         StaticSslScan::Failed if stop.load(Ordering::Relaxed) => None,
         StaticSslScan::Failed => Some(ExecutableScan::Failed),
@@ -1781,6 +1982,44 @@ pub(super) fn scan_static_ssl_executable_paced(
 
 /// Maximum distance between SSL_read and SSL_write in the same compilation unit.
 const ADJACENCY_THRESHOLD: usize = 0x1000; // 4KB
+
+/// Upper bound on ranked SSL_write candidates carried per inode. Candidate 0 is
+/// the historical "nearest write" pick; the rest let runtime plaintext
+/// self-verify rotate past a byte-pattern false positive (#10080). Bounded so a
+/// pathological binary cannot make rotation walk an unbounded list.
+const MAX_WRITE_CANDIDATES: usize = 4;
+
+/// Ranked SSL_write candidates: every WRITE_PAT match within
+/// [`ADJACENCY_THRESHOLD`] of the uniquely resolved `read_off`, closest first,
+/// deduped and capped at [`MAX_WRITE_CANDIDATES`]. Each shares the same read and
+/// handshake offsets; only `ssl_write` varies. Empty when no write match is
+/// adjacent to read (the caller turns that into `NoOffsets`).
+fn ranked_write_candidates(
+    write_matches: &[usize],
+    read_off: usize,
+    hs_off: usize,
+) -> Vec<StaticSslOffsets> {
+    let mut writes: Vec<usize> = write_matches
+        .iter()
+        .copied()
+        .filter(|&o| o.abs_diff(read_off) < ADJACENCY_THRESHOLD)
+        .collect();
+    // Sort by distance to read (nearest first); a stable sort keeps file order
+    // for equidistant matches, then dedup drops identical offsets.
+    writes.sort_by_key(|&o| o.abs_diff(read_off));
+    writes.dedup();
+    writes.truncate(MAX_WRITE_CANDIDATES);
+    writes
+        .into_iter()
+        .map(|ssl_write| StaticSslOffsets {
+            ssl_write,
+            ssl_read: read_off,
+            ssl_do_handshake: hs_off,
+            write_is_ex: false,
+            read_is_ex: false,
+        })
+        .collect()
+}
 
 /// Resolve the Bun 2026 BoringSSL generation (Claude Code >= 2.1.315, #9762).
 ///
@@ -1816,11 +2055,8 @@ fn resolve_bun2_ssl_offsets(
         }
         return StaticSslScan::NoOffsets;
     };
-    let Some(&wr_off) = write_matches
-        .iter()
-        .filter(|&&o| o.abs_diff(read_off) < ADJACENCY_THRESHOLD)
-        .min_by_key(|&&o| o.abs_diff(read_off))
-    else {
+    let candidates = ranked_write_candidates(write_matches, read_off, hs_off);
+    if candidates.is_empty() {
         if verbose {
             eprintln!(
                 "Static SSL: Bun2 SSL_write has {} matches but none within {}B of SSL_read ({read_off:#x})",
@@ -1829,18 +2065,16 @@ fn resolve_bun2_ssl_offsets(
             );
         }
         return StaticSslScan::NoOffsets;
-    };
+    }
     log::debug!("Static SSL (Bun2) detected in {path}:");
     log::debug!("  SSL_do_handshake: {hs_off:#x}");
     log::debug!("  SSL_read:         {read_off:#x}");
-    log::debug!("  SSL_write:        {wr_off:#x}");
-    StaticSslScan::Offsets(StaticSslOffsets {
-        ssl_write: wr_off,
-        ssl_read: read_off,
-        ssl_do_handshake: hs_off,
-        write_is_ex: false,
-        read_is_ex: false,
-    })
+    log::debug!(
+        "  SSL_write:        {:#x} ({} candidate(s))",
+        candidates[0].ssl_write,
+        candidates.len()
+    );
+    StaticSslScan::Offsets(candidates)
 }
 
 fn find_static_ssl_offsets_with(
@@ -1958,48 +2192,40 @@ fn find_static_ssl_offsets_with(
         }
     };
 
-    // --- SSL_write: adjacency verification ---
+    // --- SSL_write: ranked adjacency candidates ---
     if write_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_write pattern not found in {path}");
         }
         return StaticSslScan::NoOffsets;
     }
-    // Pick the closest match within ADJACENCY_THRESHOLD. A layout rebuild can
-    // place SSL_write before SSL_read (#10080), so adjacency applies on either
-    // side, matching the Bun2 resolver's rule.
-    let wr_off = write_matches
-        .iter()
-        .filter(|&&o| o.abs_diff(read_off) < ADJACENCY_THRESHOLD)
-        .min_by_key(|&&o| o.abs_diff(read_off))
-        .copied()
-        .or_else(|| {
-            if verbose {
-                eprintln!(
-                    "Static SSL: SSL_write has {} matches but none within {}B of SSL_read ({:#x})",
-                    write_matches.len(),
-                    ADJACENCY_THRESHOLD,
-                    read_off
-                );
-            }
-            None
-        });
-    let Some(wr_off) = wr_off else {
+    // Collect every match within ADJACENCY_THRESHOLD, closest first. A layout
+    // rebuild can place SSL_write before SSL_read (#10080), so adjacency applies
+    // on either side. Candidate 0 reproduces the historical nearest-write pick;
+    // the rest let plaintext self-verify rotate past a false positive.
+    let candidates = ranked_write_candidates(&write_matches, read_off, hs_off);
+    if candidates.is_empty() {
+        if verbose {
+            eprintln!(
+                "Static SSL: SSL_write has {} matches but none within {}B of SSL_read ({:#x})",
+                write_matches.len(),
+                ADJACENCY_THRESHOLD,
+                read_off
+            );
+        }
         return StaticSslScan::NoOffsets;
-    };
+    }
 
     log::debug!("Static SSL detected in {path}:");
     log::debug!("  SSL_do_handshake: {hs_off:#x}");
     log::debug!("  SSL_read:         {read_off:#x}");
-    log::debug!("  SSL_write:        {wr_off:#x}");
+    log::debug!(
+        "  SSL_write:        {:#x} ({} candidate(s))",
+        candidates[0].ssl_write,
+        candidates.len()
+    );
 
-    StaticSslScan::Offsets(StaticSslOffsets {
-        ssl_write: wr_off,
-        ssl_read: read_off,
-        ssl_do_handshake: hs_off,
-        write_is_ex: false,
-        read_is_ex: false,
-    })
+    StaticSslScan::Offsets(candidates)
 }
 
 /// Symbol cosh-ng exports as its plaintext observability attach point.
@@ -2750,13 +2976,55 @@ fn attach_cosh_tap(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<V
 
 // ─── Codex offset table (Tier 3) ────────────────────────────────────────────
 
-use super::codex_offsets::{LearnedOffsets, OffsetTable};
+use super::codex_offsets::{LearnedOffsets, OffsetTable, fingerprint_of};
 
 static CODEX_OFFSET_TABLE: std::sync::LazyLock<Option<OffsetTable>> =
     std::sync::LazyLock::new(|| {
         let json = include_str!("../../agentsight.json");
         OffsetTable::load(json)
     });
+
+/// Agent launchers proactively attached at startup to close the first-call race.
+/// Resolved through PATH and canonicalized to the real (possibly Bun single-file)
+/// binary. Kept short and bounded; extend here as new static-SSL agents appear.
+const WARM_UP_NAMES: &[&str] = &["claude", "codex"];
+
+/// Resolve each name to its real binary via PATH: the first executable match,
+/// canonicalized (readlink -f) and deduped by inode. Pure over `path_env` so it
+/// is unit-testable without touching the real environment.
+fn resolve_warm_up_paths(names: &[&str], path_env: &str) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let mut seen: HashSet<FileKey> = HashSet::new();
+    for name in names {
+        let Some(found) = path_env
+            .split(':')
+            .map(|dir| format!("{}/{name}", if dir.is_empty() { "." } else { dir }))
+            .find(|candidate| is_executable_file(candidate))
+        else {
+            continue;
+        };
+        // Canonicalize so a symlinked launcher resolves to the real binary the
+        // kernel maps (and uprobes) when the agent runs.
+        let Ok(real) = fs::canonicalize(&found) else {
+            continue;
+        };
+        let real_str = real.to_string_lossy().into_owned();
+        if let Ok(meta) = fs::metadata(&real_str) {
+            let key = (stat_dev_to_key(meta.dev()), meta.ino());
+            if seen.insert(key) {
+                out.push(real_str);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `path` is a regular file with any execute bit set.
+fn is_executable_file(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
 
 #[cfg(test)]
 mod python_tests;
@@ -2765,23 +3033,6 @@ mod python_tests;
 mod tests {
     use super::*;
 
-    #[test]
-    fn plaintext_predicate_accepts_http_rejects_noise() {
-        // SSL_write side (request line) and SSL_read side (response line).
-        assert!(ssl_payload_looks_like_http(
-            b"POST /v1/messages HTTP/1.1\r\nHost: api"
-        ));
-        assert!(ssl_payload_looks_like_http(b"GET /api/bootstrap HTTP/1.1"));
-        assert!(ssl_payload_looks_like_http(b"HTTP/1.1 200 OK\r\n"));
-        // TLS records and arbitrary bytes must not pass, so a wrong candidate
-        // offset is never confirmed as the real SSL entry point (#10080).
-        assert!(!ssl_payload_looks_like_http(
-            b"\x16\x03\x01\x00\x5a\x02\x00"
-        ));
-        assert!(!ssl_payload_looks_like_http(b"\x00\x01\x02\x03garbage"));
-        assert!(!ssl_payload_looks_like_http(b""));
-    }
-
     fn pid_identity(pid: u32) -> ProcessIdentity {
         ProcessIdentity {
             pid,
@@ -2789,45 +3040,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_verdicts_resolves_plaintext_inode_and_expires_silent_one() {
-        let offsets = StaticSslOffsets {
-            ssl_write: 1,
+    fn write_candidate(ssl_write: usize) -> StaticSslOffsets {
+        StaticSslOffsets {
+            ssl_write,
             ssl_read: 2,
             ssl_do_handshake: 3,
             write_is_ex: false,
             read_is_ex: false,
-        };
+        }
+    }
+
+    /// A pending entry with sticky direction evidence already folded in.
+    fn pending_entry(
+        candidates: Vec<StaticSslOffsets>,
+        attached_at: Instant,
+        saw_request: bool,
+        saw_response: bool,
+    ) -> PendingVerify {
+        PendingVerify {
+            candidates,
+            index: 0,
+            path: "fixture".into(),
+            attached_at,
+            saw_request,
+            saw_response,
+            fingerprint: None,
+            revision: None,
+            exhausted: false,
+        }
+    }
+
+    #[test]
+    fn classify_verdicts_confirms_request_rotates_response_only_and_waits_on_idle() {
         let now = Instant::now();
         let stale = now
             .checked_sub(VERIFY_WINDOW + Duration::from_secs(1))
             .unwrap_or(now);
         let mut pending = HashMap::new();
-        // (10,10) attached long ago, saw no plaintext -> expired, NOT persisted.
+        // (10,10): a request confirms the write candidate immediately.
         pending.insert(
             (10, 10),
-            PendingVerify {
-                offsets: offsets.clone(),
-                path: "silent".into(),
-                attached_at: stale,
-            },
+            pending_entry(vec![write_candidate(1)], now, true, false),
         );
-        // (20,20) just attached and its pid captured plaintext -> resolved.
+        // (20,20): response-only, window elapsed, another candidate remains -> Rotate.
         pending.insert(
             (20, 20),
-            PendingVerify {
-                offsets,
-                path: "live".into(),
-                attached_at: now,
-            },
+            pending_entry(
+                vec![write_candidate(1), write_candidate(9)],
+                stale,
+                false,
+                true,
+            ),
         );
-        let mut pid_inodes = HashMap::new();
-        pid_inodes.insert(100, vec![(20, 20)]);
-        pid_inodes.insert(200, vec![(10, 10)]);
-        let verified: HashSet<u32> = [100].into_iter().collect();
-        let (resolved, expired) = classify_pending_verdicts(&pending, &pid_inodes, &verified, now);
-        assert_eq!(resolved, vec![(20, 20)]);
-        assert_eq!(expired, vec![(10, 10)]);
+        // (30,30): response-only, window elapsed, last candidate -> Exhausted.
+        pending.insert(
+            (30, 30),
+            pending_entry(vec![write_candidate(1)], stale, false, true),
+        );
+        // (40,40): no traffic in either direction -> Idle (never rotate a
+        // correct-but-quiet attach just because the process has not spoken yet).
+        pending.insert(
+            (40, 40),
+            pending_entry(
+                vec![write_candidate(1), write_candidate(9)],
+                stale,
+                false,
+                false,
+            ),
+        );
+        let verdicts = classify_pending_verdicts(&pending, now);
+        assert_eq!(verdicts.get(&(10, 10)), Some(&Verdict::Verified));
+        assert_eq!(verdicts.get(&(20, 20)), Some(&Verdict::Rotate));
+        assert_eq!(verdicts.get(&(30, 30)), Some(&Verdict::Exhausted));
+        assert_eq!(verdicts.get(&(40, 40)), Some(&Verdict::Idle));
     }
 
     /// Build a raw ring-buffer sample: the header prefix (each field written at its
@@ -3080,6 +3365,73 @@ mod tests {
         img
     }
 
+    /// Zero-filled image with several WRITE_PAT matches planted, to exercise
+    /// ranked write-candidate production (nearest-first, adjacency-bounded).
+    fn build_multi_write_image(hs: usize, read: usize, writes: &[usize]) -> Vec<u8> {
+        let mut img = vec![0u8; 0x5000];
+        img[hs..hs + HS_BUN_PAT.len()].copy_from_slice(HS_BUN_PAT);
+        img[read..read + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        for &w in writes {
+            img[w..w + WRITE_PAT_T.len()].copy_from_slice(WRITE_PAT_T);
+        }
+        img
+    }
+
+    /// Test accessor for the full ranked candidate list (production returns it
+    /// via `ExecutableScan::Offsets`).
+    fn find_static_ssl_candidates(path: &str) -> Vec<StaticSslOffsets> {
+        match find_static_ssl_offsets_with(path, scan_file_patterns) {
+            StaticSslScan::Offsets(candidates) => candidates,
+            StaticSslScan::NoOffsets | StaticSslScan::Failed => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolver_ranks_write_candidates_nearest_first_within_adjacency() {
+        // read at 0x2000; writes at 0x1e00(-512), 0x1f00(-256), 0x2100(+256),
+        // and 0x4000 (+8KB, beyond ADJACENCY_THRESHOLD -> excluded). Nearest
+        // first; the two 256-distance matches keep ascending file order.
+        let img = build_multi_write_image(0x100, 0x2000, &[0x1e00, 0x1f00, 0x2100, 0x4000]);
+        with_static_ssl_fixture("rank-write", &img, |path| {
+            let writes: Vec<usize> = find_static_ssl_candidates(path)
+                .iter()
+                .map(|c| c.ssl_write)
+                .collect();
+            assert_eq!(writes, vec![0x1f00, 0x2100, 0x1e00]);
+        });
+    }
+
+    #[test]
+    fn resolver_caps_write_candidates_at_the_limit() {
+        // Five writes all within the 4KB window; only MAX_WRITE_CANDIDATES kept.
+        let img = build_multi_write_image(0x100, 0x2000, &[0x1f00, 0x1f40, 0x1f80, 0x1fc0, 0x2040]);
+        with_static_ssl_fixture("cap-write", &img, |path| {
+            assert_eq!(find_static_ssl_candidates(path).len(), MAX_WRITE_CANDIDATES);
+        });
+    }
+
+    #[test]
+    fn resolve_warm_up_paths_finds_only_executables_and_canonicalizes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agentsight-warmup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create warm-up fixture dir");
+        let claude = dir.join("claude");
+        fs::write(&claude, b"#!/bin/sh\n").expect("write claude");
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).expect("chmod claude");
+        let codex = dir.join("codex");
+        fs::write(&codex, b"x").expect("write codex");
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o644)).expect("chmod codex");
+        let path_env = dir.to_str().expect("utf-8 temp dir").to_string();
+        // claude is executable -> resolved; codex lacks the execute bit -> skipped.
+        let resolved = resolve_warm_up_paths(&["claude", "codex"], &path_env);
+        assert_eq!(resolved.len(), 1, "resolved={resolved:?}");
+        assert!(resolved[0].ends_with("/claude"), "got {}", resolved[0]);
+        // A name absent from PATH resolves to nothing.
+        assert!(resolve_warm_up_paths(&["no-such-agent"], &path_env).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn with_static_ssl_fixture(name: &str, img: &[u8], f: impl FnOnce(&str)) {
         let path = std::env::temp_dir().join(format!(
             "agentsight-static-ssl-{}-{name}",
@@ -3307,13 +3659,58 @@ mod tests {
                 .scans
                 .submit(&path, key, ScanMode::KnownStatic)
                 .expect("submit scan");
-            sniffer.pid_inodes.insert(owner, vec![key]);
+            // 模拟预热：探针先全局挂载，exec 归因仍在事件队列中。
             std::thread::sleep(Duration::from_secs(1));
             let _ = sniffer.poll_pending_scan_admissions();
             assert!(
                 sniffer.attachments.contains_key(&key),
                 "first lifetime must install the scanned offsets"
             );
+            // Offsets persist only after a request-direction plaintext confirms
+            // them (#10203); inject the owner's request signal and poll again so
+            // the learned cache is written before the simulated restart.
+            sniffer
+                .plaintext_signals
+                .lock()
+                .expect("signals lock")
+                .record(owner, true, false);
+            let _ = sniffer.poll_pending_scan_admissions();
+            assert!(sniffer.pending_verify.contains_key(&key));
+            // 首次请求先于进程关联；跨多次 poll 后仍须完成验证。
+            let _ = sniffer.poll_pending_scan_admissions();
+            sniffer.pid_inodes.insert(owner, vec![key]);
+            sniffer
+                .pid_identities
+                .insert(owner, ProcessIdentity::read(owner as i32).unwrap());
+            let _ = sniffer.poll_pending_scan_admissions();
+            assert!(
+                !sniffer.pending_verify.contains_key(&key),
+                "a request-verified inode must leave the pending set and persist"
+            );
+            // 轮换不得用旧偏移挂载自更新后的新 inode，失败后不再重试。
+            let mut pending = pending_entry(
+                vec![write_candidate(1), write_candidate(9)],
+                Instant::now(),
+                false,
+                true,
+            );
+            pending.path = path.clone();
+            pending.revision = file_revision(&path);
+            sniffer.pending_verify.insert(key, pending);
+            let replacement = tempfile::NamedTempFile::new().unwrap();
+            fs::write(replacement.path(), &image).unwrap();
+            fs::rename(replacement.path(), &path).unwrap();
+            sniffer.rotate_write_candidate(key, Instant::now());
+            assert!(!sniffer.pending_verify.contains_key(&key));
+            assert!(sniffer.attachments.contains_key(&key));
+            // 最后一个使用者退出必须一并释放验证状态。
+            sniffer.pending_verify.insert(
+                key,
+                pending_entry(vec![write_candidate(1)], Instant::now(), false, false),
+            );
+            sniffer.detach_process(owner);
+            assert!(!sniffer.pending_verify.contains_key(&key));
+            assert!(!sniffer.attachments.contains_key(&key));
         } // Dropping the sniffer detaches its links, simulating a service stop.
 
         // "Restart": a fresh instance must attach from the persisted cache

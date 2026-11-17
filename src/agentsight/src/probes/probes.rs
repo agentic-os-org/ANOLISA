@@ -337,6 +337,9 @@ impl Probes {
 
     /// Complete deferred scans and late SSL retries without blocking event consumption.
     pub fn poll_pending_ssl(&mut self) {
+        // Warm up once (idempotent): pre-attach known agent binaries so the first
+        // process is covered before its opening TLS call (the first-call race).
+        self.sslsniff.warm_up_once();
         let mut admitted = self.sslsniff.poll_pending_scan_admissions();
         admitted.extend(self.sslsniff.poll_late_retries());
         admitted.sort_by_key(|admission| admission.pid());
@@ -429,14 +432,16 @@ impl Probes {
                         // SSL records are variable-length (tiered reservation):
                         // decode by header prefix + buf_size, not a full-struct cast.
                         crate::probes::sslsniff::SslEvent::from_bytes(data).map(|event| {
-                            // Plaintext self-verify (#10080): a buffer decoding as
-                            // HTTP proves the offsets attached for this pid's inode
-                            // are the real SSL_write/SSL_read; record the pid so
-                            // verify_pending_plaintext persists them. A mis-resolved
-                            // offset never captures HTTP, so it is never confirmed.
-                            if crate::probes::sslsniff::ssl_payload_looks_like_http(&event.buf) {
-                                if let Ok(mut verified) = plaintext_signal.lock() {
-                                    verified.insert(event.pid);
+                            // Direction-aware plaintext self-verify (#10080): a
+                            // request line confirms the SSL_write offset, a response
+                            // line confirms SSL_read. A request OR an HTTP/2 client
+                            // preface (PRI * HTTP/2.0) is write-direction, so
+                            // HTTP/2-only agents verify too (#10203 review).
+                            let is_request = event.is_http_request() || event.is_http2_preface();
+                            let is_response = event.is_http_response();
+                            if is_request || is_response {
+                                if let Ok(mut signals) = plaintext_signal.lock() {
+                                    signals.record(event.pid, is_request, is_response);
                                 }
                             }
                             Event::Ssl(event)

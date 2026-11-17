@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes
+- Self-verify scanned static SSL offsets before caching them and rotate response-only write candidates. Retain early request evidence across delayed process discovery without replaying it onto reused PIDs or new candidates, and reject changed or missing binaries before rotation.
+- Pre-attach Claude Code and Codex binaries found on `PATH` at startup to capture short-lived agents' first request. Preserve the shipped table's handshake probes, clear verification state when probes detach, and allow a late request to verify the final candidate after its warning.
+
 ## 0.16.2
 
 ### Fixes
