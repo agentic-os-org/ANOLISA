@@ -5,24 +5,28 @@ use crate::ui::RatatuiInlineRenderer;
 
 pub(crate) const CONTENT_WIDTH: u16 = 76;
 
-/// Home order is fixed: five settings, then the separate getting-started page.
-pub(crate) const ENTRIES: [(MessageId, MessageId); 5] = [
+/// Home order is fixed: the quick guide first, then the default login shell.
+pub(crate) const ENTRIES: [(MessageId, MessageId); 6] = [
     (
-        MessageId::GuideWizardEntryLanguage,
-        MessageId::GuideWizardLanguageBody,
+        MessageId::GuideWizardEntryStart,
+        MessageId::GuideWizardStart,
+    ),
+    (
+        MessageId::GuideWizardEntryLogin,
+        MessageId::GuideWizardLoginBody,
     ),
     (MessageId::GuideWizardEntryAi, MessageId::GuideWizardAiBody),
-    (
-        MessageId::GuideWizardEntryTips,
-        MessageId::GuideWizardTipsBody,
-    ),
     (
         MessageId::GuideWizardEntryHealth,
         MessageId::GuideWizardHealthBody,
     ),
     (
-        MessageId::GuideWizardEntryLogin,
-        MessageId::GuideWizardLoginBody,
+        MessageId::GuideWizardEntryLanguage,
+        MessageId::GuideWizardLanguageBody,
+    ),
+    (
+        MessageId::GuideWizardEntryTips,
+        MessageId::GuideWizardTipsBody,
     ),
 ];
 
@@ -55,8 +59,7 @@ fn render_plain(i18n: I18n, markdown: &str) -> String {
 
 fn body(i18n: I18n) -> String {
     let document = format!(
-        "{}\n{}{}",
-        start_markdown(i18n),
+        "{}{}",
         settings_markdown(i18n),
         i18n.t(MessageId::GuideWizardPlainFooter),
     );

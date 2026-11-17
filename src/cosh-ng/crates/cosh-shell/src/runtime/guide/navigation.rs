@@ -3,6 +3,7 @@
 
 use super::login::LoginChoice;
 use super::session::Page;
+use super::tips::PersonalAction;
 
 #[derive(Clone)]
 pub(crate) struct Frame {
@@ -12,6 +13,9 @@ pub(crate) struct Frame {
     /// Login choices are state-dependent, so the semantic action is kept
     /// instead of an ordinal that may address a different action on return.
     pub(crate) login: Option<LoginChoice>,
+    /// The recommendation-and-data list changes with readability and damage,
+    /// so its return target is the action, not the row it happened to sit on.
+    pub(crate) personal: Option<PersonalAction>,
 }
 
 #[derive(Default)]
@@ -44,6 +48,7 @@ mod tests {
             choice,
             scroll: 0,
             login: None,
+            personal: None,
         }
     }
 
@@ -70,6 +75,7 @@ mod tests {
             choice: 1,
             scroll: 0,
             login: Some(LoginChoice::Other),
+            personal: None,
         });
         assert_eq!(
             navigation.pop().expect("login frame").login,

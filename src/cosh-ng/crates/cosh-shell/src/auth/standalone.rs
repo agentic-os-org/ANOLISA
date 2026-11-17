@@ -49,6 +49,7 @@ pub(crate) fn run(
     input: &mut GuideInput,
     adapter: &AdapterInstance,
     language: Language,
+    blocked_writes: std::collections::BTreeSet<crate::runtime::guide::result::ActionKind>,
 ) -> TaskExit {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -61,7 +62,7 @@ pub(crate) fn run(
     // clean screen so it never overlaps the page the user was reading.
     let _ = output.write_all(b"\x1b[H\x1b[2J");
     let _ = output.flush();
-    let exit = run_loop(input, adapter, language, &mut output);
+    let exit = run_loop(input, adapter, language, blocked_writes, &mut output);
     drop(guard);
     let _ = output.flush();
     exit
@@ -82,6 +83,7 @@ fn run_loop<W: Write>(
     input: &mut GuideInput,
     adapter: &AdapterInstance,
     language: Language,
+    blocked_writes: std::collections::BTreeSet<crate::runtime::guide::result::ActionKind>,
     output: &mut W,
 ) -> TaskExit {
     let mut state = InlineState {
@@ -89,6 +91,9 @@ fn run_loop<W: Write>(
         ..Default::default()
     };
     state.auth.host = AuthHost::Guide;
+    // Inherited before any load or render, so a reopened management task never
+    // offers a write whose earlier result is still unconfirmed.
+    state.auth.blocked_writes = blocked_writes;
     let mut card = AuthCardInput::default();
     let mut event_index = 0usize;
     let mut terminal_lost = false;
@@ -113,6 +118,11 @@ fn run_loop<W: Write>(
             break;
         }
         if state.auth.menu_reload {
+            if let Err(error) = retire_ecs_for_reload(&mut state, output) {
+                state.auth.outcome.reason = EndReason::Failed;
+                state.auth.outcome.error = Some(error.to_string());
+                break;
+            }
             if has_auth_operation(&state) {
                 // A lingering ECS flow makes the trigger a no-op; keep the
                 // request pending until the poll below drains it, otherwise the
@@ -130,6 +140,13 @@ fn run_loop<W: Write>(
                             terminal_lost = true;
                             state.auth.outcome.reason = EndReason::Interrupted;
                             break;
+                        }
+                        Batch::Bytes(bytes) => {
+                            handle_waiting_input(&mut state, &bytes);
+                            if state.auth.exit_requested {
+                                break;
+                            }
+                            continue;
                         }
                         _ => continue,
                     }
@@ -172,13 +189,14 @@ fn run_loop<W: Write>(
             }
             Batch::Idle => {}
             Batch::Bytes(bytes) => {
+                if bytes.contains(&0x03) || bytes.contains(&0x04) {
+                    handle_waiting_input(&mut state, &bytes);
+                    continue;
+                }
                 let Some(capture) = crate::auth::runtime::pending_auth_capture(&state) else {
                     // No card is armed (menu preparing, for example). Ctrl-C and
                     // Ctrl-D are bytes in raw mode, so they must still work.
-                    if bytes.contains(&0x03) || bytes.contains(&0x04) {
-                        state.auth.outcome.reason = EndReason::Cancelled;
-                        state.auth.exit_requested = true;
-                    }
+                    handle_waiting_input(&mut state, &bytes);
                     continue;
                 };
                 let events = card.consume(&capture, &bytes);
@@ -206,26 +224,36 @@ fn run_loop<W: Write>(
     }
 }
 
+pub(super) fn handle_waiting_input(state: &mut InlineState, bytes: &[u8]) {
+    if bytes.contains(&0x03) || bytes.contains(&0x04) {
+        state.auth.outcome.reason = EndReason::Cancelled;
+        state.auth.exit_requested = true;
+    } else if bytes == [0x1b] {
+        state.auth.menu_reload = true;
+    }
+}
+
+pub(super) fn retire_ecs_for_reload<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> io::Result<()> {
+    if state
+        .auth
+        .ecs
+        .as_ref()
+        .is_some_and(|flow| !flow.is_saving())
+    {
+        crate::auth::ecs_poll::shutdown(state);
+        super::prompt::clear_active_auth_panel(state, output)?;
+        state.auth.state = None;
+    }
+    Ok(())
+}
+
 /// Cancels what can still be cancelled and reaps what this task owns before
 /// the wizard takes the terminal back.
 fn converge<W: Write>(state: &mut InlineState, output: &mut W) {
-    // An operation still in flight may already have committed. Record that
-    // uncertainty before cancelling so the task never reports "nothing
-    // changed" for a write whose answer it stopped waiting for.
-    let in_flight = crate::auth::ecs_poll::operation_in_flight(state)
-        || state.auth.ecs_trial.preference_job.is_some();
-    if in_flight {
-        use crate::runtime::guide::result::{ActionKind, ChangeFact, Verification};
-        let kind = match state.auth.state.as_ref().map(|auth| &auth.phase) {
-            Some(super::runtime::AuthPhase::ConfirmDelete { .. }) => ActionKind::Delete,
-            Some(super::runtime::AuthPhase::ProviderAction { .. }) => ActionKind::Activate,
-            Some(super::runtime::AuthPhase::FillingField) => ActionKind::Configure,
-            _ => ActionKind::TrialPreference,
-        };
-        state
-            .auth
-            .record_fact(kind, ChangeFact::Unknown, Verification::Unconfirmed);
-    }
+    let in_flight = state.auth.ecs.is_some() || state.auth.ecs_trial.preference_job.is_some();
     let reason = state.auth.outcome.reason;
     let error = state.auth.outcome.error.clone();
     // Only an abandoned task is cancelled. A user who chose "finish and return"
@@ -236,7 +264,13 @@ fn converge<W: Write>(state: &mut InlineState, output: &mut W) {
     state.auth.outcome.reason = reason;
     state.auth.outcome.error = error;
     crate::auth::ecs_poll::shutdown(state);
-    state.auth.ecs_trial.settle_preference_worker();
+    if let Some(result) = state.auth.ecs_trial.settle_preference_worker() {
+        record_write_result(
+            state,
+            crate::runtime::guide::result::ActionKind::TrialPreference,
+            &result,
+        );
+    }
     state.auth.state = None;
     state.auth.exit_requested = false;
     state.auth.menu_reload = false;
@@ -277,6 +311,34 @@ fn auth_events(events: &[RawInputEvent], counter: &mut usize) -> Vec<ShellEvent>
 }
 
 /// Refuses to open management when the core cannot write configuration safely.
+/// Refuses a re-submission while an earlier result of the same kind is still
+/// unconfirmed. Reading current state stays available; only the write is held.
+pub(crate) fn refuse_unconfirmed_write<W: Write>(
+    state: &mut InlineState,
+    kind: crate::runtime::guide::result::ActionKind,
+    output: &mut W,
+) -> io::Result<bool> {
+    if !state.auth.write_blocked(kind) {
+        return Ok(false);
+    }
+    let i18n = state.i18n();
+    let message = i18n.format(
+        crate::i18n::MessageId::GuideWizardAiWriteBlocked,
+        &[("action", i18n.t(kind.label()))],
+    );
+    RatatuiInlineRenderer::for_terminal()
+        .with_language(state.language)
+        .write_notice_panel(
+            output,
+            NoticePanelModel {
+                title: "Change unconfirmed",
+                body: vec![message],
+                footer: None,
+            },
+        )?;
+    Ok(true)
+}
+
 pub(crate) fn refuse_unsafe_core<W: Write>(
     state: &mut InlineState,
     output: &mut W,
@@ -297,6 +359,74 @@ pub(crate) fn refuse_unsafe_core<W: Write>(
     state.auth.outcome.error = Some(message.to_string());
     state.auth.exit_requested = true;
     Ok(())
+}
+
+pub(super) fn refuse_ecs_configuration<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> io::Result<bool> {
+    if !refuse_unconfirmed_write(
+        state,
+        crate::runtime::guide::result::ActionKind::Configure,
+        output,
+    )? {
+        return Ok(false);
+    }
+    state.auth.ecs = None;
+    if let Some(auth) = state.auth.state.as_mut() {
+        auth.phase = super::runtime::AuthPhase::ManagingProviders;
+        auth.selected_provider = super::menu::hosted_entry_index(
+            state.auth.host,
+            &auth.sysom,
+            auth.existing_providers.len(),
+            super::menu::AuthManagementEntry::GuideExit,
+        );
+        auth.collected_values.clear();
+        auth.field_input.clear();
+    }
+    super::prompt::clear_active_auth_panel(state, output)?;
+    super::prompt::render_current_auth_panel(state, output)?;
+    Ok(true)
+}
+
+pub(super) fn record_configuration_result(
+    state: &mut InlineState,
+    result: std::thread::Result<Result<(), super::provider_management::AuthConfigureFailure>>,
+) {
+    let result = result.unwrap_or_else(|_| {
+        Err(super::provider_management::AuthConfigureFailure {
+            message: "configuration worker failed".into(),
+            code: None,
+            provider_updated: false,
+            unconfirmed: true,
+        })
+    });
+    record_write_result(
+        state,
+        crate::runtime::guide::result::ActionKind::Configure,
+        &result,
+    );
+}
+
+pub(super) fn record_write_result(
+    state: &mut InlineState,
+    kind: crate::runtime::guide::result::ActionKind,
+    result: &Result<(), super::provider_management::AuthConfigureFailure>,
+) {
+    use crate::runtime::guide::result::{ChangeFact, Verification};
+    let (change, verification) = match result {
+        Ok(()) => (ChangeFact::Committed, Verification::Verified),
+        Err(error) if error.provider_updated => (ChangeFact::Partial, Verification::Unconfirmed),
+        Err(error) if !error.unconfirmed => {
+            state
+                .auth
+                .outcome
+                .record_failure(kind, error.message.clone());
+            (ChangeFact::None, Verification::Verified)
+        }
+        _ => (ChangeFact::Unknown, Verification::Unconfirmed),
+    };
+    state.auth.record_fact(kind, change, verification);
 }
 
 #[cfg(test)]
@@ -341,3 +471,6 @@ mod tests {
         assert_eq!(mapped[0].message.as_deref(), Some("answer"));
     }
 }
+
+#[cfg(test)]
+mod outcome_tests;

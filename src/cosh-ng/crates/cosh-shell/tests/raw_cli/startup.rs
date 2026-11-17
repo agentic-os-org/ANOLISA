@@ -165,16 +165,16 @@ fn guide_ai_action_refuses_an_untrusted_core_without_starting_a_shell() {
         "wizard did not start: {}",
         String::from_utf8_lossy(&raw)
     );
-    // Home opens on the "ask questions" row; four steps up reach AI service,
-    // open it, then pick the management row (the first row asks questions).
-    master.write_all(b"\x1b[A\x1b[A\x1b[A\x1b[A\r").unwrap();
+    // Home opens on the quick guide; two steps down reach AI service, open it,
+    // then pick the management row (the first row only shows how to ask).
+    master.write_all(b"\x1b[B\x1b[B\r").unwrap();
     assert!(
         pump_until(
             &mut master,
             &mut buffer,
             &mut raw,
             &mut terminal,
-            "Configure AI service",
+            "Manage AI services",
             10
         ),
         "AI page not reached:\n{}",

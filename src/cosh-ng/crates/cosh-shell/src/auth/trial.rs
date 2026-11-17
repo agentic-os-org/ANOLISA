@@ -55,11 +55,21 @@ impl TrialSession {
     }
 
     /// Reaps the preference writer so a finite task never leaves it running.
-    pub(crate) fn settle_preference_worker(&mut self) {
-        self.preference_job = None;
+    pub(crate) fn settle_preference_worker(&mut self) -> Option<Result<(), AuthConfigureFailure>> {
+        let job = self.preference_job.take();
         if let Some(worker) = self.preference_worker.take() {
             let _ = worker.join();
         }
+        job.map(|job| {
+            job.try_recv().unwrap_or_else(|_| {
+                Err(AuthConfigureFailure {
+                    message: "preference worker returned no result".into(),
+                    code: None,
+                    provider_updated: false,
+                    unconfirmed: true,
+                })
+            })
+        })
     }
 }
 
@@ -330,6 +340,7 @@ pub(crate) fn poll<W: Write>(
                 message: "preference worker disconnected".into(),
                 code: None,
                 provider_updated: false,
+                unconfirmed: true,
             })),
             Err(mpsc::TryRecvError::Empty) => None,
         });
@@ -342,19 +353,11 @@ pub(crate) fn poll<W: Write>(
             tracing::warn!(error=%error.message,"ECS trial preference save failed");
         }
         clear(state, output)?;
-        {
-            use crate::runtime::guide::result::{ActionKind, ChangeFact, Verification};
-            let (change, verification) = match &result {
-                Ok(_) => (ChangeFact::Committed, Verification::Verified),
-                Err(error) if error.provider_updated => {
-                    (ChangeFact::Partial, Verification::Unconfirmed)
-                }
-                Err(_) => (ChangeFact::Unknown, Verification::Unconfirmed),
-            };
-            state
-                .auth
-                .record_fact(ActionKind::TrialPreference, change, verification);
-        }
+        super::standalone::record_write_result(
+            state,
+            crate::runtime::guide::result::ActionKind::TrialPreference,
+            &result,
+        );
         if state.auth.ecs_trial.enabling {
             if result.is_ok() || result.as_ref().is_err_and(|error| error.provider_updated) {
                 state.auth.ecs_trial.auto_use_allowed = true;
@@ -578,6 +581,13 @@ pub(super) fn set_preference_from_auth<W: Write>(
     output: &mut W,
     auto_use: bool,
 ) -> io::Result<()> {
+    if super::standalone::refuse_unconfirmed_write(
+        state,
+        crate::runtime::guide::result::ActionKind::TrialPreference,
+        output,
+    )? {
+        return Ok(());
+    }
     let AdapterInstance::CoshCore(core) = adapter else {
         return Ok(());
     };
@@ -603,6 +613,9 @@ pub(super) fn set_preference_from_auth<W: Write>(
 #[cfg(test)]
 #[path = "trial_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod outcome_tests;
 
 pub(crate) fn before_terminal_output<W: Write>(
     trial: &mut TrialSession,

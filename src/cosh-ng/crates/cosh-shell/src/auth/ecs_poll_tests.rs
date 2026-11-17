@@ -541,6 +541,7 @@ fn shell_exit_preserves_unknown_save_result_without_scheduling() {
         &mut state,
         Err(AuthConfigureFailure {
             message: "Save result is unknown".into(),
+            unconfirmed: true,
             code: None,
             provider_updated: false,
         }),
@@ -1007,6 +1008,7 @@ fn unavailable_configure_rechecks_before_claiming_authorization_is_missing() {
         &mut state,
         Err(AuthConfigureFailure {
             message: "ECS credentials unavailable".into(),
+            unconfirmed: false,
             code: Some("credential_source_unavailable".into()),
             provider_updated: false,
         }),
@@ -1245,6 +1247,7 @@ fn access_copy_role_configuration_partial_save_finishes_without_retrying_credent
         &mut state,
         Err(AuthConfigureFailure {
             message: "session save failed".into(),
+            unconfirmed: false,
             code: Some("io_error".into()),
             provider_updated: true,
         }),
@@ -1265,4 +1268,421 @@ fn access_copy_role_configuration_partial_save_finishes_without_retrying_credent
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("session could not be saved"), "{text}");
     assert!(!text.contains("Auth configured"), "{text}");
+}
+
+#[test]
+fn review_fix_held_ecs_configuration_returns_to_stable_management() {
+    let mut state = state("held");
+    state.auth.host = super::super::host::AuthHost::Guide;
+    state
+        .auth
+        .blocked_writes
+        .insert(crate::runtime::guide::result::ActionKind::Configure);
+    start_configuration(
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(
+        state.auth.ecs.is_none(),
+        "blocked ready flow must stop polling"
+    );
+    assert_eq!(
+        state.auth.state.as_ref().unwrap().phase,
+        AuthPhase::ManagingProviders
+    );
+}
+
+#[test]
+fn review_fix_ecs_terminal_unknown_holds_future_configuration() {
+    let mut state = state("unknown-guide-save");
+    state.auth.host = super::super::host::AuthHost::Guide;
+    completed_configuration(
+        &mut state,
+        Err(AuthConfigureFailure {
+            message: "missing reply".into(),
+            unconfirmed: true,
+            code: None,
+            provider_updated: false,
+        }),
+    );
+    poll(
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(state
+        .auth
+        .write_blocked(crate::runtime::guide::result::ActionKind::Configure));
+}
+
+#[test]
+fn review_fix_shutdown_consumes_configuration_result_as_configure() {
+    use crate::runtime::guide::result::{ActionKind, ChangeFact};
+    for change in [
+        ChangeFact::Committed,
+        ChangeFact::Partial,
+        ChangeFact::Unknown,
+        ChangeFact::None,
+    ] {
+        let mut state = state("shutdown-save");
+        state.auth.host = super::super::host::AuthHost::Guide;
+        let result = if change == ChangeFact::Committed {
+            Ok(())
+        } else {
+            Err(AuthConfigureFailure {
+                message: "fixture".into(),
+                unconfirmed: change == ChangeFact::Unknown,
+                code: if change == ChangeFact::Unknown {
+                    None
+                } else {
+                    Some("rejected".into())
+                },
+                provider_updated: change == ChangeFact::Partial,
+            })
+        };
+        completed_configuration(&mut state, result);
+        shutdown(&mut state);
+        assert!(state.auth.ecs.is_none());
+        let facts = state.auth.outcome.facts(ActionKind::Configure);
+        assert_eq!(facts.committed, change == ChangeFact::Committed);
+        assert_eq!(facts.partial, change == ChangeFact::Partial);
+        assert_eq!(facts.unknown, change == ChangeFact::Unknown);
+        assert!(
+            !state
+                .auth
+                .outcome
+                .facts(ActionKind::TrialPreference)
+                .unknown
+        );
+    }
+}
+
+#[test]
+fn rereview_fix_ecs_saving_abort_then_escape_keeps_exit_and_typed_receipt() {
+    use crate::runtime::guide::result::{ActionFacts, ActionKind, EndReason};
+    for abort in [0x03, 0x04] {
+        for (receipt, expected) in [
+            (
+                Ok(()),
+                ActionFacts {
+                    committed: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Err(AuthConfigureFailure {
+                    message: "session save failed".into(),
+                    code: Some("io_error".into()),
+                    provider_updated: true,
+                    unconfirmed: false,
+                }),
+                ActionFacts {
+                    partial: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Err(AuthConfigureFailure {
+                    message: "owner receipt lost".into(),
+                    code: None,
+                    provider_updated: false,
+                    unconfirmed: true,
+                }),
+                ActionFacts {
+                    unknown: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let mut state = state("guide-save-abort");
+            state.auth.host = super::super::host::AuthHost::Guide;
+            let (release, wait_release) = std::sync::mpsc::channel();
+            let worker = thread::spawn(move || {
+                wait_release.recv().unwrap();
+                receipt
+            });
+            let flow = state.auth.ecs.as_mut().unwrap();
+            flow.stage = Stage::Submitting;
+            flow.operation = Some(Operation::Configure(Some(worker)));
+            route_guide_reload_key(&mut state, abort, 0);
+            route_guide_reload_key(&mut state, 0x1b, 1);
+            let exit_requested = state.auth.exit_requested;
+            let reason = state.auth.outcome.reason;
+            release.send(()).unwrap();
+            shutdown(&mut state);
+            assert!(
+                exit_requested,
+                "raw {abort:#x} lost its exit intent while saving"
+            );
+            assert_eq!(reason, EndReason::Cancelled);
+            assert_eq!(state.auth.outcome.reason, EndReason::Cancelled);
+            assert_eq!(state.auth.outcome.facts(ActionKind::Configure), expected);
+            assert!(state.auth.ecs.is_none());
+            assert!(!state.auth.menu_reload);
+        }
+    }
+}
+
+#[test]
+fn publish_fix_ecs_escape_requests_list_not_exit() {
+    use crate::raw_input::{AuthCardInput, RawInputEvent};
+    use crate::runtime::guide::result::{ActionKind, EndReason};
+    use crate::types::{ShellEvent, ShellEventKind};
+    let mut state = state("guide-save-escape");
+    state.auth.host = super::super::host::AuthHost::Guide;
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        wait_release.recv().unwrap();
+        Ok(())
+    });
+    let flow = state.auth.ecs.as_mut().unwrap();
+    flow.stage = Stage::Submitting;
+    flow.operation = Some(Operation::Configure(Some(worker)));
+    let capture = runtime::pending_auth_capture(&state).unwrap();
+    let raw = AuthCardInput::default().consume(&capture, &[0x1b]);
+    let [RawInputEvent::QuestionCancel(id)] = raw.as_slice() else {
+        panic!("Esc must request one auth layer back");
+    };
+    let mut event = ShellEvent::user_input_intercepted("guide-auth", id);
+    event.kind = ShellEventKind::UserInputIntercepted;
+    event.component = Some("card".into());
+    event.message = Some("question_cancel".into());
+    super::super::card_actions::render_auth_card_actions(
+        &[event],
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut Vec::new(),
+        0,
+    )
+    .unwrap();
+    let list_requested = state.auth.menu_reload;
+    let exit_requested = state.auth.exit_requested;
+    let reason = state.auth.outcome.reason;
+    let still_owned = state
+        .auth
+        .ecs
+        .as_ref()
+        .is_some_and(|flow| matches!(flow.operation, Some(Operation::Configure(_))));
+    release.send(()).unwrap();
+    shutdown(&mut state);
+    assert!(
+        list_requested,
+        "Esc must return to management after the original save settles"
+    );
+    assert!(
+        !exit_requested,
+        "Esc must not end the whole management task"
+    );
+    assert_eq!(reason, EndReason::Done);
+    assert!(
+        still_owned,
+        "Esc must not detach the submitted configuration"
+    );
+    assert!(state.auth.outcome.facts(ActionKind::Configure).committed);
+}
+
+fn guide_reload_receipts() -> Vec<(
+    Result<(), AuthConfigureFailure>,
+    crate::runtime::guide::result::ActionFacts,
+)> {
+    use crate::runtime::guide::result::ActionFacts;
+    vec![
+        (
+            Ok(()),
+            ActionFacts {
+                committed: true,
+                ..Default::default()
+            },
+        ),
+        (
+            Err(AuthConfigureFailure {
+                message: "session save failed".into(),
+                code: Some("io_error".into()),
+                provider_updated: true,
+                unconfirmed: false,
+            }),
+            ActionFacts {
+                partial: true,
+                ..Default::default()
+            },
+        ),
+        (
+            Err(AuthConfigureFailure {
+                message: "definite save rejection".into(),
+                code: Some("invalid_credentials".into()),
+                provider_updated: false,
+                unconfirmed: false,
+            }),
+            ActionFacts::default(),
+        ),
+        (
+            Err(AuthConfigureFailure {
+                message: "owner receipt lost".into(),
+                code: None,
+                provider_updated: false,
+                unconfirmed: true,
+            }),
+            ActionFacts {
+                unknown: true,
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+fn guide_reload_saving_state(
+    receipt: Result<(), AuthConfigureFailure>,
+) -> (InlineState, std::sync::mpsc::Sender<()>) {
+    let mut state = state("guide-save-reload");
+    state.auth.host = super::super::host::AuthHost::Guide;
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        wait_release.recv().unwrap();
+        receipt
+    });
+    let flow = state.auth.ecs.as_mut().unwrap();
+    flow.stage = Stage::Submitting;
+    flow.operation = Some(Operation::Configure(Some(worker)));
+    (state, release)
+}
+
+fn route_guide_reload_key(state: &mut InlineState, byte: u8, event_index: usize) {
+    use crate::raw_input::{AuthCardInput, RawInputEvent};
+    use crate::types::{ShellEvent, ShellEventKind};
+    if matches!(byte, 0x03 | 0x04) {
+        super::super::standalone::handle_waiting_input(state, &[byte]);
+        return;
+    }
+    let capture = runtime::pending_auth_capture(state).unwrap();
+    let raw = AuthCardInput::default().consume(&capture, &[byte]);
+    assert_eq!(raw.len(), 1);
+    let (id, message) = match &raw[0] {
+        RawInputEvent::QuestionCancel(id) => (id, "question_cancel"),
+        RawInputEvent::QuestionAbort(id) => (id, "question_abort"),
+        other => panic!("unexpected auth input: {other:?}"),
+    };
+    let mut event = ShellEvent::user_input_intercepted("guide-auth", id);
+    event.kind = ShellEventKind::UserInputIntercepted;
+    event.component = Some("card".into());
+    event.message = Some(message.into());
+    event.started_at_ms = Some(event_index as u64);
+    super::super::card_actions::render_auth_card_actions(
+        &[event],
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        state,
+        &mut Vec::new(),
+        event_index,
+    )
+    .unwrap();
+}
+
+fn poll_released_guide_save(state: &mut InlineState, release: std::sync::mpsc::Sender<()>) {
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let Some(Operation::Configure(Some(worker))) = state
+            .auth
+            .ecs
+            .as_ref()
+            .and_then(|flow| flow.operation.as_ref())
+        else {
+            panic!("the original save worker must stay owned until poll");
+        };
+        if worker.is_finished() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "controlled save worker did not settle"
+        );
+        thread::yield_now();
+    }
+    poll(
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        state,
+        &mut Vec::new(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn publish_fix_ecs_escape_reload_retires_each_polled_receipt_without_losing_facts() {
+    use crate::runtime::guide::result::{ActionKind, EndReason};
+    for (receipt, expected) in guide_reload_receipts() {
+        let expected_failure = receipt
+            .as_ref()
+            .err()
+            .filter(|error| !error.unconfirmed && !error.provider_updated)
+            .map(|error| error.message.clone());
+        let (mut state, release) = guide_reload_saving_state(receipt);
+        route_guide_reload_key(&mut state, 0x1b, 0);
+        let list_requested = state.auth.menu_reload;
+        let exit_requested = state.auth.exit_requested;
+        poll_released_guide_save(&mut state, release);
+        let before_retire = state.auth.outcome.facts(ActionKind::Configure);
+        assert_eq!(
+            state.auth.outcome.failure(ActionKind::Configure),
+            expected_failure.as_deref()
+        );
+        super::super::standalone::retire_ecs_for_reload(&mut state, &mut Vec::new()).unwrap();
+        assert!(list_requested);
+        assert!(!exit_requested);
+        assert_eq!(before_retire, expected);
+        assert_eq!(state.auth.outcome.facts(ActionKind::Configure), expected);
+        assert_eq!(
+            state.auth.outcome.failure(ActionKind::Configure),
+            expected_failure.as_deref()
+        );
+        assert_eq!(state.auth.outcome.reason, EndReason::Done);
+        assert!(!state.auth.exit_requested);
+        assert!(
+            !runtime::has_auth_operation(&state),
+            "a fresh management list must be reachable"
+        );
+        assert!(state.auth.state.is_none());
+        assert!(state.questions.active_panel_id.is_none());
+        assert_eq!(
+            state.auth.write_blocked(ActionKind::Configure),
+            expected.unknown
+        );
+    }
+}
+
+#[test]
+fn publish_fix_ecs_escape_then_abort_keeps_exit_when_each_receipt_is_retired() {
+    use crate::runtime::guide::result::{ActionKind, EndReason};
+    for abort in [0x03, 0x04] {
+        for (receipt, expected) in guide_reload_receipts() {
+            let expected_failure = receipt
+                .as_ref()
+                .err()
+                .filter(|error| !error.unconfirmed && !error.provider_updated)
+                .map(|error| error.message.clone());
+            let (mut state, release) = guide_reload_saving_state(receipt);
+            route_guide_reload_key(&mut state, 0x1b, 0);
+            route_guide_reload_key(&mut state, abort, 1);
+            let exit_requested = state.auth.exit_requested;
+            let reason = state.auth.outcome.reason;
+            poll_released_guide_save(&mut state, release);
+            super::super::standalone::retire_ecs_for_reload(&mut state, &mut Vec::new()).unwrap();
+            assert!(
+                exit_requested,
+                "raw {abort:#x} must upgrade the pending list request"
+            );
+            assert_eq!(reason, EndReason::Cancelled);
+            assert!(state.auth.exit_requested);
+            assert_eq!(state.auth.outcome.reason, EndReason::Cancelled);
+            assert_eq!(state.auth.outcome.facts(ActionKind::Configure), expected);
+            assert_eq!(
+                state.auth.outcome.failure(ActionKind::Configure),
+                expected_failure.as_deref()
+            );
+            assert!(!runtime::has_auth_operation(&state));
+            assert!(state.auth.state.is_none());
+            assert!(state.questions.active_panel_id.is_none());
+        }
+    }
 }

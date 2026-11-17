@@ -247,8 +247,10 @@ fn usage_help_succeeds_without_home_or_runtime() {
         let result = run(&args, &paths);
         assert_eq!(result.exit_code, 0, "{}", result.stderr);
         assert!(result.stderr.is_empty());
-        assert!(result.stdout.contains("cosh --ask 'one question'"));
-        assert!(result.stdout.contains("cosh guide off"));
+        assert!(result.stdout.contains("cosh --ask '"));
+        assert!(
+            result.stdout.contains("Quick start guide") || result.stdout.contains("快速使用指南")
+        );
         assert!(result.stdout.contains("cosh health banner off"));
         assert!(result.stdout.contains("cosh login set"));
         assert!(result.stdout.contains("cosh login restore"));
@@ -286,20 +288,22 @@ fn usage_help_is_bilingual_and_describes_interactive_entry() {
     };
     let english = run_with_paths(&[], &paths, I18n::new(Language::EnUs));
     assert_eq!(english.exit_code, 0);
-    assert!(english.stdout.contains("AI Shell"));
+    assert!(english.stdout.contains("Default login shell"));
     assert!(english.stdout.contains("interactive"));
     assert!(english
         .stdout
         .contains("systems supporting login switching"));
     let chinese = run_with_paths(&[], &paths, I18n::new(Language::ZhCn));
     assert_eq!(chinese.exit_code, 0);
-    assert!(chinese.stdout.contains("AI Shell"));
+    assert!(chinese.stdout.contains("默认登录 Shell"));
     assert!(chinese.stdout.contains("交互"));
     assert!(chinese.stdout.contains("管理员"));
     assert!(chinese.stdout.contains("新登录"));
     assert!(chinese.stdout.contains("已有会话"));
     assert!(chinese.stdout.contains("仅支持登录切换的系统可用"));
-    assert!(chinese.stdout.contains("cosh --ask '你的问题'"));
+    assert!(chinese
+        .stdout
+        .contains("cosh --ask '磁盘不足时先检查什么？'"));
     assert_ne!(english.stdout, chinese.stdout);
 }
 
@@ -317,11 +321,34 @@ fn usage_help_is_readable_without_wide_description_columns() {
         let text = result.stdout;
         assert!(
             text.contains(if language == crate::Language::ZhCn {
-                "不影响手动使用 Cosh"
+                "命令分析方式与个性化推荐数据"
             } else {
-                "Manual Cosh use stays available"
+                "Command analysis mode and recommendation data"
             }),
             "{text}"
         );
     }
+}
+
+library_tests! {
+#[test]
+fn plain_quick_guide_keeps_the_first_question_command_on_one_line() {
+    let paths = UserPaths {
+        cosh_dir: None,
+        runtime_base: None,
+    };
+    for (language, command) in [
+        (Language::ZhCn, "cosh --ask '磁盘不足时先检查什么？'"),
+        (Language::EnUs, "cosh --ask 'Why is my disk full?'"),
+    ] {
+        let result = run_with_paths(&[], &paths, I18n::new(language));
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.lines().any(|line| line.trim() == command),
+            "{language:?}: command must stay copyable on one line:\n{}",
+            result.stdout
+        );
+    }
+}
+
 }

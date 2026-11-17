@@ -66,6 +66,10 @@ pub(super) struct EcsFlow {
 }
 
 impl EcsFlow {
+    pub(super) fn is_saving(&self) -> bool {
+        matches!(self.operation, Some(Operation::Configure(_))) || self.stage == Stage::Submitting
+    }
+
     fn new(auth: &RuntimeAuthState, now: Instant) -> Self {
         let challenge = match &auth.phase {
             AuthPhase::AliyunEcsChallenge {
@@ -251,6 +255,9 @@ pub(super) fn start_configuration<W: Write>(
     if state.shell_exited {
         return Ok(());
     }
+    if super::standalone::refuse_ecs_configuration(state, output)? {
+        return Ok(());
+    }
     let Some(auth) = state.auth.state.as_ref() else {
         return Ok(());
     };
@@ -335,6 +342,7 @@ fn take_reply(flow: &mut EcsFlow) -> Option<Reply> {
                     message: "Configuration worker failed; save result is unknown".into(),
                     code: None,
                     provider_updated: false,
+                    unconfirmed: true,
                 })
             }))
         }
@@ -570,6 +578,11 @@ pub(crate) fn poll<W: Write>(
                     flow.next_check = now + INTERVAL;
                 }
                 Err(error) => {
+                    super::standalone::record_write_result(
+                        state,
+                        crate::runtime::guide::result::ActionKind::Configure,
+                        &Err(error.clone()),
+                    );
                     let auth = state
                         .auth
                         .state
@@ -599,7 +612,7 @@ pub(crate) fn poll<W: Write>(
                             flow.stage = Stage::Failed;
                         }
                     } else {
-                        flow.stage = if error.code.is_none() {
+                        flow.stage = if error.unconfirmed {
                             Stage::Unknown
                         } else {
                             Stage::Failed
@@ -669,18 +682,13 @@ pub(crate) fn shutdown(state: &mut InlineState) {
         if let Some(Operation::Probe(task, _)) = &flow.operation {
             task.cancel();
         }
+        if let Some(Operation::Configure(worker)) = flow.operation.as_mut() {
+            if let Some(worker) = worker.take() {
+                super::standalone::record_configuration_result(state, worker.join());
+            }
+        }
         flow.operation.take();
     }
-}
-
-/// A registry operation is still running, so its answer may already have been
-/// applied even if the task stops waiting for it.
-pub(crate) fn operation_in_flight(state: &InlineState) -> bool {
-    state
-        .auth
-        .ecs
-        .as_ref()
-        .is_some_and(|flow| flow.operation.is_some())
 }
 
 #[cfg(test)]

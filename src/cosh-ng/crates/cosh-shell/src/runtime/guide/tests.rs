@@ -91,7 +91,7 @@ fn guide_ai_unknown_access_invites_questions_and_keeps_management_secondary() {
         |row| matches!(row, WizardRow::Text(text) if text.contains("免配置自动接入，可直接提问"))
     ));
     assert!(
-        matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == "开始提问")
+        matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == "查看提问方式")
     );
     session.handle(key(KeyCode::Down));
     assert!(matches!(
@@ -231,7 +231,7 @@ fn home_navigation_opens_a_page_and_returns_to_the_same_row() {
 fn start_page_scrolls_and_returns_without_saving() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
-    session.select_home_entry(6);
+    session.select_home_entry(0);
     session.handle(key(KeyCode::Enter));
     assert!(session.view().markdown.is_some());
     session.handle(key(KeyCode::Down));
@@ -247,7 +247,7 @@ fn start_page_scrolls_and_returns_without_saving() {
 fn data_privacy_page_scrolls_like_other_markdown_pages() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
-    session.open_subpage(super::session::Page::Data);
+    session.open_subpage(super::session::Page::Personal);
     session.open_subpage(super::session::Page::DataPrivacy);
     assert!(session.view().markdown.is_some());
     session.handle(key(KeyCode::Down));
@@ -257,7 +257,7 @@ fn data_privacy_page_scrolls_like_other_markdown_pages() {
     session.handle(key(KeyCode::Up));
     assert_eq!(session.view().scroll, 10);
     session.handle(key(KeyCode::Esc));
-    assert!(matches!(session.page, super::session::Page::Data));
+    assert!(matches!(session.page, super::session::Page::Personal));
 }
 
 #[test]
@@ -268,7 +268,7 @@ fn language_save_persists_stays_on_page_and_refreshes_the_ui_language() {
     std::env::remove_var("COSH_SHELL_LANG");
     let (_temp, paths) = fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
-    session.cursor = 0;
+    session.select_home_entry(4);
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.view().title, "Language / 语言");
     session.handle(key(KeyCode::Down));
@@ -311,26 +311,6 @@ fn health_save_reports_the_next_login_scope() {
     assert!(message.contains("next login"), "{message}");
     let store = GuideStore::open(paths.cosh_dir.as_ref().unwrap().join("guide")).unwrap();
     assert!(!store.peek_preferences().unwrap().unwrap().banner_enabled);
-}
-
-#[test]
-fn guide_tip_save_reuses_the_cli_result_and_keeps_banner_independent() {
-    let (_guard, _temp, paths) = isolated_fixture();
-    let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
-    session.cursor = 0;
-    session.handle(key(KeyCode::Down));
-    session.handle(key(KeyCode::Down));
-    session.handle(key(KeyCode::Enter));
-    assert_eq!(session.view().title, "Tips and recommendations");
-    session.handle(key(KeyCode::Enter));
-    session.handle(key(KeyCode::Down));
-    session.handle(key(KeyCode::Enter));
-    let message = session.view().message.unwrap();
-    assert!(message.contains("AI tips"), "{message}");
-    let store = GuideStore::open(paths.cosh_dir.as_ref().unwrap().join("guide")).unwrap();
-    let preferences = store.peek_preferences().unwrap().unwrap();
-    assert!(!preferences.guide_enabled);
-    assert!(preferences.banner_enabled);
 }
 
 #[test]
@@ -397,10 +377,11 @@ fn import_toggle_saves_preference_and_keeps_existing_data() {
     let before = snapshot_dir(&root);
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
     assert!(!session.bash.effective);
-    session.page = super::session::Page::Data;
-    session.cursor = 0;
-    session.shift(0); // primary import action
+    session.page = super::session::Page::Personal;
+    session.select_choice_for_test(2); // import follows the two recommendation choices
     session.tips_open();
+    session.select_choice_for_test(0);
+    session.handle(key(KeyCode::Enter));
     assert_eq!(session.bash.saved, Some(true));
     assert!(session.bash.effective);
     assert_eq!(
@@ -438,22 +419,22 @@ fn clear_data_requires_confirmation_and_keeps_the_on_off_preference() {
     assert_eq!(store.peek().unwrap().unwrap().journal.records.len(), 2);
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
     assert_eq!(session.rec.user_enabled, Reading::Value(true));
-    session.enter(super::session::Page::Data);
-    session.shift(1); // clear data only
+    session.enter(super::session::Page::Personal);
+    session.select_choice_for_test(3); // clear data only
     session.tips_open();
     assert_eq!(store.peek().unwrap().unwrap().journal.records.len(), 2);
     assert_eq!(store.peek().unwrap().unwrap().store_epoch, epoch_before);
     session.handle(key(KeyCode::Enter)); // default Cancel
-    assert!(matches!(session.page, super::session::Page::Data));
+    assert!(matches!(session.page, super::session::Page::Personal));
     assert_eq!(store.peek().unwrap().unwrap().journal.records.len(), 2);
-    session.enter(super::session::Page::Data);
-    session.shift(1);
+    session.enter(super::session::Page::Personal);
+    session.select_choice_for_test(3);
     session.tips_open();
     session.handle(key(KeyCode::Esc));
-    assert!(matches!(session.page, super::session::Page::Data));
+    assert!(matches!(session.page, super::session::Page::Personal));
     assert_eq!(store.peek().unwrap().unwrap().journal.records.len(), 2);
-    session.enter(super::session::Page::Data);
-    session.shift(1);
+    session.enter(super::session::Page::Personal);
+    session.select_choice_for_test(3);
     session.tips_open();
     session.shift(-1); // Confirm
     session.handle(key(KeyCode::Enter));
@@ -491,7 +472,7 @@ fn unreadable_data_page_defaults_to_privacy_with_or_without_reset() {
         let mut session = Session::new(paths, I18n::new(Language::EnUs));
         session.rec.damaged = damaged;
         let before = snapshot_dir(&root);
-        session.enter(super::session::Page::Data);
+        session.enter(super::session::Page::Personal);
         session.handle(key(KeyCode::Enter));
         assert!(matches!(session.page, super::session::Page::DataPrivacy));
         assert_eq!(before, snapshot_dir(&root));
@@ -518,7 +499,7 @@ fn data_clear_reset_and_privacy_routes_follow_visible_choices() {
             (MessageId::GuideWizardDataReset, Page::DataResetConfirm),
             (MessageId::GuideWizardTipsData, Page::DataPrivacy),
         ] {
-            session.enter(Page::Data);
+            session.enter(Page::Personal);
             session.cursor = session.view().rows.iter().position(|row| {
                 matches!(row, WizardRow::Choice { label: text, .. } if text == session.i18n.t(label))
             }).unwrap();
@@ -527,14 +508,14 @@ fn data_clear_reset_and_privacy_routes_follow_visible_choices() {
             assert_eq!(before, snapshot_dir(&root));
             if page != Page::DataPrivacy {
                 session.handle(key(KeyCode::Enter));
-                assert!(session.page == Page::Data);
+                assert!(session.page == Page::Personal);
                 assert_eq!(before, snapshot_dir(&root));
             }
         }
         session.enter(Page::DataResetConfirm);
         session.shift(-1);
         session.handle(key(KeyCode::Enter));
-        assert!(session.page == Page::Data);
+        assert!(session.page == Page::Personal);
         assert_eq!(session.rec.user_enabled, Reading::Value(false));
         assert!(store.peek().unwrap().unwrap().journal.records.is_empty());
     }
@@ -689,6 +670,11 @@ fn managed_login_page_offers_restore_and_other_only() {
         session.login_choices(),
         vec![LoginChoice::Restore, LoginChoice::Other]
     );
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    session.select_choice_for_test(0);
     assert!(matches!(
         session.handle(key(KeyCode::Enter)),
         Flow::LoginRestore
@@ -954,9 +940,8 @@ fn unreadable_config_shows_unknown_and_blocks_saves() {
     session.tips_open();
     assert_eq!(fs::read_to_string(&config_path).unwrap(), broken);
 
-    session.page = super::session::Page::Data;
-    session.cursor = 0;
-    session.shift(0);
+    session.page = super::session::Page::Personal;
+    session.tips_default_focus();
     assert!(session.tips_rows().iter().any(|row| matches!(
         row,
         crate::ui::guide::WizardRow::Text(text) if text.contains("Unable to read")
@@ -1010,8 +995,7 @@ fn every_home_entry_returns_to_its_own_row_across_repeated_visits() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
     for _ in 0..3 {
-        // Ordinal 5 is "ask questions", which leaves the wizard by design.
-        for entry in [0, 1, 2, 3, 4, 6] {
+        for entry in 0..6 {
             session.select_home_entry(entry);
             session.handle(key(KeyCode::Enter));
             assert_ne!(session.page, super::session::Page::Home);
@@ -1026,9 +1010,9 @@ fn every_home_entry_returns_to_its_own_row_across_repeated_visits() {
 fn tips_subpages_return_to_the_tips_row_that_opened_them() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
-    session.select_home_entry(2);
+    session.select_home_entry(5);
     session.handle(key(KeyCode::Enter));
-    for entry in 0..4 {
+    for entry in 0..2 {
         session.select_choice_for_test(entry);
         session.handle(key(KeyCode::Enter));
         assert_ne!(session.page, super::session::Page::Tips);
@@ -1106,7 +1090,7 @@ fn other_user_commands_expand_in_place_and_escape_leaves_the_login_page() {
         false,
         false,
     ));
-    session.select_home_entry(4);
+    session.select_home_entry(1);
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.page, super::session::Page::Login);
     session.shift(1);
@@ -1123,11 +1107,11 @@ fn other_user_commands_expand_in_place_and_escape_leaves_the_login_page() {
     )));
     session.handle(key(KeyCode::Esc));
     assert_eq!(session.page, super::session::Page::Home);
-    assert_eq!(session.choice_index(), 4);
+    assert_eq!(session.choice_index(), 1);
 }
 
 #[test]
-fn returning_to_login_keeps_the_semantic_action_when_choices_change() {
+fn rereview_fix_returning_to_login_keeps_the_semantic_action_when_choices_change() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths, I18n::new(Language::EnUs));
     session.snapshot.login = Ok(login_status(
@@ -1137,8 +1121,9 @@ fn returning_to_login_keeps_the_semantic_action_when_choices_change() {
         true,
         false,
     ));
-    session.select_home_entry(4);
+    session.select_home_entry(1);
     session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::Login);
     session.shift(1);
     assert_eq!(
         session.login_choices().get(session.choice_index()),
@@ -1153,8 +1138,605 @@ fn returning_to_login_keeps_the_semantic_action_when_choices_change() {
         false,
     ));
     session.restore_frame(frame);
+    assert_eq!(session.page, super::session::Page::Login);
     assert_eq!(
         session.login_choices().get(session.choice_index()),
         Some(&LoginChoice::Other)
     );
+}
+
+#[test]
+fn rereview_fix_unknown_login_stays_read_only_after_reread_and_reentry() {
+    use super::result::ActionKind;
+    use crate::runtime::login::guide_protocol::Outcome;
+    let (_guard, _temp, mut session) =
+        login_session(login_status("/bin/bash", None, "unmanaged", false, false));
+    session.select_home_entry(1);
+    session.handle(key(KeyCode::Enter));
+    session.finish_login("set", Outcome::Unconfirmed);
+    assert!(session.blocked_writes.contains(&ActionKind::LoginShell));
+    for reread in [
+        Ok(login_status(
+            "/bin/bash",
+            Some("/bin/bash"),
+            "applied",
+            true,
+            false,
+        )),
+        Ok(login_status(
+            "/usr/bin/cosh",
+            Some("/bin/bash"),
+            "applied",
+            true,
+            false,
+        )),
+        Err("account lookup unavailable".to_string()),
+    ] {
+        session.snapshot.login = reread.clone();
+        session.enter(super::session::Page::Login);
+        assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+        for action in ["set", "restore"] {
+            session.run_login(action);
+            assert!(session.message.as_deref().unwrap().contains("unconfirmed"));
+        }
+        session.run_login("reread");
+        assert!(session.blocked_writes.contains(&ActionKind::LoginShell));
+        assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+        session.snapshot.login = reread;
+        assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+        let pending = session
+            .i18n
+            .t(crate::i18n::MessageId::GuideWizardLoginCommitPending);
+        assert!(session.login_rows().iter().any(|row| matches!(row,
+            crate::ui::guide::WizardRow::Text(text) if text == pending
+        )));
+        session.handle(key(KeyCode::Esc));
+        assert_eq!(session.page, super::session::Page::Home);
+        assert_eq!(session.choice_index(), 1);
+        assert!(session.view().rows.iter().any(|row| matches!(row,
+            crate::ui::guide::WizardRow::Choice { value, .. } if value == "Change unconfirmed"
+        )));
+        session.handle(key(KeyCode::Enter));
+        assert_eq!(session.page, super::session::Page::Login);
+        assert_eq!(session.login_choices(), vec![LoginChoice::Reread]);
+        for restore in [false, true] {
+            session.open_subpage(super::session::Page::LoginConfirm(restore));
+            session.select_choice_for_test(0);
+            assert!(matches!(
+                session.handle(key(KeyCode::Enter)),
+                Flow::Continue
+            ));
+            assert_eq!(session.page, super::session::Page::Login);
+        }
+    }
+}
+
+#[test]
+fn rereview_fix_home_login_summary_keeps_actual_recovery_limits() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    for (status, expected) in [
+        (
+            login_status("/usr/bin/cosh", Some("/bin/bash"), "conflict", true, true),
+            "conflict",
+        ),
+        (
+            login_status("/bin/zsh", Some("/bin/bash"), "conflict", true, true),
+            "conflict",
+        ),
+        (
+            login_status("/usr/bin/cosh", None, "unmanaged", false, false),
+            "recovery record",
+        ),
+    ] {
+        session.snapshot.login = Ok(status);
+        let value = session
+            .view()
+            .rows
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::ui::guide::WizardRow::Choice { value, .. } => Some(value),
+                _ => None,
+            })
+            .nth(1)
+            .unwrap();
+        assert!(value.contains(expected), "{value}");
+    }
+}
+
+#[test]
+fn home_leads_with_the_quick_guide_and_keeps_the_default_login_shell_second() {
+    for (language, expected) in [
+        (
+            Language::EnUs,
+            [
+                "Quick start guide",
+                "Default login shell",
+                "AI service",
+                "Login health summary",
+                "Language",
+                "More settings",
+            ],
+        ),
+        (
+            Language::ZhCn,
+            [
+                "快速使用指南",
+                "默认登录 Shell",
+                "AI 服务",
+                "登录健康摘要",
+                "语言",
+                "更多设置",
+            ],
+        ),
+    ] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let session = Session::new(paths, I18n::new(language));
+        let view = session.view();
+        let labels = view
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                crate::ui::guide::WizardRow::Choice { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, expected);
+    }
+}
+
+#[test]
+fn more_settings_only_offers_analysis_and_recommendation_data() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(super::session::Page::Tips);
+    let labels = session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::guide::WizardRow::Choice { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels.len(), 2, "{labels:?}");
+    assert!(labels[0].contains("analysis"), "{labels:?}");
+    assert!(!labels.iter().any(|label| label.contains("Usage tips")));
+}
+
+#[test]
+fn login_page_states_the_benefit_and_the_terminal_verification() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::ZhCn));
+    session.snapshot.login = Ok(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    session.enter(super::session::Page::Login);
+    let text = session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::guide::WizardRow::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("让每次登录直接进入 Cosh"), "{text}");
+    assert!(text.contains("在当前终端按 sudo 提示验证权限"), "{text}");
+}
+
+#[test]
+fn sudo_handoff_names_the_target_and_the_terminal_steps_without_a_wizard_page() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::ZhCn));
+    session.snapshot.login = Ok(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    let set = session.login_handoff_lines("set").join("\n");
+    assert!(set.contains("目标账号："), "{set}");
+    assert!(set.contains("UID"), "{set}");
+    assert!(set.contains("将默认登录 Shell 设为 /usr/bin/cosh"), "{set}");
+    assert!(
+        set.contains("如 sudo 要求密码，请在当前终端输入。"),
+        "{set}"
+    );
+    assert!(set.contains("输入后按 Enter 继续。"), "{set}");
+    assert!(set.contains("输入通常不显示字符或星号。"), "{set}");
+    assert!(set.contains("Ctrl-C 请求取消。"), "{set}");
+    assert!(set.contains("无需密码时直接继续。"), "{set}");
+    assert!(!set.contains("Esc"), "{set}");
+    let restore = session.login_handoff_lines("restore").join("\n");
+    assert!(restore.contains("恢复为 /bin/bash"), "{restore}");
+}
+
+#[test]
+fn returning_to_the_data_list_never_lands_on_a_write_when_the_import_row_vanishes() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(super::session::Page::Personal);
+    session.select_choice_for_test(2); // import action
+    let frame = session.current_frame();
+    session.open_subpage(super::session::Page::DataPrivacy);
+    session.bash.unreadable = true;
+    session.restore_frame(frame);
+    assert_eq!(
+        session.personal_actions().get(session.choice_index()),
+        Some(&super::tips::PersonalAction::Privacy)
+    );
+    let before = session.rec.user_enabled;
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::DataPrivacy);
+    assert_eq!(session.rec.user_enabled, before);
+}
+
+#[test]
+fn import_target_follows_the_saved_preference_under_an_environment_override() {
+    for override_on in [true, false] {
+        for saved_on in [true, false] {
+            let _guard = env_guard();
+            let (temp, paths) = fixture();
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var(
+                "COSH_RECOMMENDATIONS_BASH_HISTORY",
+                if override_on { "1" } else { "0" },
+            );
+            crate::config::write_bash_history_checked(saved_on).unwrap();
+            let mut session = Session::new(paths, I18n::new(Language::EnUs));
+            assert_eq!(session.bash.saved, Some(saved_on));
+            assert_eq!(session.bash.effective, override_on);
+            session.enter(super::session::Page::Personal);
+            session.select_choice_for_test(2);
+            session.tips_open();
+            if !saved_on {
+                session.select_choice_for_test(0);
+                session.handle(key(KeyCode::Enter));
+            }
+            assert_eq!(
+                session.bash.saved,
+                Some(!saved_on),
+                "override={override_on} saved={saved_on}"
+            );
+            assert_eq!(session.bash.effective, override_on, "the env value stays");
+            let message = session.view().message.unwrap_or_default();
+            assert!(
+                message.contains(
+                    session
+                        .i18n
+                        .t(crate::i18n::MessageId::GuideWizardDataEnvNote)
+                ),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn environment_forced_off_recommendations_refuse_to_enable_without_saving() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let store = crate::recommendation::personal_store::PersonalStore::open(
+        paths.cosh_dir.as_ref().unwrap().join("recommendations"),
+    )
+    .unwrap();
+    store.set_user_enabled(false, 1_000).unwrap();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.rec.forced_off = true;
+    session.enter(super::session::Page::Personal);
+    session.select_choice_for_test(0); // enable
+    session.tips_open();
+    assert_eq!(session.rec.user_enabled, Reading::Value(false));
+    assert_eq!(
+        store.peek().unwrap().unwrap().preferences.user_enabled,
+        Some(false)
+    );
+    let message = session.view().message.unwrap_or_default();
+    assert!(!message.contains("Saved"), "{message}");
+}
+
+#[test]
+fn an_unconfirmed_management_result_blocks_that_kind_for_the_rest_of_the_wizard() {
+    use super::result::{ActionKind, ChangeFact, TaskOutcome, Verification};
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    let mut committed = TaskOutcome::default();
+    committed.record(
+        ActionKind::Configure,
+        ChangeFact::Committed,
+        Verification::Verified,
+    );
+    session.finish_ai_task(committed);
+    assert!(session.blocked_writes.is_empty());
+
+    let mut unknown = TaskOutcome::default();
+    unknown.record(
+        ActionKind::Delete,
+        ChangeFact::Unknown,
+        Verification::Unconfirmed,
+    );
+    session.finish_ai_task(unknown);
+    assert_eq!(
+        session.blocked_writes.iter().copied().collect::<Vec<_>>(),
+        vec![ActionKind::Delete]
+    );
+
+    // Reopening management keeps the gate; a later success of another kind
+    // must not clear it.
+    let mut later = TaskOutcome::default();
+    later.record(
+        ActionKind::Activate,
+        ChangeFact::Committed,
+        Verification::Verified,
+    );
+    session.finish_ai_task(later);
+    assert!(session.blocked_writes.contains(&ActionKind::Delete));
+}
+
+fn rendered(session: &Session, width: u16, height: u16) -> String {
+    use ratatui::{backend::TestBackend, Terminal};
+    let view = session.view();
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::ui::guide::render(frame, &view);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn quick_guide_last_line_stays_reachable_at_40x16_in_both_languages() {
+    for (language, tail) in [
+        (Language::ZhCn, "会结束登录会话"),
+        (Language::EnUs, "ends the login"),
+    ] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(language));
+        session.enter(super::session::Page::Start);
+        session.scroll = usize::MAX;
+        let text: String = rendered(&session, 40, 16)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            text.contains(&tail.replace(' ', "")),
+            "{language:?}: {text}"
+        );
+    }
+}
+
+#[test]
+fn login_benefit_and_action_share_the_first_screen_at_40x16() {
+    for (language, benefit) in [
+        (Language::ZhCn, "让每次登录直接进入"),
+        (Language::EnUs, "UseCoshateverylogin"),
+    ] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(language));
+        session.snapshot.login = Ok(login_status(
+            "/bin/bash",
+            Some("/bin/bash"),
+            "restored",
+            false,
+            false,
+        ));
+        session.enter(super::session::Page::Login);
+        let text = rendered(&session, 40, 16).replace(' ', "");
+        assert!(text.contains(benefit), "{language:?}: {text}");
+        let action = session
+            .i18n
+            .t(crate::i18n::MessageId::GuideWizardLoginSet)
+            .replace(' ', "");
+        assert!(text.contains(&action), "{language:?}: {text}");
+    }
+}
+
+#[test]
+fn review_fix_login_requires_confirmation_and_defaults_to_cancel() {
+    let (_guard, _temp, mut session) =
+        login_session(login_status("/bin/bash", None, "unmanaged", false, false));
+    session.select_choice_for_test(0);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert_eq!(session.page, super::session::Page::Login);
+    assert_eq!(session.choice_index(), 0);
+    session.handle(key(KeyCode::Enter));
+    session.select_choice_for_test(0);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginSet
+    ));
+}
+
+#[test]
+fn review_fix_history_import_requires_consent_and_preserves_return_focus() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(super::session::Page::Personal);
+    session.select_choice_for_test(2);
+    session.handle(key(KeyCode::Enter));
+    assert_ne!(session.bash.saved, Some(true));
+    let text = session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::guide::WizardRow::Text(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("AI service"), "{text}");
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.page, super::session::Page::Personal);
+    assert_eq!(session.choice_index(), 2);
+    assert_ne!(session.bash.saved, Some(true));
+    session.handle(key(KeyCode::Enter));
+    session.select_choice_for_test(0);
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(session.bash.saved, Some(true));
+    assert_eq!(session.choice_index(), 2);
+    let message = session.view().message.unwrap();
+    assert!(message.contains("new Cosh sessions"), "{message}");
+    assert!(!message.contains("Stopping"), "{message}");
+}
+
+#[test]
+fn review_fix_default_preferences_are_not_read_failures() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(super::session::Page::Personal);
+    let text = session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::guide::WizardRow::Text(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("default"), "{text}");
+    assert!(!text.contains("Unable to read"), "{text}");
+}
+
+#[test]
+fn review_fix_import_failed_then_cancel_clears_feedback_like_escape() {
+    for escape in [false, true] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(Language::EnUs));
+        session.enter(super::session::Page::Personal);
+        session.select_choice_for_test(2);
+        session.handle(key(KeyCode::Enter));
+        session.message = Some("Save failed".into());
+        session.message_fresh = true;
+        session.handle(key(if escape { KeyCode::Esc } else { KeyCode::Enter }));
+        assert_eq!(session.page, super::session::Page::Personal);
+        assert_eq!(session.choice_index(), 2);
+        assert!(session.message.is_none());
+        assert!(!session.message_fresh);
+    }
+}
+
+#[test]
+fn publish_fix_page_keys_read_all_long_result_facts() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(super::session::Page::Ai);
+    session.message = Some(
+        (0..40)
+            .map(|i| format!("result-{i:02}\n"))
+            .collect::<String>(),
+    );
+    let before = rendered(&session, 40, 16);
+    session.handle(key(KeyCode::PageDown));
+    let after = rendered(&session, 40, 16);
+    assert_ne!(before, after, "page key snapped back to the menu");
+    let mut seen = before + &after;
+    for _ in 0..5 {
+        session.handle(key(KeyCode::PageDown));
+        seen.push_str(&rendered(&session, 40, 16));
+    }
+    assert!(
+        seen.contains("result-00") && seen.contains("result-39"),
+        "{seen}"
+    );
+}
+
+#[test]
+fn publish_fix_unknown_login_and_read_failure_are_both_explained() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.finish_login(
+        "set",
+        crate::runtime::login::guide_protocol::Outcome::Unconfirmed,
+    );
+    session.snapshot.login = Err("state read failed".into());
+    session.select_home_entry(1);
+    session.handle(key(KeyCode::Enter));
+    let text = session
+        .view()
+        .rows
+        .into_iter()
+        .filter_map(|r| match r {
+            crate::ui::guide::WizardRow::Text(t) => Some(t),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("state read failed"), "{text}");
+    assert!(text.contains("unconfirmed"), "{text}");
+}
+
+#[test]
+fn publish_fix_cleanup_uncertainty_survives_enabling_and_reentry() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let root = paths.cosh_dir.as_ref().unwrap().join("recommendations");
+    let store = crate::recommendation::personal_store::PersonalStore::open(&root).unwrap();
+    store.initialize(status::now_hour_bucket()).unwrap();
+    fs::create_dir(root.join("state.backup.json")).unwrap();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.select_home_entry(5);
+    session.handle(key(KeyCode::Enter));
+    session.select_choice_for_test(1);
+    session.handle(key(KeyCode::Enter));
+    session.select_choice_for_test(1);
+    session.handle(key(KeyCode::Enter));
+    session.select_choice_for_test(0);
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(
+        session.rec.user_enabled,
+        super::status::Reading::Value(false)
+    );
+    fs::remove_dir(root.join("state.backup.json")).unwrap();
+    session.select_choice_for_test(0);
+    session.handle(key(KeyCode::Enter));
+    assert_eq!(
+        session.rec.user_enabled,
+        super::status::Reading::Value(true)
+    );
+    session.handle(key(KeyCode::Esc));
+    session.handle(key(KeyCode::Enter));
+    let text = session
+        .view()
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::ui::guide::WizardRow::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("cleanup remains unconfirmed"), "{text}");
+    let clear = session
+        .personal_actions()
+        .iter()
+        .position(|x| *x == super::tips::PersonalAction::Clear)
+        .unwrap();
+    session.select_choice_for_test(clear);
+    session.handle(key(KeyCode::Enter));
+    session.select_choice_for_test(0);
+    session.handle(key(KeyCode::Enter));
+    assert!(!session.view().rows.iter().any(|r|matches!(r,crate::ui::guide::WizardRow::Text(t) if t.contains("cleanup remains unconfirmed"))));
 }

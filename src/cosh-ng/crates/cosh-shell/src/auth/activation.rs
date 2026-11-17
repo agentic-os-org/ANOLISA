@@ -34,15 +34,22 @@ pub(super) fn activate_provider<W: Write>(
         if let Some(auth) = state.auth.state.as_mut() {
             auth.field_capture_revision = auth.field_capture_revision.wrapping_add(1);
         }
+        super::standalone::record_write_result(state, ActionKind::Activate, &Err(error.clone()));
+        let next_step = if state.auth.write_blocked(ActionKind::Activate) {
+            state
+                .i18n()
+                .t(crate::i18n::MessageId::GuideWizardAiWritesHeld)
+        } else if error.unconfirmed {
+            "Check the current configuration before retrying."
+        } else {
+            "Review the error and retry when ready."
+        };
         clear_active_auth_panel(state, output)?;
         renderer.write_notice_panel(
             output,
             NoticePanelModel {
                 title: "Provider switch not confirmed",
-                body: vec![
-                    error.message,
-                    "Review the error and retry when ready.".into(),
-                ],
+                body: vec![error.message, next_step.into()],
                 footer: None,
             },
         )?;

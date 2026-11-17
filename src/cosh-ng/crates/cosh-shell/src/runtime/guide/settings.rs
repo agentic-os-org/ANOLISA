@@ -38,24 +38,6 @@ impl Session {
         }
     }
 
-    pub(super) fn save_guide_tip(&mut self, enabled: bool) {
-        let Some(store) = self.open_store() else {
-            return;
-        };
-        let output = cli::set(&store, &self.paths, enabled, self.i18n);
-        if output.exit_code != 0 {
-            status::warn_failure("save_guide_tip", "set_guide");
-        }
-        // The runtime-publication result rides on the later lines; showing only
-        // the first line would hide a partial or unconfirmed publish.
-        let mut message = output.stdout.trim().to_string();
-        if message.is_empty() {
-            message = output.stderr.trim().to_string();
-        }
-        self.message = Some(message);
-        self.reload();
-    }
-
     pub(super) fn save_health(&mut self, enabled: bool) {
         let Some(store) = self.open_store() else {
             return;

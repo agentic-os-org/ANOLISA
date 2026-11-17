@@ -9,23 +9,47 @@ Use `cosh --shell bash --help` for Bash help. In an enhanced Cosh session, `/hel
 
 ## Configuration wizard and getting started
 
-`cosh guide` opens a full-screen configuration wizard in an interactive terminal, covering five
-settings: interface language, AI service, tips & recommendations (usage tips / command analysis /
-personalized prompt recommendations / recommendation data & privacy), login health summary, and
-default login shell, plus a separate getting-started page. The wizard only saves preferences and
-reuses existing owners: AI service hands off to the existing `/auth`, and the default login shell is
-changed through a private bounded protocol over foreground sudo, so the password never enters the wizard.
-Analysis mode and recommendation switches save new-session defaults; environment overrides (such as
-`COSH_RECOMMENDATIONS_ENABLED=0`) are shown honestly as "saved but overridden" or reject an enable
-request, without misleading you about the current session.
+`cosh guide` opens a configuration and onboarding wizard. Its home menu is:
 
-The wizard selects **Start asking questions** by default. It opens a Cosh session; submit your
-question there. **Manage AI service** remains a secondary entry to `/auth`. Opening the wizard
-does not activate a trial, change provider preferences, or call a model. For automatic access,
-the guide invites you with "Zero-config automatic access; ask directly"; the first question
-verifies access. An ECS identity
-check does not prove trial eligibility or remaining quota. Configured services show that their
-connection is unverified, and explicit provider settings keep priority over automatic trial access.
+1. **Quick start guide** — selected by default, starting with a question from Bash.
+2. **Default login shell** — enter Cosh at every login, without starting it manually.
+3. **AI service** — inspect access and manage saved services without starting a working shell.
+4. **Login health summary**.
+5. **Language**.
+6. **More settings** — command analysis and personalized recommendations/data.
+
+To try AI from Bash, leave the guide with Esc, one level at a time, then run:
+
+```bash
+cosh --ask 'Why is my disk full?'
+```
+
+Follow the existing AI setup prompts when needed. After the answer you remain in
+Cosh; `exit` returns to the Bash that launched it. Run `cosh` for a daily session,
+where commands and natural-language questions share the prompt; `/help` lists
+session commands. If you are already in Cosh, do not start another nested session.
+
+To use Cosh at every login, choose **Default login shell** on the guide home
+page. Check the account and target path, then confirm; Cancel is selected by
+default. Sudo uses the current terminal for any password prompt, and the wizard
+returns after the operation finishes. The change affects later logins, not the
+current session. A trusted managed record permits restoring the original Bash.
+When Cosh is the login shell, `exit` ends that login session.
+
+Opening the guide does not activate a trial or call a model. First questions
+validate automatic access; an ECS identity check does not prove trial eligibility
+or remaining quota. Saved AI service configurations show an unverified connection.
+The existing CLI controls `cosh guide on`, `cosh guide off` and
+`cosh guide status` remain independent of the wizard's settings.
+
+Configuration failures preserve the current form's confirmed fields. Leaving the
+form discards unsaved input. Esc returns one level; Ctrl-C/Ctrl-D ends AI
+management after any submitted task settles. Cancellation keeps already saved
+changes. A missing mutation receipt holds that kind of write for this guide
+session; reading current state does not establish the earlier operation's result.
+Partial success keeps the saved configuration and unsaved session-record facts
+separate. Analysis and recommendation preferences affect new Cosh sessions;
+environment overrides remain visible. Bash history import needs separate consent.
 
 At startup Cosh shows health facts once, followed by a single open suggestion
 area shared by health and personal recommendations (at most three questions).

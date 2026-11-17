@@ -34,6 +34,7 @@ pub(crate) struct WizardView {
     pub(crate) language: Language,
     /// A freshly produced result scrolls its full text into view once.
     pub(crate) message_fresh: bool,
+    pub(crate) follow_cursor: bool,
 }
 
 /// Rows a result may occupy before it moves into the scrollable body, where
@@ -159,7 +160,7 @@ fn render_rows(
         // A fresh result owns the view: show its tail rather than snapping back
         // to the focused choice, which the next keypress brings back anyway.
         scroll = max_scroll;
-    } else {
+    } else if view.follow_cursor {
         if focus_end >= scroll + content_rows {
             scroll = (focus_end + 1).saturating_sub(content_rows).min(max_scroll);
         }
@@ -220,7 +221,7 @@ fn choice_line(label: &str, value: &str, width: usize, selected: bool) -> Line<'
 fn render_markdown(frame: &mut Frame, area: Rect, view: &WizardView, markdown: &str) -> usize {
     let lines =
         MarkdownRenderModel::parse_with_language(markdown, area.width as usize, view.language)
-            .styled_lines();
+            .spaced_styled_lines();
     let height = area.height as usize;
     let width = area.width.max(1);
     let upper = lines
@@ -228,7 +229,9 @@ fn render_markdown(frame: &mut Frame, area: Rect, view: &WizardView, markdown: &
         .map(|line| line.width().max(1))
         .sum::<usize>()
         .max(1)
-        .min(u16::MAX as usize) as u16;
+        // Rect::new silently shrinks both sides once width*height passes u16::MAX,
+        // which would wrap the text narrower than the buffer and overrun it.
+        .min((u16::MAX / width.max(1)) as usize) as u16;
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let full = Rect::new(0, 0, width, upper);
     let mut buf = Buffer::empty(full);
