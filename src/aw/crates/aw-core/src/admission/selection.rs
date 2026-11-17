@@ -53,31 +53,7 @@ pub fn projected_out_steps(
     Ok(excluded)
 }
 
-pub(super) fn overlap(outer: &[String], inner: &[String], adapter: &str) -> bool {
-    outer.iter().any(|left| {
-        inner.iter().any(|right| {
-            let left_native = native(left);
-            let right_native = native(right);
-            if [left_native.as_ref(), right_native.as_ref()]
-                .into_iter()
-                .flatten()
-                .any(|(owner, _)| *owner != adapter)
-            {
-                return false;
-            }
-            if left == "*" || right == "*" {
-                return true;
-            }
-            match (left_native, right_native) {
-                (Some((_, left)), Some((_, right))) => left == right,
-                (None, None) => left == right,
-                // Normalized/native aliases belong to the Adapter. Without a
-                // native event, this intersection must retain strict admission.
-                _ => true,
-            }
-        })
-    })
-}
+pub(super) use aw_config::requirements::selectors_overlap as overlap;
 
 fn native(selector: &str) -> Option<(&str, &str)> {
     selector
