@@ -102,6 +102,7 @@ fn structured_rename_and_exchange_on_live_kernel() {
                 tree_mask: 5,
                 delete_mask: 3,
                 ordinary_write_mask: 4,
+                read_mask: 0,
                 protection_set_id: 1,
                 guard: InodeGuardVal {
                     flags: INODE_GUARD_RENAME,

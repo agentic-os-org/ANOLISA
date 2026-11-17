@@ -153,13 +153,6 @@ fn normalize_target(
 ) -> Result<NormalizedFileProtectionTarget, FileProtectionNormalizationError> {
     validate_path(&target.path)
         .map_err(|reason| target_error(target_index, &target.path, reason))?;
-    if target.protections.read && target.kind != FileProtectionTargetKind::ExactFile {
-        return Err(target_error(
-            target_index,
-            &target.path,
-            "read protection requires an exact_file target",
-        ));
-    }
     if target.kind == FileProtectionTargetKind::ExactFile
         && let Some(exclusion) = target.exclusions.first()
     {

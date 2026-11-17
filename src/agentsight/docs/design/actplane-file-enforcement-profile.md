@@ -107,12 +107,12 @@ kept because `linkat(AT_EMPTY_PATH)` can re-attach such an inode.
 
 ## Exact-file read protection
 
-The structured contract adds optional `protections.read`, defaulting to false,
-for `exact_file` targets only. The HTTP-owned template selects it through the
+The structured contract adds optional `protections.read`, defaulting to false.
+The HTTP-owned template selects it through the
 dedicated `POST /api/enforcement/file-read-bindings` route, so an older server
 answers 404 instead of ignoring an unknown field and applying an open-only
-policy; directory-tree read targets are rejected instead of claiming
-unsupported coverage. Protocol v5 and the policy schema version
+policy; directory-tree read targets follow the separate contract below, and
+backends without it reject them. Protocol v5 and the policy schema version
 remain unchanged: omitted false fields preserve old payloads, while old
 backends reject the unknown true field.
 
@@ -131,6 +131,48 @@ concurrent process-tree/file-access changes. External file replacement or
 secret rotation requires re-apply; dynamic topology and io_uring/AIO remain
 outside coverage. Validation used synthetic files on ALinux 6.6 with an
 isolated enforcer, HTTP server, UDS and pin root.
+
+## Directory-tree read protection
+
+`directory_tree` targets accept `protections.read` when health advertises
+`directory_tree_read_protection`. The read route takes an optional
+`kind: "directory_tree"`; an older server ignores the field and then rejects the
+directory as a non-regular file, and an older enforcer rejects the target at
+normalization, so neither side narrows the request silently.
+
+Inode guards cannot follow entries created after Apply, so tree reads reuse the
+name-based ancestry classification of delete and ordinary-write protection.
+Lowering sets a per-domain `read_mask` for tree read targets only; exact-file
+reads keep `INODE_GUARD_READ`, and exact-only policies therefore add no
+per-read classification. When the mask is set, the open, read-permission, mmap
+and mprotect hooks classify regular files and deny only PROTECTED results.
+UNKNOWN stays allowed as for ordinary writes, because entries on internal
+mounts never reach a namespace root. Directory listings and metadata are not
+mediated.
+
+Name-based classification would let a bound process copy an inode out of scope
+by name. A new `path_link` LSM hook denies links that drop read bits (event
+operation 10, `link`), and the rename guard denies moves that drop read bits as
+well as replacing or exchanging a stable root or ancestor, whose substitute
+would receive later secrets unprotected. Existing outside hard links cannot be
+seen from the hook, so Apply walks the held tree in the target mount namespace
+without following symlinks and rejects regular files with more than one link,
+skipping subtree exclusions and stopping after 100,000 entries. The walk also
+records each in-scope file identity, so existing mappings are rejected by
+identity as well as by tree prefix: mappings made through bind aliases are
+caught, and the prefix still covers mapped files already unlinked from the
+tree. Hard links created later by unbound
+processes and replacement of the root by unbound processes remain outside
+coverage.
+
+The activation record grows from 56 to 64 bytes, so every pinned profile marker
+advances (file v8, credential v9, full v9, agent-file-guard v10) and old pins are
+reinstalled instead of being reinterpreted. Validation covered the inode-only
+object on Anolis 5.10.134 (BPF LSM, backported `bpf_loop`) with private pins:
+engine map-level tests and an enforcer test that applies a real tree policy
+with a bind alias, a submount, an exclusion and a held descriptor. The full
+object for `bpf_d_path` kernels and both aarch64 objects were rebuilt but not
+loaded on a live kernel.
 
 ## Build Contract
 

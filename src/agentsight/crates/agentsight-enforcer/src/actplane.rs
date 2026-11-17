@@ -43,9 +43,10 @@ mod file_protection_policy;
 mod file_protection_resolver;
 mod file_protection_runtime;
 mod file_protection_topology;
+mod file_protection_tree_scan;
 mod inode_policy;
 mod preexisting_maps;
-use file_protection_policy::NormalizedFileProtectionPolicy;
+use file_protection_policy::{NormalizedFileProtectionPolicy, NormalizedFileProtectionTarget};
 use file_protection_runtime::{ActiveFileProtection, PreparedFileProtection};
 use inode_policy::InodePolicy;
 
@@ -93,24 +94,7 @@ fn structured_protected_entries(
                     ino: metadata.ino(),
                 }
             }
-            FileProtectionTargetKind::DirectoryTree => {
-                let mut subtree_prefixes = Vec::new();
-                let mut exact_entries = Vec::new();
-                for exclusion in &target.exclusions {
-                    match exclusion.kind {
-                        FileProtectionExclusionKind::DirectorySubtree => {
-                            subtree_prefixes.push(format!("{}/", exclusion.path))
-                        }
-                        FileProtectionExclusionKind::ExactEntry => {
-                            exact_entries.push(exclusion.path.clone())
-                        }
-                    }
-                }
-                preexisting_maps::ProtectedScope::Tree {
-                    subtree_prefixes,
-                    exact_entries,
-                }
-            }
+            FileProtectionTargetKind::DirectoryTree => tree_scope(target),
         };
         entries.push(preexisting_maps::ProtectedEntry {
             path: target.path.clone(),
@@ -118,6 +102,24 @@ fn structured_protected_entries(
         });
     }
     Ok(entries)
+}
+
+/// Matches `/proc` entries lexically under a tree target minus its exclusions.
+fn tree_scope(target: &NormalizedFileProtectionTarget) -> preexisting_maps::ProtectedScope {
+    let mut subtree_prefixes = Vec::new();
+    let mut exact_entries = Vec::new();
+    for exclusion in &target.exclusions {
+        match exclusion.kind {
+            FileProtectionExclusionKind::DirectorySubtree => {
+                subtree_prefixes.push(format!("{}/", exclusion.path))
+            }
+            FileProtectionExclusionKind::ExactEntry => exact_entries.push(exclusion.path.clone()),
+        }
+    }
+    preexisting_maps::ProtectedScope::Tree {
+        subtree_prefixes,
+        exact_entries,
+    }
 }
 
 fn source_label(compiled: Option<&Compiled>) -> Result<u64, BackendError> {
@@ -334,6 +336,17 @@ impl ActPlaneBackend {
         if requires_read && !self.engine.supports_file_read_guard() {
             return Err(BackendError::CompileFailure("file read protection requires attached file_open, file_permission, mmap_file and file_mprotect hooks".into()));
         }
+        let requires_tree_read = normalized.as_ref().is_some_and(|policy| {
+            policy
+                .targets
+                .iter()
+                .any(|target| target.read && target.kind == FileProtectionTargetKind::DirectoryTree)
+        });
+        if requires_tree_read && !self.engine.supports_tree_read_guard() {
+            return Err(BackendError::CompileFailure(
+                "directory-tree read protection requires the attached path_link hook in addition to the file read hooks".into(),
+            ));
+        }
         if requires_ordinary_write && !self.structured_ordinary_write_ready() {
             return Err(BackendError::CompileFailure(
                 "ordinary write protection requires the attached file_permission hook".into(),
@@ -370,18 +383,39 @@ impl ActPlaneBackend {
                 request.root_pid,
                 request.process_start_time,
             )?;
-            let read_entries: Vec<_> = topology
-                .direct_targets
-                .iter()
-                .filter(|record| policy.targets[record.target_id as usize - 1].read)
-                .map(|record| preexisting_maps::ProtectedEntry {
-                    path: record.path.authored_path.clone(),
-                    scope: preexisting_maps::ProtectedScope::Exact {
-                        dev: record.path.identity.dev,
-                        ino: record.path.identity.ino,
-                    },
-                })
-                .collect();
+            let mut read_entries = Vec::new();
+            for record in &topology.direct_targets {
+                let target = &policy.targets[record.target_id as usize - 1];
+                if !target.read {
+                    continue;
+                }
+                let path = record.path.authored_path.clone();
+                match target.kind {
+                    FileProtectionTargetKind::ExactFile => {
+                        read_entries.push(preexisting_maps::ProtectedEntry {
+                            path,
+                            scope: preexisting_maps::ProtectedScope::Exact {
+                                dev: record.path.identity.dev,
+                                ino: record.path.identity.ino,
+                            },
+                        });
+                    }
+                    FileProtectionTargetKind::DirectoryTree => {
+                        // Identities catch mappings made through aliases; the
+                        // prefix still catches mapped files unlinked before the walk.
+                        let files =
+                            file_protection_tree_scan::scan_read_tree(target, &record.path)?;
+                        read_entries.push(preexisting_maps::ProtectedEntry {
+                            path: path.clone(),
+                            scope: preexisting_maps::ProtectedScope::Identities { files },
+                        });
+                        read_entries.push(preexisting_maps::ProtectedEntry {
+                            path,
+                            scope: tree_scope(target),
+                        });
+                    }
+                }
+            }
             preexisting_maps::reject_preexisting_read_mappings(request.root_pid, &read_entries)?;
             return Ok(PreparedBinding {
                 request,
@@ -475,9 +509,17 @@ impl ActPlaneBackend {
                     })
             })
             .unwrap_or_default();
-        let structured_target_count = file_protection
+        let structured_targets: Vec<(FileProtectionTargetKind, String)> = file_protection
             .as_ref()
-            .map_or(0, |prepared| prepared.policy.targets.len());
+            .map(|prepared| {
+                prepared
+                    .policy
+                    .targets
+                    .iter()
+                    .map(|target| (target.kind, target.path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let staged_file_protection = match file_protection {
             Some(prepared) => Some(prepared.stage(
                 &self.engine,
@@ -591,8 +633,17 @@ impl ActPlaneBackend {
             None => {
                 let mut reasons = vec![String::new()];
                 let mut rule_names = vec![String::new()];
-                for target_id in 1..=structured_target_count {
-                    reasons.push(format!("structured file protection target {target_id}"));
+                // Tree denials report only the accessed basename, so the
+                // reason names the protected root that matched.
+                for (index, (kind, path)) in structured_targets.iter().enumerate() {
+                    let target_id = index + 1;
+                    let kind = match kind {
+                        FileProtectionTargetKind::ExactFile => "exact_file",
+                        FileProtectionTargetKind::DirectoryTree => "directory_tree",
+                    };
+                    reasons.push(format!(
+                        "structured file protection target {target_id} ({kind} {path})"
+                    ));
                     rule_names.push(format!("file-protection-target-{target_id}"));
                 }
                 (reasons, rule_names, HashMap::new())
@@ -748,6 +799,8 @@ impl EnforcementBackend for ActPlaneBackend {
         capabilities.ordinary_write_protection = self.structured_ordinary_write_ready();
         capabilities.file_read_protection =
             file_guard_ready && self.engine.supports_file_read_guard();
+        capabilities.directory_tree_read_protection =
+            file_guard_ready && self.engine.supports_tree_read_guard();
         capabilities.static_mount_topology = file_guard_ready;
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
@@ -1614,6 +1667,7 @@ fn operation_name(operation: u32) -> &'static str {
         7 => "rmdir",
         8 => "ordinary_write",
         9 => "read",
+        10 => "link",
         _ => "unknown",
     }
 }
@@ -1957,7 +2011,8 @@ mod tests {
             (4, "recv"),
             (8, "ordinary_write"),
             (9, "read"),
-            (10, "unknown"),
+            (10, "link"),
+            (11, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }

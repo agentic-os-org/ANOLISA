@@ -37,6 +37,13 @@ pub(super) struct HeldPath {
     pub(super) _handle: Arc<File>,
 }
 
+impl HeldPath {
+    /// Returns the `O_PATH` handle pinning this identity in the target mount namespace.
+    pub(super) fn handle(&self) -> &File {
+        &self._handle
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ResolutionError {
     path: String,

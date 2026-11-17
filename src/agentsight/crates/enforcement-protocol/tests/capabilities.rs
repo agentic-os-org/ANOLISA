@@ -4,6 +4,8 @@ fn assert_structured_file_protection_is_unsupported(capabilities: &EnforcementCa
     assert!(!capabilities.file_entry_delete_protection);
     assert!(!capabilities.directory_tree_delete_protection);
     assert!(!capabilities.ordinary_write_protection);
+    assert!(!capabilities.file_read_protection);
+    assert!(!capabilities.directory_tree_read_protection);
     assert!(!capabilities.static_mount_topology);
     assert!(!capabilities.dynamic_mount_topology);
     assert!(!capabilities.complete_content_protection);

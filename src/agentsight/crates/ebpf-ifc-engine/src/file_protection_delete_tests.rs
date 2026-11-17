@@ -61,11 +61,31 @@ import ctypes, ctypes.util, os, sys
 libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
 libc.syscall.restype = ctypes.c_long
 RENAMEAT2 = {'x86_64': 316, 'aarch64': 276}[os.uname().machine]
+held = {}
 print('ready', flush=True)
 for line in sys.stdin:
     op, path = line.rstrip('\n').split('|', 1)
     try:
-        if op == 'unlink':
+        if op == 'read':
+            with open(path, 'rb') as handle:
+                handle.read()
+        elif op == 'hold':
+            held[path] = os.open(path, os.O_RDONLY)
+        elif op == 'readheld':
+            os.pread(held[path], 16, 0)
+        elif op == 'mmapr':
+            import mmap
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                with mmap.mmap(fd, 0, mmap.MAP_PRIVATE, mmap.PROT_READ) as mapping:
+                    mapping[0:1]
+            finally:
+                os.close(fd)
+        elif op == 'listdir':
+            os.listdir(path)
+        elif op.startswith('link:'):
+            os.link(path, op.split(':', 1)[1])
+        elif op == 'unlink':
             os.unlink(path)
         elif op == 'rmdir':
             os.rmdir(path)
@@ -251,6 +271,7 @@ fn structured_deletion_classifier_on_live_kernel() {
         tree_mask: 3,
         delete_mask: 5,
         ordinary_write_mask: 2,
+        read_mask: 0,
         protection_set_id: 1,
         guard: InodeGuardVal {
             flags: INODE_GUARD_UNLINK,

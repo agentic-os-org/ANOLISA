@@ -8,7 +8,7 @@
 //! already holds one over a protected path instead of silently claiming
 //! content protection it cannot enforce.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 
@@ -40,6 +40,12 @@ pub(super) enum ProtectedScope {
         subtree_prefixes: Vec<String>,
         /// Exact entry paths excluded from the tree scope.
         exact_entries: Vec<String>,
+    },
+    /// Matches entries by any of the identities found while walking a tree,
+    /// so mappings made through bind aliases or symlinked paths are caught.
+    Identities {
+        /// Kernel-encoded `(dev, ino)` pairs of the in-scope regular files.
+        files: HashSet<(u32, u64)>,
     },
 }
 
@@ -162,6 +168,7 @@ fn reject_writable_file_descriptors(
                 dev: tdev,
                 ino: tino,
             } => *tdev == dev && *tino == ino,
+            ProtectedScope::Identities { files } => files.contains(&(dev, ino)),
             ProtectedScope::Tree {
                 subtree_prefixes,
                 exact_entries,
@@ -207,6 +214,7 @@ fn fd_flags_are_writable(fdinfo: &str) -> bool {
 fn matches_entry(mapping: &Mapping, entry: &ProtectedEntry) -> bool {
     match &entry.scope {
         ProtectedScope::Exact { dev, ino } => mapping.dev == *dev && mapping.ino == *ino,
+        ProtectedScope::Identities { files } => files.contains(&(mapping.dev, mapping.ino)),
         ProtectedScope::Tree {
             subtree_prefixes,
             exact_entries,
@@ -412,6 +420,34 @@ mod tests {
             "a subtree exclusion must not swallow sibling directories"
         );
         assert!(!matches_entry(&outside, &entry));
+    }
+
+    #[test]
+    fn identity_scope_matches_aliased_mapping_paths() {
+        let entry = ProtectedEntry {
+            path: "/srv/secrets".into(),
+            scope: ProtectedScope::Identities {
+                files: [(1, 2)].into(),
+            },
+        };
+        let alias = Mapping {
+            dev: 1,
+            ino: 2,
+            path: "/mnt/alias/token".into(),
+        };
+        let other = Mapping {
+            dev: 1,
+            ino: 3,
+            path: "/srv/secrets/other".into(),
+        };
+        assert!(
+            matches_entry(&alias, &entry),
+            "alias path of a scanned file"
+        );
+        assert!(
+            !matches_entry(&other, &entry),
+            "identity scope must not fall back to path matching"
+        );
     }
 
     #[test]

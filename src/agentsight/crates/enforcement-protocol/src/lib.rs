@@ -268,6 +268,10 @@ pub struct EnforcementCapabilities {
     /// Whether reads and mappings of an exact regular file can be denied.
     #[serde(default)]
     pub file_read_protection: bool,
+    /// Whether reads and mappings of regular files below a directory tree can be
+    /// denied, including entries created or moved in after apply.
+    #[serde(default)]
+    pub directory_tree_read_protection: bool,
     /// Whether targets are resolved against mount topology fixed at apply time.
     #[serde(default)]
     pub static_mount_topology: bool,
@@ -296,6 +300,7 @@ impl EnforcementCapabilities {
             directory_tree_delete_protection: false,
             ordinary_write_protection: false,
             file_read_protection: false,
+            directory_tree_read_protection: false,
             static_mount_topology: false,
             dynamic_mount_topology: false,
             complete_content_protection: false,
@@ -318,6 +323,7 @@ impl EnforcementCapabilities {
             directory_tree_delete_protection: false,
             ordinary_write_protection: false,
             file_read_protection: false,
+            directory_tree_read_protection: false,
             static_mount_topology: false,
             dynamic_mount_topology: false,
             complete_content_protection: false,
@@ -340,6 +346,7 @@ impl EnforcementCapabilities {
             directory_tree_delete_protection: false,
             ordinary_write_protection: false,
             file_read_protection: false,
+            directory_tree_read_protection: false,
             static_mount_topology: false,
             dynamic_mount_topology: false,
             complete_content_protection: false,
@@ -836,6 +843,8 @@ mod tests {
         assert!(!capabilities.file_entry_delete_protection);
         assert!(!capabilities.directory_tree_delete_protection);
         assert!(!capabilities.ordinary_write_protection);
+        assert!(!capabilities.file_read_protection);
+        assert!(!capabilities.directory_tree_read_protection);
         assert!(!capabilities.static_mount_topology);
         assert!(!capabilities.dynamic_mount_topology);
         assert!(!capabilities.complete_content_protection);

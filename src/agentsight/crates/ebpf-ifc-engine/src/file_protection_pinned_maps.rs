@@ -35,6 +35,17 @@ impl PinnedEngine {
             .all(|name| self.paths.link(name).try_exists().unwrap_or(false))
     }
 
+    /// Adds the link guard that keeps tree-protected inodes from gaining names
+    /// outside the classified scope.
+    pub fn supports_tree_read_guard(&self) -> bool {
+        self.supports_file_read_guard()
+            && self
+                .paths
+                .link("enforce_path_link")
+                .try_exists()
+                .unwrap_or(false)
+    }
+
     /// Begins an inactive generation after checking live map usage and capacities.
     pub fn begin_file_protection_generation(
         &self,
@@ -299,6 +310,7 @@ impl FileProtectionMapWriter for PinnedFileProtectionMaps {
             tree_mask: value.tree_mask,
             delete_mask: value.delete_mask,
             ordinary_write_mask: value.ordinary_write_mask,
+            read_mask: value.read_mask,
             protection_set_id: value.protection_set_id,
             guard: Self::guard(domain, value.guard),
         };

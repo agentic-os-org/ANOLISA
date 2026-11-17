@@ -65,6 +65,7 @@ fn structured_ordinary_write_on_live_kernel() {
         // Write-only: no delete protection is requested by this policy.
         delete_mask: 0,
         ordinary_write_mask: 3,
+        read_mask: 0,
         protection_set_id: 1,
         guard: InodeGuardVal {
             flags: INODE_GUARD_WRITE,
@@ -168,6 +169,7 @@ fn structured_content_loss_entries_on_live_kernel() {
                 tree_mask: 1,
                 delete_mask: 0,
                 ordinary_write_mask: 3,
+                read_mask: 0,
                 protection_set_id: 1,
                 guard: InodeGuardVal {
                     flags: INODE_GUARD_WRITE,

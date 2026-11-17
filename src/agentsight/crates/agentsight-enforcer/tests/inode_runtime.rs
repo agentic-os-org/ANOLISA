@@ -178,6 +178,7 @@ const TREE_WORKER: &str = r#"
 import ctypes, mmap, os, sys
 libc = ctypes.CDLL(None, use_errno=True)
 openfds = {}
+heldmaps = []
 for line in sys.stdin:
     parts = line.rstrip('\n').split('\t')
     op = parts[0]
@@ -219,6 +220,20 @@ for line in sys.stdin:
         elif op == 'read':
             with open(parts[1], 'rb') as f:
                 f.read()
+        elif op == 'mmap_read':
+            with open(parts[1], 'rb') as f:
+                with mmap.mmap(f.fileno(), 0, flags=mmap.MAP_PRIVATE,
+                               prot=mmap.PROT_READ) as mapped:
+                    mapped[0:1]
+        elif op == 'link':
+            os.link(parts[1], parts[2])
+        elif op == 'holdmap':
+            with open(parts[1], 'rb') as f:
+                heldmaps.append(mmap.mmap(f.fileno(), 0, flags=mmap.MAP_PRIVATE,
+                                          prot=mmap.PROT_READ))
+        elif op == 'dropmaps':
+            while heldmaps:
+                heldmaps.pop().close()
         elif op == 'truncate':
             os.truncate(parts[1], 1)
         elif op == 'ftruncatefd':
@@ -357,7 +372,14 @@ impl TreeWorker {
                 "unlink" | "rmdir" => assert!(after[0].is_none()),
                 "touch" | "create_empty" | "mkdir" => assert!(after[0].is_some()),
                 "bind" => assert!(after[1].is_some()),
-                "read" | "readfd" | "openfd" | "closefd" => assert_eq!(after, before),
+                "link" => assert_eq!(
+                    after[1].as_ref().map(|entry| (entry.0, entry.1)),
+                    before[0].as_ref().map(|entry| (entry.0, entry.1)),
+                    "link must name the source inode"
+                ),
+                "read" | "readfd" | "openfd" | "closefd" | "mmap_read" | "holdmap" | "dropmaps" => {
+                    assert_eq!(after, before)
+                }
                 "write" | "pwrite" | "writefd" | "pwritefd" | "truncate" | "ftruncatefd"
                 | "otrunc" | "mmap_write" => {
                     assert_eq!(
@@ -648,10 +670,10 @@ fn pre_start_boottime_pin_upgrade_restores_violation_delivery() {
     assert!(status.success(), "legacy pinned engine installation failed");
 
     let old_marker = files.pin_root.join(
-        "maps/agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a",
+        "maps/agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a",
     );
     let current_marker = files.pin_root.join(
-        "maps/agentsight_profile_agent_file_guard_v9_a62e5d9d96f91101cda019519053e950d532380a",
+        "maps/agentsight_profile_agent_file_guard_v10_a62e5d9d96f91101cda019519053e950d532380a",
     );
     assert!(old_marker.exists(), "legacy ABI marker must be present");
 
@@ -1884,6 +1906,205 @@ fn credential_events_on_live_kernel() {
     for read_operation in ["read", "readfd", "mmap"] {
         credentials(read_operation);
     }
+}
+
+fn tree_read_policy(
+    worker: &TreeWorker,
+    root: &std::path::Path,
+    public: &std::path::Path,
+) -> ApplyPolicy {
+    ApplyPolicy {
+        binding_id: Uuid::new_v4(),
+        agent_id: "tree-read-test".into(),
+        session_id: None,
+        root_pid: worker.pid(),
+        process_start_time: worker.start_time(),
+        policy_id: "tree-deny-read".into(),
+        policy_revision: "1".into(),
+        policy_dsl: String::new(),
+        policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![FileProtectionTarget {
+                path: TreeFiles::text(root).into(),
+                kind: FileProtectionTargetKind::DirectoryTree,
+                protections: FileProtections {
+                    delete: false,
+                    ordinary_write: false,
+                    read: true,
+                },
+                exclusions: vec![FileProtectionExclusion {
+                    path: TreeFiles::text(public).into(),
+                    kind: FileProtectionExclusionKind::DirectorySubtree,
+                }],
+            }],
+        }),
+    }
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn directory_tree_read_protection_on_live_kernel() {
+    let files = TreeFiles::new();
+    let public = files.root.join("public");
+    fs::create_dir(&public).expect("excluded public subtree");
+    fs::write(public.join("readme"), b"public").expect("public entry");
+    let existing = files.root.join("existing");
+    let nested = files.root.join("nested/child");
+    let marker = files.outside.join("marker");
+    let mut worker = TreeWorker::spawn_private_mount();
+    let bind_alias = files.outside.join("bind-alias");
+    assert_eq!(
+        worker.run(
+            "bind",
+            &[TreeFiles::text(&files.root), TreeFiles::text(&bind_alias)]
+        ),
+        "ok"
+    );
+    let mount_source = files.outside.join("mount-source");
+    let submount = files.root.join("nested/mounted");
+    fs::create_dir(&mount_source).expect("submount source");
+    fs::write(mount_source.join("entry"), b"mounted").expect("submount entry");
+    assert_eq!(
+        worker.run(
+            "bind",
+            &[TreeFiles::text(&mount_source), TreeFiles::text(&submount)]
+        ),
+        "ok"
+    );
+    assert_eq!(
+        worker.run("openfd", &[TreeFiles::text(&existing)]),
+        "ok",
+        "the descriptor must predate policy activation"
+    );
+
+    let backend = ActPlaneBackend::open().expect("tree read runtime");
+    let capabilities = backend.health().expect("tree read health").capabilities;
+    assert!(capabilities.file_read_protection);
+    assert!(capabilities.directory_tree_read_protection);
+
+    // A second name outside the tree would bypass name-based classification.
+    let linked = files.root.join("linked");
+    let outside_alias = files.outside.join("linked-alias");
+    fs::write(&linked, b"linked").expect("linked fixture");
+    fs::hard_link(&linked, &outside_alias).expect("pre-existing outside hard link");
+    let error = backend
+        .apply(tree_read_policy(&worker, &files.root, &public))
+        .expect_err("hard-linked tree entry must reject apply");
+    assert!(error.to_string().contains("hard links"), "{error}");
+    assert!(backend.bindings().expect("bindings").is_empty());
+    fs::remove_file(&outside_alias).expect("drop the outside alias");
+
+    // A mapping made through a bind alias is invisible to prefix matching of
+    // /proc/<pid>/maps; the walked file identities must still reject it.
+    let alias_existing = bind_alias.join("existing");
+    assert_eq!(
+        worker.run("holdmap", &[TreeFiles::text(&alias_existing)]),
+        "ok"
+    );
+    let error = backend
+        .apply(tree_read_policy(&worker, &files.root, &public))
+        .expect_err("a mapping through a bind alias must reject apply");
+    assert!(
+        error.to_string().contains("pre-existing mapping"),
+        "{error}"
+    );
+    assert!(backend.bindings().expect("bindings").is_empty());
+    assert_eq!(
+        worker.run("dropmaps", &[TreeFiles::text(&alias_existing)]),
+        "ok"
+    );
+
+    let events = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
+    let binding = backend
+        .apply(tree_read_policy(&worker, &files.root, &public))
+        .expect("apply directory-tree read policy");
+    assert_eq!(binding.state, BindingState::Enforced);
+
+    let created = files.root.join("nested/created-after-apply");
+    fs::write(&created, b"created").expect("unbound create after apply");
+    let moved_in = files.root.join("moved-in");
+    let incoming = files.outside.join("incoming");
+    fs::write(&incoming, b"incoming").expect("outside entry");
+    fs::rename(&incoming, &moved_in).expect("unbound move into the tree");
+    let alias_entry = bind_alias.join("existing");
+    let submount_entry = submount.join("entry");
+    for path in [
+        &existing,
+        &nested,
+        &created,
+        &moved_in,
+        &alias_entry,
+        &submount_entry,
+    ] {
+        for operation in ["read", "mmap_read"] {
+            assert_eq!(
+                worker.run(operation, &[TreeFiles::text(path)]),
+                "errno=1",
+                "{operation} {}",
+                path.display()
+            );
+        }
+    }
+    assert_eq!(
+        worker.run("readfd", &[TreeFiles::text(&existing)]),
+        "errno=1",
+        "descriptors held before apply are mediated per read"
+    );
+    let event = events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("read violation evidence");
+    assert_eq!(event.operation, "read");
+    assert!(event.blocked);
+    assert_eq!(event.binding_id, binding.request.binding_id);
+    assert_eq!(event.policy_revision, "1");
+    assert_eq!(event.rule_id.as_deref(), Some("file-protection-target-1"));
+    let reason = event.reason.expect("reason names the protected root");
+    assert!(reason.contains("directory_tree"), "{reason}");
+    assert!(reason.contains(TreeFiles::text(&files.root)), "{reason}");
+
+    for path in [public.join("readme"), marker.clone()] {
+        assert_eq!(
+            worker.run("read", &[TreeFiles::text(&path)]),
+            "ok",
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&existing)]),
+        "ok",
+        "read protection must not deny writes"
+    );
+    assert!(fs::read(&nested).is_ok(), "unbound processes keep access");
+    assert_eq!(
+        worker.run(
+            "link",
+            &[
+                TreeFiles::text(&existing),
+                TreeFiles::text(&files.outside.join("new-alias"))
+            ]
+        ),
+        "errno=1"
+    );
+    assert_eq!(
+        worker.run(
+            "rename",
+            &[
+                TreeFiles::text(&nested),
+                TreeFiles::text(&files.outside.join("escaped"))
+            ]
+        ),
+        "errno=1"
+    );
+
+    backend
+        .detach(binding.request.binding_id)
+        .expect("detach tree read binding");
+    assert_eq!(worker.run("read", &[TreeFiles::text(&existing)]), "ok");
+    assert_eq!(worker.run("readfd", &[TreeFiles::text(&existing)]), "ok");
+    backend.shutdown().expect("shutdown");
 }
 
 #[test]
