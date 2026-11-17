@@ -196,6 +196,7 @@ class Instance:
             raise AwError("sdk_control_busy")
         self.detaching = True
         try:
+            await asyncio.gather(*(task.close() for task in list(self.tasks)))
             connection = (
                 self.connection
                 or self.retired
@@ -209,6 +210,7 @@ class Instance:
                 await self._registration(
                     connection["identity"], {"action": "release", "handle": connection["handle"]}
                 )
+                connection["released"] = True
             self.connection = self.retired = self.pending = None
             self.state, self.last_error = "detached", None
         finally:

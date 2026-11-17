@@ -164,6 +164,7 @@ export class Instance {
       throw new AwError("sdk_control_busy");
     this.detaching = true;
     try {
+      await Promise.all([...this.tasks].map((task) => task.close()));
       const connection =
         this.connection ??
         this.retired ??
@@ -182,6 +183,7 @@ export class Instance {
             },
             this.options.timeoutMs,
           );
+          connection.released = true;
         }
       }
       this.connection = this.retired = this.pending = undefined;

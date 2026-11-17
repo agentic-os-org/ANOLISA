@@ -4,6 +4,57 @@ use super::*;
 use crate::adapter::{select, NativeContext};
 
 #[test]
+fn semantic_tool_association_checks_original_envelope_fields() {
+    let context = NativeContext {
+        target: "app".into(),
+        instance_id: "owned".into(),
+        cwd: "/tmp".into(),
+    };
+    for name in ["tool.before", "tool.after"] {
+        let mut native = json!({"api_version":"aw-hook-source/v1","event":name,
+            "session_id":"session","call_id":"call","name":"bash",
+            "input":{"command":"true"}});
+        if name == "tool.after" {
+            native["result"] = json!({"text":"done"});
+        }
+        let event = select("sdk")
+            .unwrap()
+            .normalize(&context, name, &native)
+            .unwrap();
+        let check = |event: &Value, raw: &Value| {
+            association(
+                "sdk",
+                event,
+                Some(&serde_json::to_vec(raw).unwrap()),
+                |bytes| serde_json::from_slice(bytes).ok(),
+            )["status"]
+                .clone()
+        };
+        assert_eq!(check(&event, &native), "verified");
+        for pointer in [
+            "/session_id",
+            "/tool/call_id",
+            "/tool/name",
+            "/tool/native_name",
+            "/tool/input",
+            "/tool/result",
+        ] {
+            let mut changed = event.clone();
+            *changed.pointer_mut(pointer).unwrap() = json!("forged");
+            assert_eq!(check(&changed, &native), "unverified", "{name}: {pointer}");
+        }
+        for field in ["api_version", "event"] {
+            let mut changed = event.clone();
+            changed["native"][field] = json!("forged");
+            assert_eq!(check(&changed, &changed["native"]), "unverified", "{field}");
+        }
+        let mut changed = event.clone();
+        changed["name"] = json!("input.submit");
+        assert_eq!(check(&changed, &native), "unverified");
+    }
+}
+
+#[test]
 fn qwenpaw_dispatch_identity_keeps_native_call_and_exact_input() {
     let context = NativeContext {
         target: "target".into(),

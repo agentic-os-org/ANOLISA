@@ -221,6 +221,60 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         )
         await fresh.close()
 
+    async def test_fallback_close_and_detach_join_before_root_release(self) -> None:
+        await self.start()
+        instance = self.instance()
+        await instance.connect()
+        task = await instance.task()
+        instance.lost(task.connection, AwError("ECONNRESET", unavailable=True))
+        root_released, finish_detach = asyncio.Event(), asyncio.Event()
+        original = instance._registration
+
+        async def paused(identity, command):
+            result = await original(identity, command)
+            root_released.set()
+            await finish_detach.wait()
+            return result
+
+        instance._registration = paused
+        detaching = asyncio.create_task(instance.detach_control())
+        try:
+            async with asyncio.timeout(5):
+                await root_released.wait()
+                await task.close()
+                self.assertTrue(task.closed)
+                self.assertNotIn(task, instance.tasks)
+        finally:
+            finish_detach.set()
+            await detaching
+        await instance.close()
+
+    async def test_fallback_detach_releases_retained_tasks(self) -> None:
+        await self.start()
+        instance = self.instance()
+        await instance.connect()
+        task = await instance.task()
+        socket, moved = Path(self.endpoint), Path(self.endpoint + ".held")
+        socket.rename(moved)
+        try:
+            self.assertEqual(
+                await task.invoke_native(
+                    task.routes["hooks"][0], dict(FIXTURE["native_before"], cwd=os.getcwd())
+                ),
+                (0, b"", b""),
+            )
+        finally:
+            moved.rename(socket)
+        self.assertTrue(task.fallback)
+        await instance.detach_control()
+        await task.close()
+        self.assertTrue(task.closed)
+        self.assertNotIn(task, instance.tasks)
+        await instance.close()
+        self.assertEqual(
+            (await rpc(self.endpoint, None, {"method": "status"}, 500))["result"]["bindings"], 0
+        )
+
     async def cli(self, action: str, *args: str, configuration: bool = False) -> dict:
         selection = ("--config", str(self.config)) if configuration else ("--socket", self.endpoint)
         process = await asyncio.create_subprocess_exec(
