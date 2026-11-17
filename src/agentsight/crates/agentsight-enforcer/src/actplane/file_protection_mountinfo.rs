@@ -82,7 +82,7 @@ pub(super) fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfo>, BackendErr
             id,
             parent_id,
             device,
-            root: decode_mount_path(fields[3])?,
+            root: decode_mount_root(fields[3], fields[separator + 1])?,
             mountpoint: decode_mount_path(fields[4])?,
             fs_type: fields[separator + 1].into(),
         });
@@ -98,6 +98,30 @@ pub(super) fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfo>, BackendErr
         }
     }
     Ok(mounts)
+}
+
+/// nsfs mounts created by `ip netns` and container runtimes report the
+/// namespace dentry name (for example `net:[4026532385]`) instead of a
+/// filesystem-relative root; any other non-path root stays malformed.
+fn decode_mount_root(value: &str, fs_type: &str) -> Result<String, BackendError> {
+    if fs_type == "nsfs" && is_namespace_dentry_name(value) {
+        return Ok(value.into());
+    }
+    decode_mount_path(value)
+}
+
+fn is_namespace_dentry_name(value: &str) -> bool {
+    value
+        .split_once(":[")
+        .and_then(|(kind, rest)| Some((kind, rest.strip_suffix(']')?)))
+        .is_some_and(|(kind, inode)| {
+            !kind.is_empty()
+                && kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                && !inode.is_empty()
+                && inode.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn decode_mount_path(value: &str) -> Result<String, BackendError> {

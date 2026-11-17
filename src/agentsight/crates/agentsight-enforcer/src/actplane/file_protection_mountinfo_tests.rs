@@ -39,6 +39,30 @@ fn mountinfo_decodes_escapes_and_rejects_malformed_duplicate_and_bounds() {
 }
 
 #[test]
+fn nsfs_namespace_roots_parse_while_other_pseudo_roots_stay_rejected() {
+    let parsed = parse_mountinfo(
+        b"1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 0:4 net:[4026532385] /run/netns/a rw shared:7 - nsfs nsfs rw\n",
+    )
+    .expect("nsfs bind mounts are ordinary topology entries");
+    assert_eq!(parsed[1].root, "net:[4026532385]");
+    assert_eq!(parsed[1].mountpoint, "/run/netns/a");
+
+    for malformed in [
+        // Only nsfs may report a namespace dentry name as its root.
+        "1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 0:4 net:[4026532385] /x rw - tmpfs tmpfs rw\n",
+        "1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 0:4 net:[abc] /x rw - nsfs nsfs rw\n",
+        "1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 0:4 relative /x rw - nsfs nsfs rw\n",
+        // A namespace name is never a valid mountpoint.
+        "1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 0:4 net:[1] net:[1] rw - nsfs nsfs rw\n",
+    ] {
+        assert!(
+            parse_mountinfo(malformed.as_bytes()).is_err(),
+            "{malformed:?}"
+        );
+    }
+}
+
+#[test]
 fn mount_relations_derive_underlying_and_visible_paths() {
     let root_mount = mount(1, 0, "/", "/", "ext4");
     let bind_mount = mount(2, 1, "/outside/source", "/tree/mounted", "ext4");
