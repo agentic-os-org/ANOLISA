@@ -62,6 +62,33 @@ Provider 效果。
 投影描述期望策略，不携带能力证明。Source 求解和部署编译可结合现有 Admission API
 消费投影；运行时登记与执行继续使用已准入策略。
 
+## 离线部署 Descriptor
+
+`aw_core::descriptor::compile(bytes, target, capabilities, availability)` 使用
+可信的现有 Adapter Profile 完成静态准入，生成
+`aw_contracts::deployment::DeploymentDescriptor`。部署合同注册名称为
+`deployment-descriptor-v1alpha1`，`version` 为 `aw-deployment/v1alpha1`。
+返回值可用 `serde_json` 序列化；`DeploymentDescriptor::parse` 读取已保存的字节，
+拒绝重复键、未知字段、非法结构和不支持的版本。
+
+Descriptor 仅携带原始字节 `configuration_sha256`、配置目标 `target`、Profile 的
+`adapter`/`version`/`entrypoint`、绝对路径 `endpoint`、`wait_for_input_submit`、
+`availability` 和合同版本，不包含 Provider 配置或执行计划。`auto` endpoint
+解析为 `state_dir/aw.sock`；未解析或相对服务路径会被拒绝。编译不读取环境，不启动
+进程，不执行安装。
+
+启用的 `input.submit` 要求输入等待，包括可选且没有步骤的事件；静态准入仍检查
+Profile 是否支持它。`NativeFallback` 与任一全局启用且 required 的事件冲突，
+保持 Service 的可用性检查，即使该事件被选择器排除在当前目标之外。Adapter 或
+调用方负责选择 Profile 所需的更严格可用性要求，并提供能力 Profile；Core 不含
+框架特例。
+
+`descriptor::verify` 根据原始配置字节、目标、能力 Profile 和可用性选择重新编译，
+逐项比较全部提示，用于可信部署产物的生成验证。SDK 启动时须先核对保存的配置摘要
+及预期目标和 Profile，再使用提示；配置摘要标识配置字节，不认证被改写的 Descriptor。
+运行时仍须完成 Service 准入、Provider 检查、Ready 和原生效果采用。Source 选择及
+任务 Overlay 修订是需求投影后续的独立消费者。
+
 ## 不变量与运行时边界
 
 `PolicyCandidate` 与 `AdmittedPolicy` 的内部字段全部私有，不实现 `Deserialize`

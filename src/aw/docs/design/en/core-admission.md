@@ -73,6 +73,40 @@ The projection describes desired policy and carries no capability proof. Source
 resolution and deployment compilation can consume it alongside the existing
 Admission API; runtime registration and execution still use admitted policy.
 
+## Offline deployment descriptors
+
+`aw_core::descriptor::compile(bytes, target, capabilities, availability)` runs
+static admission against a trusted existing Adapter profile and produces an
+`aw_contracts::deployment::DeploymentDescriptor`. The deployment contract is
+registered as `deployment-descriptor-v1alpha1`; its `version` is
+`aw-deployment/v1alpha1`. Serialize the returned value with `serde_json`; parse
+stored bytes with `DeploymentDescriptor::parse`, which rejects duplicate keys,
+unknown fields, invalid shapes and unsupported versions.
+
+The descriptor carries only the exact-byte `configuration_sha256`, configured
+`target`, profile `adapter`/`version`/`entrypoint`, absolute `endpoint`,
+`wait_for_input_submit` and `availability`, plus the contract version. It excludes
+Provider configuration and execution plans. An `auto` endpoint resolves to
+`state_dir/aw.sock`; compilation rejects unresolved or relative service paths.
+The compiler reads no environment, starts no process and performs no installation.
+
+An enabled `input.submit` requires input waiting, including an optional event
+with an empty step list. Static admission still checks that the supplied profile
+supports it. `NativeFallback` conflicts with any globally enabled required event,
+matching Service availability checks even when selectors exclude that event
+from this target. The Adapter/caller chooses any stricter profile-specific
+availability requirement and supplies the capability profile; Core contains no
+framework-specific branches.
+
+`descriptor::verify` recompiles the exact configuration bytes, target, capability
+profile and availability choice and compares every hint. Use this during
+production of trusted deployment artifacts. At startup, SDK consumers must
+check the stored configuration digest and expected target/profile identity
+before using hints; a digest identifies configuration bytes and does not
+authenticate a modified descriptor. Runtime Service admission, Provider checks,
+Ready and native adoption remain required. Source selection and task Overlay
+revisions are separate future consumers of requirement projection.
+
 ## Invariants and runtime boundaries
 
 `PolicyCandidate` and `AdmittedPolicy` keep all fields private, omit `Deserialize`

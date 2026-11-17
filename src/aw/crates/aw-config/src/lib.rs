@@ -7,6 +7,7 @@
 
 pub mod native;
 pub mod requirements;
+pub mod service_paths;
 
 mod parsing;
 mod policy_update;

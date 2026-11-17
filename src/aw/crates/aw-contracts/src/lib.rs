@@ -6,6 +6,7 @@
 //! ownership, scanner correctness, durable storage or remote model consumption.
 
 pub mod canonical;
+pub mod deployment;
 pub mod evidence;
 pub mod objects;
 pub mod orchestration;

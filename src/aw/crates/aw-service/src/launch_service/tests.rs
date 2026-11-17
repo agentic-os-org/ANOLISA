@@ -74,6 +74,44 @@ fn explicit_endpoint_infers_state_and_conflicting_paths_are_rejected() {
 }
 
 #[test]
+fn shared_path_rules_preserve_service_errors_and_component_normalization() {
+    for (state, endpoint, code) in [
+        ("auto", "/explicit.sock", "daemon_endpoint_must_be_aw_sock"),
+        ("auto/", "/run/aw/aw.sock", "service_path_must_be_absolute"),
+        ("/run/aw", "auto/", "daemon_path_mismatch"),
+        ("/run/aw", "/other/aw.sock", "daemon_path_mismatch"),
+        ("/run/../aw", "auto", "service_path_must_be_absolute"),
+        ("auto", "/run/../aw.sock", "service_path_must_be_absolute"),
+    ] {
+        let mut value = config();
+        value["spec"]["daemon"]["state_dir"] = json!(state);
+        value["spec"]["daemon"]["endpoint"] = json!(endpoint);
+        assert!(
+            matches!(resolve(&bytes(&value), None), Err(crate::Error::Rejected(actual)) if actual == code)
+        );
+    }
+    let mut value = config();
+    value["spec"]["daemon"]["state_dir"] = json!("/run/aw");
+    value["spec"]["daemon"]["endpoint"] = json!("/run/./aw/aw.sock");
+    assert_eq!(
+        resolve(&bytes(&value), None).unwrap().socket,
+        Path::new("/run/aw/aw.sock")
+    );
+    for (length, accepted) in [(98, true), (99, false)] {
+        value["spec"]["daemon"]["state_dir"] = json!(format!("/{}", "x".repeat(length)));
+        value["spec"]["daemon"]["endpoint"] = json!("auto");
+        let result = resolve(&bytes(&value), None);
+        if accepted {
+            assert_eq!(result.unwrap().socket.as_os_str().len(), 107);
+        } else {
+            assert!(
+                matches!(result, Err(crate::Error::Rejected(code)) if code == "service_socket_path_too_long")
+            );
+        }
+    }
+}
+
+#[test]
 fn unsafe_runtime_paths_and_overlong_socket_paths_fail_without_fallback() {
     let fixture = Fixture::new();
     let document = bytes(&config());
