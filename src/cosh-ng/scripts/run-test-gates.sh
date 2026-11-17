@@ -14,7 +14,7 @@ require_test() {
   local package="$1"
   local test_name="$2"
   shift 2
-  if ! list_tests "$package" "$@" | grep -Fxq "$test_name"; then
+  if ! list_tests "$package" "$@" | grep -Fx "$test_name" >/dev/null; then
     echo "required test is missing from Cargo inventory: $test_name" >&2
     exit 1
   fi
