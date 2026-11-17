@@ -294,6 +294,13 @@ test-qwenwork-install:
 	@echo "==> Testing QwenWork sideloading..."
 	python3 tests/test_qwenwork_install.py
 
+.PHONY: test-benchmark-l1-worker
+L1_TEST_PYTHON ?= python3
+test-benchmark-l1-worker:
+	$(L1_TEST_PYTHON) benchmark/l1-compressor/tests/test_headroom_components.py
+
+test-integration: test-benchmark-l1-worker
+
 # The L1 runner records an `rtk_version` in benchmark_identity.json through a
 # best-effort probe that must never stall the suite: a bare `$TOKENLESS_BIN` is
 # resolved through PATH, the probe runs under a timeout(1) deadline whose child

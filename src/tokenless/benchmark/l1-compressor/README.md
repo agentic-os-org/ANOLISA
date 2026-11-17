@@ -14,9 +14,11 @@ limitations under the License. -->
 
 # Tokenless Benchmark Suite
 
-Reproducible benchmark, quality, and cost-analysis suite for the tokenless
-compression engine (schema compression, response compression, TOON encoding,
-RTK rewrite compatibility). Rebuilt to match the V5 benchmark reports.
+Reproducible component measurements for Tokenless compression. The suite covers
+structured content, tool schemas, search/path lists, tables, build logs and HTML,
+plus encoding and command-rewrite compatibility. It exports complete candidate
+outputs and recovery records so offline facts and optional model questions can
+be checked against the same input.
 
 This suite is **L1 — the component layer** of the four-layer tokenless
 benchmark plan: every bench/test target measures a single compressor in
@@ -76,7 +78,7 @@ attach them to the PR as CI artifacts.
 
 ## Prerequisites
 
-- Rust stable (edition 2024, >= 1.85)
+- Rust stable >= 1.91 (edition 2024), matching the benchmark CI toolchain.
 - `tokenless` for `l1_rtk_format_compat.rs` and the RTK report (optional —
   tests skip if missing). They run `tokenless rtk` from the Tokenless release
   build (`just setup-rtk && cargo build --release` in the tokenless tree),
@@ -95,56 +97,77 @@ attach them to the PR as CI artifacts.
 ./run-benchmarks.sh --quick
 
 # Individually:
-cargo test --release                          # quality + adversarial + rate guards (96 tests)
-cargo bench                                   # performance (criterion, 54 benchmark points)
-cargo run --release --bin compression_rate    # in-process compression rates + cost analysis
-cargo run --release --bin compression_rate -- --json  # machine-readable JSON output
+cargo test --release --locked                  # quality + adversarial + rate guards
+cargo bench --locked                          # component performance
+cargo run --release --locked --bin compression_rate  # component-domain measurements
+cargo run --release --locked --bin compression_rate -- --json  # machine-readable JSON output
 ```
 
-Note: `run-benchmarks.sh` calls `cargo run --release --bin compression_rate` for
-the rate/cost report (no Python dependency). All post-processing (cost model,
-stacking report) is computed in Rust in-process.
+Additional outputs for independent reporting:
+
+```bash
+cargo run --release --locked --bin component_cases -- --output reports/components.json
+# Optional same-input comparison to a separately collected L2 measurement file:
+cargo run --release --locked --bin component_cases -- --shared <measurements.json> --output reports/shared.json
+```
+
+Check `component_cases --help` for the input flags. No L2 build or Python model
+service is needed for synthetic L1 measurements. The Headroom single-component
+worker under `assets/worker/` is optional and requires an independently installed
+reference checkout; its stdlib-only protocol tests run through
+`make -C ../../ test-benchmark-l1-worker` and are included in CI's
+`test-integration`. Reports stay ignored. `component_cases` requires `--output`
+because its files contain complete tool text and stash originals; keep those
+files private and never paste them into public issues, shared logs or chats.
+Shared evidence accepts measurements schema 1 and schema 2's SHA-256 `text_store`
+references. IDs and token counts are validated strictly; malformed identities
+abort loading instead of inventing a row. Rust regex syntax is required (no
+lookaround or backreferences); row-level fact failures remain invalid-evidence
+and do not discard other valid measurements. No provider cost is inferred from
+compressed input lengths.
 
 ## Methodology
 
-- **Token counting**: `(bytes + 3) / 4` (div_ceil) — identical to the engine's
-  own `estimate_tokens_from_bytes` heuristic. Not a real tokenizer; exists only
-  for consistent in-suite comparison.
+- **Token counting**: new domain/candidate rows use `o200k_base`. Historical
+  `(bytes + 3) / 4` estimates remain under `legacy_estimates`, not headline or
+  billing data. File identity and recovery contents are retained for checks.
 - **Criterion**: runs 100 samples per benchmark (RTK benchmarks use 20 due to
   subprocess overhead). For report-grade numbers, recommended practice is 3 runs
   taking median average (not mandatory).
-- Latency benches construct the compressor **once** (outside the timed closure)
-  and reuse it; only the `compress()` / encode call is measured. Compressor
-  setup and teardown are **excluded** so the figures line up with headroom,
-  which likewise does not count startup/teardown time.
-- **Single input source.** `python/gen_fixtures.py` is the one generator for all
-  benchmark data; it writes `fixtures/*.json`. The Rust benches embed these via
+- Legacy latency benches construct the compressor outside the timed closure.
+  The content-domain target measures the complete isolated wire invocation,
+  including per-call construction and temporary stash setup; tokenizer and
+  corpus generation are excluded. Compare each latency against its stated
+  basis rather than treating different setup scopes as interchangeable.
+- **Single input source.** `python/gen_fixtures.py` generates canonical
+  `fixtures/*.json`; content-domain synthetic bytes come from the shared Rust
+  generators in `src/lib.rs`, used by both domains and component cases.
+  The Rust canonical benches embed the committed fixtures via
   `include_str!` and use the same files, so latency and compression rate are
   measured on **byte-identical** payloads. The `canonical` bench point in
   `l1_response_latency`/`l1_schema_latency` compresses exactly the payload whose
   compression rate the `compression_rate` binary reports — the two numbers are
   attributable to one input. Regenerate with `python3 python/gen_fixtures.py`
   (fixtures are committed; no need to run it before building).
-- **Compression rate is measured in Rust, in-process.** `src/metrics.rs` counts
-  tokens (bytes/4, same heuristic as the engine) immediately before and after
-  each compressor call — no CLI subprocess in the measurement loop — and
-  `tests/l1_compression_rate.rs` pins the rates as regression guards, so any
-  compression change is traceable to a commit via `cargo test`. The
-  `compression_rate` binary emits the full report including cost analysis
-  (`--json` for machine-readable output).
+- **Candidate versus final output**: this layer calls each compressor directly.
+  A smaller candidate is not proof that the production entry accepts it; recovery,
+  source and savings gates are measured by L2/L3. Fact checks distinguish format
+  changes from missing content, and controls verify that removed information fails.
 
 ## Known Limitations
 
-1. **Single canonical fixture**: Compression rates measured on one synthetic fixture per compressor.
-   Not representative of all real-world tool responses. Multi-fixture corpus planned for a future revision.
+1. **Corpus scope**: synthetic inputs span content domains and sizes. Optional
+   shared inputs come from a caller-supplied measurement file. Neither collection
+   certifies all real workloads; hash variants of one command are not independent tasks.
 2. **TOON roundtrip limitation**: Root-level scalar keys after large mixed-type arrays are not
    recovered by the TOON decoder. Documented in `tests/l1_pipeline_retention.rs`.
 3. **RTK output filtering**: Runtime output compression data from one-time SSH collection.
    Not automatically reproducible. Serves as reference only.
-4. **Cost projections**: Arithmetic extrapolation from single fixture × linear scaling.
-   Not suitable for production cost planning without real workload validation.
-5. **Default config only**: All measurements use default compressor settings.
-   Production adapters may use different configurations with different results.
+4. **Cost**: no provider bill or end-to-end cost is measured; the old pricing
+   projections are no longer emitted as the primary report.
+5. **Recovery modes**: default/no-recovery/recovery configurations are explicitly
+   named per row. Recovery records only prove that stored originals can be read,
+   not that an agent did retrieve them or that retrieval had no latency/cost.
 6. **RTK version metadata**: `benchmark_identity.json` records `rtk_version` as a
    best-effort traceability field. A version is recorded only when the
    tokenless reference (`$TOKENLESS_BIN` — a path or a bare command name

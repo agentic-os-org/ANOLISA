@@ -21,9 +21,22 @@
 #     heavy benchmark-only dependencies (criterion) nor run the adversarial
 #     load tests as part of the normal unit-test cycle.
 #
+# L1 now needs a real tokenizer and fact-pattern support for its headline rows;
+# HTTP/model-probe dependencies remain exclusive to higher-layer harnesses.
 # Depends on the tokenless crates by path so it always benchmarks the exact
 # working-tree sources next to it.
 [workspace]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toon-format = { version = "0.7", default-features = false }
+tiktoken-rs = "0.11"
+thiserror = "2"
+regex = "1"
+sha2 = "0.10"
+libc = "0.2"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [package]
 name = "tokenless-bench"
@@ -37,17 +50,23 @@ description = "L1 component-layer benchmark and quality/adversarial test suite f
 path = "src/lib.rs"
 
 [dependencies]
-serde_json = "1.0"
-toon-format = { version = "0.7", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toon-format = { workspace = true }
 tokenless-schema = { path = "../../crates/tokenless-schema" }
 tokenless-compressors = { path = "../../crates/tokenless-compressors" }
 tokenless-ccr = { path = "../../crates/tokenless-ccr" }
+tiktoken-rs = { workspace = true }
+thiserror = { workspace = true }
+# L2's fact families include regexes; the shared real set checks them the same way.
+regex = { workspace = true }
+sha2 = { workspace = true }
 # SIGKILL fallback for rtk children that outlive the 5s timeout — used in
 # `src/metrics.rs` behind `#[cfg(unix)]`, so a plain grep misses it.
-libc = "0.2"
+libc = { workspace = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { workspace = true }
 
 # criterion needs unwinding; keep the default (no panic=abort) here.
 [profile.release]
@@ -78,4 +97,8 @@ harness = false
 # Cross-process rtk rewrite latency (ms-range; see file-top methodology note).
 [[bench]]
 name = "l1_rtk_latency"
+harness = false
+
+[[bench]]
+name = "l1_content_domain_latency"
 harness = false

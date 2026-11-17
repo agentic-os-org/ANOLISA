@@ -12,23 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-process compression-rate measurement and cost analysis.
+//! Auxiliary canonical byte estimates and RTK discovery for the L1 report.
 //!
-//! Token counts are taken immediately before and after each compressor call —
-//! the same bytes/4 heuristic the engine's own estimator uses — so the savings
-//! numbers are attributable to the library code itself, with no CLI subprocess
-//! in the loop. The rates regress alongside `cargo test` (see
-//! `tests/l1_compression_rate.rs`), which makes any compression-behaviour change
-//! traceable to the exact commit that introduced it.
-//!
-//! Cost analysis (formerly a Python post-processing script) is computed
-//! in-process here so the full report — compression rates, stacking configs,
-//! and dollar savings — is emitted by a single `compression_rate` binary.
-//!
-//! **Cost-analysis limitations**: token counts use a bytes/4 heuristic (not a
-//! real tokenizer), projections extrapolate linearly from a single canonical
-//! fixture, and model pricing is point-in-time. Treat the figures as
-//! order-of-magnitude guidance, not billing-grade predictions.
+//! The headline comes from `domains` on o200k_base; canonical bytes/4 estimates
+//! remain explicitly under legacy_estimates. No pricing or billing projection
+//! is inferred from these component measurements.
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -38,25 +26,6 @@ use std::time::Duration;
 use tokenless_schema::SchemaCompressor;
 
 use crate::{compress_json, response_canonical, rtk_command_samples, schema_canonical};
-
-// Cost-analysis limitations:
-// 1. Token counting: bytes/4 heuristic (div_ceil), not a real tokenizer
-// 2. Payload: single canonical fixture × linear scaling (no workload diversity)
-// 3. Pricing: point-in-time snapshot, subject to provider changes
-// 4. Sessions: uniform 50-round model; real sessions vary significantly
-// Treat output as order-of-magnitude guidance only.
-
-/// Sessions assumed for the cost-analysis projection.
-const ROUNDS_PER_SESSION: usize = 50;
-const SESSIONS_PER_DAY: usize = 1000;
-const DAYS_PER_MONTH: usize = 30;
-
-/// Model pricing table: (name, USD per 1M input tokens).
-const MODELS: &[(&str, f64)] = &[
-    ("Claude Sonnet 4", 3.00),
-    ("GPT-4o", 2.50),
-    ("Gemini 2.5 Pro", 1.25),
-];
 
 /// Rough token estimate: div_ceil(len, 4) — ceiling division by 4.
 ///
@@ -338,13 +307,10 @@ fn toon(value: &Value) -> String {
     toon_format::encode_default(value).expect("canonical value is TOON-encodable")
 }
 
-/// Pure compression-rate and cost-analysis metrics over the canonical fixtures.
+/// Auxiliary bytes/4 estimates over the shared canonical fixtures.
 ///
-/// Runs `JsonCompressor`, `SchemaCompressor`, and TOON encoding in-process
-/// on the SAME canonical payloads the latency benches measure, counting tokens
-/// immediately before and after each stage. Also derives the 7 stacking
-/// configurations from the V5 report and projects dollar savings over a
-/// multi-round agent session.
+/// Computes isolated stage and stacking estimates without measuring provider
+/// usage or projecting price. The cost block explicitly records not_measured.
 ///
 /// Does NOT invoke RTK (no subprocess), making it safe for `cargo test`
 /// environments without rtk installed.
@@ -404,38 +370,6 @@ pub fn compression_metrics() -> Value {
         ("full_stack", resp_comp_toon_tok + schema_comp_toon_tok),
     ];
 
-    // Cost analysis: project session-level token savings to monthly USD.
-    // NOTE: This is a rough heuristic estimate based on:
-    //   - bytes/4 token counting (not a real tokenizer),
-    //   - a single canonical fixture linearly scaled to sessions/month,
-    //   - model pricing as of the last update (subject to change).
-    // These numbers illustrate order-of-magnitude savings, not precise billing.
-    let cost_baseline = (resp_raw_tok + schema_raw_tok) * ROUNDS_PER_SESSION;
-    // Uses schema_response strategy (best non-inflating combination).
-    // CLI token-gate rejects TOON when it inflates, so the actual deployed
-    // cost equals compressed-only for this canonical payload shape.
-    let cost_tokenless = (resp_comp_tok + schema_comp_tok) * ROUNDS_PER_SESSION;
-    // Savings percentage: schema_response vs baseline (no TOON inflation risk).
-    let cost_savings = savings_pct(cost_baseline, cost_tokenless);
-    let models = MODELS
-        .iter()
-        .map(|(name, price)| {
-            let monthly_base =
-                cost_baseline as f64 * SESSIONS_PER_DAY as f64 * DAYS_PER_MONTH as f64;
-            let monthly_tl =
-                cost_tokenless as f64 * SESSIONS_PER_DAY as f64 * DAYS_PER_MONTH as f64;
-            let base_usd = monthly_base / 1_000_000.0 * price;
-            let tl_usd = monthly_tl / 1_000_000.0 * price;
-            json!({
-                "model": name,
-                "input_per_mtok": price,
-                "baseline_monthly_usd": (base_usd * 100.0).round() / 100.0,
-                "tokenless_monthly_usd": (tl_usd * 100.0).round() / 100.0,
-                "monthly_savings_usd": ((base_usd - tl_usd) * 100.0).round() / 100.0,
-            })
-        })
-        .collect::<Vec<_>>();
-
     json!({
         "canonical": {
             "response": {
@@ -475,15 +409,8 @@ pub fn compression_metrics() -> Value {
                 .collect::<Vec<_>>(),
         },
         "cost_analysis": {
-            "assumptions": {
-                "rounds_per_session": ROUNDS_PER_SESSION,
-                "sessions_per_day": SESSIONS_PER_DAY,
-                "days_per_month": DAYS_PER_MONTH,
-            },
-            "baseline_tokens": cost_baseline,
-            "tokenless_tokens": cost_tokenless,
-            "token_savings_pct": cost_savings,
-            "models": models,
+            "status": "not_measured", "models": Value::Null,
+            "reason": "requires actual provider usage, deployment-region pricing and cache accounting",
         },
     })
 }
@@ -491,9 +418,54 @@ pub fn compression_metrics() -> Value {
 /// Full report combining compression metrics and RTK command-rewrite data.
 ///
 /// Used by the `compression_rate` binary for the complete human/machine report.
-/// Calls [`compression_metrics`] + [`rtk_report`].
-pub fn full_report() -> Value {
-    let mut report = compression_metrics();
-    report["rtk"] = rtk_report();
-    report
+/// Calls [`compression_metrics`], [`crate::domains::domain_metrics`] and [`rtk_report`].
+///
+/// # Errors
+/// Returns tokenizer or component-fixture failures rather than fabricated zeroes.
+pub fn full_report() -> Result<Value, crate::domains::DomainError> {
+    let estimates = compression_metrics();
+    let domains = crate::domains::domain_metrics()?;
+    let mut rtk = rtk_report();
+    let mut raw_total = 0usize;
+    let mut rewritten_total = 0usize;
+    let mut rewritten = 0usize;
+    if let Some(samples) = rtk["samples"].as_array_mut() {
+        for sample in samples {
+            let Some(command) = sample["command"].as_str() else {
+                continue;
+            };
+            let before = crate::domains::count_text(command)?;
+            let after = sample["rewritten"]
+                .as_str()
+                .map(crate::domains::count_text)
+                .transpose()?;
+            sample["engine_estimate_before"] = sample["raw_tokens"].clone();
+            sample["raw_tokens"] = json!(before);
+            sample["tokenizer"] = json!("o200k_base");
+            if let Some(after) = after {
+                sample["engine_estimate_after"] = sample["rewritten_tokens"].clone();
+                sample["rewritten_tokens"] = json!(after);
+                sample["savings_pct"] = json!(savings_pct(before, after));
+                raw_total += before;
+                rewritten_total += after;
+                rewritten += 1;
+            }
+        }
+        rtk["overall"] = if rewritten > 0 {
+            json!({"raw_tokens": raw_total, "rewritten_tokens": rewritten_total,
+                "savings_pct": savings_pct(raw_total, rewritten_total), "tokenizer": "o200k_base"})
+        } else {
+            Value::Null
+        };
+    }
+    Ok(json!({
+        "schema_version": 2,
+        "headline_tokenizer": "o200k_base",
+        "component_domains": domains,
+        "legacy_estimates": {"tokenizer": "bytes/4 estimate; not headline or billing",
+            "canonical": estimates["canonical"], "stacking": estimates["stacking"]},
+        "cost_analysis": {"status": "not_measured", "models": Value::Null,
+            "reason": "requires actual provider usage, deployment-region pricing and cache accounting"},
+        "rtk": rtk,
+    }))
 }

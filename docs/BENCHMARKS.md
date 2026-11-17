@@ -15,7 +15,7 @@ own report, so every number here traces back to the compressor itself.
 
 | Layer | Scope | Question it answers | Status |
 |---|---|---|---|
-| **L1** component | One compressor, one standard fixture | Is each compressor correct, and what does it cost? | Results below |
+| **L1** component | Shared content-domain fixtures at multiple sizes; optional same-input real set | Is each isolated compressor correct, and what does it cost? | Recorded reference results below |
 | **L2** module | One round of tool output, five payload types | On payloads an agent really sees, how much is saved and what is lost? | Results below |
 | **L3** scenario | A whole conversation, many scenario types | Does information survive across the full message list, not just one response? | Results below |
 | **L4** end-to-end | A complete agent task | Can the task still be completed, and what did it cost in total? | Results below |
@@ -498,8 +498,10 @@ Read these before quoting any figure above.
 - **The semantic probe depends on a single model.** Temperature is fixed for
   reproducibility, but absolute scores reflect that model's ability; the
   before-and-after comparison is more reliable than the absolute value.
-- **L1 rates are per fixture.** Each figure is that compressor on its own standard
-  input, not an expected value for arbitrary production payloads.
+- **L1 rates are fixture-scoped.** The current harness spans content domains and
+  sizes, with an optional shared real set. Recorded figures retain their original
+  fixture/version identity; they are not newly measured matrix results or expected
+  values for arbitrary production payloads.
 - **Non-code diffs are measured less precisely.** The content-extraction fallback
   degrades to ordinary English words on documentation and configuration diffs, so
   it discriminates less well there than on code.
@@ -533,7 +535,7 @@ Read these before quoting any figure above.
 ```bash
 # L1 component layer
 cd src/tokenless/benchmark/l1-compressor
-cargo run --release --bin l1_bench -- --report-dir reports
+cargo run --release --locked --bin component_cases -- --output reports/components.json
 
 # L2 module layer
 cd src/tokenless/benchmark/l2-module
