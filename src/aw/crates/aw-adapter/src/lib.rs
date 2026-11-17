@@ -10,6 +10,7 @@ pub mod attachment;
 pub mod callback;
 pub mod completion;
 pub mod configuration;
+pub mod deployment;
 pub mod projection;
 mod qoder;
 pub mod reload;

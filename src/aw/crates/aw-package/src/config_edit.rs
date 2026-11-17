@@ -9,6 +9,17 @@ use publication::Snapshot;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
+/// Reads exact configuration bytes under the editor's owned-file trust boundary.
+///
+/// This preserves the file, path, ACL and snapshot checks of
+/// [`ConfigurationEditor::open`] without parsing or rewriting the document.
+///
+/// # Errors
+/// Rejects unsupported deployment filesystems, unsafe paths, oversized files and concurrent changes.
+pub fn read_configuration_bytes(path: &Path) -> Result<Vec<u8>> {
+    publication::deployment_bytes(path)
+}
+
 /// A validated configuration snapshot and its unpublished edits.
 ///
 /// Mutations preserve unrelated values and omitted optional fields. Public fields

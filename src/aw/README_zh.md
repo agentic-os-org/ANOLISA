@@ -35,6 +35,9 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 离线校验会检查服务上限：每个目标跨事件汇总后最多有 64 个适用的已启用步骤。
 退出 Agent 后，本地服务仍可复用。使用结束后查询并停止它。
 
+SDK 部署可用 `aw config descriptor` 编译绑定配置的接线提示；
+具体用法见[命令参考](../../docs/user-guide/zh/aw/cli-reference.md#aw-config-descriptor)。
+
 ```bash
 aw service status --config "$AW_HOME/aw.yaml"
 aw service stop --config "$AW_HOME/aw.yaml"

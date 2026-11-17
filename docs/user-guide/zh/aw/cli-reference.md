@@ -28,6 +28,7 @@ aw config init --help
 | `aw run` | 通过 AW 启动已配置的 Agent |
 | `aw agent connect` | 注册原生 Hooks，或连接受支持的现有进程 |
 | `aw config init` | 离线生成配置 |
+| `aw config descriptor` | 编译绑定配置的 SDK 部署提示 |
 | `aw config show` | 以 JSON 打印全部或部分配置 |
 | `aw config validate` | 校验配置，可比较策略更新范围 |
 | `aw config add-provider` | 添加完整的 Provider 定义 |
@@ -156,6 +157,23 @@ AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续�
 此检查沿用服务绑定上限，离线执行，不启动 Agent 或 Provider。
 超限时退出码为 1，JSON 输出报告 `invalid_configuration`。
 旧别名 `aw validate` 执行相同检查。
+
+### `aw config descriptor`
+
+要求 `--config FILE --agent TARGET --profile PROFILE`。支持
+`qoder-public-hooks` 和 `qwenpaw-installed-native-hooks` 两种 Profile。
+输出 `aw-deployment/v1alpha1` JSON Descriptor，无需 `--json`。输入沿用
+`aw config show` 的文件归属、路径和 ACL 检查；配置使用绝对路径，输出应发布为
+应用用户持有的私有文件。
+
+命令在 SDK Descriptor 读取器支持的文件系统上校验配置及接线能力。服务套接字须能离线
+解析为状态目录下的 `aw.sock`，路径长度须符合 Linux 套接字限制。Descriptor 保存配置
+SHA256、目标、Profile、明确的服务 endpoint、输入等待标志和可用性，不包含 Provider
+参数或凭据。适用事件、效果或失败动作不受支持时，在输出前拒绝。
+
+Descriptor 与对应的完整部署配置一起保存；配置或接线变更后重新生成。它不证明接点
+已安装、Ready 或运行准入。部署操作见
+[SDK 部署指南](../../../developer-guide/zh/aw/deployment/native-sdk.md)。
 
 ### `aw config show`
 

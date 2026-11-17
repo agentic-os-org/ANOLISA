@@ -183,6 +183,7 @@ fn configure(args: Arguments, output: crate::output::Options) -> Result<Exit> {
 
 fn config(command: Config) -> Result<Exit> {
     let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
+        Config::Descriptor(value) => return super::descriptor::run(value),
         Config::Validate(value) => return super::validation::run(value),
         Config::Init(value) => {
             let value = *value;

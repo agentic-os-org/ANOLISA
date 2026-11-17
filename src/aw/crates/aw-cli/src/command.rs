@@ -1,6 +1,7 @@
 //! One typed declaration defines the public command tree, options and help.
 
 mod confirmation;
+mod descriptor;
 mod discovery;
 mod dispatch;
 mod instance;
@@ -120,6 +121,8 @@ enum Service {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Config {
+    /// Compile SDK wiring hints without starting an Agent, service or Provider
+    Descriptor(descriptor::Options),
     /// Show redacted native source declarations; does not load or activate them
     NativeSources(package::NativeSources),
     /// Record a native source reference without opening the native source
