@@ -6,6 +6,7 @@
 //! [`admission`] checks Hook policy capability without executing anything.
 
 pub mod admission;
+pub mod descriptor;
 pub mod journal;
 pub mod ports;
 

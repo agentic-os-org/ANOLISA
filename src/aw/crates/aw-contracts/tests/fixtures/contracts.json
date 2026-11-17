@@ -872,5 +872,18 @@
       }
     },
     "error": null
+  },
+  "deployment-descriptor-v1alpha1": {
+    "version": "aw-deployment/v1alpha1",
+    "configuration_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "target": "worker",
+    "profile": {
+      "adapter": "qoder-sdk",
+      "version": "public-hooks/v1",
+      "entrypoint": "sdk-worker"
+    },
+    "endpoint": "/run/aw/aw.sock",
+    "wait_for_input_submit": false,
+    "availability": "native_fallback"
   }
 }
