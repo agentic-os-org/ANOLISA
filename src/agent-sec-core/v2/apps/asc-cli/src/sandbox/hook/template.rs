@@ -99,6 +99,9 @@ fn expand(text: &str, cwd: &Path, tmpdir: Option<&str>) -> Result<OsPermissionSe
     let cwd = cwd.to_str().ok_or(SandboxError::Environment)?;
     for rule in &mut template.permissions.filesystem.rules {
         rule.path = expand_path(&rule.path, cwd)?;
+        for path in &mut rule.excluded_paths {
+            *path = expand_path(path, cwd)?;
+        }
     }
     for path in &mut template.permissions.execution.deny_paths {
         *path = expand_path(path, cwd)?;
@@ -152,6 +155,7 @@ fn add_rule(
         effect,
         path: path.to_str().ok_or(SandboxError::Environment)?.into(),
         rights: vec![FileRight::Write],
+        excluded_paths: Vec::new(),
     };
     if !permissions.filesystem.rules.contains(&rule) {
         permissions.filesystem.rules.push(rule);

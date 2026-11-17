@@ -57,7 +57,7 @@ impl PdpRuntime {
             .filesystem
             .rules
             .iter()
-            .map(|rule| &rule.path)
+            .flat_map(|rule| std::iter::once(&rule.path).chain(&rule.excluded_paths))
             .chain(self.policy.boundaries.iter())
             .filter(|path| roots.iter().any(|root| contains(root, path)))
             .cloned()
@@ -120,14 +120,13 @@ impl PdpRuntime {
             ] {
                 let inherited_allow = rules_allow(&effective, path, right);
                 if allowed && !inherited_allow {
-                    if effective.filesystem.rules.iter().any(|rule| {
-                        rule.effect == RuleEffect::Deny
-                            && contains(&rule.path, path)
+                    for rule in &mut effective.filesystem.rules {
+                        if rule.effect == RuleEffect::Deny
+                            && rule.covers_path(path, true)
                             && rule_blocks(rule, right)
-                    }) {
-                        return Err(PdpError::Unsupported(format!(
-                            "grant below a denied ancestor cannot be represented at {path}"
-                        )));
+                        {
+                            rule.excluded_paths.push(path.clone());
+                        }
                     }
                     add_rule(&mut effective, path, RuleEffect::Allow, right);
                 } else if !allowed && inherited_allow {
@@ -253,7 +252,7 @@ fn rules_allow(permissions: &OsPermissionSet, path: &str, right: FileRight) -> b
         .filesystem
         .rules
         .iter()
-        .filter(|rule| contains(&rule.path, path))
+        .filter(|rule| rule.covers_path(path, true))
     {
         if rule.effect == RuleEffect::Deny && rule_blocks(rule, right) {
             return false;
@@ -283,6 +282,7 @@ fn add_rule(permissions: &mut OsPermissionSet, path: &str, effect: RuleEffect, r
             effect,
             path: path.to_owned(),
             rights: vec![right],
+            excluded_paths: Vec::new(),
         });
     }
 }

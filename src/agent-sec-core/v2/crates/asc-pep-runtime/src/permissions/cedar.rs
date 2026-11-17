@@ -277,17 +277,16 @@ fn project_parsed(
             (FileRight::Write, access.write),
         ] {
             if allowed != rules_allow(&permissions.filesystem.rules, path, right) {
-                if allowed
-                    && permissions.filesystem.rules.iter().any(|rule| {
-                        rule.effect == RuleEffect::Deny
-                            && contains(&rule.path, path)
+                if allowed {
+                    for rule in &mut permissions.filesystem.rules {
+                        if rule.effect == RuleEffect::Deny
+                            && rule.covers_path(path, true)
                             && (rule.rights.contains(&right)
                                 || rule.rights.contains(&FileRight::Read))
-                    })
-                {
-                    return Err(unsupported(format!(
-                        "grant below a denied ancestor at {path}"
-                    )));
+                        {
+                            rule.excluded_paths.push(path.clone());
+                        }
+                    }
                 }
                 permissions.filesystem.rules.push(FilesystemRule {
                     effect: if allowed {
@@ -297,6 +296,7 @@ fn project_parsed(
                     },
                     path: path.clone(),
                     rights: vec![right],
+                    excluded_paths: Vec::new(),
                 });
             }
         }
@@ -392,7 +392,7 @@ fn retain_exclusions(
                 && !grants.is_empty()
                 && !rules.iter().any(|rule| {
                     rule.effect == RuleEffect::Deny
-                        && contains(&rule.path, path)
+                        && rule.covers_path(path, true)
                         && (rule.rights.contains(&right) || rule.rights.contains(&FileRight::Read))
                 })
             {
@@ -400,6 +400,7 @@ fn retain_exclusions(
                     effect: RuleEffect::Deny,
                     path: path.into(),
                     rights: vec![right],
+                    excluded_paths: Vec::new(),
                 });
             }
         }
@@ -975,7 +976,7 @@ fn probe(parent: &str, boundaries: &BTreeSet<String>) -> Result<String> {
 
 fn rules_allow(rules: &[FilesystemRule], path: &str, right: FileRight) -> bool {
     let mut allowed = false;
-    for rule in rules.iter().filter(|rule| contains(&rule.path, path)) {
+    for rule in rules.iter().filter(|rule| rule.covers_path(path, true)) {
         if rule.effect == RuleEffect::Deny
             && (rule.rights.contains(&right) || rule.rights.contains(&FileRight::Read))
         {

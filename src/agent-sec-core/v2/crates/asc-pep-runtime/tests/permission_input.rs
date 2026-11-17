@@ -29,7 +29,11 @@ fn allows(permissions: &OsPermissionSet, path: &str, right: FileRight) -> bool {
         .rules
         .iter()
         .filter(|rule| {
-            rule.path == "/" || path == rule.path || path.starts_with(&format!("{}/", rule.path))
+            (rule.path == "/" || path == rule.path || path.starts_with(&format!("{}/", rule.path)))
+                && !rule
+                    .excluded_paths
+                    .iter()
+                    .any(|excluded| path == excluded || path.starts_with(&format!("{excluded}/")))
         })
         .collect();
     !applicable.iter().any(|rule| {
@@ -40,6 +44,42 @@ fn allows(permissions: &OsPermissionSet, path: &str, right: FileRight) -> bool {
             && (rule.rights.contains(&right)
                 || right == FileRight::Read && rule.rights.contains(&FileRight::Write))
     })
+}
+
+#[test]
+fn cedar_subtree_exceptions_preserve_independent_denies_and_rights() {
+    let permissions = resolve(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource);
+permit(principal, action == SecCore::Action::"process.spawn", resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/a" || resource.path like "/a/*" }
+unless { resource.path == "/a/b" || resource.path like "/a/b/*" };
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when { resource.path == "/a/b/readonly" || resource.path like "/a/b/readonly/*" };
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/a/b/private" || resource.path like "/a/b/private/*" };
+"#,
+    );
+    assert_eq!(permissions.version, 1);
+    for (path, read, write) in [
+        ("/a", false, false),
+        ("/a/other", false, false),
+        ("/a/b", true, true),
+        ("/a/b/new", true, true),
+        ("/a/b/readonly/file", true, false),
+        ("/a/b/private/file", false, false),
+        ("/a/b-other", false, false),
+        ("/elsewhere", true, true),
+    ] {
+        assert_eq!(allows(&permissions, path, FileRight::Read), read, "{path}");
+        assert_eq!(
+            allows(&permissions, path, FileRight::Write),
+            write,
+            "{path}"
+        );
+    }
 }
 
 #[test]
@@ -1067,6 +1107,90 @@ impl asc_pep_runtime::AuthorizationClient for Client {
     fn report(&self, _: &ExecutionReceipt) -> Result<ReceiptAck, asc_pep_runtime::PepError> {
         panic!("authorization-only preparation must not report execution");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn subtree_exception_decisions_reach_the_real_backend_with_the_same_scope() {
+    use asc_pep_runtime::{PepRuntime, SandboxBackend, prepare_launch};
+    if std::env::var_os("ASC_SANDBOX_INTEGRATION").is_none() {
+        return;
+    }
+    let helper = std::env::var_os("ASC_SANDBOX_HELPER").expect("built static helper");
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("sessions");
+    let current = parent.join("current");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(parent.join("secret"), "hidden").unwrap();
+    let policy = format!(
+        r#"permit(principal, action, resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} || resource.path like {} }}
+unless {{ resource.path == {} || resource.path like {} }};"#,
+        json!(parent),
+        json!(format!("{}/*", parent.display())),
+        json!(current),
+        json!(format!("{}/*", current.display())),
+    );
+    let client = Client::new(&policy);
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+        json!(current),
+        json!(format!("{}/*", current.display())),
+    ))
+    .unwrap();
+    let command = format!(
+        "set -eu; printf allowed > result; if cat '{}'; then exit 41; fi; if ls '{}'; then exit 42; fi",
+        parent.join("secret").display(),
+        parent.display(),
+    );
+    let launch = prepare_launch(
+        "/bin/sh",
+        vec!["-c".into(), command],
+        &current,
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let backend = SandboxBackend::new(helper.into());
+    let mut runtime = PepRuntime::new(backend.clone());
+    let (prepared, decision) = runtime
+        .authorize(
+            &AgentPrincipal {
+                agent_type: Some("test".into()),
+            },
+            launch,
+            &input,
+            &client,
+        )
+        .unwrap();
+    assert_eq!(
+        decision.verdict,
+        DecisionVerdict::Modify,
+        "{}",
+        decision.reason
+    );
+    let permissions = decision.effective_permissions.as_ref().unwrap();
+    assert_eq!(permissions.version, 1);
+    assert!(allows(
+        permissions,
+        current.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        permissions,
+        parent.to_str().unwrap(),
+        FileRight::Read
+    ));
+    let spec = runtime.prepare_execution(&prepared, &decision).unwrap();
+    let result = backend.execute_bound(&spec).unwrap();
+    assert!(result.installed && result.started, "{result:?}");
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(current.join("result")).unwrap(),
+        "allowed"
+    );
 }
 
 #[cfg(target_os = "linux")]

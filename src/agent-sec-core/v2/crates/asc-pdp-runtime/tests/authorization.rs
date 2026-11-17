@@ -28,6 +28,80 @@ fn permissions() -> OsPermissionSet {
     .unwrap()
 }
 
+#[test]
+fn pdp_projects_subtree_exceptions_without_overriding_requested_denies() {
+    let policy = snapshot(
+        r#"
+permit(principal, action == SecCore::Action::"file.read", resource);
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when { resource.path == "/work" || resource.path like "/work/*" }
+unless { resource.path == "/work/current" || resource.path like "/work/current/*" };
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when { resource.path == "/work/current/readonly" || resource.path like "/work/current/readonly/*" };
+"#,
+    );
+    let runtime = PdpRuntime::from_policy_set(policy).unwrap();
+    let mut input = request();
+    input.context.launch.cwd = "/work/current".into();
+    input
+        .context
+        .requested_permissions
+        .filesystem
+        .rules
+        .push(FilesystemRule {
+            effect: RuleEffect::Allow,
+            path: "/".into(),
+            rights: vec![FileRight::Read],
+            excluded_paths: vec![],
+        });
+    let decision = runtime.evaluate(&input, 100).unwrap();
+    assert_eq!(
+        decision.verdict,
+        DecisionVerdict::Modify,
+        "{}",
+        decision.reason
+    );
+    let effective = decision.effective_permissions.unwrap();
+    assert_eq!(effective.version, 1);
+    let deny = effective
+        .filesystem
+        .rules
+        .iter()
+        .find(|rule| rule.path == "/work" && rule.effect == RuleEffect::Deny)
+        .unwrap();
+    assert_eq!(deny.excluded_paths, ["/work/current"]);
+    assert!(
+        effective
+            .filesystem
+            .rules
+            .iter()
+            .any(|rule| rule.path == "/work/current/readonly"
+                && rule.effect == RuleEffect::Deny
+                && rule.rights.contains(&FileRight::Write))
+    );
+    input.context.requested_permissions = effective;
+    let unchanged = runtime.evaluate(&input, 101).unwrap();
+    assert_eq!(
+        unchanged.verdict,
+        DecisionVerdict::Allow,
+        "{}",
+        unchanged.reason
+    );
+    input
+        .context
+        .requested_permissions
+        .filesystem
+        .rules
+        .push(FilesystemRule {
+            effect: RuleEffect::Deny,
+            path: "/work".into(),
+            rights: vec![FileRight::Read],
+            excluded_paths: vec![],
+        });
+    let denied = runtime.evaluate(&input, 102).unwrap();
+    assert_eq!(denied.verdict, DecisionVerdict::Deny);
+}
+
 const FILES: &str = r#"
 permit(principal, action == SecCore::Action::"file.read", resource)
 when { resource.path == "/usr/bin/python3" || resource.path == "/work" || resource.path like "/work/*" };
@@ -249,6 +323,7 @@ when { resource.path == "/work/private" || resource.path like "/work/private/*" 
             effect: RuleEffect::Deny,
             path: "/work/private".into(),
             rights: vec![FileRight::Read],
+            excluded_paths: Vec::new(),
         });
     input
         .context

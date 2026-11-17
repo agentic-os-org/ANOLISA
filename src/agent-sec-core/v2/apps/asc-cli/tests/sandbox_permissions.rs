@@ -19,13 +19,22 @@ fn hook_rereads_cedar_for_each_authorization_request() {
 
 #[test]
 fn cedar_permissions_are_enforced_by_the_real_linux_helper() {
+    run_real_helper(REAL_HELPER);
+}
+
+#[test]
+fn subtree_exceptions_work_through_json_and_cedar_cli_inputs() {
+    run_real_helper(SUBTREE_HELPER);
+}
+
+fn run_real_helper(script: &str) {
     if std::env::var_os("ASC_SANDBOX_INTEGRATION").is_none() {
         return;
     }
     let helper = std::env::var_os("ASC_SANDBOX_HELPER")
         .expect("ASC_SANDBOX_HELPER must select the built strict helper");
     let output = Command::new("python3")
-        .args(["-c", REAL_HELPER, env!("CARGO_BIN_EXE_agent-sec-cli")])
+        .args(["-c", script, env!("CARGO_BIN_EXE_agent-sec-cli")])
         .arg(helper)
         .output()
         .unwrap();
@@ -36,6 +45,69 @@ fn cedar_permissions_are_enforced_by_the_real_linux_helper() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+const SUBTREE_HELPER: &str = r#"
+import json, pathlib, shutil, subprocess, sys, tempfile
+
+with tempfile.TemporaryDirectory(prefix='asc-subtree-cli-') as root:
+    root = pathlib.Path(root)
+    cli = root / 'agent-sec-cli'
+    shutil.copy2(sys.argv[1], cli)
+    shutil.copy2(sys.argv[2], root / 'linux-sandbox')
+    parent = root / 'sessions'
+    child = parent / 'current'
+    child.mkdir(parents=True)
+    (parent / 'secret').write_text('hidden')
+    (child / 'seed').write_text('allowed')
+    source = root / 'permissions'
+    def tree(path):
+        return f'(resource.path == {json.dumps(str(path))} || resource.path like {json.dumps(str(path) + "/*")})'
+    policy = f'''
+permit(principal, action == SecCore::Action::"file.read", resource);
+permit(principal, action == SecCore::Action::"file.write", resource) when {{ {tree(child)} }};
+forbid(principal, action == SecCore::Action::"file.read", resource)
+when {{ {tree(parent)} }} unless {{ {tree(child)} }};
+'''
+    permissions = {'version': 1, 'filesystem': {'default': 'deny', 'rules': [
+        {'effect':'allow', 'path':'/', 'rights':['read']},
+        {'effect':'deny', 'path':str(parent), 'rights':['read'], 'excluded_paths':[str(child)]},
+        {'effect':'allow', 'path':str(child), 'rights':['write']}
+    ]}, 'execution': {'deny_paths':[]}, 'network': {'mode':'off'}}
+    script = f'''set -eu
+cat seed > result
+sh -c 'cat result > child-result'
+if ls '{parent}'; then exit 41; fi
+if cat '{parent}/secret'; then exit 42; fi
+if touch '{parent}/new'; then exit 43; fi
+'''
+    def run(text, command=script):
+        source.write_text(text)
+        return subprocess.run([str(cli), '--socket', str(root/'absent.sock'), 'sandbox', 'run',
+            '--permissions', str(source), '--', '/bin/sh', '-c', command],
+            cwd=child, capture_output=True, text=True, timeout=30)
+    for text in [json.dumps(permissions), policy]:
+        result = run(text)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert (child/'child-result').read_text() == 'allowed'
+    permissions['filesystem']['rules'][2]['rights'] = ['read']
+    result = run(json.dumps(permissions), "cat seed; if touch denied-write; then exit 44; fi")
+    assert result.returncode == 0 and not (child/'denied-write').exists(), result.stderr
+    permissions['filesystem']['rules'][2]['rights'] = ['write']
+    permissions['version'] = 2
+    result = run(json.dumps(permissions), "touch must-not-run")
+    assert result.returncode != 0 and not (child/'must-not-run').exists(), result.stderr
+    assert 'unsupported OS permission version' in result.stderr, result.stderr
+    permissions['version'] = 1
+    alias = parent / 'alias'
+    alias.symlink_to(child, target_is_directory=True)
+    for boundary in [alias, parent/'secret', parent/'missing']:
+        permissions['filesystem']['rules'][1]['excluded_paths'] = [str(boundary)]
+        result = run(json.dumps(permissions), "touch must-not-run")
+        assert result.returncode != 0 and not (child/'must-not-run').exists(), result.stderr
+    permissions['filesystem']['rules'][1].pop('excluded_paths')
+    result = run(json.dumps(permissions), "touch must-not-run")
+    assert result.returncode != 0 and not (child/'must-not-run').exists(), result.stderr
+"#;
 
 fn run_script(script: &str) {
     let output = Command::new("python3")

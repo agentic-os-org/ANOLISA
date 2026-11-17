@@ -182,6 +182,16 @@ fn file_access(lines: &mut Vec<String>, filesystem: &FilesystemPermissions) {
             };
             if label == category {
                 lines.push(format!("  {label}: {}", display_text(&rule.path)));
+                if !rule.excluded_paths.is_empty() {
+                    lines.push(format!(
+                        "    Except subtrees: {}",
+                        rule.excluded_paths
+                            .iter()
+                            .map(|path| display_text(path))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
             }
         }
     }
