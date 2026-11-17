@@ -441,6 +441,7 @@ dependencies = [
  "libc",
  "path-absolutize",
  "pretty_assertions",
+ "rustix",
  "schemars",
  "seccompiler",
  "serde",

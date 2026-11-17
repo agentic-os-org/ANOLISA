@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OsPermissionSet {
-    /// Wire version; currently one.
+    /// Wire version; currently one, including optional subtree exclusions.
     pub version: u32,
     /// Default-deny filesystem view.
     pub filesystem: FilesystemPermissions,
@@ -47,6 +47,29 @@ pub struct FilesystemRule {
     pub path: String,
     /// Write implies read; deny-read also prevents writing.
     pub rights: Vec<FileRight>,
+    /// Subtrees outside this deny's scope; exclusions never grant access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_paths: Vec<String>,
+}
+
+impl FilesystemRule {
+    /// Matches the rule's range after subtracting its explicit exclusions.
+    pub fn covers_path(&self, path: &str, directory: bool) -> bool {
+        (path == self.path || directory && path_contains(&self.path, path))
+            && !self
+                .excluded_paths
+                .iter()
+                .any(|excluded| path_contains(excluded, path))
+    }
+}
+
+/// Tests literal containment at a path-component boundary.
+pub fn path_contains(parent: &str, child: &str) -> bool {
+    child == parent
+        || parent == "/"
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|tail| tail.starts_with('/'))
 }
 
 /// Rule effect independent of order or specificity.
@@ -121,11 +144,43 @@ impl Validate for OsPermissionSet {
                 "unsupported OS permission version",
             ));
         }
-        if self.filesystem.rules.len() > 1024 || self.execution.deny_paths.len() > 1024 {
+        let boundary_count = self
+            .filesystem
+            .rules
+            .iter()
+            .map(|rule| 1 + rule.excluded_paths.len())
+            .sum::<usize>();
+        if boundary_count > 1024 || self.execution.deny_paths.len() > 1024 {
             return Err(ValidationError::new("permissions", "too many path rules"));
         }
         for rule in &self.filesystem.rules {
             validate_os_path(&rule.path)?;
+            if !rule.excluded_paths.is_empty() && rule.effect != RuleEffect::Deny {
+                return Err(ValidationError::new(
+                    "excluded_paths",
+                    "subtree exclusions require a deny rule",
+                ));
+            }
+            if rule.excluded_paths.len() > 1024 {
+                return Err(ValidationError::new(
+                    "excluded_paths",
+                    "too many subtree exclusions",
+                ));
+            }
+            for (index, excluded) in rule.excluded_paths.iter().enumerate() {
+                validate_os_path(excluded)?;
+                if excluded == &rule.path
+                    || !path_contains(&rule.path, excluded)
+                    || rule.excluded_paths[..index].iter().any(|other| {
+                        path_contains(other, excluded) || path_contains(excluded, other)
+                    })
+                {
+                    return Err(ValidationError::new(
+                        "excluded_paths",
+                        "expected distinct nonoverlapping strict descendant subtrees",
+                    ));
+                }
+            }
             if rule.rights.is_empty()
                 || rule.rights.len() > 2
                 || (rule.rights.len() == 2 && rule.rights[0] == rule.rights[1])
@@ -177,6 +232,49 @@ mod tests {
                 r#"{"effect":"allow","path":"/w","rights":["read"],"scope":"subtree"}"#
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn subtree_exclusions_keep_v1_and_only_narrow_denies() {
+        let value = serde_json::json!({
+            "version": 1, "filesystem": {"default": "deny", "rules": [
+                {"effect":"deny", "path":"/a", "rights":["read"], "excluded_paths":["/a/b"]}
+            ]}, "execution":{"deny_paths":[]}, "network":{"mode":"off"}
+        });
+        let mut permissions: OsPermissionSet = serde_json::from_value(value).unwrap();
+        permissions.validate().unwrap();
+        let rule = &permissions.filesystem.rules[0];
+        for path in ["/a", "/a/other", "/a/b-other"] {
+            assert!(rule.covers_path(path, true), "{path}");
+        }
+        for path in ["/a/b", "/a/b/file", "/abc"] {
+            assert!(!rule.covers_path(path, true), "{path}");
+        }
+        for version in [0, 2, u32::MAX] {
+            permissions.version = version;
+            assert!(permissions.validate().is_err());
+        }
+        permissions.version = 1;
+        permissions.filesystem.rules[0].effect = RuleEffect::Allow;
+        assert!(permissions.validate().is_err());
+        permissions.filesystem.rules[0].effect = RuleEffect::Deny;
+        for excluded in [
+            vec!["/a"],
+            vec!["/abc"],
+            vec!["/a/b", "/a/b/c"],
+            vec!["/a/b", "/a/b"],
+        ] {
+            permissions.filesystem.rules[0].excluded_paths =
+                excluded.into_iter().map(str::to_owned).collect();
+            assert!(permissions.validate().is_err());
+        }
+        permissions.filesystem.rules[0].excluded_paths.clear();
+        permissions.validate().unwrap();
+        assert!(
+            !serde_json::to_string(&permissions)
+                .unwrap()
+                .contains("excluded_paths")
         );
     }
 }

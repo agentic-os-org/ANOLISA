@@ -176,6 +176,169 @@ fn strict_runtime_enforces_write_and_read_carveouts() {
 }
 
 #[test]
+fn strict_runtime_never_chmods_host_bind_directories() {
+    if !enabled() {
+        return;
+    }
+    // Keep the helper's coverage output separate from the mount paths under test.
+    let work = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("sessions");
+    let current = parent.join("current");
+    let outside = root.path().join("outside");
+    let nested = outside.join("nested");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    let link = parent.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    for path in [&outside, &nested] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    for writable in [false, true] {
+        for hidden_parent in [false, true] {
+            for exception in [false, true] {
+                let mut input = spec(work.path(), "printf started");
+                let paths = if hidden_parent {
+                    [link.clone(), link.join("nested")]
+                } else {
+                    [outside.clone(), nested.clone()]
+                };
+                for path in paths {
+                    input.permissions.filesystem.rules.push(
+                        serde_json::from_value(serde_json::json!({
+                            "effect":"allow", "path":path,
+                            "rights":[if writable { "write" } else { "read" }]
+                        }))
+                        .unwrap(),
+                    );
+                    input.path_facts.push(fact(&path));
+                }
+                if hidden_parent {
+                    input.permissions.filesystem.rules.push(
+                        serde_json::from_value(serde_json::json!({
+                            "effect":"deny", "path":parent, "rights":["read"],
+                            "excluded_paths":if exception { vec![&current] } else { vec![] }
+                        }))
+                        .unwrap(),
+                    );
+                }
+                input.path_facts.extend([fact(&parent), fact(&current)]);
+                let before = [&outside, &nested].map(|path| {
+                    let metadata = path.metadata().unwrap();
+                    (metadata.mode(), metadata.dev(), metadata.ino())
+                });
+                let (output, statuses) = run(&input);
+                let after = [&outside, &nested].map(|path| {
+                    let metadata = path.metadata().unwrap();
+                    (metadata.mode(), metadata.dev(), metadata.ino())
+                });
+                // Restore the fixture before asserting, including on a regressed launch.
+                for path in [&outside, &nested] {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o750)).unwrap();
+                }
+                assert_eq!(after, before, "host modes changed: {statuses:?}");
+                if hidden_parent {
+                    assert_eq!(output.status.code(), Some(125));
+                    assert!(
+                        matches!(statuses.as_slice(), [BackendStatus::Failed { message }]
+                        if message.contains("search directories require canonical mount destinations")),
+                        "{statuses:?}"
+                    );
+                    assert!(output.stdout.is_empty());
+                } else {
+                    assert!(
+                        output.status.success(),
+                        "{} {statuses:?}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(statuses.contains(&BackendStatus::Installed));
+                    assert!(statuses.contains(&BackendStatus::Started));
+                    assert_eq!(output.stdout, b"started");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn strict_runtime_restores_subtrees_without_exposing_parent_or_new_siblings() {
+    if !enabled() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("sessions");
+    let work = parent.join("group/current");
+    std::fs::create_dir_all(&work).unwrap();
+    let sibling = parent.join("other");
+    std::fs::create_dir(&sibling).unwrap();
+    std::fs::write(sibling.join("secret"), "hidden").unwrap();
+    let private = work.join("private");
+    std::fs::write(&private, "private").unwrap();
+    let script = format!(
+        r#"
+set -eu
+must_deny() {{ if "$@"; then echo "unexpected success: $*" >&2; exit 1; fi; }}
+echo ready > started
+i=0; while [ ! -e host-ready ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
+test -e host-ready
+echo allowed > result
+sh -c 'cat result > child-result'
+must_deny ls '{parent}'
+must_deny ls '{parent}/group'
+must_deny touch '{parent}/new'
+must_deny chmod 777 '{parent}'
+must_deny cat '{parent}/other/secret'
+must_deny cat '{parent}/late/secret'
+must_deny cat private
+must_deny mv '{parent}' '{parent}-moved'
+must_deny mv '{work}' '{work}-moved'
+ln -s '{parent}/other/secret' escape
+must_deny cat escape
+"#,
+        parent = parent.display(),
+        work = work.display()
+    );
+    let mut input = spec(&work, &script);
+    input.permissions.filesystem.rules.extend([
+        serde_json::from_value(serde_json::json!({"effect":"deny","path":parent,"rights":["read"],"excluded_paths":[work]})).unwrap(),
+        serde_json::from_value(serde_json::json!({"effect":"deny","path":private,"rights":["read"]})).unwrap(),
+    ]);
+    input.path_facts.extend([fact(&parent), fact(&private)]);
+    let host_work = work.clone();
+    let host_parent = parent.clone();
+    let producer = std::thread::spawn(move || {
+        for _ in 0..200 {
+            if host_work.join("started").exists() {
+                std::fs::create_dir(host_parent.join("late")).unwrap();
+                std::fs::write(host_parent.join("late/secret"), "new hidden sibling").unwrap();
+                std::fs::write(host_work.join("host-ready"), "ready").unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("sandbox did not signal readiness");
+    });
+    let (output, statuses) = run(&input);
+    producer.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {statuses:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(statuses.contains(&BackendStatus::Installed));
+    assert!(statuses.contains(&BackendStatus::Started));
+    assert_eq!(
+        std::fs::read_to_string(work.join("child-result")).unwrap(),
+        "allowed\n"
+    );
+    assert_eq!(std::fs::read_to_string(&private).unwrap(), "private");
+    assert_eq!(
+        std::fs::read_to_string(sibling.join("secret")).unwrap(),
+        "hidden"
+    );
+}
+
+#[test]
 fn strict_runtime_rejects_reserved_aliases_with_unmounted_parent() {
     if !enabled() {
         return;

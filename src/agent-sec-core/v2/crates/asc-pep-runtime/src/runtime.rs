@@ -169,7 +169,7 @@ impl PreparedInvocation {
             .filesystem
             .rules
             .iter_mut()
-            .map(|r| &mut r.path)
+            .flat_map(|r| std::iter::once(&mut r.path).chain(&mut r.excluded_paths))
             .chain(&mut permissions.execution.deny_paths)
         {
             let fact = path_facts
@@ -532,6 +532,12 @@ fn verify_ceiling(
                 rule.effect == RuleEffect::Deny
                     && rule.path == denied.path
                     && (rule.rights.contains(right) || rule.rights.contains(&FileRight::Read))
+                    && rule.excluded_paths.iter().all(|excluded| {
+                        denied
+                            .excluded_paths
+                            .iter()
+                            .any(|original| asc_sandbox_types::path_contains(original, excluded))
+                    })
             })
         }) {
             return Err(PepError::Authorization(format!(
@@ -545,22 +551,33 @@ fn verify_ceiling(
         .map(|fact| (fact.canonical_path.as_str(), fact.is_directory))
         .collect();
     let mut paths = BTreeSet::new();
-    for rule in requested
+    let boundaries: BTreeSet<_> = requested
         .filesystem
         .rules
         .iter()
         .chain(&effective.filesystem.rules)
-    {
-        let canonical = &rule.path;
+        .flat_map(|rule| std::iter::once(&rule.path).chain(&rule.excluded_paths))
+        .collect();
+    for canonical in &boundaries {
         let directory = kinds.get(canonical.as_str()).ok_or_else(|| {
             PepError::Authorization("permission path lacks an authorized identity".into())
         })?;
-        paths.insert(canonical.clone());
+        paths.insert((*canonical).clone());
         if *directory {
-            paths.insert(format!(
-                "{}/.asc-uncreated-child",
-                canonical.trim_end_matches('/')
-            ));
+            // Probe a region outside every explicit descendant boundary, including exclusions.
+            for index in 0..=boundaries.len() {
+                let probe = format!(
+                    "{}/.asc-uncreated-child-{index}",
+                    canonical.trim_end_matches('/')
+                );
+                if !boundaries
+                    .iter()
+                    .any(|boundary| asc_sandbox_types::path_contains(&probe, boundary))
+                {
+                    paths.insert(probe);
+                    break;
+                }
+            }
         }
     }
     for path in paths {
@@ -585,9 +602,7 @@ fn granted(
     let mut allowed = false;
     for rule in &permissions.filesystem.rules {
         let base = rule.path.as_str();
-        let within = path == base
-            || (kinds.get(base) == Some(&true)
-                && path.starts_with(&format!("{}/", base.trim_end_matches('/'))));
+        let within = rule.covers_path(path, kinds.get(base) == Some(&true));
         if !within {
             continue;
         }
@@ -609,4 +624,45 @@ fn granted(
         }
     }
     allowed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ceiling_checks_exception_boundaries_and_preserves_denial_scopes() {
+        let requested: OsPermissionSet = serde_json::from_value(json!({
+            "version":1, "filesystem":{"default":"deny", "rules":[
+                {"effect":"allow", "path":"/a", "rights":["write"]},
+                {"effect":"deny", "path":"/a", "rights":["read"], "excluded_paths":["/a/b"]}
+            ]}, "execution":{"deny_paths":[]}, "network":{"mode":"off"}
+        }))
+        .unwrap();
+        let facts = ["/a", "/a/b", "/a/c", "/a/b/private"]
+            .into_iter()
+            .map(|path| PathFact {
+                path: path.into(),
+                canonical_path: path.into(),
+                is_directory: true,
+                device: 1,
+                inode: 1,
+            })
+            .collect::<Vec<_>>();
+        verify_ceiling(&requested, &requested, &facts).unwrap();
+        let mut forged = requested.clone();
+        forged.filesystem.rules[1]
+            .excluded_paths
+            .push("/a/c".into());
+        assert!(verify_ceiling(&forged, &requested, &facts).is_err());
+        let mut narrowed = requested.clone();
+        narrowed.filesystem.rules[1].excluded_paths = vec!["/a/b/private".into()];
+        verify_ceiling(&narrowed, &requested, &facts).unwrap();
+        let mut unrestricted = requested.clone();
+        unrestricted.filesystem.rules.pop();
+        assert!(verify_ceiling(&unrestricted, &requested, &facts).is_err());
+        // A requested deny hidden in an effective exception must still be checked.
+        assert!(verify_ceiling(&requested, &narrowed, &facts).is_err());
+    }
 }

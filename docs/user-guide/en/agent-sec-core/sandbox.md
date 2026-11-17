@@ -161,21 +161,57 @@ it does not produce a bound execution plan.
 
 | Field | Behavior |
 |---|---|
-| `version` | Must be `1`; unknown fields are rejected. |
+| `version` | Must be `1`, including rules with subtree exclusions. Unknown versions and fields are rejected. |
 | `filesystem.default` | Must be `deny`. |
 | `filesystem.rules[].effect` | `allow` or `deny`; deny wins regardless of rule order or a more specific allow. |
 | `filesystem.rules[].rights` | A nonempty list of distinct `read` and/or `write` rights. Write includes read, creation, deletion and rename; denying read also prevents write. |
+| `filesystem.rules[].excluded_paths` | Optional, deny rules only: existing canonical descendant directories outside this rule's scope. They do not grant access or cancel other denies. |
 | `execution.deny_paths` | Mount-level noexec for named files or directory subtrees, including their visible submounts. |
 | `network.mode` | `off` blocks IP networking; `full` uses host networking without destination, port or direction filters. |
 
 Paths must be existing, normalized absolute paths, without wildcards, dot
 components or a trailing slash except for `/`. Files select one object;
-directories select their subtrees. Each of `filesystem.rules` and
-`execution.deny_paths` accepts at most 1,024 entries. New files can be created
+directories select their subtrees. Filesystem rules and their excluded paths
+together accept at most 1,024 boundaries; `execution.deny_paths` accepts at most
+1,024 entries. New files can be created
 inside a writable directory. Include the executable, loader, libraries, working
 directory and application data needed by the command; the runtime adds no grants.
 `/proc` and `/dev` are reserved for sandbox infrastructure and cannot be explicit
 rule targets.
+
+For session isolation, use `version: 1`, an allow for required runtime reads,
+and an explicit read/write allow for the current session. Add a deny with its
+current-session exception, for example this filesystem rule:
+
+```json
+{"effect":"deny","path":"/sessions","rights":["read"],"excluded_paths":["/sessions/current"]}
+```
+
+Create both directories before preparation and run with `/sessions/current` as
+cwd. The current session remains writable. Its synthetic parent permits path
+traversal but cannot be listed or modified; existing and newly created sibling
+sessions remain hidden. Intermediate directories needed to reach a deeper
+exception also permit traversal only. Independent denies inside the exception
+still apply. Exclusions must be nonoverlapping strict descendants; symlink
+boundaries and missing directories are rejected.
+
+When a plan needs synthetic traversal directories below a hidden parent, all
+mounted rule paths, the working directory and the resolved executable must use
+canonical paths without symlink components. Otherwise preparation rejects the
+plan before mounting; use the resolved paths in the permission input. This check
+also applies to inputs without `excluded_paths`. The helper creates traversal-only
+tmpfs mounts with their final mode and verifies the installed mount destinations
+before starting the command. These plans require kernel support for `openat2`
+and the `statx` mount-root attribute. A changed or unverifiable destination rejects the launch.
+
+Cedar expresses the same scope using `unless` to exclude the current subtree from
+the matching forbid, alongside a permit. A more specific permit cannot override
+an unconditional forbid. Input projection and PDP decisions preserve these
+scopes. The format remains version 1; rules without exclusions retain deny precedence.
+Using exclusions requires a CLI and helper that support `excluded_paths`, plus a
+compatible daemon for PDP authorization. Older components reject the unknown field
+instead of ignoring exclusions. Before downgrading, stop using policies with
+exclusions; an ordinary child allow does not replace an exclusion.
 
 Read-only does not mean non-executable. noexec prevents direct execution through
 the named mount; it does not prevent an allowed interpreter reading a script,

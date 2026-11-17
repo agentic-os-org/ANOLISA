@@ -16,6 +16,7 @@ use asc_sandbox_types::{
     BackendCapabilities, BackendStatus, ExecutionSpec, FileRight, NetworkMode, PathFact,
     RuleEffect, Validate,
 };
+use serde::{Deserialize, Serialize};
 
 const MAX_SPEC_BYTES: u64 = 4 * 1024 * 1024;
 const MOUNT_ATTR_NOEXEC: u64 = 0x8;
@@ -36,6 +37,21 @@ struct Mount {
     write: bool,
 }
 
+enum MountOperation {
+    Bind(Mount),
+    Hide(String, bool),
+    SearchDirectory(String),
+}
+
+impl MountOperation {
+    fn path(&self) -> &str {
+        match self {
+            Self::Bind(mount) => &mount.path,
+            Self::Hide(path, _) | Self::SearchDirectory(path) => path,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Prepared {
     mounts: Vec<Mount>,
@@ -43,6 +59,7 @@ struct Prepared {
     aliases: Vec<(PathBuf, PathBuf)>,
     root_writable: bool,
     noexec: Vec<String>,
+    search_dirs: BTreeSet<String>,
 }
 
 fn unsupported(message: impl Into<String>) -> SandboxError {
@@ -167,14 +184,28 @@ pub fn try_run() -> Option<i32> {
         if bytes.len() as u64 > MAX_SPEC_BYTES {
             return Err(unsupported("execution spec exceeds 4 MiB"));
         }
-        let spec: ExecutionSpec = serde_json::from_slice(&bytes)
-            .map_err(|e| unsupported(format!("invalid execution spec: {e}")))?;
-        spec.validate()
-            .map_err(|e| unsupported(format!("invalid execution spec: {e}")))?;
         drop(input);
         if inner {
-            run_inner(&spec, &mut status)
+            let launch: InnerLaunch = serde_json::from_slice(&bytes)
+                .map_err(|e| unsupported(format!("invalid inner launch: {e}")))?;
+            launch
+                .launch
+                .validate()
+                .map_err(|e| unsupported(e.to_string()))?;
+            if launch.noexec.len() > 1024 {
+                return Err(unsupported("too many noexec paths"));
+            }
+            for path in launch.noexec.iter().chain(launch.mounts.keys()) {
+                asc_sandbox_types::validate_os_path(path)
+                    .map_err(|e| unsupported(e.to_string()))?;
+            }
+            verify_installed_mounts(&launch.mounts)?;
+            run_inner(&launch, &mut status)
         } else {
+            let spec: ExecutionSpec = serde_json::from_slice(&bytes)
+                .map_err(|e| unsupported(format!("invalid execution spec: {e}")))?;
+            spec.validate()
+                .map_err(|e| unsupported(format!("invalid execution spec: {e}")))?;
             run_outer(&spec, &mut status)
         }
     })();
@@ -269,7 +300,12 @@ fn access(spec: &ExecutionSpec, objects: &[Object], path: &Path) -> (bool, bool)
     let mut deny_read = false;
     let mut deny_write = false;
     for (rule, object) in spec.permissions.filesystem.rules.iter().zip(objects) {
-        if !covers(object, path) {
+        if !covers(object, path)
+            || rule
+                .excluded_paths
+                .iter()
+                .any(|excluded| path.starts_with(excluded))
+        {
             continue;
         }
         match rule.effect {
@@ -291,9 +327,8 @@ fn reserved(path: &Path) -> bool {
     path.starts_with("/proc") || path.starts_with("/dev")
 }
 
-fn open_parent(path: &Path, objects: &[Object]) -> Result<File> {
+fn open_parent<'a>(path: &Path, objects: impl Iterator<Item = &'a Object>) -> Result<File> {
     let anchor = objects
-        .iter()
         .filter(|object| object.directory && path.starts_with(&object.canonical))
         .max_by_key(|object| object.canonical.components().count())
         .ok_or_else(|| unsupported(format!("no pinned ancestor for {}", path.display())))?;
@@ -390,6 +425,7 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
         .collect::<Result<Vec<_>>>()?;
     let mut mounts = BTreeMap::new();
     let mut hidden = Vec::new();
+    let mut excluded_objects = Vec::new();
     for (rule, object) in spec.permissions.filesystem.rules.iter().zip(&objects) {
         if reserved(Path::new(&object.path)) || reserved(&object.canonical) {
             return Err(unsupported(format!(
@@ -405,7 +441,31 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
                     object.path
                 )));
             }
-            reject_hardlinks(&object.canonical)?;
+            for excluded in &rule.excluded_paths {
+                let child = open_object(excluded, &spec.path_facts)?;
+                if !object.directory
+                    || !child.directory
+                    || child.canonical != Path::new(excluded)
+                    || reserved(&child.canonical)
+                {
+                    return Err(unsupported(format!(
+                        "subtree exclusion boundaries must be canonical directories: {excluded}"
+                    )));
+                }
+                let (read, write) = access(spec, &objects, &child.canonical);
+                if read {
+                    mounts.insert(
+                        excluded.clone(),
+                        Mount {
+                            path: excluded.clone(),
+                            source: child.file.try_clone()?,
+                            write,
+                        },
+                    );
+                }
+                excluded_objects.push(child);
+            }
+            reject_hardlinks(&object.canonical, &rule.excluded_paths)?;
             for alias in &objects {
                 if Path::new(&alias.path) != alias.canonical
                     && (covers(alias, &object.canonical) || covers(object, &alias.canonical))
@@ -455,7 +515,7 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
             if let std::collections::btree_map::Entry::Vacant(entry) = mounts.entry(key.clone()) {
                 entry.insert(Mount {
                     path: key,
-                    source: open_parent(parent, &objects)?,
+                    source: open_parent(parent, objects.iter().chain(&excluded_objects))?,
                     write,
                 });
             }
@@ -480,6 +540,14 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
                 },
             );
             noexec.push(path.clone());
+        } else {
+            // Restored subtrees still inherit an unreadable ancestor's noexec ceiling.
+            noexec.extend(
+                mounts
+                    .values()
+                    .filter(|mount| Path::new(&mount.path).starts_with(&object.canonical))
+                    .map(|mount| mount.path.clone()),
+            );
         }
     }
     let program = open_object(&spec.launch.resolved_program, &spec.path_facts)?;
@@ -499,6 +567,14 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
     {
         return Err(unsupported("initial executable is within a noexec range"));
     }
+    let mount_alias = objects
+        .iter()
+        .chain([&program, &cwd])
+        .find(|object| {
+            Path::new(&object.path) != object.canonical
+                && access(spec, &objects, &object.canonical).0
+        })
+        .map(|object| object.path.clone());
     for object in [program, cwd] {
         let write = access(spec, &objects, &object.canonical).1;
         mounts.insert(
@@ -516,22 +592,57 @@ fn prepare(spec: &ExecutionSpec) -> Result<Prepared> {
     let mut hidden_roots: Vec<(String, bool)> = Vec::new();
     for (path, directory) in hidden {
         if !hidden_roots.iter().any(|(parent, is_directory)| {
-            *is_directory && parent != &path && Path::new(&path).starts_with(parent)
+            *is_directory
+                && Path::new(&path).starts_with(parent)
+                && !mounts.iter().any(|mount| {
+                    mount.path != *parent
+                        && Path::new(&mount.path).starts_with(parent)
+                        && Path::new(&path).starts_with(&mount.path)
+                })
         }) {
             hidden_roots.push((path, directory));
         }
     }
     let aliases = mount_aliases(spec, &objects, &mounts, &hidden_roots)?;
+    let mut search_dirs = BTreeSet::new();
+    for mount in &mounts {
+        for parent in Path::new(&mount.path).ancestors().skip(1) {
+            if hidden_roots
+                .iter()
+                .any(|(hidden, directory)| *directory && parent.starts_with(hidden))
+                && !access(spec, &objects, parent).0
+            {
+                search_dirs.insert(
+                    parent
+                        .to_str()
+                        .ok_or_else(|| unsupported("non-UTF8 parent path"))?
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    // The installed traversal view requires symlink-free mount destinations.
+    if !search_dirs.is_empty()
+        && let Some(path) = mount_alias
+    {
+        return Err(unsupported(format!(
+            "search directories require canonical mount destinations: {path}"
+        )));
+    }
     Ok(Prepared {
         aliases,
         mounts,
         hidden: hidden_roots,
         root_writable: access(spec, &objects, Path::new("/")).1,
         noexec,
+        search_dirs,
     })
 }
 
-fn reject_hardlinks(path: &Path) -> Result<()> {
+fn reject_hardlinks(path: &Path, excluded: &[String]) -> Result<()> {
+    if excluded.iter().any(|root| path.starts_with(root)) {
+        return Ok(());
+    }
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.is_file() && metadata.nlink() > 1 {
         return Err(unsupported(format!(
@@ -541,7 +652,7 @@ fn reject_hardlinks(path: &Path) -> Result<()> {
     }
     if metadata.is_dir() {
         for child in std::fs::read_dir(path)? {
-            reject_hardlinks(&child?.path())?;
+            reject_hardlinks(&child?.path(), excluded)?;
         }
     }
     Ok(())
@@ -685,85 +796,7 @@ fn run_outer(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
             "linux-sandbox: warning: pre-existing hardlinks in writable paths may modify files outside write grants; writable paths are not scanned for hardlinks; continuing"
         );
     }
-    let mut command = Command::new(bwrap);
-    command.env_clear().args([
-        "--die-with-parent",
-        "--unshare-user",
-        "--unshare-pid",
-        "--as-pid-1",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--cap-drop",
-        "ALL",
-        "--cap-add",
-        "CAP_SYS_ADMIN",
-        "--cap-add",
-        "CAP_SETPCAP",
-        "--tmpfs",
-        "/",
-    ]);
-    if spec.permissions.network.mode == NetworkMode::Off {
-        command.arg("--unshare-net");
-    }
-    let mut preserved = Vec::new();
-    for mount in prepared.mounts {
-        command
-            .arg(if mount.write {
-                "--bind-fd"
-            } else {
-                "--ro-bind-fd"
-            })
-            .arg(mount.source.as_raw_fd().to_string())
-            .arg(mount.path);
-        preserved.push(mount.source);
-    }
-    for (name, target) in prepared.aliases {
-        command.arg("--symlink").arg(target).arg(name);
-    }
-    for (path, directory) in prepared.hidden {
-        if directory {
-            command
-                .args(["--perms", "000", "--tmpfs"])
-                .arg(&path)
-                .arg("--remount-ro")
-                .arg(path);
-        } else {
-            let empty = File::open("/dev/null")?;
-            command
-                .args(["--perms", "000", "--ro-bind-data"])
-                .arg(empty.as_raw_fd().to_string())
-                .arg(path);
-            preserved.push(empty);
-        }
-    }
-    // Fresh virtual process/device files do not reveal host proc or Unix sockets.
-    command.args(["--proc", "/proc", "--dev", "/dev"]);
-    // Exec the pinned static helper through its descriptor. A private mount
-    // destination could require creating a file under an explicitly RO root.
-    let helper_path = format!("/proc/self/fd/{}", helper.as_raw_fd());
-    preserved.push(helper);
-    if !prepared.root_writable {
-        command.args(["--remount-ro", "/"]);
-    }
-    command.args([
-        "--chdir",
-        &spec.launch.cwd,
-        "--",
-        &helper_path,
-        "--strict-inner",
-    ]);
-    let mut inner_spec = spec.clone();
-    // Already inaccessible ranges need no mount flag and may not exist in the
-    // constructed view. Keep only the noexec mounts installed by this plan.
-    inner_spec.permissions.execution.deny_paths = prepared.noexec;
-    let mut input = sealed_spec(&inner_spec)?;
-    input.seek(SeekFrom::Start(0))?;
-    command
-        .arg("--execution-spec-fd")
-        .arg(input.as_raw_fd().to_string())
-        .arg("--status-fd")
-        .arg(status.as_raw_fd().to_string());
-    preserved.push(input);
+    let (mut command, preserved) = bwrap_command(spec, status, helper, prepared, bwrap)?;
     let mut keep: BTreeSet<RawFd> = preserved.iter().map(AsRawFd::as_raw_fd).collect();
     keep.insert(status.as_raw_fd());
     close_unlisted_fds(&keep)?;
@@ -784,7 +817,274 @@ fn run_outer(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
     Err(error.into())
 }
 
-fn sealed_spec(spec: &ExecutionSpec) -> Result<File> {
+fn bwrap_command(
+    spec: &ExecutionSpec,
+    status: &File,
+    helper: File,
+    prepared: Prepared,
+    bwrap: &str,
+) -> Result<(Command, Vec<File>)> {
+    let mut command = Command::new(bwrap);
+    command.env_clear().args([
+        "--die-with-parent",
+        "--unshare-user",
+        "--unshare-pid",
+        "--as-pid-1",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CAP_SYS_ADMIN",
+        "--cap-add",
+        "CAP_SETPCAP",
+        "--tmpfs",
+        "/",
+    ]);
+    if spec.permissions.network.mode == NetworkMode::Off {
+        command.arg("--unshare-net");
+    }
+    let inner = InnerLaunch {
+        launch: spec.launch.clone(),
+        network: spec.permissions.network.mode,
+        noexec: prepared.noexec.clone(),
+        mounts: mount_checks(&prepared)?,
+    };
+    let mut preserved = Vec::new();
+    append_mounts(
+        &mut command,
+        prepared.mounts,
+        &prepared.hidden,
+        &prepared.search_dirs,
+        &mut preserved,
+    )?;
+    for (name, target) in prepared.aliases {
+        command.arg("--symlink").arg(target).arg(name);
+    }
+    for path in &prepared.search_dirs {
+        command.args(["--remount-ro", path]);
+    }
+    for (path, directory) in &prepared.hidden {
+        if *directory && !prepared.search_dirs.contains(path) {
+            command.args(["--remount-ro", path]);
+        }
+    }
+    // Fresh virtual process/device files do not reveal host proc or Unix sockets.
+    command.args(["--proc", "/proc", "--dev", "/dev"]);
+    // Exec the pinned static helper through its descriptor. A private mount
+    // destination could require creating a file under an explicitly RO root.
+    let helper_path = format!("/proc/self/fd/{}", helper.as_raw_fd());
+    preserved.push(helper);
+    if !prepared.root_writable {
+        command.args(["--remount-ro", "/"]);
+    }
+    command.args([
+        "--chdir",
+        &spec.launch.cwd,
+        "--",
+        &helper_path,
+        "--strict-inner",
+    ]);
+    let mut input = sealed_spec(&inner)?;
+    input.seek(SeekFrom::Start(0))?;
+    command
+        .arg("--execution-spec-fd")
+        .arg(input.as_raw_fd().to_string())
+        .arg("--status-fd")
+        .arg(status.as_raw_fd().to_string());
+    preserved.push(input);
+    Ok((command, preserved))
+}
+
+fn append_mounts(
+    command: &mut Command,
+    mounts: Vec<Mount>,
+    hidden: &[(String, bool)],
+    search_dirs: &BTreeSet<String>,
+    preserved: &mut Vec<File>,
+) -> Result<()> {
+    let mut operations: Vec<_> = mounts
+        .into_iter()
+        .map(MountOperation::Bind)
+        .chain(
+            hidden
+                .iter()
+                .map(|(path, directory)| MountOperation::Hide(path.clone(), *directory)),
+        )
+        .chain(
+            search_dirs
+                .iter()
+                .filter(|path| !hidden.iter().any(|(hidden, _)| hidden == *path))
+                .cloned()
+                .map(MountOperation::SearchDirectory),
+        )
+        .collect();
+    operations.sort_by_key(|operation| Path::new(operation.path()).components().count());
+    for operation in operations {
+        match operation {
+            MountOperation::Bind(mount) => {
+                command
+                    .arg(if mount.write {
+                        "--bind-fd"
+                    } else {
+                        "--ro-bind-fd"
+                    })
+                    .arg(mount.source.as_raw_fd().to_string())
+                    .arg(mount.path);
+                preserved.push(mount.source);
+            }
+            MountOperation::Hide(path, true) => {
+                // Set the mode on a fresh superblock, never on a resolved destination inode.
+                command.args([
+                    "--perms",
+                    if search_dirs.contains(&path) {
+                        "111"
+                    } else {
+                        "000"
+                    },
+                    "--tmpfs",
+                    &path,
+                ]);
+            }
+            MountOperation::Hide(path, false) => {
+                let empty = File::open("/dev/null")?;
+                command
+                    .args(["--perms", "000", "--ro-bind-data"])
+                    .arg(empty.as_raw_fd().to_string())
+                    .arg(path);
+                preserved.push(empty);
+            }
+            MountOperation::SearchDirectory(path) => {
+                command.args(["--perms", "111", "--tmpfs", &path]);
+            }
+        }
+    }
+    Ok(())
+}
+
+// Only the outer helper constructs and seals this payload. The target never inherits it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InnerLaunch {
+    launch: asc_sandbox_types::LaunchSpec,
+    network: NetworkMode,
+    noexec: Vec<String>,
+    mounts: BTreeMap<String, MountCheck>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum MountCheck {
+    Bind {
+        device: u64,
+        inode: u64,
+        readonly: bool,
+    },
+    Mask {
+        mode: u32,
+        directory: bool,
+    },
+}
+
+fn mount_checks(plan: &Prepared) -> Result<BTreeMap<String, MountCheck>> {
+    let mut checks = BTreeMap::new();
+    if plan.search_dirs.is_empty() {
+        return Ok(checks);
+    }
+    for mount in &plan.mounts {
+        let source = mount.source.metadata()?;
+        checks.insert(
+            mount.path.clone(),
+            MountCheck::Bind {
+                device: source.dev(),
+                inode: source.ino(),
+                readonly: !mount.write,
+            },
+        );
+    }
+    for (path, directory) in &plan.hidden {
+        checks.insert(
+            path.clone(),
+            MountCheck::Mask {
+                mode: 0,
+                directory: *directory,
+            },
+        );
+    }
+    for path in &plan.search_dirs {
+        checks.insert(
+            path.clone(),
+            MountCheck::Mask {
+                mode: 0o111,
+                directory: true,
+            },
+        );
+    }
+    Ok(checks)
+}
+
+fn verify_installed_mounts(checks: &BTreeMap<String, MountCheck>) -> Result<()> {
+    use rustix::fs::{
+        self, AtFlags, Mode, OFlags, ResolveFlags, StatVfsMountFlags, StatxAttributes, StatxFlags,
+    };
+    // Each directory mask gets a fresh superblock, distinct from every bind and other mask.
+    let mut devices: BTreeSet<_> = checks
+        .values()
+        .filter_map(|check| match check {
+            MountCheck::Bind { device, .. } => Some(*device),
+            MountCheck::Mask { .. } => None,
+        })
+        .collect();
+    for (path, check) in checks {
+        // Inspect one descriptor throughout, including when another process renames an ancestor.
+        let fd = fs::openat2(
+            fs::CWD,
+            path.as_str(),
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|e| unsupported(format!("cannot verify mount at {path}: {e}")))?;
+        let file = File::from(fd);
+        let stat = fs::statx(&file, "", AtFlags::EMPTY_PATH, StatxFlags::BASIC_STATS)
+            .map_err(std::io::Error::from)?;
+        let metadata = file.metadata()?;
+        let readonly = fs::fstatvfs(&file)
+            .map_err(std::io::Error::from)?
+            .f_flag
+            .contains(StatVfsMountFlags::RDONLY);
+        let matches = match check {
+            MountCheck::Bind {
+                device,
+                inode,
+                readonly: required,
+            } => metadata.dev() == *device && metadata.ino() == *inode && (!required || readonly),
+            MountCheck::Mask { mode, directory } => {
+                readonly
+                    && metadata.mode() & 0o7777 == *mode
+                    && if *directory {
+                        metadata.is_dir()
+                            && devices.insert(metadata.dev())
+                            && fs::fstatfs(&file).map_err(std::io::Error::from)?.f_type
+                                == libc::TMPFS_MAGIC
+                    } else {
+                        metadata.is_file() && metadata.len() == 0
+                    }
+            }
+        };
+        if !matches
+            || !(stat.stx_attributes_mask & stat.stx_attributes)
+                .contains(StatxAttributes::MOUNT_ROOT)
+        {
+            return Err(unsupported(format!(
+                "installed mount differs from plan at {path}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sealed_spec(spec: &InnerLaunch) -> Result<File> {
     let name = CString::new("asc-execution").map_err(|e| unsupported(e.to_string()))?;
     let fd =
         unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
@@ -800,20 +1100,18 @@ fn sealed_spec(spec: &ExecutionSpec) -> Result<File> {
     Ok(file)
 }
 
-fn run_inner(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
+fn run_inner(spec: &InnerLaunch, status: &mut File) -> Result<i32> {
     validate_stdio()?;
     set_cloexec(status.as_raw_fd(), true)?;
     // Bubblewrap's devpts setup can enter a second user namespace. Clone the
     // mount namespace so our retained CAP_SYS_ADMIN owns the noexec changes.
-    if !spec.permissions.execution.deny_paths.is_empty()
-        && unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0
-    {
+    if !spec.noexec.is_empty() && unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(unsupported(format!(
             "cannot create noexec mount namespace: {}",
             std::io::Error::last_os_error()
         )));
     }
-    for path in &spec.permissions.execution.deny_paths {
+    for path in &spec.noexec {
         install_noexec(path)?;
     }
     // Setup capabilities are removed before any target-controlled environment,
@@ -824,7 +1122,7 @@ fn run_inner(spec: &ExecutionSpec, status: &mut File) -> Result<i32> {
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    crate::seccomp::apply_strict_restrictions(spec.permissions.network.mode == NetworkMode::Full)?;
+    crate::seccomp::apply_strict_restrictions(spec.network == NetworkMode::Full)?;
     close_unlisted_fds(&BTreeSet::from([status.as_raw_fd()]))?;
     emit(status, &BackendStatus::Installed)?;
     let mut target = Command::new(&spec.launch.resolved_program);
@@ -1289,6 +1587,85 @@ mod tests {
     }
 
     #[test]
+    fn installed_view_rejects_changed_ancestor_before_start() {
+        if std::env::var_os("ASC_SANDBOX_INTEGRATION").is_none() {
+            return;
+        }
+        let (dir, mut spec) = fixture();
+        let sessions = dir.path().join("sessions");
+        let current = sessions.join("group/current");
+        let tools = dir.path().join("tools");
+        let data = tools.join("data");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        deny(&mut spec, &sessions, "read");
+        spec.permissions
+            .filesystem
+            .rules
+            .last_mut()
+            .unwrap()
+            .excluded_paths = vec![current.to_str().unwrap().into()];
+        spec.permissions.filesystem.rules.push(
+            serde_json::from_value(serde_json::json!({
+                "effect":"allow","path":data,"rights":["read"]
+            }))
+            .unwrap(),
+        );
+        spec.path_facts.extend([fact(&current), fact(&data)]);
+        let prepared = prepare(&spec).unwrap();
+        let helper = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("linux-sandbox");
+        let mut status = tempfile::tempfile().unwrap();
+        let (mut command, files) = bwrap_command(
+            &spec,
+            &status,
+            File::open(helper).unwrap(),
+            prepared,
+            checked_bwrap().unwrap(),
+        )
+        .unwrap();
+        assert!(!command.get_args().any(|arg| arg == "--chmod"));
+        let identity = |path: &Path| {
+            let meta = path.metadata().unwrap();
+            (meta.dev(), meta.ino(), meta.mode())
+        };
+        let group = sessions.join("group");
+        let paths = [&data, &sessions, &group, &current];
+        let before = paths.map(|path| identity(path));
+        // The symbolic name still leads to the very same approved data. Only its route changed.
+        std::fs::rename(&tools, dir.path().join("saved-tools")).unwrap();
+        symlink("saved-tools", &tools).unwrap();
+        let mut fds: Vec<_> = files.iter().map(AsRawFd::as_raw_fd).collect();
+        fds.push(status.as_raw_fd());
+        command
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let output = spawn_with_fds(&mut command, &fds)
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        status.rewind().unwrap();
+        let mut frames = String::new();
+        status.read_to_string(&mut frames).unwrap();
+        assert_eq!(paths.map(|path| identity(path)), before);
+        assert_eq!(
+            output.status.code(),
+            Some(125),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let event: BackendStatus = serde_json::from_str(&frames).unwrap();
+        assert!(
+            matches!(event, BackendStatus::Failed { message } if message.contains(&format!("cannot verify mount at {}", data.display())))
+        );
+    }
+
+    #[test]
     fn denied_ancestor_cannot_be_reopened_by_deeper_allow() {
         let (dir, mut spec) = fixture();
         let secret = dir.path().join("secret");
@@ -1338,6 +1715,121 @@ mod tests {
                 .iter()
                 .filter(|m| Path::new(&m.path).starts_with(&protected))
                 .all(|m| !m.write)
+        );
+    }
+
+    #[test]
+    fn exceptions_restore_inherited_grants_and_keep_nested_restrictions() {
+        let (dir, mut spec) = fixture();
+        let parent = dir.path().join("sessions");
+        let child = parent.join("group/current");
+        std::fs::create_dir_all(&child).unwrap();
+        let secret = child.join("private");
+        std::fs::write(&secret, "secret").unwrap();
+        deny(&mut spec, &parent, "read");
+        spec.permissions
+            .filesystem
+            .rules
+            .last_mut()
+            .unwrap()
+            .excluded_paths = vec![child.to_str().unwrap().into()];
+        spec.path_facts.push(fact(&child));
+        deny(&mut spec, &secret, "read");
+        spec.permissions
+            .execution
+            .deny_paths
+            .push(parent.to_str().unwrap().into());
+        let plan = prepare(&spec).unwrap();
+        assert!(
+            plan.mounts
+                .iter()
+                .any(|mount| Path::new(&mount.path) == child && mount.write)
+        );
+        assert!(
+            plan.hidden
+                .iter()
+                .any(|(path, _)| Path::new(path) == secret)
+        );
+        assert!(plan.search_dirs.contains(parent.to_str().unwrap()));
+        assert!(
+            plan.search_dirs
+                .contains(parent.join("group").to_str().unwrap())
+        );
+        assert!(plan.noexec.contains(&child.to_str().unwrap().to_owned()));
+        let mut changed = spec.clone();
+        changed
+            .path_facts
+            .iter_mut()
+            .find(|fact| Path::new(&fact.path) == child)
+            .unwrap()
+            .inode += 1;
+        assert!(prepare(&changed).is_err());
+        let allowed = child.join("data");
+        std::fs::write(&allowed, "public").unwrap();
+        std::fs::hard_link(&allowed, child.join("alias")).unwrap();
+        prepare(&spec).unwrap();
+        std::fs::hard_link(&secret, child.join("secret-alias")).unwrap();
+        assert!(
+            prepare(&spec).is_err(),
+            "independent deny must still reject hardlink aliases"
+        );
+    }
+
+    #[test]
+    fn rejects_search_directories_inside_launch_alias_mounts() {
+        let (dir, mut spec) = fixture();
+        let parent = dir.path().join("sessions");
+        let outside = dir.path().join("outside");
+        let nested = outside.join("nested");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("program"), "binary").unwrap();
+        let link = parent.join("link");
+        symlink(&outside, &link).unwrap();
+        deny(&mut spec, &parent, "read");
+        spec.launch.cwd = link.to_str().unwrap().into();
+        spec.launch.resolved_program = link.join("nested/program").to_str().unwrap().into();
+        for path in [&spec.launch.cwd, &spec.launch.resolved_program] {
+            let mut record = fact(Path::new(path));
+            record.path = path.clone();
+            spec.path_facts.push(record);
+        }
+        let error = prepare(&spec).unwrap_err().to_string();
+        assert!(error.contains("search directories require canonical mount destinations"));
+        // The same aliases are safe when no hidden parent needs synthetic directories.
+        spec.permissions.filesystem.rules.pop();
+        prepare(&spec).unwrap();
+    }
+
+    #[test]
+    fn rejects_aliases_routed_into_search_directories() {
+        let (dir, mut spec) = fixture();
+        let parent = dir.path().join("sessions");
+        let group = parent.join("group");
+        let deep = dir.path().join("deep");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::create_dir(&deep).unwrap();
+        std::fs::create_dir_all(outside.join("nested")).unwrap();
+        symlink(&group, deep.join("shortcut")).unwrap();
+        symlink(&outside, group.join("link")).unwrap();
+        for path in [deep.join("shortcut/link"), group.join("link/nested")] {
+            spec.permissions.filesystem.rules.push(
+                serde_json::from_value(serde_json::json!({
+                    "effect":"allow", "path":path, "rights":["write"]
+                }))
+                .unwrap(),
+            );
+            let mut record = fact(&path);
+            record.path = path.to_str().unwrap().into();
+            spec.path_facts.push(record);
+        }
+        deny(&mut spec, &parent, "read");
+        assert!(
+            prepare(&spec)
+                .unwrap_err()
+                .to_string()
+                .contains("search directories require canonical mount destinations")
         );
     }
 
@@ -1437,7 +1929,10 @@ mod tests {
         symlink(&outside, &allowed).unwrap();
         let replacement = parent.metadata().unwrap();
         assert_ne!(original.ino(), replacement.ino());
-        let pinned = open_parent(&parent, &objects).unwrap().metadata().unwrap();
+        let pinned = open_parent(&parent, objects.iter())
+            .unwrap()
+            .metadata()
+            .unwrap();
         assert_eq!(
             (pinned.dev(), pinned.ino()),
             (original.dev(), original.ino())
@@ -1454,15 +1949,15 @@ mod tests {
             std::fs::create_dir_all(&parent).unwrap();
             std::fs::create_dir_all(outside.join("parent")).unwrap();
             let objects = [open_object(allowed.to_str().unwrap(), &[fact(&allowed)]).unwrap()];
-            assert!(open_parent(&parent, &objects).is_ok());
-            assert!(open_parent(&allowed, &objects).is_ok());
-            assert!(open_parent(&outside, &objects).is_err());
+            assert!(open_parent(&parent, objects.iter()).is_ok());
+            assert!(open_parent(&allowed, objects.iter()).is_ok());
+            assert!(open_parent(&outside, objects.iter()).is_err());
 
             let replaced = allowed.join(replaced);
             std::fs::rename(&replaced, directory.path().join("previous-parent")).unwrap();
             symlink(&outside, &replaced).unwrap();
             assert!(
-                open_parent(&parent, &objects)
+                open_parent(&parent, objects.iter())
                     .unwrap_err()
                     .to_string()
                     .contains("cannot pin ancestor")

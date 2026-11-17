@@ -188,7 +188,8 @@ pub fn prepare_path_facts(
             .filesystem
             .rules
             .iter()
-            .map(|rule| rule.path.clone()),
+            .flat_map(|rule| std::iter::once(&rule.path).chain(&rule.excluded_paths))
+            .cloned(),
     );
     paths.extend(permissions.execution.deny_paths.iter().cloned());
     paths.extend(additional.iter().cloned());
@@ -213,6 +214,19 @@ pub fn prepare_path_facts(
                         .into());
                     }
                 }
+            }
+        }
+    }
+    for rule in &permissions.filesystem.rules {
+        if rule.excluded_paths.is_empty() {
+            continue;
+        }
+        for path in std::iter::once(&rule.path).chain(&rule.excluded_paths) {
+            let fact = &facts[path];
+            if !fact.is_directory || fact.path != fact.canonical_path {
+                return Err(PepError::Unsupported(format!(
+                    "subtree exclusion boundaries must be canonical directories: {path}"
+                )));
             }
         }
     }
