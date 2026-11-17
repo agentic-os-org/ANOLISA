@@ -953,7 +953,12 @@ fn raw_cli_startup_upgrade_policy_ai_off_blocks_probe() {
 #[cfg(target_os = "linux")]
 #[test]
 fn raw_cli_startup_upgrade_policy_ai_off_preserves_cache_and_rpm_lookup() {
-    let session = spawn_startup_upgrade_policy_fixture(Some("off"), true, true, true);
+    let mut session = spawn_startup_upgrade_policy_fixture(Some("off"), true, true, true);
+    session.wait_screen("cached upgrade notice and command are rendered", |screen| {
+        let contents = screen.contents();
+        contents.contains("Update available: cosh-ng")
+            && contents.contains("sudo dnf update cosh-ng")
+    });
     let contents = session.screen().contents();
     assert!(contents.contains("Update available: cosh-ng"), "{contents}");
     assert!(contents.contains("sudo dnf update cosh-ng"), "{contents}");
@@ -1063,7 +1068,7 @@ fn spawn_with_gated_upgrade_probe_for_shell(
     let mut files = vec![("bin/anolisa", anolisa.as_str())];
     files.extend_from_slice(extra_files);
     // Wide enough that the notice panel keeps the scoped command on one row.
-    TerminalSession::spawn_for_shell_with_startup_env(
+    let mut session = TerminalSession::spawn_for_shell_with_startup_env(
         shell,
         "enhanced",
         200,
@@ -1073,7 +1078,15 @@ fn spawn_with_gated_upgrade_probe_for_shell(
             ("COSH_SHELL_STARTUP_BANNER", "1"),
             ("COSH_SHELL_UPGRADE_CHECK_CACHE", "$HOME/upgrade-cache.json"),
         ],
-    )
+    );
+    session.wait_screen(
+        "startup banner before releasing the upgrade probe",
+        |screen| {
+            let contents = screen.contents();
+            contents.contains("Cosh AI Shell") && contents.contains("Help: /help")
+        },
+    );
+    session
 }
 
 #[cfg(target_os = "linux")]
@@ -1146,7 +1159,13 @@ fn raw_cli_upgrade_notice_waits_until_the_next_prompt_after_a_failed_command() {
 
     // One write carries the whole line, so its submit is counted and the
     // prompt after the failure is a `CommandFailed` boundary.
-    session.send(b"sleep 1; printf 'failed-%s\\n' command; false\n");
+    session.send(
+        b"printf 'upgrade-command-%s\\n' started; sleep 1; printf 'failed-%s\\n' command; false\n",
+    );
+    session.wait_screen(
+        "command starts before completing the upgrade probe",
+        |screen| screen.contents().contains("\nupgrade-command-started"),
+    );
     release_upgrade_probe(&session);
 
     session.wait_screen("next prompt renders deferred upgrade notice", |screen| {
@@ -1630,8 +1649,12 @@ fn review_regression_startup_fits_actual_narrow_pty_with_or_without_width_overri
         if let Some(width) = width {
             environment.push(("COSH_SHELL_WIDTH", width));
         }
-        let session =
+        let mut session =
             TerminalSession::spawn_for_shell_with_env("bash", "enhanced", 32, &environment);
+        session.wait_screen("narrow startup banner is rendered", |screen| {
+            let contents = screen.contents();
+            contents.contains("Cosh AI Shell") && contents.contains("Help: /help")
+        });
         let plain = strip_ansi_escape(&session.raw_output());
         assert!(plain.contains("Cosh AI Shell"), "{plain}");
         assert!(plain.contains("/help"), "{plain}");
