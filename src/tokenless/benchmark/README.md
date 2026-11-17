@@ -26,14 +26,16 @@ One subdirectory per layer of the four-layer tokenless benchmark plan:
 L1–L3 are standalone Cargo workspaces (each with its own `Cargo.toml` carrying an
 empty `[workspace]` table) kept out of the main tokenless workspace on purpose.
 **L4 is not a Cargo workspace**: it drives an agent against real repositories, so
-its harness is the Python runner in [`src/benchmark/swe-runner`](../../benchmark/swe-runner)
-plus docker, and it borrows only the naming and reporting conventions. See the
-per-layer `README.md` files for build/run instructions and methodology.
+its harness is the Python runner in
+[`benchmark/swe-runner`](../../../benchmark/swe-runner) plus docker, and it
+borrows only the naming and reporting conventions. See the per-layer
+`README.md` files for build/run instructions and methodology.
 
 For QwenWork macOS Hook overhead, use the standalone
 [PreTool rewrite latency benchmark](rewrite-latency/README.md). It compares
 staged plugins with identical inputs and verifies actual rewrites separately
 from passthroughs before reporting timings.
+
 Each layer keeps its results in its own `reports/` directory so the layers'
 numbers never mix. Every one of those directories is gitignored: benchmark
 reports are run/machine-specific artifacts and are never committed — regenerate

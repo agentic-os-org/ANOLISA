@@ -42,7 +42,6 @@ cids=$(docker ps -aq --filter "label=$LABEL" 2>/dev/null) || {
     echo "[clean] cannot inspect sandbox containers; cleanliness is unverified" >&2
     exit 1
 }
-mkdir -p "$W/logs" || exit 1
 printf '%s containers_present=%s cleanup_enabled=%s\n' "$(date -u +%FT%TZ)" \
     "$([ -n "$cids" ] && echo true || echo false)" "${L4_CLEAN_CONTAINERS:-0}" >> "$W/logs/cleanup.provenance" || exit 1
 if [ "${L4_CLEAN_CONTAINERS:-0}" != "1" ] && [ -n "$cids" ]; then
