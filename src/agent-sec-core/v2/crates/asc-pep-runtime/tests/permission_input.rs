@@ -324,6 +324,401 @@ fn point_file_grants_do_not_become_directory_grants() {
 }
 
 #[test]
+fn missing_create_targets_request_the_existing_parent_without_creating_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().canonicalize().unwrap();
+    let first = parent.join("first");
+    let second = parent.join("second");
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ [{} , {}].contains(resource.path)
+    && context.input.operation == SecCore::WriteOperation::"create" }};"#,
+        json!(first),
+        json!(second),
+    ))
+    .unwrap();
+    let bound = input.prepare(&launch()).unwrap();
+    assert_eq!(input.resolve(&launch()).unwrap(), bound.permissions);
+    assert!(
+        bound
+            .permissions
+            .filesystem
+            .rules
+            .iter()
+            .all(|rule| rule.path == parent.to_str().unwrap())
+    );
+    for path in [&first, &second, &parent.join("sibling/nested")] {
+        assert!(allows(
+            &bound.permissions,
+            path.to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(allows(
+            &bound.permissions,
+            path.to_str().unwrap(),
+            FileRight::Read
+        ));
+    }
+    assert!(!allows(
+        &bound.permissions,
+        parent.parent().unwrap().to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!first.exists() && !second.exists());
+    let mut json_permissions = bound.permissions.clone();
+    for rule in &mut json_permissions.filesystem.rules {
+        rule.path = first.to_str().unwrap().to_owned();
+    }
+    assert!(
+        PermissionInput::parse(&serde_json::to_string(&json_permissions).unwrap())
+            .unwrap()
+            .prepare(&launch())
+            .is_err()
+    );
+    assert!(
+        bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == parent.to_str().unwrap() && fact.is_directory)
+    );
+    assert!(
+        !bound
+            .path_facts
+            .iter()
+            .any(|fact| fact.path == first.to_str().unwrap()
+                || fact.path == second.to_str().unwrap())
+    );
+    // The directory grant is not an exclusive-create contract for the original name.
+    std::fs::write(&first, "created after preparation").unwrap();
+    input
+        .validate_path_facts(&launch(), &bound.permissions, &bound.path_facts)
+        .unwrap();
+    let existing = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(first),
+    ))
+    .unwrap()
+    .prepare(&launch())
+    .unwrap();
+    assert!(allows(
+        &existing.permissions,
+        first.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        &existing.permissions,
+        second.to_str().unwrap(),
+        FileRight::Write
+    ));
+}
+
+#[test]
+fn existing_directory_write_covers_explicit_missing_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("work");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    for root in [&real, &alias] {
+        let output = root.join("a/b/new");
+        let candidate = format!(
+            r#"permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ [{}, {}, {}, {}].contains(resource.path) }};"#,
+            json!(root.join("new")),
+            json!(root.join("a")),
+            json!(root.join("a/b")),
+            json!(output),
+        );
+        let runtime = format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ (resource.path == {} || resource.path like {})
+    && context.input.operation == SecCore::WriteOperation::"write" }};
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ context.input.operation == SecCore::WriteOperation::"create" }};"#,
+            json!(root),
+            json!(format!("{}/*", root.display())),
+        );
+        let input = PermissionInput::parse(&candidate)
+            .unwrap()
+            .with_runtime(PermissionInput::parse(&runtime).unwrap())
+            .unwrap();
+        let bound = input.prepare(&launch()).unwrap();
+        assert!(
+            bound
+                .permissions
+                .filesystem
+                .rules
+                .iter()
+                .all(|rule| rule.path == real.to_str().unwrap())
+        );
+        assert!(allows(
+            &bound.permissions,
+            real.join("a/b/new").to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(!allows(
+            &bound.permissions,
+            dir.path().to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(
+            bound
+                .path_facts
+                .iter()
+                .all(|fact| std::path::Path::new(&fact.path).exists())
+        );
+        assert!(!real.join("a").exists());
+        std::fs::create_dir_all(real.join("a/b")).unwrap();
+        std::fs::write(real.join("a/b/new"), "created after preparation").unwrap();
+        input
+            .validate_path_facts(&launch(), &bound.permissions, &bound.path_facts)
+            .unwrap();
+        std::fs::remove_dir_all(real.join("a")).unwrap();
+        // Whole-subtree exclusions must not be dropped just because the objects are missing.
+        let deny = format!(
+            r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+            json!(real.join("a")),
+            json!(format!("{}/a/*", real.display())),
+        );
+        assert!(
+            PermissionInput::parse(&format!("{candidate}{runtime}{deny}"))
+                .unwrap()
+                .prepare(&launch())
+                .is_err()
+        );
+    }
+    // An absent suffix must not hide an existing dangling symlink from path binding.
+    std::os::unix::fs::symlink(dir.path().join("absent"), real.join("a")).unwrap();
+    let source = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};
+permit(principal, action == SecCore::Action::"file.read", resource)
+when {{ resource.path == {} }};"#,
+        json!(real),
+        json!(format!("{}/*", real.display())),
+        json!(real.join("a/b/new")),
+    );
+    assert!(
+        PermissionInput::parse(&source)
+            .unwrap()
+            .prepare(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn missing_parents_without_covering_write_report_the_target_and_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = dir.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let target = dir.path().join("a/b/new");
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(target),
+    );
+    for extra in [
+        String::new(),
+        r#"permit(principal, action == SecCore::Action::"file.read", resource);"#.into(),
+        format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+            json!(other),
+            json!(format!("{}/*", other.display()))
+        ),
+    ] {
+        let input = PermissionInput::parse(&format!("{create}{extra}")).unwrap();
+        let errors = [
+            input.prepare(&launch()).unwrap_err().to_string(),
+            input.resolve(&launch()).unwrap_err().to_string(),
+        ];
+        for error in errors {
+            assert!(error.contains(target.to_str().unwrap()), "{error}");
+            assert!(
+                error.contains(target.parent().unwrap().to_str().unwrap()),
+                "{error}"
+            );
+            assert!(
+                error.contains("no existing writable ancestor covers the target"),
+                "{error}"
+            );
+            assert!(
+                error.contains("grant write access to an existing ancestor directory"),
+                "{error}"
+            );
+        }
+        assert!(!dir.path().join("a").exists());
+    }
+}
+
+#[test]
+fn uncovered_missing_paths_require_create_and_an_existing_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new");
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(path),
+    );
+    for restricted in [
+        create.replace("file.write", "file.read"),
+        format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} && context.input.operation == SecCore::WriteOperation::"write" }};"#,
+            json!(path),
+        ),
+    ] {
+        assert!(
+            PermissionInput::parse(&restricted)
+                .unwrap()
+                .prepare(&launch())
+                .is_err()
+        );
+    }
+    let forbid = r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+when { context.input.operation == SecCore::WriteOperation::"create" };"#;
+    let merged = PermissionInput::parse(&create)
+        .unwrap()
+        .with_runtime(PermissionInput::parse(forbid).unwrap())
+        .unwrap();
+    assert!(merged.prepare(&launch()).is_err());
+    assert!(!path.exists());
+    for target in [dir.path().join("absent/child"), path.clone()] {
+        if target == path {
+            std::os::unix::fs::symlink(dir.path().join("absent"), &path).unwrap();
+        }
+        let input = PermissionInput::parse(&format!(
+            r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+            json!(target),
+        ))
+        .unwrap();
+        assert!(input.prepare(&launch()).is_err());
+    }
+}
+
+#[test]
+fn creation_widening_preserves_exclusions_and_rejects_parent_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new");
+    let sibling = dir.path().join("protected");
+    std::fs::write(&sibling, "protected").unwrap();
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(path),
+    );
+    let deny_sibling = format!(
+        r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(sibling),
+    );
+    let bound = PermissionInput::parse(&format!("{create}{deny_sibling}"))
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(allows(
+        &bound.permissions,
+        path.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(
+        &bound.permissions,
+        sibling.to_str().unwrap(),
+        FileRight::Write
+    ));
+    for forbidden in [
+        format!("resource.path != {}", json!(path)),
+        format!(
+            "resource.path == {} || resource.path like {}",
+            json!(dir.path()),
+            json!(format!("{}/*", dir.path().display()))
+        ),
+    ] {
+        let source = format!(
+            r#"{create}
+forbid(principal, action == SecCore::Action::"file.write", resource) when {{ {forbidden} }};"#
+        );
+        assert!(
+            PermissionInput::parse(&source)
+                .unwrap()
+                .prepare(&launch())
+                .is_err()
+        );
+    }
+    // Keep the established coarse mapping: a delete-only forbid is not a write deny.
+    let source = format!(
+        r#"{create}
+forbid(principal, action == SecCore::Action::"file.write", resource)
+when {{ context.input.operation == SecCore::WriteOperation::"delete" }};"#
+    );
+    assert!(
+        PermissionInput::parse(&source)
+            .unwrap()
+            .prepare(&launch())
+            .is_ok()
+    );
+    let source = format!(
+        r#"{create}
+forbid(principal, action == SecCore::Action::"file.write", resource)
+unless {{ resource.path == {} || resource.path like {} }};"#,
+        json!(dir.path()),
+        json!(format!("{}/*", dir.path().display()))
+    );
+    let bound = PermissionInput::parse(&source)
+        .unwrap()
+        .prepare(&launch())
+        .unwrap();
+    assert!(allows(
+        &bound.permissions,
+        path.to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert!(!allows(&bound.permissions, "/", FileRight::Write));
+    std::fs::remove_file(&sibling).unwrap();
+    assert!(
+        PermissionInput::parse(&format!("{create}{deny_sibling}"))
+            .unwrap()
+            .prepare(&launch())
+            .is_err()
+    );
+}
+
+#[test]
+fn creation_through_a_directory_alias_binds_the_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("real");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&parent).unwrap();
+    std::os::unix::fs::symlink(&parent, &alias).unwrap();
+    let input = PermissionInput::parse(&format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(alias.join("new")),
+    ))
+    .unwrap();
+    let bound = input.prepare(&launch()).unwrap();
+    assert!(allows(
+        &bound.permissions,
+        parent.join("sibling").to_str().unwrap(),
+        FileRight::Write
+    ));
+    assert_eq!(bound.mount_aliases, vec![alias.to_str().unwrap()]);
+    assert!(!alias.join("new").exists());
+    std::fs::rename(&parent, dir.path().join("old-parent")).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    let error = asc_pep_runtime::SandboxBackend::new(dir.path().join("unused-helper"))
+        .execute_bound(&bound)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("path identity changed"),
+        "{error}"
+    );
+}
+
+#[test]
 fn unsupported_conditions_and_advice_are_not_discarded() {
     for text in [
         r#"permit(principal, action == SecCore::Action::"file.read", resource) when { resource.path like "/work/*.txt" };"#,
@@ -671,6 +1066,85 @@ impl asc_pep_runtime::AuthorizationClient for Client {
 
     fn report(&self, _: &ExecutionReceipt) -> Result<ReceiptAck, asc_pep_runtime::PepError> {
         panic!("authorization-only preparation must not report execution");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pdp_authorizes_the_widened_creation_request_without_expanding_its_policy() {
+    use asc_pep_runtime::{PepRuntime, SandboxBackend, prepare_launch};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new");
+    let create = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} && context.input.operation == SecCore::WriteOperation::"create" }};"#,
+        json!(path),
+    );
+    let read = r#"permit(principal, action == SecCore::Action::"file.read", resource);"#;
+    let input = PermissionInput::parse(&create)
+        .unwrap()
+        .with_runtime(PermissionInput::parse(read).unwrap())
+        .unwrap();
+    let launch = prepare_launch("/usr/bin/true", vec![], dir.path(), BTreeMap::new()).unwrap();
+    let mut runtime = PepRuntime::new(SandboxBackend::new(dir.path().join("unused-helper")));
+    let principal = AgentPrincipal {
+        agent_type: Some("cosh".into()),
+    };
+    let invocation = r#"permit(principal, action in [SecCore::Action::"file.exec", SecCore::Action::"process.spawn"], resource);"#;
+    // PAP's launch-time projection accepts path scopes, not mutation-operation context.
+    let exact = format!(
+        r#"permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} }};"#,
+        json!(path)
+    );
+    let policies = [
+        format!("{read}{invocation}{exact}"),
+        format!(
+            r#"{read}{invocation}
+permit(principal, action == SecCore::Action::"file.write", resource)
+when {{ resource.path == {} || resource.path like {} }};"#,
+            json!(dir.path()),
+            json!(format!("{}/*", dir.path().display()))
+        ),
+    ];
+    for (index, policy) in policies.iter().enumerate() {
+        let client = Client::new(policy);
+        let (prepared, decision) = runtime
+            .authorize(&principal, launch.clone(), &input, &client)
+            .unwrap();
+        let request = &prepared.request.context.requested_permissions;
+        assert!(allows(
+            request,
+            dir.path().to_str().unwrap(),
+            FileRight::Write
+        ));
+        assert!(
+            request
+                .filesystem
+                .rules
+                .iter()
+                .all(|rule| rule.path != path.to_str().unwrap())
+        );
+        assert!(!path.exists());
+        if index == 0 {
+            assert!(
+                decision
+                    .effective_permissions
+                    .as_ref()
+                    .is_none_or(|permissions| !allows(
+                        permissions,
+                        dir.path().to_str().unwrap(),
+                        FileRight::Write
+                    ))
+            );
+        } else {
+            assert_eq!(decision.verdict, DecisionVerdict::Allow);
+            assert!(allows(
+                decision.effective_permissions.as_ref().unwrap(),
+                dir.path().to_str().unwrap(),
+                FileRight::Write
+            ));
+        }
     }
 }
 
