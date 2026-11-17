@@ -506,6 +506,8 @@ async fn run(cli: Cli) -> Result<()> {
                 Response::ForkOk {
                     ws_id,
                     path,
+                    source_ws_id,
+                    source_snapshot_id,
                     initial_snapshot_id,
                 } => {
                     if format == "json" {
@@ -515,6 +517,10 @@ async fn run(cli: Cli) -> Result<()> {
                                 "schema": "ws-ckpt/fork/v1",
                                 "ws_id": ws_id,
                                 "path": path,
+                                "source": {
+                                    "ws_id": source_ws_id,
+                                    "snapshot_id": source_snapshot_id,
+                                },
                                 "initial_snapshot_id": initial_snapshot_id,
                             })
                         );
@@ -524,6 +530,11 @@ async fn run(cli: Cli) -> Result<()> {
                             escape_terminal_text(&ws_id)
                         );
                         println!("  Path: {}", escape_terminal_text(&path));
+                        println!(
+                            "  Forked from: {}/{}",
+                            escape_terminal_text(&source_ws_id),
+                            escape_terminal_text(&source_snapshot_id)
+                        );
                         println!(
                             "  Initial checkpoint: {}",
                             escape_terminal_text(&initial_snapshot_id)

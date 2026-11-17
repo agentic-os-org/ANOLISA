@@ -68,7 +68,9 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
         } => Response::ForkOk {
             ws_id: "ws-forked".to_string(),
             path: destination,
-            initial_snapshot_id: snapshot,
+            source_ws_id: "ws-source".to_string(),
+            source_snapshot_id: snapshot,
+            initial_snapshot_id: "fork-initial".to_string(),
         },
         Request::Checkpoint { .. } => Response::CheckpointOk {
             snapshot_id: "msg1-step0".to_string(),

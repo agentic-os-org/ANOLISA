@@ -833,6 +833,8 @@ pub async fn fork(
     Ok(Response::ForkOk {
         ws_id,
         path: destination_path.to_string_lossy().to_string(),
+        source_ws_id,
+        source_snapshot_id,
         initial_snapshot_id: FORK_INITIAL_SNAPSHOT_ID.to_string(),
     })
 }
@@ -3042,16 +3044,26 @@ mod tests {
         .await
         .unwrap();
 
-        let (ws_id, path, initial) = match response {
+        let (ws_id, path, source_ws, source_snapshot, initial) = match response {
             Response::ForkOk {
                 ws_id,
                 path,
+                source_ws_id,
+                source_snapshot_id,
                 initial_snapshot_id,
-            } => (ws_id, path, initial_snapshot_id),
+            } => (
+                ws_id,
+                path,
+                source_ws_id,
+                source_snapshot_id,
+                initial_snapshot_id,
+            ),
             other => panic!("expected ForkOk, got {other:?}"),
         };
         assert_ne!(ws_id, "ws-source");
         assert_eq!(path, destination.to_string_lossy());
+        assert_eq!(source_ws, "ws-source");
+        assert_eq!(source_snapshot, "snap-1");
         assert_eq!(initial, FORK_INITIAL_SNAPSHOT_ID);
         assert_eq!(
             backend.fork_calls.load(std::sync::atomic::Ordering::SeqCst),

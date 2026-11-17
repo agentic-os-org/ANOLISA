@@ -450,6 +450,10 @@ pub enum Response {
         ws_id: String,
         /// Registered workspace path (the `destination` the caller asked for).
         path: String,
+        /// Workspace the content was forked from.
+        source_ws_id: String,
+        /// Snapshot the content was forked from.
+        source_snapshot_id: String,
         /// Read-only checkpoint created from the forked content.
         initial_snapshot_id: String,
     },
@@ -2653,15 +2657,19 @@ mod tests {
         let response = Response::ForkOk {
             ws_id: "ws-forked".to_string(),
             path: "/tmp/forked".to_string(),
+            source_ws_id: "ws-source".to_string(),
+            source_snapshot_id: "snap-1".to_string(),
             initial_snapshot_id: "fork-initial".to_string(),
         };
         let frame = encode_frame(&response).expect("encode_frame failed");
         let decoded: Response = decode_payload(&frame[4..]).expect("decode_payload failed");
         assert!(matches!(
             decoded,
-            Response::ForkOk { ws_id, path, initial_snapshot_id }
+            Response::ForkOk { ws_id, path, source_ws_id, source_snapshot_id, initial_snapshot_id }
                 if ws_id == "ws-forked"
                     && path == "/tmp/forked"
+                    && source_ws_id == "ws-source"
+                    && source_snapshot_id == "snap-1"
                     && initial_snapshot_id == "fork-initial"
         ));
     }
