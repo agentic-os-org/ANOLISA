@@ -53,3 +53,36 @@ make -C distribution aw-integration-backends BACKENDS='sec-core tokenless'
 
 See the [source guide](../../../contribute/en/aw/building.md) and
 [installation guide](../../../docs/user-guide/en/aw/installation.md).
+
+## Matched SDK candidates
+
+Build npm and wheel artifacts from one full Git commit. The builder uses a Git
+archive, so local edits cannot change its inputs. Node 22+ and Python 3.11+ with
+pip, setuptools and wheel already installed are required; SDK builds are offline.
+The receipt records node, npm, Python, pip, setuptools and wheel versions. Use
+those interpreter and build-tool versions when verifying it; verification compares
+package filenames and payloads, and does not enforce tool-version equality.
+The output directory must be empty. Artifacts and the receipt are staged before
+publication; failure or cancellation rolls back files published by this build,
+leaving the directory ready for retry.
+
+```bash
+python3 distribution/packaging/aw/sdk_candidate.py build \
+  --repo "$PWD" --candidate <full-commit-sha> --output "$PWD/target/sdk-candidate"
+python3 distribution/packaging/aw/sdk_candidate.py verify \
+  --repo "$PWD" --candidate <full-commit-sha> \
+  --receipt "$PWD/target/sdk-candidate/sdk-candidate.json"
+```
+
+Verification rebuilds from the candidate and checks artifact filenames and every shipped SDK file,
+including native bridge assets. Archive timestamps are ignored. A copied commit
+field and updated checksum cannot make an old payload pass this comparison.
+Add three `--rpm /absolute/path/package.rpm` arguments to inspect the AW and both
+Provider RPMs; this requires rpm, rpm2cpio, cpio and Bash. Their embedded
+`source.json` must declare the candidate in `source_commit` (archive schema) or
+`commit` (native RPM schema); if both appear, they must agree. All three RPMs
+must share a version/release/architecture. RPM source
+records are declarations: retain the controlled offline RPM build log, source and
+vendor checksums separately. This check does not establish binary reproducibility,
+installation behavior, native adoption or business performance. Run those gates
+on the actual candidate before delivery; keep previous packages as labeled history.

@@ -48,3 +48,30 @@ make -C distribution aw-integration-backends BACKENDS='sec-core tokenless'
 
 参见[源码构建指南](../../../contribute/zh/aw/building.md)和
 [安装指南](../../../docs/user-guide/zh/aw/installation.md)。
+
+## 匹配候选 SDK
+
+从同一完整 Git commit 构建 npm 和 wheel。构建器使用 Git archive，输入不受本地
+修改影响。需要 Node 22+、Python 3.11+，并已安装 pip、setuptools 和 wheel；SDK
+构建离线执行。收据记录 node、npm、Python、pip、setuptools 和 wheel 的版本。
+核验时使用收据中的解释器和构建工具版本；校验会比较包文件名与内容，工具版本
+是否相同由操作者确认。输出目录必须为空。制品与收据先暂存再发布；失败或取消时
+回滚本次构建已发布的文件，输出目录可直接重试。
+
+```bash
+python3 distribution/packaging/aw/sdk_candidate.py build \
+  --repo "$PWD" --candidate <full-commit-sha> --output "$PWD/target/sdk-candidate"
+python3 distribution/packaging/aw/sdk_candidate.py verify \
+  --repo "$PWD" --candidate <full-commit-sha> \
+  --receipt "$PWD/target/sdk-candidate/sdk-candidate.json"
+```
+
+核验时重新构建候选，检查制品文件名并逐项比较 SDK 内的文件，包括原生桥接资源，
+忽略归档时间戳。
+仅修改收据中的 commit 和校验和无法让旧包通过内容比较。
+追加三个 `--rpm /absolute/path/package.rpm` 参数可检查 AW 和两个 Provider RPM，
+需要 rpm、rpm2cpio、cpio 和 Bash。包内 `source.json` 通过 `source_commit`（归档格式）
+或 `commit`（原生 RPM 格式）声明候选；两个字段同时出现时必须一致。三个 RPM 的
+版本、release、架构必须一致。RPM 来源记录属于声明，需另存受控断网构建日志及源码、vendor 摘要。
+本检查不证明二进制可复现、安装行为、原生采用或业务性能；交付前在实际候选上完成
+对应验收，旧包保留为明确标注的历史产物。
