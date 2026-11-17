@@ -35,6 +35,9 @@ In Qoder, ask it to read the current directory with a tool and follow its native
 Offline validation checks the service limit of 64 applicable enabled steps per target across all events.
 The local service remains reusable after the Agent exits. Inspect and stop it when finished.
 
+SDK deployments can compile configuration-bound wiring hints with `aw config descriptor`;
+see the [command reference](../../docs/user-guide/en/aw/cli-reference.md#aw-config-descriptor).
+
 ```bash
 aw service status --config "$AW_HOME/aw.yaml"
 aw service stop --config "$AW_HOME/aw.yaml"

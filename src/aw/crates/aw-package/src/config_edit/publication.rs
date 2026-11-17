@@ -46,13 +46,46 @@ impl From<&Metadata> for Identity {
 }
 
 pub(super) fn read(path: &Path) -> Result<Snapshot> {
+    read_snapshot(path, false)
+}
+
+pub(super) fn deployment_bytes(path: &Path) -> Result<Vec<u8>> {
+    Ok(read_snapshot(path, true)?.bytes)
+}
+
+fn read_snapshot(path: &Path, deployment: bool) -> Result<Snapshot> {
     let parent = pin_parent(path)?;
     let anchored = descriptor_path(&parent).join(
         path.file_name()
             .ok_or_else(|| crate::Error::Invalid("configuration path has no file name".into()))?,
     );
     let mut file = open(&anchored, false)?;
+    if deployment {
+        check_deployment_filesystem(&parent)?;
+        check_deployment_filesystem(&file)?;
+    }
     snapshot(&anchored, &mut file, &parent)
+}
+
+fn check_deployment_filesystem(file: &File) -> Result<()> {
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: the live fd pins the mount and fstatfs fills info on success.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: fstatfs succeeded above.
+    let kind = unsafe { info.assume_init() }.f_type;
+    require(
+        matches!(
+            kind,
+            libc::EXT4_SUPER_MAGIC
+                | libc::XFS_SUPER_MAGIC
+                | libc::BTRFS_SUPER_MAGIC
+                | libc::TMPFS_MAGIC
+                | libc::OVERLAYFS_SUPER_MAGIC
+        ),
+        "unsupported filesystem for deployment configuration",
+    )
 }
 
 fn descriptor_path(directory: &File) -> PathBuf {
@@ -281,6 +314,12 @@ fn unchanged(path: &Path, held: &mut File, original: &Snapshot) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn procfs_is_not_a_deployment_input_filesystem() {
+        let proc_dir = File::open("/proc/self").unwrap();
+        assert!(check_deployment_filesystem(&proc_dir).is_err());
+    }
 
     #[test]
     fn acl_probes_support_pinned_directory_descriptors() {

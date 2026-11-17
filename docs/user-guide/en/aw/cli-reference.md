@@ -28,6 +28,7 @@ aw config init --help
 | `aw run` | Launch a configured Agent with AW |
 | `aw agent connect` | Register native Hooks or attach to a supported running process |
 | `aw config init` | Create configuration offline |
+| `aw config descriptor` | Compile SDK deployment hints bound to the configuration |
 | `aw config show` | Print all or selected configuration as JSON |
 | `aw config validate` | Validate configuration and optionally compare update scope |
 | `aw config add-provider` | Add one complete Provider definition |
@@ -156,6 +157,27 @@ Disabled events and steps, and steps excluded by the target's tool selectors, do
 The check uses the service binding limit and runs without starting Agents or Providers.
 Exceeding it exits 1; JSON output reports `invalid_configuration`.
 The legacy `aw validate` alias applies the same limit.
+
+### `aw config descriptor`
+
+Requires `--config FILE --agent TARGET --profile PROFILE`. The supported profiles
+are `qoder-public-hooks` and `qwenpaw-installed-native-hooks`. Output is an
+`aw-deployment/v1alpha1` JSON descriptor; no `--json` flag is needed. The input
+uses the same owned-file, path and ACL checks as `aw config show`; pass an absolute
+configuration path and publish the output as an application-user-owned private file.
+
+The command validates configuration and the selected wiring capabilities without
+starting an Agent, Service or Provider. Inputs require a filesystem supported by the SDK
+Descriptor readers. The service socket must resolve offline to the configured state
+directory’s `aw.sock` and fit the Linux socket path limit. The descriptor contains a configuration
+SHA256, target, profile, explicit service endpoint, input waiting flag and
+availability. Provider parameters and credentials are omitted. Unsupported
+applicable events, effects or failure actions are rejected before output.
+
+Keep the descriptor with its exact deployment configuration and regenerate it
+when the configuration or wiring changes. It does not establish installed
+callbacks, Ready status or runtime admission. See the
+[SDK deployment guide](../../../developer-guide/en/aw/deployment/native-sdk.md).
 
 ### `aw config show`
 
