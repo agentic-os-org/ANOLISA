@@ -215,11 +215,7 @@ pub(super) fn scope_directory(root: &Path) -> PathBuf {
 /// branch so both failure modes have deterministic unit coverage: a timeout
 /// names the awaited kind and elapsed wait, a disconnect reports that the
 /// runtime exited instead of claiming a timeout that never elapsed.
-fn receive_failure_cause(
-    error: mpsc::RecvTimeoutError,
-    kind: &str,
-    started: Instant,
-) -> String {
+fn receive_failure_cause(error: mpsc::RecvTimeoutError, kind: &str, started: Instant) -> String {
     match error {
         mpsc::RecvTimeoutError::Timeout => format!(
             "no {kind:?} message arrived within {}s (awaited from {:?} ago)",
@@ -239,34 +235,46 @@ fn receive_failure_cause(
 fn stderr_tail_truncation_retreats_to_a_character_boundary() {
     // Witness for the capture-thread bound: a multi-byte character
     // straddling the limit must not make `String::drain` panic, and the
-    // drained result stays valid UTF-8 within the limit. The regression from
-    // the pre-fix code is the 50-round ASCII-padded CJK stream below: with a
-    // raw byte cut, `drain` panics inside a multi-byte character on most
-    // rounds because each CJK line is 3-byte aligned but the rolling window
-    // is not.
-    let line = format!("{}诊断\n", "x".repeat(4000));
+    // drained result stays valid UTF-8 and bounded. Each line below is
+    // 4090 bytes (4083 ASCII + two 3-byte CJK + newline); once the buffer
+    // starts mid-character, the raw cut lands inside the leading CJK
+    // character on every round. With the pre-fix raw `drain` of
+    // `len - limit` bytes that panics; with the retreat, the cut moves back
+    // to the character's start and the tail converges to at most
+    // limit + 2 bytes (a retreat never removes more than the straddling
+    // character). A padded 4007-byte line keeps every cut on an ASCII
+    // boundary, which would make this test a vacuous witness.
+    let line = format!("{}诊断\n", "x".repeat(4083));
     let mut tail = String::new();
     for _ in 0..50 {
         tail.push_str(&line);
+        let raw = tail.len().saturating_sub(4096);
         let excess = excess_beyond_limit(&tail, 4096);
         if excess > 0 {
             tail.drain(..excess);
         }
-        assert!(tail.len() <= 4096, "tail grew past the bound: {}", tail.len());
+        assert!(excess <= raw, "retreat must never exceed the raw excess");
+        assert!(
+            tail.len() <= 4096 + 2,
+            "tail grew past the retreat bound: {}",
+            tail.len()
+        );
+        assert!(tail.is_char_boundary(0));
     }
-    // The window must have actually been exercised: the last cut had to
-    // retreat, proving the loop is on the multi-byte path, not a vacuous
-    // all-boundary pass.
+    // The window must have actually been exercised: at the converged length
+    // of limit + 1 the raw cut lands inside the leading CJK character and
+    // the retreat engages instead of draining a panic-inducing offset. The
+    // precise retreat semantics are pinned by
+    // `excess_beyond_limit_only_cuts_at_character_boundaries`; this test
+    // proves the bounded loop cannot panic on the real stream shape.
     tail.push_str(&line);
     let raw = tail.len().saturating_sub(4096);
     let excess = excess_beyond_limit(&tail, 4096);
     assert!(excess <= raw, "retreat must never exceed the raw excess");
-    if raw > 0 && raw % 3 != 1 {
-        assert!(
-            excess < raw || tail.is_char_boundary(raw),
-            "boundary retreat never engaged"
-        );
-    }
+    assert!(
+        raw > 0 && !tail.is_char_boundary(raw),
+        "the raw cut no longer straddles a character: raw={raw}"
+    );
     assert!(std::str::from_utf8(&tail.clone().into_bytes()).is_ok());
 }
 
@@ -304,7 +312,10 @@ fn excess_beyond_limit_only_cuts_at_character_boundaries() {
 fn truncate_for_report_keeps_short_lines_and_bounds_long_ones() {
     // Short path: the line is returned untouched, no ellipsis added.
     let short = r#"{"type":"system","subtype":"init"}"#;
-    assert_eq!(truncate_for_report(short), std::borrow::Cow::Borrowed(short));
+    assert_eq!(
+        truncate_for_report(short),
+        std::borrow::Cow::Borrowed(short)
+    );
 
     // Long path: exactly 256 chars are kept, an ellipsis is appended, and
     // multi-byte content is cut on a character boundary (chars, not bytes).
@@ -364,10 +375,9 @@ fn receive_reports_runtime_exit_when_the_child_dies() {
     // without ever emitting the awaited "result".
     drop(child.stdin.take());
     let process = RuntimeProcess::from_child(child);
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        process.receive("result")
-    }))
-    .expect_err("receive must panic when the runtime exits silently");
+    let panic =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process.receive("result")))
+            .expect_err("receive must panic when the runtime exits silently");
     let message = panic
         .downcast_ref::<String>()
         .cloned()
