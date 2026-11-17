@@ -313,3 +313,73 @@ fn regenerate_gradle_goldens() {
         std::fs::write(expected, outcome.output).unwrap();
     }
 }
+
+#[test]
+fn deep_non_task_tail_after_compactable_run_never_aborts() {
+    // Regression for the run scan: 50 000 non-task lines after a compactable
+    // run must be closed iteratively, not per line, so deep tails cannot
+    // exhaust the thread stack. The run before the noise still compacts and
+    // the noise tail stays verbatim.
+    let mut input = String::from("$ ./gradlew build\nWelcome to Gradle 8.14.2!\n");
+    for index in 0..12 {
+        input.push_str(&format!("> Task :core:compileJava{index} UP-TO-DATE\n"));
+    }
+    let noise = "Some deep diagnostic body line that is not a task record\n".repeat(50_000);
+    input.push_str(&noise);
+    let output = check(&input, true);
+    assert!(output.contains(&noise[..80]));
+}
+
+#[test]
+fn malformed_task_fragments_never_enter_generic_progress_templates() {
+    // `> Task ` lines belong to the Gradle route even when the fragment is
+    // not a valid task record: the generic progress rules must not turn
+    // quoted or malformed headers into template rows.
+    let anchor = "$ ./gradlew build\n";
+    let tail = (1..=12)
+        .map(|index| format!("processing asset {index} of 12\n"))
+        .collect::<String>();
+    for fragment in [
+        // A path with dot-separated numeric segments that main's
+        // `valid_task_path` accepts; the prefix rule rejects nothing wider.
+        "> Task :1.2.3 UP-TO-DATE\n",
+        // Quoted / malformed fragments that are not task records at all.
+        "> Task > quoted fragment 12 running\n",
+        "> Task :: UP-TO-DATE\n",
+    ] {
+        let repeats = fragment.repeat(12);
+        let input = format!("{anchor}{tail}{repeats}");
+        let store = InMemoryStore::new();
+        let outcome =
+            BuildLogCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
+        let cleaned = oracle::strip_sgr(&input);
+        // The fragment itself must remain in the output verbatim.
+        assert!(
+            outcome
+                .output
+                .contains(&oracle::strip_sgr(fragment.trim_end())),
+            "fragment text missing from output: {fragment:?}"
+        );
+        // Whichever lines were stashed must be exactly the retrievable
+        // progress tail, never the fragment.
+        for key in outcome.stash_writes.iter().map(|w| &w.key) {
+            let payload = store.retrieve(key).unwrap().expect("stashed payload");
+            assert!(
+                !payload.contains("> Task "),
+                "stashed payload contains a task fragment: {key}"
+            );
+        }
+        assert!(matches!(
+            outcome.recoverability,
+            Recoverability::Lossless | Recoverability::Retrievable
+        ));
+        let _ = cleaned;
+        // A second pass must be stable.
+        let again = BuildLogCompressor.compress_with_recovery(
+            &outcome.output,
+            Some(&store),
+            &RecoveryMethod::Shell,
+        );
+        assert_eq!(again.output, outcome.output, "{fragment:?}");
+    }
+}
