@@ -298,6 +298,10 @@ pub(crate) async fn dispatch_with_context(
             Err(e) => Err(e),
             Ok(()) => crate::workspace_mgr::fork(state, &workspace, &snapshot, &destination).await,
         },
+        Request::WorkspaceTree { workspace, all } => match state.ensure_bootstrapped().await {
+            Err(e) => Err(e),
+            Ok(()) => crate::workspace_tree::tree(state, &workspace, all).await,
+        },
         Request::WorkspaceIdentityV2 { registration_path } => {
             return crate::guarded_checkpoint::workspace_identity(state, &registration_path).await;
         }

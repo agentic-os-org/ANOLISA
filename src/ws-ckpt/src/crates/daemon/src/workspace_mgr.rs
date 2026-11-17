@@ -16,7 +16,7 @@ use crate::state::{normalize_registration_path, DaemonState};
 /// Checkpoint created inside a forked workspace, and the name of the durable
 /// record that ties it back to the snapshot it was forked from.
 const FORK_INITIAL_SNAPSHOT_ID: &str = "fork-initial";
-const FORK_ORIGIN_FILE: &str = "fork-origin.json";
+pub(crate) const FORK_ORIGIN_FILE: &str = "fork-origin.json";
 
 /// Durable provenance of a forked workspace, stored beside its snapshot index.
 ///
@@ -24,10 +24,10 @@ const FORK_ORIGIN_FILE: &str = "fork-origin.json";
 /// only record of where a workspace came from, and so `init` registration
 /// (which owns the index directory) remains the one writer of `index.json`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
-struct ForkOrigin {
-    source_ws_id: String,
-    source_snapshot_id: String,
-    created_at: chrono::DateTime<chrono::Utc>,
+pub(crate) struct ForkOrigin {
+    pub(crate) source_ws_id: String,
+    pub(crate) source_snapshot_id: String,
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ── helpers ──
@@ -3472,6 +3472,147 @@ mod tests {
         assert!(read_dir_names(&state.state_dir.join(ws_ckpt_common::INDEXES_DIR))
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn tree_shows_lineage_scope_and_rejects_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, source_path, fork_path) = fork_fixture(&temp).await;
+        let source = source_path.to_string_lossy().to_string();
+        let fork_id = match fork(&state, &source, "snap-1", &fork_path.to_string_lossy())
+            .await
+            .unwrap()
+        {
+            Response::ForkOk { ws_id, .. } => ws_id,
+            other => panic!("expected ForkOk, got {other:?}"),
+        };
+        let grand_path = temp.path().join("work/grand");
+        let grand_id = match fork(
+            &state,
+            &fork_path.to_string_lossy(),
+            FORK_INITIAL_SNAPSHOT_ID,
+            &grand_path.to_string_lossy(),
+        )
+        .await
+        .unwrap()
+        {
+            Response::ForkOk { ws_id, .. } => ws_id,
+            other => panic!("expected ForkOk, got {other:?}"),
+        };
+
+        let describe = |nodes: &[ws_ckpt_common::WorkspaceTreeNode]| {
+            nodes
+                .iter()
+                .map(|node| (node.ws_id.clone(), node.depth, node.target))
+                .collect::<Vec<_>>()
+        };
+
+        // Default scope from the grandchild: its parent and itself.
+        let response = crate::workspace_tree::tree(&state, &grand_path.to_string_lossy(), false)
+            .await
+            .unwrap();
+        let Response::WorkspaceTreeOk {
+            target_ws_id,
+            root_ws_id,
+            nodes,
+            warnings,
+        } = response
+        else {
+            panic!("expected WorkspaceTreeOk, got {response:?}");
+        };
+        assert_eq!(target_ws_id, grand_id);
+        assert_eq!(root_ws_id, fork_id);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            describe(&nodes),
+            vec![(fork_id.clone(), 0, false), (grand_id.clone(), 1, true)]
+        );
+        assert_eq!(
+            nodes[1].source_snapshot_id.as_deref(),
+            Some(FORK_INITIAL_SNAPSHOT_ID)
+        );
+        assert!(nodes[1].source_registered);
+        assert_eq!(nodes[1].path, grand_path.display().to_string());
+
+        // Default scope one level up reaches the original root.
+        let response = crate::workspace_tree::tree(&state, &fork_path.to_string_lossy(), false)
+            .await
+            .unwrap();
+        let Response::WorkspaceTreeOk {
+            nodes, warnings, ..
+        } = response
+        else {
+            panic!("expected WorkspaceTreeOk");
+        };
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            describe(&nodes),
+            vec![
+                ("ws-source".to_string(), 0, false),
+                (fork_id.clone(), 1, true),
+                (grand_id.clone(), 2, false),
+            ]
+        );
+
+        // --all walks to the registered root from any descendant.
+        let response = crate::workspace_tree::tree(&state, &grand_path.to_string_lossy(), true)
+            .await
+            .unwrap();
+        let Response::WorkspaceTreeOk {
+            root_ws_id,
+            nodes,
+            warnings,
+            ..
+        } = response
+        else {
+            panic!("expected WorkspaceTreeOk");
+        };
+        assert_eq!(root_ws_id, "ws-source");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            describe(&nodes),
+            vec![
+                ("ws-source".to_string(), 0, false),
+                (fork_id.clone(), 1, false),
+                (grand_id.clone(), 2, true),
+            ]
+        );
+
+        // A corrupted record that points back up the chain is reported, not
+        // rendered as an endless tree.
+        let now = chrono::Utc::now();
+        let cycle = ForkOrigin {
+            source_ws_id: fork_id.clone(),
+            source_snapshot_id: "snap-1".to_string(),
+            created_at: now,
+        };
+        tokio::fs::create_dir_all(state.index_dir("ws-source"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            state.index_dir("ws-source").join(FORK_ORIGIN_FILE),
+            serde_json::to_vec(&cycle).unwrap(),
+        )
+        .await
+        .unwrap();
+        match crate::workspace_tree::tree(&state, &grand_path.to_string_lossy(), true)
+            .await
+            .unwrap()
+        {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InternalError);
+                assert!(message.contains("cycle"), "{message}");
+            }
+            other => panic!("expected cycle error, got {other:?}"),
+        }
+
+        match crate::workspace_tree::tree(&state, "/work/missing", false)
+            .await
+            .unwrap()
+        {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::WorkspaceNotFound),
+            other => panic!("expected WorkspaceNotFound, got {other:?}"),
+        }
     }
 
     // ── Stub backend: records recover_workspace calls; other methods panic ──
