@@ -239,6 +239,11 @@ fn matched_tail_glob_keeps_the_line_native() {
     std::fs::write(dir.join("文件.log"), b"x").expect("write fixture");
     std::fs::write(dir.join("a"), b"x").expect("write fixture");
     std::fs::write(dir.join("a\\b.log"), b"x").expect("write fixture");
+    std::fs::write(dir.join("a\"b.log"), b"x").expect("write fixture");
+    // The leading backslash is part of the name on Unix, not a separator, so
+    // the absolute-path lint misreads this fixture.
+    #[allow(clippy::join_absolute_paths)]
+    std::fs::write(dir.join("\\x.log"), b"x").expect("write fixture");
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.join("missing.log"), dir.join("dang.log"))
         .expect("write dangling symlink");
@@ -285,6 +290,19 @@ fn matched_tail_glob_keeps_the_line_native() {
         assert!(
             !arguments_have_no_unquoted_expansion(shell, "说明 dang.*", &dir),
             "{shell}: a dangling symlink is still a glob match"
+        );
+        // Inside double quotes `\"` is an escaped literal quote, so the shell
+        // removes the quote and matches `a"b.log`; the probe must do the same.
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "说明 \"a\\\"b\"*.log", &dir),
+            "{shell}: an escaped quote inside double quotes is literal content"
+        );
+        // Outside quotes `\\` is a literal backslash and the `*` that follows
+        // still globs, so the word names `\x.log`; the probe must escape only
+        // the backslash.
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "说明 \\\\*.log", &dir),
+            "{shell}: an escaped backslash must not escape the probe's glob"
         );
         // Quoting suppresses expansion, so these stay literal and reach the
         // classifier.
