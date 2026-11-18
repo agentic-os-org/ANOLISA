@@ -860,10 +860,10 @@ mod tests {
         let docs = AbsolutePathBuf::from_absolute_path(&docs).expect("absolute docs");
         let docs_public =
             AbsolutePathBuf::from_absolute_path(&docs_public).expect("absolute docs/public");
-        let policy = FileSystemSandboxPolicy::restricted(vec![
+        let entries = vec![
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
-                    path: writable_root,
+                    path: writable_root.clone(),
                 },
                 access: FileSystemAccessMode::Write,
             },
@@ -877,29 +877,40 @@ mod tests {
                 },
                 access: FileSystemAccessMode::Write,
             },
-        ]);
+        ];
 
-        let args = create_filesystem_args(&policy, temp_dir.path()).expect("filesystem args");
+        let writable_root_str = path_to_string(writable_root.as_path());
         let docs_str = path_to_string(docs.as_path());
         let docs_public_str = path_to_string(docs_public.as_path());
-        let docs_ro_index = args
-            .args
-            .windows(3)
-            .position(|window| window == ["--ro-bind", docs_str.as_str(), docs_str.as_str()])
-            .expect("docs should be remounted read-only");
-        let docs_public_rw_index = args
-            .args
-            .windows(3)
-            .position(|window| {
-                window == ["--bind", docs_public_str.as_str(), docs_public_str.as_str()]
-            })
-            .expect("docs/public should be rebound writable");
 
-        assert!(
-            docs_ro_index < docs_public_rw_index,
-            "expected read-only parent remount before nested writable bind: {:#?}",
-            args.args
-        );
+        for full_read in [false, true] {
+            let mut entries = entries.clone();
+            if full_read {
+                entries.push(FileSystemSandboxEntry {
+                    path: FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    },
+                    access: FileSystemAccessMode::Read,
+                });
+            }
+            let policy = FileSystemSandboxPolicy::restricted(entries);
+            let args = create_filesystem_args(&policy, temp_dir.path()).expect("filesystem args");
+            let last_mount_index = |flag: &str, path: &str| {
+                args.args
+                    .windows(3)
+                    .rposition(|window| window == [flag, path, path])
+                    .unwrap_or_else(|| panic!("missing {flag} for {path} (full_read={full_read})"))
+            };
+            let writable_root_bind_index = last_mount_index("--bind", &writable_root_str);
+            let docs_ro_index = last_mount_index("--ro-bind", &docs_str);
+            let docs_public_rw_index = last_mount_index("--bind", &docs_public_str);
+
+            assert!(
+                writable_root_bind_index < docs_ro_index && docs_ro_index < docs_public_rw_index,
+                "expected workspace write, docs read, docs/public write in order (full_read={full_read}): {:#?}",
+                args.args
+            );
+        }
     }
 
     #[test]
