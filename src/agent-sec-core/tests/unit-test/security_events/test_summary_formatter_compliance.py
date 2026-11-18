@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.security_events.summary_formatter import format_summary
 
