@@ -228,6 +228,14 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(requests[-1]["attribution"]["agent_id"], "copilot-shell")
         self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
 
+    def test_recovery_only_skips_adapters_without_recovery(self) -> None:
+        output = self.run_hook(
+            corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", "qoder-cli",
+            "--recovery-only",
+        )
+        self.assertEqual(output, {})
+        self.assertFalse(self.request_log.exists())
+
     def test_qwenwork_rewrite_and_response_share_rtk_state(self) -> None:
         rewritten = self.run_hook(
             corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", "qwenwork"

@@ -736,29 +736,22 @@ with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Git Bash and WSL are not required.
 
-The Python adapter registers PowerShell hook commands and handles both Bash and
-PowerShell PreTool inputs. RTK decides which commands can be rewritten;
-unsupported commands pass through. PowerShell PostTool output uses the shared
-command-output policy, including RTK deduplication and file-content protection.
+The Python adapter registers the PowerShell `PostToolUse` hook. Bash and
+PowerShell commands run with their original arguments. PostTool uses the shared
+command-output policy and protects file content.
 See [Windows installation and validation](../../docs/user-guide/en/tokenless/framework-integration.md#qwenwork-windows-x64-local-mode).
 
 ## QwenWork Plugin (macOS)
 
 The `qwenwork` adapter targets QwenWorkCN (千问办公) native Bash and macOS workspace
-Shell sessions. PreToolUse rewrites both shell tool names; PostToolUse observes
-**all tools** and compresses eligible full results through the shared policy. Metadata-only callbacks from
+Shell sessions. It registers `PostToolUse` for **all tools** and compresses
+eligible full results through the shared policy. Metadata-only callbacks from
 `mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
-output; full MCP responses remain compressible. File-content protection and RTK
-deduplication remain unchanged. Statistics use `qwenwork`, independently of Qoder CLI, Qwen Code,
-and QwenPaw. QwenWork workspace Shell hooks use the system user's default
-`~/.tokenless` directory or a valid absolute `TOKENLESS_DATA_DIR` for databases
-and Pre/Post state; `$HOME` does not redirect the default. Invalid paths pass
-through without creating state. Existing workspace databases are not migrated.
-Shell sandbox restrictions can prevent RTK statistics and execution receipts
-from being saved while commands and host Hook compression still work.
-Installation/detection reports this limitation and the current process's data
-directory without testing sandbox access. RTK's native database retains
-its own path configuration.
+output, and full MCP responses can be compressed. Statistics use `qwenwork`.
+Workspace Shell hooks use the system user's `~/.tokenless` directory or a valid
+absolute `TOKENLESS_DATA_DIR` for databases. A recovery-only `PreToolUse` hook
+routes standalone `tokenless retrieve <hash>` commands to the bundled CLI when
+present. Retrieval opens the same Stash in read-only mode.
 
 After `anolisa install tokenless`, quit QwenWorkCN and explicitly sideload the plugin:
 

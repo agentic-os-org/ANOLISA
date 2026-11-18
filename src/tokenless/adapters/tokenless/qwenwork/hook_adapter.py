@@ -16,6 +16,7 @@ from hook_utils import (
     SHELL_TOOLS,
     _bare_retrieve_hash,
     is_skill_file,
+    is_tokenless_retrieve_command,
     resolve_data_directory,
     skip,
     tokenless_retrieve_command_available,
@@ -56,8 +57,8 @@ _SHELL_ENVELOPE_KEYS = frozenset(
 _MULTIMODAL_BLOCK_TYPES = frozenset(
     {"image", "audio", "resource", "resource_link", "embedded_resource"}
 )
-_QWENWORK_PRIVATE_RUNTIME = False
 _QWENWORK_RECOVERY: dict[str, str] | None = None
+_QWENWORK_SHELL_RECOVERY = False
 
 
 def _prepare_qwenwork_recovery(
@@ -169,21 +170,26 @@ def is_retrieve_result(tool_name: str, arguments: object) -> bool:
 
 def prepare_hook_input(input_data: dict) -> dict:
     """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _QWENWORK_PRIVATE_RUNTIME, _QWENWORK_RECOVERY
-    _QWENWORK_RECOVERY = None
-
+    global _QWENWORK_RECOVERY, _QWENWORK_SHELL_RECOVERY
+    tool_name = input_data.get("tool_name")
+    workspace_shell = (
+        isinstance(tool_name, str) and tool_name in _QWENWORK_WORKSPACE_SHELLS
+    )
     plugin_root = os.environ.get("QODER_PLUGIN_ROOT", "")
     private_bin = os.path.join(plugin_root, "bin")
-    if os.path.isabs(plugin_root) and os.path.isdir(private_bin):
+    has_private_bin = os.path.isabs(plugin_root) and os.path.isdir(private_bin)
+    # Workspace shells and private runtimes need the bridge to reach this Stash.
+    _QWENWORK_SHELL_RECOVERY = (
+        not (workspace_shell or has_private_bin)
+        and tokenless_retrieve_command_available()
+    )
+    if has_private_bin:
         os.environ["PATH"] = private_bin + os.pathsep + os.environ.get("PATH", "")
         hook_utils._resolved_cache.clear()
-        # The hook's private PATH is not the model's shell PATH.
-        _QWENWORK_PRIVATE_RUNTIME = True
 
     _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(plugin_root, input_data)
 
-    tool_name = input_data.get("tool_name")
-    if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
+    if not workspace_shell:
         return input_data
 
     cwd = input_data.get("cwd")
@@ -198,9 +204,6 @@ def prepare_hook_input(input_data: dict) -> dict:
         warn(f"{error}. Passing through unchanged.")
         skip()
     hook_utils._OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
-    # Bare retrieval commands do not inherit the hook's runtime environment.
-    _QWENWORK_PRIVATE_RUNTIME = True
-
     normalized = {**input_data, "tool_name": "Bash"}
     response = input_data.get("tool_response")
     if isinstance(response, list):
@@ -218,9 +221,7 @@ def prepare_hook_input(input_data: dict) -> dict:
 
 
 def recovery_available() -> bool:
-    return _QWENWORK_RECOVERY is not None or (
-        not _QWENWORK_PRIVATE_RUNTIME and tokenless_retrieve_command_available()
-    )
+    return _QWENWORK_SHELL_RECOVERY or _QWENWORK_RECOVERY is not None
 
 
 def prepare_input(data: dict) -> dict:
@@ -229,6 +230,23 @@ def prepare_input(data: dict) -> dict:
 
 def tool_call_id(data: dict) -> str:
     return data.get("tool_use_id") or data.get("toolCallId", "")
+
+
+def recovery_pre_tool_input(data: dict) -> dict | None:
+    tool_name = data.get("tool_name", "")
+    arguments = data.get("tool_input")
+    if not isinstance(tool_name, str):
+        return None
+    if tool_name in _QWENWORK_WORKSPACE_SHELLS:
+        tool_name = "Bash"
+    if not is_tokenless_retrieve_command(tool_name, arguments):
+        return None
+
+    global _QWENWORK_RECOVERY
+    _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(
+        os.environ.get("QODER_PLUGIN_ROOT", ""), data
+    )
+    return rewrite_qwenwork_retrieve(tool_name, arguments)
 
 
 def pre_tool_input(data: dict) -> tuple[str, dict | None]:

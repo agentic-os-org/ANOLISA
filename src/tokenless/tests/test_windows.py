@@ -39,7 +39,8 @@ class WindowsHookTests(unittest.TestCase):
         self.lifecycle = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.lifecycle)
         self.env = {
-            "HOME": str(self.root), "USERPROFILE": str(self.root),
+            "HOME": str(self.root),
+            "USERPROFILE": str(self.root),
             "TOKENLESS_QWENWORK_HOME": str(self.data),
             "TOKENLESS_DATA_DIR": str(self.root / "databases"),
             "RTK_DB_PATH": str(self.root / "rtk.db"),
@@ -58,14 +59,35 @@ class WindowsHookTests(unittest.TestCase):
             self.assertEqual(self.lifecycle.main(["install"]), 0)
 
     def hook(self, event, payload):
-        config = json.loads((self.plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
-        hook = config["hooks"][event][0]["hooks"][0]
         if event == "PreToolUse":
-            self.assertIsNotNone(re.fullmatch(config["hooks"][event][0]["matcher"], payload["tool_name"]))
-        self.assertEqual(hook["shell"], "powershell")
+            # Exercise legacy Windows input handling through the shared hook.
+            args = [
+                sys.executable,
+                "-B",
+                str(self.plugin / "hooks/shared/rewrite_hook.py"),
+                "--agent-id",
+                "qwenwork",
+            ]
+        else:
+            config = json.loads(
+                (self.plugin / "hooks/hooks.json").read_text(encoding="utf-8")
+            )
+            hook = config["hooks"][event][0]["hooks"][0]
+            self.assertEqual(hook["shell"], "powershell")
+            args = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                hook["command"],
+            ]
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", hook["command"]],
-            input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8", timeout=20,
+            args,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -75,10 +97,11 @@ class WindowsHookTests(unittest.TestCase):
         settings = self.data / "settings.json"
         settings.write_text('{"disabled":true}', encoding="utf-8")
         self.install()
-        shipped = json.loads((SOURCE / "hooks/hooks.json").read_text(encoding="utf-8"))
         installed = json.loads((self.plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
-        self.assertEqual(installed["hooks"]["PreToolUse"][0]["matcher"],
-                         shipped["hooks"]["PreToolUse"][0]["matcher"] + "|PowerShell")
+        self.assertEqual(set(installed["hooks"]), {"PostToolUse"})
+        self.assertEqual(
+            installed["hooks"]["PostToolUse"][0]["hooks"][0]["shell"], "powershell"
+        )
         marker = self.plugin / self.lifecycle.MARKER
         before = marker.stat().st_mtime_ns
         self.install()
@@ -87,7 +110,7 @@ class WindowsHookTests(unittest.TestCase):
         self.assertFalse(self.plugin.exists())
         self.assertEqual(settings.read_text(encoding="utf-8"), '{"disabled":true}')
 
-    def test_native_rewrite_execution_and_posttool_passthrough(self):
+    def test_legacy_powershell_rewrite_execution_and_posttool_passthrough(self):
         self.install()
         payload = self.assert_native_call("PowerShell", "native-call")
         payload["tool_use_id"] = "unsupported-command"
@@ -119,7 +142,6 @@ class WindowsHookTests(unittest.TestCase):
         self.install()
         workspace = self.root / "host workspace"
         workspace.mkdir()
-        subprocess.run(["git", "init", "--quiet"], cwd=workspace, check=True, capture_output=True)
         sdk = Path(os.environ["TOKENLESS_TEST_QWENWORK_APP"]) / "resources/agent-sdk"
         result = subprocess.run(
             ["node", str(ROOT / "tests/qwenwork_host_hooks.mjs"), str(sdk), str(self.plugin), str(workspace)],
@@ -128,9 +150,9 @@ class WindowsHookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with closing(sqlite3.connect(self.root / "databases/stats.db")) as database:
             attribution = database.execute(
-                "SELECT agent_id, session_id, operation FROM stats WHERE tool_use_id = 'host-git-status'"
+                "SELECT agent_id, session_id FROM stats WHERE tool_use_id = 'host-json'"
             ).fetchall()
-        self.assertEqual(attribution, [("qwenwork", "host-runner", "rewrite-command")])
+        self.assertEqual(attribution, [("qwenwork", "host-runner")])
 
     def assert_native_call(self, tool_name, call_id):
         workspace = self.root / "workspace"

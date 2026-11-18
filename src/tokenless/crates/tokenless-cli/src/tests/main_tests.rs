@@ -449,7 +449,7 @@ fn get_data_dir_uses_managed_dsh_override_only_in_dsh_shell() {
         home: std::sync::OnceLock::from(home.path().to_string_lossy().into_owned()),
         data_dir: std::sync::OnceLock::new(),
     };
-    let managed_stats_result = get_db_path_with(&managed_paths);
+    let managed_stats_result = get_db_path_with(&managed_paths, true);
     let managed_stash_result = get_stash_db_path_with(&managed_paths, None);
 
     unsafe {
@@ -468,7 +468,7 @@ fn get_data_dir_uses_managed_dsh_override_only_in_dsh_shell() {
         home: std::sync::OnceLock::from(home.path().to_string_lossy().into_owned()),
         data_dir: std::sync::OnceLock::new(),
     };
-    let explicit_stats_result = get_db_path_with(&explicit_paths);
+    let explicit_stats_result = get_db_path_with(&explicit_paths, true);
     let explicit_stash_result = get_stash_db_path_with(&explicit_paths, None);
 
     unsafe {
@@ -544,7 +544,7 @@ fn ensure_db_dir_creates_parent() {
 
     // ensure_db_dir is idempotent — calling it when the dir already exists
     // (which it does for most test envs) succeeds.
-    let db_path = get_db_path_with(&DatabasePathResolver::default()).unwrap();
+    let db_path = get_db_path_with(&DatabasePathResolver::default(), true).unwrap();
     let result = ensure_db_dir(&db_path);
     // With TempDbGuard the stats DB path points to a temp dir, so this succeeds.
     assert!(result.is_ok());
@@ -655,7 +655,7 @@ fn record_compression_stats_records_dryrun_mode() {
 #[test]
 fn get_db_path_returns_valid_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let db_path = get_db_path_with(&DatabasePathResolver::default());
+    let db_path = get_db_path_with(&DatabasePathResolver::default(), true);
     assert!(db_path.unwrap().ends_with("stats.db"));
 }
 
@@ -824,13 +824,17 @@ fn run_command_retrieve_invalid_hash() {
 
 #[test]
 fn run_command_retrieve_missing_hash() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let result = run_command(Commands::Retrieve {
+    let Some(guard) = TempDbGuard::new() else {
+        return;
+    };
+    drop(SqliteStore::new(guard.stash_db_path()).unwrap());
+    let (message, code) = run_command(Commands::Retrieve {
         hash: "abcdef0123456789abcdef01".to_string(),
         stash_db: None,
-    });
-    assert!(result.is_err());
-    assert!(result.unwrap_err().0.contains("no stashed payload"));
+    })
+    .unwrap_err();
+    assert_eq!(code, 1);
+    assert!(message.contains("no stashed payload for hash"), "{message}");
 }
 
 #[test]
@@ -1917,16 +1921,19 @@ fn read_input_file_missing() {
 
 
 #[test]
-fn run_command_retrieve_store_error() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let result = run_command(Commands::Retrieve {
+fn run_command_retrieve_reports_missing_stash_after_rejecting_override() {
+    let Some(guard) = TempDbGuard::new() else {
+        return;
+    };
+    let (message, code) = run_command(Commands::Retrieve {
         hash: "abcdef0123456789abcdef01".to_string(),
-        stash_db: Some("/nonexistent/deep/nested/dir/stash.db".to_string()),
-    });
-    // The stash_db override gets rejected and falls back to the temp DB,
-    // where the hash does not exist.
-    assert!(result.is_err());
-    assert!(result.unwrap_err().0.contains("no stashed payload"));
+        stash_db: Some("relative/stash.db".to_string()),
+    })
+    .unwrap_err();
+    assert_eq!(code, 1);
+    assert!(message.contains("stash database not found at"), "{message}");
+    assert!(message.contains(guard.stash_db_path()), "{message}");
+    assert!(!Path::new(guard.stash_db_path()).exists());
 }
 
 #[test]

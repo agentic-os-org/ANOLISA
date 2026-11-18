@@ -691,12 +691,12 @@ class QwenWorkInstallTests(unittest.TestCase):
     def test_registered_non_bash_mcp_replaces_output_without_source_or_fhs(self) -> None:
         self.prepare_detached_plugin()
         self.assertEqual(set(self.hooks), {"PreToolUse", "PostToolUse"})
-        matcher = self.hooks["PreToolUse"][0]["matcher"]
-        self.assertEqual(set(WORKSPACE_SHELL_TOOLS), set(qwenwork_adapter._QWENWORK_WORKSPACE_SHELLS))
-        self.assertLessEqual({"Bash", *WORKSPACE_SHELL_TOOLS}, set(matcher.split("|")))
+        pre_tool = self.hooks["PreToolUse"][0]
+        self.assertIn("--recovery-only", pre_tool["hooks"][0]["command"])
         for tool in ("Bash", *WORKSPACE_SHELL_TOOLS):
-            self.assertIsNotNone(re.fullmatch(matcher, tool))
-        self.assertIsNone(re.fullmatch(matcher, "mcp__office__list_rows"))
+            self.assertIsNotNone(re.fullmatch(pre_tool["matcher"], tool), tool)
+        self.assertIsNone(re.fullmatch(pre_tool["matcher"], "mcp__office__list_rows"))
+        self.assertEqual(set(WORKSPACE_SHELL_TOOLS), set(qwenwork_adapter._QWENWORK_WORKSPACE_SHELLS))
         self.assertNotIn("matcher", self.hooks["PostToolUse"][0])
         for event in self.hooks.values():
             self.assertIn("--agent-id qwenwork", event[0]["hooks"][0]["command"])
@@ -744,6 +744,19 @@ class QwenWorkInstallTests(unittest.TestCase):
         (self.bin / "tokenless").chmod(0o755)
         self.env["TOKENLESS_MOCK_REQUEST_LOG"] = str(self.root / "requests.jsonl")
 
+    def test_bare_retrieval_result_bypasses_posttool_compression(self) -> None:
+        self.prepare_detached_plugin()
+        self.use_contract_mock()
+        payload = self.payload({"stdout": "original " * 500, "exit_code": 0}, "Bash")
+        payload["tool_input"] = {
+            "command": "tokenless retrieve abcdef0123456789abcdef01"
+        }
+        self.assertEqual(self.replay("PostToolUse", payload), {})
+        request = json.loads(
+            (self.root / "requests.jsonl").read_text().splitlines()[-1]
+        )
+        self.assertEqual(request["input"]["result_kind"], "retrieve")
+
     def test_workspace_shell_aliases_leave_other_agents_unchanged(self) -> None:
         before = snapshot(self.root)
         for tool in WORKSPACE_SHELL_TOOLS:
@@ -752,38 +765,6 @@ class QwenWorkInstallTests(unittest.TestCase):
                 payload["cwd"] = str(self.root)
                 self.assertIs(claude_adapter.prepare_input(payload), payload)
         self.assertEqual(snapshot(self.root), before)
-
-    def test_workspace_shell_aliases_rewrite_preserve_arguments_and_deduplicate(self) -> None:
-        self.prepare_detached_plugin()
-        self.use_contract_mock()
-        for tool in WORKSPACE_SHELL_TOOLS:
-            with self.subTest(tool=tool):
-                payload = self.payload("", tool)
-                payload["cwd"] = str(self.root)
-                payload["tool_input"] = {
-                    "command": "git status",
-                    "dir_path": str(self.root),
-                    "timeout": 30,
-                    "sandbox_permissions": "use_default",
-                }
-                output = self.replay("PreToolUse", payload)["hookSpecificOutput"]
-                self.assertEqual(
-                    output["updatedInput"],
-                    {
-                        **payload["tool_input"],
-                        "command": "/mock/rtk git status",
-                    },
-                )
-                self.assertTrue(list((self.os_home / ".tokenless/hook-state").glob("*")))
-                self.assertFalse((self.root / ".tokenless").exists())
-                payload["tool_response"] = [
-                    {"type": "text", "text": '{"body":"' + "x" * 500 + '"}'}
-                ]
-                self.assertEqual(self.replay("PostToolUse", payload), {})
-                request = json.loads((self.root / "requests.jsonl").read_text().splitlines()[-1])
-                self.assertEqual(request["attribution"]["agent_id"], "qwenwork")
-                self.assertEqual(request["input"]["output_optimization"], "rtk")
-                self.assertEqual(request["input"]["content_origin"], "command_output")
 
     def test_workspace_data_directory_preserves_environment_across_cwds(self) -> None:
         self.prepare_detached_plugin()
@@ -813,16 +794,19 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                     payload = self.payload("", tool)
                     payload["cwd"] = str(self.root)
                     payload["tool_input"] = {"command": "git status"}
-                    result = self.replay("PreToolUse", payload)
-                    self.assertIn("hookSpecificOutput", result)
-                    self.assertEqual(json.loads((self.bin / "data-dir.json").read_text()), override)
-                    self.assertTrue(list((state_dir / "hook-state").glob("*")))
-                    payload["cwd"] = str(other_cwd)
-                    payload["tool_response"] = [{"type": "text", "text": "log " * 500}]
-                    self.assertEqual(self.replay("PostToolUse", payload), {})
-                    self.assertEqual(json.loads((self.bin / "data-dir.json").read_text()), override)
-                    request = json.loads((self.root / "requests.jsonl").read_text().splitlines()[-1])
-                    self.assertEqual(request["input"]["output_optimization"], "rtk")
+                    self.assertEqual(self.replay("PreToolUse", payload), {})
+                    for cwd in (self.root, other_cwd):
+                        payload["cwd"] = str(cwd)
+                        payload["tool_response"] = [
+                            {"type": "text", "text": '{"body":"' + "x" * 500 + '"}'}
+                        ]
+                        self.replay("PostToolUse", payload)
+                        self.assertEqual(
+                            json.loads((self.bin / "data-dir.json").read_text()), override
+                        )
+                        request = json.loads((self.root / "requests.jsonl").read_text().splitlines()[-1])
+                        self.assertEqual(request["input"]["output_optimization"], "none")
+                        self.assertEqual(request["input"]["content_origin"], "command_output")
                     self.assertFalse(list((state_dir / "hook-state").glob("*")))
                     self.assertFalse((self.root / ".tokenless").exists())
                     self.assertFalse((other_cwd / ".tokenless").exists())
@@ -855,8 +839,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                 payload["cwd"] = str(self.root)
                 payload["tool_input"] = {"command": "git status"}
                 before = snapshot(self.root)
-                for event in ("PreToolUse", "PostToolUse"):
-                    self.assertEqual(self.replay(event, payload), {})
+                self.assertEqual(self.replay("PostToolUse", payload), {})
                 with mock.patch.dict(os.environ, {"TOKENLESS_DATA_DIR": directory}):
                     for action in (("detect",), ("install", "--dry-run")):
                         # Detached source is deliberately absent; inspect the installed copy.
@@ -915,8 +898,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         payload = self.payload([{"type": "text", "text": "log " * 500}], "mcp__workspace__bash")
         payload["cwd"] = str(self.root)
         payload["tool_input"] = {"command": "git status"}
-        for event in ("PreToolUse", "PostToolUse"):
-            self.assertEqual(self.replay(event, payload), {})
+        self.assertEqual(self.replay("PostToolUse", payload), {})
         self.assertFalse((self.root / "relative-data").exists())
         self.assertFalse((self.root / ".tokenless").exists())
         self.assertFalse((self.home / ".tokenless").exists())
@@ -999,6 +981,11 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
             request["capabilities"]["recovery"],
             {"kind": "shell" if sys.platform == "darwin" else "none"},
         )
+        del self.hooks["PreToolUse"]
+        (self.target / "hooks/hooks.json").write_text(json.dumps({"hooks": self.hooks}))
+        self.replay("PostToolUse", self.payload(response, "Bash"))
+        request = json.loads((private_bin / "request.json").read_text())
+        self.assertEqual(request["capabilities"]["recovery"], {"kind": "none"})
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS private recovery bridge")
     def test_private_recovery_without_global_path_and_concurrent_attribution(self) -> None:
@@ -1026,9 +1013,16 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
             payload.update(
                 cwd=str(self.root), session_id=f"session-{index}", tool_use_id=f"call-{index}"
             )
-            payload["tool_input"] = {"command": f"tokenless retrieve '{key}'", "timeout": 30}
+            payload["tool_input"] = {
+                "command": f"tokenless retrieve '{key}'",
+                "dir_path": str(self.root),
+                "timeout": 30,
+                "sandbox_permissions": "use_default",
+            }
             rewritten = self.replay("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]
-            self.assertEqual(rewritten["timeout"], 30)
+            self.assertEqual(
+                rewritten, {**payload["tool_input"], "command": rewritten["command"]}
+            )
             result = subprocess.run(
                 ["/bin/bash", "-c", rewritten["command"]],
                 capture_output=True,
@@ -1060,8 +1054,23 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         payload = self.payload("", "Bash")
         with mock.patch.dict(
             os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}
-        ), mock.patch.object(sys, "platform", "darwin"):
+        ), mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            qwenwork_adapter, "tokenless_retrieve_command_available", return_value=False
+        ):
             self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
+            workspace = self.payload("", "mcp__workspace__bash")
+            workspace["tool_input"] = {"command": f"tokenless retrieve {key}", "timeout": 30}
+            with mock.patch.object(qwenwork_adapter, "_QWENWORK_RECOVERY", None):
+                recovery = qwenwork_adapter.recovery_pre_tool_input(workspace)
+                self.assertIsNotNone(recovery)
+                self.assertEqual(shlex.split(recovery["command"])[-3:], [str(private), "retrieve", key])
+                self.assertEqual(recovery["timeout"], 30)
+
+            workspace["tool_input"] = {"command": "git status"}
+            with mock.patch.object(qwenwork_adapter, "_prepare_qwenwork_recovery") as prepare:
+                self.assertIsNone(qwenwork_adapter.recovery_pre_tool_input(workspace))
+                prepare.assert_not_called()
+
             qwenwork_adapter.prepare_input(payload)
             self.assertTrue(qwenwork_adapter.recovery_available())
             for command in (
@@ -1096,38 +1105,31 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                 qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": f"tokenless retrieve {key}"})
             )
 
-    def test_registered_array_and_pretool_attribution(self) -> None:
+    def test_registered_pretool_bypasses_other_commands_without_running_cli(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
-        result = self.replay("PostToolUse", self.payload([{"body": "x" * 500}]))
-        self.assertEqual(result["hookSpecificOutput"]["updatedToolOutput"], [{"body": "x" * 20}])
-        payload = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "git status", "description": "keep"},
-            "session_id": "sandbox", "tool_use_id": "pre-sandbox",
-        }
-        result = self.replay("PreToolUse", payload)
-        self.assertEqual(
-            result["hookSpecificOutput"]["updatedInput"],
-            {"command": "/mock/rtk git status", "description": "keep"},
-        )
-        requests = [
-            json.loads(line) for line in (self.root / "requests.jsonl").read_text().splitlines()
-        ]
-        self.assertEqual([request["operation"] for request in requests], ["post_tool", "pre_tool"])
-        for request in requests:
-            self.assertEqual(request["attribution"]["agent_id"], "qwenwork")
-        # The persisted RTK state must prevent a second transformation.
-        post = self.payload({"body": "x" * 500}, "Bash")
-        post["tool_use_id"] = "pre-sandbox"
-        self.assertEqual(self.replay("PostToolUse", post), {})
+        payload = self.payload("", "Bash")
+        payload["cwd"] = str(self.root)
+        key = "abcdef0123456789abcdef01"
+        for tool in ("Bash", *WORKSPACE_SHELL_TOOLS):
+            payload["tool_name"] = tool
+            for command in (
+                "git status",
+                f"tokenless retrieve {key} | cat",
+                f"tokenless retrieve {key}; git status",
+                f"tokenless retrieve {key} --stash-db other.db",
+            ):
+                with self.subTest(tool=tool, command=command):
+                    payload["tool_input"] = {"command": command, "description": "keep"}
+                    self.assertEqual(self.replay("PreToolUse", payload), {})
+        self.assertFalse((self.root / "requests.jsonl").exists())
+        self.assertFalse((self.root / ".tokenless" / "hook-state").exists())
 
     def test_dispatcher_fails_open_on_linux_invalid_input_and_missing_resources(self) -> None:
         self.prepare_detached_plugin()
         payload = self.payload({"body": "x" * 500})
         self.executable("uname", "#!/bin/sh\nprintf '%s\\n' Linux\n")
-        for event in ("PreToolUse", "PostToolUse"):
-            self.assertEqual(self.replay(event, payload), {})
+        self.assertEqual(self.replay("PostToolUse", payload), {})
         self.assertFalse((self.bin / "spawn_log").exists())
         self.executable("uname", "#!/bin/sh\nprintf '%s\\n' Darwin\n")
         self.assertEqual(self.replay("PostToolUse", "not json"), {})

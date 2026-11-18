@@ -28,9 +28,10 @@ input unchanged; exit code 2 is reserved for blocking decisions. A missing
 Python interpreter or shared hook resource therefore disables optimization for
 that invocation without requiring another dispatcher.
 
-PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`,
-`mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`;
-RTK decides whether to rewrite each command.
+The Windows installer registers only `PostToolUse`.
+
+The following RTK behavior applies to legacy PreTool registrations and direct
+compatibility tests. RTK decides whether to rewrite each command.
 PowerShell calls run RTK through the native `tokenless.exe` and scope attribution
 variables to that invocation. PostTool classifies PowerShell output as command output,
 retains file-content protection, and avoids compressing RTK output twice.

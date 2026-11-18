@@ -104,18 +104,21 @@ in that set. Host applications
 retain raw tool values for UI and business logic and pass only copied, final model-visible text to
 `post_tool`. Retrieve output never enters PostTool again.
 
-QwenWork's hook adapter normalizes recognized workspace Shell MCP names to `Bash`
-before either lifecycle request. It unwraps only an exact single plain text block;
-unknown block arrays pass through without compression. The workspace event's
-absolute `cwd` anchors `.tokenless` state for both hooks and the RTK command.
-Native Bash keeps the existing state location and replaces only single-stream
-`stdout` in the host's text slot, passing multi-stream, failed, or unfamiliar
-shell envelopes through while enforcing net savings on the delivered replacement.
-Plugin-private binaries are resolved by the adapter. On macOS, a verified PreTool
-bridge anchors standalone recovery commands to that binary and the same state,
-Stash selection and attribution. Without that bridge, private runtime paths declare
-`recovery.kind = none`. The bridge and exact recovery recognition belong to the
-QwenWork adapter, independently of other hosts.
+On macOS, QwenWork registers PostToolUse and a PreToolUse hook for recovery commands.
+PostTool normalizes recognized
+workspace Shell MCP names to `Bash` and unwraps an exact single plain text block.
+Unknown block arrays pass through. Native Bash replaces only single-stream
+`stdout` in the host's text slot and passes through multi-stream, failed, or
+unfamiliar shell envelopes. The adapter checks net savings on the delivered text.
+
+PostTool uses the configured Tokenless data directory and can run the bundled
+binary. For standalone recovery commands on macOS, PreTool supplies the bundled
+executable and the same data directory. Other commands pass through. Workspace
+Shell and plugin-private runtimes declare no recovery when the bridge is
+unavailable. A native Shell using a separately installed CLI can recover through
+its PATH. Retrieval opens the existing
+Stash read-only. Writers preserve the SQLite WAL sidecars for those readers
+and clean up expired entries.
 
 Invalid inputs, a missing packaged `tokenless` executable, lifecycle operation failures, attachment failures, and
 tool-name collisions fail fast. Normal Core dispositions such as passthrough, no savings, and

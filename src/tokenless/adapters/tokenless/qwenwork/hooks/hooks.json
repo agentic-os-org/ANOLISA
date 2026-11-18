@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py --agent-id qwenwork",
+            "command": "bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py --agent-id qwenwork --recovery-only",
             "timeout": 10
           }
         ]
