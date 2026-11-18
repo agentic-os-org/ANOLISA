@@ -738,12 +738,15 @@ mod tests {
     fn export_keeps_gap_counters_only_on_read_truncation_markers() {
         use std::os::unix::fs::PermissionsExt;
 
-        let marker: Value = serde_json::from_str(include_str!(
+        let mut marker: Value = serde_json::from_str(include_str!(
             "../../../cosh-types/tests/fixtures/audit-v1-shell-truncated.json"
         ))
         .unwrap();
+        // The standalone fixture carries sequence 3; a readable segment must start at zero.
+        marker["sequence"] = serde_json::json!(0);
         let mut future = marker.clone();
         future["event_id"] = Value::String("future-event-1".to_string());
+        future["sequence"] = serde_json::json!(1);
         future["event_type"] = Value::String("future.event".to_string());
         future["data"] = serde_json::json!({
             "operation": "future_operation",
