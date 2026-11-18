@@ -1051,12 +1051,19 @@ fn normalize_cmd(cmd: &str) -> String {
 pub(crate) fn normalize_action_sig(call: &crate::atif::AtifToolCall) -> String {
     let tool = call.display_name();
     let args = &call.arguments;
-    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-        return format!("{tool}:{}", normalize_cmd(cmd));
+    if let Some(cmd) = crate::tool_command::from_arguments(args) {
+        return format!("{tool}:{}", normalize_cmd(&cmd));
     }
-    let target = ["file_path", "path", "notebook_path", "pattern", "url"]
-        .iter()
-        .find_map(|k| args.get(k).and_then(|v| v.as_str()));
+    let target = [
+        "file_path",
+        "filePath",
+        "path",
+        "notebook_path",
+        "pattern",
+        "url",
+    ]
+    .iter()
+    .find_map(|k| args.get(k).and_then(|v| v.as_str()));
     match target {
         Some(t) => format!("{tool}:{}", trunc(&mask_digits(t), 60)),
         None => tool,
@@ -2024,6 +2031,36 @@ mod tests {
     fn action_sig_uses_file_target_for_write_tools() {
         let sig = normalize_action_sig(&call("Edit", json!({"file_path": "src/p.rs"})));
         assert_eq!(sig, "Edit:src/p.rs");
+        let camel = normalize_action_sig(&call("Edit", json!({"filePath": "src/q.rs"})));
+        assert_eq!(camel, "Edit:src/q.rs");
+    }
+
+    #[test]
+    fn action_sig_reuses_command_extractor_for_aliases_and_argv() {
+        for key in ["command", "cmd", "script"] {
+            assert_eq!(
+                normalize_action_sig(&call(
+                    "exec_command",
+                    json!({key: "cd /repo && cargo test"})
+                )),
+                "exec_command:cargo test"
+            );
+            assert_eq!(
+                normalize_action_sig(&call(
+                    "shell",
+                    json!({key: ["cargo", "test", "--workspace"]})
+                )),
+                "shell:cargo test --workspace"
+            );
+        }
+        // Malformed argv or blank commands fall back to target/tool name without panicking.
+        for bad in [
+            json!({"command": ["cargo", null]}),
+            json!({"command": []}),
+            json!({"command": "   "}),
+        ] {
+            assert_eq!(normalize_action_sig(&call("shell", bad)), "shell");
+        }
     }
 
     /// The ledger must cover every agent turn (no filtering), carry the canonical
