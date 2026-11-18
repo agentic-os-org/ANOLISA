@@ -45,7 +45,7 @@ await aw.close();
 业务原生就绪后，部署方后台准备 sec-core，并以应用用户执行：
 
 ```bash
-aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
 ```
 
 设置 `daemon.startup: on_demand` 时，命令启动或复用 AW。PID 对应已安装接入模块的
@@ -220,8 +220,8 @@ Service 仍可达时，回调 RPC 失败或取消会先清理该事件，再传�
 AW_SOCKET=/absolute/private/aw.sock
 aw instance list --socket "$AW_SOCKET"
 AW_SDK_INSTANCE=application_id_from_list
-aw instance attach --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
-aw instance detach --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+aw connect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
 ```
 
 应用确认 Ready 或释放空闲登记后，结果才显示 `completed`。存在活动任务时 detach 返回

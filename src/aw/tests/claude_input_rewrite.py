@@ -71,7 +71,7 @@ def main():
                     except subprocess.TimeoutExpired:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait(timeout=5)
-                subprocess.run([str(args.aw.resolve()), "stop", "--config", str(config)],
+                subprocess.run([str(args.aw.resolve()), "service", "stop", "--config", str(config)],
                                env=environment, capture_output=True, timeout=15, check=True)
                 shutil.copytree(state / "journal", output / "journal")
     (args.output / "result.json").write_text(json.dumps(reports, indent=2))

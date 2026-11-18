@@ -48,12 +48,11 @@ that configuration. After the prepared native application reports ready, pause
 new work, edit the policy in `aw.yaml`, and run:
 
 ```bash
-aw instance update --agent TARGET
-aw status --config aw.yaml
+aw update --agent TARGET
+aw service status --config aw.yaml
 ```
 
-Use `--instance ID` to select one of several instances. `aw instance update` uses
-the same update contract as `aw update`; it does not discover or attach processes.
+Use `--instance ID` to select one of several instances. Run `aw update` from the directory containing the shared configuration.
 The startup connection and native settings remain in place for subsequent policy
 changes. Changes outside the permitted policy fields require restart.
 
@@ -64,9 +63,9 @@ changes. Changes outside the permitted policy fields require restart.
 3. Validate, apply and query the active revision. Replace `TARGET` with the configuration target name.
 
 ```bash
-aw validate --config next.yaml --against current.yaml
+aw config validate --config next.yaml --against current.yaml
 aw update --config current.yaml --agent TARGET --policy next.yaml
-aw status --config current.yaml
+aw service status --config current.yaml
 ```
 
 Success returns `policy_revision`, the previous revision, audit key, preparation and activation durations. Resume dispatch after confirmation; each new task receives a complete policy snapshot.

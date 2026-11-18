@@ -66,10 +66,10 @@ set its `argv` to `[node, /absolute/application.mjs]`, and configure your before
 and after policies. Its included commands are neutral. Then run:
 
 ```bash
-target/debug/aw validate --config /absolute/aw.pi.yaml
+target/debug/aw config validate --config /absolute/aw.pi.yaml
 target/debug/aw run --config /absolute/aw.pi.yaml --agent pi -- 'Your task'
-target/debug/aw status --config /absolute/aw.pi.yaml
-target/debug/aw stop --config /absolute/aw.pi.yaml
+target/debug/aw service status --config /absolute/aw.pi.yaml
+target/debug/aw service stop --config /absolute/aw.pi.yaml
 ```
 
 `--agent` selects your configuration target; its `adapter` remains `pi`.
@@ -134,7 +134,7 @@ try {
 }
 ```
 
-After the host reports Ready, use `aw instance update --agent pi` from the
+After the host reports Ready, use `aw update --agent pi` from the
 configuration directory. Each session retains one immutable policy through
 its prompts, tool callbacks and disposal. Updates reject an open session,
 application factory preparation or unconfirmed cleanup; close every session

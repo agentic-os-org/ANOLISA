@@ -50,8 +50,7 @@ CLI 通过 `aw-package` 完成本地 Provider 管理与离线编辑；文件校�
 启动器和服务共同使用 `aw-adapter`；Adapter 不依赖 service、Host 或 CLI 内部类型。
 
 本地 AW 扩展安装使用 `aw install --prefix ... --bundle ...`，原生 Hook 注册使用
-`aw agent connect --config ... --agent ...`，旧的 `aw install --config ... --agent ...`
-仍兼容。混用安装和原生注册选项会在写入前失败。新的本地包须声明 Provider 协议，
+`aw connect --config ... --agent ...`。混用安装和原生注册选项会在写入前失败。新的本地包须声明 Provider 协议，
 拒绝 `manifest.json` 与 core/后端 bundle。此入口不下载 URL、不调用原生包
 管理器，也不激活 Provider。已安装的 Provider 也可直接通过 `transport.argv`
 接入，无需 AW 包记录；RPM 所有的文件保留 RPM 管理权。

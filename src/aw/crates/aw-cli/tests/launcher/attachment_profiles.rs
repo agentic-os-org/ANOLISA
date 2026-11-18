@@ -90,7 +90,7 @@ fn check_profile(profile_name: &str, peer_profile: Option<&str>, shared: bool) {
     }
     let _peer = Process::spawn(&fixture, command);
     let peer_pid = wait(&peer_root.join("native-pid.json")).as_u64().unwrap() as u32;
-    let output = install_entrypoint(&fixture, pid, false, &["agent", "connect"]);
+    let output = install_entrypoint(&fixture, pid, false, &["connect"]);
     if shared {
         assert!(!output.status.success(), "{output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("scope is shared"));
@@ -100,12 +100,7 @@ fn check_profile(profile_name: &str, peer_profile: Option<&str>, shared: bool) {
         assert!(!fixture.root.join("post-seen").exists());
     } else {
         assert_eq!(success(output)["attached"], true);
-        success(install_entrypoint(
-            &fixture,
-            pid,
-            true,
-            &["agent", "connect"],
-        ));
+        success(install_entrypoint(&fixture, pid, true, &["connect"]));
     }
     assert!(!peer_root.join("post-seen").exists());
     assert!(!peer_home

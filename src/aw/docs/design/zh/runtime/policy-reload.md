@@ -5,7 +5,7 @@
 AW 可以显式更新通过稳定桥接启动的空闲实例策略，原生宿主进程保持运行；忙碌实例拒绝更新。
 受限桥接路径通过 `aw run --reloadable` 显式启用，已验证基线为 Qoder 1.1.73 TUI 和
 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled Worker
-1.1.78。准入检查已安装版本所用的入口和原生空闲/更新协议。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
+1.1.78。准入检查已安装版本所用的入口和原生空闲/更新协议。外部 TUI 和 App 接入通过 `aw connect --pid PID` 提供；SDK daemon
 外部接入和 steer 仍在规划中。
 `qoder-sdk` 的普通 `aw run` 为每个受管 Query 建立常驻子 scope。
 普通 QwenPaw App 启动为每个受管 Agent reply 建立任务 scope。
@@ -34,8 +34,8 @@ QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled 
 占用及时移除，没有累计历史调用上限。快照缺失、确认过期或 owner 失效会阻止任务执行。
 
 `aw update --config aw.yaml --agent TARGET` 在原配置关联的同一服务中选择根实例。
-多个匹配要求 `--instance ID`。既有 `aw agent connect --pid` / `aw install --pid` 及
-`--remove` 流程继续支持 Qoder TUI、QwenPaw App 的 PID 接入。便捷选择器
+多个匹配要求 `--instance ID`。`aw connect --agent TARGET --pid PID` 及
+`aw disconnect --agent TARGET --pid PID`继续支持 Qoder TUI、QwenPaw App 的 PID 接入。便捷选择器
 `aw update --pid` 延后，与 Adapter 接入独立；服务侧进程关联和身份检查持续生效。
 此更新路径不增加跨 namespace 控制。管控侧选择执行容器，在最终路径准备 Hook 文件，并将
 更新和任务派发串行化；更新成功后再恢复派发。活跃任务及清理期间返回 `busy`，
@@ -100,13 +100,13 @@ Worker 1.1.78 可能在生成器清理完成前发出 command completion 和 res
 错误只报告公共配置部分，不打印配置值。
 
 ```bash
-aw validate --config next.yaml --against current.yaml
+aw config validate --config next.yaml --against current.yaml
 ```
 
 成功打印 `policy update scope valid; runtime activation is not checked`，
 只说明变化限于策略字段。Provider 发现、私有配置检查、原生支持、就绪确认、闲置确认和
-激活仍需运行时准入。基线缺失或无效时失败。原有 `aw validate --config FILE`
-保留输出与语义。此比较适用于所有已配置的 Adapter，不证明任何框架支持运行时热更新。
+激活仍需运行时准入。基线缺失或无效时失败。不带 `--against` 的 `aw config validate --config FILE`
+校验候选配置并输出 `configuration valid`；自动化使用 `--json` 管理报告。此比较适用于所有已配置的 Adapter，不证明任何框架支持运行时热更新。
 
 ## 已实现：预热与显式空闲激活
 
@@ -117,7 +117,7 @@ Hook 文件，再于首个请求派发前应用策略。普通 resident worker �
 模型、凭据和 Session 配置继续由框架管理；此操作只修改前述 AW 策略字段。
 
 `aw run --config current.yaml --agent TARGET --reloadable` 即使默认没有用户 Hook，
-也会预装稳定回调。`aw status` 返回实例 ID、激活策略版本、就绪、请求/工具数量和进程元数据。
+也会预装稳定回调。`aw service status` 返回实例 ID、激活策略版本、就绪、请求/工具数量和进程元数据。
 通过 `aw update --config current.yaml --agent TARGET` 应用同一份已编辑的配置，
 选择目标的唯一实例并读取当前版本；保留独立 `--policy next.yaml` 形式。多个匹配要求
 `--instance`；`--socket` 和
@@ -257,7 +257,7 @@ binding 和回调资源；detach 不终止 Agent。进程退出使关联失效�
    CLI 接入回归和 AgentScope middleware 测试覆盖这些契约；原生清单要求独立的
    Qoder 1.1.73 TUI 启动及派发前空闲切换用例。完整的托管 TUI 工具轮次采纳及 QwenPaw App
    热更新仍需独立验收，并保留 1.1.64 print 测试。
-3. 通过 `aw install --pid` / `--remove` 提供原生 attach/detach，覆盖作用域注册、
+3. 通过 `aw connect --agent TARGET --pid PID` / `aw disconnect --agent TARGET --pid PID` 提供原生 attach/detach，覆盖作用域注册、
    原生确认及 PID/start ticks 不变验收。
 4. 逐步扩展其他 Adapter。OpenClaw/Hermes 及 Pi/Claude SDK/AgentScope 是后续候选；
    热更新和旁路接入是独立能力，SDK 接入可以要求预装桥接。

@@ -76,7 +76,7 @@ async def hook(payload, call_id, context):
 def status():
     config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
     return json.loads(subprocess.check_output([
-        config["executable"], "status", "--config", os.environ["SUBMISSION_CONFIG"],
+        config["executable"], "service", "status", "--config", os.environ["SUBMISSION_CONFIG"],
     ], timeout=5))["result"]
 
 

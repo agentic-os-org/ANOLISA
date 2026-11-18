@@ -44,7 +44,7 @@ async def worker():
             assert len(selected) == 2, (name, selected)
             delivered = json.dumps(selected[-1]["request"]["messages"])
             assert ("PRIVATE_SKILL_BODY" in delivered) == (name == "signed"), (name, delivered)
-            status = json.loads(subprocess.check_output([os.environ["AW_TEST_BIN"], "status", "--socket",
+            status = json.loads(subprocess.check_output([os.environ["AW_TEST_BIN"], "service", "status", "--socket",
                 str(root / "state/aw.sock")], timeout=5))["result"]
             assert status["events"] == status["resources"]["usage"]["invocations"] == 0, status
             cases.append(name)
@@ -104,7 +104,7 @@ def run(aw, provider, output):
         processes = []
         try:
             with (output / "serve.log").open("wb") as log:
-                service = subprocess.Popen([str(aw), "serve", "--config", str(path), "--state-dir", str(root / "state")], stdout=log, stderr=log, start_new_session=True)
+                service = subprocess.Popen([str(aw), "service", "serve", "--config", str(path), "--state-dir", str(root / "state")], stdout=log, stderr=log, start_new_session=True)
                 processes.append(service)
                 deadline = time.monotonic() + 15
                 while not (root / "state/aw.sock").exists():
@@ -120,7 +120,7 @@ def run(aw, provider, output):
                     child.wait(timeout=120)
                 assert child.returncode == 0, (output / "worker.stderr").read_text()
                 result = json.loads((output / "worker.stdout").read_text())
-                status = json.loads(subprocess.check_output([str(aw), "status", "--socket", str(root / "state/aw.sock")], timeout=5))["result"]
+                status = json.loads(subprocess.check_output([str(aw), "service", "status", "--socket", str(root / "state/aw.sock")], timeout=5))["result"]
                 assert status["bindings"] == status["events"] == 0, status
                 result.update(bindings=0, events=0)
                 (output / "result.json").write_text(json.dumps(result, indent=2))

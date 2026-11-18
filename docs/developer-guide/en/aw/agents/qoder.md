@@ -13,7 +13,7 @@ Qoder CLI separately and verify its version. From `src/aw`:
 ```bash
 cargo build --locked -p aw-cli --bin aw
 qodercli --version
-target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw config validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
@@ -58,8 +58,8 @@ when Qoder exits. It releases that session's binding and unfinished work. The
 shared daemon remains available to later sessions using the same configuration.
 
 ```bash
-target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
-target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw service status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw service stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
 ## Prepare native startup
@@ -87,7 +87,7 @@ Qoder processes can share the prepared profile. While the selected instance is
 idle, edit the permitted policy fields and run:
 
 ```bash
-target/debug/aw instance update --config aw.yaml --instance INSTANCE_ID
+target/debug/aw update --config aw.yaml --instance INSTANCE_ID
 ```
 
 Print requests read their initial policy at startup; updates cannot interrupt an
@@ -140,8 +140,8 @@ profile, then attach before its first request. Set the matching executable in
 `spec.agents.qoder.argv` in `aw.yaml`. From the directory containing that file:
 
 ```bash
-aw instance attach --agent qoder --pid "$QODER_PID"
-aw instance update --agent qoder
+aw connect --agent qoder --pid "$QODER_PID"
+aw update --agent qoder
 ```
 
 Set `QODER_PID` to the terminal process you started. Attachment verifies its
@@ -160,7 +160,7 @@ and user settings.
 Remove the attachment after the terminal is idle:
 
 ```bash
-aw instance attach --agent qoder --pid "$QODER_PID" --remove
+aw disconnect --agent qoder --pid "$QODER_PID"
 ```
 
 AW restores only its owned settings entries. See [policy updates](../deployment/policy-updates.md)

@@ -140,7 +140,7 @@ plugin=QwenPawPlugin(instance)
                 startup_seconds = time.monotonic() - started
                 initial = json.loads(
                     subprocess.check_output(
-                        [str(AW), "status", "--config", str(config)], text=True, timeout=10
+                        [str(AW), "service", "status", "--config", str(config)], text=True, timeout=10
                     )
                 )["result"]
                 self.assertEqual(initial["instances"], [], initial)
@@ -194,8 +194,7 @@ plugin=QwenPawPlugin(instance)
                                 subprocess.check_output(
                                     [
                                         str(AW),
-                                        "instance",
-                                        "attach",
+                                        "connect",
                                         "--socket",
                                         str(root / "state/aw.sock"),
                                         "--sdk-instance",
@@ -209,7 +208,7 @@ plugin=QwenPawPlugin(instance)
                             attach_seconds = time.monotonic() - started
                         status = json.loads(
                             subprocess.check_output(
-                                [str(AW), "status", "--config", str(config)], text=True, timeout=10
+                                [str(AW), "service", "status", "--config", str(config)], text=True, timeout=10
                             )
                         )["result"]
                         self.assertEqual(len(status["instances"]), 1, status)
@@ -234,8 +233,7 @@ plugin=QwenPawPlugin(instance)
                             subprocess.check_output(
                                 [
                                     str(AW),
-                                    "instance",
-                                    "detach" if mode == "detached" else "attach",
+                                    "disconnect" if mode == "detached" else "connect",
                                     "--socket",
                                     str(root / "state/aw.sock"),
                                     "--sdk-instance",

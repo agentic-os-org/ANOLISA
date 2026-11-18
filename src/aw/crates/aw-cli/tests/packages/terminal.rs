@@ -74,10 +74,7 @@ fn output_options_are_strict_local_and_never_approval_flags() {
         assert!(!f.prefix.exists());
     }
     for command in [
-        vec!["install", "--config", "aw.yaml", "--agent", "qoder"],
-        vec![
-            "agent", "connect", "--config", "aw.yaml", "--agent", "qoder",
-        ],
+        vec!["connect", "--config", "aw.yaml", "--agent", "qoder"],
         vec!["run", "--config", "aw.yaml", "--agent", "qoder"],
         vec!["config", "show", "--config", "/missing"],
         vec!["config", "validate", "--config", "/missing"],

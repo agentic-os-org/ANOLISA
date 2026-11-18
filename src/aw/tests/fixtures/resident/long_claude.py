@@ -94,7 +94,7 @@ async def main():
                 assert not client._aw_bridge.invocations.pending
                 status = json.loads(
                     subprocess.check_output(
-                        [config["executable"], "status", "--config", str(ROOT / "aw.json")],
+                        [config["executable"], "service", "status", "--config", str(ROOT / "aw.json")],
                         timeout=5,
                     )
                 )["result"]

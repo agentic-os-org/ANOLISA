@@ -80,7 +80,7 @@ def main():
         save(root / "candidate.json", candidate)
 
         def status():
-            return json.loads(checked([aw, "status", "--config", config], env=env).stdout)["result"]
+            return json.loads(checked([aw, "service", "status", "--config", config], env=env).stdout)["result"]
 
         def busy():
             result = subprocess.run([aw, "update", "--config", config, "--agent", "sdk", "--policy", root / "candidate.json"],
@@ -98,7 +98,7 @@ def main():
                 await_condition(lambda: status()["instances"][0]["requests"] == 0, 10, "private lease release")
 
         try:
-            processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", root / "state"])
+            processes.start("daemon", [aw, "service", "serve", "--config", config, "--state-dir", root / "state"])
             await_condition(lambda: (root / "state/aw.sock").exists(), 10, "service startup")
             worker = processes.start("worker", [aw, "run", "--config", config, "--agent", "sdk"])
             await_condition(lambda: (root / "ready").exists() or processes.exited(worker), 30, "private factory ready")

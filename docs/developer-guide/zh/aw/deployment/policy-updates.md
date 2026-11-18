@@ -42,12 +42,11 @@ Session 或客户端关闭前保留原策略。
 暂停新任务派发，修改 `aw.yaml` 的策略，再执行：
 
 ```bash
-aw instance update --agent TARGET
-aw status --config aw.yaml
+aw update --agent TARGET
+aw service status --config aw.yaml
 ```
 
-同一目标有多个实例时，用 `--instance ID` 选择。`aw instance update` 复用 `aw update`
-的更新合同，不执行进程发现或附着。后续策略修改沿用已安装的启动接点和原生设置；
+同一目标有多个实例时，用 `--instance ID` 选择。从共享配置所在目录运行 `aw update`。后续策略修改沿用已安装的启动接点和原生设置；
 允许更新的策略字段之外的变化需要重启。
 
 ## 应用候选策略
@@ -57,9 +56,9 @@ aw status --config aw.yaml
 3. 校验、应用并查询实际版本，将 `TARGET` 换成配置目标名。
 
 ```bash
-aw validate --config next.yaml --against current.yaml
+aw config validate --config next.yaml --against current.yaml
 aw update --config current.yaml --agent TARGET --policy next.yaml
-aw status --config current.yaml
+aw service status --config current.yaml
 ```
 
 成功响应返回 `policy_revision`、前版本、审计 key 及准备和激活耗时。确认成功后恢复派发，每个新任务取得完整策略快照。

@@ -32,8 +32,8 @@ Do not launch the returned command as an unrelated replacement process.
 After readiness, pause new work, edit policy fields in `aw.yaml`, and update:
 
 ```bash
-aw instance update --agent TARGET
-aw status --config aw.yaml
+aw update --agent TARGET
+aw service status --config aw.yaml
 ```
 
 A later preparation from the same configuration path reuses the selected daemon

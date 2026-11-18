@@ -15,7 +15,7 @@ const fingerprint = () => Object.fromEntries(Object.entries(config.typescript.fi
   .map(([name, file]) => [name, createHash('sha256').update(readFileSync(file)).digest('hex')]));
 const original = fingerprint();
 const status = () => JSON.parse(execFileSync(process.env.CLAUDE_TEST_AW,
-  ['status', '--config', process.env.CLAUDE_TEST_CONFIG], { timeout: 5000 })).result;
+  ['service', 'status', '--config', process.env.CLAUDE_TEST_CONFIG], { timeout: 5000 })).result;
 if (matcherFault) {
   // Inject a callback fault between the real bridge and unmodified public SDK.
   // Unit coverage separately exercises the bridge's actual identity-limit throw.

@@ -147,7 +147,7 @@ def main():
                 if scenario == 'transforms':
                     assert row['rejected_transforms'] == ['transformContext', 'convertToLlm', 'onPayload'], row
                     assert len(requests) == 1, ('rewritten input reached HTTP transport', requests)
-                status = json.loads(call([aw, 'status', '--config', path], root, env)[1])['result']
+                status = json.loads(call([aw, 'service', 'status', '--config', path], root, env)[1])['result']
                 assert status['bindings'] == 0 and status['events'] == 0, status
                 assert status['resources']['usage']['invocations'] == 0, status
                 scanner_rows = [json.loads(line) for line in (root / 'scanner.jsonl').read_text().splitlines()]
@@ -162,7 +162,7 @@ def main():
                                 'invocations': status['resources']['usage']['invocations'], 'status': status})
             finally:
                 try:
-                    stopped = call([aw, 'stop', '--config', path], root, env, timeout=15)
+                    stopped = call([aw, 'service', 'stop', '--config', path], root, env, timeout=15)
                     assert stopped[0] == 0, stopped
                     # Stop acknowledges shutdown before the listener is dropped.
                     deadline = time.monotonic() + 5

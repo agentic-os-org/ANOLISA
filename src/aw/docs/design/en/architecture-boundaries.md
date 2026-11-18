@@ -58,8 +58,7 @@ Both launcher and service use `aw-adapter`, which does not depend on service,
 Host or CLI internals.
 
 Local AW extension installation uses `aw install --prefix ... --bundle ...`; native Hook
-registration uses `aw agent connect --config ... --agent ...`. The old native
-`aw install --config ... --agent ...` remains compatible. Mixed installation
+registration uses `aw connect --config ... --agent ...`. Mixed installation
 and native-registration arguments fail before mutation. Local packages use
 `package.json` and declare the Provider protocol; `manifest.json` and core/backend
 bundles are rejected. This path does not fetch URLs, invoke a native package manager or

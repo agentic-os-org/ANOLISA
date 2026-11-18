@@ -132,7 +132,7 @@ Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录
 ### 显式策略更新
 
 受支持的常驻工厂和已准备原生启动安装 Adapter 更新边界，`aw run --reloadable`
-选择单独的受限桥接。`aw instance update` 与 `aw update` 定位现有实例，
+选择单独的受限桥接。`aw update` 定位现有实例，
 由 `aw-service` 在请求准入门外准备新的不可变 Host，再在同一门内最终复查空闲和版本后发布。
 服务保留启动身份，每个实例持有自己的激活策略。原生 Adapter 报告请求/工具生命周期，
 保留调度与效果采纳；Provider 协议和 Core 计划执行不变。
@@ -243,13 +243,13 @@ Adapter 在原生调度前登记模型产生的身份，等待原生命令队列
 
 ## 外部管理进程的原生接入
 
-`aw install --pid` 复用现有配置与 Adapter 准备、Bind/Host 准入、EnableReload、
+`aw connect --pid` 复用现有配置与 Adapter 准备、Bind/Host 准入、EnableReload、
 AssociateProcess 和稳定 dispatch。CLI 管理私有挂载记录及服务绑定；`aw-adapter`
 管理 Qoder settings 合并与确认，以及 QwenPaw 插件 API 安装和移除，有限时长的
 loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享现有进程身份帮助函数。
 
 原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
-`install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
+`aw disconnect --agent TARGET --pid PID` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
 私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。
 
 语言 SDK 在 Instance／Task 上提供公共 Admission。原生 Source 安装捕获，并根据配置

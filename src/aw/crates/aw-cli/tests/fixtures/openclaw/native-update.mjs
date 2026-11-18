@@ -26,7 +26,7 @@ const repeated = spawnSync(config.binary, ['bridge', '--adapter', 'openclaw', '-
 assert.notEqual(repeated.status, 0);
 assert.match(repeated.stderr, /bridge_already_ready/);
 const pid = process.pid;
-const update = () => spawnSync(config.binary, ['instance', 'update', '--instance', binding.binding.instance_id,
+const update = () => spawnSync(config.binary, ['update', '--instance', binding.binding.instance_id,
   '--config', process.env.AW_TEST_CONFIG, '--policy', process.env.AW_TEST_POLICY],
   { encoding: 'utf8', timeout: 20000, maxBuffer: 1024 * 1024 });
 let context = { sessionId: 'session', runId: 'blocked-run' };

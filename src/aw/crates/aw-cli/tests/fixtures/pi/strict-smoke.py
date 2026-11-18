@@ -110,13 +110,13 @@ def main():
                 assert not forbidden, ('unchecked output reached HTTP model', scenario, forbidden)
                 assert code == 0, (scenario, out, err)
                 shutil.copy(root / 'events.json', output / (scenario + '-events.json'))
-                status = json.loads(call([aw, 'status', '--config', path], root, env)[1])['result']
+                status = json.loads(call([aw, 'service', 'status', '--config', path], root, env)[1])['result']
                 assert status['bindings'] == 0 and status['events'] == 0, status
                 assert status['resources']['usage']['invocations'] == 0, status
                 results.append({**json.loads(out), 'http_requests': len(requests), 'status': 'passed'})
             finally:
                 try:
-                    call([aw, 'stop', '--config', path], root, env, timeout=15)
+                    call([aw, 'service', 'stop', '--config', path], root, env, timeout=15)
                     deadline = time.monotonic() + 5
                     while (root / 'state/aw.sock').exists() and time.monotonic() < deadline:
                         time.sleep(.05)

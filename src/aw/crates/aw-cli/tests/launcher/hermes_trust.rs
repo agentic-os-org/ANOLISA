@@ -292,7 +292,7 @@ fn hermes_discovers_metadata_above_the_version_output_limit() {
     )
     .unwrap();
     let index = fs::read(source.join(".git/index")).ok();
-    for operation in ["install", "run"] {
+    for operation in ["connect", "run"] {
         let mut command = command(&fixture, &profile, operation);
         command.env("PATH", "/usr/bin:/bin");
         let output = fixture.run(command);
@@ -338,7 +338,7 @@ fn hermes_rejects_non_utf8_cwd_before_preflight_or_service_setup() {
 fn hermes_rejects_help_before_probes_or_profile_changes() {
     let (fixture, profile) = hermes_fixture();
     for flag in ["--help", "-h"] {
-        for (operation, appended) in [("install", false), ("run", false), ("run", true)] {
+        for (operation, appended) in [("connect", false), ("run", false), ("run", true)] {
             let mut document = fixture.document();
             let mut argv = vec![
                 json!(profile.parent().unwrap().join("hermes")),
@@ -378,7 +378,7 @@ fn hermes_rejects_writable_dotenv_before_run_or_install_probes() {
     fs::write(&dotenv, "PATH=/untrusted\n").unwrap();
     for mode in [0o664, 0o666] {
         fs::set_permissions(&dotenv, fs::Permissions::from_mode(mode)).unwrap();
-        for operation in ["run", "install"] {
+        for operation in ["run", "connect"] {
             let output = fixture.run(command(&fixture, &profile, operation));
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8_lossy(&output.stderr).contains("Hermes profile .env"));
@@ -414,7 +414,7 @@ fn hermes_rejects_non_executable_or_special_explicit_entrypoints() {
         document["spec"]["agents"] =
             json!({"hermes":{"adapter":"hermes","argv":[executable,"chat"]}});
         fixture.save(&document);
-        for operation in ["run", "install"] {
+        for operation in ["run", "connect"] {
             let started = Instant::now();
             let output = fixture.run(command(&fixture, &profile, operation));
             assert_eq!(output.status.code(), Some(1));
@@ -470,7 +470,7 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
             document["spec"]["agents"] =
                 json!({"hermes":{"adapter":"hermes","argv":[executable,"chat"]}});
             fixture.save(&document);
-            for operation in ["install", "run"] {
+            for operation in ["connect", "run"] {
                 let output = fixture.run(command(&fixture, &profile, operation));
                 assert_eq!(output.status.code(), Some(1));
                 let error = String::from_utf8_lossy(&output.stderr);
@@ -502,7 +502,7 @@ fn hermes_rejects_writable_git_helpers_before_execution() {
         fs::set_permissions(&bin, fs::Permissions::from_mode(directory_mode)).unwrap();
         let mut paths = vec![bin.clone()];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        let mut command = command(&fixture, &profile, "install");
+        let mut command = command(&fixture, &profile, "connect");
         command.env("PATH", std::env::join_paths(paths).unwrap());
         let output = fixture.run(command);
         assert_eq!(output.status.code(), Some(1));

@@ -109,7 +109,7 @@ def main() -> None:
         path.write_text(json.dumps(config))
         (args.output / "config.json").write_text(json.dumps(config, indent=2))
         logs = (args.output / "serve.log").open("w")
-        cmd = [str(aw), "serve", "--config", str(path), "--state-dir", str(state)]
+        cmd = [str(aw), "service", "serve", "--config", str(path), "--state-dir", str(state)]
         record = {
             "command": cmd,
             "cwd": str(root),
@@ -237,7 +237,7 @@ def main() -> None:
         finally:
             try:
                 subprocess.run(
-                    [str(aw), "stop", "--socket", str(state / "aw.sock")],
+                    [str(aw), "service", "stop", "--socket", str(state / "aw.sock")],
                     timeout=5,
                     capture_output=True,
                 )

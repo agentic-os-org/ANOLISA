@@ -26,8 +26,8 @@
 就绪后暂停新任务派发，修改 `aw.yaml` 中的策略字段，再执行：
 
 ```bash
-aw instance update --agent TARGET
-aw status --config aw.yaml
+aw update --agent TARGET
+aw service status --config aw.yaml
 ```
 
 后续从同一配置路径准备实例时，复用已选定 daemon，并将修改后的策略与服务启动配置

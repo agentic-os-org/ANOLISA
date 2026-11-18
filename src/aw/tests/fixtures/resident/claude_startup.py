@@ -78,6 +78,7 @@ def assert_released(client: Any, root: Path, config: dict[str, Any]) -> None:
         subprocess.check_output(
             [
                 config["executable"],
+                "service",
                 "status",
                 "--config",
                 str(root / "aw.json"),
@@ -272,6 +273,7 @@ async def acknowledge_expired(root: Path, config: dict[str, Any]) -> None:
                     subprocess.check_output(
                         [
                             config["executable"],
+                            "service",
                             "status",
                             "--config",
                             str(root / "aw.json"),

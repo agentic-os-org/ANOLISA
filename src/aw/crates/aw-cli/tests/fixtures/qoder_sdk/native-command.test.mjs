@@ -97,7 +97,7 @@ for (const mode of ["daemon-allow", "daemon-deny", "daemon-rule-deny", "daemon-a
     };
     const failures = [];
     try {
-      start("service", ["serve", "--config", file, "--state-dir", join(root, "state")]);
+      start("service", ["service", "serve", "--config", file, "--state-dir", join(root, "state")]);
       for (let attempt = 0; attempt < 100; attempt++) {
         try { await access(join(root, "state/aw.sock")); break; }
         catch { await new Promise(resolve => setTimeout(resolve, 50)); }

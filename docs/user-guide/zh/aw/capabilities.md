@@ -139,7 +139,7 @@ AgentScope SDK 2.0.6 工厂回复支持应用自有私有租约。工具显式�
 原生启动需要先按框架文档完成准备。SDK 应用保留 AW 工厂接入；OpenClaw、Hermes 和
 QwenPaw 安装一次启动组件并重启。Qoder TUI 沿用独占 profile、首请求前 attach 的路径。
 尚未接入的运行中进程没有就绪的 AW 实例。接点就绪并完成表中的清理后，执行
-`aw instance update --agent TARGET` 即可加载默认 `aw.yaml`。普通 `aw run` 启动的
+`aw update --agent TARGET` 即可加载默认 `aw.yaml`。普通 `aw run` 启动的
 Pi、Claude SDK、OpenClaw 和 Hermes 仍沿用原有重启要求。Qoder SDK 和 QwenPaw
 保留受限 `--reloadable` 模式，QwenPaw 另有受限的外部 attach 路径。具体入口与清理限制见
 [策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)。

@@ -12,7 +12,7 @@ fn validate_bytes(fixture: &Fixture, candidate: &[u8], against: bool) -> Output 
     let next = fixture.root.join("next.json");
     fs::write(&next, candidate).unwrap();
     let mut command = fixture.command();
-    command.args(["validate", "--config"]).arg(&next);
+    command.args(["config", "validate", "--config"]).arg(&next);
     if against {
         command.arg("--against").arg(fixture.root.join("aw.json"));
     }
@@ -130,6 +130,53 @@ fn baseline_is_bounded_and_missing_paths_are_errors() {
 }
 
 #[test]
+fn comparison_errors_report_invalid_candidate_and_baseline_inputs() {
+    let fixture = Fixture::new();
+    let document = fixture.document();
+    let next = fixture.root.join("next.json");
+    let check = |against: bool, code: &str| {
+        let mut command = fixture.command();
+        command
+            .args(["config", "validate", "--json", "--config"])
+            .arg(&next);
+        if against {
+            command.arg("--against").arg(fixture.root.join("aw.json"));
+        }
+        let output = fixture.run(command);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["command"], "config validate");
+        assert_eq!(report["status"], "failed");
+        assert_eq!(report["error"]["code"], code);
+        assert!(!fixture.root.join("state").exists());
+        assert!(!fixture.root.join("trace.jsonl").exists());
+    };
+    for invalid in [
+        b"spec: {}\nspec: {}\n".to_vec(),
+        b"{}".to_vec(),
+        vec![b' '; aw_config::MAX_DOCUMENT_BYTES + 1],
+    ] {
+        fixture.save(&document);
+        fs::write(&next, &invalid).unwrap();
+        check(false, "invalid_configuration");
+        check(true, "invalid_configuration");
+        assert_eq!(fs::read(&next).unwrap(), invalid);
+        fs::write(fixture.root.join("aw.json"), &invalid).unwrap();
+        fs::write(&next, serde_json::to_vec(&document).unwrap()).unwrap();
+        check(true, "invalid_configuration");
+        assert_eq!(fs::read(fixture.root.join("aw.json")).unwrap(), invalid);
+    }
+    fixture.save(&document);
+    fs::remove_file(&next).unwrap();
+    check(false, "io");
+    check(true, "io");
+    fs::write(&next, serde_json::to_vec(&document).unwrap()).unwrap();
+    fs::remove_file(fixture.root.join("aw.json")).unwrap();
+    check(true, "io");
+}
+
+#[test]
 fn comparison_errors_identify_candidate_and_baseline_inputs() {
     let fixture = Fixture::new();
     let document = fixture.document();
@@ -160,12 +207,16 @@ fn comparison_errors_identify_candidate_and_baseline_inputs() {
     fixture.save(&document);
     let missing = fixture.root.join("missing.json");
     let mut command = fixture.command();
-    command.args(["validate", "--config"]).arg(&missing);
+    command
+        .args(["config", "validate", "--config"])
+        .arg(&missing);
     let plain = fixture.run(command);
     assert_eq!(plain.status.code(), Some(1));
 
     let mut command = fixture.command();
-    command.args(["validate", "--config"]).arg(&missing);
+    command
+        .args(["config", "validate", "--config"])
+        .arg(&missing);
     command.arg("--against").arg(fixture.root.join("aw.json"));
     let candidate = fixture.run(command);
     assert_eq!(candidate.status.code(), Some(1));

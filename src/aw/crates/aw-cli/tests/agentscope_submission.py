@@ -102,7 +102,7 @@ def run(aw, output, report, security=None):
         records = []
         try:
             with (output / "serve.log").open("wb") as log:
-                service = subprocess.Popen([str(aw), "serve", "--config", str(path), "--state-dir", str(root / "state")],
+                service = subprocess.Popen([str(aw), "service", "serve", "--config", str(path), "--state-dir", str(root / "state")],
                                            stdout=log, stderr=log, start_new_session=True)
                 processes.append(service)
                 records.append({"pid": service.pid, "role": "service"})
@@ -126,7 +126,7 @@ def run(aw, output, report, security=None):
                                 "Task exception was never retrieved"]:
                     assert failure not in diagnostics, diagnostics
                 status = json.loads(subprocess.check_output(
-                    [str(aw), "status", "--socket", str(root / "state/aw.sock")], timeout=5
+                    [str(aw), "service", "status", "--socket", str(root / "state/aw.sock")], timeout=5
                 ))["result"]
                 assert status["bindings"] == status["events"] == 0, status
                 result = json.loads((output / "worker.stdout").read_text())

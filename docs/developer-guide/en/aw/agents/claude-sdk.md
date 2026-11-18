@@ -39,8 +39,8 @@ async with create_client(options) as client:
 
 ```bash
 target/debug/aw run --config /absolute/aw.claude-sdk.yaml --agent claude -- 'Use echo to return hello.'
-target/debug/aw status --config /absolute/aw.claude-sdk.yaml
-target/debug/aw stop --config /absolute/aw.claude-sdk.yaml
+target/debug/aw service status --config /absolute/aw.claude-sdk.yaml
+target/debug/aw service stop --config /absolute/aw.claude-sdk.yaml
 ```
 
 Claude SDK event budgets must be 1..55,000 ms. Each `input.submit`, `tool.before` or `tool.after`
@@ -102,7 +102,7 @@ See the [Provider guide](../providers/sec-core.md) before sharing its configurat
 The direct task-worker mode permits one client per worker. Use the [resident entrypoint](../deployment/resident.md) for multiple task clients.
 
 The `claude-sdk` adapter supports this restricted foreground worker factory;
-`aw agent connect` does not provide persistent installation for it, and all `--native-*`
+`aw connect` does not provide persistent installation for it, and all `--native-*`
 overrides are unsupported.
 
 ### Final tool-result security boundary
@@ -237,7 +237,7 @@ finally:
                    check=True)
 ```
 
-After readiness, `aw instance update --agent claude` loads the same default
+After readiness, `aw update --agent claude` loads the same default
 `aw.yaml`. An open client keeps its policy for its entire conversation;
 updates require every client to disconnect and complete cleanup. The next
 client fetches and installs the current routes before SDK connection, including

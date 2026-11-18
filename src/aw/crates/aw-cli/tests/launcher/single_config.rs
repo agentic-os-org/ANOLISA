@@ -182,13 +182,10 @@ fn ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_st
     let connect = |remove| {
         let mut command = fixture.command();
         command
-            .args(["agent", "connect", "--config"])
+            .args([if remove { "disconnect" } else { "connect" }, "--config"])
             .arg(fixture.root.join("aw.json"))
             .args(["--agent", "qoder", "--pid", &pid.to_string()])
             .env("XDG_RUNTIME_DIR", runtime.path());
-        if remove {
-            command.arg("--remove");
-        }
         success(fixture.run(command))
     };
     connect(false);
@@ -233,7 +230,7 @@ fn ordinary_launch_preserves_auto_connection_after_detach_and_refreshes_after_st
     // A direct service shutdown leaves the path receipt behind intentionally.
     let mut command = fixture.command();
     command
-        .args(["serve", "--config"])
+        .args(["service", "serve", "--config"])
         .arg(fixture.root.join("aw.json"))
         .arg("--state-dir")
         .arg(&edited.state_dir);
@@ -421,8 +418,6 @@ fn offline_service_commands_report_stable_diagnostics_without_starting_a_service
             vec!["service", "status"],
             vec!["service", "stop"],
             vec!["update", "--agent", "qoder"],
-            vec!["status"],
-            vec!["stop"],
         ] {
             let mut command = fixture.command();
             command

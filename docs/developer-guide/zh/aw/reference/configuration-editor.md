@@ -21,7 +21,7 @@
 定义文件包含一个完整 YAML/JSON 对象，最多 4 MiB、32 层。`show` 会显示私有值。
 
 相同定义重复添加或删除不存在的对象保留原文件；同名不同定义报冲突。先删除引用步骤，再删除 Provider。每条命令独立原子发布，重写注释和格式，修改前保留备份。
-`validate` 只校验字段与引用，接受相对路径。完整文件安全与并发规则见[编辑合同](../../../../../src/aw/docs/design/zh/configuration/configuration-editing.md)。
+`aw config validate` 只校验字段与引用，接受相对路径。完整文件安全与并发规则见[编辑合同](../../../../../src/aw/docs/design/zh/configuration/configuration-editing.md)。
 
 ## 给空配置添加规则
 
@@ -78,7 +78,7 @@ chmod 600 "$AW_DEMO/check-tool.py" "$AW_DEMO/provider.yaml" "$AW_DEMO/event.yaml
 
 ```bash
 aw run --config "$AW_DEMO/aw-core.yaml" --agent qoder
-aw stop --config "$AW_DEMO/aw-core.yaml"
+aw service stop --config "$AW_DEMO/aw-core.yaml"
 rm -r -- "$AW_DEMO"
 ```
 
@@ -98,7 +98,7 @@ rm -r -- "$AW_DEMO"
 编辑器不打开来源引用。它严格校验 AW 描述结构，保持已有顺序，拒绝同 ID 的不同定义，
 复用原有原子发布流程。移除描述不卸载原生对象。移除最后一项会删除可选的 `native_config` 段；
 降级到旧 AW 构建前，应从所有目标移除此段。编辑会重写 AW YAML 文件；原生文件的
-字节、注释和未知字段完整保留。来源描述属于启动设置，`validate --against` 会拒绝在
+字节、注释和未知字段完整保留。来源描述属于启动设置，`aw config validate --against` 会拒绝在
 AW 策略更新中修改它们。原生文件监听和动态配置继续由原生 loader 管理。
 
 `native-sources` 输出 `native: declared_not_loaded`、`aw: not_admitted`，仅展示来源

@@ -308,7 +308,7 @@ Provider 和请求 ID、时长、字节数以及执行状态。不记录工具�
 同一用户的其他进程。
 
 显式 `spec.daemon.state_dir` 和 `spec.daemon.endpoint` 必须匹配选定目录与
-socket。`auto` 将路径选择交给启动方，`aw serve` 仍要求 `--state-dir`。
+socket。`auto` 将路径选择交给启动方，`aw service serve` 仍要求 `--state-dir`。
 `aw run` 实现按需启动，`external` 要求已有服务。两个路径均为 `auto` 时，启动器
 选择 `$XDG_RUNTIME_DIR/aw/<revision-prefix>`；未设置运行目录变量时使用
 `/tmp/aw-UID/<revision-prefix>`。显式提供的运行目录必须已存在、属于当前用户并
@@ -327,7 +327,7 @@ Service 启动文档校验一次，资源限额和证据源初始化共用该不
 取消并等待本实例清理，移除自身文件，其他实例与 daemon 继续运行。释放超时会让
 实例保持清理状态并拒绝新事件；后续 release 可完成清理，不重新执行事件。
 
-`Server` 不安装信号处理器，由接入方提供取消标志。`aw serve` CLI 处理
+`Server` 不安装信号处理器，由接入方提供取消标志。`aw service serve` CLI 处理
 SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `stop` 响应仅确认
 收到请求，必须等待前台进程退出才能认定关闭完成。执行器清理和文件系统同步不
 提供硬实时保证。

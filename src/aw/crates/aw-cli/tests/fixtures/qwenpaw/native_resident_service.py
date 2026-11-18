@@ -74,7 +74,7 @@ class NativeResidentServiceTests(ResidentPolicyTests, unittest.IsolatedAsyncioTe
         config = self.root / "aw.json"
         config.write_text(json.dumps(document))
         log = native.OUTPUT / f"{self._testMethodName}.service.log"
-        command = [str(self.binary), "serve", "--config", str(config), "--state-dir", str(self.root / "s")]
+        command = [str(self.binary), "service", "serve", "--config", str(config), "--state-dir", str(self.root / "s")]
         with log.open("wb") as stream:
             self.service = await asyncio.create_subprocess_exec(*command, cwd=self.root, stdout=stream, stderr=stream)
         self.addAsyncCleanup(self.stop)

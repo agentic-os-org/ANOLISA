@@ -168,7 +168,7 @@ Each native startup route requires the framework's documented preparation. SDK
 applications retain their AW factories; OpenClaw, Hermes and QwenPaw require
 one-time startup setup and a restart. Qoder TUI uses its existing exclusive-profile
 attachment before the first request. An unprepared running process has no ready
-AW instance. With that boundary installed, `aw instance update --agent TARGET`
+AW instance. With that boundary installed, `aw update --agent TARGET`
 loads the default `aw.yaml` after the relevant work drains. Ordinary `aw run`
 Pi, Claude SDK, OpenClaw and Hermes keep their existing restart requirement.
 Qoder SDK and QwenPaw retain restricted `--reloadable` modes; QwenPaw also

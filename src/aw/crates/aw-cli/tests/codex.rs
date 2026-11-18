@@ -50,7 +50,7 @@ fn command(f: &Fixture, verb: &str) -> Command {
 }
 
 fn install(f: &Fixture) {
-    let output = f.run(command(f, "install"));
+    let output = f.run(command(f, "connect"));
     assert!(
         output.status.success(),
         "{}",
@@ -512,7 +512,7 @@ fn schema_integer_budget_encodings_launch_the_same_chain() {
         assert_eq!(fs::read_to_string(&path).unwrap(), raw);
         let mut validate = f.command();
         validate
-            .args(["validate", "--config"])
+            .args(["config", "validate", "--config"])
             .arg(f.root.join("aw.json"));
         assert!(f.run(validate).status.success());
         install(&f);
@@ -544,7 +544,7 @@ fn install_requires_reconciliation_before_noop_or_changed_retry() {
         let backup = f.root.join("home/hooks.json.aw-backup");
         fs::write(&backup, b"unreconciled-concurrent-edit").unwrap();
         for _ in 0..2 {
-            let output = f.run(command(&f, "install"));
+            let output = f.run(command(&f, "connect"));
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("recovery review"));
             assert_eq!(fs::read(&hooks).unwrap(), live);

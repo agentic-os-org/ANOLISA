@@ -55,7 +55,7 @@ After native application readiness, deployment prepares sec-core in the backgrou
 and runs under the application user:
 
 ```bash
-aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
 ```
 
 With `daemon.startup: on_demand`, this command starts or reuses AW. The PID must
@@ -275,8 +275,8 @@ From a terminal under the same application user, select the exact
 AW_SOCKET=/absolute/private/aw.sock
 aw instance list --socket "$AW_SOCKET"
 AW_SDK_INSTANCE=application_id_from_list
-aw instance attach --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
-aw instance detach --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+aw connect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
 ```
 
 The result reaches `completed` only after the application confirms Ready or

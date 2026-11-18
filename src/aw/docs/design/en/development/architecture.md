@@ -79,8 +79,7 @@ ownership or automatically transfer files between databases.
 Installed Providers connect through explicit `transport.argv` and their process
 protocol without an AW package record. RPM-owned Providers and backends stay
 under their native manager; local raw Provider registration is optional.
-Preserve legacy native `aw install --config ... --agent ...` semantics while
-offering `aw agent connect`; reject mixed package/native options before writes.
+Use `aw connect` for native Hook registration and `aw install` for local Provider extensions.
 Pass only NativeContext and typed options into the Adapter. The caller supplies
 cancellation and launch-file access; the Adapter returns plans, comparison data
 and native replies. Raw native verification must retain strict decoding and

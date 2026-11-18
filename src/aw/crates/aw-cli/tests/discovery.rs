@@ -31,6 +31,9 @@ fn metadata_and_human_inventory_describe_public_syntax_only() {
         "aw",
         "aw completion",
         "aw commands",
+        "aw connect",
+        "aw disconnect",
+        "aw update",
         "aw config validate",
         "aw service stop",
         "aw list",
@@ -54,7 +57,16 @@ fn metadata_and_human_inventory_describe_public_syntax_only() {
     ] {
         assert!(!names.contains(&hidden), "exposed {hidden}");
     }
-    for absent in ["aw provider", "aw migrate", "aw service start"] {
+    for absent in [
+        "aw provider",
+        "aw migrate",
+        "aw service start",
+        "aw agent",
+        "aw agent connect",
+        "aw instance update",
+        "aw instance attach",
+        "aw instance detach",
+    ] {
         assert!(!names.contains(&absent));
     }
     let binding_commands: Vec<_> = commands
@@ -80,7 +92,11 @@ fn metadata_and_human_inventory_describe_public_syntax_only() {
         .unwrap();
     assert_eq!(bundle["takes_values"], true);
     assert_eq!(bundle["value_names"], serde_json::json!(["ABS_DIR"]));
-    assert_eq!(bundle["required"], false);
+    assert_eq!(bundle["required"], true);
+    assert!(!options.iter().any(|argument| matches!(
+        argument["long"].as_str(),
+        Some("config" | "agent" | "native-profile" | "pid" | "remove")
+    )));
     let human = invoke(&["commands"], directory.path());
     assert!(human.status.success() && human.stderr.is_empty());
     let text = String::from_utf8(human.stdout).unwrap();
@@ -115,6 +131,10 @@ fn every_shell_uses_public_tree_and_does_not_install_a_script() {
             "native-prepare",
             "native-setup",
             "native-release",
+            "aw__agent",
+            "aw,agent",
+            "aw__instance__update",
+            "aw,instance,update",
         ] {
             assert!(!text.contains(hidden), "{shell}: exposed {hidden}");
         }

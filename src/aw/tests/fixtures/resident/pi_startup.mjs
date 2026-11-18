@@ -19,7 +19,7 @@ export async function run({ createSession, recover, root, config }) {
       const deadline = Date.now() + 7000;
       while (true) {
         const status = JSON.parse(execFileSync(config.executable,
-          ["status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
+          ["service", "status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
         if (status.bindings === 1) {
           assert.equal(status.events, 0);
           break;
@@ -46,7 +46,7 @@ export async function run({ createSession, recover, root, config }) {
     environment: { AW_TEST_MODE: "allow", AW_TEST_TENANT: "invalid-stream" } }),
   /Pi requires its public model stream function/);
   const status = JSON.parse(execFileSync(config.executable,
-    ["status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
+    ["service", "status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
   assert.equal(status.bindings, 1);
   assert.equal(status.events, 0);
   results.push({ case: "invalid-native-stream-rejected", passed: true });

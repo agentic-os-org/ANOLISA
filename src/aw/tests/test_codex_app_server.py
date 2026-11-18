@@ -153,8 +153,8 @@ def main():
         policy["spec"]["events"]["tool.before"]["required"] = True
         config = root / "aw.json"
         config.write_text(json.dumps(policy))
-        run([str(args.aw), "validate", "--config", str(config)], workspace, environment, args.output)
-        run([str(args.aw), "install", "--config", str(config), "--agent", "codex"],
+        run([str(args.aw), "config", "validate", "--config", str(config)], workspace, environment, args.output)
+        run([str(args.aw), "connect", "--config", str(config), "--agent", "codex"],
             workspace, environment, args.output)
         trust_hooks(args.codex, workspace, environment, home, args.output)
         child = start_child([str(args.aw), "run", "--config", str(config), "--agent", "codex"],
@@ -186,7 +186,7 @@ def main():
             try:
                 stop_child(child)
             finally:
-                run([str(args.aw), "stop", "--config", str(config)], workspace, environment, args.output)
+                run([str(args.aw), "service", "stop", "--config", str(config)], workspace, environment, args.output)
     (args.output / "result.json").write_text(json.dumps({
         "version": version, "entrypoint": "app-server stdio", "output_replaced": True,
         "code_blocked": True, "prompt_blocked": True,

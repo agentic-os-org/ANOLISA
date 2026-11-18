@@ -221,7 +221,7 @@ release operations once the shared limit is reached. Overload rejects admission 
 new budgets. After existing work drains, new identities can use reclaimed capacity.
 A rejected registration consumes its sequence, so retrying it cannot reopen work.
 
-`aw status --config aw.yaml` exposes limits, current bindings/invocations/
+`aw service status --config aw.yaml` exposes limits, current bindings/invocations/
 correlations/calls/connections, peak active invocations per binding, rejection
 count and reason counters. Memory for AW correlation grows with active work;
 audit disk and SDK conversation history require separate retention. Limits need

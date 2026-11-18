@@ -205,7 +205,7 @@ def main() -> None:
         except (OSError, ValueError):
             raise SystemExit(
                 "Hermes AW callbacks were not registered before chat; "
-                "check plugin selections and rerun aw install"
+                "check plugin selections and rerun aw connect"
             ) from None
         if receipt != expected or env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("Hermes AW registration does not match this launch")
@@ -309,7 +309,7 @@ def main() -> None:
         if len(loaded) != 1 or not loaded[0][1].enabled or loaded[0][1].error:
             raise SystemExit(
                 "Hermes AW plugin is not loaded and enabled; "
-                "check plugin selections and rerun aw install"
+                "check plugin selections and rerun aw connect"
             )
         key, plugin = loaded[0]
         events = {"tool.before": "pre_tool_call", "tool.after": "post_tool_call"}

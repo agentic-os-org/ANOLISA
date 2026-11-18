@@ -5,9 +5,9 @@
 ## 查看状态与停止
 
 ```bash
-aw status --config "$HOME/aw/aw.yaml"
+aw service status --config "$HOME/aw/aw.yaml"
 aw inspect --config "$HOME/aw/aw.yaml" --json
-aw stop --config "$HOME/aw/aw.yaml"
+aw service stop --config "$HOME/aw/aw.yaml"
 ```
 
 `status` 查看实例，`inspect` 查看 Provider 摘要。先退出共享这份配置的所有 Agent，再停止 AW，并用 `status` 确认服务已退出。sec-core 和 AgentSight 服务由各自管理者维护。

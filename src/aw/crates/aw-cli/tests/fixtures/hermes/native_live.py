@@ -153,10 +153,10 @@ def main() -> None:
                 (args.output / (label + ".log")).write_bytes(result.stdout + result.stderr)
                 assert result.returncode == 0, (label, result.stderr.decode()[-2000:])
                 return result
-            run([str(args.aw), "install", "--config", str(path), "--agent", "hermes", "--native-profile", str(profile)], "install")
+            run([str(args.aw), "connect", "--config", str(path), "--agent", "hermes", "--native-profile", str(profile)], "install")
             original = (profile / "config.yaml").read_bytes()
             daemon_log = (args.output / "daemon.log").open("wb")
-            daemon = subprocess.Popen([str(args.aw), "serve", "--config", str(path), "--state-dir", str(state)], cwd=work, env=env,
+            daemon = subprocess.Popen([str(args.aw), "service", "serve", "--config", str(path), "--state-dir", str(state)], cwd=work, env=env,
                                       stdout=daemon_log, stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 10
             while not (state / "aw.sock").exists():
@@ -170,7 +170,7 @@ def main() -> None:
                 from native_interactive import verify
                 proof = verify(args, argv, native_env, work, enabled, server)
                 assert (profile / "config.yaml").read_bytes() == original
-                status = json.loads(run([str(args.aw), "status", "--config", str(path)], "status-interactive").stdout)
+                status = json.loads(run([str(args.aw), "service", "status", "--config", str(path)], "status-interactive").stdout)
                 assert status["result"]["bindings"] == 0 and status["result"]["events"] == 0
                 assert status["result"]["observations"] == []
                 proof.update(bindings_after_exit=0, events_after_exit=0, observations_after_exit=0, native_config_preserved=True)
@@ -190,7 +190,7 @@ def main() -> None:
                 invocations = [row for row in invocations if row.get("method") == "invoke"]
                 assert {row["event"]["name"] for row in invocations} == {"tool.before", "tool.after"}
                 assert all(label in row["event"]["tool"]["input"]["command"] for row in invocations)
-                status = json.loads(run([str(args.aw), "status", "--config", str(path)], "status-" + label).stdout)
+                status = json.loads(run([str(args.aw), "service", "status", "--config", str(path)], "status-" + label).stdout)
                 assert status["result"]["bindings"] == 0
                 results.append({"case": label, "model_calls": server.calls - count, "tool_executed": executed, "instance_released": True})
             (args.output / "result.json").write_text(json.dumps({"status": "passed", "native_command": True, "cases": results}, indent=2))

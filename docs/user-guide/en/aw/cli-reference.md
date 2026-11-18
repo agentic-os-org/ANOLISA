@@ -26,7 +26,8 @@ aw config init --help
 | Command | Purpose |
 | --- | --- |
 | `aw run` | Launch a configured Agent with AW |
-| `aw agent connect` | Register native Hooks or attach to a supported running process |
+| `aw connect` | Register native Hooks or connect a supported native/SDK application |
+| `aw disconnect` | Disconnect a live native/SDK application while retaining its process |
 | `aw config init` | Create configuration offline |
 | `aw config descriptor` | Compile SDK deployment hints bound to the configuration |
 | `aw config show` | Print all or selected configuration as JSON |
@@ -44,7 +45,7 @@ aw config init --help
 | `aw service stop` | Request service shutdown |
 | `aw update` | Activate a policy on one supported idle instance |
 | `aw inspect` | Query the service and optional Provider summaries |
-| `aw install` | Install local Provider extensions; also retains legacy native Hook connection syntax |
+| `aw install` | Install local Provider extensions |
 | `aw uninstall` | Remove locally managed Provider extensions |
 | `aw list` | List recorded local Provider installations |
 | `aw doctor` | Check their installed files |
@@ -54,8 +55,7 @@ aw config init --help
 | `aw instance setup` | Install startup assets in an explicitly selected private directory |
 | `aw instance prepare` | Prepare the calling application's native factory and registration |
 | `aw instance release` | Release the owner's registration and staged assets |
-| `aw instance attach` | Attach or remove supported native Hooks on a selected process |
-| `aw instance update` | Apply policy using the shared `aw.yaml` by default |
+| `aw instance list` | Discover applications with installed cooperative SDK support |
 | `aw instance` | Register, confirm, query and release application-owned instances through JSON |
 | `aw audit-export` | Read one retained public audit page without a control connection |
 | `aw request` | Send a service operation from stdin JSON; for integration and diagnostics |
@@ -63,7 +63,7 @@ aw config init --help
 
 ## Output options
 
-The following management commands accept the shared output options: local-extension `install`, `uninstall`, `list`, `doctor`, `recover`, `config init`, `config validate`, `config add-provider`, `config remove-provider`, `config add-event`, `config add-hook`, `config remove-hook`, `config add-native-source` and `config remove-native-source`.
+The following management commands accept the shared output options: `install`, `uninstall`, `list`, `doctor`, `recover`, `config init`, `config validate`, `config add-provider`, `config remove-provider`, `config add-event`, `config add-hook`, `config remove-hook`, `config add-native-source` and `config remove-native-source`.
 
 | Option | Default and meaning |
 | --- | --- |
@@ -74,7 +74,9 @@ The following management commands accept the shared output options: local-extens
 
 `--json` conflicts with all three human-output options. `--quiet` conflicts with `--verbose`. `--color` can accompany either human-output option. These options do not change native Agent or protocol streams.
 
-`service status`, `service stop`, `update`, `request`, `config show` and `config native-sources` already produce JSON and do not accept `--json`. `inspect` requires `--json`. `run` preserves the Agent's output, exit code and signals. For JSON report fields and scripting exit codes, see [CLI automation](../../../developer-guide/en/aw/reference/cli.md).
+`service status`, `service stop`, `connect` for a live application, `disconnect`, `update`, `request`, `config show` and `config native-sources` already produce JSON and do not accept `--json`. `inspect` requires `--json`. `run` preserves the Agent's output, exit code and signals. For JSON report fields and scripting exit codes, see [CLI automation](../../../developer-guide/en/aw/reference/cli.md).
+
+Use the exit status of `aw connect --agent TARGET` for persistent Hook wiring. An Adapter may print setup instructions.
 
 ## Launch and connect
 
@@ -101,17 +103,36 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directo
 
 AW can start its local service on demand; the service can remain reusable after the Agent exits. See [service commands](#service-and-policy-updates) for status and shutdown.
 
-### `aw agent connect`
+### `aw connect`
 
 | Argument | Required / default | Meaning |
 | --- | --- | --- |
-| `--config FILE` | Required | AW configuration |
-| `--agent TARGET` | Required | Configured native target |
-| `--native-profile NAME` | Adapter-specific | Native profile used for persistent registration |
-| `--pid PID` | Optional positive integer | Attach to an idle, caller-owned supported Qoder TUI or QwenPaw App process |
-| `--remove` | Off; requires `--pid` | Remove AW-owned attached Hooks while leaving the native process running |
+| `--config FILE` | Default: `aw.yaml` in the current directory | AW configuration; conflicts with explicit `--socket` |
+| `--agent TARGET` | Required for native registration or attachment | Configured native target; conflicts with SDK selectors |
+| `--native-profile NAME` | Adapter-specific | Native profile used for persistent registration; conflicts with PID and SDK selectors |
+| `--pid PID` | Optional positive integer with `--agent` | Attach to an idle, caller-owned supported Qoder TUI or QwenPaw App process |
+| `--sdk-pid PID` or `--sdk-instance ID` | Select exactly one for SDK connection | Select an application with installed SDK support; conflicts with native selectors |
+| `--socket ABS_PATH` | Optional for SDK connection | Select an existing Service instead of resolving it from configuration |
+| `--timeout-ms N` | SDK acknowledgement: `100..30000`, default `5000` | Bound the wait for the application to confirm the connection |
 
-`--pid` conflicts with `--native-profile`. Without `--pid`, this command performs the Adapter's supported persistent registration; it does not install Agent software. With `--pid`, readiness, ownership and idle checks apply. See [process attachment](../../../developer-guide/en/aw/deployment/process-attach.md) for prerequisites and detach behavior.
+With `--agent` and no `--pid`, the command performs the Adapter's supported
+persistent registration. With `--pid`, readiness, ownership and idle checks apply.
+SDK connection requires the application's installed listener; it uses the same
+registration and Ready path as direct SDK connection. See [process attachment](../../../developer-guide/en/aw/deployment/process-attach.md)
+and [SDK applications](#applications-with-an-installed-sdk) for prerequisites.
+
+### `aw disconnect`
+
+Use `--agent TARGET --pid PID` for native attachment, or `--sdk-instance ID` for
+one cooperating SDK application. The two selectors are mutually exclusive.
+`--config FILE` defaults to `aw.yaml`; SDK disconnection also accepts
+`--socket ABS_PATH` instead of configuration and `--timeout-ms N` (`100..30000`, default
+`5000`). Use `aw instance list` to obtain the exact SDK application ID; SDK
+disconnection does not accept a PID selector.
+
+Disconnection requires an idle connection and retains the native process and
+Service. It does not remove persistent startup wiring. Remove inactive Qoder
+startup wiring with the separate `aw instance setup --remove` operation.
 
 ## Configuration
 
@@ -156,7 +177,10 @@ Each configured target may select at most 64 enabled steps across all enabled ev
 Disabled events and steps, and steps excluded by the target's tool selectors, do not count.
 The check uses the service binding limit and runs without starting Agents or Providers.
 Exceeding it exits 1; JSON output reports `invalid_configuration`.
-The legacy `aw validate` alias applies the same limit.
+Default human output reports `configuration valid`, or
+`policy update scope valid; runtime activation is not checked` with `--against`.
+Automation should use `--json` and the versioned management report described in
+[CLI automation](../../../developer-guide/en/aw/reference/cli.md).
 
 ### `aw config descriptor`
 
@@ -237,7 +261,7 @@ Neither command starts a service. Both return JSON. Exit Agents sharing the serv
 
 | Argument | Required / default | Meaning |
 | --- | --- | --- |
-| `--config FILE` or `--socket ABS_PATH` | Exactly one | Select the existing service |
+| `--config FILE` or `--socket ABS_PATH` | Default: `--config aw.yaml` | Select the existing service |
 | `--agent TARGET` | Required unless `--instance` is given | Select the configured target; more than one matching root instance requires `--instance` |
 | `--instance ID` | Required unless `--agent` is given | Select one instance; can be combined with `--agent` to require both to match |
 | `--policy FILE` | Required with `--socket`; otherwise defaults to `--config` | Complete candidate configuration |
@@ -257,13 +281,12 @@ These commands manage local unpacked Provider extensions declaring `aw-provider/
 
 | Argument | Required / default | Meaning |
 | --- | --- | --- |
-| `--bundle ABS_DIR` | Required for extension installation | Unpacked local Provider bundle |
-| `--prefix ABS_DIR` | Required for extension installation | Destination installation directory |
+| `--bundle ABS_DIR` | Required | Unpacked local Provider bundle |
+| `--prefix ABS_DIR` | Required | Destination installation directory |
 | `--dry-run` | Off | Show files, packages and conflicts without writes |
 | `--scope user\|system` | `user` | Package database scope; system writes require root |
 | Shared output options | Optional | [Output options](#output-options) |
 
-The legacy native-connection form is listed under [compatibility](#compatibility-and-internal-entrypoints). It cannot be combined with extension-installation options.
 
 ### `aw uninstall`
 
@@ -314,13 +337,25 @@ Takes no options beyond help. Serves the command Provider protocol over stdin/st
 
 ## Compatibility and internal entrypoints
 
-| Retained command | Preferred public command and differences |
+The redundant commands below have been removed. Update scripts before replacing
+AW; preserve their configuration, target and process selectors.
+
+| Removed command | Current command |
 | --- | --- |
-| `aw serve --config FILE --state-dir ABS_DIR` | `aw service serve`; same arguments |
-| `aw status (--config FILE \| --socket ABS_PATH)` | `aw service status`; same arguments |
-| `aw stop (--config FILE \| --socket ABS_PATH)` | `aw service stop`; same arguments |
-| `aw validate --config FILE [--against BASELINE_FILE]` | `aw config validate`; the alias does not accept shared output options |
-| `aw install --config FILE --agent TARGET [--native-profile NAME] [--pid PID] [--remove]` | `aw agent connect`; the same native connection restrictions apply; no shared output options or extension options |
+| `aw serve` | `aw service serve`; same options |
+| `aw status` | `aw service status`; same options and JSON |
+| `aw stop` | `aw service stop`; same options and JSON |
+| `aw validate` | `aw config validate`; human summaries remain available; use `--json` for automation |
+| `aw agent connect`, native `aw install --config FILE --agent TARGET`, `aw instance attach` | `aw connect`; `--config` defaults to `aw.yaml`; keep native or SDK selectors |
+| Native `aw connect --pid PID --remove` or `aw instance attach --pid PID --remove` | `aw disconnect --agent TARGET --pid PID`; keep `--config` when supplied |
+| `aw instance detach --sdk-instance ID` | `aw disconnect --sdk-instance ID`; keep `--config` or `--socket` and timeout |
+| `aw instance update` | `aw update`; same update options and default `aw.yaml` |
+
+`config validate --json` emits a management envelope with `format: 1`, `status`
+and either `result` or `error`. It exits 0 on success and 1 on failure. Scripts
+should inspect those fields instead of parsing human diagnostics. Syntax errors
+still print to stderr with empty stdout. Local Provider installation continues
+through `aw install --prefix DIR --bundle DIR`.
 
 The following hidden commands are generated and called by Adapters, not user setup commands. They are omitted from `aw commands` and completion. Their private binding and stdin protocols must match the installed AW version; do not handcraft calls or copy bindings between workers. They use a separate protocol parser: public command help and `aw commands --json` do not enumerate their accepted lifecycle actions or payloads.
 
@@ -371,7 +406,9 @@ that registration's staged directory; it does not stop the application, sibling
 instances or daemon. Keep the binding private. For crash cleanup and removing
 installed startup assets, see [independent instances](../../../developer-guide/en/aw/deployment/independent-instances.md).
 
-## `aw instance attach` and `aw instance update`
+<a id="aw-instance-attach-and-aw-update"></a>
+
+## `aw connect` and `aw update`
 
 Run these commands from the directory containing your shared `aw.yaml`, or supply
 `--config FILE` explicitly. Attachment currently supports Qoder TUI and QwenPaw
@@ -380,17 +417,17 @@ Pause request dispatch before attaching; wait for native confirmation before
 resuming. The command does not start or restart the Agent.
 
 ```bash
-aw instance attach --agent TARGET --pid NATIVE_PID
-aw instance update --agent TARGET
-aw instance update --instance INSTANCE_ID --policy next.yaml
-aw instance attach --agent TARGET --pid NATIVE_PID --remove
+aw connect --agent TARGET --pid NATIVE_PID
+aw update --agent TARGET
+aw update --instance INSTANCE_ID --policy next.yaml
+aw disconnect --agent TARGET --pid NATIVE_PID
 ```
 
 Replace `TARGET`, `NATIVE_PID` and `INSTANCE_ID` with your configured target,
 selected process and returned instance ID. Attach verifies the process identity
 and native Hook adoption. Removal retains the native process and unrelated Hooks.
-Both attachment forms accept `--config FILE`, `--agent TARGET` and `--pid PID`;
-`--remove` selects removal.
+Connection and disconnection accept `--config FILE`, `--agent TARGET` and
+`--pid PID`. Use `aw disconnect` after the selected instance is idle.
 
 Update reuses the [idle policy update contract](../../../developer-guide/en/aw/deployment/policy-updates.md).
 It accepts `--config FILE`, `--agent TARGET`, `--instance ID`, `--policy FILE` and
@@ -402,7 +439,7 @@ an unknown instance is an error and does not trigger attachment.
 These commands return the existing attachment/update JSON responses. Update
 also supports the prepared native modes in the linked guide; attachment remains
 limited to its documented entrypoints. The application-owned JSON protocol below
-cannot be combined with these subcommands.
+has its own `aw instance` command.
 
 ### Applications with an installed SDK
 
@@ -411,12 +448,14 @@ SDK plugin first. Select its PID to start or reuse AW with the configuration's
 `daemon.startup: on_demand` setting:
 
 ```bash
-aw instance attach --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+aw connect --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
 ```
 
 A process with multiple SDK listeners requires `--sdk-instance ID` from
 `aw instance list --config aw.yaml`. A supplied `--socket PATH` selects an
 existing service. This does not install Hooks into an arbitrary process.
+Disconnect an idle SDK application with `aw disconnect --sdk-instance ID`,
+using the same configuration or socket. Discovery remains `aw instance list`.
 For QwenPaw startup before AW, use the
 [after-only plugin](../../../developer-guide/en/aw/deployment/python-sdk.md#deferred-tool-after-attachment).
 

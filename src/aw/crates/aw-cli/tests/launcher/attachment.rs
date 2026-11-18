@@ -73,7 +73,7 @@ pub(super) fn native(fixture: &Fixture) -> (Process, u32) {
 }
 
 pub(super) fn install(fixture: &Fixture, pid: u32, remove: bool) -> Output {
-    install_entrypoint(fixture, pid, remove, &["install"])
+    install_entrypoint(fixture, pid, remove, &["connect"])
 }
 
 pub(super) fn install_entrypoint(
@@ -85,14 +85,11 @@ pub(super) fn install_entrypoint(
     let mut command = fixture.command();
     command
         .env("XDG_RUNTIME_DIR", "")
-        .args(entry)
+        .args(if remove { &["disconnect"] } else { entry })
         .arg("--config")
         .arg(fixture.root.join("aw.json"))
         .args(["--agent", "qoder", "--pid"])
         .arg(pid.to_string());
-    if remove {
-        command.arg("--remove");
-    }
     fixture.run(command)
 }
 
@@ -255,7 +252,7 @@ fn cancelled_unconfirmed_install_retains_bridge_until_confirmed_cleanup() {
     let identity = aw_service::ProcessIdentity::read(pid).unwrap();
     let mut command = fixture.command();
     command
-        .args(["install", "--config"])
+        .args(["connect", "--config"])
         .arg(fixture.root.join("aw.json"))
         .args(["--agent", "qoder", "--pid"])
         .arg(pid.to_string());
@@ -301,18 +298,8 @@ fn external_install_creates_missing_native_settings_without_launching_an_agent()
     let (_process, pid) = native(&fixture);
     let settings = fixture.root.join("home/.qoder/settings.json");
     fs::remove_file(&settings).unwrap();
-    success(install_entrypoint(
-        &fixture,
-        pid,
-        false,
-        &["agent", "connect"],
-    ));
-    success(install_entrypoint(
-        &fixture,
-        pid,
-        true,
-        &["agent", "connect"],
-    ));
+    success(install_entrypoint(&fixture, pid, false, &["connect"]));
+    success(install_entrypoint(&fixture, pid, true, &["connect"]));
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(settings).unwrap()).unwrap(),
         json!({})
@@ -404,7 +391,7 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
             .env_remove("AW_NATIVE_CONFIG");
         let peer = Process::spawn(&fixture, command);
         let peer_pid = wait(&peer_root.join("native-pid.json")).as_u64().unwrap() as u32;
-        let shared = install_entrypoint(&fixture, pid, false, &["agent", "connect"]);
+        let shared = install_entrypoint(&fixture, pid, false, &["connect"]);
         assert!(!shared.status.success(), "{:?}", shared);
         assert!(String::from_utf8_lossy(&shared.stderr).contains("scope is shared"));
         assert_eq!(service.status()["bindings"], 0);
@@ -430,6 +417,8 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
     let uncertain = install(&fixture, pid, false);
     assert!(!uncertain.status.success());
     assert!(String::from_utf8_lossy(&uncertain.stderr).contains("cleanup incomplete"));
+    assert!(String::from_utf8_lossy(&uncertain.stderr)
+        .contains("aw disconnect --config FILE --agent TARGET --pid PID"));
     let record: Value = serde_json::from_slice(&fs::read(&ownership).unwrap()).unwrap();
     let staged = std::path::Path::new(record["registration"]["source"].as_str().unwrap());
     assert!(staged.join("plugin.py").is_file());
@@ -570,7 +559,7 @@ fn empty_runtime_directory_allows_auto_path_detach() {
     );
     let mut command = fixture.command();
     command
-        .args(["serve", "--config"])
+        .args(["service", "serve", "--config"])
         .arg(fixture.root.join("aw.json"))
         .arg("--state-dir")
         .arg(&paths.state_dir)
@@ -667,7 +656,7 @@ fn killed_installer_during_bind_preparation_releases_binding_and_allows_retry() 
     let identity = aw_service::ProcessIdentity::read(pid).unwrap();
     let mut command = fixture.command();
     command
-        .args(["agent", "connect", "--config"])
+        .args(["connect", "--config"])
         .arg(fixture.root.join("aw.json"))
         .args(["--agent", "qoder", "--pid"])
         .arg(pid.to_string());

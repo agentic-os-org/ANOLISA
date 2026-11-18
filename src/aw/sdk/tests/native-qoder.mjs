@@ -111,7 +111,6 @@ async function control(action) {
   const { stdout } = await execute(
     binary,
     [
-      "instance",
       action,
       "--socket",
       state + "/aw.sock",
@@ -136,7 +135,7 @@ try {
   client.listen();
   await startService();
   await until(() => client.applicationId);
-  await control("attach");
+  await control("connect");
   await until(() => client.state === "ready");
   for (const mode of [
     "online",
@@ -152,13 +151,13 @@ try {
       await until(() => client.state === "ready");
     }
     if (mode === "detached") {
-      await control("detach");
+      await control("disconnect");
       await until(() => client.state === "detached");
       await writeFile(root + "/deny", "1");
     }
     if (mode === "attached") {
       await rm(root + "/deny");
-      await control("attach");
+      await control("connect");
       await until(() => client.state === "ready");
     }
     if (mode === "aw-deny") await writeFile(root + "/deny", "1");

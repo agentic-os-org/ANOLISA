@@ -77,7 +77,7 @@ fn select<'a>(args: &Arguments, status: &'a Value) -> Result<&'a Value> {
         });
     let instance = matches
         .next()
-        .ok_or("no matching instance; use aw status")?;
+        .ok_or("no matching instance; use aw service status --config FILE")?;
     if matches.next().is_some() {
         return Err("multiple matching instances; specify --instance".into());
     }

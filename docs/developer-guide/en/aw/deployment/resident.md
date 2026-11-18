@@ -108,7 +108,7 @@ initialize the native runtime as described in its section, and start sec-core
 with the configured socket before launching:
 
 ```bash
-aw validate --config /absolute/path/aw.sdk-security.yaml
+aw config validate --config /absolute/path/aw.sdk-security.yaml
 aw run --config /absolute/path/aw.sdk-security.yaml --agent qoder-sdk -- "your prompt"
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home aw run \
   --config /absolute/path/aw.sdk-security.yaml --agent qwenpaw

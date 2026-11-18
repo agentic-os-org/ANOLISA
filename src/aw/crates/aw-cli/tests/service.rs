@@ -515,7 +515,7 @@ fn restart_rejects_stale_clients_and_keeps_crashed_event_incomplete() {
     let state = fixture.state();
     let mut child = ChildGuard(
         Command::new(binary)
-            .args(["serve", "--config"])
+            .args(["service", "serve", "--config"])
             .arg(&configuration)
             .arg("--state-dir")
             .arg(&state)
@@ -527,7 +527,7 @@ fn restart_rejects_stale_clients_and_keeps_crashed_event_incomplete() {
             .spawn()
             .unwrap(),
     );
-    fs::write(fixture.0.join("service-process.json"), json!({"command": [binary, "serve", "--config", configuration, "--state-dir", state], "cwd": fixture.0,
+    fs::write(fixture.0.join("service-process.json"), json!({"command": [binary, "service", "serve", "--config", configuration, "--state-dir", state], "cwd": fixture.0,
         "pid": child.0.id(), "ports": [], "log": fixture.0.join("service.stderr"), "timeout_seconds": 10,
         "stop": format!("kill -TERM -- -{}", child.0.id())}).to_string()).unwrap();
     let socket = state.join("aw.sock");

@@ -168,7 +168,7 @@ actual native object and rejects source changes across checking. See the
 
 Supported resident factories and prepared native startup install Adapter update
 boundaries; `aw run --reloadable` selects a separate restricted bridge.
-`aw instance update` and `aw update` address an existing instance and ask
+`aw update` addresses an existing instance and asks
 `aw-service` to prepare a new immutable Host outside the request gate, then publish it only after a final idle/revision
 check under that gate. The service retains the bootstrap identity while each
 instance owns its active policy. Native Adapters report request/tool lifetimes
@@ -303,7 +303,7 @@ MCP dispatch and the pinned Claude transport.
 
 ## Caller-owned native attachment
 
-`aw install --pid` reuses the existing configuration and Adapter preparation,
+`aw connect --pid` reuses the existing configuration and Adapter preparation,
 Bind/Host admission, EnableReload, AssociateProcess and stable dispatch. The CLI
 owns the private attachment record and service binding. `aw-adapter` owns Qoder
 settings merging/confirmation and QwenPaw plugin API installation/removal;
@@ -311,7 +311,7 @@ its bounded loopback HTTP transport uses the workspace's existing `reqwest`.
 The existing service process-identity helper is shared with the CLI.
 
 The native callback confirms readiness before the caller dispatches input.
-Later `aw update` uses the existing idle activation gate. `install --remove`
+Later `aw update` uses the existing idle activation gate. `aw disconnect --agent TARGET --pid PID`
 uses Unbind to close complete request/tool admission atomically, then removes
 owned native registration and private artifacts. External processes are neither
 launched nor signalled by this path. Ordinary `aw run` keeps child supervision.

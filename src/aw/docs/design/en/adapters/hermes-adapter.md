@@ -169,7 +169,7 @@ temporary configuration overlay and only loads enabled plugins. AW therefore
 uses an explicit installation step:
 
 ```bash
-aw install --config aw.yaml --agent hermes --native-profile /absolute/profile
+aw connect --config aw.yaml --agent hermes --native-profile /absolute/profile
 aw run --config aw.yaml --agent hermes --native-profile /absolute/profile -- chat
 ```
 
@@ -465,7 +465,7 @@ tool side effect and matching before/after audit events.
 ## Rollback
 
 Stop sessions and configuration writers before restoring a file reported by
-`aw install`. Review `displaced` for concurrent or late writes and merge them;
+`aw connect`. Review `displaced` for concurrent or late writes and merge them;
 `backup` holds the exact initial bytes. Restore the chosen file over the same profile's `config.yaml`, then
 remove only `plugins/aw-native-hooks` and `.aw-install.lock` created by AW. Keep or
 delete both recovery files according to the operator's retention policy. Ordinary

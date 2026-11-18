@@ -36,8 +36,8 @@ async with create_client(options) as client:
 
 ```bash
 target/debug/aw run --config /absolute/aw.claude-sdk.yaml --agent claude -- 'Use echo to return hello.'
-target/debug/aw status --config /absolute/aw.claude-sdk.yaml
-target/debug/aw stop --config /absolute/aw.claude-sdk.yaml
+target/debug/aw service status --config /absolute/aw.claude-sdk.yaml
+target/debug/aw service stop --config /absolute/aw.claude-sdk.yaml
 ```
 
 Claude SDK 事件预算必须为 1..55,000 ms。每个 `input.submit`、`tool.before` 或 `tool.after` 路由
@@ -84,7 +84,7 @@ QwenPaw，Claude 尚无对应解析合同。共享配置前请核对 [Provider �
 
 直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用[常驻入口](../deployment/resident.md)。
 
-当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
+当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
 
 ### 最终工具结果安全边界
@@ -200,7 +200,7 @@ finally:
                    check=True)
 ```
 
-Ready 后执行 `aw instance update --agent claude`，会加载同一份默认
+Ready 后执行 `aw update --agent claude`，会加载同一份默认
 `aw.yaml`。已连接客户端在整个会话中保留自己的策略；更新要求全部客户端断开并
 完成清理。新客户端在连接 SDK 前获取并安装当前路由，包括原生回调组合与受管
 MCP 检查。准备和销毁期间均保留准入占用，更新无法越过这些边界。

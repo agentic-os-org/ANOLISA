@@ -3,7 +3,7 @@
 [English](../../en/adapters/codex-adapter.md)
 
 `codex` Adapter 通过 `aw run` 将本地 Codex 进程接入共享 Service 和 Provider 链。
-`aw install` 为 UserPromptSubmit、PreToolUse 和 PostToolUse 各写入一个稳定的 AW 命令 Hook。
+`aw connect` 为 UserPromptSubmit、PreToolUse 和 PostToolUse 各写入一个稳定的 AW 命令 Hook。
 会话、模型、沙箱、审批和原生 Hook 调度由 Codex 管理；AW 负责启动准入、单个 AW 命令内
 Provider 步骤的有序执行及允许或阻断结果。
 

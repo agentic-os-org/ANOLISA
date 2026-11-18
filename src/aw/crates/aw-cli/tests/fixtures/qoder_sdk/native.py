@@ -134,6 +134,7 @@ with tempfile.TemporaryDirectory(prefix="aw-qsdk-") as temporary:
             "service",
             [
                 str(args.aw.resolve()),
+                "service",
                 "serve",
                 "--config",
                 str(config),

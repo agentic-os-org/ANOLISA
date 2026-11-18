@@ -12,7 +12,8 @@ Use `aw commands --json` for command and argument discovery, and command-specifi
 | Entrypoint | Output |
 | --- | --- |
 | `install`, `uninstall`, `list --installed`, `doctor`, `recover`, `config init/validate/add-*/remove-*` | Optional local `--json` |
-| `service status/stop`, `instance`, `request`, `config show`, `update` | Always JSON; do not add `--json` |
+| `service status/stop`, `connect` for a live application, `disconnect`, `instance`, `request`, `config show`, `update` | Always JSON; do not add `--json` |
+| `connect --agent TARGET` without a PID | Use the exit status for persistent Hook wiring. An Adapter may print setup instructions. |
 | `inspect` | Requires `--json` |
 | `run` | Preserves native Agent output; forwards arguments after `--` unchanged |
 
@@ -101,8 +102,8 @@ Command syntax/request-file I/O failures use stderr. Cancellation has no write
 side effects. After the one-shot command exits there is no resource to stop.
 Remove `"$AW_QUERY"` when the request file is no longer needed.
 
-`aw instance list`, `attach --sdk-instance ID` and `detach --sdk-instance ID`
-operate on application-installed SDK listeners. `attach --sdk-pid PID` selects
+`aw instance list`, `aw connect --sdk-instance ID` and `aw disconnect --sdk-instance ID`
+operate on application-installed SDK listeners. `aw connect --sdk-pid PID` selects
 one listener by its pinned process identity; use the instance ID when a process
 has multiple listeners. With `--config` and `daemon.startup: on_demand`, this PID
 selector starts or reuses AW. With `--socket`, it requires an existing service.

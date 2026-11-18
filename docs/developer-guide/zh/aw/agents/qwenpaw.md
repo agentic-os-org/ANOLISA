@@ -123,8 +123,8 @@ qwenpaw app --host 127.0.0.1 --port 8096
 修改 `aw.yaml`，暂停任务派发后在另一终端更新：
 
 ```bash
-aw status --config aw.yaml
-aw instance update --agent qwenpaw
+aw service status --config aw.yaml
+aw update --agent qwenpaw
 ```
 
 输入、工具、严格 After 与 reply 清理沿用普通模式的接点；原生 App、用户插件和 MCP
@@ -145,5 +145,5 @@ QwenPaw 的 [wheel 构建脚本](https://github.com/kongche-jbw/QwenPaw/blob/099
 保留 Console 静态资源。继续使用未修复版本时，运行期间保持原生 MCP 配置与权限不变；
 变更应在 App 退出后完成，并核验持久配置后再启动。
 
-`aw instance update` 更新 AW 策略，继续按回复空闲边界生效。AW 的 `tool.before`
+`aw update` 更新 AW 策略，继续按回复空闲边界生效。AW 的 `tool.before`
 阻断保护经过其 Hook 的后续调用；原生驱动的并发控制由上述 QwenPaw 修复提供。

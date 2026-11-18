@@ -79,7 +79,7 @@ executables without a managed locator remain usable.
 These references do not discover arbitrary external processes or shell-generated
 paths. Package removal therefore checks only the evidence it can establish;
 backend lifecycle and native package removal remain their owners' responsibility.
-Native Hook registration uses `aw agent connect` and is separate from Provider
+Native Hook registration uses `aw connect` and is separate from Provider
 bundle installation.
 
 ## Verification

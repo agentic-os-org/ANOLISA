@@ -142,7 +142,7 @@ time.sleep(30)
         }
     }
 
-    fn command(&self, legacy: bool) -> Command {
+    fn command(&self) -> Command {
         let mut command = Command::new(self.core.join("bin/aw"));
         let mut path = vec![self.agent.join("bin")];
         path.extend(std::env::split_paths(
@@ -156,11 +156,7 @@ time.sleep(30)
             .env("XDG_STATE_HOME", &self.state)
             .env("TMPDIR", self.profile.parent().unwrap())
             .env("FAKE_ROOT", &self.fixture.root);
-        if legacy {
-            command.arg("install");
-        } else {
-            command.args(["agent", "connect"]);
-        }
+        command.arg("connect");
         command
             .arg("--config")
             .arg(self.fixture.root.join("aw.json"))
@@ -273,7 +269,7 @@ fn exclusive(prefix: &Path) -> File {
 fn persistent_registration_protects_aw_and_agent_packages_until_cancelled() {
     for legacy in [false, true] {
         let registration = Registration::new(legacy);
-        let mut process = Process::spawn(&registration.fixture, registration.command(legacy));
+        let mut process = Process::spawn(&registration.fixture, registration.command());
         process
             .wait_until("persistent registration metadata probe", TIMEOUT, |_| {
                 Ok((
@@ -310,7 +306,7 @@ fn an_existing_package_writer_blocks_persistent_registration_before_native_execu
         let registration = Registration::new(legacy);
         for prefix in [&registration.core, &registration.agent] {
             let lock = exclusive(prefix);
-            let output = registration.fixture.run(registration.command(legacy));
+            let output = registration.fixture.run(registration.command());
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8_lossy(&output.stderr)
                 .contains("installed package files are being changed"));

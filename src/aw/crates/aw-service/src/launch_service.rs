@@ -122,7 +122,7 @@ pub fn resolve(bytes: &[u8], runtime_dir: Option<&Path>) -> Result<ServicePaths>
 /// Reuse an exact matching daemon or start the configured on-demand service.
 ///
 /// Startup is serialized with a private per-state lock. Configuration is copied
-/// from these bytes into a private immutable snapshot before spawning `aw serve`.
+/// from these bytes into a private immutable snapshot before spawning `aw service serve`.
 /// Existing sockets are never unlinked, including stale sockets. The new child
 /// has a separate session, null stdin/stdout and a private stderr log; it survives
 /// Agent and launcher exit. External mode never creates files or starts a process.
@@ -207,9 +207,10 @@ fn absolute(path: &Path) -> Result<()> {
     aw_config::service_paths::absolute(path).map_err(|error| rejected(&error.to_string()))
 }
 
-/// Literal `aw serve` arguments; no shell expansion or original config path is used.
-fn arguments(paths: &ServicePaths, snapshot: &Path) -> [OsString; 5] {
+/// Literal `aw service serve` arguments; no shell expansion or original config path is used.
+fn arguments(paths: &ServicePaths, snapshot: &Path) -> [OsString; 6] {
     [
+        "service".into(),
         "serve".into(),
         "--config".into(),
         snapshot.into(),

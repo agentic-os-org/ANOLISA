@@ -406,7 +406,7 @@ sandbox or isolation from other processes of that user.
 
 Explicit `spec.daemon.state_dir` and `spec.daemon.endpoint` values must match the
 selected directory and socket. `auto` leaves path selection to the launcher;
-`aw serve` still requires `--state-dir`. `aw run` implements on-demand startup;
+`aw service serve` still requires `--state-dir`. `aw run` implements on-demand startup;
 `external` requires an existing service. With both paths set to `auto`, the
 launcher chooses `$XDG_RUNTIME_DIR/aw/<revision-prefix>` or
 `/tmp/aw-UID/<revision-prefix>` when the runtime variable is unset. An explicitly
@@ -434,7 +434,7 @@ timed-out release leaves the instance draining and rejects new events; a later
 release can finish cleanup without repeating event execution.
 
 `Server` installs no signal handlers; its owner supplies a cancellation flag.
-The `aw serve` CLI handles SIGINT/SIGTERM, cancels active work and joins connection
+The `aw service serve` CLI handles SIGINT/SIGTERM, cancels active work and joins connection
 and event workers. A successful `stop` reply acknowledges the request; wait for
 the foreground process to exit before treating shutdown as complete. Executor
 cleanup and filesystem synchronization are not hard real-time guarantees.

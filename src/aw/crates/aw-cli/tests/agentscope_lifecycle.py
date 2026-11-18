@@ -191,7 +191,7 @@ def main() -> None:
             AW_TEST_ROOT=str(root), TOKENLESS_STATS_ENABLED="0", TOKENLESS_SLS_ENABLED="0"
         )
         with process(
-            [str(aw), "serve", "--config", str(path), "--state-dir", str(state)],
+            [str(aw), "service", "serve", "--config", str(path), "--state-dir", str(state)],
             root,
             output,
             "serve",
@@ -243,7 +243,7 @@ def main() -> None:
                     assert len(final) < len(raw) and json.loads(final) == json.loads(raw)
             status = json.loads(
                 subprocess.check_output(
-                    [str(aw), "status", "--socket", str(state / "aw.sock")], timeout=5
+                    [str(aw), "service", "status", "--socket", str(state / "aw.sock")], timeout=5
                 )
             )["result"]
             assert status["events"] == status["bindings"] == 0, status

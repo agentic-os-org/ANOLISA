@@ -15,7 +15,7 @@ export async function runWorker({ createSession, args }) {
   const root = process.env.FAKE_ROOT;
   const observations = [];
   const update = () => spawnSync(process.env.AW_TEST_EXECUTABLE,
-    ["instance", "update", "--instance", process.env.AW_TEST_INSTANCE,
+    ["update", "--instance", process.env.AW_TEST_INSTANCE,
       "--policy", join(root, "deny.json")], { encoding: "utf8", timeout: 35000 });
   for (const index of [0, 1]) {
     const cwd = join(root, String(index));
@@ -27,7 +27,7 @@ export async function runWorker({ createSession, args }) {
       assert.match(busy.stderr, /busy/);
       await session.prompt("fixture");
       assert.equal(existsSync(join(cwd, "effect")), index === 0);
-      const status = spawnSync(process.env.AW_TEST_EXECUTABLE, ["status", "--config", "aw.yaml"],
+      const status = spawnSync(process.env.AW_TEST_EXECUTABLE, ["service", "status", "--config", "aw.yaml"],
         { encoding: "utf8", timeout: 5000 });
       assert.equal(status.status, 0, status.stderr);
       const observation = JSON.parse(status.stdout).result.observations[0];

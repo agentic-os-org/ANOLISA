@@ -26,7 +26,7 @@ cases = []
 for mode in ("return", "exit-zero", "exit", "exception", "import", "validation"):
     prepared = command("instance", "prepare", "--config", str(root / "aw.json"), "--agent", "sdk")
     directory = Path(prepared["binding"]).parent
-    status = command("status", "--config", str(root / "aw.json"))["result"]
+    status = command("service", "status", "--config", str(root / "aw.json"))["result"]
     assert status["bindings"] == 1, status
     guard = directory / "hermes-entrypoint.py"
     if mode == "validation":
@@ -80,7 +80,7 @@ for mode in ("return", "exit-zero", "exit", "exception", "import", "validation")
         finally:
             sys.dont_write_bytecode = previous
     # This owner is still running: the service reaper cannot hide a missing release.
-    status = command("status", "--config", str(root / "aw.json"))["result"]
+    status = command("service", "status", "--config", str(root / "aw.json"))["result"]
     assert status["bindings"] == status["events"] == 0, status
     assert not directory.exists(), directory
     cases.append(mode)

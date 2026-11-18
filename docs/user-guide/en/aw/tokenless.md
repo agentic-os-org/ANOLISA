@@ -42,7 +42,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
   --qoder "$AW_QODER"
-aw validate --config "$AW_HOME/tokenless.yaml"
+aw config validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 ```
@@ -124,7 +124,7 @@ Disabling recording does not delete history or disable compression. See
 Exit the Agent, then stop the service.
 
 ```bash
-aw stop --config "$AW_HOME/tokenless.yaml"
+aw service stop --config "$AW_HOME/tokenless.yaml"
 ```
 
 Remove Tokenless steps and any unused Provider from the configuration, validate and relaunch.

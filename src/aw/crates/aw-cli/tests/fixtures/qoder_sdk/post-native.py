@@ -84,7 +84,7 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
             save(config, document)
         processes = Processes(case, output, environment)
         try:
-            processes.start("service", [str(args.aw.resolve()), "serve", "--config", str(config), "--state-dir", str(case / "state")])
+            processes.start("service", [str(args.aw.resolve()), "service", "serve", "--config", str(config), "--state-dir", str(case / "state")])
             await_condition(lambda: (case / "state/aw.sock").exists(), 10, "AW service readiness")
             run = processes.start("worker", [str(args.aw.resolve()), "run", "--config", str(config), "--agent", "sdk"])
             for _, _, record in processes.items:

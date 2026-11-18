@@ -38,7 +38,7 @@ def verify(args, argv: list[str], env: dict, work: Path, config: dict, server) -
         last = None
         while time.monotonic() < deadline:
             assert child.poll() is None, "native CLI exited before idle update"
-            result = subprocess.run([str(args.aw), "instance", "update", "--config", str(work.parent / "aw.json"), "--policy", str(candidate),
+            result = subprocess.run([str(args.aw), "update", "--config", str(work.parent / "aw.json"), "--policy", str(candidate),
                 "--agent", "hermes"], cwd=work, env=env, capture_output=True, timeout=10, check=False)
             last = result
             if result.returncode == 0:
@@ -58,7 +58,7 @@ def verify(args, argv: list[str], env: dict, work: Path, config: dict, server) -
         assert server.deliveries == [True] if skill else (work / "marker").read_text() == "AW_ALLOW"
         update("idle-enable")
         assert busy_rejections >= 1, "active native turn must reject updates"
-        observed = subprocess.run([str(args.aw), "status", "--config", str(work.parent / "aw.json")],
+        observed = subprocess.run([str(args.aw), "service", "status", "--config", str(work.parent / "aw.json")],
             cwd=work, env=env, capture_output=True, timeout=10, check=True)
         state = json.loads(observed.stdout)["result"]
         (args.output / "active-status.json").write_bytes(observed.stdout)
@@ -77,7 +77,7 @@ def verify(args, argv: list[str], env: dict, work: Path, config: dict, server) -
             assert child.poll() is None and time.monotonic() < deadline, "second native model turn did not complete"
             time.sleep(0.05)
         assert server.deliveries == [True, False] if skill else not (work / "marker").exists(), "updated policy did not block the second native tool"
-        observed = subprocess.run([str(args.aw), "status", "--config", str(work.parent / "aw.json")],
+        observed = subprocess.run([str(args.aw), "service", "status", "--config", str(work.parent / "aw.json")],
             cwd=work, env=env, capture_output=True, timeout=10, check=True)
         (args.output / "denied-status.json").write_bytes(observed.stdout)
         observation = json.loads(observed.stdout)["result"]["observations"][0]

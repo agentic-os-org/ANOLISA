@@ -259,6 +259,7 @@ fn installed_binaries_scan_and_recover_audit() {
     }
     let aw = external("AW_TEST_AW");
     let args = [
+        "service".as_ref(),
         "serve".as_ref(),
         "--config".as_ref(),
         config.as_os_str(),

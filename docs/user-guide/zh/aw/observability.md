@@ -29,14 +29,14 @@ evidence:
 ## 运行与查看
 
 ```bash
-aw validate --config "$HOME/aw/aw.yaml"
+aw config validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
 在另一个终端查看同一配置。
 
 ```bash
-aw status --config "$HOME/aw/aw.yaml"
+aw service status --config "$HOME/aw/aw.yaml"
 ```
 
 启动信息会显示来源查询状态和审计 key。Agent 发生工具调用后，检查 status 中的

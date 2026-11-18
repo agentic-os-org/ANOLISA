@@ -59,10 +59,10 @@ export async function run(session, { args }) {
 附带命令为中性示例。随后执行：
 
 ```bash
-target/debug/aw validate --config /absolute/aw.pi.yaml
+target/debug/aw config validate --config /absolute/aw.pi.yaml
 target/debug/aw run --config /absolute/aw.pi.yaml --agent pi -- 'Your task'
-target/debug/aw status --config /absolute/aw.pi.yaml
-target/debug/aw stop --config /absolute/aw.pi.yaml
+target/debug/aw service status --config /absolute/aw.pi.yaml
+target/debug/aw service stop --config /absolute/aw.pi.yaml
 ```
 
 `--agent` 选择配置中的目标名，`adapter` 保持为 `pi`。`--native-settings`、
@@ -116,7 +116,7 @@ try {
 }
 ```
 
-宿主报告 Ready 后，在配置目录执行 `aw instance update --agent pi`。
+宿主报告 Ready 后，在配置目录执行 `aw update --agent pi`。
 每个会话在 prompt、工具回调与销毁期间保留同一份策略。会话未关闭、工厂正在准备
 或清理尚未确认时，更新会被拒绝；关闭全部会话后再更新。新建会话采用新策略，
 包括输入和 Skill 检查。严格结果控制仍要求两个 Pi 包版本相同且处于上述发布线。

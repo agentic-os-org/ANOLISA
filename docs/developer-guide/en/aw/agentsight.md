@@ -70,7 +70,7 @@ normal [native launch arguments](../../../user-guide/en/aw/index.md).
 
 ```bash
 aw run --config ./aw.yaml --agent qoder
-aw status --config ./aw.yaml
+aw service status --config ./aw.yaml
 ```
 
 Startup reports an observation audit key and source query state. Status exposes

@@ -88,7 +88,7 @@ received by that lifecycle hook. The user's native configuration stays intact.
 From another terminal, update an idle instance using the same configuration:
 
 ```bash
-aw instance update --config /absolute/aw.yaml --agent openclaw
+aw update --config /absolute/aw.yaml --agent openclaw
 ```
 
 The policy stays fixed from `before_agent_run` through completed tool callbacks

@@ -177,8 +177,14 @@ enum ResultView<'a> {
 mod mutation;
 
 pub(crate) enum ValidationError {
-    Io(std::io::Error),
-    Configuration(aw_config::Error),
+    Io {
+        source: std::io::Error,
+        input: Option<&'static str>,
+    },
+    Configuration {
+        source: aw_config::Error,
+        input: Option<&'static str>,
+    },
     Projection(projection::Error),
 }
 
@@ -374,16 +380,18 @@ pub(crate) fn complete_validation(
     result: Result<Outcome, ValidationError>,
 ) -> crate::cli::Result<crate::cli::Exit> {
     let result = result.map_err(|error| {
-        let (code, message, human) = match error {
-            ValidationError::Io(error) => (
+        let (code, message, human, input) = match error {
+            ValidationError::Io { source, input } => (
                 ErrorCode::Io,
                 "A configuration file could not be read",
-                error.to_string(),
+                source.to_string(),
+                input,
             ),
-            ValidationError::Configuration(error) => (
+            ValidationError::Configuration { source, input } => (
                 ErrorCode::InvalidConfiguration,
                 "Configuration validation failed",
-                error.to_string(),
+                source.to_string(),
+                input,
             ),
             ValidationError::Projection(error) => (
                 ErrorCode::InvalidConfiguration,
@@ -394,10 +402,15 @@ pub(crate) fn complete_validation(
                     projection::Error::Admission(_) => "Configuration projection failed",
                 },
                 error.to_string(),
+                None,
             ),
         };
         Failure {
-            human,
+            // Comparison roles only annotate human output; JSON retains its fixed diagnostic.
+            human: match input {
+                Some(input) => format!("{input}: {human}"),
+                None => human,
+            },
             diagnostic: Diagnostic {
                 code,
                 message,

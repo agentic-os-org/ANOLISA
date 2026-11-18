@@ -177,15 +177,6 @@ fn json_remains_local_and_syntax_errors_do_not_emit_result_objects() {
             "install", "--prefix", "/missing", "--bundle", "/missing", "--json", "--json",
         ],
         vec![
-            "install",
-            "--config",
-            "missing.yaml",
-            "--agent",
-            "qoder",
-            "--json",
-        ],
-        vec![
-            "agent",
             "connect",
             "--config",
             "missing.yaml",

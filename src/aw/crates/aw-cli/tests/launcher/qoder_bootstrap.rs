@@ -92,7 +92,7 @@ fn native_print_startup_updates_and_releases_without_aw_run() {
     fixture.save(&document);
     let mut update = fixture.command();
     update
-        .args(["instance", "update", "--config"])
+        .args(["update", "--config"])
         .arg(fixture.root.join("aw.json"))
         .args(["--agent", "qoder"]);
     success(fixture.run(update));
@@ -201,7 +201,7 @@ fn rejected_configuration_keeps_active_policy_and_exit_independent_of_disk() {
         }
         let mut update = fixture.command();
         update
-            .args(["instance", "update", "--config"])
+            .args(["update", "--config"])
             .arg(fixture.root.join("aw.json"))
             .args(["--agent", "qoder"]);
         let rejected = fixture.run(update);
@@ -233,7 +233,7 @@ fn rejected_configuration_keeps_active_policy_and_exit_independent_of_disk() {
     fixture.save(&document);
     let mut update = fixture.command();
     update
-        .args(["instance", "update", "--config"])
+        .args(["update", "--config"])
         .arg(fixture.root.join("aw.json"))
         .args(["--agent", "qoder"]);
     success(fixture.run(update));

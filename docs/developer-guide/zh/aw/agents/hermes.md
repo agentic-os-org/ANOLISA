@@ -16,7 +16,7 @@
 
 ```bash
 cd src/aw
-target/debug/aw agent connect --config /absolute/aw.hermes.yaml --agent hermes \
+target/debug/aw connect --config /absolute/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
 target/debug/aw run --config /absolute/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -92,7 +92,7 @@ export AW_INSTANCE_BOOTSTRAP="$(python3 -c 'import json; print(json.load(open("h
 配置中的目标使用相同的原生参数；参数不一致时在原生分发前终止。准备完成后重启一次。启动模块保留原生 main，在同一进程复用 AW 的登记、参数完整性和完成检查。版本查询和管理命令保留原生行为。准备失败会阻止聊天分发。
 
 ```bash
-aw instance update --config /absolute/aw.yaml --agent hermes
+aw update --config /absolute/aw.yaml --agent hermes
 ```
 
 更新在确认结束的聊天轮次之间生效。请求占用包括模型调用、工具执行和回调清理。取消后没有回复、异常或仍在执行的回调会保留占用状态，处理原因后需重启进程。这条更新路径的事件预算上限为 55,000 ms。准备前将原生 `plugins.hook_callback_timeout` 设为至少 60 秒，或明确设为无限制，为完整事件预算和回调清理留出时间。AW 校验这项前提，保留用户的原生配置。

@@ -343,7 +343,7 @@ fn attach(
             let released = call(client, Operation::ReleaseInstance { instance_id });
             if removed.is_err() || released.is_err() {
                 let _ = directory.keep();
-                return Err(format!("{error}; attachment cleanup incomplete; retry aw install --remove with the same config, target and PID; native={removed:?}, binding={released:?}").into());
+                return Err(format!("{error}; attachment cleanup incomplete; retry aw disconnect --config FILE --agent TARGET --pid PID using the original config, target and PID; native={removed:?}, binding={released:?}").into());
             }
             if let Err(cleanup) = confirm::cleanup(directory.path()) {
                 let _ = directory.keep();

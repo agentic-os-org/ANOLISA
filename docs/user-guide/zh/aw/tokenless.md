@@ -39,7 +39,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI" \
   --qoder "$AW_QODER"
-aw validate --config "$AW_HOME/tokenless.yaml"
+aw config validate --config "$AW_HOME/tokenless.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/tokenless.yaml" --agent qoder
 ```
@@ -114,7 +114,7 @@ export TOKENLESS_SLS_ENABLED=0
 退出 Agent 后停止服务。
 
 ```bash
-aw stop --config "$AW_HOME/tokenless.yaml"
+aw service stop --config "$AW_HOME/tokenless.yaml"
 ```
 
 删除配置中的 Tokenless 步骤及不再使用的 Provider，校验后重新启动。

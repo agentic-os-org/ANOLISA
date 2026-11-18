@@ -262,8 +262,7 @@ print(json.dumps(r))
             result = subprocess.run(
                 [
                     str(a.aw),
-                    "instance",
-                    "attach",
+                    "connect",
                     "--config",
                     str(config),
                     "--sdk-pid",
@@ -325,8 +324,7 @@ print(json.dumps(r))
         detached = subprocess.run(
             [
                 str(a.aw),
-                "instance",
-                "detach",
+                "disconnect",
                 "--config",
                 str(config),
                 "--sdk-instance",

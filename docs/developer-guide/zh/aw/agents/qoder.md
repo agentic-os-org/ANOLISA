@@ -12,7 +12,7 @@ AW 尚未通过 `anolisa install` 或 RPM 发布。开发者可以在 Linux 上�
 ```bash
 cargo build --locked -p aw-cli --bin aw
 qodercli --version
-target/debug/aw validate --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw config validate --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qoder
 ```
 
@@ -53,8 +53,8 @@ AW 打开 Qoder 的原生终端界面，Qoder 退出后回到原 shell，并释�
 与未完成工作。共享 daemon 继续运行，供使用同一配置的后续会话复用。
 
 ```bash
-target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
-target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw service status --config crates/aw-service/examples/aw.qoder.yaml
+target/debug/aw service stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
 ## 准备原生命令启动
@@ -78,7 +78,7 @@ qoder -p 'Review this harmless prompt.'
 Qoder 进程可以共用已准备的配置目录。选中实例空闲时，编辑允许更新的策略字段后执行：
 
 ```bash
-target/debug/aw instance update --config aw.yaml --instance INSTANCE_ID
+target/debug/aw update --config aw.yaml --instance INSTANCE_ID
 ```
 
 print 请求在启动时读取初始策略，运行中的请求不能切换策略。原有参数限制继续
@@ -121,8 +121,8 @@ Qoder CLI 1.1.73 使用独占的私有 HOME 配置启动终端后，可在第一
 从该配置所在目录执行：
 
 ```bash
-aw instance attach --agent qoder --pid "$QODER_PID"
-aw instance update --agent qoder
+aw connect --agent qoder --pid "$QODER_PID"
+aw update --agent qoder
 ```
 
 先将 `QODER_PID` 设为自己启动的终端进程。附着会核验启动身份和原生配置采用结果，
@@ -139,7 +139,7 @@ headless fast hooks 和其他 Qoder 进程共用的配置目录会被拒绝。
 终端空闲后移除附着：
 
 ```bash
-aw instance attach --agent qoder --pid "$QODER_PID" --remove
+aw disconnect --agent qoder --pid "$QODER_PID"
 ```
 
 AW 只恢复自己拥有的配置条目。版本校验与中断恢复见

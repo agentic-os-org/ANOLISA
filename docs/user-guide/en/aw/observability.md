@@ -29,14 +29,14 @@ Do not put tokens on the command line. Use the service origin as the endpoint, w
 ## Run and inspect
 
 ```bash
-aw validate --config "$HOME/aw/aw.yaml"
+aw config validate --config "$HOME/aw/aw.yaml"
 aw run --config "$HOME/aw/aw.yaml" --agent qoder
 ```
 
 Check the same configuration from another terminal.
 
 ```bash
-aw status --config "$HOME/aw/aw.yaml"
+aw service status --config "$HOME/aw/aw.yaml"
 ```
 
 Startup output includes source query state and an audit key. After the Agent makes a tool call,

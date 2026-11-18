@@ -81,7 +81,7 @@ class AppReloadTests(unittest.TestCase):
                         "max_items": 32, "max_bytes": 262144,
                     }
                 save(config, document)
-                daemon = processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", root / "state"])
+                daemon = processes.start("daemon", [aw, "service", "serve", "--config", config, "--state-dir", root / "state"])
                 await_condition(lambda: (root / "state/aw.sock").exists() or processes.exited(daemon), 5, "AW startup")
                 self.assertFalse(processes.exited(daemon))
                 if native_start:
@@ -104,7 +104,7 @@ class AppReloadTests(unittest.TestCase):
                     child = processes.start("app", [aw, "run", "--config", config, "--agent", "native", *(["--reloadable"] if reloadable else [])], ports[:1])
 
                 def status():
-                    return json.loads(checked([aw, "status", "--config", config], env=environment).stdout)["result"]
+                    return json.loads(checked([aw, "service", "status", "--config", config], env=environment).stdout)["result"]
 
                 def ready():
                     self.assertFalse(processes.exited(child), "App exited before readiness")
@@ -132,7 +132,7 @@ class AppReloadTests(unittest.TestCase):
                 for index, (policy, tool, expected_state, path) in enumerate(cases):
                     candidate = root / "next.json"
                     save(candidate, policy)
-                    command = ([aw, "instance", "update", "--instance", status()["instances"][0]["instance_id"]]
+                    command = ([aw, "update", "--instance", status()["instances"][0]["instance_id"]]
                                if native_start else [aw, "update", "--agent", "native"])
                     changed = json.loads(checked([*command, "--config", config, "--policy", candidate], env=environment).stdout)
                     arguments = {"command": (root / "tool-command.txt").read_text(), "timeout": 5} if path is None else {"file_path": str(path)}

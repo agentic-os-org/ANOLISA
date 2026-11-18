@@ -180,7 +180,7 @@ raise SystemExit(result.returncode)
                 assert selected[0]["response"]["result"]["disposition"] == "passthrough"
                 assert selected[0]["response"]["result"]["output"] == result["prettyJson"]
                 assert result["afterCalls"] == 1
-        code, out, err = call([aw, "status", "--config", str(config)])
+        code, out, err = call([aw, "service", "status", "--config", str(config)])
         assert code == 0, err
         status = json.loads(out)["result"]
         assert status["bindings"] == 0 and status["events"] == 0
@@ -196,7 +196,7 @@ raise SystemExit(result.returncode)
         (state / "verified-audits.json").write_text(json.dumps(audits, indent=2))
         results.append({"case": case, "passed": True, "artifacts": str(state)})
     finally:
-        code, out, err = call([aw, "stop", "--config", str(config)])
+        code, out, err = call([aw, "service", "stop", "--config", str(config)])
         assert code == 0, err
         deadline = time.monotonic() + 5
         while (state / "state/aw.sock").exists() and time.monotonic() < deadline:

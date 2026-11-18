@@ -60,7 +60,7 @@ openclaw gateway run
 在另一个终端中，使用同一份配置更新空闲实例：
 
 ```bash
-aw instance update --config /absolute/aw.yaml --agent openclaw
+aw update --config /absolute/aw.yaml --agent openclaw
 ```
 
 从 `before_agent_run` 到工具回调完成且 `agent_end` 成功，同一请求固定使用一个策略版本。两个工具事件都支持在请求之间增删步骤，初始策略也可以为空。缺失完成回调、原生取消、活动请求标识重复或无法确认清理时，实例持续占用更新门禁，需要重启该 Gateway 后恢复管理。未获请求准入的工具调用会被阻断。原生 `tools.invoke` 仍不属于这个受管入口。

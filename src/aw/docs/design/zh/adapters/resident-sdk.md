@@ -164,7 +164,7 @@ status/stop/close/release 操作。过载直接拒绝准入，不绕过、
 不隐式重试、不重开预算。旧调用排空后，新身份可使用回收容量。注册因过载失败也消耗序号，
 原序号不能在容量恢复后重新开工。
 
-aw status --config aw.yaml 展示 limits、bindings/invocations/correlations/calls/connections
+aw service status --config aw.yaml 展示 limits、bindings/invocations/correlations/calls/connections
 当前用量、单 binding 活动 invocation 峰值、拒绝总数与原因计数。AW 关联内存随活动工作量增长，
 审计磁盘和 SDK 会话历史需要独立保留策略。生产并发数需实测，调大这些配置只增加并发容量。
 

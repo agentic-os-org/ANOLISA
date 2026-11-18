@@ -12,16 +12,16 @@ CLI 和正在运行的 sec-core socket 的绝对路径。
 先单独安装并登录 Codex。从 `aw.yaml` 所在目录运行：
 
 ```bash
-aw validate --config aw.yaml
-aw install --config aw.yaml --agent codex
+aw config validate --config aw.yaml
+aw connect --config aw.yaml --agent codex
 codex
 # In Codex, run /hooks and trust the three exact AW command definitions; then exit.
 aw run --config aw.yaml --agent codex
-aw status --config aw.yaml
-aw stop --config aw.yaml
+aw service status --config aw.yaml
+aw service stop --config aw.yaml
 ```
 
-`aw install` 在 `CODEX_HOME/hooks.json` 或 `~/.codex/hooks.json` 中加入稳定定义，
+`aw connect` 在 `CODEX_HOME/hooks.json` 或 `~/.codex/hooks.json` 中加入稳定定义，
 保留已有 Hook，也不授予信任。`aw run` 在启动会话前记录 Codex 报告的版本，检查 Hook 清单、
 信任状态和 AW 策略。直接启动 Codex 时，已安装的 AW 命令处于空闲状态。
 AW 可执行文件路径变化后，需要重新安装并审查信任。

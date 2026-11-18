@@ -97,7 +97,7 @@ def exercise(binaries, native, output, native_start=False):
                     assert event["turn_id"] == event["native"]["request_set_id"]
                     identities.add((event["session_id"], event["turn_id"]))
                 assert len(identities) == 1
-                snapshot = json.loads(subprocess.check_output([aw, "status", "--config", str(config)],
+                snapshot = json.loads(subprocess.check_output([aw, "service", "status", "--config", str(config)],
                     env=controls, text=True, timeout=10))["result"]
                 assert snapshot["bindings"] == snapshot["events"] == 0, snapshot
                 if native_start:
@@ -112,7 +112,7 @@ def exercise(binaries, native, output, native_start=False):
                 for journal in (case / "state/journal").glob("*.jsonl"):
                     (output / f"{scenario}-{journal.name}").write_bytes(journal.read_bytes())
                 if (case / "state/aw.sock").exists():
-                    subprocess.run([aw, "stop", "--config", str(config)], env=controls,
+                    subprocess.run([aw, "service", "stop", "--config", str(config)], env=controls,
                                    capture_output=True, check=True, timeout=15)
     (output / "results.json").write_text(json.dumps({"passed": True,
         "native_version": version, "native_start": native_start, "runtime_removed": not root.exists(), "cases": cases}, indent=2) + "\n")

@@ -455,7 +455,7 @@ def main() -> None:
                         continue
                     verify(state, case, out)
                     code, out, err = call(
-                        [str(args.bin / "aw"), "status", "--config", str(config)], state, env
+                        [str(args.bin / "aw"), "service", "status", "--config", str(config)], state, env
                     )
                     assert code == 0, err
                     status = json.loads(out)["result"]
@@ -465,7 +465,7 @@ def main() -> None:
                 finally:
                     if (state / "state/aw.sock").exists():
                         code, out, err = call(
-                            [str(args.bin / "aw"), "stop", "--config", str(config)], state, env
+                            [str(args.bin / "aw"), "service", "stop", "--config", str(config)], state, env
                         )
                         assert code == 0, err
                         deadline = time.monotonic() + 5

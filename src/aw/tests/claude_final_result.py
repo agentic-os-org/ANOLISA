@@ -55,7 +55,7 @@ def run(aw, output, mode, node=None):
         processes = Processes(case, output, environment)
         result = None
         try:
-            processes.start("service", [str(aw), "serve", "--config", str(config),
+            processes.start("service", [str(aw), "service", "serve", "--config", str(config),
                                         "--state-dir", str(case / "state")])
             await_condition(lambda: (case / "state/aw.sock").exists(), 10, "AW readiness")
             process = processes.start("worker", [str(aw), "run", "--config", str(config), "--agent", "claude"])
@@ -85,7 +85,7 @@ def run(aw, output, mode, node=None):
                     assert ("AW_CLAUDE_FINAL_SECRET_MARKER" in json.dumps(checks)) == mode.endswith(("late", "timeout", "error"))
                     result["final_gate"] = "verified"
             status = json.loads(subprocess.check_output(
-                [str(aw), "status", "--config", str(config)], timeout=10))["result"]
+                [str(aw), "service", "status", "--config", str(config)], timeout=10))["result"]
             assert status["bindings"] == status["events"] == 0, status
             result["bindings_released"] = True
         finally:

@@ -102,7 +102,7 @@ async def run(server):
                 messages.append({"type": type(message).__name__, "value": asdict(message)})
             if ENFORCE:
                 status = json.loads(subprocess.check_output([os.environ["CLAUDE_TEST_AW"],
-                    "status", "--config", os.environ["CLAUDE_TEST_CONFIG"]], timeout=5))["result"]
+                    "service", "status", "--config", os.environ["CLAUDE_TEST_CONFIG"]], timeout=5))["result"]
                 assert status["bindings"] == 1 and status["events"] == 0, status
                 (ROOT / "active-status.json").write_text(json.dumps(status))
             if MODE == "mcp-gate-multi-late":

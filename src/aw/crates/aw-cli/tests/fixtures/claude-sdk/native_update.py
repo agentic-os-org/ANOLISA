@@ -80,7 +80,7 @@ async def worker(aw):
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
             "ANTHROPIC_API_KEY": "local-fixture", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         })
-    update = ["instance", "update", "--instance", prepared["instance_id"], "--policy", "deny.json"]
+    update = ["update", "--instance", prepared["instance_id"], "--policy", "deny.json"]
     try:
         for denied in (False, True):
             client = create_client(options)
@@ -98,7 +98,7 @@ async def worker(aw):
                             results.append(message)
                 assert len(results) == 1
                 assert Path("native-effect").exists() is not denied
-                state = json.loads(aw_call(aw, ["status", "--config", "aw.yaml"]).stdout)["result"]
+                state = json.loads(aw_call(aw, ["service", "status", "--config", "aw.yaml"]).stdout)["result"]
                 observation = state["observations"][0]
                 assert observation["instance_id"] != prepared["instance_id"]
                 assert observation["coverage"] == "unknown"
@@ -161,7 +161,7 @@ def main():
         (root / "deny.json").write_text(json.dumps(document))
         env = {"PATH": os.environ["PATH"], "HOME": str(root / "home"), "LANG": "C.UTF-8"}
         with (args.output / "service.log").open("wb") as log:
-            service = subprocess.Popen([aw, "serve", "--config", root / "aw.yaml", "--state-dir", root / "s"],
+            service = subprocess.Popen([aw, "service", "serve", "--config", root / "aw.yaml", "--state-dir", root / "s"],
                                        cwd=root, env=env, stdout=log, stderr=log, start_new_session=True)
             try:
                 deadline = time.monotonic() + 15
@@ -179,7 +179,7 @@ def main():
                 (args.output / "worker.log").write_bytes(stdout + stderr)
                 assert child.returncode == 0, stderr.decode()
                 (args.output / "result.json").write_text((root / "result.json").read_text())
-                state = json.loads(aw_call(aw, ["status", "--config", str(root / "aw.yaml")]).stdout)["result"]
+                state = json.loads(aw_call(aw, ["service", "status", "--config", str(root / "aw.yaml")]).stdout)["result"]
                 assert state["bindings"] == state["events"] == 0, state
             finally:
                 if service.poll() is None:

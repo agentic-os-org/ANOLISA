@@ -19,7 +19,7 @@ Initialize the profile and model credentials with Hermes first.
 
 ```bash
 cd src/aw
-target/debug/aw agent connect --config /absolute/aw.hermes.yaml --agent hermes \
+target/debug/aw connect --config /absolute/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
 target/debug/aw run --config /absolute/aw.hermes.yaml --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -106,7 +106,7 @@ argument-integrity and completion guards in that process. Version and management
 commands remain native. Preparation failure prevents chat dispatch.
 
 ```bash
-aw instance update --config /absolute/aw.yaml --agent hermes
+aw update --config /absolute/aw.yaml --agent hermes
 ```
 
 Updates activate between confirmed completed chat turns. The native request

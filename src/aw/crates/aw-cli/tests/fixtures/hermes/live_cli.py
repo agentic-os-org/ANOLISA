@@ -321,7 +321,7 @@ def register(ctx: Any) -> None:
                             dotenv = profile_env + (f"{key}={value}\n" if source == "dotenv" else "")
                             (profile / ".env").write_text(dotenv)
                             managed_env = {**env, key: value} if source == "parent" else env
-                            assert run([base[0], "install", *base[1:]], name, work, managed_env) != 0, name
+                            assert run([base[0], "connect", *base[1:]], name, work, managed_env) != 0, name
                             assert not shadowed.exists(), name
                             assert "native config writer failed" in (args.output / (name + ".log")).read_text()
                             assert (profile / ".env").read_text() == dotenv
@@ -354,7 +354,7 @@ def register(ctx: Any) -> None:
                         try:
                             cleanup_base = [*base]
                             cleanup_base[-1] = str(cleanup_profile)
-                            assert run([base[0], "install", *cleanup_base[1:]], "install-cleanup-error",
+                            assert run([base[0], "connect", *cleanup_base[1:]], "install-cleanup-error",
                                        work, {**env, "PYTHONPATH": str(imports)}) != 0
                             cleanup_log = (args.output / "install-cleanup-error.log").read_text()
                             cleanup_report = json.loads(cleanup_log.splitlines()[0])
@@ -381,7 +381,7 @@ def register(ctx: Any) -> None:
                     assert len(original.encode()) < 4 * 1024 * 1024
                     assert len(json.dumps([expanded, expanded]).encode()) > 4 * 1024 * 1024
                     (profile / "config.yaml").write_text(original)
-                    assert run([base[0], "install", *base[1:]], "install", work, env) == 0
+                    assert run([base[0], "connect", *base[1:]], "install", work, env) == 0
                     installed = (profile / "config.yaml").read_bytes()
                     report = json.loads((args.output / "install.log").read_text())
                     backup, displaced = Path(report["backup"]), Path(report["displaced"])
@@ -401,7 +401,7 @@ def register(ctx: Any) -> None:
                     assert b"# Keep this operator comment" in installed
                     assert b'text_yes: "yes"' in installed
                     assert not list(profile.glob(".aw-config-*"))
-                    assert run([base[0], "install", *base[1:]], "install-again", work, env) == 0
+                    assert run([base[0], "connect", *base[1:]], "install-again", work, env) == 0
                     assert (profile / "config.yaml").read_bytes() == installed
                     repeated = json.loads((args.output / "install-again.log").read_text())
                     assert repeated["backup"] is None and repeated["displaced"] is None
@@ -412,7 +412,7 @@ def register(ctx: Any) -> None:
                                                   b"hook_callback_timeout: 1:20\n")
                     assert b"hook_callback_timeout: 1:20\n" in installed
                     (profile / "config.yaml").write_bytes(installed)
-                daemon = start([str(args.aw), "serve", "--config", str(config), "--state-dir", str(state)],
+                daemon = start([str(args.aw), "service", "serve", "--config", str(config), "--state-dir", str(state)],
                                "daemon-" + label, work, env)
                 deadline = time.monotonic() + 10
                 while not (state / "aw.sock").exists() and time.monotonic() < deadline:
@@ -480,13 +480,13 @@ def register(ctx: Any) -> None:
                 assert not (work / "NEVER").exists()
                 assert all(row["literal"] == "literal ; $(touch NEVER) ' spaces" for row in rows
                            if row["step"].startswith("aw-"))
-                assert run([str(args.aw), "status", "--config", str(config)],
+                assert run([str(args.aw), "service", "status", "--config", str(config)],
                            "status-" + label, work, env) == 0
                 status = json.loads((args.output / ("status-" + label + ".log")).read_text())
                 result["instance_released"] = status["result"]["bindings"] == 0
                 assert result["instance_released"], result
                 results.append(result)
-                assert run([str(args.aw), "stop", "--config", str(config)], "stop-" + label, work, env) == 0
+                assert run([str(args.aw), "service", "stop", "--config", str(config)], "stop-" + label, work, env) == 0
                 assert daemon.wait(timeout=10) == 0
                 audit_events = []
                 for journal in state.rglob("*.jsonl"):

@@ -17,8 +17,8 @@ From `src/aw`, with that environment's `python3` on PATH:
 
 ```bash
 target/debug/aw run --config crates/aw-service/examples/aw.agentscope.yaml --agent agentscope
-target/debug/aw status --config crates/aw-service/examples/aw.agentscope.yaml
-target/debug/aw stop --config crates/aw-service/examples/aw.agentscope.yaml
+target/debug/aw service status --config crates/aw-service/examples/aw.agentscope.yaml
+target/debug/aw service stop --config crates/aw-service/examples/aw.agentscope.yaml
 ```
 
 The example uses a deterministic offline model and a local Echo tool. It needs no
@@ -91,13 +91,13 @@ another terminal to inspect it and apply changes from the same configuration:
 
 ```bash
 python /absolute/application/worker.py
-aw status --config aw.yaml
-aw instance update --agent agentscope
+aw service status --config aw.yaml
+aw update --agent agentscope
 ```
 
 Pause new replies and fully drain active replies before updating. The next reply
 adopts the updated input and tool routes through the existing resident factory.
-For multiple workers, select one with `aw instance update --instance INSTANCE`.
+For multiple workers, select one with `aw update --instance INSTANCE`.
 After all reply streams and execution leases close, release the instance in the
 application's `finally` block:
 
@@ -221,7 +221,7 @@ tool routes takes effect together.
 
 ```bash
 aw update --config current.yaml --agent agentscope --policy next.yaml
-aw status --config current.yaml
+aw service status --config current.yaml
 ```
 
 Pause dispatch before updating. Model execution, active tool tasks and unconfirmed
@@ -250,7 +250,7 @@ List the ready instances and update one selected worker after pausing its task
 dispatch. Replace `INSTANCE` with that worker's `instance_id` from status:
 
 ```bash
-aw status --config current.yaml
+aw service status --config current.yaml
 aw update --config current.yaml --instance INSTANCE --policy next.yaml
 ```
 

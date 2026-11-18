@@ -96,7 +96,7 @@ def main():
                 row = json.loads(out)
                 assert row['passed'] and len(requests) == row['model_calls'], (scenario, row, requests)
                 assert len(requests) == (1 if scenario in ['signed', 'plain'] else 0), (scenario, requests)
-                status = json.loads(call([aw, 'status', '--config', path], root, env)[1])['result']
+                status = json.loads(call([aw, 'service', 'status', '--config', path], root, env)[1])['result']
                 assert status['bindings'] == 0 and status['events'] == 0, status
                 assert status['resources']['usage']['invocations'] == 0, status
                 for line in (root / 'scanner.jsonl').read_text().splitlines():
@@ -106,7 +106,7 @@ def main():
                 rows.append({'case': scenario, **row, 'bindings': 0, 'events': 0, 'invocations': 0})
             finally:
                 try:
-                    stopped = call([aw, 'stop', '--config', path], root, env, timeout=15)
+                    stopped = call([aw, 'service', 'stop', '--config', path], root, env, timeout=15)
                     assert stopped[0] == 0, stopped
                     deadline = time.monotonic() + 5
                     while (root / 'state/aw.sock').exists() and time.monotonic() < deadline:
