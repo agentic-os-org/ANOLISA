@@ -113,7 +113,9 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
     original_json = {'version':1, 'filesystem':{'default':'deny','rules':[
         {'effect':'allow','path':'/','rights':['read']}]},
         'execution':{'deny_paths':[]}, 'network':{'mode':'off'}}
-    for policy in [read, read + write, json.dumps(original_json)]:
+    output = root / 'new-output'
+    create = read + 'permit(principal, action == SecCore::Action::"file.write", resource) when { resource.path == ' + json.dumps(str(output)) + ' && context.input.operation == SecCore::WriteOperation::"create" };'
+    for policy in [read, read + write, json.dumps(original_json), create]:
         source.write_text(policy)
         thread = threading.Thread(target=receive)
         thread.start()
@@ -125,7 +127,10 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
         assert not thread.is_alive() and not errors, errors
         assert result.returncode != 0 and 'recording request only' in result.stderr, result.stderr
     listener.close()
-    assert len(received) == 3, received
+    assert len(received) == 4, received
+    creation = received[3]['params']['context']['requested_permissions']['filesystem']['rules']
+    assert any(rule['path'] == str(root) and rule['effect'] == 'allow' and 'write' in rule['rights'] for rule in creation), creation
+    assert all(rule['path'] != str(output) for rule in creation) and not output.exists(), creation
     for request in received:
         assert request['method'] == 'authorization.evaluate', request
         assert set(request['params']) == {'request_id','principal','action','resource','context'}, request
@@ -136,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix='asc-permission-hook-') as root:
         assert request['params']['context']['agent'] == {'agent_type':'cosh'}, request
         assert 'policy' not in request['params'], request
         assert 'policy' not in request['params']['context'], request
-    first, second, legacy = [item['params']['context']['requested_permissions'] for item in received]
+    first, second, legacy = [item['params']['context']['requested_permissions'] for item in received[:3]]
     assert first == legacy == original_json
     assert first != second
     assert all('write' not in rule['rights'] for rule in first['filesystem']['rules'])
@@ -180,6 +185,34 @@ with tempfile.TemporaryDirectory(prefix='asc-cedar-real-') as root:
         assert (result.returncode == 0) == expected, (result.returncode, result.stdout, result.stderr)
         if stdout is not None:
             assert result.stdout == stdout, (result.stdout, result.stderr)
+    # A missing creation target requests the whole parent, including sibling mutations.
+    output = cwd / 'new-output'
+    protected = cwd / 'protected'
+    protected.write_text('unchanged')
+    create = base + rule('permit', 'file.write',
+        f'resource.path == {json.dumps(str(output))} && context.input.operation == SecCore::WriteOperation::"create"')
+    create += rule('forbid', 'file.write', f'resource.path == {json.dumps(str(protected))}')
+    check(run(create, ['/bin/sh', '-c', 'printf created > new-output; printf sibling > sibling']), True)
+    assert output.read_text() == 'created' and (cwd / 'sibling').read_text() == 'sibling'
+    output.unlink()
+    check(run(create, ['/bin/sh', '-c', 'printf changed > protected']), False)
+    assert protected.read_text() == 'unchanged' and not output.exists()
+    check(run(create, ['/bin/sh', '-c', f'printf outside > {root / "outside"}']), False)
+    assert not (root / 'outside').exists()
+    # Existing directory write covers explicitly mentioned missing descendants without create.
+    nested = cwd / 'a' / 'b' / 'new'
+    ancestor_write = base + rule('permit', 'file.write',
+        tree(cwd) + ' && context.input.operation == SecCore::WriteOperation::"write"')
+    ancestor_write += rule('forbid', 'file.write', 'context.input.operation == SecCore::WriteOperation::"create"')
+    ancestor_write += rule('permit', 'file.read', f'resource.path == {json.dumps(str(nested))}')
+    check(run(ancestor_write, ['/bin/sh', '-c', 'mkdir -p a/b && printf nested > a/b/new']), True)
+    assert nested.read_text() == 'nested'
+    shutil.rmtree(cwd / 'a')
+    uncovered = base + rule('permit', 'file.write', f'resource.path == {json.dumps(str(nested))}')
+    denied = run(uncovered, ['/bin/sh', '-c', 'mkdir -p a/b && printf unexpected > a/b/new'])
+    check(denied, False)
+    assert str(nested) in denied.stderr and 'no existing writable ancestor covers the target' in denied.stderr, denied.stderr
+    assert not (cwd / 'a').exists()
     # This grant has no readable parent mount; losing the target exclusion grants the secret.
     file_read = rule('permit', 'file.read', f'resource.path == {json.dumps(str(file_alias))}')
     deny_key = rule('forbid', 'file.read', f'resource.path == {json.dumps(str(target / "key"))}')

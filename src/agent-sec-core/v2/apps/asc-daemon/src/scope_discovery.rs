@@ -21,7 +21,7 @@ use std::time::Duration;
 use asc_daemon_core::scope_discovery::{
     ProcessFingerprint, ProcessObservation, ScopeDiscoveryState,
 };
-use asc_pap::PapError;
+use asc_pap::{PapError, ScopeDiscoverySeed};
 use asc_policy_types::identifiers::ResourceId;
 use asc_policy_types::process_discovery::ProcessIdentity;
 #[cfg(test)]
@@ -78,16 +78,12 @@ impl asc_pap::ScopeDiscovery for ScopeDiscoveryRegistry {
         if jobs.len() >= MAX_DISCOVERY_JOBS {
             return Err(PapError::Unavailable);
         }
-        let state =
-            ScopeDiscoveryState::from_seed(scope.clone()).map_err(|_| PapError::Conflict)?;
         let job = ScopeDiscoveryJob::spawn(
-            scope.scope_id.clone(),
-            state,
+            scope.clone(),
             PathBuf::from("/proc"),
             SCAN_INTERVAL,
             self.sink.clone(),
-        )
-        .map_err(|_| PapError::Unavailable)?;
+        )?;
         jobs.push(job);
         Ok(())
     }
@@ -114,22 +110,32 @@ pub struct ScopeDiscoveryJob {
 
 impl ScopeDiscoveryJob {
     fn spawn(
-        scope_id: ResourceId,
-        state: ScopeDiscoveryState,
+        mut seed: ScopeDiscoverySeed,
         root: PathBuf,
         interval: Duration,
         sink: Arc<dyn asc_pap::ScopeBindingSink>,
     ) -> Result<Self, PapError> {
-        let facts = ProcessFacts {
-            uid: state.requires_owner_uid(),
-            arguments: state.requires_arguments(),
-        };
-        let state = Arc::new(Mutex::new(state));
         let boot_id = fs::read_to_string(root.join("sys/kernel/random/boot_id"))
             .map_err(|_| PapError::Unavailable)?;
         if boot_id.trim().is_empty() {
             return Err(PapError::Unavailable);
         }
+        let scope_id = seed.scope_id.clone();
+        let previous_count = seed.instances.len();
+        // A reboot proves these instances exited even if their PIDs are now unreadable.
+        // Retain the PID pin so a PID Scope never follows a replacement instance.
+        seed.instances
+            .retain(|instance| instance.boot_id == boot_id.trim());
+        let retired = seed.instances.len() != previous_count;
+        let state = ScopeDiscoveryState::from_seed(seed).map_err(|_| PapError::Conflict)?;
+        if retired {
+            sink.sync_instances(&scope_id, &state.instances().cloned().collect::<Vec<_>>())?;
+        }
+        let facts = ProcessFacts {
+            uid: state.requires_owner_uid(),
+            arguments: state.requires_arguments(),
+        };
+        let state = Arc::new(Mutex::new(state));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker_state = state.clone();
@@ -394,12 +400,14 @@ fn read_uid(process: &Path) -> io::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::{Child, Command};
     use std::time::Instant;
 
-    use asc_pap::PapService;
+    use asc_pap::{PapRepository, PapService, ScopeBindingSink};
     use asc_policy_repository_sqlite::SqlitePolicyRepository;
+    use asc_policy_types::binding::BindingStatus;
+    use asc_policy_types::scope::{ProcessMatcher, ScopeSelector, ScopeStatus};
 
     use super::*;
     use asc_policy_types::policy::PreparedPolicy;
@@ -417,6 +425,30 @@ mod tests {
         uid: true,
         arguments: true,
     };
+
+    fn mock_process(root: &Path) -> PathBuf {
+        let process = root.join("42");
+        fs::create_dir_all(process.join("ns")).unwrap();
+        symlink("pid:[123]", process.join("ns/pid")).unwrap();
+        symlink("/bin/sleep", process.join("exe")).unwrap();
+        fs::write(
+            process.join("stat"),
+            "42 (agent (worker)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987 20",
+        )
+        .unwrap();
+        fs::write(process.join("comm"), "agent\n").unwrap();
+        fs::write(
+            process.join("cmdline"),
+            b"node\0/usr/local/bin/agent\0\0chat\0",
+        )
+        .unwrap();
+        fs::write(
+            process.join("status"),
+            "Name:\tagent\nUid:\t1000\t1000\t1000\t1000\n",
+        )
+        .unwrap();
+        process
+    }
 
     struct Process(Child);
     impl Drop for Process {
@@ -446,6 +478,110 @@ mod tests {
     impl asc_pap::ScopeBindingSink for TestSink {
         fn sync_instances(&self, _: &ResourceId, _: &[ProcessIdentity]) -> Result<(), PapError> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn recovery_retires_previous_boot_bindings_and_preserves_same_boot_instances_and_pid_pins() {
+        for (reboot, pinned, boot_id, phase) in [
+            (false, false, "boot-one", BindingStatus::PendingApply),
+            (true, false, "boot-two", BindingStatus::PendingDelete),
+            (true, true, "boot-two", BindingStatus::PendingDelete),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let database = directory.path().join("policy-state.db");
+            let repository = Arc::new(SqlitePolicyRepository::open(&database).unwrap());
+            let pap = PapService::new(repository.clone());
+            let policy = pap
+                .create_policy("test", &file_policy(vec!["/protected".into()]))
+                .unwrap();
+            let scope = PreparedScope {
+                scope_id: ResourceId::new("recovered").unwrap(),
+                selector: if pinned {
+                    ScopeSelector::Pid { pid: 42 }
+                } else {
+                    ScopeSelector::Process {
+                        matcher: ProcessMatcher::Name {
+                            process_name: "agent".into(),
+                        },
+                    }
+                },
+                policy_snapshots: vec![policy],
+                owner_uid: None,
+                status: ScopeStatus::Active,
+            };
+            repository.put_scope(&scope).unwrap();
+            let previous = ProcessIdentity {
+                boot_id: "boot-one".into(),
+                pid_namespace: "pid:[123]".into(),
+                pid: 42,
+                start_time: 987,
+            };
+            pap.sync_instances(&scope.scope_id, std::slice::from_ref(&previous))
+                .unwrap();
+            let binding = pap.list_bindings(10, 0).unwrap().items.remove(0);
+            let id = binding.spec.binding_id;
+            let root = directory.path().join("proc");
+            fs::create_dir_all(root.join("sys/kernel/random")).unwrap();
+            fs::write(
+                root.join("sys/kernel/random/boot_id"),
+                format!("{boot_id}\n"),
+            )
+            .unwrap();
+            // The PID exists, but no process identity or matching metadata is readable.
+            fs::create_dir(root.join("42")).unwrap();
+            fs::write(root.join("42/stat"), "malformed").unwrap();
+            let mut job = ScopeDiscoveryJob::spawn(
+                repository.scope_discovery_seed(&scope.scope_id).unwrap(),
+                root.clone(),
+                Duration::from_secs(60),
+                Arc::new(pap.clone()),
+            )
+            .unwrap();
+            assert_eq!(pap.get_binding(&id).unwrap().status, phase);
+            job.shutdown().unwrap();
+            if !reboot {
+                assert_eq!(job.instances().unwrap(), vec![previous]);
+                continue;
+            }
+            if pinned {
+                mock_process(&root);
+                let observation = observe(&root, boot_id, previous.pid, FACTS).unwrap();
+                let mut state = job.state.lock().unwrap();
+                state.reconcile(vec![observation], &BTreeSet::from([previous.pid]), true);
+                assert!(state.instances().next().is_none());
+                continue;
+            }
+            drop(job);
+            drop(pap);
+            drop(repository);
+
+            let repository = Arc::new(SqlitePolicyRepository::open(&database).unwrap());
+            let pap = PapService::new(repository.clone());
+            assert_eq!(
+                pap.get_binding(&id).unwrap().status,
+                BindingStatus::PendingDelete
+            );
+            // Reuse every numeric identity field: only the boot ID distinguishes this process.
+            mock_process(&root);
+            let mut job = ScopeDiscoveryJob::spawn(
+                repository.scope_discovery_seed(&scope.scope_id).unwrap(),
+                root,
+                Duration::from_secs(60),
+                Arc::new(pap.clone()),
+            )
+            .unwrap();
+            wait_for_instances(&job, 1);
+            job.shutdown().unwrap();
+            let bindings = pap.list_bindings(10, 0).unwrap().items;
+            assert_eq!(bindings.len(), 2);
+            let active = bindings
+                .iter()
+                .find(|binding| binding.status.phase == BindingStatus::PendingApply)
+                .unwrap();
+            assert_ne!(active.spec.binding_id, id);
+            assert_eq!(active.spec.scope.process.boot_id, boot_id);
         }
     }
 
@@ -624,10 +760,12 @@ mod tests {
             "policySnapshots":[policy]
         }))
         .unwrap();
-        let state = ScopeDiscoveryState::for_scope(scope.clone()).unwrap();
         let mut job = ScopeDiscoveryJob::spawn(
-            scope.scope_id,
-            state,
+            ScopeDiscoverySeed {
+                scope,
+                pinned_process: None,
+                instances: Vec::new(),
+            },
             "/proc".into(),
             Duration::from_millis(20),
             Arc::new(TestSink),
@@ -657,26 +795,7 @@ mod tests {
     #[test]
     fn djob_scope_proc_adapter_preserves_failed_reads_and_rejects_malformed_stat() {
         let directory = tempfile::tempdir().unwrap();
-        let process = directory.path().join("42");
-        fs::create_dir_all(process.join("ns")).unwrap();
-        symlink("pid:[123]", process.join("ns/pid")).unwrap();
-        symlink("/bin/sleep", process.join("exe")).unwrap();
-        fs::write(
-            process.join("stat"),
-            "42 (agent (worker)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987 20",
-        )
-        .unwrap();
-        fs::write(process.join("comm"), "agent\n").unwrap();
-        fs::write(
-            process.join("cmdline"),
-            b"node\0/usr/local/bin/agent\0\0chat\0",
-        )
-        .unwrap();
-        fs::write(
-            process.join("status"),
-            "Name:\tagent\nUid:\t1000\t1000\t1000\t1000\n",
-        )
-        .unwrap();
+        let process = mock_process(directory.path());
         let stop = AtomicBool::new(false);
         let scan = scan_proc(directory.path(), "boot", &stop, FACTS).unwrap();
         assert_eq!(scan.observations[0].identity.start_time, 987);
@@ -746,8 +865,11 @@ mod tests {
         }))
         .unwrap();
         let mut job = ScopeDiscoveryJob::spawn(
-            scope.scope_id.clone(),
-            ScopeDiscoveryState::for_scope(scope).unwrap(),
+            ScopeDiscoverySeed {
+                scope,
+                pinned_process: None,
+                instances: Vec::new(),
+            },
             "/proc".into(),
             Duration::from_millis(20),
             Arc::new(TestSink),

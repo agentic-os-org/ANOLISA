@@ -1,17 +1,7 @@
 use super::*;
 use actix_web::{App, test as awtest};
 use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
-use cosh_types::checkpoint::{
-    ChangeType, DiffEntry, GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2, GuardedRollbackEvidenceV2,
-    GuardedRollbackOutcomeV2, WorkspaceGenerationTokenV2, WsCkptRequest, WsCkptResponse,
-};
-use std::{
-    io::{Read, Write},
-    os::unix::fs::PermissionsExt,
-    os::unix::net::UnixListener,
-    sync::Arc,
-    thread,
-};
+use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
 fn document() -> AtifTrajectory {
     serde_json::from_value(json!({
@@ -469,28 +459,8 @@ fn state(dir: &Path, config: Value) -> web::Data<AppState> {
     web::Data::from(state)
 }
 
-#[actix_web::test]
-async fn api_joins_real_cli_json_pages_and_rejects_mixed_revisions() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("ws-ckpt");
-    std::fs::write(&binary, r#"#!/bin/sh
-case "$1" in
-status) printf '%s' '{"workspaces":[{"ws_id":"ws-123456","path":"/workspace/fixture","snapshot_count":2}]}' ;;
-list) case " $* " in
-  *' --cursor page2 '*) printf '%s' '{"snapshots":[{"id":"s2","meta":{"created_at":"2026-01-01T00:00:12Z"}}],"next_cursor":null}' ;;
-  *) printf '%s' '{"snapshots":[{"id":"s1","meta":{"created_at":"2026-01-01T00:00:01Z"}}],"next_cursor":"page2"}' ;;
-esac ;;
-*) exit 1 ;;
-esac
-"#).unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut data = state(dir.path(), json!({"binary": binary})).into_inner();
-    Arc::get_mut(&mut data).unwrap().auth = Arc::new(super::super::auth::DashboardAuth::init(
-        &crate::config::ServerAuthConfig { enabled: true },
-        dir.path(),
-    ));
-    let data = web::Data::from(data);
-    let store = TrajectoryStore::new_with_path(&dir.path().join("trajectories.db")).unwrap();
+fn fixture_trajectory(dir: &Path, data: &AppState) {
+    let store = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
     store
         .upsert_trajectory(&TrajectoryRecord {
             session_id: "fixture-session".into(),
@@ -514,6 +484,148 @@ esac
         })
         .unwrap();
     *data.trajectory_store.write().unwrap() = Some(Arc::new(store));
+}
+
+fn fixture_config(dir: &Path, restore_enabled: bool) -> Value {
+    json!({
+        "binary": dir.join("ws-ckpt"),
+        "socket": dir.join("ws-ckpt.sock"),
+        "restore_enabled": restore_enabled,
+    })
+}
+
+fn fixture_json(dir: &Path, name: &str, value: Value) {
+    std::fs::write(
+        dir.join(format!("{name}.json")),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+}
+
+fn fixture_rollback(dir: &Path, name: &str, mut value: Value) {
+    value["schema"] = json!("ws-ckpt.rollback.v1");
+    fixture_json(dir, name, value);
+}
+
+fn fixture_cli(dir: &Path, restore_enabled: bool) -> web::Data<AppState> {
+    let binary = dir.join("ws-ckpt");
+    std::fs::write(
+        &binary,
+        r#"#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+test "${WS_CKPT_REQUIRE_TRUSTED_PEER:-}" = 1
+test "${WS_CKPT_SOCKET##*/}" = ws-ckpt.sock
+printf '%s\n' "$*" >> calls
+case "$1" in
+    status) cat status.json ;;
+    list)
+        case " $* " in
+            *' --cursor page2 '*) cat second.json ;;
+            *) cat first.json ;;
+        esac ;;
+    diff)
+        test "$2" = --workspace
+        test "$3" = ws-123456
+        test "$5" = --format
+        test "$6" = json
+        case "$4" in --from=*) cat "diff-${4#--from=}.json" ;; *) exit 1 ;; esac ;;
+    rollback)
+        case " $* " in *' --guarded '*) ;; *) exit 1 ;; esac
+        case " $* " in *' --json '*) ;; *) exit 1 ;; esac
+        case " $* " in
+            *' --check '*)
+                test "$4" = --check
+                test "$5" = --workspace
+                test "$6" = /workspace/fixture
+                if test -f check-error.txt; then
+                    cat check-error.txt >&2
+                    exit 2
+                fi
+                cat check.json ;;
+            *' --preview '*)
+                for arg in "$@"; do
+                    case "$arg" in --snapshot=*) cat "preview-${arg#--snapshot=}.json"; exit ;; esac
+                done
+                exit 1 ;;
+            *' --result '*) cat > result.stdin; cat result.json ;;
+            *) cat > execute.stdin; cat execute.json; exit 1 ;;
+        esac ;;
+    *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    fixture_json(
+        dir,
+        "status",
+        json!({"workspaces":[
+            {"ws_id":"ws-123456","path":"/workspace/fixture","snapshot_count":2}
+        ]}),
+    );
+    fixture_rollback(
+        dir,
+        "check",
+        json!({"status": "compatible", "ws_id": "ws-123456", "registered_path": "/workspace/fixture", "diff_json": true}),
+    );
+    let mut state = state(dir, fixture_config(dir, restore_enabled)).into_inner();
+    Arc::get_mut(&mut state).unwrap().auth = Arc::new(super::super::auth::DashboardAuth::init(
+        &crate::config::ServerAuthConfig { enabled: true },
+        dir,
+    ));
+    web::Data::from(state)
+}
+
+fn fixture_calls(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("calls")).unwrap()
+}
+
+fn fixture_preview(dir: &Path, id: &str, changes: Vec<Value>) {
+    fixture_rollback(
+        dir,
+        &format!("preview-{id}"),
+        json!({
+            "status":"preview", "registered_path":"/workspace/fixture", "ws_id":"ws-123456",
+            "snapshot_id":id, "generation":([7; 32]), "diff_digest":([6; 32]), "changes":changes,
+        }),
+    );
+}
+
+fn fixture_snapshots(dir: &Path, ids: &[&str]) {
+    let snapshots: Vec<_> = ids
+        .iter()
+        .map(|id| json!({"id": id, "workspace": "/workspace/fixture", "meta": {"missing": false}}))
+        .collect();
+    fixture_json(dir, "first", json!({"snapshots": snapshots}));
+}
+
+#[actix_web::test]
+async fn api_joins_cli_pages_and_rejects_mixed_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture_json(
+        dir.path(),
+        "first",
+        json!({
+            "snapshots": [{
+                "id": "s1", "workspace": "/workspace/fixture",
+                "meta": {"created_at": "2026-01-01T00:00:01Z", "metadata": {"topic": "fixture"}}
+            }], "next_cursor": "page2"
+        }),
+    );
+    fixture_json(
+        dir.path(),
+        "second",
+        json!({
+            "snapshots": [{
+                "id": "s2", "workspace": "/workspace/fixture", "detail": "summary",
+                "omitted_fields": ["metadata"],
+                "meta": {"created_at": "2026-01-01T00:00:12Z", "missing": false}
+            }], "next_cursor": null
+        }),
+    );
+    let data = fixture_cli(dir.path(), false);
+    fixture_trajectory(dir.path(), &data);
     let app = awtest::init_service(
         App::new()
             .app_data(data)
@@ -571,7 +683,12 @@ esac
     )
     .await;
     assert_eq!(first["scope"]["path"], "/workspace/fixture");
+    assert_eq!(first["scope"]["ws_id"], "ws-123456");
     assert_eq!(first["step_snapshots"]["1"][0]["id"], "s1");
+    assert_eq!(
+        first["step_snapshots"]["1"][0]["meta"]["metadata"]["topic"],
+        "fixture"
+    );
     assert_eq!(first["restore_enabled"], false);
     let cursor = first["completeness"]["next_cursor"].as_str().unwrap();
     let uri = format!("/ws-ckpt/trajectory/fixture-session/snapshots?cursor={cursor}");
@@ -579,7 +696,12 @@ esac
         awtest::call_and_read_body_json(&app, awtest::TestRequest::get().uri(&uri).to_request())
             .await;
     assert_eq!(second["association"], first["association"]);
-    assert_eq!(second["step_snapshots"]["3"][0]["id"], "s2");
+    let summary = &second["step_snapshots"]["3"][0];
+    assert_eq!(summary["id"], "s2");
+    assert_eq!(summary["workspace"], "/workspace/fixture");
+    assert_eq!(summary["detail"], "summary");
+    assert_eq!(summary["omitted_fields"], json!(["metadata"]));
+    assert_eq!(summary["meta"]["missing"], false);
     assert_eq!(second["completeness"]["complete"], true);
     let mut invalid: Cursor =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(cursor).unwrap()).unwrap();
@@ -594,6 +716,83 @@ esac
             .status(),
         StatusCode::CONFLICT
     );
+    let calls = fixture_calls(dir.path());
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("list "))
+            .count(),
+        2
+    );
+    assert!(calls.lines().all(|line| line.starts_with("status ")
+        || line.starts_with("list ")
+        || line.starts_with("rollback --guarded --json --check ")));
+}
+
+#[actix_web::test]
+async fn incompatible_cli_hides_workspace_snapshots_and_restore() {
+    for failure in [
+        "--guarded",
+        "--json",
+        "missing diff_json",
+        "diff_json false",
+        "schema",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let data = fixture_cli(dir.path(), true);
+        fixture_trajectory(dir.path(), &data);
+        match failure {
+            "--guarded" | "--json" => std::fs::write(
+                dir.path().join("check-error.txt"),
+                format!("error: unexpected argument '{failure}'"),
+            )
+            .unwrap(),
+            "missing diff_json" | "diff_json false" | "schema" => {
+                let path = dir.path().join("check.json");
+                let mut check: Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                match failure {
+                    "missing diff_json" => {
+                        check.as_object_mut().unwrap().remove("diff_json");
+                    }
+                    "diff_json false" => check["diff_json"] = json!(false),
+                    _ => check["schema"] = json!("ws-ckpt.rollback.v2"),
+                }
+                fixture_json(dir.path(), "check", check);
+            }
+            _ => unreachable!(),
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .service(get_snapshots)
+                .service(snapshot_availability),
+        )
+        .await;
+        let uri = "/ws-ckpt/session/fixture-session/snapshots";
+        let head = awtest::call_service(
+            &app,
+            awtest::TestRequest::default()
+                .method(actix_web::http::Method::HEAD)
+                .uri(uri)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(head.status(), StatusCode::NOT_FOUND, "{failure}");
+        let body: Value =
+            awtest::call_and_read_body_json(&app, awtest::TestRequest::get().uri(uri).to_request())
+                .await;
+        assert!(body["trajectory"]["steps"].is_array(), "{failure}");
+        assert_eq!(body["scope"], Value::Null, "{failure}");
+        assert_eq!(body["step_snapshots"], json!({}), "{failure}");
+        assert_eq!(body["restore_enabled"], false, "{failure}");
+        assert_eq!(body["reason"], "ws_ckpt_incompatible", "{failure}");
+        assert!(
+            !fixture_calls(dir.path())
+                .lines()
+                .any(|line| line.starts_with("list "))
+        );
+    }
 }
 
 #[actix_web::test]
@@ -611,7 +810,7 @@ async fn restore_is_disabled_and_confirmation_tokens_cannot_be_forged() {
         .uri("/ws-ckpt/restore/prepare")
         .set_json(json!({
             "target": {"workspace": "ws-123456", "snapshot_id": "s1"}, "writers_stopped": true,
-            "expected_preview": fixture_fingerprint()
+            "expected_preview": {"generation": ([7; 32]), "diff_digest": ([6; 32])}
         }))
         .to_request();
     assert!(
@@ -634,171 +833,69 @@ async fn restore_is_disabled_and_confirmation_tokens_cannot_be_forged() {
     assert!(!dir.path().join(".secret_salt").exists());
 }
 
-fn restore_state(dir: &Path, socket: String) -> web::Data<AppState> {
-    let binary = dir.join("ws-ckpt");
-    std::fs::write(
-        &binary,
-        r#"#!/bin/sh
-case "$1" in
-status) printf '%s' '{"workspaces":[{"ws_id":"ws-123456","path":"/workspace/fixture"}]}' ;;
-*) exit 1 ;;
-esac
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut state = state(
-        dir,
-        json!({
-            "binary": binary, "socket": socket, "restore_enabled": true
-        }),
-    )
-    .into_inner();
-    Arc::get_mut(&mut state).unwrap().auth = Arc::new(super::super::auth::DashboardAuth::init(
-        &crate::config::ServerAuthConfig { enabled: true },
-        dir,
-    ));
-    web::Data::from(state)
-}
-
-fn guarded_preview(request: &WsCkptRequest) -> WsCkptResponse {
-    let WsCkptRequest::GuardedRollbackPreviewV2 {
-        registered_path,
-        ws_id,
-        expected_generation,
-        target_snapshot_id,
-    } = request
-    else {
-        panic!("expected guarded preview")
-    };
-    WsCkptResponse::GuardedRollbackPreviewV2Ok {
-        protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
-        registered_path: registered_path.clone(),
-        ws_id: ws_id.clone(),
-        generation: *expected_generation,
-        target_snapshot_id: target_snapshot_id.clone(),
-        diff_digest: [6; 32],
-        changes: vec![DiffEntry {
-            path: "deleted.txt".into(),
-            change_type: ChangeType::Deleted,
-            detail: None,
-        }],
-        caller_uid: unsafe { libc::geteuid() },
-    }
-}
-
-fn fixture_fingerprint() -> PreviewFingerprint {
-    PreviewFingerprint {
-        generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
-        diff_digest: [6; 32],
-    }
-}
-
-fn restore_daemon(
-    count: usize,
-    reply: impl Fn(&WsCkptRequest) -> WsCkptResponse + Send + 'static,
-) -> (
-    tempfile::TempDir,
-    String,
-    thread::JoinHandle<Vec<WsCkptRequest>>,
-) {
+#[actix_web::test]
+async fn read_only_diff_requires_an_exact_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("ws-ckpt.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let handle = thread::spawn(move || {
-        (0..count)
-            .map(|_| {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut length = [0; 4];
-                stream.read_exact(&mut length).unwrap();
-                let mut payload = vec![0; u32::from_le_bytes(length) as usize];
-                stream.read_exact(&mut payload).unwrap();
-                let request: WsCkptRequest = bincode::deserialize(&payload).unwrap();
-                let payload = bincode::serialize(&reply(&request)).unwrap();
-                stream
-                    .write_all(&(payload.len() as u32).to_le_bytes())
-                    .unwrap();
-                stream.write_all(&payload).unwrap();
-                request
-            })
-            .collect()
-    });
-    (dir, socket.to_string_lossy().into_owned(), handle)
-}
-
-fn identity(request: &WsCkptRequest) -> WsCkptResponse {
-    let WsCkptRequest::WorkspaceIdentityV2 { registration_path } = request else {
-        panic!("expected workspace identity")
-    };
-    WsCkptResponse::WorkspaceIdentityV2Ok {
-        protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
-        ws_id: "ws-123456".into(),
-        registered_path: registration_path.clone(),
-        generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+    let data = fixture_cli(dir.path(), false);
+    let ids = ["-s10", "before refactor", "重构前"];
+    fixture_snapshots(dir.path(), &ids);
+    for id in ids {
+        fixture_json(
+            dir.path(),
+            &format!("diff-{id}"),
+            json!({"changes": [{"path": id, "change_type": "Deleted", "detail": null}]}),
+        );
     }
+    let app = awtest::init_service(App::new().app_data(data).service(diff)).await;
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::post()
+            .uri("/ws-ckpt/diff")
+            .set_json(json!({"workspace": "ws-123456", "snapshot_id": "-s1"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(
+        !fixture_calls(dir.path())
+            .lines()
+            .any(|line| line.starts_with("diff "))
+    );
+
+    for id in ids {
+        let body: Value = awtest::call_and_read_body_json(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/ws-ckpt/diff")
+                .set_json(json!({"workspace": "ws-123456", "snapshot_id": id}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(body["snapshot_id"], id);
+        assert_eq!(body["changes"][0]["path"], id);
+        assert!(body.get("restore_preview").is_none());
+    }
+    assert!(
+        !fixture_calls(dir.path())
+            .lines()
+            .any(|line| line.starts_with("rollback "))
+    );
 }
 
 #[actix_web::test]
 async fn restore_requires_writer_confirmation_then_reconciles_unknown_without_retry() {
-    let (socket_dir, socket, daemon) = restore_daemon(6, |request| match request {
-        WsCkptRequest::WorkspaceIdentityV2 { .. } => identity(request),
-        WsCkptRequest::GuardedRollbackPreviewV2 { .. } => {
-            let mut response = guarded_preview(request);
-            if let WsCkptResponse::GuardedRollbackPreviewV2Ok { changes, .. } = &mut response {
-                let directory = "nested/".repeat(15);
-                changes.extend((1..20_000).map(|index| DiffEntry {
-                    path: format!("node_modules/{directory}file-{index}.js"),
-                    change_type: ChangeType::Modified,
-                    detail: None,
-                }));
-            }
-            response
-        }
-        WsCkptRequest::GuardedRollbackV2 {
-            registered_path,
-            ws_id,
-            expected_generation,
-            target_snapshot_id,
-            expected_diff_digest,
-            operation_id,
-            operation_digest,
-        } => WsCkptResponse::GuardedRollbackV2Uncertain {
-            evidence: GuardedRollbackEvidenceV2 {
-                ws_id: ws_id.clone(),
-                registered_path: registered_path.clone(),
-                expected_generation: *expected_generation,
-                target_snapshot_id: target_snapshot_id.clone(),
-                expected_diff_digest: *expected_diff_digest,
-                operation_id: operation_id.clone(),
-                operation_digest: *operation_digest,
-                caller_uid: unsafe { libc::geteuid() },
-                outcome: GuardedRollbackOutcomeV2::Unknown {
-                    reason: "reply lost".into(),
-                },
-            },
-        },
-        WsCkptRequest::GuardedRollbackEvidenceV2 {
-            ws_id,
-            operation_id,
-            operation_digest,
-        } => WsCkptResponse::GuardedRollbackEvidenceV2Ok {
-            evidence: Some(GuardedRollbackEvidenceV2 {
-                ws_id: ws_id.clone(),
-                registered_path: "/workspace/fixture".into(),
-                expected_generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
-                target_snapshot_id: "s1".into(),
-                expected_diff_digest: [6; 32],
-                operation_id: operation_id.clone(),
-                operation_digest: *operation_digest,
-                caller_uid: unsafe { libc::geteuid() },
-                outcome: GuardedRollbackOutcomeV2::Succeeded {
-                    resulting_generation: WorkspaceGenerationTokenV2::from_bytes([8; 32]),
-                },
-            }),
-        },
-        _ => panic!("unexpected request: {request:?}"),
-    });
-    let data = restore_state(socket_dir.path(), socket.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let data = fixture_cli(dir.path(), true);
+    let directory = "nested/".repeat(15);
+    let changes = (0..20_000)
+        .map(|index| {
+            json!({
+                "path":format!("node_modules/{directory}file-{index}.js"),
+                "change_type":"Modified", "detail":null,
+            })
+        })
+        .collect();
+    fixture_preview(dir.path(), "s1", changes);
     let app = awtest::init_service(
         App::new()
             .app_data(data.clone())
@@ -812,7 +909,8 @@ async fn restore_requires_writer_confirmation_then_reconciles_unknown_without_re
     let stopped = awtest::TestRequest::post()
         .uri("/ws-ckpt/restore/prepare")
         .set_json(json!({
-            "target": target, "writers_stopped": false, "expected_preview": fixture_fingerprint()
+            "target":target, "writers_stopped":false,
+            "expected_preview":{"generation": ([7; 32]), "diff_digest": ([6; 32])}
         }))
         .to_request();
     assert!(
@@ -830,9 +928,11 @@ async fn restore_requires_writer_confirmation_then_reconciles_unknown_without_re
     )
     .await;
     assert_eq!(preview["changes"].as_array().unwrap().len(), 20_000);
+    assert_eq!(preview["restore_preview"]["generation"], json!(([7; 32])));
+    assert_eq!(preview["restore_preview"]["diff_digest"], json!(([6; 32])));
     assert!(serde_json::to_vec(&preview["changes"]).unwrap().len() > 2 * 1024 * 1024);
     let prepare_body = json!({
-        "target": target, "writers_stopped": true, "expected_preview": preview["restore_preview"]
+        "target":target, "writers_stopped":true, "expected_preview":preview["restore_preview"]
     });
     assert!(serde_json::to_vec(&prepare_body).unwrap().len() < 1_024);
     let prepared: Value = awtest::call_and_read_body_json(
@@ -846,7 +946,7 @@ async fn restore_requires_writer_confirmation_then_reconciles_unknown_without_re
     let token = prepared["confirmation_token"].as_str().unwrap();
     assert!(token.len() < 1_024);
     assert!(prepared.get("preview").is_none());
-    let config_path = socket_dir.path().join("agentsight.json");
+    let config_path = dir.path().join("agentsight.json");
     std::fs::write(
         &config_path,
         json!({"ws_ckpt":{"socket":"/changed.sock"}}).to_string(),
@@ -855,120 +955,164 @@ async fn restore_requires_writer_confirmation_then_reconciles_unknown_without_re
     assert!(open_confirmation(&data, token).is_err());
     std::fs::write(
         &config_path,
-        json!({"ws_ckpt":{
-            "binary": socket_dir.path().join("ws-ckpt"), "socket": socket, "restore_enabled": true
-        }})
-        .to_string(),
+        json!({"ws_ckpt":fixture_config(dir.path(), true)}).to_string(),
     )
     .unwrap();
+
     let unknown: Value = awtest::call_and_read_body_json(
         &app,
         awtest::TestRequest::post()
             .uri("/ws-ckpt/restore/execute")
-            .set_json(json!({"confirmation_token": token}))
+            .set_json(json!({"confirmation_token":token}))
             .to_request(),
     )
     .await;
     assert_eq!(unknown["status"], "unknown");
+    let sent: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("execute.stdin")).unwrap()).unwrap();
+    assert_eq!(sent["ws_id"], "ws-123456");
+    assert_eq!(sent["generation"], json!(([7; 32])));
+    assert_eq!(sent["diff_digest"], json!(([6; 32])));
+    assert_eq!(sent["operation_id"], prepared["operation_id"]);
+    fixture_rollback(
+        dir.path(),
+        "result",
+        json!({
+            "status":"result", "evidence":{
+                "ws_id":"ws-123456", "registered_path":"/workspace/fixture",
+                "expected_generation":([7; 32]), "target_snapshot_id":"s1",
+                "expected_diff_digest":([6; 32]), "operation_id":sent["operation_id"],
+                "operation_digest":sent["operation_digest"], "caller_uid":unsafe { libc::geteuid() },
+                "outcome":{"Succeeded":{"resulting_generation":([8; 32])}},
+            }
+        }),
+    );
     std::fs::write(
         &config_path,
-        json!({"ws_ckpt":{"socket": socket, "restore_enabled": false}}).to_string(),
+        json!({"ws_ckpt":fixture_config(dir.path(), false)}).to_string(),
     )
     .unwrap();
+    std::fs::write(dir.path().join("check-error.txt"), "guarded check failed").unwrap();
     let reconciled: Value = awtest::call_and_read_body_json(
         &app,
         awtest::TestRequest::post()
             .uri("/ws-ckpt/restore/result")
-            .set_json(json!({"confirmation_token": token}))
+            .set_json(json!({"confirmation_token":token}))
             .to_request(),
     )
     .await;
     assert!(reconciled["evidence"].is_object());
-    assert!(matches!(
-        daemon.join().unwrap().as_slice(),
-        [
-            WsCkptRequest::WorkspaceIdentityV2 { .. },
-            WsCkptRequest::GuardedRollbackPreviewV2 { .. },
-            WsCkptRequest::WorkspaceIdentityV2 { .. },
-            WsCkptRequest::GuardedRollbackPreviewV2 { .. },
-            WsCkptRequest::GuardedRollbackV2 { .. },
-            WsCkptRequest::GuardedRollbackEvidenceV2 { .. }
-        ]
-    ));
+    let queried: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("result.stdin")).unwrap()).unwrap();
+    assert_eq!(queried, sent);
+    let calls = fixture_calls(dir.path());
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("rollback ") && line.contains(" --preview "))
+            .count(),
+        2
+    );
+    assert!(!calls.lines().any(|line| line.starts_with("diff ")));
+    let execute_calls = calls.lines().filter(|line| {
+        line.starts_with("rollback ")
+            && !line
+                .split_whitespace()
+                .any(|arg| matches!(arg, "--preview" | "--result"))
+    });
+    assert_eq!(execute_calls.count(), 1);
 }
 
 #[actix_web::test]
 async fn explicit_restore_refusal_reports_known_no_effect() {
-    let (dir, socket, daemon) = restore_daemon(1, |request| {
-        assert!(matches!(request, WsCkptRequest::GuardedRollbackV2 { .. }));
-        WsCkptResponse::GuardedRollbackV2Rejected {
-            code: cosh_types::checkpoint::GuardedRollbackRejectionCodeV2::CwdOccupied,
-            message: "writer still active".into(),
-        }
-    });
-    let data = restore_state(dir.path(), socket.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let data = fixture_cli(dir.path(), true);
+    fixture_rollback(
+        dir.path(),
+        "execute",
+        json!({
+            "status":"known_no_effect", "code":"CwdOccupied", "message":"writer still active"
+        }),
+    );
     // An older sealed token contained the entire preview and extra fields.
     let legacy = json!({
-        "preview": CkptGuardedRollbackPreviewV2 {
-            protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
-            registered_path: "/workspace/fixture".into(),
-            ws_id: "ws-123456".into(),
-            generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
-            target_snapshot_id: "s1".into(),
-            diff_digest: [6; 32],
-            changes: vec![],
-            caller_uid: unsafe { libc::geteuid() },
+        "preview": {
+            "protocol_version":2, "registered_path":"/workspace/fixture",
+            "ws_id":"ws-123456", "generation":([7; 32]),
+            "target_snapshot_id":"s1", "diff_digest":([6; 32]), "changes":[],
+            "caller_uid":unsafe { libc::geteuid() },
         },
-        "operation_id": uuid::Uuid::new_v4().to_string(),
-        "operation_digest": vec![9u8; 32],
-        "socket": socket,
-        "protection_snapshot_id": "protection-fixture"
+        "operation_id":uuid::Uuid::new_v4().to_string(),
+        "operation_digest":vec![9u8; 32],
+        "socket":dir.path().join("ws-ckpt.sock"), "protection_snapshot_id":"protection-fixture",
     });
     let token = secret::seal(&legacy.to_string(), dir.path()).unwrap();
     let app = awtest::init_service(App::new().app_data(data).service(execute)).await;
+    let mut oversized = legacy;
+    oversized["operation_id"] = json!("a".repeat(4096));
+    let oversized_token = secret::seal(&oversized.to_string(), dir.path()).unwrap();
     let response = awtest::call_service(
         &app,
         awtest::TestRequest::post()
             .uri("/ws-ckpt/restore/execute")
-            .set_json(json!({"confirmation_token": token}))
+            .set_json(json!({"confirmation_token": oversized_token}))
             .to_request(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body: Value = awtest::read_body_json(response).await;
     assert_eq!(body["effect"], "known_no_effect");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("refresh changes and confirm again")
-    );
-    assert_eq!(daemon.join().unwrap().len(), 1);
+    assert!(!dir.path().join("calls").exists());
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::post()
+            .uri("/ws-ckpt/restore/execute")
+            .set_json(json!({"confirmation_token":token}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value = awtest::read_body_json(response).await;
+    assert_eq!(body["effect"], "known_no_effect");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("refresh changes and confirm again") && error.contains("CwdOccupied"));
+    assert!(dir.path().join("execute.stdin").exists());
 }
 
 #[actix_web::test]
 async fn restore_rejects_changed_preview_before_execute() {
-    let (socket_dir, socket, daemon) = restore_daemon(4, |request| match request {
-        WsCkptRequest::WorkspaceIdentityV2 { .. } => identity(request),
-        WsCkptRequest::GuardedRollbackPreviewV2 { .. } => guarded_preview(request),
-        _ => panic!("restore must not execute after a failed prepare: {request:?}"),
-    });
-    let data = restore_state(socket_dir.path(), socket);
-    let app =
-        awtest::init_service(App::new().app_data(data).service(prepare).service(execute)).await;
-    for fingerprint in [
-        PreviewFingerprint {
-            diff_digest: [9; 32],
-            ..fixture_fingerprint()
-        },
-        PreviewFingerprint {
-            generation: WorkspaceGenerationTokenV2::from_bytes([9; 32]),
-            ..fixture_fingerprint()
-        },
-    ] {
-        let response = awtest::call_service(&app, awtest::TestRequest::post().uri("/ws-ckpt/restore/prepare")
-            .set_json(json!({"target":{"workspace":"ws-123456","snapshot_id":"s1"}, "writers_stopped":true, "expected_preview":fingerprint})).to_request()).await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+    let dir = tempfile::tempdir().unwrap();
+    let data = fixture_cli(dir.path(), true);
+    fixture_preview(dir.path(), "s1", vec![]);
+    let app = awtest::init_service(App::new().app_data(data).service(diff).service(prepare)).await;
+    let target = json!({"workspace":"ws-123456","snapshot_id":"s1"});
+    let preview: Value = awtest::call_and_read_body_json(
+        &app,
+        awtest::TestRequest::post()
+            .uri("/ws-ckpt/diff")
+            .set_json(&target)
+            .to_request(),
+    )
+    .await;
+    let original: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("preview-s1.json")).unwrap())
+            .unwrap();
+    for field in ["generation", "diff_digest"] {
+        let mut changed = original.clone();
+        changed[field] = json!(([9; 32]));
+        fixture_json(dir.path(), "preview-s1", changed);
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/ws-ckpt/restore/prepare")
+                .set_json(json!({
+                    "target":target, "writers_stopped":true,
+                    "expected_preview":preview["restore_preview"],
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{field}");
     }
-    assert_eq!(daemon.join().unwrap().len(), 4);
+    assert!(!dir.path().join("execute.stdin").exists());
 }

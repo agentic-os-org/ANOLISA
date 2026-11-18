@@ -9,16 +9,16 @@ use crate::config::{
 use crate::diagnostics::health::runtime::{
     health_check_ids, start_login_health_scan_config_entry_until, validate_health_check_ids,
 };
+use crate::diagnostics::health::{
+    banner_policy,
+    runtime::clock::{arm_banner_exit, HealthDeadline},
+};
 use crate::runtime::shell_integration::write_frame;
 use crate::ui::RatatuiInlineRenderer;
 
 pub(crate) fn run_cli(args: &[OsString]) -> i32 {
-    if matches!(args, [flag] if flag == crate::diagnostics::health::suppression::claim::WORKER_FLAG)
-    {
-        return crate::diagnostics::health::suppression::claim::run_worker();
-    }
     let started = Instant::now();
-    let default_deadline = started + Duration::from_millis(500);
+    let default_deadline = started + super::BANNER_BUDGET_CAP;
     let action = match parse_action(args) {
         Ok(action) => action,
         Err(()) => return usage(default_deadline),
@@ -92,6 +92,25 @@ pub(super) fn render(mut options: Options, deadline: Instant) -> i32 {
     if deadline <= Instant::now() {
         return 0;
     }
+    let budget = deadline.saturating_duration_since(Instant::now());
+    if budget <= Duration::from_millis(banner_policy::SCAN_RESERVE_MS) {
+        return 0;
+    }
+    let mut global = match options.absolute_boottime_us {
+        Some(us) => HealthDeadline::at_boottime(us.saturating_mul(1000)),
+        None => HealthDeadline::after(budget),
+    };
+    let Ok(ref mut global) = global else {
+        return 0;
+    };
+    if global.clamp_remaining(budget).is_err() {
+        return 0;
+    }
+    let mut output_deadline = *global;
+    output_deadline.shorten_by(Duration::from_millis(banner_policy::OUTPUT_RESERVE_MS));
+    if arm_banner_exit(output_deadline).is_err() {
+        return 0;
+    }
     // Reject unsafe output before consuming persistent invitation state.
     if write_frame(nix::libc::STDOUT_FILENO, &[], deadline).is_err() {
         return 1;
@@ -115,21 +134,29 @@ pub(super) fn render(mut options: Options, deadline: Instant) -> i32 {
         options.disabled.dedup();
     }
     let worker_deadline = deadline
-        .checked_sub(Duration::from_millis(20))
+        .checked_sub(Duration::from_millis(banner_policy::SCAN_RESERVE_MS))
         .unwrap_or(deadline);
     if worker_deadline <= Instant::now() {
         return 0;
     }
-    let mut handle =
-        match start_login_health_scan_config_entry_until(worker_deadline, &options.disabled) {
-            Ok(Some(handle)) => handle,
-            _ => return 0,
-        };
+    let mut scan_deadline = *global;
+    scan_deadline.shorten_by(Duration::from_millis(banner_policy::SCAN_RESERVE_MS));
+    let boottime_expires_us = Some(scan_deadline.expires_ns / 1000);
+    let mut handle = match start_login_health_scan_config_entry_until(
+        worker_deadline,
+        boottime_expires_us,
+        &options.disabled,
+    ) {
+        Ok(Some(handle)) => handle,
+        _ => return 0,
+    };
     let wait = worker_deadline.saturating_duration_since(Instant::now());
     let Some(report) = handle.finish_within(wait) else {
         return 0;
     };
-    if Instant::now() >= deadline {
+    let mut seal_deadline = *global;
+    seal_deadline.shorten_by(Duration::from_millis(banner_policy::SEAL_RESERVE_MS));
+    if seal_deadline.remaining().unwrap_or_default().is_zero() {
         return 0;
     }
     let Some(config) = report.login_config.as_ref() else {
@@ -159,9 +186,15 @@ pub(super) fn render(mut options: Options, deadline: Instant) -> i32 {
         now_ms,
     );
     let text = prepared.final_text(&store, runtime.as_ref());
-    if text.is_empty() || Instant::now() >= deadline {
+    if text.is_empty()
+        || text.len() > banner_policy::MAX_TEXT_BYTES
+        || output_deadline.remaining().unwrap_or_default().is_zero()
+    {
         return 0;
     }
+    let Ok(deadline) = output_deadline.local_instant() else {
+        return 0;
+    };
     i32::from(write_frame(nix::libc::STDOUT_FILENO, text.as_bytes(), deadline).is_err())
 }
 

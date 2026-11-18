@@ -27,7 +27,7 @@ pub(super) fn fixture_report_for_context(
         scan_id: raw.scan_id.clone(),
         started_at_ms: options.started_at_ms,
         now_epoch_seconds: options.now_epoch_seconds,
-        deadline: job::JobDeadline::after(DEFAULT_SCAN_BUDGET).expect("fixture clock"),
+        deadline: clock::HealthDeadline::after(DEFAULT_SCAN_BUDGET).expect("fixture clock"),
         context,
         config: config.clone(),
         environment: None,

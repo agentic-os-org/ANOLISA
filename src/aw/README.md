@@ -75,6 +75,7 @@ Use `aw instance setup` or an application-owned `prepare` call to retain native 
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 
 Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
@@ -102,7 +103,9 @@ injection scanning with separate risk and failure policies; see
 
 AW currently integrates Qoder CLI, Codex CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
 Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
-SDK applications explicitly use managed factories. Runtime admission checks the required
+SDK applications can use managed factories or the public Runtime SDK with
+application-owned semantic callbacks. Qoder applications can load one configuration
+with `createQoderBridge` and defer attachment until the first tool; see [SDK integration](../../docs/developer-guide/en/aw/deployment/native-sdk.md). Runtime admission checks the required
 native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)
 record the tested framework versions.
 [Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers prewarming, native configuration with unmodified SDK/Worker files, Pilot runtime launcher grants, pinned Bash consumers and declarative role assets.
@@ -139,3 +142,8 @@ reports admission separately from activation; see [configuration](../../docs/use
 Local audit consumers can use `aw audit-export` to read retained metadata after
 service shutdown. See [audit export](../../docs/user-guide/en/aw/cli-reference.md#aw-audit-export)
 for the owned state directory and bounded read interface.
+
+For experimental native QwenPaw startup followed by cooperative attachment,
+see [deferred tool-after integration](../../docs/developer-guide/en/aw/deployment/python-sdk.md#deferred-tool-after-attachment).
+The installed plugin holds the first tool until ready; `aw instance attach
+--config aw.yaml --sdk-pid PID` starts or reuses AW without launching the Agent.

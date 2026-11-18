@@ -23,7 +23,13 @@ Scopes start discovery jobs which create and reconcile their Bindings automatica
 Authorization is always enabled; PAP supplies the current Cedar policies.\n\
 An empty policy set denies requests. Decision acceptance expires after 60 seconds.\n\
 PII rules: --pii-rules <ABSOLUTE_PATH>, default /etc/agent-sec/pii-checker/rules.yaml.\n\
-Rules are compiled at startup; restart to apply updates.\n";
+Rules are compiled at startup; restart to apply updates.\n\
+\n\
+Gateway host probes and recovery are disabled by default.\n\
+--enable-gateway selects Gateway construction and recovery before RPC readiness.\n\
+It restores saved enablement; agent-sec-cli gateway enable controls proxy activation.\n\
+Existing Gateway state, credentials, runtime files or credential Scopes require --enable-gateway.\n\
+When skipping Gateway, the operator must ensure no external proxy or routing remains.\n";
 
 /// Parsed command-line configuration for the daemon process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +42,8 @@ pub struct Cli {
     pub pii_rules: Option<PathBuf>,
     /// Optional root-owned `SkillSec` settings file.
     pub skillsec_config: Option<PathBuf>,
+    /// Skips Gateway management by default for fresh deployments.
+    pub disable_gateway: bool,
 }
 
 /// Successful command-line parse outcome.
@@ -81,6 +89,7 @@ impl Cli {
         let mut policy_admin_uids = BTreeSet::new();
         let mut pii_rules = None;
         let mut skillsec_config = None;
+        let mut disable_gateway = true;
 
         while let Some(argument) = arguments.next() {
             if argument == OsStr::new("--help") || argument == OsStr::new("-h") {
@@ -99,6 +108,10 @@ impl Cli {
                     return Err(CliError::MissingSocketValue);
                 }
                 socket_path = Some(PathBuf::from(value));
+                continue;
+            }
+            if argument == OsStr::new("--enable-gateway") {
+                disable_gateway = false;
                 continue;
             }
             let inline_rules = argument
@@ -162,6 +175,7 @@ impl Cli {
             policy_admin_uids,
             pii_rules,
             skillsec_config,
+            disable_gateway,
         })))
     }
 }
@@ -232,6 +246,24 @@ pub enum CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_management_is_disabled_by_default() {
+        for (extra, expected) in [(None, true), (Some("--enable-gateway"), false)] {
+            let ParseOutcome::Serve(config) = Cli::parse_from_with_socket_env(
+                ["agent-sec-daemon", "serve"].into_iter().chain(extra),
+                None,
+            )
+            .unwrap() else {
+                panic!("expected daemon invocation");
+            };
+            assert_eq!(config.disable_gateway, expected);
+        }
+        assert!(matches!(
+            Cli::parse_from_with_socket_env(["agent-sec-daemon", "--disable-gateway"], None),
+            Err(CliError::UnknownArgument(_))
+        ));
+    }
 
     #[test]
     fn removed_authorization_configuration_is_rejected() {

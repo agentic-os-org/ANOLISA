@@ -809,6 +809,95 @@ function renderCausalPanel() {
   return { calls, driver, panel, rendered, ApiRequestError, navigations };
 }
 
+test('causal attribution survives storage being denied before mount or after a run', async () => {
+  const previousWindow = global.window;
+  try {
+    for (const deniedAt of ['mount', 'result']) {
+      let denied = deniedAt === 'mount';
+      const storage = new Map();
+      global.window = {
+        setInterval: () => 1,
+        clearInterval: () => {},
+        get localStorage() {
+          if (denied) throw new DOMException('Storage is disabled', 'SecurityError');
+          return { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) };
+        },
+      };
+      const { driver, panel, calls } = renderCausalPanel();
+      driver.slots[0].setter('Check the result');
+      const { element } = driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 });
+      const button = findNode(element, (node) => node.type === 'button'
+        && node.children?.includes('发起归因'));
+      const pending = button.props.onClick();
+      denied = true;
+      const result = { id: 'completed-case', nodes: [], edges: [], outcome: 'pass' };
+      calls.runCausalAttribution[0].resolve({ case: result, cached: false });
+      await pending;
+      assert.equal(driver.slots[3].value, result, `${deniedAt}: retain the completed case`);
+      assert.equal(driver.slots[2].value, null, `${deniedAt}: storage is not an attribution failure`);
+      assert.equal(driver.slots[1].value, false);
+      assert.equal(driver.slots[5].value.length, 1, 'the current result remains in memory');
+    }
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('available causal storage still persists the completed result under its round key', async () => {
+  const previousWindow = global.window;
+  const storage = new Map();
+  try {
+    global.window = {
+      setInterval: () => 1, clearInterval() {},
+      localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+    };
+    const { driver, panel, calls } = renderCausalPanel();
+    driver.slots[0].setter('Check this round');
+    const { element } = driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 });
+    const button = findNode(element, (node) => node.type === 'button' && node.children?.includes('发起归因'));
+    const pending = button.props.onClick();
+    const result = { id: 'completed', nodes: [], edges: [], outcome: 'pass' };
+    calls.runCausalAttribution[0].resolve({ case: result, cached: false });
+    await pending;
+    assert.equal(storage.size, 1);
+    const history = JSON.parse(storage.get('agentsight.causal.history.v2:session:sess-1:r0'));
+    assert.equal(history[0].complaint, 'Check this round');
+    assert.deepEqual(history[0].caseData, result);
+    assert.equal(driver.slots[2].value, null);
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
+test('clearing causal history still clears the panel when persistent deletion is denied', () => {
+  const previousWindow = global.window;
+  try {
+    global.window = {
+      confirm: () => true,
+      localStorage: {
+        getItem: () => null,
+        removeItem: () => { throw new DOMException('Storage is disabled', 'SecurityError'); },
+      },
+    };
+    const { driver, panel } = renderCausalPanel();
+    driver.slots[5].setter([{ complaint: 'previous', ranAt: '2026-01-01T00:00:00Z', caseData: { id: 'previous', nodes: [] } }]);
+    driver.slots[0].setter('previous');
+    const { element } = driver.render(panel, { sessionId: 'sess-1', roundIndex: 0 });
+    const clear = findNode(element, (node) => node.type === 'button'
+      && node.children?.some(child => typeof child === 'string' && child.includes('清空')));
+    assert.ok(clear, 'history exposes its clear action');
+    clear.props.onClick({ preventDefault() {} });
+    assert.deepEqual(driver.slots[5].value, []);
+    assert.equal(driver.slots[3].value, null);
+    assert.equal(driver.slots[0].value, '');
+  } finally {
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
+});
+
 test('causal attribution: an empty round must clear the previous panel state', () => {
   const { driver, panel } = renderCausalPanel();
   driver.slots[0].setter('round 1 complaint');

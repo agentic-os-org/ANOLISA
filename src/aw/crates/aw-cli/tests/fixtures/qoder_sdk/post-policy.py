@@ -9,7 +9,7 @@ import time
 request = json.load(sys.stdin)
 reply = {"api_version": "aw-provider/v1alpha1", "request_id": request["request_id"], "status": "ok"}
 if request["method"] == "describe":
-    reply["operations"] = [{"name": "check", "events": ["tool.before", "tool.after"], "effects": ["observe", "replace_result"]}]
+    reply["operations"] = [{"name": "check", "events": ["tool.before", "tool.after", "security.violation"], "effects": ["observe", "replace_result", "block"]}]
 elif request["method"] == "invoke":
     event = request["event"]
     with Path(os.environ["QODER_TEST_ROOT"], "events.jsonl").open("a") as stream:
@@ -20,7 +20,15 @@ elif request["method"] == "invoke":
             time.sleep(60)
         if mode in ("failure", "failure-error", "report"):
             sys.exit(23)
+    if event["name"] == "security.violation":
+        mode = os.environ["QODER_POST_CASE"]
+        if mode == "gate-timeout":
+            time.sleep(60)
+        if mode == "gate-error":
+            sys.exit(23)
     reply.update(input_digest=request["input_digest"], effects=[])
     if event["name"] == "tool.after" and os.environ["QODER_POST_CASE"] == "replace":
         reply["effects"] = [{"type":"replace_result", "text":"AW_SAFE_POST_RESULT", "reason_code":"pii_risk"}]
+    if event["name"] == "security.violation" and "AW_QODER_LATE_POST_SECRET" in json.dumps(event):
+        reply["effects"] = [{"type": "block", "reason_code": "pii_risk"}]
 print(json.dumps(reply))

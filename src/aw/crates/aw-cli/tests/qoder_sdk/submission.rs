@@ -17,7 +17,10 @@ fn submit_policy_runs_before_model_without_tool_identity() {
             document["spec"]["events"]["tool.before"].clone();
         document["spec"]["events"]["input.submit"]["steps"][0]["on_error"] = json!(on_error);
         if scenario == "timeout" {
-            document["spec"]["events"]["input.submit"]["budget_ms"] = json!(200);
+            // Leave time for callback transport and interpreter startup on busy runners.
+            // The Provider records its invocation before waiting beyond this event budget.
+            document["spec"]["events"]["input.submit"]["budget_ms"] = json!(5000);
+            document["spec"]["providers"]["policy"]["timeout_ms"] = json!(10000);
         }
         let mut second = document["spec"]["events"]["input.submit"]["steps"][0].clone();
         second["id"] = json!("second-submit-check");
@@ -51,7 +54,11 @@ fn submit_policy_runs_before_model_without_tool_identity() {
             .map(|e| serde_json::from_slice::<Value>(&fs::read(e.path()).unwrap()).unwrap())
             .filter(|r| r["method"] == "invoke" && r["event"]["name"] == "input.submit")
             .collect();
-        assert_eq!(submissions.len(), if blocked { 1 } else { 2 });
+        assert_eq!(
+            submissions.len(),
+            if blocked { 1 } else { 2 },
+            "{scenario}/{on_error}"
+        );
         if !blocked {
             assert_eq!(submissions[0]["event"], submissions[1]["event"]);
         }

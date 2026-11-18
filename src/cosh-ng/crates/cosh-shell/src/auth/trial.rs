@@ -53,6 +53,24 @@ impl TrialSession {
     pub(crate) fn is_blocking(&self) -> bool {
         self.flow.is_some() || self.preference_job.is_some()
     }
+
+    /// Reaps the preference writer so a finite task never leaves it running.
+    pub(crate) fn settle_preference_worker(&mut self) -> Option<Result<(), AuthConfigureFailure>> {
+        let job = self.preference_job.take();
+        if let Some(worker) = self.preference_worker.take() {
+            let _ = worker.join();
+        }
+        job.map(|job| {
+            job.try_recv().unwrap_or_else(|_| {
+                Err(AuthConfigureFailure {
+                    message: "preference worker returned no result".into(),
+                    code: None,
+                    provider_updated: false,
+                    unconfirmed: true,
+                })
+            })
+        })
+    }
 }
 
 impl Drop for TrialSession {
@@ -322,6 +340,7 @@ pub(crate) fn poll<W: Write>(
                 message: "preference worker disconnected".into(),
                 code: None,
                 provider_updated: false,
+                unconfirmed: true,
             })),
             Err(mpsc::TryRecvError::Empty) => None,
         });
@@ -334,6 +353,11 @@ pub(crate) fn poll<W: Write>(
             tracing::warn!(error=%error.message,"ECS trial preference save failed");
         }
         clear(state, output)?;
+        super::standalone::record_write_result(
+            state,
+            crate::runtime::guide::result::ActionKind::TrialPreference,
+            &result,
+        );
         if state.auth.ecs_trial.enabling {
             if result.is_ok() || result.as_ref().is_err_and(|error| error.provider_updated) {
                 state.auth.ecs_trial.auto_use_allowed = true;
@@ -341,8 +365,12 @@ pub(crate) fn poll<W: Write>(
                 super::runtime::clear_observed_model_after_provider_change(state);
             }
             if result.as_ref().is_err_and(|error| error.provider_updated) {
-                super::completion::finish_partial_configuration(state, output)?;
-            } else {
+                super::completion::finish_partial_configuration(
+                    state,
+                    output,
+                    crate::runtime::guide::result::ActionKind::TrialPreference,
+                )?;
+            } else if !state.auth.host.is_guide() {
                 notice(
                     state,
                     output,
@@ -360,20 +388,24 @@ pub(crate) fn poll<W: Write>(
             }
         } else {
             state.auth.ecs_trial.disable_save_failed = result.is_err();
-            notice(
-                state,
-                output,
-                if result.is_ok() {
-                    "✓ 以后不再提示免配置接入。问题已保留，可用 /auth 配置模型或重新启用。"
-                } else {
-                    "未能保存，已仅对本次会话生效。问题已保留，可用 /auth 重试。"
-                },
-                if result.is_ok() {
-                    "Automatic OS Console access disabled. Your question is retained."
-                } else {
-                    "Unable to save; disabled for this session only. Your question is retained."
-                },
-            )?;
+            // A guide task ends with its own process, so a session-only
+            // fallback would evaporate; the task result reports the facts.
+            if !state.auth.host.is_guide() {
+                notice(
+                    state,
+                    output,
+                    if result.is_ok() {
+                        "✓ 以后不再提示免配置接入。问题已保留，可用 /auth 配置模型或重新启用。"
+                    } else {
+                        "未能保存，已仅对本次会话生效。问题已保留，可用 /auth 重试。"
+                    },
+                    if result.is_ok() {
+                        "Automatic OS Console access disabled. Your question is retained."
+                    } else {
+                        "Unable to save; disabled for this session only. Your question is retained."
+                    },
+                )?;
+            }
         }
         state.auth.ecs_trial.enabling = false;
         state.auth.ecs_trial.permanent = false;
@@ -549,6 +581,13 @@ pub(super) fn set_preference_from_auth<W: Write>(
     output: &mut W,
     auto_use: bool,
 ) -> io::Result<()> {
+    if super::standalone::refuse_unconfirmed_write(
+        state,
+        crate::runtime::guide::result::ActionKind::TrialPreference,
+        output,
+    )? {
+        return Ok(());
+    }
     let AdapterInstance::CoshCore(core) = adapter else {
         return Ok(());
     };
@@ -574,6 +613,9 @@ pub(super) fn set_preference_from_auth<W: Write>(
 #[cfg(test)]
 #[path = "trial_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod outcome_tests;
 
 pub(crate) fn before_terminal_output<W: Write>(
     trial: &mut TrialSession,

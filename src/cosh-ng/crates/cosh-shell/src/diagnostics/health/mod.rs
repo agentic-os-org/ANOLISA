@@ -1,3 +1,4 @@
+pub(crate) mod banner_policy;
 pub(crate) mod builder;
 pub(crate) mod collectors;
 pub(crate) mod context;
@@ -25,7 +26,11 @@ pub(crate) use model::{
     HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
     HealthTryItem, HealthTryKind, HealthUnavailableReason, UnavailableCollector,
 };
-pub(crate) use prompt_selection::{sorted_findings, sorted_try_items, startup_prompt_suggestions};
+pub(crate) use plan::{advice_for_prompt, AdviceDefinition};
+pub(crate) use prompt_selection::{
+    exposure_evidence, select_try_items, sorted_findings, sorted_try_items,
+    startup_prompt_suggestions, AdviceSurface,
+};
 pub(crate) use recommendation::{apply_try_recommendations, generate_try_recommendations};
 pub(crate) use rules::{apply_judgement_rules, evaluate_judgement_rules};
 pub(crate) use runtime::{

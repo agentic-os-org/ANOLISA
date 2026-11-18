@@ -87,6 +87,65 @@ QwenPaw，Claude 尚无对应解析合同。共享配置前请核对 [Provider �
 当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
 
+### 最终工具结果安全边界
+
+`tool.after` 观察原生 Post 结果；应用回调仍可在 AW 完成后返回
+`updatedToolOutput`。必需的 `security.violation` 策略会在 bundled CLI 内增加
+最终检查，位置是 HTTP 运行时发送序列化 Anthropic Messages 请求之前。
+
+条件 Profile 覆盖 Linux arm64、x86_64 上的 Python SDK 0.2.88／CLI 2.1.161
+和 SDK 0.2.182／CLI 2.1.325，以及 TypeScript SDK 0.3.325／CLI 2.1.325，
+并精确校验 SDK 与可执行文件指纹。使用全新前台
+`create_client`，设置 `setting_sources=[]`，不配置 settings、plugins、resume、
+自定义 agents 或运行时／Provider overrides；模型端点为 Anthropic 兼容 HTTP(S)
+base URL，支持 `/apps/anthropic` 这类网关路径前缀。必须指定模型 ID，不配置 fallback，
+拒绝 `auto`、`default`、`sonnet`、`opus`、`haiku` 等别名。其他路由上携带请求体的
+请求会被拒绝，包括令牌刷新和其他模型 API。显式设置 `tools=["Bash"]` 或 `tools=[]`，MCP 只配置进程内 SDK
+server；后台执行会被禁用。最终步骤必须配置 `on_error: block`，支持结构化 Provider 与 Boolean 策略。
+未知构建在必需策略准入时被拒绝；不支持的工厂配置在发出 query 前失败。
+
+私有 Bun preload 同时覆盖全局 `fetch` 与连接池 `FetchSession.fetch`。适配器将
+最终文本关联到原生 session、call、工具名及输入，调用既有 AW Hook 链，再发送
+不可变的已检查请求体。策略拒绝、错误、超时、身份缺失或历史结果变化均暂扣工具
+内容；未知请求结构停止请求。已经发生的工具副作用保留。仅配置普通 Post 的启动
+不安装最终 preload。
+
+原生验收覆盖 Bash、SDK MCP 的安全与后置改写用例，以及策略超时、错误，并保存
+HTTP 请求和确定性本地模型回复。另已通过 Python SDK 0.2.182 对阿里云 Token Plan
+的 `qwen3.8-flash` 做可选托管验收：捕获代理原样转发已检查的请求体，托管模型仅在
+关闭 Gate 时回显后置改写标记。此项验证使用 Qwen 模型的 Claude SDK 调用链。
+常驻会话、子 Agent、其他模型 API 和多模态交付尚未验收。该 Profile 拒绝应用 Hook 附加上下文注入；
+在模型边界之前读取结果的其他观察者仍不属于本项保护范围。
+
+### TypeScript 前台 Query
+
+在应用目录安装 `@anthropic-ai/claude-agent-sdk@0.3.325`，使用 Linux 上的
+Node.js 22+。沿用 `claude-sdk` Adapter，配置
+`argv: ["/absolute/path/to/node", "/absolute/path/to/worker.mjs"]`。
+公共工厂组合原生工具回调，在 SDK 初始化和运行时就绪后交付首条 prompt：
+
+```javascript
+const { createQuery } = await import(process.env.AW_CLAUDE_SDK_BRIDGE);
+const query = await createQuery({
+  prompt: "Run printf hello once and report its result.",
+  options: {
+    model: "claude-sonnet-4-6", settingSources: [],
+    tools: ["Bash"], allowedTools: ["Bash"], maxTurns: 2,
+  },
+});
+try {
+  for await (const message of query) console.log(JSON.stringify(message));
+} finally {
+  query.close();
+}
+```
+
+该工厂支持一个前台 Query、`tool.before` observe/block、`tool.after` observe，
+以及条件启用的最终检查。可传入 `cwd`、`env`、仅含公共 SDK server 的
+`mcpServers` 和原生工具 `hooks`；应用回调在 AW 回调完成后执行。返回对象仅提供
+异步迭代和 `close()`。TypeScript Profile 暂不支持输入替换、结果压缩、常驻热更新、
+原生命令步骤和运行时重配置。仅启用 Post 时也会拒绝未知 TypeScript SDK 指纹。
+
 ### 启用 Bash PreTool 与 PostTool 优化
 
 使用 [Tokenless 共享配置](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml)，
@@ -104,6 +163,8 @@ PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察�
 
 固定版本原生测试由[贡献指南](../../../../../src/aw/CONTRIBUTING_zh.md)统一运行。
 常驻客户端与受管 MCP 见[常驻部署](../deployment/resident.md)。
+
+最终历史回执仅保存摘要与暂扣标记，不复制工具文本。提前拒绝、异常或取消时，会通过独立的有界清理调用关闭 AW 事件，再返回结果。
 
 ## 原生启动与空闲策略更新
 
@@ -182,7 +243,6 @@ Hook，保留已有 Hook、原生拒绝和设置。这些 Hook 添加的上下�
 常驻客户端每次检查确认关闭后回收输入记录，保留递增序号拒绝重放，可以在同一客户端
 继续超过 1,024 次提交。前台 binding 与旧工具事件共用累计 1,024 条关联容量，
 应在达到上限前创建新 binding。每次检查后均释放活动输入事件及扫描调用。
-
 
 ## 任务观测
 

@@ -26,14 +26,30 @@ impl Runtime {
             return Err(rejected("service_stopping"));
         }
         match operation {
-            Operation::Registration { .. } => Err(rejected("registration_requires_peer")),
+            Operation::Registration { .. } | Operation::SdkControl { .. } => {
+                Err(rejected("registration_requires_peer"))
+            }
+            Operation::SdkCallback {
+                instance_id,
+                event,
+                step_id,
+                native_input,
+                close,
+            } => self.sdk_callback(
+                &instance_id,
+                &event,
+                &step_id,
+                native_input,
+                close,
+                deadline,
+            ),
             Operation::RecentExecutions => self.audit.recent(),
             Operation::Status => {
                 let observations = self.observation_status()?;
                 let policies = self.policy_status()?;
                 let resources = self.resource_status()?;
                 Ok(
-                    json!({"registration_protocol": crate::REGISTRATION_VERSION, "pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
+                    json!({"sdk_control_protocol": crate::SDK_CONTROL_VERSION, "sdk_protocol": crate::SDK_VERSION, "registration_protocol": crate::REGISTRATION_VERSION, "pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
                 "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),
                 "resources": resources, "observations": observations, "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
                 )

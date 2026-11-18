@@ -4,17 +4,28 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::private_state;
-mod cli;
+pub(crate) mod cli;
 mod context;
+mod health_exposure;
 pub(crate) use context::{load_failure_context, valid_context_id};
 mod runtime;
-pub(crate) use cli::run_cli;
+pub(crate) mod wizard;
+pub(crate) use cli::{run_cli, UserPaths};
 pub(crate) use runtime::{RuntimeSnapshot, RuntimeState};
+pub(crate) use wizard::{terminal_capable, wants_wizard};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const WEEK_MS: u64 = 7 * DAY_MS;
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_CLAIMS: usize = 256;
+
+#[derive(Clone, Copy)]
+pub(crate) struct HealthExposure<'a> {
+    pub(crate) evidence: &'a str,
+    pub(crate) event: Option<(&'a str, &'a str)>,
+    pub(crate) severity: Option<u8>,
+    pub(crate) legacy_problems: &'a [String],
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Error {
@@ -178,6 +189,18 @@ impl GuideStore {
         })
     }
 
+    /// Opens an existing store without creating directories; `None` when absent.
+    pub(crate) fn open_existing(root: impl AsRef<Path>) -> Result<Option<Self>, Error> {
+        let root = root.as_ref();
+        if !root.exists() {
+            return Ok(None);
+        }
+        private_state::validate_directory(root)?;
+        Ok(Some(Self {
+            root: root.to_path_buf(),
+        }))
+    }
+
     fn lock(&self) -> Result<private_state::LockGuard, Error> {
         Ok(private_state::LockGuard::try_acquire(
             &self.root.join("state.lock"),
@@ -186,6 +209,15 @@ impl GuideStore {
 
     pub(crate) fn load_preferences(&self) -> Result<Option<Preferences>, Error> {
         let _lock = self.lock()?;
+        self.read_preferences()
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Reads preferences without the write lock so status stays read-only.
+    pub(crate) fn peek_preferences(&self) -> Result<Option<Preferences>, Error> {
         self.read_preferences()
     }
 
@@ -289,7 +321,41 @@ impl GuideStore {
         request: ClaimRequest<'_>,
         now_ms: u64,
     ) -> Result<ClaimDecision, Error> {
-        self.claim_prepared(runtime, snapshot, request, now_ms, || Ok(()))
+        self.claim_prepared(runtime, snapshot, request, now_ms, None, || Ok(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claim_login_health(
+        &self,
+        runtime: Option<&RuntimeState>,
+        snapshot: &GuideSnapshot,
+        request: ClaimRequest<'_>,
+        now_ms: u64,
+        evidence: &str,
+    ) -> Result<ClaimDecision, Error> {
+        self.claim_health_version(
+            runtime,
+            snapshot,
+            request,
+            now_ms,
+            HealthExposure {
+                evidence,
+                event: Some(("fixture-v1", evidence)),
+                severity: None,
+                legacy_problems: &[],
+            },
+        )
+    }
+
+    pub(crate) fn claim_health_version(
+        &self,
+        runtime: Option<&RuntimeState>,
+        snapshot: &GuideSnapshot,
+        request: ClaimRequest<'_>,
+        now_ms: u64,
+        version: HealthExposure<'_>,
+    ) -> Result<ClaimDecision, Error> {
+        self.claim_prepared(runtime, snapshot, request, now_ms, Some(version), || Ok(()))
     }
 
     fn claim_prepared(
@@ -298,6 +364,7 @@ impl GuideStore {
         snapshot: &GuideSnapshot,
         request: ClaimRequest<'_>,
         now_ms: u64,
+        health_evidence: Option<HealthExposure<'_>>,
         prepare: impl FnOnce() -> Result<(), Error>,
     ) -> Result<ClaimDecision, Error> {
         validate_request(&request)?;
@@ -331,11 +398,48 @@ impl GuideStore {
         let host = digest(&[request.host]);
         let problem = digest(&[request.host, request.problem]);
         let scope = digest(&[request.host, request.session]);
-        if claims
-            .entries
-            .iter()
-            .any(|entry| suppresses(entry, &request, &host, &problem, &scope, now_ms))
-        {
+        let exposures = if request.kind == InviteKind::LoginHealth && health_evidence.is_some() {
+            match health_exposure::read(&self.root) {
+                Ok(exposures) => Some(exposures),
+                Err(_) => return Ok(ClaimDecision::Suppressed),
+            }
+        } else {
+            None
+        };
+        if let Some(version) = health_evidence {
+            if version
+                .event
+                .is_some_and(|(domain, _)| !health_exposure::valid_event_domain(domain))
+            {
+                return Err(Error::InvalidRequest);
+            }
+            let legacy: Vec<_> = version
+                .legacy_problems
+                .iter()
+                .map(|problem| digest(&[request.host, problem]))
+                .collect();
+            if claims.entries.iter().any(|entry| {
+                entry.host == host
+                    && matches!(entry.kind, InviteKind::LoginHealth | InviteKind::Failure)
+                    && now_ms.saturating_sub(entry.shown_at_ms) < DAY_MS
+                    && legacy.contains(&entry.problem)
+                    && !new_health_event(exposures.as_ref(), health_evidence, entry)
+            }) {
+                return Ok(ClaimDecision::Suppressed);
+            }
+        }
+        if claims.entries.iter().any(|entry| {
+            suppresses(
+                entry,
+                &request,
+                &host,
+                &problem,
+                &scope,
+                now_ms,
+                exposures.as_ref(),
+                health_evidence,
+            )
+        }) {
             return Ok(ClaimDecision::Suppressed);
         }
         claims
@@ -346,15 +450,48 @@ impl GuideStore {
         }
         // Save the referenced context before committing suppression under the same lock.
         prepare()?;
+        let stored_problem = health_evidence
+            .filter(|_| request.kind == InviteKind::LoginHealth)
+            .and_then(|version| version.legacy_problems.first())
+            .map(|problem| digest(&[request.host, problem]))
+            .unwrap_or_else(|| problem.clone());
         claims.entries.push(ClaimEntry {
             kind: request.kind,
             host,
-            problem,
+            problem: stored_problem.clone(),
             scope,
             shown_at_ms: now_ms,
         });
         let bytes = serde_json::to_vec(&claims).map_err(|_| Error::Corrupt)?;
         private_state::atomic_write(&self.root.join("claims.json"), &bytes, MAX_BYTES)?;
+        if request.kind == InviteKind::LoginHealth {
+            if let Some(evidence) = health_evidence {
+                let mut exposures = exposures.unwrap_or_default();
+                exposures
+                    .entries
+                    .retain(|entry| now_ms.saturating_sub(entry.shown_at_ms) < DAY_MS);
+                exposures
+                    .entries
+                    .push(health_exposure::HealthExposureEntry {
+                        problem: stored_problem,
+                        shown_at_ms: now_ms,
+                        evidence: digest(&[evidence.evidence]),
+                        identity: claims.entries.last().map(claim_identity),
+                        event: evidence.event.map(|(domain, identity)| {
+                            health_exposure::ExposureEvent {
+                                domain: domain.to_string(),
+                                identity: digest(&[identity]),
+                            }
+                        }),
+                        severity: evidence.severity,
+                    });
+                if exposures.entries.len() > MAX_CLAIMS
+                    || health_exposure::write(&self.root, &exposures).is_err()
+                {
+                    return Ok(ClaimDecision::Suppressed);
+                }
+            }
+        }
         Ok(ClaimDecision::Claimed(Claim {
             runtime_generation: snapshot.runtime_generation,
             generation,
@@ -446,6 +583,8 @@ fn suppresses(
     problem: &str,
     scope: &str,
     now_ms: u64,
+    exposures: Option<&health_exposure::HealthExposures>,
+    evidence: Option<HealthExposure<'_>>,
 ) -> bool {
     if entry.host != host {
         return false;
@@ -459,7 +598,8 @@ fn suppresses(
             (entry.kind == request.kind && entry.scope == scope && age < DAY_MS)
                 || (matches!(entry.kind, InviteKind::LoginHealth | InviteKind::Failure)
                     && entry.problem == problem
-                    && age < DAY_MS)
+                    && age < DAY_MS
+                    && !new_health_event(exposures, evidence, entry))
         }
         InviteKind::Help => {
             entry.kind == InviteKind::Help && entry.problem == problem && age < 30_000
@@ -477,6 +617,42 @@ fn digest(parts: &[&str]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn new_health_event(
+    exposures: Option<&health_exposure::HealthExposures>,
+    evidence: Option<HealthExposure<'_>>,
+    entry: &ClaimEntry,
+) -> bool {
+    let (Some(exposures), Some(evidence)) = (exposures, evidence) else {
+        return false;
+    };
+    if entry.kind != InviteKind::LoginHealth {
+        return false;
+    }
+    let Some((domain, event)) = evidence.event else {
+        return false;
+    };
+    health_exposure::paired(exposures, entry).is_some_and(|paired| {
+        paired.event.as_ref().is_some_and(|previous| {
+            previous.domain == domain
+                && (previous.identity != digest(&[event])
+                    || evidence
+                        .severity
+                        .zip(paired.severity)
+                        .is_some_and(|(current, old)| current > old))
+        })
+    })
+}
+
+fn claim_identity(entry: &ClaimEntry) -> String {
+    digest(&[
+        &format!("{:?}", entry.kind),
+        &entry.host,
+        &entry.problem,
+        &entry.scope,
+        &entry.shown_at_ms.to_string(),
+    ])
+}
+
 fn generation_token(persistent: &str, runtime: Option<&str>) -> String {
     digest(&["guide-generation", persistent, runtime.unwrap_or("")])
 }
@@ -485,5 +661,9 @@ fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
+library_tests! {
+    mod health_version_tests;
+}
 #[cfg(test)]
 mod tests;

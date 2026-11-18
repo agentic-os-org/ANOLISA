@@ -23,6 +23,47 @@ or grant permissions.
 agent-sec-cli --socket "$SOCKET" policy list
 ```
 
+## Built-in credential injection (unreleased V2)
+
+`agent-sec-cli inject-credential` combines fake generation, Policy creation and
+Scope assignment for the packaged GitHub Cedar template. Existing step-by-step
+commands remain available. This source-tree feature is not a released Gateway
+installation path; it requires a matching V2 CLI/daemon and installed gateway assets.
+
+```bash
+sudo agent-sec-cli inject-credential --builtin github \
+  --real-token-file /root/github.token \
+  --owner agentuser --cmdline-arg /usr/local/bin/my-agent
+```
+
+Run as root, select a non-root Agent owner (`--owner` or `--owner-uid`), and target
+that Agent with exactly one of `--cmdline-arg`, `--executable` or `--process-name`.
+For script Agents, use their full command path, not a shared interpreter selector.
+The real token file must be private and owned by root or the owner; every ancestor
+must be trusted and non-writable by group/others. Keep the real token inaccessible
+to the Agent. The root-owned packaged template is never changed or embedded in the CLI.
+
+The JSON result contains IDs, `fakeTokenFile`, gateway status and teardown commands,
+never token values. When the run used a non-default daemon socket, every returned
+teardown, recovery and next-step command includes the same `--socket`. A second
+concurrent run fails immediately with a lock error and creates no records; retry after
+the first finishes. Generated fakes default to the owner's
+`.config/agent-sec/gateway/`; `--output-dir` selects another owner-writable directory.
+`--fake-token-file` instead uses an existing private fake. The original real file
+is unchanged; staged copies are removed after successful registration. Admission
+failure retains root-only recovery files; follow the error's manual recovery and
+cleanup commands. Keep the delivered fake for Agent startup. Configure `GH_TOKEN`/`GITHUB_TOKEN` yourself; no `agent.env` is written.
+
+The command never enables the gateway. Enable it separately with
+`sudo agent-sec-cli gateway enable`, then obtain the shared CA with
+`agent-sec-cli gateway ca` and configure the Agent's TLS trust. Binding acceptance
+alone does not establish traffic protection. `--wait-seconds N` waits for existing
+matching processes to reach READY; timeout still prints the result and exits 1.
+`--dry-run` reads only the template, without token reads or daemon calls.
+To revoke injection, execute the returned Scope deletion command, wait for cleanup,
+then delete the Policy. See the [Gateway contract (Chinese)](../../../../src/agent-sec-core/docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)
+for readiness, response-rewrite limits and partial-failure recovery.
+
 ## Policy database location
 
 With no nonempty `AGENT_SEC_DATA_DIR`, the daemon checks two Policy database paths:

@@ -291,6 +291,8 @@ struct Hook {
     on_error: String,
     #[arg(long, value_parser = ["true"])]
     close_event: Option<String>,
+    #[arg(long, hide = true, value_parser = ["true"])]
+    event_receipt: Option<String>,
 }
 
 #[derive(Args, Debug, PartialEq)]

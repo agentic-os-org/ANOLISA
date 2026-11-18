@@ -29,6 +29,7 @@ impl Runtime {
             | Operation::ObserveHookEvent { instance_id, .. }
             | Operation::Unbind { instance_id }
             | Operation::ReleaseInstance { instance_id }
+            | Operation::SdkCallback { instance_id, .. }
             | Operation::OpenEvent { instance_id, .. }
             | Operation::OpenHookEvent { instance_id, .. }
             | Operation::CloseHookEvent { instance_id, .. }
@@ -36,7 +37,8 @@ impl Runtime {
             | Operation::InvokeStep { instance_id, .. }
             | Operation::CloseEvent { instance_id, .. }
             | Operation::FreezeContext { instance_id, .. } => instance_id,
-            Operation::Registration { .. }
+            Operation::SdkControl { .. }
+            | Operation::Registration { .. }
             | Operation::Status
             | Operation::RecentExecutions
             | Operation::Bind { .. }

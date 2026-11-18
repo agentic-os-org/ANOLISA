@@ -1,0 +1,85 @@
+Fetching distribution (retrying 3 times, with an initial back off of 5000 ms).
+Downloading https://services.gradle.org/distributions/gradle-9.8.1-bin.zip
+..............10%..............20%...............30%..............40%...............50%..............60%...............70%..............80%...............90%..............100%
+
+Welcome to Gradle 9.8.1!
+
+Here are the highlights of this release:
+ - Java 27 support
+ - Maven mirror settings reuse
+ - Linked problem locations in build output
+
+For more details see https://docs.gradle.org/9.8.1/release-notes.html
+
+Starting a Gradle Daemon (subsequent builds will be faster)
+Parallel Configuration Cache is an incubating feature.
+Configuration on demand is an incubating feature.
+Calculating task graph as no cached configuration is available for tasks: :simulator:build
+> Task :plugins:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :plugins:generateExternalPluginSpecBuilders
+> Task :plugins:extractPrecompiledScriptPluginPlugins FROM-CACHE
+> Task :plugins:compilePluginsBlocks
+> Task :plugins:generateScriptPluginAdapters FROM-CACHE
+> Task :plugins:pluginDescriptors
+> Task :plugins:processResources
+> Task :plugins:generatePrecompiledScriptPluginAccessors
+> Task :plugins:generatePrecompiledScriptPluginAccessors FROM-CACHE
+> Task :plugins:compileKotlin
+> Task :plugins:compileJava NO-SOURCE
+> Task :plugins:classes
+> Task :plugins:jar
+> Task :caffeine:processJavaPoetResources
+> Task :caffeine:processResources NO-SOURCE
+> Task :simulator:downloadCaffeine
+> Task :caffeine:downloadCaffeine
+> Task :simulator:processResources
+> Task :caffeine:processCodeGenResources NO-SOURCE
+> Task :simulator:sourcesJar
+> Task :simulator:processTestResources NO-SOURCE
+> Task :caffeine:compileJavaPoetJava
+> Task :caffeine:javaPoetClasses
+> Task :caffeine:generateNodes
+> Task :caffeine:generateLocalCaches
+> Task :caffeine:compileJava
+> Task :caffeine:classes
+> Task :caffeine:compileCodeGenJava
+> Task :simulator:compileJava
+> Task :caffeine:codeGenClasses
+> Task :simulator:classes
+> Task :caffeine:jar
+> Task :simulator:jar
+> Task :simulator:startScripts
+> Task :simulator:distTar
+> Task :simulator:distZip
+> Task :simulator:compileTestJava
+> Task :simulator:forbiddenApisMain SKIPPED
+> Task :simulator:testClasses
+> Task :simulator:forbiddenApisTest SKIPPED
+> Task :simulator:forbiddenApis UP-TO-DATE
+> Task :simulator:pmdMain SKIPPED
+> Task :simulator:pmdTest SKIPPED
+> Task :simulator:spotbugsMain SKIPPED
+> Task :simulator:spotbugsTest SKIPPED
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::arrayBaseOffset has been called by net.openhft.hashing.UnsafeAccess (file:/work/gradle-home/caches/modules-2/files-2.1/net.openhft/zero-allocation-hashing/2026.0/2447494f7842ca377b4ccdba2089a8da5c1d1b50/zero-allocation-hashing-2026.0.jar)
+WARNING: Please consider reporting this to the maintainers of class net.openhft.hashing.UnsafeAccess
+WARNING: sun.misc.Unsafe::arrayBaseOffset will be removed in a future release
+> Task :caffeine:javadoc
+> Task :simulator:test
+> Task :simulator:check
+> Task :simulator:javadoc
+> Task :simulator:javadocJar
+> Task :simulator:assemble
+> Task :simulator:build
+
+[Incubating] Problems report is available at: file:///work/source/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 23m 16s
+30 actionable tasks: 27 executed, 3 from cache
+Configuration cache entry stored.

@@ -20,6 +20,8 @@ use ws_ckpt_common::{
 
 use std::cell::RefCell;
 
+mod rollback;
+
 /// Backend-usage advisory threshold (percent); CLI-side since daemon returns raw bytes.
 const ADVISORY_FS_USAGE_PCT: f64 = 90.0;
 const ADVISORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
@@ -172,7 +174,7 @@ enum Commands {
 
     /// Rollback workspace to a specific snapshot
     Rollback {
-        /// Workspace path or ID (absolute path, relative path, or workspace ID)
+        /// Workspace path or ID. Guarded modes use the registered path, except --result uses the workspace ID
         #[arg(long, short = 'w', value_parser = workspace_value_parser())]
         workspace: String,
 
@@ -187,6 +189,22 @@ enum Commands {
         /// Preview file changes without executing rollback
         #[arg(long)]
         preview: bool,
+
+        /// Use an exact guarded preview, confirmed execution, or durable result lookup
+        #[arg(long, requires = "json", conflicts_with = "num_ancestors")]
+        guarded: bool,
+
+        /// Return a single versioned JSON result
+        #[arg(long)]
+        json: bool,
+
+        /// Check the guarded protocol for a registered workspace path
+        #[arg(long, requires = "guarded", conflicts_with_all = ["to", "preview", "result"])]
+        check: bool,
+
+        /// Query guarded evidence for a workspace ID and the operation read from stdin
+        #[arg(long, requires = "guarded", conflicts_with_all = ["to", "preview"])]
+        result: bool,
     },
 
     /// Delete a specific snapshot
@@ -338,6 +356,7 @@ enum PluginRuntime {
 async fn main() {
     let cli = Cli::parse();
     let is_daemon = matches!(cli.command, Commands::Daemon { .. });
+    let rollback_json = matches!(cli.command, Commands::Rollback { json: true, .. });
     let start = std::time::Instant::now();
 
     match run(cli).await {
@@ -350,12 +369,17 @@ async fn main() {
                         map.insert("elapsed_secs".to_string(), serde_json::json!(elapsed));
                     }
                     println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                    if rollback_json && !rollback::succeeded(&data) {
+                        process::exit(1);
+                    }
                 } else {
                     println!("Completed in {:.3}s", elapsed);
                 }
             }
             // Post-command soft advisory: best-effort, silent on failure.
-            print_health_advisory_if_needed().await;
+            if !rollback_json {
+                print_health_advisory_if_needed().await;
+            }
         }
         Err(e) => {
             let elapsed = start.elapsed().as_secs_f64();
@@ -497,7 +521,33 @@ async fn run(cli: Cli) -> Result<()> {
             to,
             num_ancestors,
             preview,
+            guarded,
+            json,
+            check,
+            result,
         } => {
+            if json {
+                let mode = if check {
+                    rollback::Mode::Check
+                } else if result {
+                    rollback::Mode::Result
+                } else if preview {
+                    rollback::Mode::Preview
+                } else {
+                    rollback::Mode::Execute
+                };
+                emit_json(
+                    rollback::run_json(
+                        resolve_workspace_arg(&workspace),
+                        to,
+                        num_ancestors,
+                        guarded,
+                        mode,
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
             if to.is_none() && num_ancestors.is_none() {
                 anyhow::bail!("either --snapshot/-s or --num-ancestors/-n must be specified");
             }
@@ -908,59 +958,105 @@ fn resolve_workspace_arg(workspace: &str) -> String {
 
 /// Send a request to the daemon via Unix Socket and receive a response
 async fn send_request_to_daemon(request: &Request) -> Result<Response> {
-    let socket_path = get_socket_path();
-
-    let mut stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-        match e.kind() {
-            std::io::ErrorKind::NotFound => {
+    match send_request(request, configured_peer_uid()?).await {
+        Ok(response) => Ok(response),
+        Err(IpcFailure::Connect(error)) => match error.kind() {
+            io::ErrorKind::NotFound => {
                 eprintln!("\x1b[31m\u{2717} Daemon is not running.\x1b[0m");
                 eprintln!("  Start the systemd service `ws-ckpt`, or its daemon container.");
                 process::exit(1);
             }
-            std::io::ErrorKind::ConnectionRefused => {
+            io::ErrorKind::ConnectionRefused => {
                 eprintln!(
                     "\x1b[33m\u{26a0} Daemon is starting up. Please retry in a few seconds.\x1b[0m"
                 );
                 process::exit(1);
             }
-            _ => {}
-        }
-        anyhow::anyhow!(
-            "Failed to connect to ws-ckpt daemon ({}): {}",
-            socket_path.display(),
-            e
-        )
-    })?;
+            _ => Err(IpcFailure::Connect(error).into_error()),
+        },
+        Err(error) => Err(error.into_error()),
+    }
+}
 
-    // Send request
-    let frame = encode_frame(request)?;
+enum IpcFailure {
+    Connect(io::Error),
+    BeforeSend(anyhow::Error),
+    PossiblyApplied(anyhow::Error),
+}
+
+impl IpcFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Connect(error) => anyhow::Error::new(error).context(format!(
+                "Failed to connect to ws-ckpt daemon ({})",
+                get_socket_path().display()
+            )),
+            Self::BeforeSend(error) | Self::PossiblyApplied(error) => error,
+        }
+    }
+}
+
+fn effective_uid() -> Result<u32> {
+    // The credentials on a local socket pair describe the process that created it.
+    let (stream, _peer) = UnixStream::pair()?;
+    Ok(stream.peer_cred()?.uid())
+}
+
+fn configured_peer_uid() -> Result<Option<u32>> {
+    (std::env::var("WS_CKPT_REQUIRE_TRUSTED_PEER").as_deref() == Ok("1"))
+        .then(effective_uid)
+        .transpose()
+}
+
+fn verify_peer(stream: &UnixStream, caller_uid: u32) -> Result<()> {
+    let uid = stream
+        .peer_cred()
+        .context("read ws-ckpt peer credentials")?
+        .uid();
+    anyhow::ensure!(
+        uid == 0 || uid == caller_uid,
+        "untrusted ws-ckpt socket peer UID {uid}"
+    );
+    Ok(())
+}
+
+async fn send_request(
+    request: &Request,
+    trusted_peer_uid: Option<u32>,
+) -> std::result::Result<Response, IpcFailure> {
+    let mut stream = UnixStream::connect(get_socket_path())
+        .await
+        .map_err(IpcFailure::Connect)?;
+    if let Some(uid) = trusted_peer_uid {
+        verify_peer(&stream, uid).map_err(IpcFailure::BeforeSend)?;
+    }
+
+    let frame = encode_frame(request).map_err(|error| IpcFailure::BeforeSend(error.into()))?;
+    // write_all can fail after transmitting part of the request.
+    exchange_frame(&mut stream, &frame)
+        .await
+        .map_err(IpcFailure::PossiblyApplied)
+}
+
+async fn exchange_frame(stream: &mut UnixStream, frame: &[u8]) -> Result<Response> {
     stream
-        .write_all(&frame)
+        .write_all(frame)
         .await
         .context("failed to send request")?;
-
-    // Read response: 4-byte LE length + payload
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
+    let len = stream
+        .read_u32_le()
         .await
         .context("failed to read response length")?;
-    let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
-        anyhow::bail!(
-            "Response frame too large: {} bytes (max {})",
-            len,
-            MAX_FRAME_SIZE
-        );
-    }
-    let mut payload = vec![0u8; len as usize];
+    anyhow::ensure!(
+        len <= MAX_FRAME_SIZE,
+        "Response frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
+    );
+    let mut payload = vec![0; len as usize];
     stream
         .read_exact(&mut payload)
         .await
         .context("failed to read response payload")?;
-
-    let response: Response = decode_payload(&payload)?;
-    Ok(response)
+    Ok(decode_payload(&payload)?)
 }
 
 /// Best-effort pre-view reload. `None` = global only; `Some(ws)` = global + that ws.
@@ -989,39 +1085,9 @@ async fn silent_reload(req: &Request) {
 
 /// Silent IPC: errors bubble up so the caller can ignore them; never `process::exit`.
 async fn try_send_request_to_daemon_silent(request: &Request) -> Result<Response> {
-    let socket_path = get_socket_path();
-
-    let mut stream = UnixStream::connect(&socket_path)
+    send_request(request, configured_peer_uid()?)
         .await
-        .context("connect to daemon (silent)")?;
-
-    let frame = encode_frame(request)?;
-    stream
-        .write_all(&frame)
-        .await
-        .context("send request (silent)")?;
-
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .await
-        .context("read response length (silent)")?;
-    let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
-        anyhow::bail!(
-            "Response frame too large: {} bytes (max {})",
-            len,
-            MAX_FRAME_SIZE
-        );
-    }
-    let mut payload = vec![0u8; len as usize];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .context("read response payload (silent)")?;
-
-    let response: Response = decode_payload(&payload)?;
-    Ok(response)
+        .map_err(IpcFailure::into_error)
 }
 
 /// Emit a best-effort advisory to stderr when any threshold is crossed.
@@ -3363,6 +3429,7 @@ mod tests {
                 to,
                 num_ancestors,
                 preview,
+                ..
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(to.as_deref(), Some("msg1-step1"));
@@ -3390,6 +3457,7 @@ mod tests {
                 to,
                 num_ancestors,
                 preview,
+                ..
             } => {
                 assert_eq!(workspace, "/tmp/test");
                 assert_eq!(to, None);

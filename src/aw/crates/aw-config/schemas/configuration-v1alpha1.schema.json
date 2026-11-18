@@ -285,7 +285,8 @@
             "hermes",
             "claude-sdk",
             "qoder-sdk",
-            "codex"
+            "codex",
+            "sdk"
           ]
         },
         "argv": {

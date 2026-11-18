@@ -86,3 +86,10 @@ core 包交付；原生验收使用独立 `aw-integration-backends` 目标构建
 只安装 Provider 文件不会启用它。
 
 其他组件使用[仓库构建指南](../../../docs/user-guide/zh/getting-started/building.md)。
+
+SDK wheel 构建与离线安装测试还需要打包工具：
+
+```bash
+python3 -m pip install setuptools==68.1.2 wheel==0.42.0
+python3 -m pip wheel --no-build-isolation --no-deps src/aw/sdk/python --wheel-dir src/aw/target/sdk-package
+```

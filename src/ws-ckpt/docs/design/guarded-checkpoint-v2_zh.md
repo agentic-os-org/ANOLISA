@@ -121,6 +121,15 @@ Cosh 将 `InsufficientSpace` 映射为 `CheckpointCreateFailed` 或
 编号为 12，rollback 拒绝码编号为 17。旧版 cosh 无法解码新拒绝码，会以不可重试的
 protocol error 安全拒绝。
 
+## Guarded rollback CLI JSON 契约
+
+AgentSight 只接受 schema 标识 `ws-ckpt.rollback.v1`。`rollback --guarded --json --check`
+确认工作区身份，并通过 `diff_json: true` 声明 CLI 支持 `diff --format json`。
+工作区没有快照时也可以检查。字段缺失或为 false 时，工作区快照入口不可用。
+
+Guarded 执行和结果查询通过 stdin 接收确认 JSON，上限为 4096 字节。AgentSight 在启动
+CLI 前检查同一上限。超限属于执行前拒绝。
+
 ## 兼容性与验证
 
 新 Request/Response variant 只追加在 bincode enum 末尾，所有 legacy discriminant 和

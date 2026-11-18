@@ -66,6 +66,10 @@ pub(super) struct EcsFlow {
 }
 
 impl EcsFlow {
+    pub(super) fn is_saving(&self) -> bool {
+        matches!(self.operation, Some(Operation::Configure(_))) || self.stage == Stage::Submitting
+    }
+
     fn new(auth: &RuntimeAuthState, now: Instant) -> Self {
         let challenge = match &auth.phase {
             AuthPhase::AliyunEcsChallenge {
@@ -251,6 +255,9 @@ pub(super) fn start_configuration<W: Write>(
     if state.shell_exited {
         return Ok(());
     }
+    if super::standalone::refuse_ecs_configuration(state, output)? {
+        return Ok(());
+    }
     let Some(auth) = state.auth.state.as_ref() else {
         return Ok(());
     };
@@ -335,6 +342,7 @@ fn take_reply(flow: &mut EcsFlow) -> Option<Reply> {
                     message: "Configuration worker failed; save result is unknown".into(),
                     code: None,
                     provider_updated: false,
+                    unconfirmed: true,
                 })
             }))
         }
@@ -466,6 +474,7 @@ pub(crate) fn poll<W: Write>(
                         .state
                         .as_mut()
                         .expect("auth retained while preparing menu"),
+                    state.auth.host,
                     result,
                 );
                 return redraw(state, output);
@@ -557,7 +566,11 @@ pub(crate) fn poll<W: Write>(
                     return finish_auth_configuration(state, output, &label);
                 }
                 Err(error) if error.provider_updated => {
-                    return super::completion::finish_partial_configuration(state, output);
+                    return super::completion::finish_partial_configuration(
+                        state,
+                        output,
+                        crate::runtime::guide::result::ActionKind::Configure,
+                    );
                 }
                 Err(error) if error.code.as_deref() == Some("credential_source_unavailable") => {
                     flow.stage = Stage::Checking;
@@ -565,6 +578,11 @@ pub(crate) fn poll<W: Write>(
                     flow.next_check = now + INTERVAL;
                 }
                 Err(error) => {
+                    super::standalone::record_write_result(
+                        state,
+                        crate::runtime::guide::result::ActionKind::Configure,
+                        &Err(error.clone()),
+                    );
                     let auth = state
                         .auth
                         .state
@@ -594,7 +612,7 @@ pub(crate) fn poll<W: Write>(
                             flow.stage = Stage::Failed;
                         }
                     } else {
-                        flow.stage = if error.code.is_none() {
+                        flow.stage = if error.unconfirmed {
                             Stage::Unknown
                         } else {
                             Stage::Failed
@@ -638,6 +656,7 @@ pub(crate) fn poll<W: Write>(
                 .state
                 .as_mut()
                 .expect("auth retained while preparing menu"),
+            state.auth.host,
             Err(flow
                 .error
                 .take()
@@ -662,6 +681,11 @@ pub(crate) fn shutdown(state: &mut InlineState) {
     if let Some(mut flow) = state.auth.ecs.take() {
         if let Some(Operation::Probe(task, _)) = &flow.operation {
             task.cancel();
+        }
+        if let Some(Operation::Configure(worker)) = flow.operation.as_mut() {
+            if let Some(worker) = worker.take() {
+                super::standalone::record_configuration_result(state, worker.join());
+            }
         }
         flow.operation.take();
     }

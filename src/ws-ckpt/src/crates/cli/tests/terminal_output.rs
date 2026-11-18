@@ -2,17 +2,26 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use serde_json::{json, Value};
 use ws_ckpt_common::{
-    decode_payload, encode_frame, RecoveryPreview, Request, Response, StatusReport, WorkspaceInfo,
+    decode_payload, encode_frame, ErrorCode, GuardedRollbackRejectionCodeV2, RecoveryPreview,
+    Request, Response, StatusReport, WorkspaceGenerationTokenV2, WorkspaceInfo,
+    GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
 };
 
 struct SocketDir(PathBuf);
 
 impl SocketDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("ws-ckpt-output-{}", std::process::id()));
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ws-ckpt-output-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -25,16 +34,34 @@ impl Drop for SocketDir {
 }
 
 fn run_cli(socket_dir: &SocketDir, args: &[&str], responses: Vec<Response>) -> Output {
+    let output = run_cli_with_input(socket_dir, args, responses, None);
+    assert!(output.status.success(), "{output:?}");
+    output
+}
+
+fn run_cli_with_input(
+    socket_dir: &SocketDir,
+    args: &[&str],
+    responses: Vec<Response>,
+    input: Option<&Value>,
+) -> Output {
     let socket = socket_dir.0.join("ckpt.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ws-ckpt"))
         .env("WS_CKPT_SOCKET", &socket)
         .args(args)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    if let Some(input) = input {
+        serde_json::to_writer(stdin, input).unwrap();
+    } else {
+        drop(stdin);
+    }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     for response in responses {
@@ -68,15 +95,178 @@ fn run_cli(socket_dir: &SocketDir, args: &[&str], responses: Vec<Response>) -> O
             Response::DeleteOk { target } => {
                 assert!(matches!(request, Request::Delete { snapshot, .. } if snapshot == *target));
             }
+            Response::WorkspaceIdentityV2Ok {
+                registered_path, ..
+            } => {
+                assert!(
+                    matches!(request, Request::WorkspaceIdentityV2 { registration_path }
+                    if registration_path == *registered_path)
+                );
+            }
+            Response::GuardedRollbackV2Rejected { .. } => {
+                assert!(matches!(request, Request::GuardedRollbackV2 {
+                    target_snapshot_id, operation_id, ..
+                } if target_snapshot_id == "s1" && operation_id == "op-123"));
+            }
+            Response::GuardedRollbackEvidenceV2Ok { .. } => {
+                assert!(matches!(request, Request::GuardedRollbackEvidenceV2 {
+                    ws_id, operation_id, ..
+                } if ws_id == "ws-abc123" && operation_id == "op-123"));
+            }
             _ => {}
         }
         stream.write_all(&encode_frame(&response).unwrap()).unwrap();
     }
     drop(listener);
     std::fs::remove_file(socket).unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-    output
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn rollback_json_reports_plain_success_preview_and_rejection() {
+    let socket_dir = SocketDir::new();
+    let args = ["rollback", "--json", "-w", "ws-abc123", "-s", "s1"];
+    let output = run_cli(
+        &socket_dir,
+        &args,
+        vec![Response::RollbackOk {
+            from: "ws-abc123".into(),
+            to: "s1".into(),
+        }],
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["schema"], "ws-ckpt.rollback.v1");
+    assert_eq!(body["status"], "succeeded");
+    assert_eq!(body["snapshot_id"], "s1");
+    assert_eq!(body["workspace"], "ws-abc123");
+
+    let output = run_cli(
+        &socket_dir,
+        &[
+            "rollback",
+            "--json",
+            "--preview",
+            "-w",
+            "/workspace",
+            "-s",
+            "s1",
+        ],
+        vec![Response::RollbackPreviewOk {
+            to: "s1".into(),
+            changes: vec![],
+        }],
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["status"], "preview");
+    assert_eq!(body["changes"], json!([]));
+
+    for (code, expected) in [
+        (ErrorCode::CwdOccupied, "known_no_effect"),
+        (ErrorCode::DiskSpaceInsufficient, "known_no_effect"),
+        (ErrorCode::InternalError, "unknown"),
+    ] {
+        let code_name = format!("{code:?}");
+        let output = run_cli_with_input(
+            &socket_dir,
+            &args,
+            vec![Response::Error {
+                code,
+                message: code_name.clone(),
+            }],
+            None,
+        );
+        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success());
+        assert_eq!(body["status"], expected);
+        assert_eq!(body["code"], code_name);
+    }
+}
+
+#[test]
+fn rollback_guarded_checks_protocol_and_uses_operation_evidence() {
+    let socket_dir = SocketDir::new();
+    let identity = |version| Response::WorkspaceIdentityV2Ok {
+        protocol_version: version,
+        ws_id: "ws-abc123".into(),
+        registered_path: "/workspace".into(),
+        generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+    };
+    let check = [
+        "rollback",
+        "--guarded",
+        "--json",
+        "--check",
+        "-w",
+        "/workspace",
+    ];
+    let output = run_cli(
+        &socket_dir,
+        &check,
+        vec![identity(GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2)],
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["status"], "compatible");
+    assert_eq!(body["ws_id"], "ws-abc123");
+    assert_eq!(body["diff_json"], true);
+
+    let output = run_cli_with_input(&socket_dir, &check, vec![identity(99)], None);
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success());
+    assert_eq!(body["status"], "error");
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("protocol version 99"));
+
+    let confirmation = json!({
+        "ws_id": "ws-abc123",
+        "generation": ([7_u8; 32]),
+        "diff_digest": ([8_u8; 32]),
+        "operation_id": "op-123",
+        "operation_digest": ([9_u8; 32]),
+    });
+    let output = run_cli_with_input(
+        &socket_dir,
+        &[
+            "rollback",
+            "--guarded",
+            "--json",
+            "-w",
+            "/workspace",
+            "-s",
+            "s1",
+        ],
+        vec![
+            identity(GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2),
+            Response::GuardedRollbackV2Rejected {
+                code: GuardedRollbackRejectionCodeV2::DiffMismatch,
+                message: "preview is stale".into(),
+            },
+        ],
+        Some(&confirmation),
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success());
+    assert_eq!(body["status"], "known_no_effect");
+    assert_eq!(body["code"], "DiffMismatch");
+
+    let output = run_cli_with_input(
+        &socket_dir,
+        &[
+            "rollback",
+            "--guarded",
+            "--json",
+            "--result",
+            "-w",
+            "ws-abc123",
+        ],
+        vec![Response::GuardedRollbackEvidenceV2Ok { evidence: None }],
+        Some(&confirmation),
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success());
+    assert_eq!(body["status"], "result");
+    assert!(body["evidence"].is_null());
 }
 
 #[test]

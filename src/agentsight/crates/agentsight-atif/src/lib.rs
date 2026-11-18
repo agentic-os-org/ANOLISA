@@ -510,20 +510,36 @@ impl AtifTrajectory {
         serde_json::to_value(self)
     }
 
-    /// Validate step_id sequence (1-based, contiguous).
+    /// Validate step_id sequences (1-based, contiguous) in this trajectory and
+    /// in every embedded subagent trajectory.
+    ///
+    /// Each trajectory numbers its own steps from 1, so a child is validated
+    /// independently of its parent and siblings.
     ///
     /// # Errors
-    /// Returns a message describing the first out-of-sequence step.
+    /// Returns a message describing the first out-of-sequence step. Nested
+    /// failures name the trajectory that owns the step.
     pub fn validate_step_ids(&self) -> Result<(), String> {
+        self.validate_step_ids_in("")
+    }
+
+    fn validate_step_ids_in(&self, context: &str) -> Result<(), String> {
         for (i, step) in self.steps.iter().enumerate() {
             if step.step_id != i + 1 {
                 return Err(format!(
-                    "Step at index {} has step_id={}, expected {}",
+                    "{context}Step at index {} has step_id={}, expected {}",
                     i,
                     step.step_id,
                     i + 1
                 ));
             }
+        }
+        for (index, child) in self.subagent_trajectories.iter().flatten().enumerate() {
+            let label = match child.trajectory_id.as_deref() {
+                Some(id) if !id.trim().is_empty() => id.to_string(),
+                _ => format!("#{index}"),
+            };
+            child.validate_step_ids_in(&format!("{context}Subagent trajectory {label}: "))?;
         }
         Ok(())
     }
@@ -734,6 +750,81 @@ mod tests {
         let mut traj = minimal_trajectory();
         traj.steps[0].step_id = 5;
         assert!(traj.validate_step_ids().is_err());
+    }
+
+    fn atif_json(trajectory_id: &str, step_ids: &[u64], subagents: &[String]) -> String {
+        let steps = step_ids
+            .iter()
+            .map(|id| format!(r#"{{"step_id": {id}, "source": "user", "message": "synthetic"}}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let children = if subagents.is_empty() {
+            String::new()
+        } else {
+            format!(r#", "subagent_trajectories": [{}]"#, subagents.join(", "))
+        };
+        format!(
+            r#"{{"schema_version": "ATIF-v1.7", "session_id": "synthetic-run",
+                "trajectory_id": "{trajectory_id}",
+                "agent": {{"name": "fixture", "version": "fixture"}},
+                "steps": [{steps}]{children}}}"#
+        )
+    }
+
+    /// A root sequence that is valid says nothing about the sequences embedded
+    /// under it: the SDK imports and consumes subagent trajectories as ordinary
+    /// trajectories, so a child that starts at 2 has to be rejected too.
+    #[test]
+    fn validate_rejects_a_child_that_does_not_start_at_one() {
+        let json = atif_json("parent", &[1], &[atif_json("child", &[2], &[])]);
+        let error = validate_trajectory_str(&json).expect_err("a child starting at 2 must fail");
+        assert!(
+            error.contains("child"),
+            "the error must name the offending trajectory: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_grandchild_gap() {
+        let grandchild = atif_json("grandchild", &[1, 3], &[]);
+        let child = atif_json("child", &[1], &[grandchild]);
+        let json = atif_json("parent", &[1], &[child]);
+        let error = validate_trajectory_str(&json).expect_err("a grandchild gap must fail");
+        assert!(
+            error.contains("grandchild"),
+            "the error must name the offending trajectory: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_later_sibling() {
+        let json = atif_json(
+            "parent",
+            &[1],
+            &[
+                atif_json("first", &[1], &[]),
+                atif_json("second", &[1, 2, 4], &[]),
+            ],
+        );
+        let error = validate_trajectory_str(&json).expect_err("the later sibling must fail");
+        assert!(
+            error.contains("second"),
+            "the error must name the offending trajectory: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_nested_and_independently_numbered_trajectories() {
+        let grandchild = atif_json("grandchild", &[1], &[]);
+        let json = atif_json(
+            "parent",
+            &[1, 2],
+            &[
+                atif_json("child", &[1, 2], &[grandchild]),
+                atif_json("sibling", &[1, 2, 3], &[]),
+            ],
+        );
+        validate_trajectory_str(&json).expect("each trajectory numbers its own steps from 1");
     }
 
     #[test]

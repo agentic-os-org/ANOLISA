@@ -376,6 +376,22 @@ also supports the prepared native modes in the linked guide; attachment remains
 limited to its documented entrypoints. The application-owned JSON protocol below
 cannot be combined with these subcommands.
 
+### Applications with an installed SDK
+
+A cooperating application retains its native startup command and installs the
+SDK plugin first. Select its PID to start or reuse AW with the configuration's
+`daemon.startup: on_demand` setting:
+
+```bash
+aw instance attach --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+A process with multiple SDK listeners requires `--sdk-instance ID` from
+`aw instance list --config aw.yaml`. A supplied `--socket PATH` selects an
+existing service. This does not install Hooks into an arbitrary process.
+For QwenPaw startup before AW, use the
+[after-only plugin](../../../developer-guide/en/aw/deployment/python-sdk.md#deferred-tool-after-attachment).
+
 ## `aw instance`
 
 Explicit Adapters connect to an existing same-user daemon using the registration protocol behind native preparation. `--socket PATH` is required. `--connect` discovers service identity without reading stdin. Other calls read registration, Ready, query or release JSON from stdin and always return JSON. `--timeout-ms` defaults to 30000 and accepts 1–60000, covering input, connection and request.

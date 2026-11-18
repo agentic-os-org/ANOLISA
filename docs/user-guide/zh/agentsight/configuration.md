@@ -360,19 +360,42 @@ journalctl -u agentsight.service -n 30 --no-pager
 
 ## 工作区快照后端（Linux）
 
-可选的 `ws_ckpt` 配置连接本机 ws-ckpt 实例：
+可选的 `ws_ckpt` 配置指定 AgentSight 调用本机 ws-ckpt CLI 的方式：
 
 ```json
-{"ws_ckpt":{"binary":"/usr/local/bin/ws-ckpt","socket":"/run/ws-ckpt/ws-ckpt.sock","restore_enabled":false,"plugins":{"example-agent":{"runtime":"openclaw","config_path":"/home/example/.openclaw/ws-ckpt.json"}}}}
+{
+  "ws_ckpt": {
+    "binary": "/usr/bin/ws-ckpt",
+    "restore_enabled": false,
+    "plugins": {
+      "example-openclaw": {
+        "runtime": "openclaw",
+        "config_path": "/home/example/.openclaw/ws-ckpt.json"
+      },
+      "example-hermes": {
+        "runtime": "hermes",
+        "config_path": "/home/example/.hermes/config.yaml"
+      }
+    }
+  }
+}
 ```
 
-`binary` 默认从 PATH 查找 `ws-ckpt`。`socket` 默认读取 `WS_CKPT_SOCKET`，再回退到
-`/run/ws-ckpt/ws-ckpt.sock`；JSON CLI 查询与 guarded 操作使用同一 socket。配置逐请求
-读取，不配置时保留原有部署方式。工具显式传入 workspace 时可省略 `plugins`，不从
-进程 cwd 推测工作区。
+`binary` 默认使用 PATH 上的 `ws-ckpt`。AgentSight 通过 CLI 查询快照和文件差异，并在
+开启恢复后通过 CLI 发起 guarded 回滚。连接守护进程和校验对端 UID 都由 CLI 负责。
+
+守护进程使用自定义地址时，可用 `socket` 指定地址。AgentSight 通过子进程的
+`WS_CKPT_SOCKET` 将地址传给 CLI，取值顺序为 `socket` 配置、AgentSight 进程的
+`WS_CKPT_SOCKET` 环境变量、`/run/ws-ckpt/ws-ckpt.sock`。
+
+配置逐请求读取。Sight 使用 `rollback --guarded --json --check` 确认注册工作区，并检查
+CLI 是否支持 `diff --format json`。任一检查失败时隐藏快照和恢复入口，ATIF 轨迹照常
+显示。只读模式也适用。工具显式传入 workspace 时可省略 `plugins`，不从进程 cwd 推测
+工作区。
 
 `plugins` 的键必须匹配轨迹中的 ATIF agent 名称，并对应实际宿主实例。`runtime`
-支持 `openclaw`（持久化 JSON）或 `hermes`（YAML 中的 `plugins.ws-ckpt`）。可选
+支持 `openclaw`（持久化 JSON）或 `hermes`（YAML 中的 `plugins.ws-ckpt`）。如果 Hermes
+实例设置了 `HERMES_HOME`，请将 `config_path` 指向该实例的 `config.yaml`。可选
 `workspace_override` 表示该实例已知的环境覆盖值或宿主默认值；不能拿 Sight 的 HOME
 或环境代替。配置文件若在调用之后修改，不用当前值倒填历史工作区；实例不明确时保持
 未解析状态。

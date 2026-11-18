@@ -180,3 +180,17 @@ fn reloadable_execution_grants_fail_before_the_sdk_probe() {
         assert!(!fixture.root.path().join("launch").exists());
     }
 }
+
+#[test]
+fn empty_optional_final_policy_preserves_resident_mode() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input(None, false);
+    input.document["spec"]["events"]["security.violation"] =
+        json!({"enabled":true,"required":false,"steps":[]});
+    let prepared = QoderSdk.prepare(input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(prepared.capabilities().entrypoint, "sdk-worker");
+    assert!(!prepared
+        .capabilities()
+        .events
+        .contains_key("security.violation"));
+}

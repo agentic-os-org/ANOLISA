@@ -1,14 +1,24 @@
 use crate::diagnostics::health::{
-    sorted_try_items, HealthFactValue, HealthMessageId, HealthScanReport, HealthTryKind,
+    select_try_items, AdviceSurface, HealthFactValue, HealthMessageId, HealthScanReport,
+    HealthTryKind,
 };
 use crate::insight::guidance::{quote::bash_arg, BashEvent, FailureKind};
 use crate::ui::{primary_health_prompt_suggestion, HealthBannerModel, RatatuiInlineRenderer};
 use crate::Language;
 
+mod suggestions;
+pub(crate) use suggestions::{
+    session_health_questions, suggestion_surface_payload, SuggestionItem, SuggestionListModel,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Invitation {
     pub(crate) problem: String,
     pub(crate) text: String,
+    pub(crate) evidence: Option<String>,
+    pub(crate) event: Option<(&'static str, String)>,
+    pub(crate) severity: Option<u8>,
+    pub(crate) legacy_problems: Vec<String>,
     target: Target,
 }
 
@@ -22,48 +32,31 @@ pub(crate) fn health_candidate(
     report: &HealthScanReport,
     language: Language,
 ) -> Option<Invitation> {
-    health_candidate_for(report, language, Target::Bash)
-}
-
-pub(crate) fn health_candidate_for(
-    report: &HealthScanReport,
-    language: Language,
-    target: Target,
-) -> Option<Invitation> {
-    let item = sorted_try_items(report).into_iter().next()?;
-    if item.kind != HealthTryKind::AskAgent
-        || (matches!(target, Target::Bash)
-            && !matches!(
-                item.prompt_id,
-                Some(
-                    HealthMessageId::HealthPromptAnalyzeMemoryPressure
-                        | HealthMessageId::HealthPromptCheckSwapPressure
-                        | HealthMessageId::HealthPromptCheckRecentOom
-                        | HealthMessageId::HealthPromptInspectProcessMemory
-                        | HealthMessageId::HealthPromptInspectDiskUsage
-                        | HealthMessageId::HealthPromptInspectHighLoad
-                )
-            ))
-    {
+    let item = select_try_items(report, &report.try_items, AdviceSurface::Bash, 1)
+        .into_iter()
+        .next()?;
+    if item.kind != HealthTryKind::AskAgent {
         return None;
     }
     let prompt = primary_health_prompt_suggestion(report, crate::I18n::new(language))?;
     if prompt.is_empty() || prompt.len() > 2048 || prompt.chars().any(char::is_control) {
         return None;
     }
-    let text = match target {
-        Target::Bash => format!("  cosh --ask {}", bash_arg(&prompt)?),
-        Target::Cosh => match language {
-            Language::ZhCn => format!("可以直接提问：\n{prompt}"),
-            Language::EnUs => {
-                format!("Try asking:\n{prompt}")
-            }
-        },
-    };
+    let text = format!("  cosh --ask {}", bash_arg(&prompt)?);
     Some(Invitation {
-        problem: item.id.clone(),
+        problem: crate::diagnostics::health::prompt_selection::exposure_problem(report, item),
         text,
-        target,
+        evidence: Some(crate::diagnostics::health::exposure_evidence(report, item)),
+        event: crate::diagnostics::health::prompt_selection::exposure_event(report, item),
+        severity: report
+            .findings
+            .iter()
+            .find(|finding| finding.id == item.finding_id)
+            .map(|finding| finding.severity.precedence()),
+        legacy_problems: crate::diagnostics::health::prompt_selection::legacy_exposure_problems(
+            item,
+        ),
+        target: Target::Bash,
     })
 }
 
@@ -76,6 +69,10 @@ pub(crate) fn login_entry(language: Language) -> Invitation {
         target: Target::Bash,
         problem: "login-entry".to_string(),
         text: text.to_string(),
+        evidence: None,
+        event: None,
+        severity: None,
+        legacy_problems: Vec::new(),
     }
 }
 
@@ -88,6 +85,10 @@ pub(crate) fn default_login(language: Language) -> Invitation {
         target: Target::Cosh,
         problem: "default-login".to_string(),
         text: text.to_string(),
+        evidence: None,
+        event: None,
+        severity: None,
+        legacy_problems: Vec::new(),
     }
 }
 
@@ -110,6 +111,10 @@ pub(crate) fn failure_invitation(
         target: Target::Bash,
         problem: event.expression.clone(),
         text,
+        evidence: None,
+        event: None,
+        severity: None,
+        legacy_problems: Vec::new(),
     })
 }
 
@@ -165,6 +170,49 @@ pub(crate) fn render_health(
     target: Target,
     invitation: Option<&Invitation>,
 ) -> Option<String> {
+    let text = render_health_full(renderer, report, show_facts, target, invitation);
+    if target != Target::Bash
+        || text.as_ref().is_some_and(|text| {
+            text.len() < crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES
+        })
+    {
+        return text;
+    }
+    let mut compact = String::new();
+    if show_facts {
+        let findings = crate::diagnostics::health::sorted_findings(report);
+        let finding = findings.first()?;
+        compact.push_str(
+            &crate::diagnostics::health::prompt_selection::format_health_message(
+                renderer.i18n(),
+                finding.title_id,
+                &finding.detail_args,
+            ),
+        );
+        compact.push('\n');
+        for key in ["mount", "service", "path", "cgroup"] {
+            if let Some(value) = finding.detail_args.get(key) {
+                if value.chars().count() > 2048 {
+                    return None;
+                }
+                compact.push_str(&visible_data(value));
+                compact.push('\n');
+            }
+        }
+    }
+    compact.push_str(&render_health_full(
+        renderer, report, false, target, invitation,
+    )?);
+    (compact.len() < crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES).then_some(compact)
+}
+
+fn render_health_full(
+    renderer: &RatatuiInlineRenderer,
+    report: &HealthScanReport,
+    show_facts: bool,
+    target: Target,
+    invitation: Option<&Invitation>,
+) -> Option<String> {
     let mut output = Vec::new();
     if show_facts {
         let mut presentation = report.clone();
@@ -197,6 +245,23 @@ pub(crate) fn render_health(
         renderer.write_health_banner(&mut output, model).ok()?;
     }
     let mut text = String::from_utf8(output).ok()?;
+    if show_facts && target == Target::Bash {
+        if let Some(finding) = crate::diagnostics::health::sorted_findings(report).first() {
+            for key in ["mount", "service", "path", "cgroup"] {
+                if let Some(value) = finding.detail_args.get(key) {
+                    if value.chars().count() > 2048 {
+                        return None;
+                    }
+                    let value = visible_data(value);
+                    if !text.contains(&value) {
+                        text.push_str("  ");
+                        text.push_str(&value);
+                        text.push('\n');
+                    }
+                }
+            }
+        }
+    }
     if let Some(invitation) = invitation.filter(|item| !show_facts || item.problem != "login-entry")
     {
         if invitation.problem == "login-entry" {
@@ -217,9 +282,6 @@ pub(crate) fn render_health(
                 }
                 text.push_str(entry);
             }
-            text.push('\n');
-        } else if matches!(invitation.target, Target::Cosh) {
-            text.push_str(&invitation.text);
             text.push('\n');
         } else {
             let language = renderer.i18n().language();

@@ -38,7 +38,7 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
 }
 
 fn usage() -> Error {
-    Error { message: "usage: login-preflight --verify-installed --entry /usr/bin/cosh --record-version 1 | check-erase | check-protocol 1 --record-version 1 --entry /usr/bin/cosh | check-target|replace|downgrade ABSOLUTE_RPM | erase".into(), usage: true }
+    Error { message: "usage: login-preflight --verify-installed --entry /usr/bin/cosh --record-version 1 | check-erase | check-protocol 1 --record-version 1 --entry /usr/bin/cosh | check-target|replace|downgrade ABSOLUTE_RPM | erase".into(), usage: true, unconfirmed: false }
 }
 
 fn parse(args: &[OsString]) -> Result<Action> {

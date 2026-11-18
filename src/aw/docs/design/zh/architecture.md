@@ -207,9 +207,12 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 | 活跃能力、计划与证据 Schema | `aw-contracts/schemas/` |
 | 配置 | `aw-config/schemas/` |
 | Provider 消息与 View 协议 | `aw-provider/schemas/` |
+| 原生桥接数据 | Adapter |
 | Provider 私有配置与后端数据 | 对应的具体 Provider 目录 |
 
-`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 28 份。
+`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同。
+[Registry](../../../crates/aw-contracts/src/registry.rs) 列出活跃 Schema；
+[目录清单测试](../../../crates/aw-contracts/tests/schemas.rs) 要求每份 Schema 文件均已注册。
 计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
 此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
 
@@ -248,6 +251,11 @@ loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享�
 原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
 `install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
 私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。
+
+语言 SDK 在 Instance／Task 上提供公共 Admission。原生 Source 安装捕获，并根据配置
+选择输入或首次工具准入。Qoder 和配置式 QwenPaw 复用此机制，QwenPaw 同时保留
+resident 结果保障。Service／Host／executor 继续负责权威策略与 Provider 执行，
+见 [SDK 归属](runtime/native-sdk.md#仅工具后的延迟任务准入)。
 
 公共审计消费者通过 `aw audit-export` → `aw-service::audit_export` →
 `aw-core::journal::reader` 读取。读取器固定所属用户的存储并验证有界源链，

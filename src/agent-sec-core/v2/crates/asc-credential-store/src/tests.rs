@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use crate::{
     CredentialId, CredentialState, CredentialStore, CredentialStoreError, FakeFormat,
     MAX_ACTIVE_FAKES_PER_SCOPE, MAX_FAKES_TOTAL, PairInput, STORE_FILE_NAME, ScopeId, Secret,
-    SecretsTarget, generate_fake, read_token_file, validate_pair, write_fake_file,
+    SecretsTarget, generate_fake, read_root_asset, read_token_file, validate_pair, write_fake_file,
+    write_owner_file,
 };
 
 const REAL: &str = "aaaaaaaaaaaaaaaaaaaa";
@@ -1046,22 +1047,59 @@ fn valid_store_open_cleans_crashed_writer_temporaries() {
     assert!(!leftover.exists());
 }
 
-// /tmp is intentionally rejected by the CLI helpers. Use a private fixture below
-// an already trusted workspace, or report the exact environment limitation.
+// The home directory keeps trust-boundary tests runnable in group-writable CI checkouts.
 fn token_fixture() -> Option<tempfile::TempDir> {
-    let base = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
     let uid = rustix::process::geteuid().as_raw();
-    for ancestor in base.ancestors() {
-        let metadata = fs::metadata(ancestor).unwrap();
-        if (metadata.uid() != 0 && metadata.uid() != uid) || metadata.mode() & 0o7022 != 0 {
-            eprintln!(
-                "token helper test skipped: workspace ancestor is not trusted: {}",
-                ancestor.display()
-            );
-            return None;
+    let candidates = std::iter::once(std::env::current_dir().unwrap())
+        .chain(std::env::var_os("HOME").map(PathBuf::from))
+        .chain((uid == 0 && cfg!(target_os = "linux")).then(|| PathBuf::from("/run")));
+    for candidate in candidates {
+        let Ok(base) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if base.ancestors().all(|ancestor| {
+            let metadata = fs::metadata(ancestor).unwrap();
+            (metadata.uid() == 0 || metadata.uid() == uid) && metadata.mode() & 0o7022 == 0
+        }) {
+            return Some(tempfile::tempdir_in(base).unwrap());
         }
     }
-    Some(tempfile::tempdir_in(base).unwrap())
+    eprintln!("token helper test skipped: no trusted fixture directory");
+    None
+}
+
+fn run_root_case(test_name: &str) {
+    if !cfg!(target_os = "linux") || rustix::process::geteuid().is_root() {
+        return;
+    }
+    if !std::process::Command::new("sudo")
+        .args(["-n", "true"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("root fixture skipped: passwordless sudo unavailable");
+        return;
+    }
+    let mut command = std::process::Command::new("sudo");
+    command.args(["-n", "env"]);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        let mut assignment = std::ffi::OsString::from("LLVM_PROFILE_FILE=");
+        assignment.push(profile);
+        command.arg(assignment);
+    }
+    let test_name = test_name.split_once("::").unwrap().1;
+    let output = command
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
 }
 
 #[test]
@@ -1165,4 +1203,107 @@ fn fake_file_is_create_new_private_and_validation_or_generation_failure_creates_
             .is_err()
     );
     assert!(!absent.exists());
+}
+
+#[test]
+fn owner_file_creates_private_directories_and_never_replaces() {
+    let Some(root) = token_fixture() else { return };
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    if uid != 0 {
+        assert!(crate::lock_root_directory(root.path()).is_err());
+    }
+    let directory = root.path().join("a/b");
+    let path = write_owner_file(&directory, "fake", FAKE, uid, gid).unwrap();
+    assert_eq!(path, directory.join("fake"));
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&directory), 0o700);
+    assert_eq!(mode(&root.path().join("a")), 0o700);
+    assert_eq!(fs::read_to_string(&path).unwrap(), FAKE);
+    assert!(write_owner_file(&directory, "fake", OTHER, uid, gid).is_err());
+    assert!(write_owner_file(&directory, "foreign", FAKE, uid.wrapping_add(1), gid).is_err());
+    assert!(!directory.join("foreign").exists());
+    assert_eq!(fs::read_to_string(&path).unwrap(), FAKE);
+    for name in ["", ".", "..", "x/y"] {
+        assert!(write_owner_file(&directory, name, FAKE, uid, gid).is_err());
+    }
+    assert!(write_owner_file(&directory, "bad", "has space", uid, gid).is_err());
+    assert!(!directory.join("bad").exists());
+    let alias = root.path().join("alias");
+    symlink(&directory, &alias).unwrap();
+    assert!(write_owner_file(&alias, "new", FAKE, uid, gid).is_err());
+    assert!(write_owner_file(&root.path().join("c/../d"), "new", FAKE, uid, gid).is_err());
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o720)).unwrap();
+    assert!(write_owner_file(&directory, "new", FAKE, uid, gid).is_err());
+    assert!(!directory.join("new").exists());
+}
+
+#[test]
+fn owner_directories_stay_usable_and_private_under_a_restrictive_umask() {
+    const CHILD: &str = "ASC_CREDENTIAL_STORE_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // The umask is process-wide, so the restrictive case runs alone in a child.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::owner_directories_stay_usable_and_private_under_a_restrictive_umask",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    let Some(root) = token_fixture() else { return };
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o700));
+    let directory = root.path().join("a/b");
+    let written = write_owner_file(&directory, "fake", FAKE, uid, gid);
+    // Restore before exit so coverage output stays readable to its merger.
+    rustix::process::umask(previous);
+    let path = written.unwrap();
+    assert_eq!(mode(&root.path().join("a")), 0o700);
+    assert_eq!(mode(&directory), 0o700);
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(fs::read_to_string(&path).unwrap(), FAKE);
+}
+
+#[test]
+fn root_asset_requires_root_ownership_and_no_shared_write() {
+    run_root_case(concat!(
+        module_path!(),
+        "::root_asset_requires_root_ownership_and_no_shared_write"
+    ));
+    let Some(root) = token_fixture() else { return };
+    let path = root.path().join("asset");
+    fs::write(&path, "permit(principal, action, resource);").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    if rustix::process::geteuid().is_root() {
+        let lock_path = root.path().join("locked");
+        let lock = crate::lock_root_directory(&lock_path).unwrap();
+        assert!(crate::lock_root_directory(&lock_path).is_err());
+        drop(lock);
+        assert!(crate::lock_root_directory(&lock_path).is_ok());
+        assert_eq!(
+            read_root_asset(&path, 64).unwrap(),
+            b"permit(principal, action, resource);"
+        );
+        assert!(read_root_asset(&path, 8).is_err());
+        for permissions in [0o664, 0o646, 0o4644] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(permissions)).unwrap();
+            assert!(read_root_asset(&path, 64).is_err());
+        }
+    } else {
+        // A non-root workspace cannot hold a trusted asset.
+        assert!(read_root_asset(&path, 64).is_err());
+    }
+    assert!(read_root_asset(&root.path().join("missing"), 64).is_err());
 }

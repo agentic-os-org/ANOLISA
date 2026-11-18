@@ -65,7 +65,7 @@ build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
 
 .PHONY: build-cli-v2
 build-cli-v2: ## Build V2 Rust CLI and daemon binaries
-	cd v2 && $(CARGO_BUILD_ENV) CARGO_TARGET_DIR="$(abspath $(V2_CARGO_TARGET_DIR))" $(RAW_RUST_BUILDER) build --release --locked $(CARGO_OFFLINE_FLAGS) --workspace
+	cd v2 && $(CARGO_BUILD_ENV) ASC_GATEWAY_DATADIR="$(BUILD_GATEWAY_DATADIR)" CARGO_TARGET_DIR="$(abspath $(V2_CARGO_TARGET_DIR))" $(RAW_RUST_BUILDER) build --release --locked $(CARGO_OFFLINE_FLAGS) --workspace
 	install -d -m 0755 $(V2_BIN_BUILD_DIR)
 	cp -p "$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-cli" \
 		"$(abspath $(V2_CARGO_TARGET_DIR))/$(RAW_RUST_RELEASE_SUBDIR)/agent-sec-daemon" \

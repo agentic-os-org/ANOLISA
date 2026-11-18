@@ -22,6 +22,7 @@ struct Prepared {
     sdks: std::collections::BTreeMap<String, PathBuf>,
     policy: assets::Policy,
     versions: std::collections::BTreeMap<String, Sdk>,
+    final_profile: Option<Value>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -101,14 +102,31 @@ impl Adapter for QoderSdk {
         {
             return Err("Qoder SDK probe did not resolve the declared installed packages".into());
         }
+        let final_profile =
+            super::qoder_final::profile(&input, &sdks[&policy.sites[0]], cancelled)?;
+        if final_profile.is_some()
+            && (policy.sites != ["global"]
+                || policy.declarative_plugins
+                || !policy.command_wrappers.is_empty()
+                || !policy.runtime_preloads.is_empty()
+                || !policy.runtime_launchers.is_empty())
+        {
+            return Err(
+                "Qoder final gate requires the global SDK without native extensions".into(),
+            );
+        }
         Ok(Box::new(Prepared {
             input,
             sdks,
             policy,
             versions,
+            final_profile,
         }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+        if event == "security.violation" {
+            return super::qoder_final::normalize(binding, native);
+        }
         if event == "input.submit" {
             if native["hook_event_name"] != "UserPromptSubmit"
                 || native["cwd"].as_str() != binding.cwd.to_str()
@@ -131,6 +149,20 @@ impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
         let mut capabilities = adapter::catalog::QODER_SDK
             .capabilities(&self.versions[&self.policy.sites[0]].version, "sdk-worker");
+        if self.final_profile.is_some() {
+            capabilities.entrypoint = "foreground-final-worker".into();
+            capabilities.events = [
+                ("tool.before".into(), vec!["observe".into(), "block".into()]),
+                ("tool.after".into(), vec!["observe".into()]),
+                (
+                    "security.violation".into(),
+                    vec!["observe".into(), "block".into()],
+                ),
+            ]
+            .into();
+            capabilities.failure_actions.clear();
+            return capabilities;
+        }
         if self.input.options.reloadable {
             capabilities.events.remove("input.submit");
             if let Some(effects) = capabilities.events.get_mut("tool.after") {
@@ -144,6 +176,16 @@ impl PreparedLaunch for Prepared {
         capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if self.final_profile.is_some() {
+            super::claude_final::validate(steps)
+                .map_err(|_| "Qoder final gate requires structured fail-closed final steps")?;
+            if steps
+                .iter()
+                .any(|step| matches!(step.execution, aw_core::admission::StepExecution::Native))
+            {
+                return Err("Qoder final gate requires structured Provider steps".into());
+            }
+        }
         if self.input.options.reloadable {
             crate::reload::validate(
                 &self.input.document,
@@ -186,6 +228,10 @@ impl PreparedLaunch for Prepared {
         context.files.write(
             "reload.mjs",
             include_bytes!("../../native/qoder-sdk/reload.mjs"),
+        )?;
+        context.files.write(
+            "final-launch.mjs",
+            include_bytes!("../../native/qoder-sdk/final-launch.mjs"),
         )?;
         for (name, bytes) in [
             (
@@ -243,14 +289,19 @@ impl PreparedLaunch for Prepared {
         ] {
             context.files.write(name, bytes)?;
         }
+        let final_profile = self
+            .final_profile
+            .as_ref()
+            .filter(|_| events.contains_key("security.violation"));
         let config = context.files.write(
             "qoder-sdk.json",
             &serde_json::to_vec(&json!({
                 "executable":context.executable, "binding":context.binding_path, "sdk":self.sdks[&self.policy.sites[0]],
                 "sdks":self.sdks, "sdk_metadata":self.versions, "default_site":self.policy.sites[0],
                 "native_command_wrappers":self.policy.wrappers(), "native_policy":self.policy,
-                "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable,
-                "resident_policy_reload": !self.input.options.reloadable,
+                "reloadable":self.input.options.reloadable, "resident":!self.input.options.reloadable && final_profile.is_none(),
+                "resident_policy_reload": !self.input.options.reloadable && final_profile.is_none(),
+                "final_profile": final_profile,
                 "cwd":self.input.command.cwd, "ready_path":ready, "ready_token":token, "hooks":hooks
             }))?,
         )?;
@@ -258,10 +309,21 @@ impl PreparedLaunch for Prepared {
         command
             .environment
             .insert("AW_QODER_SDK_BRIDGE".into(), bridge.into_os_string());
-        command
-            .environment
-            .insert("AW_QODER_SDK_CONFIG".into(), config.into_os_string());
+        command.environment.insert(
+            "AW_QODER_SDK_CONFIG".into(),
+            config.clone().into_os_string(),
+        );
         let provider_environment = command.environment.clone();
+        if final_profile.is_some() {
+            let preload = super::qoder_final::configure(context)?;
+            command.environment.insert(
+                "NODE_OPTIONS".into(),
+                format!("--import={}", preload.display()).into(),
+            );
+            command
+                .environment
+                .insert("AW_QODER_FINAL_CONFIG".into(), config.into_os_string());
+        }
         Ok(LaunchPlan {
             command,
             provider_environment,

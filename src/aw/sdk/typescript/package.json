@@ -1,0 +1,32 @@
+{
+  "name": "@anolisa/aw-sdk",
+  "version": "0.1.1",
+  "description": "Application-owned AW Service client with explicit native fallback",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "linux"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/client.mjs"
+    },
+    "./qoder": {
+      "types": "./dist/qoder.d.ts",
+      "import": "./dist/qoder.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "examples"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

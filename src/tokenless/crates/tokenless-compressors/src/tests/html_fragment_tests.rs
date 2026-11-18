@@ -6,6 +6,107 @@ fn markdown(input: &str) -> String {
 }
 
 #[test]
+fn zero_indent_rich_text_renders_without_style() {
+    for indent in ["0", "0px", "0em", "0%", "-0px"] {
+        assert_eq!(
+            markdown(&format!(
+                "<div><p style=\"text-align:left;text-indent:{indent};margin-left:0\">\
+                 View <strong>the listing</strong> at <a href=\"/listing\">this link</a>.</p></div>"
+            )),
+            "View **the listing** at [this link](/listing)."
+        );
+    }
+}
+
+#[test]
+fn invalid_zero_indentation_keeps_whole_fragment() {
+    for indent in ["0foo", "0 -9999px", "0px -9999px", "0-9999px", "0% junk"] {
+        let input = format!(
+            "<p style=\"text-indent:{indent}\">Keep this</p>\
+             <p><strong>Sibling</strong></p>"
+        );
+        assert_eq!(HtmlExtractor.render_fragment(&input), None, "{indent}");
+    }
+}
+
+#[test]
+fn logical_sizes_that_clip_content_keep_whole_fragment() {
+    for property in ["inline-size", "block-size", "max-inline-size", "max-block-size"] {
+        for overflow in ["hidden", "clip"] {
+            let input = format!(
+                "<div style=\"{property}:0;overflow:{overflow}\">Hidden</div>\
+                 <p><strong>Sibling</strong></p>"
+            );
+            assert_eq!(
+                HtmlExtractor.render_fragment(&input),
+                None,
+                "{property}; overflow:{overflow}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_inline_style_preserves_its_subtree_and_compresses_siblings() {
+    let rendered = markdown(
+        "<div><p style=\"future-format:compact\"><strong>Keep this subtree</strong></p>\
+         <p><strong>Compress this sibling</strong></p></div>",
+    );
+    assert!(rendered.contains(
+        "<p style=\"future-format:compact\"><strong>Keep this subtree</strong></p>"
+    ));
+    assert!(rendered.contains("**Compress this sibling**"));
+    assert!(!rendered.contains("<strong>Compress this sibling</strong>"));
+    assert_eq!(
+        HtmlExtractor.render_fragment(
+            "<p style=\"future-format:compact\"><strong>Keep this subtree</strong></p>"
+        ),
+        None
+    );
+}
+
+#[test]
+fn unknown_stylesheets_and_inline_hazards_still_pass_through() {
+    for style in [
+        "future-format:compact;visibility:hidden",
+        "opacity:0;future-format:compact",
+        "position:absolute;future-format:compact",
+        "future-format:var(--format)",
+        "-vendor-format:compact",
+        "--format:compact",
+    ] {
+        let input = format!(
+            "<div><p style=\"{style}\">Keep this</p><p><strong>Sibling</strong></p></div>"
+        );
+        assert_eq!(HtmlExtractor.render_fragment(&input), None, "{style}");
+    }
+    assert_eq!(
+        HtmlExtractor.render_fragment(
+            "<style>p{future-format:compact}</style><p><strong>Keep this</strong></p>"
+        ),
+        None
+    );
+}
+
+#[test]
+fn cross_element_styles_do_not_use_local_fallback() {
+    for style in [
+        "text-indent:-9999px",
+        "content-visibility:hidden",
+        "all:unset",
+        "grid-column:2",
+        "counter-increment:section",
+        "translate:-9999px",
+    ] {
+        let input = format!(
+            "<div style=\"display:grid\"><p style=\"{style}\">First</p>\
+             <p><strong>Second</strong></p></div>"
+        );
+        assert_eq!(HtmlExtractor.render_fragment(&input), None, "{style}");
+    }
+}
+
+#[test]
 fn multiple_roots_tables_ordered_lists_and_links_render_in_order() {
     let view = HtmlExtractor
         .render_fragment(

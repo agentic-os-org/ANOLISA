@@ -53,7 +53,7 @@ if args.protocol == "provider":
                               "status":"error", "error_code":"scanner_unavailable"}))
             sys.exit(0)
         if request["event"]["name"] == "input.submit" and request["event"]["native"].get("scenario") == "timeout":
-            time.sleep(2)
+            time.sleep(30)
         if request["event"]["name"] == "tool.after":
             reply["effects"] = ([{"type": "replace_result", "text": "compact"}]
                 if args.behavior == "replace" else [{"type": "observe", "reason_code": "after_recorded"}])

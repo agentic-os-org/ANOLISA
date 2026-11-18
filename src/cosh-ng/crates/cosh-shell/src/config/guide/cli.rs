@@ -5,20 +5,32 @@ use std::path::PathBuf;
 use super::{Error, GuideStore, RuntimeState, SetGuideError};
 use crate::config::{
     detect_language_from_env, load::copilot_shell_cosh_dir, parse_language_setting, private_state,
-    resolve_language_setting,
+    read_guidance_language, resolve_language_setting,
 };
 use crate::i18n::{I18n, MessageId};
 
-struct UserPaths {
-    cosh_dir: Option<PathBuf>,
-    runtime_base: Option<PathBuf>,
+#[derive(Clone)]
+pub(crate) struct UserPaths {
+    pub(crate) cosh_dir: Option<PathBuf>,
+    pub(crate) runtime_base: Option<PathBuf>,
+}
+
+impl UserPaths {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            cosh_dir: copilot_shell_cosh_dir(),
+            runtime_base: std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        }
+    }
 }
 
 #[derive(Debug)]
-struct CommandOutput {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
+pub(crate) struct CommandOutput {
+    pub(crate) exit_code: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 impl CommandOutput {
@@ -30,12 +42,30 @@ impl CommandOutput {
         }
     }
 
+    fn text(stdout: String) -> Self {
+        Self {
+            exit_code: 0,
+            stdout,
+            stderr: String::new(),
+        }
+    }
+
     fn error(exit_code: i32, message: String) -> Self {
         Self {
             exit_code,
             stdout: String::new(),
             stderr: format!("{message}\n"),
         }
+    }
+
+    /// First feedback line: the saved result, or the failure reason.
+    pub(crate) fn summary(&self) -> String {
+        let text = if self.exit_code == 0 {
+            &self.stdout
+        } else {
+            &self.stderr
+        };
+        text.lines().next().unwrap_or_default().to_string()
     }
 }
 
@@ -45,18 +75,18 @@ enum Action {
 }
 
 pub(crate) fn run_cli(args: &[OsString]) -> i32 {
-    let paths = UserPaths {
-        cosh_dir: copilot_shell_cosh_dir(),
-        runtime_base: std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from),
+    let paths = UserPaths::from_env();
+    let language = if parse_action(args).is_some() {
+        std::env::var("COSH_SHELL_LANG")
+            .ok()
+            .and_then(|value| parse_language_setting(&value))
+            .map(resolve_language_setting)
+            .unwrap_or_else(detect_language_from_env)
+    } else {
+        read_guidance_language().unwrap_or_else(|_| detect_language_from_env())
     };
-    let language = std::env::var("COSH_SHELL_LANG")
-        .ok()
-        .and_then(|value| parse_language_setting(&value))
-        .map(resolve_language_setting)
-        .unwrap_or_else(detect_language_from_env);
-    let output = run_with_paths(args, &paths, I18n::new(language));
+    let i18n = I18n::new(language);
+    let output = run_with_paths(args, &paths, i18n);
     if std::io::stdout()
         .write_all(output.stdout.as_bytes())
         .is_err()
@@ -79,9 +109,12 @@ fn parse_action(args: &[OsString]) -> Option<Action> {
     }
 }
 
-fn run_with_paths(args: &[OsString], paths: &UserPaths, i18n: I18n) -> CommandOutput {
-    if args.is_empty() || matches!(args, [leaf] if matches!(leaf.to_str(), Some("--help" | "-h"))) {
-        return CommandOutput::ok(vec![i18n.t(MessageId::GuideUsage).to_string()]);
+pub(super) fn run_with_paths(args: &[OsString], paths: &UserPaths, i18n: I18n) -> CommandOutput {
+    if args.is_empty() || matches!(args, [leaf] if leaf == "--plain") {
+        return CommandOutput::text(super::wizard::plain_text(i18n));
+    }
+    if matches!(args, [leaf] if matches!(leaf.to_str(), Some("--help" | "-h"))) {
+        return CommandOutput::text(super::wizard::usage_text(i18n));
     }
     let Some(action) = parse_action(args) else {
         return CommandOutput::error(2, i18n.t(MessageId::GuideUsage).to_string());
@@ -108,7 +141,12 @@ fn run_with_paths(args: &[OsString], paths: &UserPaths, i18n: I18n) -> CommandOu
     }
 }
 
-fn set(store: &GuideStore, paths: &UserPaths, enabled: bool, i18n: I18n) -> CommandOutput {
+pub(crate) fn set(
+    store: &GuideStore,
+    paths: &UserPaths,
+    enabled: bool,
+    i18n: I18n,
+) -> CommandOutput {
     let runtime = paths
         .runtime_base
         .as_deref()
@@ -236,7 +274,7 @@ fn state_error(i18n: I18n, id: MessageId, error: &Error) -> CommandOutput {
     CommandOutput::error(1, i18n.format(id, &[("error", &error_reason(i18n, error))]))
 }
 
-fn error_reason(i18n: I18n, error: &Error) -> String {
+pub(crate) fn error_reason(i18n: I18n, error: &Error) -> String {
     let id = match error {
         Error::State(private_state::Error::Io(std::io::ErrorKind::PermissionDenied)) => {
             MessageId::HealthUnavailablePermissionDenied

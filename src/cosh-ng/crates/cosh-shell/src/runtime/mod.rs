@@ -16,7 +16,9 @@ pub(crate) mod evidence_requests;
 #[allow(clippy::field_reassign_with_default)]
 mod evidence_requests_tests;
 pub(crate) mod evidence_state;
+pub(crate) mod guide;
 pub(crate) mod health_banner;
+pub(crate) mod help;
 pub(crate) mod hooks;
 pub(crate) mod insight;
 pub(crate) mod invocation;

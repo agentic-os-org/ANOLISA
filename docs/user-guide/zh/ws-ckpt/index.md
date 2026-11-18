@@ -94,9 +94,9 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | 命令 | 说明 |
 |------|------|
 | `ws-ckpt init -w <workspace>` | 初始化工作区 |
-| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | 创建新检查点 |
-| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | 回滚到指定检查点 |
-| `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | 回滚 N 个祖先版本 |
+| `ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]` | 创建新检查点。省略 `-s` 时自动生成快照 ID。 |
+| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview] [--json]` | 回滚到指定检查点，可选 JSON 输出 |
+| `ws-ckpt rollback -w <workspace> -n <num-ancestors> [--json]` | 回滚 N 个祖先版本 |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | 列出检查点；默认自动翻页 |
 | `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | 显示文件变化；省略 `-t` 时与当前工作区比较 |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
@@ -169,12 +169,43 @@ ws-ckpt rollback -w /home/user/projects/my-project -s snap-001
 # 预览回滚（不实际执行）
 ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview
 
+# 以 JSON 格式预览回滚
+ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview --json
+
 # 清理旧检查点，保留最近 20 个
 ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 
 # 为工作区启用自动清理
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### 回滚的 JSON 输出
+
+`ws-ckpt rollback --json` 向 stdout 输出一个 JSON 对象。只有传入
+`--preview` 才会预览回滚效果。成功回滚时返回工作区 ID 和实际恢复到的完整快照 ID。
+
+```json
+{
+  "elapsed_secs": 0.012,
+  "schema": "ws-ckpt.rollback.v1",
+  "snapshot_id": "snap-001",
+  "status": "succeeded",
+  "workspace": "ws-abc123"
+}
+```
+
+传入 `--preview` 时，结果含 `status: "preview"`、`snapshot_id` 和文件级
+`changes`。执行失败时退出码非零，JSON 区分确定未执行（`known_no_effect`）
+和结果未知（`unknown`），并返回 `code` 和 `message`。
+
+集成需要在执行前确认完整快照和预览内容时，使用 `rollback --guarded --json`。
+传入 `--check -w <registered_path>` 可检查该工作区的守护进程兼容性，成功时返回
+`status: "compatible"`。guarded 模式的 `--preview` 接受工作区注册路径和完整快照
+ID，另外返回 `ws_id`、`registered_path`、`generation` 和 `diff_digest`。
+执行 guarded 回滚时，从 stdin 的 JSON 对象读取 `ws_id`、`generation`、
+`diff_digest`、`operation_id` 和 `operation_digest`。传入 `--result -w <ws_id>`
+和同一份 stdin JSON 即可查询持久化结果。结果含 `status: "result"` 和
+`evidence`，后者可能为 `null`。
 
 ### cleanup 中断后的快照恢复
 

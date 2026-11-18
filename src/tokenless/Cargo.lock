@@ -2020,6 +2020,7 @@ dependencies = [
  "csv",
  "html5ever",
  "indexmap",
+ "regex",
  "serde_json",
  "thiserror 2.0.18",
  "tokenless-ccr",

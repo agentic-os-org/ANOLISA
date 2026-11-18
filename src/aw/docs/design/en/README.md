@@ -9,6 +9,18 @@ file-transaction store; `aw-exec` owns runtime file leases. Distribution Make
 targets and scripts build release artifacts. Independently installed Providers
 connect through the process protocol without AW package records.
 
+## Development rules by task
+
+[AGENTS.md](../../../AGENTS.md) defines the product contract and required reading.
+Read the matching rules before changing the corresponding area.
+
+| Area | Development rules |
+| --- | --- |
+| Framework, Providers and packaging | [Ownership and contracts](development/architecture.md) |
+| Agent, SDK and Hook Source integration | [Semantics, lifecycle and support evidence](development/hooks.md) |
+| Documentation and navigation | [Audiences, placement and generated support](development/documentation.md) |
+| Source layout, CI and releases | [Validation and resource lifecycle](development/validation.md) |
+
 ## Request execution
 
 | Area | Contract |
@@ -46,3 +58,5 @@ verified Journal record using retained source identity and creation time.
 [Connector](integrations/agentsight/agentsight-readonly.md) · [Evidence context](runtime/evidence-context.md) · [Integration roadmap](integrations/agentsight/agentsight-integration.md)
 
 For independent process identity, request deduplication and Ready gating, see [local service](runtime/local-service.md#independent-registration).
+
+[Application-owned SDK protocol](runtime/native-sdk.md)

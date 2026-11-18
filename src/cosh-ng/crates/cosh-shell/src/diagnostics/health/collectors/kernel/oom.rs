@@ -11,24 +11,46 @@ pub(super) fn oom_scope_label_id_from_constraint(raw: &str) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OomSignal {
     pub(super) epoch: u64,
+    pub(super) identity_epoch: u64,
+    pub(super) monotonic_ns: Option<u64>,
     pub(super) process: Option<String>,
     pub(super) pid: Option<u64>,
     pub(super) constraint: Option<String>,
     pub(super) task_cgroup: Option<String>,
     pub(super) oom_cgroup: Option<String>,
     pub(super) source_line_count: u64,
+    pub(super) has_event_anchor: bool,
     has_kill_record: bool,
 }
 
 impl OomSignal {
+    pub(super) fn event_epoch(&self) -> u64 {
+        if self.has_event_anchor {
+            self.identity_epoch
+        } else {
+            self.epoch
+        }
+    }
+
     pub(super) fn from_line(epoch: u64, line: &str) -> Self {
         let (legacy_task_cgroup, legacy_oom_cgroup) = parse_legacy_memcg_cgroups(line);
+        let event_pid = confirmed_kill_pid(line);
         Self {
             epoch,
+            identity_epoch: epoch,
+            monotonic_ns: line
+                .trim_start()
+                .strip_prefix('[')
+                .and_then(|line| line.split_once(']'))
+                .and_then(|(time, _)| time.trim().parse::<f64>().ok())
+                .filter(|time| time.is_finite() && *time >= 0.0)
+                .map(|time| (time * 1_000_000_000.0).round() as u64),
             process: parse_killed_process(line)
                 .or_else(|| parse_oom_key_value(line, "task"))
                 .or_else(|| parse_oom_key_value(line, "comm")),
-            pid: parse_killed_pid(line).or_else(|| parse_oom_key_value(line, "pid")?.parse().ok()),
+            pid: event_pid
+                .or_else(|| parse_killed_pid(line))
+                .or_else(|| parse_oom_key_value(line, "pid")?.parse().ok()),
             constraint: parse_oom_key_value(line, "constraint"),
             task_cgroup: parse_oom_key_value(line, "task_memcg")
                 .or_else(|| parse_oom_key_value(line, "task_cgroup"))
@@ -37,20 +59,71 @@ impl OomSignal {
                 .or_else(|| parse_oom_key_value(line, "oom_cgroup"))
                 .or(legacy_oom_cgroup),
             source_line_count: 1,
+            has_event_anchor: event_pid.is_some(),
             has_kill_record: line.contains("oom-kill:") || line.contains("Killed process"),
         }
     }
 
     fn merge_from(&mut self, other: OomSignal) {
         self.epoch = self.epoch.max(other.epoch);
+        if !self.has_event_anchor && other.has_event_anchor {
+            self.identity_epoch = other.identity_epoch;
+            self.monotonic_ns = other.monotonic_ns;
+        }
         self.process = self.process.take().or(other.process);
         self.pid = self.pid.or(other.pid);
         self.constraint = self.constraint.take().or(other.constraint);
         self.task_cgroup = self.task_cgroup.take().or(other.task_cgroup);
         self.oom_cgroup = self.oom_cgroup.take().or(other.oom_cgroup);
         self.source_line_count += other.source_line_count;
+        self.has_event_anchor |= other.has_event_anchor;
         self.has_kill_record |= other.has_kill_record;
     }
+}
+
+fn confirmed_kill_pid(line: &str) -> Option<u64> {
+    let line = line.trim_start();
+    let message = if let Some(rest) = line.strip_prefix('[') {
+        rest.split_once(']')?.1.trim_start()
+    } else {
+        let (timestamp, rest) = line.split_once(' ')?;
+        timestamp.parse::<f64>().ok()?;
+        let rest = rest.trim_start();
+        if let Some(message) = rest.strip_prefix("kernel:") {
+            message
+        } else {
+            rest.split_once(' ')?
+                .1
+                .trim_start()
+                .strip_prefix("kernel:")?
+        }
+    }
+    .trim_start();
+    let message = message
+        .strip_prefix("kernel:")
+        .unwrap_or(message)
+        .trim_start();
+    let message = if let Some(rest) = message.strip_prefix('[') {
+        let (caller, message) = rest.split_once(']')?;
+        let caller = caller.trim();
+        let caller_id = caller
+            .strip_prefix('T')
+            .or_else(|| caller.strip_prefix('C'))?;
+        caller_id.trim().parse::<u64>().ok()?;
+        message.trim_start()
+    } else {
+        message
+    };
+    let message = message
+        .strip_prefix("Out of memory: ")
+        .or_else(|| message.strip_prefix("Memory cgroup out of memory: "))
+        .unwrap_or(message);
+    message
+        .strip_prefix("Killed process ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub(super) fn merge_oom_signal(events: &mut Vec<OomSignal>, signal: OomSignal, starts_event: bool) {
@@ -106,7 +179,7 @@ pub(super) fn count_oom_events(
 ) -> u64 {
     events
         .iter()
-        .filter(|event| now_epoch_seconds.saturating_sub(event.epoch) <= window_seconds)
+        .filter(|event| now_epoch_seconds.saturating_sub(event.event_epoch()) <= window_seconds)
         .count() as u64
 }
 

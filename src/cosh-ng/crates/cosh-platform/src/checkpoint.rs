@@ -2209,14 +2209,18 @@ mod tests {
             command.uid(65_534);
         }
         let mut daemon = command.spawn().unwrap();
+        let socket_ready = || {
+            fs::metadata(&socket_path)
+                .is_ok_and(|metadata| metadata.permissions().mode() & 0o777 == 0o666)
+        };
         for _ in 0..100 {
-            if socket_path.exists() {
+            if socket_ready() {
                 break;
             }
             assert!(daemon.try_wait().unwrap().is_none());
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(socket_path.exists());
+        assert!(socket_ready());
 
         let trusted_owner = if test_uid == 0 {
             0
@@ -2241,7 +2245,8 @@ mod tests {
         let Ok(socket_path) = std::env::var("COSH_TEST_UNTRUSTED_PEER_SOCKET") else {
             return;
         };
-        let listener = UnixListener::bind(socket_path).unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666)).unwrap();
         let (mut stream, _) = listener.accept().unwrap();
         let mut byte = [0_u8; 1];
         assert_eq!(stream.read(&mut byte).unwrap(), 0);

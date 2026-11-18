@@ -29,10 +29,13 @@ mod hooks;
 mod input;
 mod invocations;
 mod limits;
+mod maintenance;
 mod policy;
 pub(crate) mod process;
 mod registration;
 mod scopes;
+mod sdk;
+mod sdk_control;
 mod submissions;
 
 use crate::MAX_STEPS_PER_BINDING as MAX_STEPS;
@@ -92,6 +95,7 @@ pub(crate) struct Runtime {
     calls: AtomicU64,
     contexts: evidence::Contexts,
     owners: Mutex<BTreeMap<String, scopes::Owner>>,
+    sdk_controls: sdk_control::Registry,
     registrations: Mutex<BTreeMap<String, Arc<registration::Record>>>,
 }
 
@@ -128,6 +132,7 @@ impl Runtime {
             resources: limits::Resources::default(),
             owners: Mutex::new(BTreeMap::new()),
             registrations: Mutex::new(BTreeMap::new()),
+            sdk_controls: sdk_control::Registry::default(),
             identity: Identity {
                 generation,
                 config_revision: revision,

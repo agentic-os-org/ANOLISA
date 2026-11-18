@@ -6,6 +6,516 @@ use ratatui::text::Span;
 use std::time::Instant;
 
 #[test]
+fn installed_cosh_help_is_readonly_localized_and_independent_of_shell() {
+    for (name, saved, override_language, expected) in [
+        ("empty", None, None, "Launch options"),
+        ("saved", Some("zh-CN"), None, "启动选项"),
+        ("override", Some("zh-CN"), Some("en-US"), "Launch options"),
+        ("unsafe", None, None, "Launch options"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let config_dir = home.join(".copilot-shell");
+        let config_path = config_dir.join("config.toml");
+        let original = saved.map(|language| format!("[ui]\nlanguage = \"{language}\"\n"));
+        if let Some(content) = &original {
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(&config_path, content).unwrap();
+        } else if name == "unsafe" {
+            fs::create_dir_all(&config_dir).unwrap();
+            nix::unistd::mkfifo(
+                &config_path,
+                nix::sys::stat::Mode::from_bits_truncate(0o600),
+            )
+            .unwrap();
+        }
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+        command
+            .arg0("cosh")
+            .arg("--help")
+            .env_clear()
+            .env("HOME", &home)
+            .env("LANG", "en_US.UTF-8")
+            .env("TERM", "dumb")
+            .env(
+                "COSH_SHELL_DEFAULT_SHELL",
+                root.path().join("missing-shell"),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(language) = override_language {
+            command.env("COSH_SHELL_LANG", language);
+        }
+        let child = command.spawn().unwrap();
+        let output = crate::support::raw_cli::wait_for_raw_cli_output(child);
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert!(output.stderr.is_empty(), "{name}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        for entry in [expected, "Usage: cosh", "--ask", "cosh guide", "/help"] {
+            assert!(text.contains(entry), "{name}: missing {entry}: {text}");
+        }
+        for internal in ["\x1b", "interactive-demo", "--__", "host-demo"] {
+            assert!(!text.contains(internal), "{name}: {text}");
+        }
+        if let Some(content) = original {
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), content);
+        }
+        if name == "empty" {
+            assert!(!home.exists(), "help created user state");
+        } else {
+            assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(&config_dir).unwrap().count(), 1);
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn interactive_guide_initializes_private_diagnostic_log() {
+    verify_guide_exit(None);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn guide_sigterm_restores_the_terminal_and_screen() {
+    verify_guide_exit(Some(nix::libc::SIGTERM));
+}
+
+/// H02/H04: opening AI management from the wizard must never fall back to a
+/// working shell, even when the configured core cannot be trusted.
+#[test]
+#[cfg(target_os = "linux")]
+fn guide_ai_action_refuses_an_untrusted_core_without_starting_a_shell() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let sentinel = root.path().join("core-executed");
+    let fake_core = root.path().join("cosh-core");
+    fs::write(
+        &fake_core,
+        format!("#!/bin/sh\ntouch {}\nexec /bin/sh\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_core, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let size = nix::libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut master = fs::File::from(pty.master);
+    let slave = fs::File::from(pty.slave);
+    let flags = unsafe { nix::libc::fcntl(master.as_raw_fd(), nix::libc::F_GETFL) };
+    assert_eq!(
+        unsafe {
+            nix::libc::fcntl(
+                master.as_raw_fd(),
+                nix::libc::F_SETFL,
+                flags | nix::libc::O_NONBLOCK,
+            )
+        },
+        0
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+    command
+        .arg0("cosh")
+        .arg("guide")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.path())
+        .env("TERM", "xterm-256color")
+        .env("COSH_SHELL_LANG", "en-US")
+        .env("COSH_CORE_PATH", &fake_core)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() < 0
+                || nix::libc::ioctl(nix::libc::STDIN_FILENO, nix::libc::TIOCSCTTY as _, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    drop(slave);
+
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    // Ratatui paints cells in fragments, so assertions read a rendered screen
+    // rather than looking for contiguous text in the raw byte stream.
+    let mut terminal = vt100::Parser::new(24, 80, 0);
+    assert!(
+        pump_until(
+            &mut master,
+            &mut buffer,
+            &mut raw,
+            &mut terminal,
+            "Cosh setup and getting started",
+            20
+        ),
+        "wizard did not start: {}",
+        String::from_utf8_lossy(&raw)
+    );
+    // Home opens on the quick guide; two steps down reach AI service, open it,
+    // then pick the management row (the first row only shows how to ask).
+    master.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    assert!(
+        pump_until(
+            &mut master,
+            &mut buffer,
+            &mut raw,
+            &mut terminal,
+            "Manage AI services",
+            10
+        ),
+        "AI page not reached:\n{}",
+        terminal.screen().contents()
+    );
+    master.write_all(b"\x1b[B\r").unwrap();
+    let refused = pump_until(
+        &mut master,
+        &mut buffer,
+        &mut raw,
+        &mut terminal,
+        "failed the identity check",
+        15,
+    );
+    let descendants = linux_descendant_programs(child.id());
+    let _ = master.write_all(b"\x1b\x1b");
+    let exit_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut status = None;
+    while std::time::Instant::now() < exit_deadline {
+        if let Ok(count) = master.read(&mut buffer) {
+            raw.extend_from_slice(&buffer[..count]);
+        }
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    let output = String::from_utf8_lossy(&raw).to_string();
+    assert!(refused, "untrusted core was not refused:\n{output}");
+    assert!(
+        !sentinel.exists(),
+        "the wizard executed an untrusted core override"
+    );
+    assert!(
+        !descendants
+            .iter()
+            .any(|program| matches!(program.as_str(), "bash" | "zsh" | "sh" | "cosh")),
+        "wizard started a working shell: {descendants:?}"
+    );
+    assert!(status.success(), "{status}");
+}
+
+#[cfg(target_os = "linux")]
+fn pump_until(
+    master: &mut fs::File,
+    buffer: &mut [u8],
+    raw: &mut Vec<u8>,
+    terminal: &mut vt100::Parser,
+    until: &str,
+    seconds: u64,
+) -> bool {
+    use std::io::Read;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        match master.read(buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                raw.extend_from_slice(&buffer[..count]);
+                terminal.process(&buffer[..count]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+        if terminal.screen().contents().contains(until) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_descendant_programs(root_pid: u32) -> Vec<String> {
+    let mut pending = vec![root_pid];
+    let mut programs = Vec::new();
+    while let Some(pid) = pending.pop() {
+        let Ok(children) = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) else {
+            continue;
+        };
+        for token in children.split_whitespace() {
+            let Ok(child_pid) = token.parse::<u32>() else {
+                continue;
+            };
+            if let Ok(comm) = fs::read_to_string(format!("/proc/{child_pid}/comm")) {
+                programs.push(comm.trim().to_string());
+            }
+            pending.push(child_pid);
+        }
+    }
+    programs
+}
+
+#[cfg(target_os = "linux")]
+fn verify_guide_exit(signal: Option<i32>) {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::ExitStatusExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let size = nix::libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut master = fs::File::from(pty.master);
+    let slave = fs::File::from(pty.slave);
+    let original_termios = nix::sys::termios::tcgetattr(&slave).unwrap();
+    let original_flags = unsafe { nix::libc::fcntl(slave.as_raw_fd(), nix::libc::F_GETFL) };
+    assert!(original_flags >= 0);
+    let flags = unsafe { nix::libc::fcntl(master.as_raw_fd(), nix::libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe {
+            nix::libc::fcntl(
+                master.as_raw_fd(),
+                nix::libc::F_SETFL,
+                flags | nix::libc::O_NONBLOCK,
+            )
+        },
+        0
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+    command
+        .arg0("cosh")
+        .arg("guide")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.path())
+        .env("TERM", "xterm-256color")
+        .env("COSH_SHELL_LANG", "en-US")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() < 0
+                || nix::libc::ioctl(nix::libc::STDIN_FILENO, nix::libc::TIOCSCTTY as _, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        match master.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => raw.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+        if String::from_utf8_lossy(&raw).contains("Cosh setup and getting started") {
+            ready = true;
+            break;
+        }
+    }
+    if ready {
+        if let Some(signal) = signal {
+            let _ = unsafe { nix::libc::kill(child.id() as i32, signal) };
+        } else {
+            let _ = master.write_all(b"q");
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut status = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(count) = master.read(&mut buffer) {
+            raw.extend_from_slice(&buffer[..count]);
+        }
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if status.is_some() {
+        for _ in 0..32 {
+            match master.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => raw.extend_from_slice(&buffer[..count]),
+            }
+        }
+    }
+    let restored_termios = nix::sys::termios::tcgetattr(&slave).unwrap();
+    let restored_flags = unsafe { nix::libc::fcntl(slave.as_raw_fd(), nix::libc::F_GETFL) };
+    drop(master);
+    if status.is_none() {
+        let _ = child.kill();
+        assert!(
+            child
+                .wait_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_some(),
+            "guide could not be reaped after forced termination"
+        );
+    }
+    child.wait().unwrap();
+    assert!(
+        ready,
+        "guide did not become ready: {}",
+        String::from_utf8_lossy(&raw)
+    );
+    let status = status.expect("guide did not exit before the deadline");
+    if let Some(signal) = signal {
+        assert_eq!(status.signal(), Some(signal));
+    } else {
+        assert!(status.success(), "{status}");
+    }
+    assert_eq!(restored_termios, original_termios);
+    assert_eq!(restored_flags, original_flags);
+    let output = String::from_utf8_lossy(&raw);
+    let enter = output
+        .rfind("\x1b[?1049h")
+        .expect("guide did not enter the alternate screen");
+    let leave = output
+        .rfind("\x1b[?1049l")
+        .expect("guide did not leave the alternate screen");
+    let hide = output
+        .rfind("\x1b[?25l")
+        .expect("guide did not hide the cursor");
+    let show = output
+        .rfind("\x1b[?25h")
+        .expect("guide did not show the cursor");
+    assert!(leave > enter, "alternate screen was not restored");
+    assert!(show > hide, "cursor was not restored");
+    let log_dir = root.path().join(".copilot-shell/logs");
+    let log = fs::read_dir(&log_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("cosh-shell.log.")
+        })
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        log.contains("guide wizard starting"),
+        "interactive guide left no startup log: {log}"
+    );
+    assert_eq!(
+        fs::metadata(log_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[test]
+fn guide_management_uses_environment_language_while_plain_uses_saved_language() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let config_dir = home.join(".copilot-shell");
+    fs::create_dir(&config_dir).unwrap();
+    fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = config_dir.join("config.toml");
+    let saved = "[ui]\nlanguage = 'zh-CN'\n";
+    fs::write(&path, saved).unwrap();
+    for override_language in [
+        None,
+        Some("en-US"),
+        Some("zh-CN"),
+        Some("auto"),
+        Some("invalid"),
+    ] {
+        for action in ["on", "off", "status", "--plain"] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+            command
+                .arg0("cosh")
+                .args(["guide", action])
+                .env_clear()
+                .env("HOME", &home)
+                .env("LC_ALL", "en_US.UTF-8")
+                .env("TERM", "dumb")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(language) = override_language {
+                command.env("COSH_SHELL_LANG", language);
+            }
+            let output = crate::support::raw_cli::wait_for_raw_cli_output(command.spawn().unwrap());
+            assert!(
+                output.status.success(),
+                "{action}/{override_language:?}: {output:?}"
+            );
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let text = String::from_utf8(output.stdout).unwrap();
+            let chinese = override_language == Some("zh-CN")
+                || (action == "--plain" && matches!(override_language, None | Some("invalid")));
+            let expected = match (action == "--plain", chinese) {
+                (true, true) => "Cosh 配置与入门",
+                (true, false) => "Cosh setup and getting started",
+                (false, true) => "AI 使用提示",
+                (false, false) => "AI tips",
+            };
+            assert!(
+                text.starts_with(expected),
+                "{action}/{override_language:?}: {text}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        }
+    }
+}
+
+#[test]
+fn static_guide_paths_do_not_initialize_logging() {
+    for args in [vec!["guide"], vec!["guide", "--plain"]] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let output = Command::new(env!("CARGO_BIN_EXE_cosh-shell"))
+            .arg0("cosh")
+            .args(args)
+            .env_clear()
+            .env("HOME", &home)
+            .env("TERM", "dumb")
+            .env("COSH_SHELL_LANG", "en-US")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!home.exists(), "static guide created user state");
+    }
+}
+
+#[test]
 fn help_flag_writes_to_stdout_not_stderr() {
     // POSIX/GNU convention: --help output goes to stdout, not stderr.
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
@@ -443,7 +953,12 @@ fn raw_cli_startup_upgrade_policy_ai_off_blocks_probe() {
 #[cfg(target_os = "linux")]
 #[test]
 fn raw_cli_startup_upgrade_policy_ai_off_preserves_cache_and_rpm_lookup() {
-    let session = spawn_startup_upgrade_policy_fixture(Some("off"), true, true, true);
+    let mut session = spawn_startup_upgrade_policy_fixture(Some("off"), true, true, true);
+    session.wait_screen("cached upgrade notice and command are rendered", |screen| {
+        let contents = screen.contents();
+        contents.contains("Update available: cosh-ng")
+            && contents.contains("sudo dnf update cosh-ng")
+    });
     let contents = session.screen().contents();
     assert!(contents.contains("Update available: cosh-ng"), "{contents}");
     assert!(contents.contains("sudo dnf update cosh-ng"), "{contents}");
@@ -553,7 +1068,7 @@ fn spawn_with_gated_upgrade_probe_for_shell(
     let mut files = vec![("bin/anolisa", anolisa.as_str())];
     files.extend_from_slice(extra_files);
     // Wide enough that the notice panel keeps the scoped command on one row.
-    TerminalSession::spawn_for_shell_with_startup_env(
+    let mut session = TerminalSession::spawn_for_shell_with_startup_env(
         shell,
         "enhanced",
         200,
@@ -563,7 +1078,15 @@ fn spawn_with_gated_upgrade_probe_for_shell(
             ("COSH_SHELL_STARTUP_BANNER", "1"),
             ("COSH_SHELL_UPGRADE_CHECK_CACHE", "$HOME/upgrade-cache.json"),
         ],
-    )
+    );
+    session.wait_screen(
+        "startup banner before releasing the upgrade probe",
+        |screen| {
+            let contents = screen.contents();
+            contents.contains("Cosh AI Shell") && contents.contains("Help: /help")
+        },
+    );
+    session
 }
 
 #[cfg(target_os = "linux")]
@@ -636,7 +1159,13 @@ fn raw_cli_upgrade_notice_waits_until_the_next_prompt_after_a_failed_command() {
 
     // One write carries the whole line, so its submit is counted and the
     // prompt after the failure is a `CommandFailed` boundary.
-    session.send(b"sleep 1; printf 'failed-%s\\n' command; false\n");
+    session.send(
+        b"printf 'upgrade-command-%s\\n' started; sleep 1; printf 'failed-%s\\n' command; false\n",
+    );
+    session.wait_screen(
+        "command starts before completing the upgrade probe",
+        |screen| screen.contents().contains("\nupgrade-command-started"),
+    );
     release_upgrade_probe(&session);
 
     session.wait_screen("next prompt renders deferred upgrade notice", |screen| {
@@ -1033,7 +1562,7 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -1044,9 +1573,9 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
     assert!(!output.contains("Mem avail 94%"), "{output}");
     assert!(output.contains("Swap used"), "{output}");
     assert!(output.contains("Needs attention"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(first_health_prompt(&output).is_some(), "{output}");
-    assert_eq!(output.matches("Try asking:").count(), 1, "{output}");
+    assert_eq!(output.matches("Ask directly").count(), 1, "{output}");
     assert!(!output.contains("Next:"), "{output}");
     assert_inline_before_followup(&output, "╭─ Health check", "exit");
 }
@@ -1120,8 +1649,12 @@ fn review_regression_startup_fits_actual_narrow_pty_with_or_without_width_overri
         if let Some(width) = width {
             environment.push(("COSH_SHELL_WIDTH", width));
         }
-        let session =
+        let mut session =
             TerminalSession::spawn_for_shell_with_env("bash", "enhanced", 32, &environment);
+        session.wait_screen("narrow startup banner is rendered", |screen| {
+            let contents = screen.contents();
+            contents.contains("Cosh AI Shell") && contents.contains("Help: /help")
+        });
         let plain = strip_ansi_escape(&session.raw_output());
         assert!(plain.contains("Cosh AI Shell"), "{plain}");
         assert!(plain.contains("/help"), "{plain}");
@@ -1158,16 +1691,16 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("critical"), "{output}");
     assert!(output.contains("OOM"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(
-        output.contains("Check recent OOM impact on java")
-            && output.contains("event timing and memory limits"),
+        output.contains("Help me check the recent OOM impact on java")
+            && output.contains("and its memory limits"),
         "{output}"
     );
     assert!(!output.contains("CONSTRAINT_"), "{output}");
@@ -1208,7 +1741,7 @@ fn raw_cli_startup_health_degraded_fixture_is_read_only() {
 
     assert!(output.contains("Health check"), "{output}");
     assert!(output.contains("degraded"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(first_health_prompt(&output).is_some(), "{output}");
     assert!(!output.contains("[Personal]"), "{output}");
     assert!(!output.contains("Tab insert"), "{output}");
@@ -1261,7 +1794,7 @@ fn raw_cli_startup_health_healthy_fixture_renders_resource_summary_once() {
     }
     assert!(!visible.contains("Unavailable:"), "{output}");
     assert!(!visible.contains("Needs attention"), "{output}");
-    assert!(!output.contains("Try asking:"), "{output}");
+    assert!(!output.contains("Ask directly"), "{output}");
     assert_inline_before_followup(&output, "╭ Cosh AI Shell", "exit");
     assert_inline_before_followup(
         &output,
@@ -1291,7 +1824,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -1300,14 +1833,14 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
     assert!(!output.contains("Load  Load 1m"), "{output}");
     assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(first_health_prompt(&output).is_some(), "{output}");
     assert!(!output.contains("Next:"), "{output}");
     let health_block = output
         .split("Health check")
         .nth(1)
         .unwrap_or(output.as_str())
-        .split("Try asking:")
+        .split("Ask directly")
         .next()
         .unwrap_or(output.as_str());
     assert!(!health_block.contains("\x1b["), "{output}");
@@ -1341,7 +1874,7 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
     assert!(!output.contains("Load  Load 1m"), "{output}");
     assert!(output.contains("Memory  used"), "{output}");
     assert!(!output.contains("Mem avail 94%"), "{output}");
-    assert!(!output.contains("Try asking:"), "{output}");
+    assert!(!output.contains("Ask directly"), "{output}");
     assert!(!output.contains("Shift+Tab cycle"), "{output}");
     assert!(!output.contains("▕"), "{output}");
     assert!(!output.contains("Next:"), "{output}");
@@ -1355,9 +1888,11 @@ fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
     let cwd = private_startup_health_home("startup-health-suppressed-try");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
+    let home = cwd.to_string_lossy().into_owned();
     let env = [
         ("COSH_SHELL_STARTUP_BANNER", "1"),
         ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-warning"),
+        ("HOME", home.as_str()),
         (
             "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
             suppression_store.as_str(),
@@ -1372,9 +1907,9 @@ fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
         &[],
         &env,
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
-    assert!(first.contains("Try asking:"), "{first}");
+    assert!(first.contains("Ask directly"), "{first}");
     assert!(!first.contains("Next:"), "{first}");
 
     let second = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -1382,15 +1917,16 @@ fn raw_cli_startup_health_suppresses_only_the_visible_primary_try_item() {
         &[],
         &env,
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Health check", b"exit\n")],
     );
     assert!(second.contains("Health check"), "{second}");
     assert!(second.contains("warning"), "{second}");
-    assert_eq!(second.matches("Try asking:").count(), 1, "{second}");
     let first_prompt = first_health_prompt(&first).expect("first primary health prompt");
-    let second_prompt = first_health_prompt(&second).expect("next unsuppressed health prompt");
-    assert_ne!(first_prompt, second_prompt, "{second}");
     assert!(!second.contains(&first_prompt), "{second}");
+    assert!(
+        !second.contains("Ask directly"),
+        "displayed candidates are charged once: {second}"
+    );
     assert!(!second.contains("Next:"), "{second}");
 }
 
@@ -1438,11 +1974,11 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        &[("Try asking:", b"exit\n")],
+        &[("Ask directly", b"exit\n")],
     );
 
     assert!(shown.contains("Health check"), "{shown}");
-    assert!(shown.contains("Try asking:"), "{shown}");
+    assert!(shown.contains("Ask directly"), "{shown}");
 }
 
 #[test]
@@ -1468,14 +2004,14 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
         ],
         &cwd,
         &[
-            (" › Check memory pressure, top consumers", b"\t\n"),
+            (" › Help me check memory pressure, top consumers", b"\t\n"),
             ("Received shell prompt request", b"exit\n"),
         ],
     );
 
-    assert!(output.contains("Try asking:"), "{output}");
+    assert!(output.contains("Ask directly"), "{output}");
     assert!(
-        output.contains("Check memory pressure, top consumers"),
+        output.contains("Help me check memory pressure, top consumers"),
         "{output}"
     );
     let first_prompt = first_health_prompt(&output).expect("first health prompt");
@@ -1554,26 +2090,24 @@ fn raw_cli_startup_health_shift_tab_cycles_then_enter_submits_active_prompt() {
         ],
         &cwd,
         &[
-            (" › Check memory pressure, top consumers", b"\x1b[Z"),
+            (" › Help me check memory pressure, top consumers", b"\x1b[Z"),
+            ("Help me check swap pressure and available memory", b"\n"),
             (
-                " › Check whether swap pressure is active, available memory and related processes",
-                b"\n",
-            ),
-            (
-                "Received shell prompt request: Check whether swap pressure is active",
+                "Received shell prompt request: Help me check swap pressure",
                 b"exit\n",
             ),
         ],
     );
 
-    assert_eq!(output.matches("Try asking:").count(), 1, "{output}");
+    assert_eq!(output.matches("Ask directly").count(), 1, "{output}");
     assert!(
-        output.contains("\x1b[2m › Check whether swap pressure"),
+        output.contains("\x1b[2m › ")
+            && output.contains("Help me check swap pressure and available memory"),
         "{output}"
     );
     assert!(
         compact_without_box_chars(&output).contains(
-            "Received shell prompt request: Check whether swap pressure is active, available memory and related processes"
+            "Received shell prompt request: Help me check swap pressure and available memory"
         ),
         "{output}"
     );
@@ -1617,7 +2151,7 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
             &[("Health check:", b"\t\nexit\n")]
         } else {
             &[
-                (" › Check memory pressure, top consumers", b"\t\n"),
+                (" › Help me check memory pressure, top consumers", b"\t\n"),
                 ("Received shell prompt request:", b"exit\n"),
             ]
         };
@@ -1625,14 +2159,14 @@ fn raw_cli_startup_health_prompt_selection_respects_terminal_capability_not_colo
             run_raw_cli_with_args_env_current_dir_and_marker_input("fake", &[], &env, &cwd, steps);
 
         if name == "dumb" {
-            assert!(!output.contains("Try asking:"), "{name}\n{output}");
+            assert!(!output.contains("Ask directly"), "{name}\n{output}");
             assert!(first_health_prompt(&output).is_none(), "{name}\n{output}");
             assert!(
                 !output.contains("Received shell prompt request:"),
                 "{name}\n{output}"
             );
         } else {
-            assert!(output.contains("Try asking:"), "{name}\n{output}");
+            assert!(output.contains("Ask directly"), "{name}\n{output}");
             assert!(first_health_prompt(&output).is_some(), "{name}\n{output}");
             assert!(
                 output.contains("Received shell prompt request:"),
@@ -2087,11 +2621,17 @@ fn first_health_prompt(output: &str) -> Option<String> {
     let plain = strip_ansi_escape(output);
     let mut lines = plain
         .lines()
-        .skip_while(|line| line.trim() != "Try asking:");
+        .skip_while(|line| !line.contains("Ask directly"));
     lines.next()?;
-    lines
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_string())
+    let row = lines.find(|line| !line.trim().is_empty())?.trim();
+    let unmarked = row.strip_prefix('›').unwrap_or(row).trim_start();
+    Some(
+        match unmarked.split_once(". ") {
+            Some((number, question)) if number.chars().all(|ch| ch.is_ascii_digit()) => question,
+            _ => unmarked,
+        }
+        .to_string(),
+    )
 }
 
 fn compact_without_box_chars(output: &str) -> String {
@@ -2204,10 +2744,53 @@ fn raw_cli_startup_health_unusable_history_keeps_facts_without_inviting() {
             &[("Health check", b"exit\n")],
         );
         assert!(output.contains("Health check"), "{kind}: {output}");
-        assert!(!output.contains("Try asking:"), "{kind}: {output}");
+        assert!(!output.contains("Ask directly"), "{kind}: {output}");
         if let Some(before) = before {
             assert_eq!(fs::read(&history).unwrap(), before);
         }
         fs::remove_dir_all(&home).unwrap();
     }
+}
+
+#[test]
+fn raw_cli_startup_banner_blank_line_above_logo_and_single_below_health() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-healthy"),
+            ("NO_COLOR", "1"),
+        ],
+    );
+    assert!(output.contains("Health check"), "{output}");
+    let lines: Vec<&str> = output.split('\n').collect();
+    let logo = lines
+        .iter()
+        .position(|line| line.contains("██████╗"))
+        .expect("startup logo");
+    assert!(logo > 0, "logo must not be the first line: {output}");
+    assert!(
+        !lines[logo].contains("\x1b[2K"),
+        "logo shares the cleared prompt line, no blank line above: {output}"
+    );
+    assert!(
+        lines[logo - 1].contains("\x1b[2K"),
+        "expected a cleared blank line above the logo: {output}"
+    );
+    let bottom = lines
+        .iter()
+        .rposition(|line| line.contains('╰') && line.contains('╯'))
+        .expect("health panel bottom border");
+    let blanks = lines[bottom + 1..]
+        .iter()
+        .take_while(|line| line.trim_matches('\r').is_empty())
+        .count();
+    assert_eq!(
+        blanks, 1,
+        "exactly one blank line below the health panel: {output}"
+    );
 }

@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::cosh_core::CoshCoreAdapter;
 use super::cosh_core_registry::{
-    extension_mutation_requires_reload, registry_timeout, RegistryQueryError,
+    extension_mutation_requires_reload, guard_auth_params, registry_timeout, RegistryQueryError,
     AUTH_CONFIGURE_TIMEOUT, REGISTRY_MUTATION_TIMEOUT, REGISTRY_READ_TIMEOUT,
 };
 
@@ -293,4 +293,35 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     let _ = std::fs::remove_file(&script);
     let error = format!("{:?}", result.unwrap_err());
     assert!(error.contains("provider_updated: true"), "{error}");
+}
+
+#[test]
+fn guarded_trial_activation_carries_the_write_guard_for_null_params() {
+    assert_eq!(
+        guard_auth_params(Value::Null, true).unwrap(),
+        serde_json::json!({"guarded_writes": true})
+    );
+    assert_eq!(
+        guard_auth_params(serde_json::json!({"auto_use": false}), true).unwrap(),
+        serde_json::json!({"auto_use": false, "guarded_writes": true})
+    );
+}
+
+#[test]
+fn guarded_auth_writes_refuse_params_that_cannot_carry_the_guard() {
+    let error = guard_auth_params(serde_json::json!(["x"]), true)
+        .expect_err("unshaped params must not carry the guard");
+    assert!(
+        matches!(
+            error,
+            RegistryQueryError::Response { ref code, .. }
+                if code.as_deref() == Some("guarded_writes_unsupported")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn unguarded_trial_activation_keeps_null_params() {
+    assert_eq!(guard_auth_params(Value::Null, false).unwrap(), Value::Null);
 }

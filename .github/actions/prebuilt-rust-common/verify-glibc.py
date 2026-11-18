@@ -9,7 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 GLIBC_RE = re.compile(r"\bGLIBC_(\d+)\.(\d+)(?:\.(\d+))?\b")
 MACHINES = {
     "x86_64": "Advanced Micro Devices X86-64",
@@ -100,8 +99,14 @@ def main() -> int:
         tuple(int(item) for item in match.groups(default="0"))
         for match in GLIBC_RE.finditer(symbols)
     }
+    # The linker records DT_RELR support as an ABI name, not a numeric version.
+    # This relocation format first became available in glibc 2.36.
+    if re.search(r"\bGLIBC_ABI_DT_RELR\b", symbols):
+        required.add((2, 36, 0))
     if not required:
-        print(f"ERROR: no GLIBC symbol versions found in {args.binary}", file=sys.stderr)
+        print(
+            f"ERROR: no GLIBC symbol versions found in {args.binary}", file=sys.stderr
+        )
         return 1
     maximum = max(required)
     padded_limit = args.maximum + (0,) * (len(maximum) - len(args.maximum))

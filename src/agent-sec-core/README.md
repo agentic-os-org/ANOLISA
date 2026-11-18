@@ -628,8 +628,13 @@ Details: [Observability User Guide](../../docs/user-guide/en/agent-sec-core/inde
 
 ## Security Events
 
-Security events are written both as JSONL and into a SQLite store. Query the store
-with `agent-sec-cli events`:
+Security events are written both as JSONL and into a SQLite store.
+
+If a JSONL file ends without a newline after an interrupted append, the writer
+preserves those bytes and separates the next record with a newline. It does not
+repair malformed records; the independent SQLite store is unchanged.
+
+Query the store with `agent-sec-cli events`.
 
 V2 queries use the UDS peer UID: ordinary users read their own events and root reads
 all UIDs. Filter with the original session ID; root receives matching events from all UIDs.

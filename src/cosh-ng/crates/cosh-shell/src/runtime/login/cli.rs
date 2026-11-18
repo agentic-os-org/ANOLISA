@@ -86,10 +86,23 @@ pub(crate) fn run_cli(args: &[OsString]) -> i32 {
     }
 }
 
-fn run(options: Options, i18n: I18n) -> Result<i32> {
+pub(super) fn run(options: Options, i18n: I18n) -> Result<i32> {
+    run_with_output(options, i18n, false)
+}
+
+pub(super) fn run_quiet(options: Options, i18n: I18n) -> Result<i32> {
+    if !options.yes || options.expected_uid.is_none() || unsafe { nix::libc::geteuid() } != 0 {
+        return Err(Error::new(i18n.t(MessageId::LoginIdentityMismatch)));
+    }
+    run_with_output(options, i18n, true)
+}
+
+fn run_with_output(options: Options, i18n: I18n, quiet: bool) -> Result<i32> {
     if options.action == Action::Status {
         let snapshot = super::query_status(options.user.as_deref()).map_err(Error::new)?;
-        println!("{}", status_text(&snapshot, i18n));
+        if !quiet {
+            println!("{}", status_text(&snapshot, i18n));
+        }
         return Ok(i32::from(snapshot.conflict));
     }
     let euid = unsafe { nix::libc::geteuid() };
@@ -119,7 +132,7 @@ fn run(options: Options, i18n: I18n) -> Result<i32> {
     } else {
         bash
     };
-    if options.expected_uid.is_none() {
+    if !quiet && options.expected_uid.is_none() {
         println!(
             "{}",
             i18n.format(
@@ -172,7 +185,9 @@ fn run(options: Options, i18n: I18n) -> Result<i32> {
         if !status.success() {
             return Err(administrator_command(&account.name, options.action, i18n));
         }
-        println!("{}", i18n.t(MessageId::LoginChangeComplete));
+        if !quiet {
+            println!("{}", i18n.t(MessageId::LoginChangeComplete));
+        }
         return Ok(0);
     }
     let native_lease = if options.action == Action::Set {
@@ -197,7 +212,7 @@ fn run(options: Options, i18n: I18n) -> Result<i32> {
         || account::lookup(Some(&name), euid),
         |target, lock| super::editor::change_shell(&account, target, native_lease.as_ref(), lock),
     )?;
-    if options.expected_uid.is_none() {
+    if !quiet && options.expected_uid.is_none() {
         println!(
             "{}",
             i18n.format(

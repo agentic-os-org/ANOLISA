@@ -10,7 +10,7 @@ use crate::runtime::state::InlineState;
 
 use super::capture::auth_capture_id;
 use super::delete_confirm::render_delete_confirmation;
-use super::menu::{existing_provider_label, management_options};
+use super::menu::{existing_provider_label, hosted_options};
 use super::provider_display::provider_option;
 use super::provider_management::provider_action_options;
 use super::runtime::AuthPhase;
@@ -28,11 +28,26 @@ pub(super) fn render_current_auth_panel<W: Write>(
 
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let options = management_options(&auth.sysom, &auth.existing_providers);
+            let options = hosted_options(
+                state.auth.host,
+                &auth.sysom,
+                &auth.existing_providers,
+                state.i18n(),
+            );
 
+            let mut question =
+                "\u{1f511} Provider Management \u{2014} Select your AI provider:".to_string();
+            if !state.auth.blocked_writes.is_empty() {
+                question = format!(
+                    "{}\n{question}",
+                    state
+                        .i18n()
+                        .t(crate::i18n::MessageId::GuideWizardAiWritesHeld)
+                );
+            }
             let model = QuestionPanelModel {
                 id: &panel_id,
-                question: "\u{1f511} Provider Management \u{2014} Select your AI provider:",
+                question: &question,
                 options: &options,
                 selected_option: auth.selected_provider,
                 selected_options: &[],

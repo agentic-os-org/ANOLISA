@@ -1,0 +1,625 @@
+version: 1
+suite: guide-ai-state
+defaults:
+  execution: ci
+  adapter: cosh-core
+  shell: bash
+  shell_mode: isolated
+  approval_mode: auto
+  analysis_mode: smart
+  render: terminal
+  real_provider: false
+  terminal_cols: 100
+  terminal_rows: 42
+  timeout_ms: 180000
+cases:
+  - id: GUIDE-AI-NARROW-EN
+    title: English 40x16 home labels remain identifiable in the settled frame
+    tags: [shell, guide, ai-state, issue-10166, ecs-real, narrow, visual]
+    terminal_cols: 40
+    terminal_rows: 16
+    command: [env, TERM=xterm-256color, LANG=C.UTF-8, COSH_SHELL_LANG=en-US, /usr/bin/cosh, guide]
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {id: narrow-home, type: wait_quiet, quiet_ms: 2500, timeout_ms: 30000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {id: narrow-ai-page, type: wait_quiet, quiet_ms: 800, timeout_ms: 15000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["AI service", "See how to ask"]
+      not_contains: ["Not configured", "Terminal too small"]
+    evidence:
+      points:
+        - {id: narrow-home, trigger_event: narrow-home, layout_sensitive: true, required_types: [screenshot]}
+        - {id: narrow-ai-page, trigger_event: narrow-ai-page, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-NARROW-ZH
+    title: Chinese 40x16 home labels remain identifiable in the settled frame
+    tags: [shell, guide, ai-state, issue-10166, ecs-real, narrow, visual]
+    terminal_cols: 40
+    terminal_rows: 16
+    command: [env, TERM=xterm-256color, LANG=C.UTF-8, COSH_SHELL_LANG=zh-CN, /usr/bin/cosh, guide]
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {id: narrow-home, type: wait_quiet, quiet_ms: 2500, timeout_ms: 30000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_quiet, quiet_ms: 1200, timeout_ms: 45000}
+      - {id: narrow-ai-page, type: wait_quiet, quiet_ms: 800, timeout_ms: 15000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["AI 服务", "查看提问方式"]
+      not_contains: ["未配置", "终端过小"]
+    evidence:
+      points:
+        - {id: narrow-home, trigger_event: narrow-home, layout_sensitive: true, required_types: [screenshot]}
+        - {id: narrow-ai-page, trigger_event: narrow-ai-page, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-STATE-ZH
+    title: Zero-config ECS guide shows the auto access path instead of unconfigured (zh)
+    tags: [shell, guide, ai-state, issue-10166, ecs-real]
+    command:
+      - env
+      - TERM=xterm-256color
+      - LANG=C.UTF-8
+      - COSH_SHELL_LANG=zh-CN
+      - /usr/bin/cosh
+      - guide
+    input:
+      - type: wait_for
+        text: "Enter"
+        timeout_ms: 30000
+      - id: home-settled
+        type: wait_quiet
+        quiet_ms: 2500
+        timeout_ms: 30000
+      - type: bytes
+        hex: "1b5b421b5b42"
+      - type: key
+        name: enter
+      - type: wait_quiet
+        quiet_ms: 1200
+        timeout_ms: 45000
+      - id: ai-page-settled
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 15000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 10000
+      - type: bytes
+        text: "q"
+    expect:
+      status: 0
+      contains:
+        - "当前 AI"
+        - "零配置自动使用：开启"
+        - "免配置自动接入，可直接提问"
+      not_contains:
+        - "未配置"
+        - "待确认"
+    evidence:
+      points:
+        - id: home-settled
+          trigger_event: home-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ai-page-settled
+          trigger_event: ai-page-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: GUIDE-AI-STATE-EN
+    title: Zero-config ECS guide shows the auto access path instead of unconfigured (en)
+    tags: [shell, guide, ai-state, issue-10166, ecs-real]
+    command:
+      - env
+      - TERM=xterm-256color
+      - LANG=C.UTF-8
+      - COSH_SHELL_LANG=en-US
+      - /usr/bin/cosh
+      - guide
+    input:
+      - type: wait_for
+        text: "Enter"
+        timeout_ms: 30000
+      - id: home-settled
+        type: wait_quiet
+        quiet_ms: 2500
+        timeout_ms: 30000
+      - type: bytes
+        hex: "1b5b421b5b42"
+      - type: key
+        name: enter
+      - type: wait_for
+        text: "See how to ask"
+        timeout_ms: 45000
+      - id: ai-page-settled
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 15000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 10000
+      - type: bytes
+        text: "q"
+    expect:
+      status: 0
+      contains:
+        - "AI service"
+        - "Zero-config auto use"
+        - "Zero-config automatic access; ask directly"
+      not_contains:
+        - "Not configured"
+        - "unconfirmed"
+    evidence:
+      points:
+        - id: home-settled
+          trigger_event: home-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ai-page-settled
+          trigger_event: ai-page-settled
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: GUIDE-AI-FIRST-ASK-ZH
+    title: First user-initiated ask completes via ECS trial without manual configuration
+    tags: [shell, guide, ai-state, issue-10166, ecs-real, scripted-pty-downgraded]
+    command:
+      - env
+      - TERM=xterm-256color
+      - LANG=C.UTF-8
+      - COSH_SHELL_LANG=zh-CN
+      - "PS1=GUIDEQA$ "
+      - bash
+      - --login
+      - -i
+    input:
+      - type: wait_for
+        text: "GUIDEQA$ "
+        timeout_ms: 30000
+      - type: line
+        text: "cosh --ask '请只回复 PONGOK10166 这个词，不要执行任何命令。'; printf 'RETURN_PARENT_BASH\\n'"
+      - type: wait_for
+        text: "╭ Agent"
+        timeout_ms: 90000
+      - id: actual-answer
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 15000
+      - type: line
+        text: "exit"
+      - type: wait_for
+        text: "RETURN_PARENT_BASH"
+        timeout_ms: 30000
+        occurrence: "+1"
+      - id: returned-parent
+        type: wait_quiet
+        quiet_ms: 300
+        timeout_ms: 10000
+      - type: line
+        text: "exit 0"
+    expect:
+      status: 0
+      contains:
+        - "PONGOK10166"
+        - "RETURN_PARENT_BASH"
+      not_contains:
+        - "等待开通"
+        - "Waiting for activation"
+        - "No model configured"
+        - "ModelNotConfigured"
+        - "EcsTrialDisabled"
+    evidence:
+      points:
+        - id: actual-answer
+          trigger_event: actual-answer
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: returned-parent
+          trigger_event: returned-parent
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: GUIDE-PRIMARY-ASK-ZH
+    title: The default guide choice opens the quick guide and its documented Bash command gets a real answer
+    tags: [shell, guide, ai-state, issue-10166, ecs-real, scripted-pty-downgraded]
+    command:
+      - env
+      - TERM=xterm-256color
+      - LANG=C.UTF-8
+      - COSH_SHELL_LANG=zh-CN
+      - "PS1=GUIDEQA$ "
+      - bash
+      - --login
+      - -i
+    input:
+      - type: wait_for
+        text: "GUIDEQA$ "
+        timeout_ms: 30000
+      - type: line
+        text: "cosh guide; printf 'GUIDE_RETURN_PARENT\\n'"
+      - type: wait_for
+        text: "Enter"
+        timeout_ms: 30000
+      - id: default-guide-choice
+        type: wait_quiet
+        quiet_ms: 2000
+        timeout_ms: 15000
+      - type: key
+        name: enter
+      - type: wait_for
+        text: "cosh --ask"
+        timeout_ms: 30000
+      - id: quick-guide-page
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 15000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_for
+        text: "GUIDE_RETURN_PARENT"
+        occurrence: "+1"
+        timeout_ms: 30000
+      - type: line
+        text: "cosh --ask '请把数字 66101 倒序后接在 GUIDESTART 后面，仅回复结果，不执行命令。'; printf 'GUIDE_ASK_DONE\\n'"
+      - type: wait_for
+        text: "GUIDESTART10166"
+        timeout_ms: 90000
+      - id: default-ask-answer
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: line
+        text: "exit"
+      - type: wait_for
+        text: "GUIDE_ASK_DONE"
+        occurrence: "+1"
+        timeout_ms: 30000
+      - type: line
+        text: "exit 0"
+    expect:
+      status: 0
+      contains:
+        - "快速使用指南"
+        - "磁盘不足时先检查什么？"
+        - "GUIDESTART10166"
+        - "GUIDE_RETURN_PARENT"
+      not_contains: ["等待开通", "Waiting for activation", "ModelNotConfigured", "EcsTrialDisabled"]
+    evidence:
+      points:
+        - id: default-guide-choice
+          trigger_event: default-guide-choice
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: quick-guide-page
+          trigger_event: quick-guide-page
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: default-ask-answer
+          trigger_event: default-ask-answer
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: GUIDE-AI-PAGE-ASK-EN
+    title: The primary AI page choice shows how to ask and keeps management secondary
+    tags: [shell, guide, ai-state, issue-10166, ecs-real, scripted-pty-downgraded]
+    terminal_cols: 80
+    command:
+      - env
+      - TERM=xterm-256color
+      - LANG=C.UTF-8
+      - COSH_SHELL_LANG=en-US
+      - "PS1=GUIDEQA$ "
+      - bash
+      - --login
+      - -i
+    input:
+      - type: wait_for
+        text: "GUIDEQA$ "
+        timeout_ms: 30000
+      - type: line
+        text: "cosh guide; printf 'AI_PAGE_RETURN_PARENT\\n'"
+      - type: wait_for
+        text: "Enter"
+        timeout_ms: 30000
+      - type: wait_quiet
+        quiet_ms: 2000
+        timeout_ms: 15000
+      - type: bytes
+        hex: "1b5b421b5b42"
+      - type: key
+        name: enter
+      - type: wait_for
+        text: "See how to ask"
+        timeout_ms: 45000
+      - id: ai-page-primary-choice
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: enter
+      - type: wait_for
+        text: "cosh --ask"
+        timeout_ms: 30000
+      - id: ai-how-to-page
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 15000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - type: wait_for
+        text: "AI_PAGE_RETURN_PARENT"
+        occurrence: "+1"
+        timeout_ms: 30000
+      - type: line
+        text: "cosh --ask '请把数字 66101 倒序后接在 AIPAGE 后面，仅回复结果，不执行命令。'; printf 'AI_PAGE_ASK_DONE\\n'"
+      - type: wait_for
+        text: "AIPAGE10166"
+        timeout_ms: 90000
+      - id: ai-page-answer
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: line
+        text: "exit"
+      - type: wait_for
+        text: "AI_PAGE_ASK_DONE"
+        occurrence: "+1"
+        timeout_ms: 30000
+      - type: line
+        text: "exit 0"
+    expect:
+      status: 0
+      contains:
+        - "See how to ask"
+        - "Quick start guide"
+        - "Why is my disk full?"
+        - "AIPAGE10166"
+        - "AI_PAGE_RETURN_PARENT"
+      not_contains: ["Waiting for activation", "ModelNotConfigured", "EcsTrialDisabled"]
+    evidence:
+      points:
+        - id: ai-page-primary-choice
+          trigger_event: ai-page-primary-choice
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ai-how-to-page
+          trigger_event: ai-how-to-page
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: ai-page-answer
+          trigger_event: ai-page-answer
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: GUIDE-AI-DISABLED-EN
+    title: An explicit automatic-access opt-out is distinct from missing configuration
+    tags: [shell, guide, ai-state, issue-10166, synthetic-preferences]
+    command:
+      - bash
+      - -c
+      - |
+        set -eu
+        case_home=$(mktemp -d /tmp/cosh-guide-disabled-XXXXXX)
+        trap 'rm -rf "$case_home"' EXIT
+        install -d -m 700 "$case_home/.copilot-shell/cosh"
+        state_file="$case_home/.copilot-shell/cosh/preferences.toml"
+        printf 'version = 1\n[ecs_trial]\nauto_use = false\n' > "$state_file"
+        chmod 600 "$state_file"
+        before=$(sha256sum "$state_file")
+        env TERM=xterm-256color LANG=C.UTF-8 COSH_SHELL_LANG=en-US HOME="$case_home" /usr/bin/cosh guide
+        test "$before" = "$(sha256sum "$state_file")"
+        printf '\nREADONLY_STATE_OK\n'
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {id: disabled-state, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["Automatic ECS trial use is off", "READONLY_STATE_OK"]
+      not_contains: ["Not configured", "Unable to confirm AI access right now"]
+    evidence:
+      points:
+        - {id: disabled-state, trigger_event: disabled-state, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-PREFERENCE-ERROR-EN
+    title: A corrupt preference file is shown as unknown rather than user opt-out
+    tags: [shell, guide, ai-state, issue-10166, fault-injection]
+    command:
+      - bash
+      - -c
+      - |
+        set -eu
+        case_home=$(mktemp -d /tmp/cosh-guide-broken-XXXXXX)
+        trap 'rm -rf "$case_home"' EXIT
+        install -d -m 700 "$case_home/.copilot-shell/cosh"
+        state_file="$case_home/.copilot-shell/cosh/preferences.toml"
+        printf 'broken = = preferences\n' > "$state_file"
+        chmod 600 "$state_file"
+        before=$(sha256sum "$state_file")
+        env TERM=xterm-256color LANG=C.UTF-8 COSH_SHELL_LANG=en-US HOME="$case_home" /usr/bin/cosh guide
+        test "$before" = "$(sha256sum "$state_file")"
+        printf '\nREADONLY_STATE_OK\n'
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {id: preference-error, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["Unable to confirm AI access right now", "READONLY_STATE_OK"]
+      not_contains: ["Automatic ECS trial use is off", "Not configured"]
+    evidence:
+      points:
+        - {id: preference-error, trigger_event: preference-error, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-EXPLICIT-EN
+    title: A configured explicit provider stays selected and connection remains unverified
+    tags: [shell, guide, ai-state, issue-10166, synthetic-provider-no-request]
+    command:
+      - bash
+      - -c
+      - |
+        set -eu
+        case_home=$(mktemp -d /tmp/cosh-guide-explicit-XXXXXX)
+        trap 'rm -rf "$case_home"' EXIT
+        install -d -m 700 "$case_home/.copilot-shell"
+        state_file="$case_home/.copilot-shell/config.toml"
+        printf '[ai]\nactive_provider = "chosen-service"\n[ai.providers.chosen-service]\nprovider_type = "openai_compat"\nmodel = "synthetic-test-model"\napi_key = "synthetic-test-only"\n' > "$state_file"
+        chmod 600 "$state_file"
+        before=$(sha256sum "$state_file")
+        env TERM=xterm-256color LANG=C.UTF-8 COSH_SHELL_LANG=en-US HOME="$case_home" /usr/bin/cosh guide
+        test "$before" = "$(sha256sum "$state_file")"
+        printf '\nREADONLY_STATE_OK\n'
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {id: explicit-provider, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["chosen-service", "Connection unverified", "READONLY_STATE_OK"]
+      not_contains: ["Zero-config automatic access; ask directly", "Not configured"]
+    evidence:
+      points:
+        - {id: explicit-provider, trigger_event: explicit-provider, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-INCOMPLETE-EN
+    title: An incomplete explicit provider is retained without automatic trial fallback
+    tags: [shell, guide, ai-state, issue-10166, synthetic-provider-no-request]
+    terminal_cols: 110
+    command:
+      - bash
+      - -c
+      - |
+        set -eu
+        case_home=$(mktemp -d /tmp/cosh-guide-incomplete-XXXXXX)
+        trap 'rm -rf "$case_home"' EXIT
+        install -d -m 700 "$case_home/.copilot-shell"
+        state_file="$case_home/.copilot-shell/config.toml"
+        printf '[ai]\nactive_provider = "chosen-service"\n[ai.providers.chosen-service]\nprovider_type = "openai_compat"\nmodel = "synthetic-test-model"\n' > "$state_file"
+        chmod 600 "$state_file"
+        before=$(sha256sum "$state_file")
+        env TERM=xterm-256color LANG=C.UTF-8 COSH_SHELL_LANG=en-US HOME="$case_home" /usr/bin/cosh guide
+        test "$before" = "$(sha256sum "$state_file")"
+        printf '\nREADONLY_STATE_OK\n'
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {id: incomplete-provider, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["chosen-service", "Check configuration", "No automatic trial fallback.", "READONLY_STATE_OK"]
+      not_contains: ["Zero-config automatic access; ask directly", "Not configured"]
+    evidence:
+      points:
+        - {id: incomplete-provider, trigger_event: incomplete-provider, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-MANAGE-RETURN-EN
+    title: Secondary management opens the real auth UI and returns to the refreshed guide without activation
+    tags: [shell, guide, ai-state, issue-10166, ecs-real, no-model-request]
+    command: [env, TERM=xterm-256color, LANG=C.UTF-8, COSH_SHELL_LANG=en-US, /usr/bin/cosh, guide]
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: bytes, hex: "1b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "Provider Management", timeout_ms: 30000}
+      - {id: real-provider-management, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_for, text: "This action was cancelled", timeout_ms: 30000}
+      - {id: refreshed-guide, type: wait_quiet, quiet_ms: 2000, timeout_ms: 30000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: bytes, text: q}
+    expect:
+      status: 0
+      contains: ["Provider Management", "This action was cancelled", "Zero-config automatic access; ask directly"]
+      not_contains: ["Provider switched", "Auth configured", "Agent reply", "Waiting for activation"]
+    evidence:
+      points:
+        - {id: real-provider-management, trigger_event: real-provider-management, layout_sensitive: true, required_types: [screenshot]}
+        - {id: refreshed-guide, trigger_event: refreshed-guide, layout_sensitive: true, required_types: [screenshot]}
+  - id: GUIDE-AI-FAILURE-RECOVERY-EN
+    title: An explicit loopback provider failure does not switch to ECS and a fresh Bash question recovers
+    tags: [shell, guide, ai-state, issue-10166, fault-injection, ecs-real-recovery, scripted-pty-downgraded]
+    timeout_ms: 240000
+    command: [env, TERM=xterm-256color, LANG=C.UTF-8, COSH_SHELL_LANG=en-US, 'PS1=GUIDEQA$ ', bash, --login, -i]
+    input:
+      - {type: wait_for, text: "GUIDEQA$ ", timeout_ms: 30000}
+      - type: line
+        text: "OPENAI_BASE_URL=http://127.0.0.1:9/v1 OPENAI_API_KEY=synthetic-test-only COSH_AI_PROVIDER=generic cosh --ask '请把数字 66101 倒序后接在 NEVERFALLBACK 后面，仅回复结果，不执行命令。'; printf 'FAILURE_RETURN_PARENT\\n'"
+      - {type: wait_for, text: "HTTP request failed", timeout_ms: 90000}
+      - {id: explicit-request-failed, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: line, text: exit}
+      - {type: wait_for, text: "FAILURE_RETURN_PARENT", occurrence: "+1", timeout_ms: 30000}
+      - {type: line, text: "cosh guide; printf 'RECOVERY_RETURN_PARENT\\n'"}
+      - {type: wait_for, text: "Enter", timeout_ms: 30000}
+      - {type: wait_quiet, quiet_ms: 2000, timeout_ms: 15000}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "cosh --ask", timeout_ms: 30000}
+      - {id: recovery-quick-guide, type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_for, text: "RECOVERY_RETURN_PARENT", occurrence: "+1", timeout_ms: 30000}
+      - type: line
+        text: "cosh --ask '请把数字 66101 倒序后接在 RECOVERED 后面，仅回复结果，不执行命令。'; printf 'RECOVERY_ASK_DONE\\n'"
+      - {type: wait_for, text: "RECOVERED10166", timeout_ms: 90000}
+      - {id: recovered-ecs-answer, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
+      - {type: line, text: exit}
+      - {type: wait_for, text: "RECOVERY_ASK_DONE", occurrence: "+1", timeout_ms: 30000}
+      - {type: line, text: "exit 0"}
+    expect:
+      status: 0
+      contains: ["HTTP request failed", "127.0.0.1:9", "RECOVERED10166", "RECOVERY_RETURN_PARENT"]
+      not_contains: ["NEVERFALLBACK10166", "Waiting for activation", "EcsTrialDisabled"]
+    evidence:
+      points:
+        - {id: explicit-request-failed, trigger_event: explicit-request-failed, layout_sensitive: true, required_types: [screenshot]}
+        - {id: recovery-quick-guide, trigger_event: recovery-quick-guide, layout_sensitive: true, required_types: [screenshot]}
+        - {id: recovered-ecs-answer, trigger_event: recovered-ecs-answer, layout_sensitive: true, required_types: [screenshot]}

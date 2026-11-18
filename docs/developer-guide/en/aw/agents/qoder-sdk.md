@@ -2,6 +2,8 @@
 
 [中文版](../../../zh/aw/agents/qoder-sdk.md)
 
+For application-owned startup with explicit native fallback, see the [TypeScript SDK](../deployment/native-sdk.md).
+
 ## Dependencies and factories
 
 Verified baseline: `@qoder-ai/qoder-agent-sdk@1.0.56` with bundled international Worker 1.1.78. Use Node.js 22+, install the SDK in the application directory and retain SDK authentication. AW accepts other SDK/Worker releases with the required native interfaces and records their actual versions. Package identity, the declared site, Hook dispatch, invocation identity and Query cleanup remain checked at launch and use.
@@ -267,6 +269,40 @@ ticket. Native rejection before publication releases the unused ticket without
 calling `settle`. If settlement or cleanup fails, retain ownership, diagnose the
 failure and restart the fenced worker. Ordering invariants are in the
 [execution design](../../../../../src/aw/docs/design/en/adapters/private-execution.md#native-bash-consumers).
+
+## Final tool-result gate
+
+SDK 1.0.57 / Worker 1.1.81 on Linux arm64 and x64 supports an opt-in
+`security.violation` gate for one foreground Bash Query. Enable that event with
+`required: true` and structured Provider steps using `on_error: block`.
+`tool.after` remains observation-only in this profile; use `on_error: report` there.
+Launch with `aw run`, use the managed daemon, and pass a string prompt plus
+`settingSources: []`, `persistSession: false`, `tools: ["Bash"]`, and `model: "auto"`.
+The returned Query exposes iteration and `close()`.
+
+AW verifies the SDK and bundled Worker fingerprints before launch, installs
+process-local Node loader patches, and holds the first prompt until both the
+Worker instrumentation and native Hooks are ready. Installed package files stay
+unchanged. After application Post Hooks, the gate checks the serialized legacy
+request immediately before native request encoding. It binds each Bash result
+to its native session, call and arguments, and invokes the existing AW Provider
+chain. Denial, timeout, invalid identity or Provider failure substitutes
+`AW withheld the final tool result`; changed replay bytes are also withheld.
+
+This profile requires the global package and native legacy transport. Custom
+models/transports, SDK context mutation, MCP, plugins, background tool requests,
+additional user/notification turns, context compaction and policy updates are
+unsupported. A changed original context or an uncovered result envelope aborts
+model dispatch. Other published releases retain ordinary Post behavior; a
+required final gate rejects an unverified build before application launch.
+
+Five `final-1.0.57-*` cases in the [native matrix](../../../../../src/aw/tests/native-matrix.json)
+exercise safe output, post-AW mutation, timeout, Provider error and failed native
+Bash with hosted inference. The failure case verifies PostFailure, final `is_error`
+and model text quoting checked stderr. They require an authorized Qoder PAT and assert actual assistant
+output, policy records, unchanged packages and released processes/events.
+The network payload uses native encoding; the checked plaintext is the encoding
+input, and the hosted assistant response supplies delivery evidence.
 
 ## Updates and long-running work
 

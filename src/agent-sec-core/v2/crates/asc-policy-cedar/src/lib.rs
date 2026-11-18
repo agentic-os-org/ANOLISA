@@ -8,8 +8,11 @@
 pub mod advice;
 pub mod default_policy;
 pub mod http;
+mod rewrite;
 pub mod schema;
 mod validation;
+
+pub use rewrite::rewrite_token_files;
 
 use asc_policy_types::cedar::CedarPolicySource;
 use cedar_policy::ValidationWarning;

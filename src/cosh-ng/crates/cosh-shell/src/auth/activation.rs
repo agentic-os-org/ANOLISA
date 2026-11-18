@@ -7,6 +7,7 @@ use crate::runtime::state::InlineState;
 use super::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use super::provider_management::{core_auth_activate, ExistingProvider};
 use super::runtime::clear_observed_model_after_provider_change;
+use crate::runtime::guide::result::{ActionKind, ChangeFact, Verification};
 
 pub(super) fn activate_provider<W: Write>(
     adapter: &AdapterInstance,
@@ -24,20 +25,31 @@ pub(super) fn activate_provider<W: Write>(
                 state.auth.ecs_trial.auto_use_allowed = true;
                 state.auth.ecs_trial.disable_save_failed = false;
             }
-            return super::completion::finish_partial_configuration(state, output);
+            return super::completion::finish_partial_configuration(
+                state,
+                output,
+                ActionKind::Activate,
+            );
         }
         if let Some(auth) = state.auth.state.as_mut() {
             auth.field_capture_revision = auth.field_capture_revision.wrapping_add(1);
         }
+        super::standalone::record_write_result(state, ActionKind::Activate, &Err(error.clone()));
+        let next_step = if state.auth.write_blocked(ActionKind::Activate) {
+            state
+                .i18n()
+                .t(crate::i18n::MessageId::GuideWizardAiWritesHeld)
+        } else if error.unconfirmed {
+            "Check the current configuration before retrying."
+        } else {
+            "Review the error and retry when ready."
+        };
         clear_active_auth_panel(state, output)?;
         renderer.write_notice_panel(
             output,
             NoticePanelModel {
                 title: "Provider switch not confirmed",
-                body: vec![
-                    error.message,
-                    "Review the error and retry when ready.".into(),
-                ],
+                body: vec![error.message, next_step.into()],
                 footer: None,
             },
         )?;
@@ -51,6 +63,11 @@ pub(super) fn activate_provider<W: Write>(
     }
     clear_observed_model_after_provider_change(state);
     state.auth.state.take();
+    state.auth.record_fact(
+        ActionKind::Activate,
+        ChangeFact::Committed,
+        Verification::Verified,
+    );
     clear_active_auth_panel(state, output)?;
     renderer.write_notice_panel(
         output,

@@ -94,19 +94,6 @@ impl GenAIBuilder {
         path: &str,
         request_body: Option<&str>,
     ) -> String {
-        format!(
-            "pmk-{:x}",
-            Self::pending_match_digest(pid, start_timestamp_ns, method, path, request_body)
-        )
-    }
-
-    fn pending_match_digest(
-        pid: u32,
-        start_timestamp_ns: u64,
-        method: &str,
-        path: &str,
-        request_body: Option<&str>,
-    ) -> sha2::digest::Output<Sha256> {
         let mut hasher = Sha256::new();
         hasher.update(b"agentsight-pending-v1\0");
         hasher.update(pid.to_string().as_bytes());
@@ -120,7 +107,7 @@ impl GenAIBuilder {
         if let Some(body) = request_body {
             hasher.update(body.as_bytes());
         }
-        hasher.finalize()
+        format!("pmk-{:x}", hasher.finalize())
     }
 
     pub(super) fn pending_match_key_json(
@@ -130,19 +117,6 @@ impl GenAIBuilder {
         path: &str,
         body: &serde_json::Value,
     ) -> String {
-        format!(
-            "pmk-{:x}",
-            Self::pending_match_digest_json(pid, timestamp, method, path, body)
-        )
-    }
-
-    fn pending_match_digest_json(
-        pid: u32,
-        timestamp: u64,
-        method: &str,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> sha2::digest::Output<Sha256> {
         struct HashWriter<'a>(&'a mut Sha256);
         impl std::io::Write for HashWriter<'_> {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -167,38 +141,22 @@ impl GenAIBuilder {
         if let Err(error) = serde_json::to_writer(HashWriter(&mut hasher), body) {
             log::warn!("Cannot hash parsed request body: {error}");
         }
-        hasher.finalize()
+        format!("pmk-{:x}", hasher.finalize())
     }
 
-    fn request_match_key(
+    fn parsed_request_match_body(
         request: &ParsedRequest,
-        pid: u32,
         body: Option<&serde_json::Value>,
-    ) -> String {
-        let digest = request.fingerprint(pid).map(Into::into).unwrap_or_else(|| {
-            let digest = if let Some(body) = body {
-                Self::pending_match_digest_json(
-                    pid,
-                    request.source_event.timestamp_ns,
-                    &request.method,
-                    &request.path,
-                    body,
-                )
-            } else {
-                let raw =
-                    (!request.body().is_empty()).then(|| String::from_utf8_lossy(request.body()));
-                Self::pending_match_digest(
-                    pid,
-                    request.source_event.timestamp_ns,
-                    &request.method,
-                    &request.path,
-                    raw.as_deref(),
-                )
-            };
-            request.cache_fingerprint(pid, digest.into());
-            digest
-        });
-        format!("pmk-{digest:x}")
+    ) -> Option<String> {
+        body.map(|v| serde_json::to_string(v).unwrap_or_default())
+            .or_else(|| {
+                let raw = request.body();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(raw).to_string())
+                }
+            })
     }
 
     /// Build GenAI semantic events AND a `PendingCallInfo` to be written to DB
@@ -462,7 +420,14 @@ impl GenAIBuilder {
 
         let call_id = self.generate_id();
         let body = request.json_body();
-        let pending_match_key = Self::request_match_key(request, conn_id.pid, body.as_ref());
+        let match_body = Self::parsed_request_match_body(request, body.as_ref());
+        let pending_match_key = Self::pending_match_key(
+            conn_id.pid,
+            request.source_event.timestamp_ns,
+            &request.method,
+            &request.path,
+            match_body.as_deref(),
+        );
 
         // A SysOM POP request wraps the LLM parameters in a JSON string
         // (`llmParamString`). The match key above deliberately keeps the raw
@@ -895,40 +860,6 @@ mod tests {
     use std::rc::Rc;
 
     #[test]
-    fn request_match_key_cache_preserves_canonical_json_and_raw_fallback() {
-        for body in [r#" { "z": 1, "a": "雪\n\"" } "#, "not-json 雪"] {
-            let request = make_request("/v1/chat/completions", body);
-            let parsed = request.json_body();
-            let expected = if let Some(value) = &parsed {
-                GenAIBuilder::pending_match_key_json(
-                    1,
-                    request.source_event.timestamp_ns,
-                    &request.method,
-                    &request.path,
-                    value,
-                )
-            } else {
-                GenAIBuilder::pending_match_key(
-                    1,
-                    request.source_event.timestamp_ns,
-                    &request.method,
-                    &request.path,
-                    Some(body),
-                )
-            };
-            assert_eq!(
-                GenAIBuilder::request_match_key(&request, 1, parsed.as_ref()),
-                expected
-            );
-            assert!(request.fingerprint(1).is_some());
-            assert_eq!(
-                GenAIBuilder::request_match_key(&request, 1, parsed.as_ref()),
-                expected
-            );
-        }
-    }
-
-    #[test]
     fn payload_memory_delivery_does_not_defer_explicit_openai_request_session() {
         let request = make_request(
             "/v1/chat/completions",
@@ -974,7 +905,6 @@ mod tests {
             ssl_ptr: 0x1,
         });
         ParsedRequest {
-            cached_fingerprint: Default::default(),
             method: "POST".to_string(),
             path: path.to_string(),
             version: 11,

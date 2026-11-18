@@ -45,16 +45,6 @@ pub fn run_command(
     timeout: Duration,
     subsystem: &str,
 ) -> Result<Output, CoshError> {
-    run_command_with_poll_interval(cmd, timeout, subsystem, Duration::from_millis(100))
-}
-
-/// Run a latency-sensitive command with a custom process polling interval.
-pub fn run_command_with_poll_interval(
-    cmd: &mut Command,
-    timeout: Duration,
-    subsystem: &str,
-    poll_interval: Duration,
-) -> Result<Output, CoshError> {
     // Lead a fresh process group so a timeout can reap grandchildren too.
     process::isolate_process_group(cmd);
     let mut child = cmd
@@ -100,7 +90,7 @@ pub fn run_command_with_poll_interval(
                     kill_group_and_reap(&mut child);
                     return Err(timeout_error(timeout, subsystem));
                 }
-                std::thread::sleep(poll_interval);
+                std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
                 kill_group_and_reap(&mut child);
@@ -132,7 +122,7 @@ pub fn run_command_with_poll_interval(
             kill_group(pgid);
             return Err(timeout_error(timeout, subsystem));
         }
-        std::thread::sleep(poll_interval.min(Duration::from_millis(50)));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let stdout = stdout_out.unwrap();
     let stderr = stderr_out.unwrap();

@@ -8,6 +8,17 @@
 负责运行时文件读锁。发行 Make 目标与脚本构建交付件；独立安装的 Provider
 通过进程协议接入，不要求 AW 包记录。
 
+## 按任务读取开发规则
+
+[AGENTS.md](../../../AGENTS.md) 定义产品合同与必读索引。修改对应领域前阅读适用规则。
+
+| 领域 | 开发规则 |
+| --- | --- |
+| 框架、Provider 与打包 | [所有权和合同](development/architecture.md) |
+| Agent、SDK 与 Hook Source 接入 | [语义、生命周期和支持证据](development/hooks.md) |
+| 文档与导航 | [读者、位置和生成能力说明](development/documentation.md) |
+| 源码布局、CI 与发布 | [验证和资源生命周期](development/validation.md) |
+
 ## 请求执行
 
 | 主题 | 合同 |
@@ -43,3 +54,5 @@
 [来源连接器](integrations/agentsight/agentsight-readonly.md) · [证据上下文](runtime/evidence-context.md) · [集成规划](integrations/agentsight/agentsight-integration.md)
 
 独立进程登记的身份、去重与 Ready 门禁见[本地服务](runtime/local-service.md#独立登记)。
+
+[应用自有 SDK 协议](runtime/native-sdk.md)

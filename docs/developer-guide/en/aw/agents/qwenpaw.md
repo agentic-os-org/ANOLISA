@@ -2,6 +2,8 @@
 
 [中文版](../../../zh/aw/agents/qwenpaw.md)
 
+For application-owned startup with explicit native fallback, see the [Python SDK](../deployment/python-sdk.md).
+
 Run source examples from `src/aw`; build AW with the [integration tutorial](../integration.md) first.
 
 ## Start QwenPaw
@@ -43,6 +45,11 @@ Providers and boolean Hooks, after `withhold_result` prevents unverified result
 delivery and later dispatch. This action is admitted only on ordinary resident
 launches. Strict after processing withholds streaming chunks for matching tools.
 Task-private execution also withholds intermediate chunks until terminal redaction.
+After checks and cleanup, a foreground tool emits its reviewed final body as one
+chunk to the native Agent, which produces tool output events before consuming the
+terminal result. Ordinary text is preserved; sensitive text uses the replacement.
+Failed checks and cancellation do not publish unverified content. Tools without
+withholding keep native streaming; background output retains the callback boundary above.
 Native Hook or lifecycle failures fence the Agent even when AW steps use `report`;
 restart the failed Agent after correcting the cause. Cleanup timeout or uncertain finish/release acknowledgement fences
 new requests process-wide and requires a worker restart. Credentials remain owned
@@ -96,6 +103,14 @@ before the first plugin phase. Construction also requires the resident middlewar
 installation guard. AW module imports begin in
 the native plugin initialization phase, before Agent loading. Initialization
 failure stops the App; a missing or mismatched receipt blocks Agent construction.
+
+For QwenPaw 2.1.1b3, managed startup uses libc `realpath` for existing paths
+in the native plugin isolation sweeps. Missing or unresolved paths retain native
+normalization. Resolution is uncached, so plugin reloads observe changed symlinks;
+module eviction and import isolation remain owned by QwenPaw. Other versions
+keep their native path implementation. Repeated installation reuses the same
+wrapper. If ctypes or the required libc symbols are unavailable, startup keeps
+the native normalizer; errors during native path resolution still propagate.
 
 ## Separate HTTP startup and first protected work
 

@@ -47,7 +47,8 @@ impl Runtime {
         }
         match command {
             command @ (RegistrationCommand::Register { .. }
-            | RegistrationCommand::RegisterNative { .. }) => {
+            | RegistrationCommand::RegisterNative { .. }
+            | RegistrationCommand::RegisterSdk { .. }) => {
                 self.register(command, peer, deadline, cancelled)
             }
             RegistrationCommand::Query { key } => {
@@ -228,6 +229,19 @@ impl Runtime {
                 serde_json::to_vec(&command).map_err(|_| rejected("registration_encoding"))?
             )
         );
+        let sdk = match &command {
+            RegistrationCommand::RegisterSdk {
+                sdk_version,
+                availability,
+                ..
+            } => {
+                if sdk_version != crate::SDK_VERSION {
+                    return Err(rejected("sdk_protocol_version"));
+                }
+                Some(*availability)
+            }
+            _ => None,
+        };
         let native = matches!(&command, RegistrationCommand::RegisterNative { .. });
         let (key, target, capabilities, cwd, environment, config) = match command {
             RegistrationCommand::Register {
@@ -245,6 +259,15 @@ impl Runtime {
                 cwd,
                 environment,
                 config,
+            }
+            | RegistrationCommand::RegisterSdk {
+                key,
+                target,
+                capabilities,
+                cwd,
+                environment,
+                config,
+                ..
             } => (key, target, capabilities, cwd, environment, config),
             _ => return Err(rejected("registration_action")),
         };
@@ -287,6 +310,8 @@ impl Runtime {
             record
         };
         let result = (|| {
+            // Replay fences outlive owners; only active preparation and owners retain FDs.
+            let process = record.process.clone().watch()?;
             let bytes = config
                 .as_ref()
                 .map_or(self.bytes.as_slice(), |value| value.as_bytes());
@@ -299,6 +324,7 @@ impl Runtime {
                 .admission
                 .preflight(bytes, &target, capabilities.clone().into())
                 .map_err(|_| rejected("binding_preflight"))?;
+            super::sdk::validate_availability(document.as_value(), sdk)?;
             // Use the ordinary factory's route projection, including native input,
             // Skill and result handling constraints; no restricted reload profile.
             let routes = if native {
@@ -327,8 +353,9 @@ impl Runtime {
                 .insert(
                     record.id.clone(),
                     Owner::independent(
-                        record.process.clone(),
+                        process.clone(),
                         native,
+                        sdk,
                         Arc::clone(&record.cancellation),
                         deadline,
                     ),
@@ -340,7 +367,7 @@ impl Runtime {
                         if cancelled.load(Ordering::Acquire)
                             || self.stopped.load(Ordering::Acquire)
                             || Instant::now() >= deadline
-                            || record.process.check().is_err()
+                            || process.check().is_err()
                             || peer.check().is_err()
                         {
                             record.cancellation.store(true, Ordering::Release);
@@ -379,7 +406,7 @@ impl Runtime {
             let owner = owners
                 .get_mut(&record.id)
                 .ok_or_else(|| rejected("registration_cancelled"))?;
-            record.process.caller(peer)?;
+            process.caller(peer)?;
             if cancelled.load(Ordering::Acquire)
                 || record.cancellation.load(Ordering::Acquire)
                 || self.stopped.load(Ordering::Acquire)
@@ -390,7 +417,7 @@ impl Runtime {
             self.lifecycle_record(
                 "registration_prepared",
                 &record.id,
-                json!({"process":record.process.metadata(),"request_id":handle.key.request_id}),
+                json!({"process":process.metadata(),"request_id":handle.key.request_id}),
             )?;
             owner.acknowledge_by = Some(Instant::now() + CONFIRMATION_WINDOW);
             *record
@@ -399,7 +426,8 @@ impl Runtime {
                 .map_err(|_| rejected("state_poisoned"))? = json!({
                 "state":"pending_ready", "handle":handle, "routes":routes,
                 "policy_revision":instance.host.revision(),
-                "confirmation_timeout_ms":CONFIRMATION_WINDOW.as_millis() as u64
+                "confirmation_timeout_ms":CONFIRMATION_WINDOW.as_millis() as u64,
+                "sdk_protocol":sdk.map(|_| crate::SDK_VERSION), "availability":sdk
             });
             Ok(())
         })();

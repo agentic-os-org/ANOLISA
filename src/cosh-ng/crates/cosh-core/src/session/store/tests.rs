@@ -299,8 +299,8 @@ fn summaries_are_newest_first_and_derive_metadata() {
     store.persist(&mut older).unwrap();
     let mut newer = new_session(&store, "second prompt");
     store.persist(&mut newer).unwrap();
-    newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
-    store.persist(&mut newer).unwrap();
+    set_mtime(&store.session_file(&older.session_id), 1_000);
+    set_mtime(&store.session_file(&newer.session_id), 2_000);
 
     let (summaries, cursor) = store.list(10, None, false).unwrap();
 
@@ -682,8 +682,9 @@ cwd: /root\n\n\
     let mut older = new_session(&store, &envelope("查看当前目录下的文件"));
     store.persist(&mut older).unwrap();
     let mut newer = new_session(&store, &envelope("帮我检查 nginx 服务状态"));
-    newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
     store.persist(&mut newer).unwrap();
+    set_mtime(&store.session_file(&older.session_id), 1_000);
+    set_mtime(&store.session_file(&newer.session_id), 2_000);
 
     let (summaries, _) = store.list(10, None, false).unwrap();
 

@@ -1300,6 +1300,55 @@ impl GenAIBuilder {
         (!refusal.is_empty()).then_some(refusal)
     }
 
+    /// Recover the complete output carried by a terminal Responses event.
+    ///
+    /// `response.completed` and `response.incomplete` carry the whole final
+    /// Response object, including `output[]`. A drained capture that attached
+    /// after the deltas has no other copy of the answer or of a tool call, so
+    /// read the same fields the per-event arms read. Deltas still win over
+    /// repeated text, and `ResponsesToolCalls::observe` merges a terminal item
+    /// into a call the delta path already registered.
+    fn observe_terminal_output(
+        resp: &serde_json::Value,
+        calls: &mut ResponsesToolCalls,
+        saw_text_delta: bool,
+        saw_refusal_delta: bool,
+        closing_text: &mut Option<String>,
+        closing_refusal: &mut Option<String>,
+    ) {
+        let Some(output) = resp.get("output").and_then(|o| o.as_array()) else {
+            return;
+        };
+        for (index, item) in output.iter().enumerate() {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    let chunk = serde_json::json!({ "item": item });
+                    if !saw_text_delta
+                        && closing_text.is_none()
+                        && let Some(text) = Self::closing_message_item_text(&chunk)
+                    {
+                        *closing_text = Some(text);
+                    }
+                    if !saw_refusal_delta
+                        && closing_refusal.is_none()
+                        && let Some(refusal) = Self::closing_message_item_refusal(&chunk)
+                    {
+                        *closing_refusal = Some(refusal);
+                    }
+                }
+                Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+                    let event = serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": index,
+                        "item": item,
+                    });
+                    calls.observe(&event);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Aggregate OpenAI **Responses** API SSE chunks into parts.
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
@@ -1406,6 +1455,16 @@ impl GenAIBuilder {
                 "response.completed" => {
                     saw_responses_event = true;
                     completed = true;
+                    if let Some(resp) = chunk.get("response") {
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
+                    }
                 }
                 "response.output_item.added" => {
                     saw_responses_event = true;
@@ -1452,15 +1511,17 @@ impl GenAIBuilder {
                 "response.output_item.done" => {
                     // A capture that started mid-stream may open with a done
                     // item instead of an added one; the item router recovers
-                    // the complete call from it, so a function_call done item
+                    // the complete call from it, so any call-shaped done item
                     // proves this is a Responses stream with recoverable
-                    // content.
-                    if chunk
-                        .get("item")
-                        .and_then(|i| i.get("type"))
-                        .and_then(|t| t.as_str())
-                        == Some("function_call")
-                    {
+                    // content. A custom tool call or a Codex local shell call
+                    // is the same evidence as a function_call.
+                    if matches!(
+                        chunk
+                            .get("item")
+                            .and_then(|i| i.get("type"))
+                            .and_then(|t| t.as_str()),
+                        Some("function_call" | "custom_tool_call" | "local_shell_call")
+                    ) {
                         saw_responses_event = true;
                     }
                     // A finished `message` item carries the whole answer in
@@ -1532,6 +1593,14 @@ impl GenAIBuilder {
                                 _ => {}
                             }
                         }
+                        Self::observe_terminal_output(
+                            resp,
+                            &mut calls,
+                            saw_text_delta,
+                            saw_refusal_delta,
+                            &mut closing_text,
+                            &mut closing_refusal,
+                        );
                     }
                 }
                 _ => {}
@@ -2827,6 +2896,37 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("STOP"));
     }
 
+    /// A drained capture can attach after the deltas, leaving only the
+    /// complete `response.output_item.done` event. The item router already
+    /// records a `custom_tool_call` or `local_shell_call` from that event,
+    /// but the drain gate only recognised a `function_call` done item, so
+    /// the merger returned `None` and discarded the call it had observed.
+    #[test]
+    fn test_merge_responses_sse_chunks_keeps_a_done_item_call() {
+        let body = r#"[
+            {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}},
+            {"type":"response.output_item.done","output_index":1,"item":{"type":"local_shell_call","id":"lsc_1","call_id":"call_ls","action":{"type":"exec","command":["ls","-l"]}}}
+        ]"#;
+        let (parts, finish) =
+            GenAIBuilder::extract_parts_from_sse_body(body).expect("the calls must survive");
+        let calls: Vec<_> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall { id, name, .. } => Some((
+                    id.as_deref().expect("a done item carries the wire call id"),
+                    name.as_str(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![("call_patch", "apply_patch"), ("call_ls", "shell")],
+            "both calls are complete in the captured done items: {parts:?}"
+        );
+        assert_eq!(finish, None, "no terminal event was captured");
+    }
+
     /// Gemini thinking models mark reasoning parts with `thought: true`;
     /// those must become Reasoning parts, not body text. An explicit null
     /// finishReason on a middle chunk must not be mistaken for a terminator.
@@ -3057,6 +3157,84 @@ mod tests {
             matches!(&parts[0], MessagePart::Reasoning { content } if content == "think"),
             "deltas must win over their closing copies, got {parts:?}"
         );
+    }
+
+    /// A drained capture that attached after the deltas has the complete final
+    /// Response object in the terminal event. The drain merger read only the
+    /// delta/closing item events, so a terminal-only body persisted no text or
+    /// tool call even though `response.output` carried both.
+    #[test]
+    fn test_responses_sse_terminal_output_recovers_text_and_tool_call() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_term","model":"gpt-5"}},
+            {"type":"response.completed","response":{
+                "id":"resp_term","model":"gpt-5","status":"completed",
+                "output":[
+                    {"type":"message","id":"msg_term","role":"assistant","content":[
+                        {"type":"output_text","text":"Hello"}
+                    ]},
+                    {"type":"function_call","id":"fc_term","call_id":"call_term",
+                     "name":"read_file","arguments":"{\"path\":\"/tmp/a\"}"}
+                ]
+            }}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the terminal output must yield parts");
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "Hello"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("call_term")
+                    && name == "read_file"
+                    && arguments.as_ref() == Some(&serde_json::json!({"path": "/tmp/a"}))),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("tool_calls"));
+    }
+
+    /// The capped/filtered terminal event is a separate arm; it carries the
+    /// same complete `output[]`. A drained delta-less capture must recover
+    /// text, refusal and the tool call there too, and the cap must still win
+    /// over the tool-call finish.
+    #[test]
+    fn test_responses_sse_incomplete_terminal_output_recovers_all_parts() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_incomplete","model":"gpt-5"}},
+            {"type":"response.incomplete","response":{
+                "id":"resp_incomplete","model":"gpt-5","status":"incomplete",
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "output":[
+                    {"type":"message","id":"msg_text","role":"assistant","content":[
+                        {"type":"output_text","text":"partial answer"}
+                    ]},
+                    {"type":"message","id":"msg_refusal","role":"assistant","content":[
+                        {"type":"refusal","refusal":"I can't continue"}
+                    ]},
+                    {"type":"function_call","id":"fc_incomplete","call_id":"call_incomplete",
+                     "name":"read_file","arguments":"{\"path\":\"/tmp/b\"}"}
+                ]
+            }}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("the incomplete terminal output must yield parts");
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "partial answer"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[1], MessagePart::Text { content } if content == "I can't continue"),
+            "got {parts:?}"
+        );
+        assert!(
+            matches!(&parts[2], MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("call_incomplete")
+                    && name == "read_file"
+                    && arguments.as_ref() == Some(&serde_json::json!({"path": "/tmp/b"}))),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("length"));
     }
 
     #[test]

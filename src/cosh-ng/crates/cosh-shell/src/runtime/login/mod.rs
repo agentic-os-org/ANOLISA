@@ -2,6 +2,9 @@ mod account;
 mod capability;
 mod cli;
 pub(crate) mod editor;
+pub(crate) mod guide_protocol;
+#[cfg(test)]
+mod guide_protocol_tests;
 pub(crate) mod invitation;
 mod launch;
 pub(crate) mod lifecycle;
@@ -23,22 +26,37 @@ type Result<T> = std::result::Result<T, Error>;
 struct Error {
     message: String,
     usage: bool,
+    unconfirmed: bool,
 }
 impl Error {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             usage: false,
+            unconfirmed: false,
         }
     }
     fn usage() -> Self {
         Self {
             message: "usage: cosh login status|set|restore [--user USER] [--yes]".into(),
             usage: true,
+            unconfirmed: false,
         }
     }
     fn io(error: std::io::Error) -> Self {
         Self::new(format!("login management I/O failed: {error}"))
+    }
+    /// The account may already have changed; the caller must re-read status
+    /// instead of treating this as a definite no-op failure.
+    fn unconfirmed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            usage: false,
+            unconfirmed: true,
+        }
+    }
+    fn is_unconfirmed(&self) -> bool {
+        self.unconfirmed
     }
 }
 impl fmt::Display for Error {
@@ -223,8 +241,12 @@ fn transact(
         Ok(after) => after,
         Err(_) => {
             record.phase = Phase::Conflict;
-            store.write(&record)?;
-            return Err(Error::new(
+            store.write(&record).map_err(|_| {
+                Error::unconfirmed(
+                    "account update could not be verified and the conflict record could not be saved; inspect login status",
+                )
+            })?;
+            return Err(Error::unconfirmed(
                 "account update could not be verified; inspect login status before retrying",
             ));
         }
@@ -238,18 +260,26 @@ fn transact(
     }
     if ensure_identity(expected, &after).is_err() || after.shell != target {
         record.phase = Phase::Conflict;
-        store.write(&record)?;
-        return Err(Error::new(
+        store.write(&record).map_err(|_| {
+            Error::unconfirmed(
+                "account update could not be verified and the conflict record could not be saved; inspect login status",
+            )
+        })?;
+        return Err(Error::unconfirmed(
             "account update could not be verified; inspect login status before retrying",
         ));
     }
     record.phase = final_phase;
     store.write(&record).map_err(|_| {
-        Error::new(
+        Error::unconfirmed(
             "account shell changed but transaction finalization failed; inspect login status",
         )
     })?;
-    changed?;
+    changed.map_err(|_| {
+        Error::unconfirmed(
+            "account shell changed but the login tool reported failure; inspect login status",
+        )
+    })?;
     status(after, Some(&record))
 }
 

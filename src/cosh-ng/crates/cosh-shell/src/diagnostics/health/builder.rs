@@ -94,6 +94,60 @@ impl HealthReportBuilder {
         self.report.login_config = None;
     }
 
+    pub(super) fn discard_check_facts(&mut self, ids: &[String]) {
+        let discarded: BTreeSet<_> = self
+            .report
+            .check_results
+            .iter()
+            .filter(|check| ids.contains(&check.id))
+            .flat_map(|check| check.fact_ids.iter().cloned())
+            .collect();
+        self.report
+            .facts
+            .retain(|fact| !discarded.contains(&fact.id));
+        self.report
+            .fact_metadata
+            .retain(|id, _| !discarded.contains(id));
+        self.report.findings.retain(|finding| {
+            !finding
+                .evidence_fact_ids
+                .iter()
+                .any(|id| discarded.contains(id))
+        });
+        for check in self
+            .report
+            .check_results
+            .iter_mut()
+            .filter(|check| ids.contains(&check.id))
+        {
+            check.fact_ids.clear();
+            check.gaps.clear();
+            check.status = HealthCheckStatus::Partial;
+            self.pending.insert(check.id.clone());
+            if check.collector == Some(HealthCollector::Host) {
+                self.report.host = None;
+            }
+        }
+        self.report.sync_check_projections();
+    }
+
+    pub(super) fn seal_check_gap(
+        &mut self,
+        id: &str,
+        collector: HealthCollector,
+        reason: HealthUnavailableReason,
+        elapsed_ms: u128,
+    ) {
+        self.add_check_gap(
+            id,
+            collector,
+            reason,
+            HealthSeverity::Unavailable,
+            elapsed_ms,
+        );
+        self.pending.remove(id);
+    }
+
     pub(crate) fn set_host(&mut self, host: impl Into<String>) -> &mut Self {
         let host = host.into();
         self.report.host = Some(host.clone());

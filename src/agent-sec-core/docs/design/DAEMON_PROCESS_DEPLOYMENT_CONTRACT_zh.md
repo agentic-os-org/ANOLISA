@@ -900,13 +900,28 @@ GitHub 鉴权；已有代理连接不保证无缝恢复，须重连。
 TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停止代理与删除整个运行目录
 （`remove_all`）行为保持不变，不适用主动 disable 的 CA 保留规则，不能概括为所有故障都 fail-open。
 
-当前 daemon 在启动 Binding worker 前恢复 file Scope 删除屏障并同步执行
+显式指定 `agent-sec-daemon serve --enable-gateway` 时，原有 Gateway 装配路径在启动
+Binding worker 前恢复 file Scope 删除屏障并同步执行
 `GatewayService.recover()`，开放 UDS 请求前再执行 `PapService.recover_scopes()`；不设置
 独立 gateway 恢复 Job。Apply claim 的 SQLite 事务核对 canonical Scope 仍为 `Active`，
 防止删除中的 assignment 重新部署策略。网关构造读取投影失败时，先停止旧代理、撤流并
 删除运行时快照，再返回错误；持久投影和凭据不删除，清理失败显式报告且不跳过其它清理。
 网关构造或恢复失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，
 不阻塞原有 file-policy daemon readiness。
+当前 daemon 默认 `disable_gateway=true`，保留 file Scope 恢复但不装配 Gateway Runtime、
+凭证登记及执行端口；相关请求明确不可用。该模式只检查本地职责：Gateway 状态目录、凭据目录、
+运行目录存在或不可读取（包括符号链接），以及任意状态的凭证 Scope，均拒绝启动；不删除数据。
+部署方须保证无外部代理或残留路由；此模式不会调用 systemd/nftables 证明宿主无残留。
+凭据 Policy 的正常提交先持久化 Credential Store，尚未创建 Scope 的已登记凭据也由目录
+检查拦截；仅保留 Policy 元数据不构成网关执行责任，新增凭据 Scope 仍须 Gateway 执行端口。
+仅提供 `--enable-gateway` 作为启动开关，将该值设为 false，恢复原有
+构造、恢复及失败清理路径。该启动参数不修改保存的 enabled 状态；数据面关闭时仍须
+另行调用 `agent-sec-cli gateway enable`。未装配 Gateway 时，该运行时命令不可用。
+已有 Gateway 状态的部署须在启动命令中添加 `--enable-gateway`；默认启动仍会拒绝，
+但无需降级二进制即可恢复管理。systemd 通过 drop-in 清空再完整覆盖 `ExecStart`，保留
+原有路径和参数并追加该选项，随后 daemon-reload、重启。
+该默认值变更不迁移或清除已有职责。启用管理时，Gateway 恢复仍在 RPC ready 前同步完成；
+此处不实现异步或运行时惰性初始化。
 file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
 管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
 generation 在每次尝试前持久化且不复用；网关恢复、撤销或首次 enable 失败时停止 unit、
@@ -934,12 +949,13 @@ await 后须重新验证 canonical 授权，过时操作不得恢复引流。
 | DPROC-GW-002 | Scope 准备/删除、Binding 实例/后代身份、UID 查询、稳定 fake、generation、失败收敛、组隔离、目录权限 | `asc-gateway-runtime/src/tests.rs` |
 | DPROC-GW-003 | unit、drop-in 与静态文件 staging、安装/卸载边界 | `tests/v2/packaging/test_systemd.py` |
 | DPROC-GW-004 | 真实 CLI Cedar Policy/Scope、startup-before-agent、discovery/systemd/nft；mock REST 注入 real、`true` 未压缩回显为 fake，`false` 与压缩 body 不保证 fake；Git clone/fetch/push；跨 Scope、配对幂等、共享 Scope/最后退役、opaque pair remove、生成/人工 fake 80% 校验、源文件删除后恢复与旧数据拒绝、多实例与重启稳定 fake、空 Scope 删除；域外/UDP 放行；daemon/proxy 重启；关闭仅保留 CA | `tests/v2/systemd/test_gateway.py`；显式 `ASC_GATEWAY_E2E_USER`，本机 `198.18.0.1`、临时 CA 与 dummy Token，不访问外网 |
+| DPROC-GW-005 | 默认启动时通过认证 health、file Policy/Scope 可用、Gateway 方法与新凭据 Policy 不可用、正常退出；已有 Gateway 目录或悬空符号链接时非零退出、不开放 RPC 且保留原状态；同一份已有状态通过 `--enable-gateway` 恢复管理接口，不强制开启 disabled 代理 | `tests/v2/e2e/test_gateway_opt_out_e2e.py` |
 
 响应开关按 [网关设计 §6](V2_SECRET_GATEWAY_DESIGN_zh.md#6-交付与验证边界) 的内部 mock
 矩阵验收，真实 GitHub/其他外部 API 不作为验收条件。源码、代理黑盒与最终安装制品需
 分别验证；Gateway 尚未对外开放，本次不交付旧数据迁移，不能从源码检查或测试矩阵
 推导最终安装验收通过或已发布支持。
-默认关闭 E2E 只观察 `scopes=[]`、无 nft/runtime/凭据目录，不启用网关、不改变宿主网关状态。
+默认启动 E2E 验证 Gateway 接口不可用且无 nft/runtime/凭据目录，不启用网关、不改变宿主网关状态。
 
 ## V2 sandbox 执行与授权接入（DPROC-SANDBOX-001）
 

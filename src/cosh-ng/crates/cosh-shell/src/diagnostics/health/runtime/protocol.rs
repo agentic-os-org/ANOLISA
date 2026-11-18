@@ -5,7 +5,8 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 
 use super::super::model::HealthProgress;
-use super::job::{monotonic_ns, JobDeadline};
+use super::super::plan::SampleSource;
+use super::clock::{boottime_ns, HealthDeadline};
 use super::plan::WorkerRequest;
 use super::process::COMMAND_POLL_INTERVAL;
 
@@ -25,8 +26,25 @@ pub(super) enum ProtocolError {
 #[serde(tag = "type", content = "data")]
 pub(super) enum Payload {
     Start(WorkerRequest),
-    Progress(HealthProgress),
+    Progress {
+        task_id: u64,
+        progress: HealthProgress,
+    },
     Configuration(crate::config::HealthLoginConfig),
+    Collect(CollectTask),
+    SourceDone {
+        task_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CollectTask {
+    pub(super) task_id: u64,
+    pub(super) source: SampleSource,
+    pub(super) check_ids: Vec<String>,
+    pub(super) deadline: HealthDeadline,
+    pub(super) work_deadline: HealthDeadline,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,10 +63,10 @@ pub(super) fn encode(
     payload: Payload,
 ) -> Result<Vec<u8>, ProtocolError> {
     let frame = Frame {
-        version: 1,
+        version: 2,
         nonce: nonce.to_string(),
         sequence,
-        emitted_ns: monotonic_ns().map_err(ProtocolError::Io)?,
+        emitted_ns: boottime_ns().map_err(ProtocolError::Io)?,
         payload,
     };
     let mut body = LimitedBuffer {
@@ -99,7 +117,7 @@ impl Decoder {
     pub(super) fn receive(
         &mut self,
         stream: &mut UnixStream,
-        deadline: JobDeadline,
+        deadline: HealthDeadline,
     ) -> Result<bool, ProtocolError> {
         let mut chunk = [0; 4096];
         loop {
@@ -133,7 +151,7 @@ impl Decoder {
         }
         let frame: Frame = serde_json::from_slice(&self.buffer[4..length + 4])
             .map_err(|_| ProtocolError::Invalid)?;
-        if frame.version != 1
+        if frame.version != 2
             || frame.nonce.len() != 32
             || !frame.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
@@ -196,7 +214,7 @@ impl Decoder {
 pub(super) fn send(
     stream: &mut UnixStream,
     bytes: &[u8],
-    deadline: JobDeadline,
+    deadline: HealthDeadline,
 ) -> Result<(), ProtocolError> {
     let mut offset = 0;
     while offset < bytes.len() {
@@ -218,4 +236,6 @@ pub(super) fn send(
 }
 
 #[cfg(test)]
-mod tests;
+library_tests! {
+    mod tests;
+}

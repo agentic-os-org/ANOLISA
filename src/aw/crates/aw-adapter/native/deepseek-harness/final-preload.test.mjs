@@ -22,7 +22,8 @@ test("a changed agent-loop build fails before it can run", () => {
       env: { ...process.env, NODE_OPTIONS: `--import=${preload}` },
     });
     if (result.error) throw result.error;
-    if (result.status === 0 || !result.stderr.includes("does not support this DSH agent-loop build")) {
+    const rejection = "AW final result gate does not support /node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js build";
+    if (result.status === 0 || !result.stderr.includes(rejection)) {
       throw Error(`unsupported DSH build was not rejected: ${result.stderr}`);
     }
   } finally {

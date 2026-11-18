@@ -3,6 +3,8 @@
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
 mod classify;
+mod gradle;
+mod maven;
 mod pnpm;
 mod template;
 mod trace;
@@ -23,6 +25,12 @@ const MIN_ROUTINE_RUN_LINES: usize = 9;
 const ROUTINE_EDGE_LINES: usize = 2;
 const MAX_OMISSION_BLOCKS: usize = 8;
 const GENERIC_TEMPLATE_MIN_LINES: usize = 9;
+
+struct LayoutEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
 
 /// Stable operations performed inside the build-log domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +86,7 @@ impl BuildLogCompressor {
     /// Detects a supported build/test log using a bounded head-and-tail sample.
     #[must_use]
     pub fn detect(input: &str) -> bool {
-        detect_format(input).is_some()
+        detect_format(input).0.is_some()
     }
 
     /// Builds the smallest valid build-log candidate under the recovery policy.
@@ -102,14 +110,57 @@ impl BuildLogCompressor {
             .into_iter()
             .collect::<Vec<_>>();
         let store = stash.filter(|_| recovery.is_available());
-        let Some(format) = detect_format(&cleaned) else {
+        let (Some(mut format), sample) = detect_format(&cleaned) else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        if format != BuildLogFormat::Pnpm && store.is_none() {
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
+        ) && store.is_none()
+        {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         }
 
         let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
+        // Preserve already-compacted Gradle results as terminal even when an
+        // oversized preamble pushes the template header out of the sample window.
+        if !matches!(
+            format,
+            BuildLogFormat::Pnpm | BuildLogFormat::Maven | BuildLogFormat::Gradle
+        ) && gradle::is_compacted(&lines)
+        {
+            format = BuildLogFormat::Gradle;
+        }
+        let (maven_layouts, gradle_layouts) = match format {
+            BuildLogFormat::Maven => (maven::plan(&lines), Vec::new()),
+            BuildLogFormat::Gradle => (Vec::new(), gradle::plan(&lines)),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let mut maven_transfers = Vec::new();
+        if format == BuildLogFormat::Maven
+            && maven_layouts.is_empty()
+            && !maven::is_compacted(&lines)
+            && store.is_some()
+        {
+            // No-edit Maven results retain anchored Generic recovery, plus verified
+            // transfers that remain inside an active Maven scope.
+            if is_anchored(&sample) {
+                maven_transfers = maven::scoped_transfers(&lines);
+            }
+            if let Some(generic) = detect_generic(&sample) {
+                format = generic;
+            } else if maven_transfers.iter().filter(|&&ok| ok).count() >= GENERIC_TEMPLATE_MIN_LINES
+            {
+                format = BuildLogFormat::Generic;
+            }
+        } else if format == BuildLogFormat::Gradle
+            && gradle_layouts.is_empty()
+            && !gradle::is_compacted(&lines)
+            && store.is_some()
+            && let Some(generic) = detect_generic(&sample)
+        {
+            format = generic;
+        }
         let stripped = lines
             .iter()
             .map(|line| line.trim_end_matches('\n').to_owned())
@@ -117,12 +168,34 @@ impl BuildLogCompressor {
         let (mut roles, run_starts, mut layouts) = if format == BuildLogFormat::Pnpm {
             let plan = pnpm::plan(&lines);
             (plan.roles, plan.run_starts, plan.layouts)
+        } else if format == BuildLogFormat::Maven {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                maven_layouts,
+            )
+        } else if format == BuildLogFormat::Gradle {
+            (
+                vec![LineRole::Summary; lines.len()],
+                HashSet::new(),
+                gradle_layouts,
+            )
         } else {
             let templates = dominant_generic_templates(format, &stripped);
             (
                 stripped
                     .iter()
-                    .map(|line| classify(line, format, &templates))
+                    .enumerate()
+                    .map(|(index, line)| {
+                        let role = classify(line, format, &templates);
+                        if role == LineRole::Unknown
+                            && maven_transfers.get(index).copied().unwrap_or(false)
+                        {
+                            LineRole::Routine(RoutineFamily::Generic)
+                        } else {
+                            role
+                        }
+                    })
                     .collect::<Vec<_>>(),
                 HashSet::new(),
                 Vec::new(),
@@ -277,7 +350,7 @@ fn render_reduced(
     plans: &[OmissionPlan],
     keys: &[String],
     recovery: &RecoveryMethod,
-    layouts: &[pnpm::LayoutEdit],
+    layouts: &[LayoutEdit],
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0;
@@ -322,10 +395,25 @@ fn render_marker(
     )
 }
 
-fn detect_format(input: &str) -> Option<BuildLogFormat> {
-    let sample = sample_lines(input);
+fn detect_format(input: &str) -> (Option<BuildLogFormat>, Vec<String>) {
+    let mut sample = sample_lines(input);
+    let maven = maven::detect(&sample);
+    let gradle = gradle::detect(&sample);
+    // Keep CR visible to Maven and Gradle, whose layout grammars only handle LF records.
+    // Existing detectors retain the CRLF normalization previously done by lines().
+    for line in &mut sample {
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
     if pnpm::detect(&sample) {
-        return Some(BuildLogFormat::Pnpm);
+        return (Some(BuildLogFormat::Pnpm), sample);
+    }
+    if maven {
+        return (Some(BuildLogFormat::Maven), sample);
+    }
+    if gradle {
+        return (Some(BuildLogFormat::Gradle), sample);
     }
     let formats = [
         BuildLogFormat::Cargo,
@@ -354,17 +442,21 @@ fn detect_format(input: &str) -> Option<BuildLogFormat> {
             winner_score = score;
         }
     }
-    winner.or_else(|| detect_generic(&sample))
+    let format = winner.or_else(|| detect_generic(&sample));
+    (format, sample)
 }
 
-fn detect_generic(sample: &[String]) -> Option<BuildLogFormat> {
-    let anchored = sample.iter().any(|line| {
+fn is_anchored(sample: &[String]) -> bool {
+    sample.iter().any(|line| {
         let trimmed = line.trim();
         trimmed.starts_with("$ ")
             || trimmed.to_ascii_lowercase().starts_with("exit code:")
             || trimmed.to_ascii_lowercase().starts_with("exit status:")
-    });
-    if !anchored {
+    })
+}
+
+fn detect_generic(sample: &[String]) -> Option<BuildLogFormat> {
+    if !is_anchored(sample) {
         return None;
     }
     let mut counts = HashMap::new();
@@ -400,7 +492,7 @@ fn sample_lines(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut head_bytes = 0;
     let mut head_end = 0;
-    for line in input.lines().take(SAMPLE_LINES_PER_END) {
+    for line in input.split_terminator('\n').take(SAMPLE_LINES_PER_END) {
         if head_bytes + line.len() > SAMPLE_BYTES_PER_END {
             break;
         }
@@ -413,7 +505,11 @@ fn sample_lines(input: &str) -> Vec<String> {
     let mut tail = Vec::new();
     let mut tail_bytes = 0;
     let mut tail_start = None;
-    for line in input.lines().rev().take(SAMPLE_LINES_PER_END) {
+    for line in input
+        .split_terminator('\n')
+        .rev()
+        .take(SAMPLE_LINES_PER_END)
+    {
         if tail_bytes + line.len() > SAMPLE_BYTES_PER_END {
             break;
         }
@@ -424,10 +520,9 @@ fn sample_lines(input: &str) -> Vec<String> {
         }
     }
     tail.reverse();
-    if !sampled.is_empty()
-        && tail_start.is_some_and(|start| !matches!(&input[head_end..start], "\n" | "\r\n"))
-    {
-        // Multi-line detectors must not join separated sampling windows.
+    if tail_start.is_some_and(|start| !matches!(&input[head_end..start], "\n" | "\r\n")) {
+        // Multi-line detectors must not join windows or mistake a tail-only
+        // sample for the document's head when its first record exceeds the budget.
         sampled.push("\0".into());
     }
     sampled.extend(tail);

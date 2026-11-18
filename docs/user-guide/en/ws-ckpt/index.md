@@ -95,9 +95,9 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | Command | Description |
 |---------|-------------|
 | `ws-ckpt init -w <workspace>` | Initialize a workspace for checkpointing |
-| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | Create a new checkpoint |
-| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | Restore workspace to a checkpoint |
-| `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | Rollback N ancestors |
+| `ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]` | Create a new checkpoint. Omit `-s` to generate the snapshot ID automatically. |
+| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview] [--json]` | Restore a workspace to a checkpoint, optionally using JSON output |
+| `ws-ckpt rollback -w <workspace> -n <num-ancestors> [--json]` | Rollback N ancestors |
 | `ws-ckpt list [-w <workspace>] [--orphans] [--format table\|json] [--limit N] [--cursor TOKEN]` | List checkpoints; auto-page by default |
 | `ws-ckpt diff -w <workspace> -f <from> [-t <to>] [--format text\|json]` | Show file changes; omit `-t` to compare with the current workspace |
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | Delete a specific checkpoint |
@@ -180,12 +180,46 @@ ws-ckpt rollback -w /home/user/projects/my-project -s snap-001
 # Preview rollback without applying
 ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview
 
+# Preview rollback with JSON output
+ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview --json
+
 # Cleanup old checkpoints, keep last 20
 ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 
 # Enable auto-cleanup for workspace
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### Rollback JSON output
+
+`ws-ckpt rollback --json` writes one JSON object to stdout. It still executes
+the rollback unless you pass `--preview`. A successful rollback reports the
+workspace ID and the full ID of the restored snapshot.
+
+```json
+{
+  "elapsed_secs": 0.012,
+  "schema": "ws-ckpt.rollback.v1",
+  "snapshot_id": "snap-001",
+  "status": "succeeded",
+  "workspace": "ws-abc123"
+}
+```
+
+With `--preview`, the result has `status: "preview"`, `snapshot_id`, and
+file-level `changes`. A failed execution exits nonzero. The JSON distinguishes
+`known_no_effect` from `unknown` and includes a `code` and `message`.
+
+Use `rollback --guarded --json` when an integration needs to confirm the exact
+snapshot and the preview before executing. With `--check -w <registered_path>`,
+the CLI checks daemon compatibility for that workspace and reports
+`status: "compatible"` on success. A guarded `--preview` takes a registered
+workspace path and full snapshot ID and also returns `ws_id`,
+`registered_path`, `generation`, and `diff_digest`. Guarded execution reads
+`ws_id`, `generation`, `diff_digest`, `operation_id`, and `operation_digest`
+from a JSON object on stdin. Query the durable result with
+`--result -w <ws_id>` and the same stdin JSON. The result has
+`status: "result"` and an `evidence` field, which may be `null`.
 
 ### Snapshot recovery after an interrupted cleanup
 

@@ -2,19 +2,13 @@
 
 use std::collections::HashSet;
 
-use super::{LineRole, RoutineFamily, saves_both};
+use super::{LayoutEdit, LineRole, RoutineFamily, saves_both};
 
 const MAX_LINE_BYTES: usize = 4096;
 const MAX_NOTICE_BYTES: usize = 8192;
 const MAX_DEPENDENCY_ROWS: usize = 256;
 const MAX_DEPENDENCY_BYTES: usize = 64 * 1024;
 const MAX_LAYOUT_EDITS: usize = 256;
-
-pub(super) struct LayoutEdit {
-    pub start: usize,
-    pub end: usize,
-    pub replacement: String,
-}
 
 pub(super) struct Plan {
     pub roles: Vec<LineRole>,

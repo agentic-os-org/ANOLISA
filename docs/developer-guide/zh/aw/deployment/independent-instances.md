@@ -182,3 +182,5 @@ cargo test --locked -p aw-cli --test service registration::
 启动环境。保留其他 `NODE_OPTIONS`、Python 启动文件与原生设置。单独连接的插件按 Agent
 指南清理，再正常重启。SDK 应用须在排空工作后同时移除启动代码和 AW 工厂接入。
 回退集成版本时，配套恢复 AW 二进制与业务入口。
+
+协商后的直接回调扩展见 [SDK 协议](../../../../../src/aw/docs/design/zh/runtime/native-sdk.md)。该扩展增加显式可用性选择，保留既有登记和 Scope 所有权检查。

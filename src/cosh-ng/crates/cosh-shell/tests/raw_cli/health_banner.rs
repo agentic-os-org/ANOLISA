@@ -8,7 +8,7 @@ use wait_timeout::ChildExt;
 
 #[test]
 fn actual_health_banner_accepts_only_a_valid_automatic_deadline_with_captured_stdio() {
-    for mode in ["manual", "expired", "valid"] {
+    for mode in ["manual", "expired", "overwide", "valid"] {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().canonicalize().unwrap();
         let runtime = home.join("runtime");
@@ -35,10 +35,10 @@ fn actual_health_banner_accepts_only_a_valid_automatic_deadline_with_captured_st
                 unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut now) },
                 0
             );
-            let deadline = if mode == "valid" {
-                now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000 + 450_000
-            } else {
-                1
+            let deadline = match mode {
+                "valid" => now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000 + 250_000,
+                "overwide" => now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000 + 450_000,
+                _ => 1,
             };
             command.args(["--bash-deadline-boottime-us", &deadline.to_string()]);
         }
@@ -141,4 +141,81 @@ fn unwritable_health_tty_does_not_consume_an_invitation() {
         !home.join(".copilot-shell/cosh/guide").exists(),
         "unshown invitation must not create or consume guide state"
     );
+}
+
+#[test]
+fn login_health_banner_frames_one_blank_line_above_and_below() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = home.join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let boottime_us = || {
+        let mut now: nix::libc::timespec = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_BOOTTIME, &mut now) },
+            0
+        );
+        now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1_000
+    };
+    let command = |deadline: u64, stdout: Stdio| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+        cmd.arg0("cosh")
+            .args([
+                "health",
+                "banner",
+                "--budget-ms",
+                "500",
+                "--bash-deadline-boottime-us",
+                &deadline.to_string(),
+            ])
+            .env_clear()
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("PATH", "/usr/bin:/bin")
+            .env("COSH_SHELL_LANG", "en-US")
+            .env("COSH_SHELL_AI", "off")
+            .env("COSH_SHELL_HEALTH_SCAN", "fixture:linux-healthy")
+            .env("TERM", "xterm-256color")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::null());
+        cmd
+    };
+    // Warm the page cache before checking framing within the login budget.
+    if let Ok(mut warm) = command(boottime_us() + 250_000, Stdio::null()).spawn() {
+        if warm.wait_timeout(Duration::from_secs(3)).unwrap().is_none() {
+            let _ = warm.kill();
+            let _ = warm.wait();
+        }
+    }
+    let mut child = command(boottime_us() + 250_000, Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = child
+        .wait_timeout(Duration::from_secs(3))
+        .unwrap()
+        .expect("login health banner deadline");
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    assert!(status.success(), "{status:?}");
+    assert!(
+        stdout.starts_with(b"\n"),
+        "one blank line above: {:?}",
+        String::from_utf8_lossy(&stdout)
+    );
+    assert!(!stdout.starts_with(b"\n\n"), "exactly one blank above");
+    assert!(
+        stdout.ends_with(b"\n\n"),
+        "one blank line below: {:?}",
+        String::from_utf8_lossy(&stdout)
+    );
+    assert!(!stdout.ends_with(b"\n\n\n"), "exactly one blank below");
 }

@@ -14,7 +14,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -285,16 +285,22 @@ impl JsonlEventWriter {
         self.ensure_parent_dir(state)?;
         let mut file = open_private_append(&self.path)?;
 
-        if self.needs_rotation(&file, line_bytes)? {
+        let mut needs_separator = self.needs_line_separator(&file)?;
+        if self.needs_rotation(&file, line_bytes + u64::from(needs_separator))? {
             drop(file);
             self.rotate();
             file = open_private_append(&self.path)?;
+            needs_separator = self.needs_line_separator(&file)?;
         }
 
-        let result = file
-            .write_all(line.as_bytes())
-            .and_then(|()| file.flush())
-            .map_err(|err| EventLogError::io("append to", &self.path, err));
+        let result = (if needs_separator {
+            file.write_all(b"\n")
+        } else {
+            Ok(())
+        })
+        .and_then(|()| file.write_all(line.as_bytes()))
+        .and_then(|()| file.flush())
+        .map_err(|err| EventLogError::io("append to", &self.path, err));
 
         drop(file);
         if let Some(lock) = lock {
@@ -303,6 +309,48 @@ impl JsonlEventWriter {
             let _ = flock(&lock, FlockOperation::Unlock);
         }
         result
+    }
+
+    // Checks the append target without changing its write-only descriptor.
+    fn needs_line_separator(&self, file: &File) -> Result<bool, EventLogError> {
+        let metadata = file
+            .metadata()
+            .map_err(|err| EventLogError::io("stat", &self.path, err))?;
+        if !metadata.is_file() {
+            return Err(EventLogError::io(
+                "check record boundary",
+                &self.path,
+                std::io::Error::other("log file is not a regular file"),
+            ));
+        }
+        if metadata.len() == 0 {
+            return Ok(false);
+        }
+        // open_private_append has already restored owner read permission. Do
+        // not block on a replacement FIFO; verify identity before reading.
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK;
+        let reader = File::from(
+            rustix::fs::open(&self.path, flags, Mode::empty())
+                .map_err(|err| EventLogError::io("open record boundary", &self.path, err.into()))?,
+        );
+        let read_metadata = reader
+            .metadata()
+            .map_err(|err| EventLogError::io("stat record boundary", &self.path, err))?;
+        if !read_metadata.is_file()
+            || metadata.dev() != read_metadata.dev()
+            || metadata.ino() != read_metadata.ino()
+        {
+            return Err(EventLogError::io(
+                "check record boundary",
+                &self.path,
+                std::io::Error::other("log file changed while checking its record boundary"),
+            ));
+        }
+        let mut last_byte = [0];
+        reader
+            .read_exact_at(&mut last_byte, metadata.len() - 1)
+            .map_err(|err| EventLogError::io("read record boundary", &self.path, err))?;
+        Ok(last_byte[0] != b'\n')
     }
 
     fn acquire_lock(&self, state: &mut WriterState) -> Option<File> {
@@ -526,6 +574,75 @@ mod tests {
             .collect();
         names.sort_unstable();
         names
+    }
+
+    #[test]
+    fn boundary_check_rejects_a_replaced_inode() {
+        let dir = TempDir::new().expect("temp dir");
+        let writer = writer_in(&dir);
+        fs::write(writer.path(), b"broken").expect("seed");
+        let file = open_private_append(writer.path()).expect("open");
+        fs::rename(writer.path(), dir.path().join("old")).expect("rename");
+        fs::write(writer.path(), b"replacement").expect("replace");
+        assert!(writer.needs_line_separator(&file).is_err());
+        assert_eq!(fs::read(writer.path()).expect("read"), b"replacement");
+    }
+
+    #[test]
+    fn boundary_check_rejects_a_symlink_to_a_different_inode() {
+        let dir = TempDir::new().expect("temp dir");
+        let writer = writer_in(&dir);
+        fs::write(writer.path(), b"broken").expect("seed");
+        let file = open_private_append(writer.path()).expect("open");
+        let original = dir.path().join("old");
+        fs::rename(writer.path(), &original).expect("rename");
+        let other = dir.path().join("other");
+        fs::write(&other, b"other").expect("other file");
+        std::os::unix::fs::symlink(&other, writer.path()).expect("symlink");
+        assert!(writer.needs_line_separator(&file).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn boundary_check_rejects_a_replaced_fifo() {
+        let dir = TempDir::new().expect("temp dir");
+        let writer = writer_in(&dir);
+        fs::write(writer.path(), b"broken").expect("seed");
+        let file = open_private_append(writer.path()).expect("open");
+        fs::remove_file(writer.path()).expect("remove");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            writer.path(),
+            rustix::fs::FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .expect("fifo");
+        assert!(writer.needs_line_separator(&file).is_err());
+    }
+
+    #[test]
+    fn boundary_check_reports_revoked_read_permission() {
+        let dir = TempDir::new().expect("temp dir");
+        let writer = writer_in(&dir);
+        fs::write(writer.path(), b"broken").expect("seed");
+        let file = open_private_append(writer.path()).expect("open");
+        fs::set_permissions(writer.path(), fs::Permissions::from_mode(0o200)).expect("revoke read");
+        let result = writer.needs_line_separator(&file);
+        fs::set_permissions(writer.path(), fs::Permissions::from_mode(0o600))
+            .expect("restore read");
+        assert!(result.is_err());
+        assert_eq!(fs::read(writer.path()).expect("read"), b"broken");
+    }
+
+    #[test]
+    fn boundary_check_reports_a_missing_reader_path() {
+        let dir = TempDir::new().expect("temp dir");
+        let writer = writer_in(&dir);
+        fs::write(writer.path(), b"broken").expect("seed");
+        let file = open_private_append(writer.path()).expect("open");
+        fs::remove_file(writer.path()).expect("remove");
+        assert!(writer.needs_line_separator(&file).is_err());
     }
 
     #[test]

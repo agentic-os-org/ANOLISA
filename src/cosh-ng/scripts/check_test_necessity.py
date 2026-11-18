@@ -28,6 +28,9 @@ SUBPROCESS_ENTRIES = (
     'crates/cosh-shell/src/diagnostics/health/runtime/job/tests.rs::deadline_job_child',
     'crates/cosh-shell/src/diagnostics/health/collectors/command/tests.rs::controlling_terminal_child',
 )
+PROVISIONED_HEALTH_MATRIX = (
+    'crates/cosh-shell/src/diagnostics/health/runtime/acceptance_tests.rs::live_report_matrix'
+)
 FIELDS = (
     "rule",
     "pattern",
@@ -190,9 +193,18 @@ def main(argv=None) -> int:
     )
     if helper_count != len(SUBPROCESS_ENTRIES):
         failures.append("supervised subprocess entries must match their exact registry set")
-    if ignored_count - provisioned_count - helper_count != 3 or heavy_count - provisioned_count != 3:
+    health_matrix_count = sum(
+        rule_hits[rule.data["rule"]]
+        for rule in rules
+        if rule.data["pattern"] == PROVISIONED_HEALTH_MATRIX
+        and rule.data["disposition"] == "provisioned-health-matrix"
+    )
+    if health_matrix_count != 1:
+        failures.append("the provisioned health report matrix must match its exact registry entry")
+    ordinary_ignored_count = ignored_count - provisioned_count - helper_count - health_matrix_count
+    if ordinary_ignored_count != 3 or heavy_count - provisioned_count != 3:
         failures.append(
-            f"ordinary ignored tests ({ignored_count - provisioned_count - helper_count}) and explicit-heavy registry tests "
+            f"ordinary ignored tests ({ordinary_ignored_count}) and explicit-heavy registry tests "
             f"({heavy_count - provisioned_count}) must both remain 3"
         )
 

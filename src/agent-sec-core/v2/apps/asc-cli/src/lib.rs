@@ -151,7 +151,9 @@ impl Cli {
                         .unwrap_or(u32::MAX)
                 } else if arguments.command.is_intent() {
                     45_000
-                } else if arguments.command.is_skill_sec() || arguments.command.gateway().is_some()
+                } else if arguments.command.is_skill_sec()
+                    || arguments.command.gateway().is_some()
+                    || arguments.command.inject_credential().is_some()
                 {
                     60_000
                 } else {
@@ -296,11 +298,29 @@ impl Cli {
             .map(|command| command.run(socket, self.timeout(), stdout, stderr))
     }
 
+    /// Runs one-step credential injection, or returns `None` for another command.
+    ///
+    /// # Errors
+    /// Returns file, daemon transport or output failures.
+    pub fn run_inject_credential(
+        &self,
+        socket: &Path,
+        stdout: &mut impl std::io::Write,
+        stderr: &mut impl std::io::Write,
+    ) -> Option<std::io::Result<u8>> {
+        self.command
+            .inject_credential()
+            .map(|command| command.run(socket, self.timeout(), stdout, stderr))
+    }
+
     /// The events query command, or `None` for another command.
     pub const fn events(&self) -> Option<&EventsCommand> {
         self.command.events()
     }
 }
+
+/// Daemon endpoint used when neither `--socket` nor the environment names one.
+pub(crate) const DEFAULT_SOCKET: &str = "/run/agent-sec-core/daemon.sock";
 
 /// Resolves the daemon endpoint from the option, then the environment.
 fn resolve_socket(
@@ -312,7 +332,7 @@ fn resolve_socket(
         None => daemon_socket_path_from_env(
             socket_env
                 .filter(|path| !path.is_empty())
-                .or(Some(OsStr::new("/run/agent-sec-core/daemon.sock"))),
+                .or(Some(OsStr::new(DEFAULT_SOCKET))),
         )
         .map_err(|error| {
             clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())

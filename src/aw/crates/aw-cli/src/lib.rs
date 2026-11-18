@@ -70,6 +70,7 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
             | "update"
             | "bridge"
             | "scope"
+            | "sdk-control"
             | "qoder-bootstrap"
             | "codex-hook"
             | "native-setup"

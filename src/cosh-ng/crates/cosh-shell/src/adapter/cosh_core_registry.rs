@@ -11,6 +11,26 @@ pub(super) const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const REGISTRY_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const AUTH_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(12);
 
+pub(super) fn guard_auth_params(
+    mut params: Value,
+    guarded: bool,
+) -> Result<Value, RegistryQueryError> {
+    if guarded {
+        if params.is_null() {
+            params = Value::Object(serde_json::Map::new());
+        }
+        let Some(object) = params.as_object_mut() else {
+            return Err(RegistryQueryError::Response {
+                message: "auth registry params cannot carry guarded writes".into(),
+                code: Some("guarded_writes_unsupported".into()),
+                provider_updated: false,
+            });
+        };
+        object.insert("guarded_writes".into(), Value::Bool(true));
+    }
+    Ok(params)
+}
+
 #[cfg(test)]
 type ReaderSpawnCheck = fn(u32) -> std::io::Result<()>;
 
@@ -59,8 +79,9 @@ impl CoshCoreAdapter {
         &self,
         domain: &str,
         action: &str,
-        params: Value,
+        mut params: Value,
     ) -> Result<Value, RegistryQueryError> {
+        params = guard_auth_params(params, domain == "auth" && self.guarded_auth_writes)?;
         if domain == "auth" && matches!(action, "set_trial_preference" | "state") {
             return self
                 .runtime
@@ -228,18 +249,23 @@ impl CoshCoreAdapter {
         };
 
         let _ = reader_handle.join();
-        if domain == "auth"
-            && matches!(
-                action,
-                "configure" | "activate_trial" | "set_trial_preference" | "state"
-            )
+        // The response already arrived, so the owner operation is finished.
+        // Reaping stays bounded for every action: a core that never exits must
+        // not hold the wizard (or the shell) open after delivering its answer.
         {
             use wait_timeout::ChildExt;
-            if !matches!(child.wait_timeout(Duration::from_millis(250)), Ok(Some(_))) {
+            let grace = if domain == "auth"
+                && matches!(
+                    action,
+                    "configure" | "activate_trial" | "set_trial_preference" | "state"
+                ) {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
+            if !matches!(child.wait_timeout(grace), Ok(Some(_))) {
                 super::terminate_and_reap_process(&mut child);
             }
-        } else {
-            let _ = child.wait();
         }
 
         // Parse the response
@@ -249,7 +275,9 @@ impl CoshCoreAdapter {
         let success = resp
             .get("success")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .ok_or_else(|| {
+                RegistryQueryError::Transport("registry response has no boolean success".into())
+            })?;
         if success {
             Ok(resp.get("data").cloned().unwrap_or(Value::Null))
         } else {

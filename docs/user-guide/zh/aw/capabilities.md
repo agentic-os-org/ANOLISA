@@ -2,7 +2,18 @@
 
 [English](../../en/aw/capabilities.md)
 
+两语言 SDK 支持应用确认的 attach／detach，操作见[协作式控制](../../../developer-guide/zh/aw/deployment/native-sdk.md#协作式-attach-与-detach)。
+
+应用自行持有的 QwenPaw App 可使用 [Python SDK](../../../developer-guide/zh/aw/deployment/python-sdk.md)，公开 middleware 的覆盖范围在接入指南中单独说明。
+
+应用自行持有的 Qoder Query 可通过 [TypeScript SDK](../../../developer-guide/zh/aw/deployment/native-sdk.md) 显式选择原生回退。公开 Hook 接线的覆盖与验收范围单独列出。
+
 AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下能力由 Adapter 接入原生工具流程；具体版本和启动步骤见[Agent 接入索引](../../../developer-guide/zh/aw/native-agents.md)。
+
+两种语言包均可通过 `sdk/application` profile 接入无框架依赖的输入与工具回调，
+支持输入／工具前置观察和阻断、工具后置观察。应用负责安装真实边界并在执行前采用
+`block`。候选包测试覆盖两种语言；自动插桩和任意应用的最终结果防护仍需独立实现与
+验收。见 [通用 Runtime SDK 接入](../../../developer-guide/zh/aw/deployment/native-sdk.md#通用应用接入)。
 
 ## Hook 支持矩阵
 
@@ -21,6 +32,7 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | × | × |
+| `sdk` | ✓ | ✓ | × | ✓ | × | ✓ | ✓ | × | × |
 <!-- aw-regression-matrix:end -->
 `tool.before` 可观察或阻断，`tool.after` 可观察或通过结构化 Provider 替换结果。布尔脚本和原生命令不能请求结果替换。
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
@@ -48,6 +60,13 @@ Qoder SDK 前台 `Read` 的文本结果支持 PII 内容替换，并保留文件
 
 Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用后拒绝媒体、`input`/`context`/`before_provider_request` 扩展处理器、展开的斜杠命令及队列/其他输入入口。输入拒绝或 block 检查故障后，同一会话可在清理完成后继续 prompt；取消和清理失败会终止任务。直接回调改写用户消息或序列化 Provider 请求也会被拒绝。
 
+Claude SDK 对精确匹配的 Python／TypeScript SDK／bundled CLI 构建开放最终
+`security.violation` 检查。私有运行时 Gate 在 Post 回调完成后检查序列化工具
+结果；未知构建拒绝必需策略。范围见
+[Claude 最终结果限制](../../../developer-guide/zh/aw/agents/claude-sdk.md#最终工具结果安全边界)。
+
+Qoder SDK 1.0.57 / Worker 1.1.81 在 Linux arm64/x64 上支持单次前台 Bash Query 的必需最终结果检查，在原生请求编码前检查 Post Hook 后的文本；未覆盖的传输、额外上下文轮次和运行时构建均拒绝放行。参见[配置与范围](../../../developer-guide/zh/aw/agents/qoder-sdk.md#最终工具结果检查)。
+
 ## 16 个通用 Hook
 
 下表列出公共 Provider Hook 的实现状态，各 Adapter 的效果支持见上表。
@@ -68,8 +87,13 @@ Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用
 | `model.before_request` | 规划中 |
 | `runtime.observed` | 规划中 |
 | `runtime.exited` | 规划中 |
-| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5 工具最终结果边界，支持观察和阻断 |
+| `security.violation` | 已实现于固定版本的 DeepSeek Harness 0.2.1-rc.5；OpenClaw 2026.9.5–2026.9.7 已验证构建的显式 OpenAI-completions Gateway 路径提供实验性支持；支持观察和阻断 |
 | `coverage.changed` | 规划中 |
+
+OpenClaw 最终检查要求精确构建、前台 Gateway 和非 reloadable 模式。上方静态矩阵描述普通启动能力。最终检查在原生结果和请求改写完成后检查模型请求；未知构建或路径拒绝必需策略。接线限制见 [OpenClaw 指南](../../../developer-guide/zh/aw/agents/openclaw.md#工具结果最终检查)。
+
+Qoder SDK 1.0.55／1.0.56 仍只有后置 Post 改写反例和普通 Hook 覆盖。已验证的
+1.0.57／Worker 1.1.81 前台 legacy Profile 在 Linux arm64/x64 提供上文所述最终检查。
 
 ## Skill 校验
 
@@ -141,6 +165,14 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 
 框架版本沿用[原生接入检查](../../../developer-guide/zh/aw/native-agents.md)。记录的测试基线用于复现验收，其他版本可通过相同原生合同接入。
 
+
+配置式 QwenPaw SDK 插件从 AW 文件选择输入或首次工具准入。
+配置输入检查时，在模型派发前等待；仅工具策略时，模型推理与 AW 接入可重叠，
+原生工具进入前固定 Scope。required resident 路径保留结果扣留和原生清理。
+AfterOnlyPlugin 保持范围较窄的兼容合同。固定原生套件覆盖
+QwenPaw 2.2.2.post1／AgentScope 2.0.10 的 after-only、before-only 和 input-only 配置。
+见 [Python SDK 部署](../../../developer-guide/zh/aw/deployment/python-sdk.md#安装与接入)。
+
 ## 原生配置加载
 
 通用 native-loader API 和离线来源引用编辑器保留原文件，区分声明、加载、准入和激活。
@@ -165,3 +197,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 已验收的 SDK 0.2.88 / CLI 2.1.161 中，原生 `disableAllHooks: true` 关闭 settings
 Hook，SDK 注册的 AW callbacks 仍执行。原生改参用例记录执行前终检缺口，并验证 AW
 明确拒绝时工具不会执行；这些用例不构成最终参数强制检查验收。
+
+配置式 Qoder SDK 接入使用原生公开 Hook 与协作 PID attach；未启用 input.submit 时，
+模型推理可先于 AW 开始，首次工具准入固定 Scope。支持输入／工具前观察和阻断、工具后
+观察；结果替换和最终检查继续沿用受管入口。见 [SDK 部署](../../../developer-guide/zh/aw/deployment/native-sdk.md#按配置接入-qoder)。

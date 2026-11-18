@@ -169,6 +169,8 @@ pub(super) enum AuthManagementEntry {
     Existing(usize),
     /// Start the template picker for a brand-new provider.
     AddNew,
+    /// Guide-only: leave management and return to the wizard.
+    GuideExit,
 }
 
 /// Rows of the management panel, in display order.
@@ -195,7 +197,82 @@ pub(super) fn management_entry_count(sysom: &SysomMenu, existing_count: usize) -
     management_entries(sysom, existing_count).len()
 }
 
+/// Rows for the surface that hosts the flow. The guide always keeps an explicit
+/// exit row so an empty configuration still has a way back to the wizard.
+pub(super) fn hosted_entries(
+    host: super::host::AuthHost,
+    sysom: &SysomMenu,
+    existing_count: usize,
+) -> Vec<AuthManagementEntry> {
+    let mut entries = management_entries(sysom, existing_count);
+    if host.is_guide() {
+        entries.push(AuthManagementEntry::GuideExit);
+    }
+    entries
+}
+
+/// Row of `entry` on the hosting surface, which for the guide includes the
+/// explicit exit row that `management_entries` does not carry.
+pub(super) fn hosted_entry_index(
+    host: super::host::AuthHost,
+    sysom: &SysomMenu,
+    existing_count: usize,
+    entry: AuthManagementEntry,
+) -> usize {
+    hosted_entries(host, sysom, existing_count)
+        .iter()
+        .position(|candidate| *candidate == entry)
+        .unwrap_or_else(|| management_entry_index(sysom, existing_count, entry))
+}
+
+pub(super) fn hosted_entry_count(
+    host: super::host::AuthHost,
+    sysom: &SysomMenu,
+    existing_count: usize,
+) -> usize {
+    hosted_entries(host, sysom, existing_count).len()
+}
+
+pub(super) fn hosted_entry(
+    host: super::host::AuthHost,
+    sysom: &SysomMenu,
+    existing_count: usize,
+    selected: usize,
+) -> AuthManagementEntry {
+    hosted_entries(host, sysom, existing_count)
+        .get(selected)
+        .copied()
+        .unwrap_or(if host.is_guide() {
+            AuthManagementEntry::GuideExit
+        } else {
+            AuthManagementEntry::AddNew
+        })
+}
+
+pub(super) fn hosted_options(
+    host: super::host::AuthHost,
+    sysom: &SysomMenu,
+    providers: &[ExistingProvider],
+    i18n: crate::i18n::I18n,
+) -> Vec<String> {
+    let mut options = management_options(sysom, providers);
+    if host.is_guide() {
+        if let Some(last) = options.last_mut() {
+            *last = format!(
+                "  {}",
+                i18n.t(crate::i18n::MessageId::GuideWizardAiAddService)
+            );
+        }
+        options.push(format!(
+            "  {}",
+            i18n.t(crate::i18n::MessageId::GuideWizardAiExit)
+        ));
+    }
+    options
+}
+
 /// The row at `selected`, falling back to `AddNew` for an out-of-range selection.
+#[cfg(test)]
 pub(super) fn management_entry(
     sysom: &SysomMenu,
     existing_count: usize,
@@ -257,6 +334,8 @@ pub(super) fn management_options(sysom: &SysomMenu, providers: &[ExistingProvide
                 existing_provider_option(sysom, providers, index)
             }
             AuthManagementEntry::AddNew => ADD_NEW_PROVIDER_LABEL.to_string(),
+            // Guide-only row; `hosted_options` appends its localized label.
+            AuthManagementEntry::GuideExit => String::new(),
         })
         .collect()
 }

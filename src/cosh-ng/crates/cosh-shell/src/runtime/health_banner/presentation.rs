@@ -1,5 +1,6 @@
 use crate::config::guide::{
-    Claim, ClaimDecision, ClaimRequest, GuideSnapshot, GuideStore, InviteKind, RuntimeState,
+    Claim, ClaimDecision, ClaimRequest, GuideSnapshot, GuideStore, HealthExposure, InviteKind,
+    RuntimeState,
 };
 use crate::diagnostics::health::HealthScanReport;
 use crate::ui::{guidance, RatatuiInlineRenderer};
@@ -38,7 +39,11 @@ pub(super) fn prepare(
             .is_none_or(|config| config.health.enabled);
     let body = guidance::render_health(renderer, report, show_facts, guidance::Target::Bash, None)
         .unwrap_or_default();
-    let facts = body;
+    let facts = if body.is_empty() {
+        body
+    } else {
+        format!("\n{body}")
+    };
     let mut prepared = Prepared {
         facts,
         invitation: None,
@@ -68,9 +73,14 @@ pub(super) fn prepare(
     ) else {
         return prepared;
     };
-    if text.len() > 16 * 1024 {
+    if text.len() >= crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES {
         return prepared;
     }
+    let text = if text.is_empty() {
+        text
+    } else {
+        format!("\n{text}")
+    };
     let session = report.scan_id.as_str();
     let request = ClaimRequest {
         kind,
@@ -78,7 +88,29 @@ pub(super) fn prepare(
         problem: &invitation.problem,
         session,
     };
-    if let Ok(ClaimDecision::Claimed(claim)) = store.claim(runtime, snapshot, request, now_ms) {
+    let decision = if kind == InviteKind::LoginHealth {
+        match invitation.evidence.as_deref() {
+            Some(evidence) => store.claim_health_version(
+                runtime,
+                snapshot,
+                request,
+                now_ms,
+                HealthExposure {
+                    evidence,
+                    event: invitation
+                        .event
+                        .as_ref()
+                        .map(|(domain, value)| (*domain, value.as_str())),
+                    severity: invitation.severity,
+                    legacy_problems: &invitation.legacy_problems,
+                },
+            ),
+            None => store.claim(runtime, snapshot, request, now_ms),
+        }
+    } else {
+        store.claim(runtime, snapshot, request, now_ms)
+    };
+    if let Ok(ClaimDecision::Claimed(claim)) = decision {
         prepared.invitation = Some((claim, text));
     }
     prepared

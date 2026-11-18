@@ -4,21 +4,21 @@ use super::{AppState, secret, storage_data_dir};
 use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, get, head, post, web};
 use agentsight_atif::{AtifTrajectory, ObservationResult, StepSource, ToolCall, same_call_id};
+use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use cosh_platform::checkpoint::{CkptClient, CkptRequestEffect};
-use cosh_types::checkpoint::{
-    CkptGuardedRollbackPreviewV2, DEFAULT_SOCKET_PATH, WorkspaceGenerationTokenV2,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
 };
+mod command;
+
+const DEFAULT_SOCKET_PATH: &str = "/run/ws-ckpt/ws-ckpt.sock";
+// CLI JSON contract: src/ws-ckpt/docs/design/guarded-checkpoint-v2.md.
+const ROLLBACK_SCHEMA: &str = "ws-ckpt.rollback.v1";
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -60,16 +60,13 @@ impl Config {
             .unwrap_or_else(|| DEFAULT_SOCKET_PATH.into())
     }
 
-    fn cli(&self, args: &[&str]) -> anyhow::Result<Value> {
-        let mut cmd = Command::new(self.binary.as_deref().unwrap_or(Path::new("ws-ckpt")));
-        cmd.args(args);
-        cmd.env("WS_CKPT_SOCKET", self.socket());
-        let output = cosh_platform::run_command_with_poll_interval(
-            &mut cmd,
-            Duration::from_secs(30),
-            "ws-ckpt",
-            Duration::from_millis(10),
-        )?;
+    fn run(&self, args: &[&str], input: Option<&[u8]>) -> anyhow::Result<std::process::Output> {
+        let binary = self.binary.as_deref().unwrap_or(Path::new("ws-ckpt"));
+        command::run(binary, &self.socket(), args, input)
+    }
+
+    fn query(&self, args: &[&str]) -> anyhow::Result<Value> {
+        let output = self.run(args, None)?;
         anyhow::ensure!(
             output.status.success(),
             "ws-ckpt query failed: {}",
@@ -78,14 +75,42 @@ impl Config {
         Ok(serde_json::from_slice(&output.stdout)?)
     }
 
-    fn client(&self) -> CkptClient {
-        CkptClient::new(&self.socket()).require_trusted_peer(nix_uid())
+    fn guarded_rollback(&self, args: &[&str], input: Option<&[u8]>) -> anyhow::Result<Value> {
+        let mut command = vec!["rollback", "--guarded", "--json"];
+        command.extend_from_slice(args);
+        self.guarded_json(&command, input)
     }
-}
 
-fn nix_uid() -> u32 {
-    // Reading euid has no memory or ownership preconditions.
-    unsafe { libc::geteuid() }
+    fn guarded_json(&self, args: &[&str], input: Option<&[u8]>) -> anyhow::Result<Value> {
+        let output = self.run(args, input)?;
+        let response: Value = serde_json::from_slice(&output.stdout).with_context(|| {
+            format!(
+                "ws-ckpt guarded JSON is unavailable ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+        anyhow::ensure!(
+            response["schema"] == ROLLBACK_SCHEMA,
+            "incompatible ws-ckpt rollback schema: expected {ROLLBACK_SCHEMA}, got {}",
+            response["schema"]
+        );
+        if output.status.success()
+            || matches!(
+                response["status"].as_str(),
+                Some("known_no_effect" | "unknown")
+            )
+        {
+            Ok(response)
+        } else {
+            anyhow::bail!(
+                "ws-ckpt guarded operation failed: {}",
+                response["message"]
+                    .as_str()
+                    .unwrap_or("unexpected CLI response")
+            );
+        }
+    }
 }
 
 fn succeeded(result: &ObservationResult, tool_name: &str) -> bool {
@@ -350,17 +375,50 @@ fn load(data: &AppState, kind: &str, id: &str) -> anyhow::Result<AtifTrajectory>
     .into())
 }
 
-fn identify(cfg: &Config, selector: &str) -> anyhow::Result<Value> {
-    let status = cfg.cli(&["status", "--workspace", selector, "--format", "json"])?;
-    let rows = status["workspaces"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("invalid workspace status"))?;
+#[derive(Deserialize, Serialize)]
+struct WorkspaceInfo {
+    ws_id: String,
+    path: String,
+    snapshot_count: u32,
+}
+
+fn identify(cfg: &Config, selector: &str) -> anyhow::Result<WorkspaceInfo> {
+    let mut status = cfg.query(&["status", "--workspace", selector, "--format", "json"])?;
+    let workspaces: Vec<WorkspaceInfo> = serde_json::from_value(status["workspaces"].take())?;
+    let mut rows = workspaces.into_iter();
     let row = rows
-        .iter()
-        .find(|row| row["path"] == selector || row["ws_id"] == selector)
+        .next()
+        .filter(|row| row.path == selector || row.ws_id == selector)
         .ok_or_else(|| anyhow::anyhow!("workspace identity not found"))?;
-    anyhow::ensure!(rows.len() == 1, "ambiguous workspace status");
-    Ok(row.clone())
+    anyhow::ensure!(rows.next().is_none(), "ambiguous workspace status");
+    Ok(row)
+}
+
+fn compatible_snapshot_scope(cfg: &Config, selector: &str) -> Option<WorkspaceInfo> {
+    let check = || {
+        let scope = identify(cfg, selector).context("query ws-ckpt workspace identity")?;
+        let response = cfg
+            .guarded_rollback(&["--check", "--workspace", &scope.path], None)
+            .context("check ws-ckpt guarded rollback JSON support")?;
+        anyhow::ensure!(
+            response["status"] == "compatible"
+                && response["ws_id"] == scope.ws_id
+                && response["registered_path"] == scope.path,
+            "ws-ckpt guarded rollback check did not confirm the registered workspace"
+        );
+        anyhow::ensure!(
+            response["diff_json"] == true,
+            "ws-ckpt diff JSON support could not be confirmed"
+        );
+        Ok(scope)
+    };
+    match check() {
+        Ok(scope) => Some(scope),
+        Err(error) => {
+            log::warn!("workspace snapshots unavailable: {error:#}");
+            None
+        }
+    }
 }
 
 fn hermes_checkpoint_steps(
@@ -537,9 +595,10 @@ pub(super) async fn snapshot_availability(
         && web::block(move || {
             let cfg = config(&data)?;
             let doc = load(&data, &kind, &id)?;
-            Ok::<_, anyhow::Error>(
-                workspace(&doc, &cfg)?.is_some_and(|selector| identify(&cfg, &selector).is_ok()),
-            )
+            let Some(selector) = workspace(&doc, &cfg)? else {
+                return Ok(false);
+            };
+            Ok::<_, anyhow::Error>(compatible_snapshot_scope(&cfg, &selector).is_some())
         })
         .await
         .is_ok_and(|result| result.unwrap_or(false));
@@ -568,11 +627,19 @@ pub(super) async fn get_snapshots(
         let Some(selector) = workspace(&doc, &cfg)? else {
             return Ok(json!({"trajectory": doc, "scope": null, "reason": "workspace_unresolved", "step_snapshots": {}}));
         };
-        let scope = identify(&cfg, &selector)?;
-        let ws = scope["ws_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing ws_id"))?;
+        let Some(scope) = compatible_snapshot_scope(&cfg, &selector) else {
+            return Ok(json!({
+                "trajectory": doc,
+                "scope": null,
+                "reason": "ws_ckpt_incompatible",
+                "step_snapshots": {},
+                "restore_enabled": false
+            }));
+        };
+        let ws = &scope.ws_id;
         let boundaries: Vec<_> = doc.steps.iter().map(|step| (step.step_id, &step.source, &step.timestamp)).collect();
-        let checkpoints = hermes_checkpoint_steps(&doc, scope["path"].as_str().unwrap_or_default(), ws);
-        let revision = format!("{:x}", Sha256::digest(serde_json::to_vec(&(kind, id, boundaries, ws, &scope["path"], cfg.socket(), &checkpoints))?));
+        let checkpoints = hermes_checkpoint_steps(&doc, &scope.path, ws);
+        let revision = format!("{:x}", Sha256::digest(serde_json::to_vec(&(kind, id, boundaries, ws, &scope.path, cfg.socket(), &checkpoints))?));
         let cursor: Option<Cursor> = cursor
             .map(|raw| -> anyhow::Result<_> {
                 let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| Rejected {
@@ -586,19 +653,19 @@ pub(super) async fn get_snapshots(
             })
             .transpose()?;
         if let Some(cursor) = &cursor {
-            anyhow::ensure!(cursor.workspace == ws && cursor.revision == revision && cursor.as_of <= now, Rejected { status: StatusCode::CONFLICT, message: "snapshot page changed; reload from the first page" });
+            anyhow::ensure!(&cursor.workspace == ws && cursor.revision == revision && cursor.as_of <= now, Rejected { status: StatusCode::CONFLICT, message: "snapshot page changed; reload from the first page" });
         }
         let as_of = cursor.as_ref().map(|c| c.as_of).unwrap_or(now);
         let mut args = vec!["list", "--workspace", ws, "--format", "json", "--limit", "100"];
         if let Some(cursor) = &cursor { args.extend(["--cursor", &cursor.next]); }
-        let page = cfg.cli(&args)?;
-        let rows: Vec<Value> = serde_json::from_value(page["snapshots"].clone())?;
+        let mut page = cfg.query(&args)?;
+        let rows = serde_json::from_value(page["snapshots"].take())?;
         let next = page["next_cursor"].as_str().map(|next| -> anyhow::Result<_> {
-            Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Cursor {workspace: ws.into(), revision: revision.clone(), as_of, next: next.into()})?))
+            Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Cursor {workspace: ws.clone(), revision: revision.clone(), as_of, next: next.into()})?))
         }).transpose()?;
         let mut response = associate(&doc, rows, as_of, &checkpoints);
         response["trajectory"] = serde_json::to_value(doc)?;
-        response["scope"] = scope;
+        response["scope"] = serde_json::to_value(scope)?;
         let method = if checkpoints.is_empty() { "timestamp_interval" } else { "checkpoint_result_then_timestamp_interval" };
         response["association"] = json!({"method": method, "revision": revision, "as_of": as_of});
         response["completeness"] = json!({"complete": next.is_none(), "next_cursor": next});
@@ -613,39 +680,76 @@ pub(super) struct Target {
     snapshot_id: String,
 }
 
+fn snapshot_changes(
+    cfg: &Config,
+    scope: &WorkspaceInfo,
+    snapshot_id: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut args = vec![
+            "list",
+            "--workspace",
+            &scope.ws_id,
+            "--format",
+            "json",
+            "--limit",
+            "100",
+        ];
+        if let Some(cursor) = &cursor {
+            args.extend(["--cursor", cursor]);
+        }
+        let page = cfg.query(&args)?;
+        let snapshots = page["snapshots"]
+            .as_array()
+            .context("invalid snapshot list")?;
+        if snapshots.iter().any(|row| {
+            row["id"] == snapshot_id
+                && row["workspace"] == scope.path
+                && row["meta"]["missing"] == false
+        }) {
+            break;
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        anyhow::ensure!(cursor.is_some(), "exact snapshot is unavailable");
+    }
+    let from = format!("--from={snapshot_id}");
+    let mut result = cfg.query(&[
+        "diff",
+        "--workspace",
+        &scope.ws_id,
+        &from,
+        "--format",
+        "json",
+    ])?;
+    Ok(serde_json::from_value(result["changes"].take())?)
+}
+
 fn guarded_preview(
     cfg: &Config,
-    scope: &Value,
-    path: &str,
+    scope: &WorkspaceInfo,
     target: &Target,
-) -> anyhow::Result<CkptGuardedRollbackPreviewV2> {
-    let client = cfg.client();
-    let identity = client.workspace_identity_v2(path)?;
+) -> anyhow::Result<(PreviewFingerprint, Vec<Value>)> {
+    let snapshot_arg = format!("--snapshot={}", target.snapshot_id);
+    let mut response = cfg.guarded_rollback(
+        &["--preview", "--workspace", &scope.path, &snapshot_arg],
+        None,
+    )?;
     anyhow::ensure!(
-        identity.registered_path == path && scope["ws_id"] == identity.ws_id,
-        "workspace identity changed; refresh before restore"
+        response["status"] == "preview"
+            && response["registered_path"] == scope.path
+            && response["ws_id"] == scope.ws_id
+            && response["snapshot_id"] == target.snapshot_id,
+        "ws-ckpt preview does not match the requested rollback target"
     );
-    Ok(client.guarded_rollback_preview_v2(
-        path,
-        &identity.ws_id,
-        identity.generation,
-        &target.snapshot_id,
-    )?)
+    let changes = serde_json::from_value(response["changes"].take())?;
+    Ok((serde_json::from_value(response)?, changes))
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
 struct PreviewFingerprint {
-    generation: WorkspaceGenerationTokenV2,
+    generation: [u8; 32],
     diff_digest: [u8; 32],
-}
-
-impl From<&CkptGuardedRollbackPreviewV2> for PreviewFingerprint {
-    fn from(preview: &CkptGuardedRollbackPreviewV2) -> Self {
-        Self {
-            generation: preview.generation,
-            diff_digest: preview.diff_digest,
-        }
-    }
 }
 
 /// Compare one exact snapshot with the current workspace; never evaluate recorded commands.
@@ -655,31 +759,14 @@ pub(super) async fn diff(data: web::Data<AppState>, body: web::Json<Target>) -> 
     blocking(move || {
         let cfg = config(&data)?;
         let scope = identify(&cfg, &target.workspace)?;
-        let path = scope["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing registered path"))?;
         let mut output = if cfg.restore_enabled && data.auth.enabled {
-            let preview = guarded_preview(&cfg, &scope, path, &target)?;
-            let fingerprint = PreviewFingerprint::from(&preview);
-            json!({ "changes": preview.changes, "restore_preview": fingerprint })
+            let (fingerprint, changes) = guarded_preview(&cfg, &scope, &target)?;
+            json!({"changes": changes, "restore_preview": fingerprint})
         } else {
-            // CLI diff accepts prefixes, so verify the full ID in read-only mode.
-            let snapshot = cfg.client().find_snapshot(path, &target.snapshot_id)?;
-            anyhow::ensure!(
-                snapshot.is_some_and(|entry| !entry.missing && entry.workspace == path),
-                "exact snapshot is unavailable"
-            );
-            cfg.cli(&[
-                "diff",
-                "--workspace",
-                path,
-                "--from",
-                &target.snapshot_id,
-                "--format",
-                "json",
-            ])?
+            let changes = snapshot_changes(&cfg, &scope, &target.snapshot_id)?;
+            json!({"changes": changes})
         };
-        output["scope"] = scope;
+        output["scope"] = serde_json::to_value(scope)?;
         output["snapshot_id"] = json!(target.snapshot_id);
         output["compared_at"] = json!(Utc::now());
         Ok(output)
@@ -731,17 +818,15 @@ pub(super) async fn prepare(data: web::Data<AppState>, body: web::Json<Prepare>)
         anyhow::ensure!(request.writers_stopped, Rejected { status: StatusCode::CONFLICT, message: "confirm there will be no other writes to this workspace during rollback" });
         let cfg = restore_config(&data)?;
         let scope = identify(&cfg, &request.target.workspace)?;
-        let path = scope["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing registered path"))?;
-        let preview = guarded_preview(&cfg, &scope, path, &request.target)?;
-        let fingerprint = PreviewFingerprint::from(&preview);
+        let (fingerprint, _) = guarded_preview(&cfg, &scope, &request.target)?;
         anyhow::ensure!(
             fingerprint == request.expected_preview,
             Rejected { status: StatusCode::CONFLICT, message: "workspace or file changes differ from the displayed preview; stop other writes, refresh, and confirm again" }
         );
         let preview = PreparedPreview {
-            registered_path: preview.registered_path,
-            ws_id: preview.ws_id,
-            target_snapshot_id: preview.target_snapshot_id,
+            registered_path: scope.path,
+            ws_id: scope.ws_id,
+            target_snapshot_id: request.target.snapshot_id,
             fingerprint,
         };
         let operation_id = uuid::Uuid::new_v4().to_string();
@@ -768,6 +853,27 @@ fn open_confirmation(data: &AppState, token: &str) -> anyhow::Result<Prepared> {
     Ok(prepared)
 }
 
+fn rollback_input(prepared: &Prepared) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&json!({
+        "ws_id": prepared.preview.ws_id,
+        "generation": prepared.preview.fingerprint.generation,
+        "diff_digest": prepared.preview.fingerprint.diff_digest,
+        "operation_id": prepared.operation_id,
+        "operation_digest": prepared.operation_digest,
+    }))?)
+}
+
+fn matches_evidence(prepared: &Prepared, evidence: &Value) -> bool {
+    let preview = &prepared.preview;
+    evidence["ws_id"] == preview.ws_id
+        && evidence["registered_path"] == preview.registered_path
+        && evidence["expected_generation"] == json!(preview.fingerprint.generation)
+        && evidence["target_snapshot_id"] == preview.target_snapshot_id
+        && evidence["expected_diff_digest"] == json!(preview.fingerprint.diff_digest)
+        && evidence["operation_id"] == prepared.operation_id
+        && evidence["operation_digest"] == json!(prepared.operation_digest)
+}
+
 /// Execute only the sealed, exact preview; uncertain outcomes are queried, never retried here.
 #[post("/ws-ckpt/restore/execute")]
 pub(super) async fn execute(
@@ -779,11 +885,30 @@ pub(super) async fn execute(
         let cfg = restore_config(&data)?;
         let prepared = open_confirmation(&data, &token)?;
         let p = &prepared.preview;
-        match cfg.client().guarded_rollback_v2(&p.registered_path, &p.ws_id, p.fingerprint.generation, &p.target_snapshot_id, p.fingerprint.diff_digest, &prepared.operation_id, prepared.operation_digest) {
-            Ok(evidence) => Ok(json!({"status": "succeeded", "evidence": evidence})),
-            Err(failure) if failure.effect == CkptRequestEffect::KnownNoEffect => Err(RestoreNoEffect(failure.error.to_string()).into()),
-            Err(_) => Ok(json!({"status": "unknown", "operation_id": prepared.operation_id, "confirmation_token": token})),
+        let input = rollback_input(&prepared)?;
+        let snapshot_arg = format!("--snapshot={}", p.target_snapshot_id);
+        match cfg.guarded_rollback(&["--workspace", &p.registered_path, &snapshot_arg], Some(&input)) {
+            Ok(response) if response["status"] == "succeeded"
+                && matches_evidence(&prepared, &response["evidence"])
+                && response["evidence"]["outcome"]["Succeeded"].is_object() =>
+            {
+                return Ok(json!({"status": "succeeded", "evidence": response["evidence"]}));
+            }
+            Ok(response) if response["status"] == "known_no_effect" => {
+                let code = response["code"].as_str().unwrap_or("rejected");
+                let message = response["message"].as_str().unwrap_or("ws-ckpt refused rollback");
+                return Err(RestoreNoEffect(format!("{code}: {message}")).into());
+            }
+            Err(error) if error.is::<command::BeforeExecution>() => {
+                return Err(RestoreNoEffect(error.to_string()).into());
+            }
+            Err(error) => log::warn!("ws-ckpt rollback {} result is unknown: {error:#}", prepared.operation_id),
+            Ok(response) => log::warn!(
+                "ws-ckpt rollback {} result is unknown: status={}, code={}, message={}",
+                prepared.operation_id, response["status"], response["code"], response["message"]
+            ),
         }
+        Ok(json!({"status": "unknown", "operation_id": prepared.operation_id, "confirmation_token": token}))
     }).await
 }
 
@@ -797,11 +922,18 @@ pub(super) async fn restore_result(
     blocking(move || {
         let cfg = config(&data)?;
         let p = open_confirmation(&data, &token)?;
-        let evidence = cfg.client().guarded_rollback_evidence_v2(
-            &p.preview.ws_id,
-            &p.operation_id,
-            p.operation_digest,
+        let response = cfg.guarded_rollback(
+            &["--result", "--workspace", &p.preview.ws_id],
+            Some(&rollback_input(&p)?),
         )?;
+        let evidence = response
+            .get("evidence")
+            .filter(|_| response["status"] == "result")
+            .ok_or_else(|| anyhow::anyhow!("unexpected ws-ckpt rollback evidence response"))?;
+        anyhow::ensure!(
+            evidence.is_null() || matches_evidence(&p, evidence),
+            "ws-ckpt evidence does not match the requested rollback operation"
+        );
         Ok(json!({"evidence": evidence, "operation_id": p.operation_id}))
     })
     .await

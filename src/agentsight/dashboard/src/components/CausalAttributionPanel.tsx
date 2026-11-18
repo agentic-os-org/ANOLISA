@@ -43,8 +43,8 @@ function readHistory(
   roundIndex?: number,
   idKind?: 'session' | 'conversation',
 ): HistoryEntry[] {
-  if (typeof window === 'undefined' || !window.localStorage) return [];
   try {
+    if (typeof window === 'undefined' || !window.localStorage) return [];
     const raw = window.localStorage.getItem(historyKey(sessionId, roundIndex, idKind));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as HistoryEntry[];
@@ -60,8 +60,8 @@ function writeHistory(
   idKind: 'session' | 'conversation' | undefined,
   entries: HistoryEntry[],
 ): void {
-  if (typeof window === 'undefined' || !window.localStorage) return;
   try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
     const trimmed = entries.slice(-HISTORY_MAX_ENTRIES);
     window.localStorage.setItem(
       historyKey(sessionId, roundIndex, idKind),
@@ -630,8 +630,13 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   };
 
   const clearHistory = () => {
-    if (typeof window === 'undefined' || !window.localStorage) return;
-    window.localStorage.removeItem(historyKey(sessionId, roundIndex, idKind));
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage?.removeItem(historyKey(sessionId, roundIndex, idKind));
+      }
+    } catch {
+      // Optional persistence must not prevent clearing the current panel.
+    }
     setHistory([]);
     setCaseData(null);
     setCached(false);

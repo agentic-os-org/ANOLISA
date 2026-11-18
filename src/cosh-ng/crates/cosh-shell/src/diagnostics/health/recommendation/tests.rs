@@ -70,11 +70,11 @@ fn memory_and_swap_generate_sorted_try_items() {
     assert_eq!(report.try_items.len(), 2);
     assert_eq!(
         report.try_items[0].label_id,
-        HealthMessageId::HealthTryCheckSwapPressure
+        HealthMessageId::HealthTryAnalyzeMemoryPressure
     );
     assert_eq!(
         report.try_items[1].label_id,
-        HealthMessageId::HealthTryAnalyzeMemoryPressure
+        HealthMessageId::HealthTryCheckSwapPressure
     );
     assert!(report
         .findings

@@ -258,9 +258,13 @@ development environment and checks.
 | Active capability, plan and evidence schemas | `aw-contracts/schemas/` |
 | Configuration | `aw-config/schemas/` |
 | Provider messages and View protocol | `aw-provider/schemas/` |
+| Native bridge data | The Adapter |
 | Provider private configuration and backend data | The concrete Provider directory |
 
-`aw-contracts/schemas/` contains only registered, tested contracts, currently 28.
+`aw-contracts/schemas/` contains only registered, tested contracts. The
+[Registry](../../../crates/aw-contracts/src/registry.rs) lists the active schemas;
+the [inventory test](../../../crates/aw-contracts/tests/schemas.rs) requires every
+schema file to be registered.
 Plan, evidence and other v1 contracts remain active; the four capability profiles
 use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
 in this repository and were removed. Their contents remain in Git history.
@@ -311,6 +315,12 @@ Later `aw update` uses the existing idle activation gate. `install --remove`
 uses Unbind to close complete request/tool admission atomically, then removes
 owned native registration and private artifacts. External processes are neither
 launched nor signalled by this path. Ordinary `aw run` keeps child supervision.
+
+Language SDKs own shared Admission over Instance/Task. Native Sources install
+capture and choose the configured input or first-tool boundary. Qoder and the
+configured QwenPaw entry reuse it; QwenPaw additionally retains its resident
+result guard. Service/Host/executor keep policy authority and Provider execution.
+See [SDK ownership](runtime/native-sdk.md#deferred-after-only-task-admission).
 
 Public audit consumers use `aw audit-export` → `aw-service::audit_export` →
 `aw-core::journal::reader`. The reader pins owned storage and verifies bounded

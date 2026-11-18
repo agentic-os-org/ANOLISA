@@ -1172,6 +1172,27 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
     persist_config_to_dir(config, &dir)
 }
 
+mod guarded;
+
+/// Wizard-initiated persistence: ownership-checked, no-follow, and never
+/// treating an unreadable document as an empty one.
+pub fn persist_config_guarded(config: &CoreConfig) -> Result<(), String> {
+    let dir = config_dir();
+    guarded::verify_dir(&dir)?;
+    guarded::verify_target(&dir.join("config.toml"))?;
+    persist_config_inner(config, &dir, true)
+}
+
+#[cfg(test)]
+pub fn persist_config_guarded_to_dir(
+    config: &CoreConfig,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    guarded::verify_dir(dir)?;
+    guarded::verify_target(&dir.join("config.toml"))?;
+    persist_config_inner(config, dir, true)
+}
+
 /// Matches only the `[ai]` table header and its dotted children (`[ai.providers.x]`),
 /// not lookalike sections such as `[aider]` or `[ai_drivers]`.
 /// Trailing whitespace or an inline comment after the closing bracket is accepted.
@@ -1189,11 +1210,28 @@ fn is_ai_section_header(line: &str) -> bool {
 }
 
 fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    persist_config_inner(config, dir, false)
+}
+
+fn persist_config_inner(
+    config: &CoreConfig,
+    dir: &std::path::Path,
+    guard: bool,
+) -> Result<(), String> {
+    if guard {
+        guarded::verify_dir(dir)?;
+    } else {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    }
 
     let config_path = dir.join("config.toml");
 
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let existing = if guard {
+        guarded::verify_target(&config_path)?;
+        guarded::read_existing(&config_path)?
+    } else {
+        std::fs::read_to_string(&config_path).unwrap_or_default()
+    };
 
     let mut preserved = String::new();
     let mut in_ai_section = false;
@@ -1277,6 +1315,10 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
             preserved.push_str("explicit_cache = true\n");
         }
         preserved.push('\n');
+    }
+
+    if guard {
+        return guarded::replace(dir, &config_path, &preserved);
     }
 
     let pid = std::process::id();

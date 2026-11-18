@@ -14,13 +14,17 @@ use super::super::collectors::{
 };
 use super::super::env_collectors::{run_environment_check, EnvironmentConfigSample};
 use super::super::model::{HealthCollector, HealthProgress};
-use super::job::{install_worker_timeout_handler, timer_remaining, JobDeadline};
+use super::super::plan::{source_definition, FinishPolicy};
+use super::clock::HealthDeadline;
+use super::job::{install_worker_timeout_handler, timer_remaining};
 use super::plan::{checks, ScanContext, WorkerRequest};
 use super::process::{set_nonblocking, COMMAND_POLL_INTERVAL};
-use super::protocol::{self, Decoder, Payload, ProtocolError, FRAME_COUNT_LIMIT, TOTAL_LIMIT};
+use super::protocol::{
+    self, CollectTask, Decoder, Payload, ProtocolError, FRAME_COUNT_LIMIT, TOTAL_LIMIT,
+};
 
 pub(super) const IPC_FD: i32 = 3;
-pub(crate) const PRIVATE_WORKER_FLAG: &str = "--__cosh-health-worker-v1";
+pub(crate) const PRIVATE_WORKER_FLAG: &str = "--__cosh-health-worker-v2";
 pub(super) const MAX_WORKER_BUDGET: Duration = Duration::from_secs(3);
 
 pub(crate) fn run_private_health_worker() -> i32 {
@@ -38,7 +42,7 @@ fn run_worker() -> Result<(), ProtocolError> {
     if budget.is_zero() || budget > MAX_WORKER_BUDGET {
         return Err(ProtocolError::Invalid);
     }
-    let bootstrap = JobDeadline::after(budget).map_err(ProtocolError::Io)?;
+    let bootstrap = HealthDeadline::after(budget).map_err(ProtocolError::Io)?;
     let mut stream = unsafe { UnixStream::from_raw_fd(IPC_FD) };
     let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of_val(&address) as libc::socklen_t;
@@ -65,9 +69,6 @@ fn run_worker() -> Result<(), ProtocolError> {
         }
         thread::sleep(COMMAND_POLL_INTERVAL);
     };
-    if !decoder.is_empty() {
-        return Err(ProtocolError::Invalid);
-    }
     if frame.sequence != 0 {
         return Err(ProtocolError::Invalid);
     }
@@ -89,6 +90,7 @@ fn run_worker() -> Result<(), ProtocolError> {
         return Err(ProtocolError::Io(io::Error::last_os_error()));
     }
     collectors::enter_worker_job(request.deadline).map_err(|_| ProtocolError::Invalid)?;
+    super::clock::arm_alarm(request.deadline).map_err(ProtocolError::Io)?;
     let login_config = if request.config_source == super::plan::ConfigSource::LoginConfigProjection
     {
         if request.context != ScanContext::LoginBanner {
@@ -101,57 +103,32 @@ fn run_worker() -> Result<(), ProtocolError> {
         None
     };
     let mut writer = ProgressWriter {
-        stream,
-        nonce: frame.nonce,
+        stream: stream.try_clone().map_err(ProtocolError::Io)?,
+        nonce: frame.nonce.clone(),
         deadline: request.deadline,
         sequence: 1,
         total: 0,
+        task_id: 0,
     };
     if let Some(config) = login_config {
         writer.write_payload(Payload::Configuration(config))?;
     }
     let writer = Arc::new(Mutex::new(writer));
-    if let Some(name) = &request.fixture_name {
+    let fixture = request.fixture_name.as_ref().map(|name| {
         let options = super::HealthScanOptions {
             started_at_ms: request.started_at_ms,
             now_epoch_seconds: request.now_epoch_seconds,
-            total_budget: request.deadline.remaining().map_err(ProtocolError::Io)?,
+            total_budget: request.deadline.remaining().unwrap_or_default(),
             mode: super::HealthScanMode::Fixture(name.clone()),
         };
-        let report = super::fixtures::fixture_report_for_context(
+        super::fixtures::fixture_report_for_context(
             name,
             &request.config,
             &options,
             request.context,
             &request.disabled,
-        );
-        let mut output = writer.lock().map_err(|_| ProtocolError::Invalid)?;
-        for check in report.check_results.iter().filter(|check| {
-            check.collector.is_some()
-                && check.status != super::super::model::HealthCheckStatus::Disabled
-        }) {
-            if check.collector == Some(HealthCollector::Host) {
-                if let Some(host) = &report.host {
-                    output.write(HealthProgress::Host(host.clone()))?;
-                }
-            }
-            for id in &check.fact_ids {
-                let fact = report
-                    .facts
-                    .iter()
-                    .find(|fact| fact.id == *id)
-                    .ok_or(ProtocolError::Invalid)?;
-                let metadata = report.fact_metadata.get(id).ok_or(ProtocolError::Invalid)?;
-                output.write(HealthProgress::Fact {
-                    check_id: check.id.clone(),
-                    fact: fact.clone(),
-                    metadata: metadata.clone(),
-                })?;
-            }
-            output.write(HealthProgress::Check(check.clone()))?;
-        }
-        return Ok(());
-    }
+        )
+    });
     let output = writer.clone();
     let mut builder = HealthReportBuilder::new(&request.scan_id, request.started_at_ms)
         .with_progress(move |progress| {
@@ -164,14 +141,12 @@ fn run_worker() -> Result<(), ProtocolError> {
             }
             sent
         });
-    let sources = super::plan::sources(&request);
-    let memory_sample = sources
-        .contains(&super::super::plan::SampleSource::Meminfo)
-        .then(std::cell::OnceCell::new);
-    let disk_sample = sources
-        .contains(&super::super::plan::SampleSource::Filesystems)
-        .then(std::cell::OnceCell::new);
     let planned = checks(&request);
+    for spec in &planned {
+        if !spec.enabled {
+            builder.declare_check_id(spec.id, spec.collector, false);
+        }
+    }
     let root_enabled = planned
         .iter()
         .any(|check| check.id == "filesystem.root" && check.enabled);
@@ -185,16 +160,183 @@ fn run_worker() -> Result<(), ProtocolError> {
     if request.environment.is_some() && environment.is_none() {
         return Err(ProtocolError::Invalid);
     }
+    let memory_sample = std::cell::OnceCell::new();
+    let disk_sample = std::cell::OnceCell::new();
     let environment_sample = std::cell::OnceCell::<EnvironmentConfigSample>::new();
-    for spec in planned {
-        if !spec.enabled {
-            builder.declare_check_id(spec.id, spec.collector, false);
-            continue;
+    let mut last_task_id = 0u64;
+    loop {
+        let task = receive_collect_task(
+            &mut decoder,
+            &mut stream,
+            request.deadline,
+            &frame.nonce,
+            last_task_id,
+        )?;
+        last_task_id = task.task_id;
+        if task.deadline.expires_ns > request.deadline.expires_ns
+            || task.work_deadline.expires_ns > task.deadline.expires_ns
+            || task
+                .work_deadline
+                .remaining()
+                .map_err(ProtocolError::Io)?
+                .is_zero()
+            || task.check_ids.is_empty()
+            || task.check_ids.iter().any(|id| {
+                !planned
+                    .iter()
+                    .any(|spec| spec.id == id && spec.enabled && spec.source == task.source)
+            })
+        {
+            return Err(ProtocolError::Invalid);
         }
-        if builder.progress_failed() || collectors::worker_command_stopped() {
-            break;
+        super::clock::arm_alarm(task.work_deadline).map_err(ProtocolError::Io)?;
+        {
+            let mut output = writer.lock().map_err(|_| ProtocolError::Invalid)?;
+            output.task_id = task.task_id;
+            output.deadline = task.work_deadline;
         }
-        if request
+        if let Some(report) = &fixture {
+            let mut output = writer.lock().map_err(|_| ProtocolError::Invalid)?;
+            for check in report.check_results.iter().filter(|check| {
+                task.check_ids.contains(&check.id)
+                    && check.collector.is_some()
+                    && check.status != super::super::model::HealthCheckStatus::Disabled
+            }) {
+                if check.collector == Some(HealthCollector::Host) {
+                    if let Some(host) = &report.host {
+                        output.write(HealthProgress::Host(host.clone()))?;
+                    }
+                }
+                for id in &check.fact_ids {
+                    let fact = report
+                        .facts
+                        .iter()
+                        .find(|fact| fact.id == *id)
+                        .ok_or(ProtocolError::Invalid)?;
+                    let metadata = report.fact_metadata.get(id).ok_or(ProtocolError::Invalid)?;
+                    output.write(HealthProgress::Fact {
+                        check_id: check.id.clone(),
+                        fact: fact.clone(),
+                        metadata: metadata.clone(),
+                    })?;
+                }
+                output.write(HealthProgress::Check(check.clone()))?;
+            }
+        } else {
+            for spec in planned.iter().filter(|spec| {
+                spec.source == task.source && task.check_ids.contains(&spec.id.to_string())
+            }) {
+                if builder.progress_failed() || collectors::worker_command_stopped() {
+                    return Err(ProtocolError::Invalid);
+                }
+                if request
+                    .deadline
+                    .remaining()
+                    .map_err(ProtocolError::Io)?
+                    .is_zero()
+                    || task
+                        .deadline
+                        .remaining()
+                        .map_err(ProtocolError::Io)?
+                        .is_zero()
+                {
+                    return Err(ProtocolError::Timeout);
+                }
+                let budget = Duration::from_millis(spec.budget_ms)
+                    .min(task.work_deadline.remaining().map_err(ProtocolError::Io)?);
+                collectors::begin_worker_check(budget).map_err(|_| ProtocolError::Invalid)?;
+                builder.start_check_id(
+                    spec.id,
+                    spec.collector,
+                    spec.scope.clone(),
+                    spec.coverage.clone(),
+                    now_millis(),
+                );
+                match spec.collector {
+                    HealthCollector::Cpu => collect_cpu(&mut builder),
+                    HealthCollector::Memory => {
+                        let (sampled_at, sample) =
+                            memory_sample.get_or_init(|| (now_millis(), collectors::read_memory()));
+                        builder.set_sampled_at(*sampled_at);
+                        match sample {
+                            Ok(facts) => {
+                                facts.record(&mut builder, 0);
+                                builder.add_check_done(spec.id);
+                            }
+                            Err(reason) => {
+                                builder.add_unavailable(
+                                    spec.collector,
+                                    *reason,
+                                    super::super::model::HealthSeverity::Degraded,
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                    HealthCollector::Host => collect_host(&mut builder),
+                    HealthCollector::Disk => {
+                        let (sampled_at, sample) = disk_sample.get_or_init(|| {
+                            (
+                                now_millis(),
+                                collectors::read_disk_sample(
+                                    &request.config,
+                                    request.context.passive(),
+                                    root_enabled,
+                                    mounts_enabled,
+                                ),
+                            )
+                        });
+                        builder.set_sampled_at(*sampled_at);
+                        match sample {
+                            Ok(facts) => {
+                                facts.record(&mut builder, 0);
+                                builder.add_check_done(spec.id);
+                            }
+                            Err(reason) => {
+                                builder.add_unavailable(
+                                    spec.collector,
+                                    *reason,
+                                    super::super::model::HealthSeverity::Degraded,
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                    HealthCollector::KernelSignal => {
+                        collect_kernel_signals(&mut builder, request.now_epoch_seconds)
+                    }
+                    HealthCollector::ConfiguredService => {
+                        collect_configured_services(&mut builder, &request.config)
+                    }
+                    collector => {
+                        let config = environment.as_ref().ok_or(ProtocolError::Invalid)?;
+                        let snapshot =
+                            request.environment.as_ref().ok_or(ProtocolError::Invalid)?;
+                        let cwd = if snapshot.cwd.is_absolute() {
+                            snapshot.cwd.clone()
+                        } else {
+                            std::env::current_dir()
+                                .map(|cwd| cwd.join(&snapshot.cwd))
+                                .unwrap_or_else(|_| snapshot.cwd.clone())
+                        };
+                        run_environment_check(
+                            &mut builder,
+                            collector,
+                            config,
+                            &cwd,
+                            0,
+                            request.context == ScanContext::OnDemand,
+                            &environment_sample,
+                        );
+                    }
+                }
+                builder.complete_check();
+            }
+        }
+        if builder.progress_failed() {
+            return Err(ProtocolError::Invalid);
+        }
+        if task
             .deadline
             .remaining()
             .map_err(ProtocolError::Io)?
@@ -202,129 +344,66 @@ fn run_worker() -> Result<(), ProtocolError> {
         {
             return Err(ProtocolError::Timeout);
         }
-        collectors::begin_worker_check(Duration::from_millis(spec.budget_ms))
-            .map_err(|_| ProtocolError::Invalid)?;
-        builder.start_check_id(
-            spec.id,
-            spec.collector,
-            spec.scope,
-            spec.coverage,
-            now_millis(),
-        );
-        match spec.collector {
-            HealthCollector::Cpu => collect_cpu(&mut builder),
-            HealthCollector::Memory => {
-                let (sampled_at, sample) = memory_sample
-                    .as_ref()
-                    .ok_or(ProtocolError::Invalid)?
-                    .get_or_init(|| (now_millis(), collectors::read_memory()));
-                builder.set_sampled_at(*sampled_at);
-                match sample {
-                    Ok(facts) => {
-                        facts.record(&mut builder, 0);
-                        builder.add_check_done(spec.id);
-                        if spec.id == "resource.swap"
-                            && !super::super::rules::swap_context_complete(
-                                builder.report(),
-                                &request.config,
-                            )
-                        {
-                            builder.add_unavailable(
-                                spec.collector,
-                                super::super::model::HealthUnavailableReason::MissingContext,
-                                super::super::model::HealthSeverity::Unavailable,
-                                0,
-                            );
-                        }
-                    }
-                    Err(reason) => {
-                        builder.add_unavailable(
-                            spec.collector,
-                            *reason,
-                            super::super::model::HealthSeverity::Degraded,
-                            0,
-                        );
-                    }
-                }
-            }
-            HealthCollector::Host => collect_host(&mut builder),
-            HealthCollector::Disk => {
-                let (sampled_at, sample) = disk_sample
-                    .as_ref()
-                    .ok_or(ProtocolError::Invalid)?
-                    .get_or_init(|| {
-                        (
-                            now_millis(),
-                            collectors::read_disk_sample(
-                                &request.config,
-                                request.context.passive(),
-                                root_enabled,
-                                mounts_enabled,
-                            ),
-                        )
-                    });
-                builder.set_sampled_at(*sampled_at);
-                match sample {
-                    Ok(facts) => {
-                        facts.record(&mut builder, 0);
-                        builder.add_check_done(spec.id);
-                    }
-                    Err(reason) => {
-                        builder.add_unavailable(
-                            spec.collector,
-                            *reason,
-                            super::super::model::HealthSeverity::Degraded,
-                            0,
-                        );
-                    }
-                }
-            }
-            HealthCollector::KernelSignal => {
-                collect_kernel_signals(&mut builder, request.now_epoch_seconds)
-            }
-            HealthCollector::ConfiguredService => {
-                collect_configured_services(&mut builder, &request.config)
-            }
-            collector => {
-                let config = environment.as_ref().ok_or(ProtocolError::Invalid)?;
-                let snapshot = request.environment.as_ref().ok_or(ProtocolError::Invalid)?;
-                let cwd = if snapshot.cwd.is_absolute() {
-                    snapshot.cwd.clone()
-                } else {
-                    std::env::current_dir()
-                        .map(|cwd| cwd.join(&snapshot.cwd))
-                        .unwrap_or_else(|_| snapshot.cwd.clone())
-                };
-                run_environment_check(
-                    &mut builder,
-                    collector,
-                    config,
-                    &cwd,
-                    0,
-                    request.context == ScanContext::OnDemand,
-                    &environment_sample,
-                );
-            }
+        writer
+            .lock()
+            .map_err(|_| ProtocolError::Invalid)?
+            .write_payload(Payload::SourceDone {
+                task_id: task.task_id,
+            })?;
+        if source_definition(task.source).finish_policy == FinishPolicy::RetireAfterSource {
+            return Ok(());
         }
-        builder.complete_check();
+        super::clock::arm_alarm(request.deadline).map_err(ProtocolError::Io)?;
+        writer.lock().map_err(|_| ProtocolError::Invalid)?.deadline = request.deadline;
     }
-    if builder.progress_failed() {
-        return Err(ProtocolError::Invalid);
+}
+
+fn receive_collect_task(
+    decoder: &mut Decoder,
+    stream: &mut UnixStream,
+    deadline: HealthDeadline,
+    nonce: &str,
+    last_task_id: u64,
+) -> Result<CollectTask, ProtocolError> {
+    loop {
+        let eof = decoder.receive(stream, deadline)?;
+        if let Some(frame) = decoder.next()? {
+            if frame.nonce != nonce {
+                return Err(ProtocolError::Invalid);
+            }
+            let Payload::Collect(task) = frame.payload else {
+                return Err(ProtocolError::Invalid);
+            };
+            if task.task_id <= last_task_id {
+                return Err(ProtocolError::Invalid);
+            }
+            return Ok(task);
+        }
+        if eof {
+            return Err(ProtocolError::Invalid);
+        }
+        if deadline.remaining().map_err(ProtocolError::Io)?.is_zero() {
+            return Err(ProtocolError::Timeout);
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL);
     }
-    Ok(())
 }
 
 struct ProgressWriter {
     stream: UnixStream,
     nonce: String,
-    deadline: JobDeadline,
+    deadline: HealthDeadline,
     sequence: u64,
     total: usize,
+    task_id: u64,
 }
 
 impl ProgressWriter {
     fn write(&mut self, progress: HealthProgress) -> Result<(), ProtocolError> {
-        self.write_payload(Payload::Progress(progress))
+        self.write_payload(Payload::Progress {
+            task_id: self.task_id,
+            progress,
+        })
     }
     fn write_payload(&mut self, payload: Payload) -> Result<(), ProtocolError> {
         if self.sequence > FRAME_COUNT_LIMIT {

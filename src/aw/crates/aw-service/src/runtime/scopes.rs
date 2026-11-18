@@ -23,6 +23,7 @@ pub(super) struct Owner {
     pub(super) process: Process,
     pub(super) independent: bool,
     pub(super) native: bool,
+    pub(super) sdk: Option<crate::Availability>,
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) acknowledge_by: Option<Instant>,
     policy_confirmed: bool,
@@ -150,7 +151,7 @@ impl Runtime {
     }
 
     pub(super) fn own_instance(&self, id: &str, pid: u32) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let instances = self
             .instances
             .lock()
@@ -171,6 +172,7 @@ impl Runtime {
                 parent: None,
                 independent: false,
                 native: false,
+                sdk: None,
                 acknowledge_by: None,
                 policy_confirmed: true,
                 validity: None,
@@ -189,7 +191,7 @@ impl Runtime {
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
-        let process = Process::read(pid)?;
+        let process = Process::read(pid)?.watch()?;
         let id = self.identifier()?;
         let cancellation = Arc::new(AtomicBool::new(false));
         let (bytes, target, capabilities) = {
@@ -226,7 +228,8 @@ impl Runtime {
                 return Err(rejected("registration_not_ready"));
             }
             let independent = owner.independent;
-            let policy_confirmed = instance.reload.is_none();
+            let sdk = owner.sdk;
+            let policy_confirmed = instance.reload.is_none() && sdk.is_none();
             if instances.len() >= self.limits.bindings {
                 return Err(self.overload("binding_limit"));
             }
@@ -242,6 +245,7 @@ impl Runtime {
                     parent: Some(parent.into()),
                     independent,
                     native: false,
+                    sdk,
                     acknowledge_by: Some(deadline + Duration::from_secs(5)),
                     policy_confirmed,
                     validity: None,
@@ -438,9 +442,19 @@ impl Runtime {
 }
 
 impl Owner {
+    /// Return a pending deadline; expired bridge leases are already fenced.
+    pub(in crate::runtime) fn maintenance_deadline(&self) -> Option<Instant> {
+        self.acknowledge_by
+            .into_iter()
+            .chain(self.validity.as_ref().map(|validity| validity.deadline))
+            .filter(|deadline| *deadline > Instant::now())
+            .min()
+    }
+
     pub(super) fn independent(
         process: Process,
         native: bool,
+        sdk: Option<crate::Availability>,
         cancelled: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Self {
@@ -450,6 +464,7 @@ impl Owner {
             cancelled,
             independent: true,
             native,
+            sdk,
             acknowledge_by: Some(deadline),
             policy_confirmed: true,
             validity: None,

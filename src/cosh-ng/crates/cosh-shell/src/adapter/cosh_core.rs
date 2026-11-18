@@ -45,6 +45,9 @@ pub struct CoshCoreAdapter {
     /// Shell cwd tracked from the PTY host so that short-lived `--registry`
     /// processes resolve the same project root as the headless runtime.
     pub(crate) shell_cwd: Arc<Mutex<Option<String>>>,
+    /// Wizard-initiated auth writes must go through the ownership-checked
+    /// core writer; ordinary shell auth keeps its historical behavior.
+    pub(crate) guarded_auth_writes: bool,
 }
 
 impl Default for CoshCoreAdapter {
@@ -66,6 +69,7 @@ impl Default for CoshCoreAdapter {
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
             shell_cwd: Arc::new(Mutex::new(None)),
+            guarded_auth_writes: false,
         }
     }
 }
@@ -79,7 +83,15 @@ impl CoshCoreAdapter {
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
             shell_cwd: Arc::new(Mutex::new(None)),
+            guarded_auth_writes: false,
         }
+    }
+
+    /// Requests the core's ownership-checked configuration writer for every
+    /// auth registry call made through this adapter.
+    pub(crate) fn with_guarded_auth_writes(mut self) -> Self {
+        self.guarded_auth_writes = true;
+        self
     }
 
     /// Enables or disables real model process execution.

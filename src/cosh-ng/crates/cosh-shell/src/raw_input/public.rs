@@ -2,7 +2,9 @@
 #[path = "mod.rs"]
 mod implementation;
 
-pub use implementation::{RawInputCapture, RawObserverAction, RawRelayAction};
+pub use implementation::{
+    RawInputCapture, RawObserverAction, RawRelayAction, SuggestionSurfacePayload,
+};
 
 #[allow(unused_imports)]
 pub(crate) use implementation::{

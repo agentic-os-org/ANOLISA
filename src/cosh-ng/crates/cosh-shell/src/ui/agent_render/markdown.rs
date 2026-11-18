@@ -26,7 +26,7 @@ use list::{render_plain_list_item, render_ratatui_list_item};
 use table::{render_plain_markdown_table, render_ratatui_markdown_table};
 
 #[derive(Debug, Clone)]
-pub(super) struct MarkdownRenderModel {
+pub(crate) struct MarkdownRenderModel {
     lines: Vec<MarkdownLine>,
     width: usize,
     language: crate::Language,
@@ -38,7 +38,7 @@ impl MarkdownRenderModel {
         Self::parse_with_language(text, width, crate::Language::EnUs)
     }
 
-    pub(super) fn parse_with_language(text: &str, width: usize, language: crate::Language) -> Self {
+    pub(crate) fn parse_with_language(text: &str, width: usize, language: crate::Language) -> Self {
         Self {
             lines: lines_from_markdown(text),
             width,
@@ -64,7 +64,7 @@ impl MarkdownRenderModel {
         )
     }
 
-    pub(super) fn styled_lines(&self) -> Vec<Line<'static>> {
+    pub(crate) fn styled_lines(&self) -> Vec<Line<'static>> {
         let i18n = crate::I18n::new(self.language);
         let mut rendered = self
             .lines
@@ -75,6 +75,26 @@ impl MarkdownRenderModel {
         rendered = compact_styled_lines(rendered);
         while rendered.last().is_some_and(line_is_empty) {
             rendered.pop();
+        }
+        rendered
+    }
+
+    /// Guide pages keep one blank row between blocks; chat replies stay compact.
+    pub(crate) fn spaced_styled_lines(&self) -> Vec<Line<'static>> {
+        let i18n = crate::I18n::new(self.language);
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        let mut after_heading = false;
+        for line in self.lines.clone() {
+            let heading = matches!(line, MarkdownLine::Heading { .. });
+            let block = styled_lines_from_markdown_line(&i18n, line, self.width);
+            if block.iter().all(line_is_empty) {
+                continue;
+            }
+            if !rendered.is_empty() && !after_heading {
+                rendered.push(Line::raw(""));
+            }
+            rendered.extend(block);
+            after_heading = heading;
         }
         rendered
     }

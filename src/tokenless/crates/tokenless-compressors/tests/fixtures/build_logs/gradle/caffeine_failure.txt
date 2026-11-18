@@ -1,0 +1,41 @@
+Starting a Gradle Daemon, 1 incompatible and 3 stopped Daemons could not be reused, use --status for details
+Parallel Configuration Cache is an incubating feature.
+Configuration on demand is an incubating feature.
+Calculating task graph as no cached configuration is available for tasks: buid
+> Task :plugins:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :plugins:generateExternalPluginSpecBuilders UP-TO-DATE
+> Task :plugins:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+> Task :plugins:compilePluginsBlocks UP-TO-DATE
+> Task :plugins:generatePrecompiledScriptPluginAccessors UP-TO-DATE
+> Task :plugins:generateScriptPluginAdapters UP-TO-DATE
+> Task :plugins:compileKotlin UP-TO-DATE
+> Task :plugins:compileJava NO-SOURCE
+> Task :plugins:pluginDescriptors UP-TO-DATE
+> Task :plugins:processResources UP-TO-DATE
+> Task :plugins:classes UP-TO-DATE
+> Task :plugins:jar UP-TO-DATE
+
+[Incubating] Problems report is available at: file:///work/source/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+No matches
+  Task 'buid' not found in root project 'caffeine' and its subprojects. Some candidates are: 'build'.
+
+* Try:
+> Run gradlew tasks to get a list of available tasks.
+> For more on name expansion, please refer to https://docs.gradle.org/9.8.1/userguide/command_line_interface.html#sec:name_abbreviation in the Gradle documentation.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 19s
+9 actionable tasks: 9 up-to-date
+Configuration cache entry stored.

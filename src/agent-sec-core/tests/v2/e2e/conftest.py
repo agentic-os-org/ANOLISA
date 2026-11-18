@@ -139,6 +139,7 @@ def _start_daemon(
     admin_uids: list[int],
     pii_rules: Path | None = None,
     skillsec_roots: list[Path] | None = None,
+    disable_gateway: bool = True,
 ) -> subprocess.Popen:
     """Starts a foreground daemon and waits for authenticated daemon.health success."""
     config, environment = _daemon_settings(socket_path)
@@ -158,6 +159,8 @@ def _start_daemon(
         argv += ["--policy-admin-uid", str(uid)]
     if pii_rules is not None:
         argv += ["--pii-rules", str(pii_rules)]
+    if not disable_gateway:
+        argv.append("--enable-gateway")
     process = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
@@ -267,10 +270,13 @@ def start_daemon(tmp_path: Path):
         name: str = "daemon.sock",
         pii_rules: Path | None = None,
         skillsec_roots: list[Path] | None = None,
+        disable_gateway: bool = True,
     ) -> DaemonHandle:
         socket_path = tmp_path / name
         uids = admin_uids if admin_uids is not None else [os.getuid()]
-        process = _start_daemon(socket_path, uids, pii_rules, skillsec_roots)
+        process = _start_daemon(
+            socket_path, uids, pii_rules, skillsec_roots, disable_gateway
+        )
         started.append(process)
         return DaemonHandle(process, socket_path)
 

@@ -1,0 +1,71 @@
+version: 1
+suite: guide-ai-navigation
+defaults:
+  execution: ci
+  adapter: cosh-core
+  shell: bash
+  real_provider: false
+  terminal_cols: 100
+  terminal_rows: 36
+  timeout_ms: 90000
+cases:
+  - id: GUIDE-AI-TEMPLATE-ESC-CTRLD-EN
+    title: Read-only AI template navigation returns to management and respects Ctrl-D
+    tags: [shell, guide, ai, navigation, read-only, no-provider-writes]
+    command:
+      - env
+      - TERM=xterm-256color
+      - LANG=C.UTF-8
+      - COSH_SHELL_LANG=en-US
+      - bash
+      - --noprofile
+      - --norc
+      - -c
+      - >-
+        account_before=$(getent passwd "$(id -un)");
+        config_before=$(sha256sum "$HOME/.copilot-shell/config.toml" "$HOME/.copilot-shell/cosh/preferences.toml" 2>/dev/null || true);
+        /usr/bin/cosh guide;
+        guide_status=$?;
+        test "$guide_status" -eq 0 || exit "$guide_status";
+        test "$account_before" = "$(getent passwd "$(id -un)")" || exit 41;
+        test "$config_before" = "$(sha256sum "$HOME/.copilot-shell/config.toml" "$HOME/.copilot-shell/cosh/preferences.toml" 2>/dev/null || true)" || exit 42;
+        printf 'ACCOUNT_AND_CONFIG_UNCHANGED\n'
+    input:
+      - {type: wait_for, text: "Enter", timeout_ms: 15000}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "Ask from Bash when you need it", timeout_ms: 10000}
+      - {type: wait_for, text: "Why is my disk full?", timeout_ms: 10000}
+      - {id: quick-guide, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_for, text: "Quick start guide", timeout_ms: 10000}
+      - {type: bytes, hex: "1b5b421b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "See how to ask", timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b42"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "Provider Management", timeout_ms: 15000}
+      - {type: bytes, hex: "1b5b411b5b41"}
+      - {type: key, name: enter}
+      - {type: wait_for, text: "Authentication Required", timeout_ms: 15000}
+      - {id: ai-template-ready, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_for, text: "Provider Management", timeout_ms: 10000}
+      - {id: ai-template-esc-management-add, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
+      - {type: bytes, hex: "04"}
+      - {type: wait_for, text: "No configuration changed.", timeout_ms: 10000}
+      - {id: ai-ctrl-d-restores-source, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
+      - {type: key, name: esc}
+      - {type: wait_for, text: "Quick start guide", timeout_ms: 10000}
+      - {id: ai-home-focus-restored, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
+      - {type: key, name: esc}
+    expect:
+      status: 0
+      contains: ["Ask from Bash when you need it", "Why is my disk full?", "Authentication Required", "Provider Management", "Add AI service", "No configuration changed.", "ACCOUNT_AND_CONFIG_UNCHANGED"]
+      not_contains: ["Checking endpoint, credentials, and model", "credentials saved", "panicked", "Traceback"]
+    evidence:
+      points:
+        - {id: quick-guide, trigger_event: quick-guide, layout_sensitive: true, required_types: [screenshot]}
+        - {id: ai-template-ready, trigger_event: ai-template-ready, layout_sensitive: true, required_types: [screenshot]}
+        - {id: ai-template-esc-management-add, trigger_event: ai-template-esc-management-add, layout_sensitive: true, required_types: [screenshot]}
+        - {id: ai-ctrl-d-restores-source, trigger_event: ai-ctrl-d-restores-source, layout_sensitive: true, required_types: [screenshot]}
+        - {id: ai-home-focus-restored, trigger_event: ai-home-focus-restored, layout_sensitive: true, required_types: [screenshot]}

@@ -216,38 +216,8 @@ pub(super) const GIT: ReadonlySpec = ReadonlySpec {
                     bare_number_max: 0,
                 }),
             ),
-            (
-                "grep",
-                Validator::Generic(GenericSpec {
-                    short_flags: "niclwEFP",
-                    long_flags: &[
-                        "--cached",
-                        "--no-index",
-                        "--untracked",
-                        "--fixed-strings",
-                        "--perl-regexp",
-                        "--extended-regexp",
-                        "--word-regexp",
-                        "--count",
-                        "--name-only",
-                        "--files-with-matches",
-                        "--files-without-match",
-                        "--heading",
-                        "--break",
-                        "--show-function",
-                    ],
-                    value_flags: &[
-                        ("-A", Some(10_000)),
-                        ("-B", Some(10_000)),
-                        ("-C", Some(10_000)),
-                        ("-e", None),
-                        ("--max-depth", Some(20)),
-                    ],
-                    deny_flags: &[],
-                    path_mode: PathMode::Unchecked,
-                    bare_number_max: 0,
-                }),
-            ),
+            // git grep can search the filesystem via --no-index or the
+            // grep.fallbackToNoIndex config. Without cwd/config, require approval.
             (
                 "shortlog",
                 Validator::Generic(GenericSpec {

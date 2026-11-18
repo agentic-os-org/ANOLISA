@@ -1103,6 +1103,11 @@ Cedar HTTP 网关六个方法的清单、
 - `agent-sec-cli key generate-fake --real-token-file ... --output ... --format auto`
   为批准的纯本地入口（默认 auto），没有 RPC、不登记或授权。未知启发式明确失败，
   以 O_EXCL 创建 0600 输出，不打印 Token；不是 daemon 失联 fallback。
+- `agent-sec-cli inject-credential --builtin github ...` 是 root 一步入口，不新增 RPC：
+  依次调用既有 `policy.scopes.list`、`policy.templates.create`、`policy.scopes.create`，
+  可选 `policy.bindings.list`，以及 `gateway.status`/`gateway.ca`；不调用 `gateway.enable`。
+  模板读取、fake 生成和文件交付在 CLI 本地完成，见
+  [网关设计 §2.2](V2_SECRET_GATEWAY_DESIGN_zh.md#22-scope-准备与发现)。
 
 本节是未开放 Gateway 的内部终态契约，以 ANOLISA `89fe4fec0` 为基线，结合
 `46738d58d` Cedar 注入设计；响应算法沿用 `46e2a8682`。完整语义见

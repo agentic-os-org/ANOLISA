@@ -1,0 +1,279 @@
+version: 1
+suite: login-guide
+defaults:
+  execution: ci
+  adapter: cosh-core
+  shell: bash
+  real_provider: false
+  terminal_cols: 100
+  terminal_rows: 30
+  timeout_ms: 60000
+cases:
+  - id: LOGIN-GUIDE-10165-RESTORED-ZH
+    title: Restored login page offers set and other-user guidance without a handoff residue
+    tags: [shell, guide, login, issue-10165, read-only]
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=zh-CN
+      - TERM=xterm-256color
+      - /usr/bin/cosh
+      - guide
+    input:
+      - id: home-ready
+        type: wait_for
+        text: "Enter"
+        timeout_ms: 15000
+      - type: bytes
+        hex: "1b5b42"
+      - type: key
+        name: enter
+      - id: login-page
+        type: wait_for
+        text: "UID"
+        timeout_ms: 10000
+      - id: restored-menu
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b42"
+      - type: key
+        name: enter
+      - id: other-guidance
+        type: wait_for
+        text: "--user"
+        occurrence: 3
+        timeout_ms: 10000
+      - id: other-user-page
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - id: home-return
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - id: residual-after-exit
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 10000
+    expect:
+      status: 0
+      contains:
+        - "当前登录 Shell：/bin/bash"
+        - "事务状态：已恢复"
+        - "其它用户管理命令"
+        - "coshloginstatus--userUSER"
+        - "coshloginset--userUSER"
+        - "coshloginrestore--userUSER"
+      not_contains:
+        - "恢复原登录"
+        - "正在打开登录管理"
+        - "用法：cosh"
+        - "usage:"
+        - "打开登录管理失败"
+        - "Traceback"
+    evidence:
+      points:
+        - id: restored-menu
+          trigger_event: restored-menu
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: other-user-page
+          trigger_event: other-user-page
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: residual-after-exit
+          trigger_event: residual-after-exit
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: LOGIN-GUIDE-10165-RESTORED-EN
+    title: English restored login page keeps the same safe choices and persistent guidance
+    tags: [shell, guide, login, issue-10165, read-only, i18n]
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=en-US
+      - TERM=xterm-256color
+      - /usr/bin/cosh
+      - guide
+    input:
+      - id: home-ready
+        type: wait_for
+        text: "Enter"
+        timeout_ms: 15000
+      - type: bytes
+        hex: "1b5b42"
+      - type: key
+        name: enter
+      - id: login-page
+        type: wait_for
+        text: "UID"
+        timeout_ms: 10000
+      - id: restored-menu
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 10000
+      - type: bytes
+        hex: "1b5b42"
+      - type: key
+        name: enter
+      - id: other-guidance
+        type: wait_for
+        text: "--user"
+        occurrence: 3
+        timeout_ms: 10000
+      - id: other-user-page
+        type: wait_quiet
+        quiet_ms: 600
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - id: home-return
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - id: residual-after-exit
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 10000
+    expect:
+      status: 0
+      contains:
+        - "Current loginshell:/bin/bash"
+        - "Transaction:restored"
+        - "administrator"
+        - "coshloginstatus--userUSER"
+        - "coshloginset--userUSER"
+        - "coshloginrestore--userUSER"
+      not_contains:
+        - "Restoreoriginal"
+        - "Restore original login shell"
+        - "Openingloginmanagement"
+        - "Opening login management"
+        - "usage:"
+        - "Login management handoff failed"
+        - "Traceback"
+    evidence:
+      points:
+        - id: restored-menu
+          trigger_event: restored-menu
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: other-user-page
+          trigger_event: other-user-page
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: residual-after-exit
+          trigger_event: residual-after-exit
+          layout_sensitive: true
+          required_types: [screenshot]
+  - id: LOGIN-GUIDE-10165-RESIZE-ZH
+    title: Restored login page survives supported sizes and fails closed below the minimum
+    tags: [shell, guide, login, issue-10165, read-only, resize]
+    command:
+      - /usr/bin/env
+      - COSH_SHELL_LANG=zh-CN
+      - TERM=xterm-256color
+      - /usr/bin/cosh
+      - guide
+    input:
+      - id: home-ready
+        type: wait_for
+        text: "Enter"
+        timeout_ms: 15000
+      - type: bytes
+        hex: "1b5b42"
+      - type: key
+        name: enter
+      - id: login-page
+        type: wait_for
+        text: "UID"
+        timeout_ms: 10000
+      - id: login-100
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
+      - type: resize
+        rows: 24
+        cols: 80
+      - id: login-80
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
+      - type: resize
+        rows: 20
+        cols: 60
+      - id: login-60
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
+      - type: resize
+        rows: 16
+        cols: 40
+      - id: login-40
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
+      - type: resize
+        rows: 16
+        cols: 39
+      - id: too-small-39
+        type: wait_quiet
+        quiet_ms: 500
+        timeout_ms: 10000
+      - type: wait_quiet
+        quiet_ms: 100
+        timeout_ms: 10000
+      - type: key
+        name: esc
+      - id: resize-exit
+        type: wait_quiet
+        quiet_ms: 800
+        timeout_ms: 10000
+    expect:
+      status: 0
+      contains:
+        - "当前登录 Shell：/bin/bash"
+        - "终端过小，无法显示向导。"
+      not_contains:
+        - "恢复原登录"
+        - "Traceback"
+    evidence:
+      points:
+        - id: login-100
+          trigger_event: login-100
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: login-80
+          trigger_event: login-80
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: login-60
+          trigger_event: login-60
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: login-40
+          trigger_event: login-40
+          layout_sensitive: true
+          required_types: [screenshot]
+        - id: too-small-39
+          trigger_event: too-small-39
+          layout_sensitive: true
+          required_types: [screenshot]

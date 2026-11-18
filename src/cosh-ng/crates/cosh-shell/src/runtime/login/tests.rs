@@ -662,3 +662,174 @@ fn lifecycle_record_scan_validates_private_lock_metadata_without_reading_content
     .unwrap();
     assert_eq!(store.records().unwrap().len(), 1);
 }
+
+#[test]
+fn post_write_reload_failure_is_unconfirmed_through_the_guide_protocol() {
+    let (_directory, store) = fixture();
+    let expected = account("/bin/bash");
+    let calls = Cell::new(0);
+    let error = transact(
+        Action::Set,
+        &expected,
+        &"a".repeat(64),
+        &store,
+        || Ok(()),
+        || {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n < 2 {
+                Ok(account("/bin/bash"))
+            } else {
+                Err(Error::new("reload failed after change"))
+            }
+        },
+        |_, _| Ok(()),
+    )
+    .unwrap_err();
+    assert!(
+        error.is_unconfirmed(),
+        "post-write failure must be unconfirmed: {error}"
+    );
+    let request = guide_protocol::Request {
+        version: guide_protocol::VERSION,
+        action: "set".into(),
+        username: "alice".into(),
+        expected_uid: 1001,
+        operation_id: "op-post-write".into(),
+    };
+    let reply = guide_protocol::reply_from_run_error(&request, &error);
+    assert_eq!(reply.outcome, "unconfirmed");
+    let raw = serde_json::to_string(&reply).unwrap();
+    assert!(matches!(
+        guide_protocol::classify(Some(&raw), "alice", 1001, COSH_PATH),
+        guide_protocol::Outcome::Unconfirmed
+    ));
+}
+
+#[test]
+fn pre_write_failure_is_definite_error_through_the_guide_protocol() {
+    let (_directory, store) = fixture();
+    let error = transact(
+        Action::Restore,
+        &account(COSH_PATH),
+        "",
+        &store,
+        || Ok(()),
+        || Ok(account(COSH_PATH)),
+        |_, _| panic!("a missing record must not change the account"),
+    )
+    .unwrap_err();
+    assert!(!error.is_unconfirmed());
+    let request = guide_protocol::Request {
+        version: guide_protocol::VERSION,
+        action: "restore".into(),
+        username: "alice".into(),
+        expected_uid: 1001,
+        operation_id: "op-missing-record".into(),
+    };
+    let reply = guide_protocol::reply_from_run_error(&request, &error);
+    assert_eq!(reply.outcome, "error");
+    let raw = serde_json::to_string(&reply).unwrap();
+    assert!(matches!(
+        guide_protocol::classify(Some(&raw), "alice", 1001, "/bin/bash"),
+        guide_protocol::Outcome::Error(_)
+    ));
+}
+
+#[test]
+fn post_write_conflict_save_failure_is_unconfirmed_for_reload_and_identity_paths() {
+    for identity_mismatch in [false, true] {
+        let (directory, store) = fixture();
+        let expected = account("/bin/bash");
+        let calls = Cell::new(0);
+        let error = transact(
+            Action::Set,
+            &expected,
+            &"a".repeat(64),
+            &store,
+            || Ok(()),
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                if n < 2 {
+                    Ok(account("/bin/bash"))
+                } else if identity_mismatch {
+                    let mut wrong = account("/bin/bash");
+                    wrong.uid = 1002;
+                    Ok(wrong)
+                } else {
+                    Err(Error::new("reload failed after change"))
+                }
+            },
+            |_, _| {
+                let target = directory.path().join("1001.json");
+                fs::remove_file(&target).unwrap();
+                let outside = directory.path().join("outside");
+                fs::write(&outside, b"{}").unwrap();
+                symlink(&outside, &target).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.is_unconfirmed(),
+            "identity_mismatch={identity_mismatch}: conflict-save failure after change must be unconfirmed: {error}"
+        );
+        let request = guide_protocol::Request {
+            version: guide_protocol::VERSION,
+            action: "set".into(),
+            username: "alice".into(),
+            expected_uid: 1001,
+            operation_id: "op-conflict".into(),
+        };
+        let reply = guide_protocol::reply_from_run_error(&request, &error);
+        assert_eq!(reply.outcome, "unconfirmed");
+        let raw = serde_json::to_string(&reply).unwrap();
+        assert!(matches!(
+            guide_protocol::classify(Some(&raw), "alice", 1001, COSH_PATH),
+            guide_protocol::Outcome::Unconfirmed
+        ));
+    }
+}
+
+#[test]
+fn tool_error_after_a_verified_account_change_is_unconfirmed() {
+    let (_directory, store) = fixture();
+    let current = RefCell::new(account("/bin/bash"));
+    let expected = current.borrow().clone();
+    let error = transact(
+        Action::Set,
+        &expected,
+        &"a".repeat(64),
+        &store,
+        || Ok(()),
+        || Ok(current.borrow().clone()),
+        |target, _| {
+            current.borrow_mut().shell = target.into();
+            Err(Error::new(
+                "account tool reported failure after changing the shell",
+            ))
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.is_unconfirmed(),
+        "a verified account change with a tool error must be unconfirmed: {error}"
+    );
+    assert_eq!(current.borrow().shell, COSH_PATH);
+    assert_eq!(store.read(1001).unwrap().unwrap().phase, Phase::Applied);
+    let request = guide_protocol::Request {
+        version: guide_protocol::VERSION,
+        action: "set".into(),
+        username: "alice".into(),
+        expected_uid: 1001,
+        operation_id: "op-verified-tool-error".into(),
+    };
+    let reply = guide_protocol::reply_from_run_error(&request, &error);
+    assert_eq!(reply.outcome, "unconfirmed");
+    let raw = serde_json::to_string(&reply).unwrap();
+    assert!(matches!(
+        guide_protocol::classify(Some(&raw), "alice", 1001, COSH_PATH),
+        guide_protocol::Outcome::Unconfirmed
+    ));
+}
