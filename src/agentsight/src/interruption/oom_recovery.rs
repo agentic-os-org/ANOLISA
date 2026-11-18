@@ -891,7 +891,7 @@ printf '[%s] Out of memory: Killed process 4000003 (openclaw-gatewa) total-vm:10
     /// Two kills in the same second: the recorded one seeds the cutoff, and
     /// the other must still be recovered. The cutoff used `<=`, which dropped
     /// every event sharing the last recorded timestamp even though the
-    /// per-event `(pid, timestamp)` dedup had never seen that pid.
+    /// per-kill dedup had never seen that pid.
     const FAKE_DMESG_SAME_SECOND: &str = r#"#!/bin/sh
 printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 4000101 (openclaw-gatewa) total-vm:1024kB\n'
 printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 4000102 (openclaw-gatewa) total-vm:1024kB\n'
@@ -1433,9 +1433,10 @@ esac
         // When `dmesg -T` is unavailable (busybox/Alpine, older util-linux)
         // the fallback prints boot-relative stamps ("[  123.456789]"), which
         // parse_dmesg_timestamp cannot read. Stamping those with the scan
-        // time makes the value change on every run, so the (pid, timestamp)
-        // dedup can never match and every restart re-inserts all historical
-        // OOM kills as fresh events. The derived time must be stable.
+        // time makes the value change on every run, so the per-kill dedup
+        // never matches across later scans and every restart re-inserts all
+        // historical OOM kills as fresh events. The derived time must be
+        // stable.
         let line =
             "[  123.456789] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB";
         let first = parse_dmesg_lines(line).expect("parse");

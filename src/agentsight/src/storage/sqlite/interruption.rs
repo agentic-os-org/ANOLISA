@@ -180,8 +180,8 @@ impl InterruptionStore {
         Ok(())
     }
 
-    /// Deduplication check for OOM events: return true if an agent_crash row
-    /// with oom=true already exists for the given (pid, occurred_at_ns).
+    /// Exact `(pid, occurred_at_ns)` check for an OOM `agent_crash` row, kept
+    /// for test assertions; production recovery uses [`Self::oom_event_exists_for_kill`].
     pub fn oom_event_exists(&self, pid: i32, occurred_at_ns: i64) -> bool {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
