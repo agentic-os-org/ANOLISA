@@ -1,0 +1,54 @@
+{
+  "apiVersion": "aw/v1alpha1",
+  "kind": "AWConfiguration",
+  "metadata": {
+    "name": "target-availability"
+  },
+  "spec": {
+    "daemon": {
+      "startup": "external",
+      "endpoint": "auto",
+      "state_dir": "/tmp/aw-descriptor-fixture"
+    },
+    "execution": {
+      "guarantee": "native_hook",
+      "default_event_budget_ms": 1000
+    },
+    "audit": {
+      "enabled": true,
+      "payload": "metadata_only"
+    },
+    "agents": {
+      "app": {
+        "adapter": "qwenpaw",
+        "argv": [
+          "/absent/native-agent"
+        ]
+      },
+      "qoder": {
+        "adapter": "qoder-sdk",
+        "argv": [
+          "/absent/native-agent"
+        ]
+      }
+    },
+    "providers": {},
+    "events": {
+      "input.submit": {
+        "enabled": true,
+        "required": false,
+        "steps": []
+      },
+      "tool.before": {
+        "enabled": true,
+        "required": true,
+        "steps": [],
+        "match": {
+          "tools": [
+            "native:qwenpaw:Shell"
+          ]
+        }
+      }
+    }
+  }
+}

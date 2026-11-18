@@ -137,11 +137,26 @@ fn enabled_empty_optional_input_still_requires_wait_and_capability() {
 }
 
 #[test]
-fn required_availability_remains_global_even_when_event_is_projected_out() {
+fn required_availability_follows_applicable_target_requirements() {
     let mut value = document();
     value["spec"]["agents"]["pi"] = json!({"adapter":"pi","argv":["/missing/agent"]});
     value["spec"]["events"]["tool.before"]["required"] = json!(true);
     value["spec"]["events"]["tool.before"]["match"] = json!({"tools":["native:pi:Shell"]});
+    assert!(compile(
+        &bytes(&value),
+        "qoder",
+        capabilities(),
+        Availability::NativeFallback
+    )
+    .is_ok());
+    assert!(compile(
+        &bytes(&value),
+        "qoder",
+        capabilities(),
+        Availability::Required
+    )
+    .is_ok());
+    value["spec"]["events"]["tool.before"]["match"] = json!({"tools":["native:qoder:Shell"]});
     assert!(matches!(
         compile(
             &bytes(&value),
@@ -151,13 +166,6 @@ fn required_availability_remains_global_even_when_event_is_projected_out() {
         ),
         Err(DescriptorError::Availability)
     ));
-    assert!(compile(
-        &bytes(&value),
-        "qoder",
-        capabilities(),
-        Availability::Required
-    )
-    .is_ok());
 }
 
 #[test]

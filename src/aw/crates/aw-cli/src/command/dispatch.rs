@@ -236,6 +236,13 @@ fn config(command: Config) -> Result<Exit> {
             .flags,
             value.output,
         ),
+        Config::Show(super::Show {
+            configuration,
+            sdk_target: Some(selection),
+            ..
+        }) => {
+            return super::package::show_target(&configuration.config, &selection);
+        }
         Config::Show(value) => (
             "show",
             options([

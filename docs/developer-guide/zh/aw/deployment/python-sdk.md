@@ -90,7 +90,7 @@ HTTP 就绪后，部署方准备 sec-core，再执行
 中关闭任务。结果为 `(code, stdout_bytes, stderr_bytes)`。
 
 显式模式及策略约束与 [TypeScript SDK](native-sdk.md#可用性与任务归属)一致。
-`native_fallback` 要求全部已启用事件设置 `required: false`。传输缺席／丢失经首次
+`native_fallback` 要求注册目标适用的全部已启用事件设置 `required: false`。传输缺席／丢失经首次
 有界检测后使当前任务固定回退，后续回调立即返回中性结果；恢复仅影响新任务。
 生命周期 RPC 默认超时 1000 ms；回调 RPC 至少容纳事件预算加 1000 ms 传输余量，
 Service 保留同一事件截止时间。

@@ -20,6 +20,17 @@ pub fn read_configuration_bytes(path: &Path) -> Result<Vec<u8>> {
     publication::deployment_bytes(path)
 }
 
+/// Loads a validated document under the same private-file rules as `aw config show`.
+///
+/// # Errors
+/// Rejects unsafe paths, concurrent changes and invalid configuration.
+pub fn read_configuration(path: &Path) -> Result<aw_config::Configuration> {
+    let snapshot = publication::read(path)?;
+    aw_config::Validator::new()
+        .and_then(|validator| validator.parse(&snapshot.bytes))
+        .map_err(configuration_error)
+}
+
 /// A validated configuration snapshot and its unpublished edits.
 ///
 /// Mutations preserve unrelated values and omitted optional fields. Public fields

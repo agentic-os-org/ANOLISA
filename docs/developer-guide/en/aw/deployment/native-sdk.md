@@ -42,7 +42,7 @@ absolute path; this bridge rejects configurations with both paths set to `auto`.
 A single `qoder-sdk` target is selected automatically; pass `target` when the
 configuration contains several. The bridge defaults to `availability: "native_fallback"`:
 AW loss leaves native Queries, Hooks, tools and model execution running. Set
-`required: false` on every enabled event; `on_error: block` and explicit denials
+`required: false` on every enabled event applicable to this target; `on_error: block` and explicit denials
 still apply while AW is reachable. A conflicting required policy rejects bridge
 initialization. Choose `availability: "required"` explicitly when protected work
 must stop on AW loss. Availability is an SDK lifecycle option; policy remains in the file.
@@ -129,7 +129,7 @@ pass `descriptor_file` to [the Python factory](python-sdk.md#install-and-integra
 Compilation applies the existing capability admission rules and records the
 target, profile, explicit socket, input boundary and availability. It starts no
 Service, Provider or native application. The QwenPaw profile requires service
-availability; Qoder records whether enabled events require protection. In both
+availability; Qoder records whether applicable events require protection. In both
 loading paths, Qoder retains the caller's availability choice and defaults to
 `native_fallback`. Pass `availability: "required"` explicitly when the descriptor
 requires it; a conflicting choice fails before installing the listener.
@@ -195,7 +195,7 @@ npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
 Use an absolute socket path in a private directory owned by the application
 user. Run AW under that same user with the complete configuration containing
 `agents.qoder.adapter: qoder-sdk`. For `native_fallback`, set `required: false`
-on every enabled event; explicit Provider denials still apply. Start the service
+on every enabled event applicable to this target; explicit Provider denials still apply. Start the service
 independently with `aw service serve --config /absolute/aw.yaml` and select the
 socket reported by that service. The SDK never starts a service or an Agent.
 

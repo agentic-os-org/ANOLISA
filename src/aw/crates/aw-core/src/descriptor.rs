@@ -18,7 +18,7 @@ pub enum DescriptorError {
     /// Deployment requires resolvable locations accepted by the local service.
     #[error("deployment descriptor requires valid explicit service locations")]
     Endpoint,
-    /// Native fallback conflicts with a configured enabled required event.
+    /// Native fallback conflicts with an applicable enabled required event.
     #[error("native fallback conflicts with an enabled required event")]
     Availability,
     /// A supplied hint differs from compilation of the exact deployment inputs.
@@ -30,8 +30,8 @@ pub enum DescriptorError {
 ///
 /// The caller supplies an existing trusted Adapter profile and its availability
 /// choice. Static admission checks all applicable enabled events and steps.
-/// Required-event availability checks retain the Service's global configuration
-/// scope, including required events whose selectors exclude this target.
+/// Required-event availability checks use the same target projection as admission,
+/// retaining empty events and uncertain native aliases.
 ///
 /// # Errors
 /// Rejects invalid configuration, unsupported profile requirements, unresolved
@@ -46,12 +46,10 @@ pub fn compile(
     let candidate = AdmissionEngine::new()?.preflight(bytes, target, capabilities)?;
     let config = candidate.configuration();
     let spec = &config.as_value()["spec"];
+    let requirements =
+        aw_config::requirements::project(config, target).map_err(AdmissionError::Configuration)?;
     if availability == Availability::NativeFallback
-        && spec["events"].as_object().is_some_and(|events| {
-            events
-                .values()
-                .any(|event| event["enabled"] == true && event["required"] == true)
-        })
+        && requirements.iter().any(|event| event.required)
     {
         return Err(DescriptorError::Availability);
     }
@@ -64,8 +62,6 @@ pub fn compile(
         .ok_or(DescriptorError::Endpoint)?;
     let (_, endpoint) = aw_config::service_paths::resolve(Path::new(state), Path::new(endpoint))
         .map_err(|_| DescriptorError::Endpoint)?;
-    let requirements =
-        aw_config::requirements::project(config, target).map_err(AdmissionError::Configuration)?;
     let profile = candidate.capabilities();
     let value = json!({
         "version": VERSION,

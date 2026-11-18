@@ -114,7 +114,7 @@ the native App or shared Service. For direct integrations, obtain a task with
 
 The explicit modes and policy constraints match the
 [TypeScript SDK](native-sdk.md#availability-and-task-ownership).
-`native_fallback` requires `required: false` on every enabled event. Missing or
+`native_fallback` requires `required: false` on every enabled event applicable to the registered target. Missing or
 lost transport fixes current tasks in fallback after the first bounded check;
 subsequent callbacks return neutral immediately. Recovery applies to new tasks.
 Lifecycle RPCs default to 1000 ms. Callback RPCs allow at least the event budget

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from aw_sdk import AwError
-from test_deployment import BINARY, FIXTURE
+from test_deployment import BINARY, MULTI_ADAPTER
 from test_qwenpaw import Response
 
 
@@ -32,8 +32,7 @@ class NativeDeployment(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(prefix="aw-plugin-descriptor-") as temporary:
             root = Path(temporary)
             config, descriptor = root / "config.json", root / "descriptor.json"
-            document = deepcopy(FIXTURE["configuration"])
-            document["spec"]["agents"]["app"]["adapter"] = "qwenpaw"
+            document = deepcopy(MULTI_ADAPTER)
             config.write_text(json.dumps(document))
             config.chmod(0o600)
             result = subprocess.run(
