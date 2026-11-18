@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -7,6 +7,7 @@ use crate::types::{AgentEvent, AgentRequest};
 
 const QUESTION_ANSWER_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 
+mod acp;
 mod claude;
 mod claude_stream;
 mod claude_stream_extract;
@@ -27,6 +28,8 @@ mod cosh_core_service;
 mod cosh_core_tests;
 mod ecs_probe;
 mod fake;
+#[cfg(test)]
+mod host_capability_tests;
 mod launch_path;
 mod process;
 mod prompt;
@@ -35,7 +38,13 @@ mod prompt_tests;
 mod qwen;
 mod qwen_stream;
 mod session_assets;
+mod threaded_run;
 
+pub use acp::{
+    AcpAgentAdapter, AcpHostAuthority, AcpHostDecision, AcpHostExecuteOutcome,
+    AcpHostExecuteRequest, AcpHostInputWait, AcpHostRefusal, AcpPermissionDecision,
+    AcpPermissionPolicy,
+};
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
 pub use control_protocol::*;
@@ -58,11 +67,13 @@ pub(crate) use process::{
     ProviderStdinMode, ProviderStreamParser, StderrTail,
 };
 pub use prompt::{
-    prompt_from_request, prompt_from_request_with_evidence_access,
-    prompt_from_request_with_evidence_policy, provider_prompt_contract,
+    acp_prompt_contract, prompt_from_request, prompt_from_request_with_evidence_access,
+    prompt_from_request_with_evidence_policy, provider_prompt_contract, PreambleTools,
 };
 pub use qwen::QwenCliAdapter;
 pub(crate) use session_assets::{admit_session_assets, gateway_executable};
+use threaded_run::start_threaded_adapter_run;
+use threaded_run::start_threaded_adapter_run_with_flag;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterError {
@@ -71,7 +82,7 @@ pub struct AdapterError {
 
 /// Result of detaching an adapter from its current provider session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FreshSessionOutcome {
+pub enum FreshSessionOutcome {
     /// Provider-session bindings were cleared; the next request starts fresh.
     ///
     /// `previous_session_id` is the id we detached from, or `None` when no
@@ -121,6 +132,24 @@ pub struct AgentRunHandle {
     control_capabilities: Arc<Mutex<ControlProtocolCapabilities>>,
     pending_provider_session: Option<Arc<Mutex<Option<String>>>>,
     cancellation_artifacts: ProviderCancellationArtifactStore,
+    /// Queued-but-unconsumed UI data events for the ACP run; None for other
+    /// adapters, which keep the historical unbounded behaviour.
+    ui_inflight: Option<Arc<AtomicUsize>>,
+}
+
+/// A29: the ACP UI queue admits at most this many queued data events. Mirrors
+/// the Core in-flight bound; over-limit fails the run through the existing
+/// error path. Control events are exempt so cancel/approval/terminal still
+/// deliver while a flood is queued.
+const UI_EVENT_CAP: usize = 4096;
+
+/// High-volume streaming events metered by the UI admission gauge; every other
+/// variant is control/structural and exempt.
+fn is_ui_data_event(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TextDelta { .. } | AgentEvent::ToolOutputDelta { .. }
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -211,6 +240,7 @@ impl AgentRunHandle {
             control_capabilities: Arc::new(Mutex::new(ControlProtocolCapabilities::default())),
             pending_provider_session: None,
             cancellation_artifacts: ProviderCancellationArtifactStore::default(),
+            ui_inflight: None,
         }
     }
 
@@ -242,7 +272,14 @@ impl AgentRunHandle {
 
     pub fn poll_event_timeout(&self, timeout: Duration) -> Result<AgentRunPoll, AdapterError> {
         match self.receiver.recv_timeout(timeout) {
-            Ok(Ok(event)) => Ok(AgentRunPoll::Event(event)),
+            Ok(Ok(event)) => {
+                if let Some(gauge) = &self.ui_inflight {
+                    if is_ui_data_event(&event) {
+                        gauge.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                Ok(AgentRunPoll::Event(event))
+            }
             Ok(Err(err)) => Err(err),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(AgentRunPoll::Timeout),
             Err(mpsc::RecvTimeoutError::Disconnected) => Ok(AgentRunPoll::Finished),
@@ -364,6 +401,7 @@ pub enum AdapterKind {
     ClaudeCode,
     QwenCli,
     CoshCore,
+    Acp,
 }
 
 impl AdapterKind {
@@ -373,6 +411,7 @@ impl AdapterKind {
             "claude" | "claude-code" => Some(Self::ClaudeCode),
             "co" | "qwen" | "qwen-cli" => Some(Self::QwenCli),
             "cosh-core" | "core" => Some(Self::CoshCore),
+            "acp" => Some(Self::Acp),
             _ => None,
         }
     }
@@ -384,6 +423,7 @@ pub enum AdapterInstance {
     ClaudeCode(ClaudeCodeAdapter),
     QwenCli(QwenCliAdapter),
     CoshCore(CoshCoreAdapter),
+    Acp(AcpAgentAdapter),
 }
 
 impl AgentAdapter for AdapterInstance {
@@ -393,6 +433,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.name(),
             Self::QwenCli(adapter) => adapter.name(),
             Self::CoshCore(adapter) => adapter.name(),
+            Self::Acp(adapter) => adapter.name(),
         }
     }
 
@@ -402,6 +443,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.capabilities(),
             Self::QwenCli(adapter) => adapter.capabilities(),
             Self::CoshCore(adapter) => adapter.capabilities(),
+            Self::Acp(adapter) => adapter.capabilities(),
         }
     }
 
@@ -411,6 +453,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.run(request),
             Self::QwenCli(adapter) => adapter.run(request),
             Self::CoshCore(adapter) => adapter.run(request),
+            Self::Acp(adapter) => adapter.run(request),
         }
     }
 
@@ -424,6 +467,7 @@ impl AgentAdapter for AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.run_stream(request, sink),
             Self::QwenCli(adapter) => adapter.run_stream(request, sink),
             Self::CoshCore(adapter) => adapter.run_stream(request, sink),
+            Self::Acp(adapter) => adapter.run_stream(request, sink),
         }
     }
 }
@@ -438,6 +482,19 @@ impl AdapterInstance {
             Self::ClaudeCode(adapter) => adapter.start_cancellable(request, mode),
             Self::QwenCli(adapter) => adapter.start_cancellable(request, mode),
             Self::CoshCore(adapter) => adapter.start_cancellable(request, mode),
+            Self::Acp(adapter) => {
+                // Clear the shared flag before the handle is returned so a cancel
+                // issued right after cannot be discarded by the worker thread.
+                let cancelled = adapter.cancel_handle();
+                cancelled.store(false, Ordering::SeqCst);
+                let adapter = AdapterInstance::Acp(adapter.clone().with_approval_mode(mode));
+                start_threaded_adapter_run_with_flag(
+                    adapter,
+                    request,
+                    cancelled,
+                    Some(UI_EVENT_CAP),
+                )
+            }
             _ => start_threaded_adapter_run(self.clone(), request),
         }
     }
@@ -448,6 +505,7 @@ impl AdapterInstance {
             Self::QwenCli(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::CoshCore(adapter) => adapter.committed_session_id(),
             Self::Fake(_) => None,
+            Self::Acp(adapter) => adapter.committed_session_id(),
         }
     }
 
@@ -462,6 +520,7 @@ impl AdapterInstance {
             // The fake adapter never resumes a provider session, so there is
             // nothing to detach; report unsupported rather than faking success.
             Self::Fake(_) => FreshSessionOutcome::Unsupported,
+            Self::Acp(adapter) => adapter.start_fresh_session(),
         }
     }
 
@@ -471,6 +530,7 @@ impl AdapterInstance {
             Self::QwenCli(adapter) => Some(adapter.program.clone()),
             Self::CoshCore(adapter) => Some(adapter.program.clone()),
             Self::Fake(_) => None,
+            Self::Acp(adapter) => Some(adapter.program.clone()),
         }
     }
 }
@@ -523,50 +583,7 @@ pub fn adapter_for_kind(kind: AdapterKind) -> AdapterInstance {
         AdapterKind::ClaudeCode => AdapterInstance::ClaudeCode(ClaudeCodeAdapter::default()),
         AdapterKind::QwenCli => AdapterInstance::QwenCli(QwenCliAdapter::default()),
         AdapterKind::CoshCore => AdapterInstance::CoshCore(CoshCoreAdapter::default()),
-    }
-}
-
-fn start_threaded_adapter_run(adapter: AdapterInstance, request: AgentRequest) -> AgentRunHandle {
-    let (sender, receiver) = mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_flag = Arc::clone(&cancelled);
-    let cancel = Arc::new(move || {
-        cancel_flag.store(true, Ordering::SeqCst);
-    });
-
-    thread::spawn(move || {
-        let mut sent_cancelled = false;
-        let result = adapter.run_stream(&request, &mut |event| {
-            if cancelled.load(Ordering::SeqCst) {
-                sent_cancelled = true;
-                let _ = sender.send(Ok(AgentEvent::AgentCancelled {
-                    run_id: request.id.clone(),
-                    reason: "user requested cancellation".to_string(),
-                }));
-                return Err(AdapterError {
-                    message: "agent run cancelled".to_string(),
-                });
-            }
-            sender.send(Ok(event)).map_err(|_| AdapterError {
-                message: "agent event receiver dropped".to_string(),
-            })
-        });
-        if let Err(err) = result {
-            if !sent_cancelled {
-                let _ = sender.send(Err(err));
-            }
-        }
-    });
-
-    AgentRunHandle {
-        receiver,
-        cancel,
-        approval_sender: None,
-        question_answer_confirmation: None,
-        auth_sender: None,
-        control_capabilities: Arc::new(Mutex::new(ControlProtocolCapabilities::default())),
-        pending_provider_session: None,
-        cancellation_artifacts: ProviderCancellationArtifactStore::default(),
+        AdapterKind::Acp => AdapterInstance::Acp(AcpAgentAdapter::from_environment()),
     }
 }
 

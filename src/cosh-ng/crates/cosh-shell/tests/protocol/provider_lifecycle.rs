@@ -504,14 +504,26 @@ fn assert_recorded_process_is_not_running(pid_file: &Path) {
         .expect("read mock provider pid")
         .trim()
         .to_string();
-    let status = fs::read_to_string(format!("/proc/{pid}/status"));
-    if let Ok(status) = status {
+    // A pending SIGKILL is only delivered when the kernel next schedules the
+    // task, so one /proc read can still observe R after the kill was sent.
+    // Wait for the exit instead of racing the scheduler; a descendant that is
+    // never killed still fails at the deadline.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return;
+        };
+        if status
+            .lines()
+            .any(|line| line.starts_with("State:\tZ") || line.starts_with("State:\tX"))
+        {
+            return;
+        }
         assert!(
-            status
-                .lines()
-                .any(|line| { line.starts_with("State:\tZ") || line.starts_with("State:\tX") }),
+            Instant::now() < deadline,
             "mock provider descendant PID {pid} is still running: {status}"
         );
+        thread::sleep(Duration::from_millis(10));
     }
 }
 

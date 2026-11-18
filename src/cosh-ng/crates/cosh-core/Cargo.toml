@@ -11,6 +11,7 @@ name = "cosh-core"
 path = "src/main.rs"
 
 [dependencies]
+agent-client-protocol = { workspace = true }
 clap.workspace = true
 atty = "0.2"
 cosh-types = { path = "../cosh-types" }

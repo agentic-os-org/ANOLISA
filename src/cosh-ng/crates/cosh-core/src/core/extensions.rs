@@ -106,6 +106,8 @@ impl CoshCore {
             client_capabilities: crate::protocol::ClientControlCapabilities::default(),
             trial_access: None,
             trial_identity_provider: None,
+            pending_input: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            shutdown_deadline: std::sync::Mutex::new(None),
             approval_response_timeout_default: Duration::from_secs(
                 APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS,
             ),

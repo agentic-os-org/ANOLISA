@@ -2779,7 +2779,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "HOME is process-wide, so the inherited value must stay stable across awaits"
+    )]
     async fn hook_env_overrides_inherited_value_without_touching_the_parent() {
+        let _env_lock = crate::sls::tests::ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // HOME is inherited from the parent; the hook shadows it for its own
         // child process only.
         let inherited = std::env::var("HOME").expect("HOME is set in the test environment");

@@ -2101,3 +2101,131 @@ fn turn_consent_blocks_do_not_cover_a_foreign_run() {
         .trust
         .is_blocked_for_turn_consent("run-1", &key));
 }
+
+fn cwd_report_block(end_cwd: &str) -> crate::types::CommandBlock {
+    crate::types::CommandBlock {
+        id: "cmd-cwd".to_string(),
+        session_id: "sess-1".to_string(),
+        command: "cd somewhere".to_string(),
+        origin: Default::default(),
+        cwd: "/".to_string(),
+        end_cwd: end_cwd.to_string(),
+        started_at_ms: 0,
+        ended_at_ms: 0,
+        duration_ms: 0,
+        exit_code: 0,
+        status: crate::types::CommandStatus::Completed,
+        output: crate::types::OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    }
+}
+
+fn expected_cwd_request(expected: Option<&str>) -> RuntimeApprovalRequest {
+    let mut input = serde_json::json!({ "command": "echo cwd-check" });
+    if let Some(dir) = expected {
+        input["expectedCwd"] = serde_json::json!(dir);
+    }
+    let mut request = provider_tool_request("run_shell_command", Some(input));
+    request.status = ApprovalRequestStatus::Approved;
+    request.execution_path = Some("foreground_shell_pty");
+    request.request_id = None;
+    request
+}
+
+fn live_cwd() -> String {
+    std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temp dir")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn expected_cwd_mismatch_refuses_without_dispatch() {
+    let mut state = InlineState::default();
+    state.session_blocks.push(cwd_report_block(&live_cwd()));
+    let missing = format!("{}/cosh-absent-subdir", live_cwd());
+
+    queue_approved_shell_handoff(&mut state, &expected_cwd_request(Some(&missing)));
+
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .is_none());
+    let entry = state.approvals.journal.last().expect("refusal journaled");
+    assert_eq!(entry.decision, ApprovalRequestStatus::Denied);
+    assert_eq!(
+        entry.execution_path,
+        Some("not_executed_shell_request_policy_local")
+    );
+}
+
+#[test]
+fn expected_cwd_matching_the_live_directory_still_dispatches() {
+    let mut state = InlineState::default();
+    state.session_blocks.push(cwd_report_block(&live_cwd()));
+
+    queue_approved_shell_handoff(&mut state, &expected_cwd_request(Some(&live_cwd())));
+
+    let handoff = state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("handoff");
+    assert_eq!(handoff.command, "echo cwd-check");
+}
+
+#[test]
+fn expected_cwd_without_a_verifiable_directory_refuses() {
+    let mut state = InlineState {
+        shell_command_activity_observed: true,
+        ..InlineState::default()
+    };
+
+    queue_approved_shell_handoff(&mut state, &expected_cwd_request(Some(&live_cwd())));
+
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .is_none());
+    let entry = state.approvals.journal.last().expect("refusal journaled");
+    assert_eq!(entry.decision, ApprovalRequestStatus::Denied);
+}
+
+#[test]
+fn prompt_reported_directory_satisfies_expected_cwd() {
+    let mut state = InlineState {
+        shell_prompt_cwd: Some(live_cwd()),
+        ..InlineState::default()
+    };
+
+    queue_approved_shell_handoff(&mut state, &expected_cwd_request(Some(&live_cwd())));
+
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .is_some());
+}
+
+#[test]
+fn absent_expected_cwd_leaves_the_foreground_path_untouched() {
+    let mut state = InlineState {
+        shell_command_activity_observed: true,
+        ..InlineState::default()
+    };
+
+    queue_approved_shell_handoff(&mut state, &expected_cwd_request(None));
+
+    assert!(state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .is_some());
+    assert!(state.approvals.journal.is_empty());
+}

@@ -19,11 +19,12 @@ impl AcpV1Codec {
             .ok_or(AcpV1CodecError::MultiMessageFrameRequiresBridge)
     }
 
-    /// Decodes one single-message or batch-aware ACP transport frame.
+    /// Decodes one single-message ACP transport frame.
     ///
-    /// Valid batch entries are processed independently in source order. JSON-RPC
-    /// errors for malformed call-shaped entries are returned as outbound frames;
-    /// malformed response-shaped entries are ignored as required by JSON-RPC.
+    /// SDK 5.x classifies JSON-RPC batch arrays as malformed: an empty batch
+    /// `[]` yields an Invalid Request response and keeps the connection ready,
+    /// while a non-empty batch fails closed and makes the codec terminal. The
+    /// dedicated supervised stdout stream does not decode batch entries.
     ///
     /// # Errors
     ///
@@ -103,7 +104,12 @@ impl AcpV1Codec {
                 self.phase = AcpV1ProtocolPhase::Terminal;
                 Err(AcpV1CodecError::Sdk(error.to_string()))
             }
-            TransportFrame::Batch(batch) => self.decode_batch(batch),
+            _ => {
+                self.phase = AcpV1ProtocolPhase::Terminal;
+                Err(AcpV1CodecError::Sdk(
+                    "unsupported inbound frame variant".to_string(),
+                ))
+            }
         }
     }
 
@@ -130,80 +136,12 @@ impl AcpV1Codec {
         }
     }
 
-    fn decode_batch(
-        &mut self,
-        batch: TransportBatch,
-    ) -> Result<AcpV1DecodedFrame, AcpV1CodecError> {
-        if batch.len() > MAX_ACP_BATCH_ENTRIES {
-            return Err(AcpV1CodecError::BatchTooLarge {
-                limit: MAX_ACP_BATCH_ENTRIES,
-            });
-        }
-
-        let response_count = batch
-            .entries()
-            .filter(|entry| batch_entry_requires_response(entry))
-            .count();
-        let batch_id = if response_count == 0 {
-            None
-        } else {
-            let batch_id = self.next_inbound_batch_sequence;
-            self.next_inbound_batch_sequence = batch_id
-                .checked_add(1)
-                .ok_or(AcpV1CodecError::BatchIdExhausted)?;
-            self.pending_inbound_batches.insert(
-                batch_id,
-                PendingInboundBatch {
-                    responses: vec![None; response_count],
-                },
-            );
-            Some(batch_id)
-        };
-
-        let mut next_response_slot = 0;
-        let mut observations = Vec::with_capacity(batch.len());
-        let mut outbound_frames = Vec::new();
-        for entry in batch.into_entries() {
-            let requires_response = batch_entry_requires_response(&entry);
-            let response_destination = match (batch_id, requires_response) {
-                (Some(batch_id), true) => {
-                    let destination = InboundResponseDestination::Batch {
-                        batch_id,
-                        slot: next_response_slot,
-                    };
-                    next_response_slot += 1;
-                    destination
-                }
-                _ => InboundResponseDestination::Individual,
-            };
-            match entry {
-                TransportBatchEntry::Message(message) => {
-                    observations.push(self.decode_message(message, response_destination)?);
-                }
-                TransportBatchEntry::Malformed { raw: _, error } => {
-                    if requires_response {
-                        let response = RawJsonRpcMessage::response(RequestId::Null, Err(error));
-                        outbound_frames
-                            .extend(self.settle_inbound_response(response_destination, response)?);
-                    }
-                }
-            }
-        }
-        if let Some(batch_id) = batch_id {
-            outbound_frames.extend(self.take_completed_batch(batch_id)?);
-        }
-        Ok(AcpV1DecodedFrame {
-            observations,
-            outbound_frames,
-        })
-    }
-
     fn decode_response(
         &mut self,
-        response: Response<serde_json::Value>,
+        response: RawJsonRpcResponse,
     ) -> Result<AcpV1Observation, AcpV1CodecError> {
         match response {
-            Response::Result { id, result } => {
+            RawJsonRpcResponse::Result { id, result } => {
                 let request_id = from_sdk_request_id(id)?;
                 let pending = self
                     .pending_outbound
@@ -211,7 +149,7 @@ impl AcpV1Codec {
                     .ok_or_else(|| AcpV1CodecError::UnknownResponse(request_id.clone()))?;
                 self.decode_success(pending, result)
             }
-            Response::Error { id, error } => {
+            RawJsonRpcResponse::Error { id, error } => {
                 let request_id = from_sdk_request_id(id)?;
                 let pending = self
                     .pending_outbound
@@ -226,7 +164,7 @@ impl AcpV1Codec {
                 }
                 Ok(AcpV1Observation::RequestFailed {
                     request: pending.kind,
-                    code: i32::from(error.code),
+                    code: error.code,
                     message: error.message,
                 })
             }
@@ -331,9 +269,6 @@ impl AcpV1Codec {
             let request_ids = std::mem::take(&mut self.pending_permissions)
                 .into_keys()
                 .collect();
-            // The provider closed the prompt before any client response could
-            // complete, so deferred batch response slots are unreachable.
-            self.pending_inbound_batches.clear();
             return Ok(
                 AcpV1Observation::PromptCancelledWithPendingPermissions {
                     session_id,
@@ -388,7 +323,7 @@ impl AcpV1Codec {
 
     fn decode_request(
         &mut self,
-        id: RequestId,
+        id: RawJsonRpcId,
         method: &str,
         params: Option<RawJsonRpcParams>,
         response_destination: InboundResponseDestination,

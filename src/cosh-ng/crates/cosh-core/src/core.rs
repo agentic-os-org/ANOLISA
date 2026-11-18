@@ -58,11 +58,48 @@ fn is_sensitive_write(tool_name: &str, params: &serde_json::Value) -> bool {
             .is_some_and(crate::redaction::contains_sensitive_text)
 }
 
+/// Turns the host's foreground facts into the tool result and the audit fields
+/// describing the same action.
+///
+/// Success requires a confirmed zero exit: an absent exit code stays unknown,
+/// and a signal or any non-success host status contradicts a reported zero.
+fn host_shell_result(
+    llm_content: String,
+    exit_code: Option<i32>,
+    metadata: Option<&serde_json::Value>,
+    tool_data: &mut AuditToolData,
+) -> ToolResult {
+    let fact = |name: &str| metadata.and_then(|meta| meta.get(name));
+    let signal = fact("signal").and_then(serde_json::Value::as_str);
+    let status = fact("status").and_then(serde_json::Value::as_str);
+    // A timed-out, interrupted or unexecuted action did not succeed, so its
+    // status outranks a recorded zero exit rather than being read as success.
+    let is_error = exit_code != Some(0)
+        || signal.is_some()
+        || matches!(
+            status,
+            Some("failed" | "interrupted" | "timed_out" | "not_executed")
+        );
+    tool_data.execution_path = Some("host_executed_shell".to_string());
+    tool_data.output_ref = fact("output_ref")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    ToolResult {
+        output: llm_content,
+        is_error,
+    }
+}
+
 /// Typed terminal state for one user-request loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentTurnOutcome {
     Completed,
-    MaxTurns { limit: u32 },
+    /// The user interrupted the run. Every declared call is paired and the
+    /// turn is audited as cancelled; the transport must not report success.
+    Interrupted,
+    MaxTurns {
+        limit: u32,
+    },
 }
 
 pub struct CoshCore {
@@ -102,6 +139,14 @@ pub struct CoshCore {
     pub client_capabilities: ClientControlCapabilities,
     pub(crate) trial_access: Option<Arc<provider_access::TrialAccess>>,
     pub(crate) trial_identity_provider: Option<(String, Arc<dyn ContentGenerator>)>,
+    /// Input an earlier in-turn wait read but did not act on, in arrival order.
+    /// Every wait consumes this before the transport, so the wait that happened
+    /// to read a line never loses or reorders it.
+    pending_input: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// A21: absolute Shutdown grace deadline shared across every provider step
+    /// of one turn (generate plus each stream event), so a later hanging step
+    /// is still cancelled at the first Shutdown's deadline. Reset per turn.
+    shutdown_deadline: std::sync::Mutex<Option<tokio::time::Instant>>,
     // One-shot mode shortens only this fallback; explicit overrides and
     // receipt-based handoff keep their existing semantics.
     approval_response_timeout_default: Duration,
@@ -369,6 +414,62 @@ impl CoshCore {
             .await
     }
 
+    /// Hands buffered input back to the transport loop, which must process it
+    /// before reading anything new.
+    pub(crate) fn drain_pending_input(&mut self) -> Vec<String> {
+        self.pending_input
+            .get_mut()
+            .map(|queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// The single input dispatch for in-turn waits: buffered lines first, then
+    /// the transport.
+    async fn next_input_line<R: AsyncBufReadExt + Unpin>(
+        &self,
+        reader: &mut tokio::io::Lines<R>,
+    ) -> std::io::Result<Option<String>> {
+        if let Some(line) = self
+            .pending_input
+            .lock()
+            .expect("input queue is never poisoned")
+            .pop_front()
+        {
+            return Ok(Some(line));
+        }
+        reader.next_line().await
+    }
+
+    /// Waits for one provider step on either admission path.
+    ///
+    /// Both paths keep the run cancellable while the model is in flight; the
+    /// trial path additionally forwards trial control and progress.
+    async fn await_provider<F, R, W>(
+        &self,
+        trial_access: Option<&Arc<provider_access::TrialAccess>>,
+        future: F,
+        reader: &mut tokio::io::Lines<R>,
+        writer: &mut W,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+        R: AsyncBufReadExt + Unpin,
+        W: Write,
+    {
+        if trial_access.is_some() {
+            provider_access::drive(trial_access, future, reader, writer).await
+        } else {
+            provider_access::drive_provider(
+                future,
+                reader,
+                &|| self.provider.cancel(),
+                &self.pending_input,
+                &self.shutdown_deadline,
+            )
+            .await
+        }
+    }
+
     /// Handles a provider-facing envelope while giving UserPromptSubmit the
     /// structured raw input when the transport supplied one.
     ///
@@ -386,6 +487,13 @@ impl CoshCore {
         R: AsyncBufReadExt + Unpin,
     {
         self.approval_timed_out.store(false, Ordering::SeqCst);
+        *self
+            .shutdown_deadline
+            .lock()
+            .expect("shutdown deadline lock") = None;
+        // Repetition is only meaningful inside one request: a new user request
+        // starts with its own history, so an old action cannot trip the warning.
+        self.loop_detector = LoopDetector::new();
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -521,6 +629,19 @@ impl CoshCore {
                     );
                     return Err(format!(
                         "prompt approval timed out before reaching a decision surface (request_id={request_id}); nothing was executed and the turn ends here so a late decision cannot split state"
+                    ));
+                }
+                ApprovalResult::HostExecuteUnknown(reason) => {
+                    self.emit(
+                        writer,
+                        &OutputMessage::assistant_text(
+                            &self.session_id,
+                            "The foreground action's outcome is unknown; it may still have run. The turn ends here.",
+                        ),
+                    );
+                    return Err(format!(
+                        "foreground execute outcome is unknown (request_id={request_id}): {}; the action may still have run and the turn ends here",
+                        reason.unwrap_or_else(|| "no reason given".to_string())
                     ));
                 }
                 ApprovalResult::Interrupted
@@ -689,14 +810,15 @@ impl CoshCore {
             self.metrics.api_requests += 1;
             let api_start = Instant::now();
 
-            let stream_result = provider_access::drive(
-                trial_access.as_ref(),
-                self.provider
-                    .generate(&msgs_with_system, turn_tool_decls, &generate_config),
-                reader,
-                writer,
-            )
-            .await;
+            let stream_result = self
+                .await_provider(
+                    trial_access.as_ref(),
+                    self.provider
+                        .generate(&msgs_with_system, turn_tool_decls, &generate_config),
+                    reader,
+                    writer,
+                )
+                .await;
 
             let mut stream = match stream_result {
                 Ok(s) => s,
@@ -759,8 +881,9 @@ impl CoshCore {
 
             let mut stream_started = false;
 
-            while let Some(event) =
-                provider_access::drive(trial_access.as_ref(), stream.next(), reader, writer).await
+            while let Some(event) = self
+                .await_provider(trial_access.as_ref(), stream.next(), reader, writer)
+                .await
             {
                 if !stream_started
                     && !matches!(
@@ -1195,7 +1318,9 @@ impl CoshCore {
                 // Every id in the assistant message needs exactly one tool result,
                 // or the next provider request violates tool-message pairing — and
                 // headless persists and reuses the session even when a turn fails.
-                if fatal_turn.is_some() {
+                // An interruption ends the run for the same reason a fatal does:
+                // the rest of the batch is answered, never executed.
+                if fatal_turn.is_some() || interrupted {
                     self.skip_unexecuted_tool_call(
                         CoreAuditScope::tool(&run_id, &turn_id, &tc.id),
                         writer,
@@ -1231,14 +1356,11 @@ impl CoshCore {
                             result.is_error,
                         ));
                     }
-                    if interrupted {
-                        return Ok(AgentTurnOutcome::Completed);
-                    }
                     continue;
                 }
 
                 let parsed_params = parse_tool_arguments(&tc.arguments);
-                let tool_data = AuditToolData {
+                let mut tool_data = AuditToolData {
                     tool_kind,
                     input_shape: Some(match &parsed_params {
                         Ok(params) => json_shape(params).to_string(),
@@ -1337,9 +1459,6 @@ impl CoshCore {
                         &result.output,
                         result.is_error,
                     ));
-                    if interrupted {
-                        return Ok(AgentTurnOutcome::Completed);
-                    }
                     continue;
                 }
 
@@ -1434,9 +1553,23 @@ impl CoshCore {
                         } else {
                             params
                         };
-                        (outcome, params)
+                        // Classify the action that will actually run. A patch
+                        // never downgrades an approval the pre-patch action
+                        // already required.
+                        let final_outcome = match (outcome, self.classify_tool(&tc.name, &params)) {
+                            (Outcome::RequireApproval, _) => Outcome::RequireApproval,
+                            (_, classified) => classified,
+                        };
+                        (final_outcome, params)
                     }
                 };
+
+                // From here the audit describes the final action, including any
+                // hook patch; `tool.requested` above still records the request.
+                tool_data.input_shape = Some(json_shape(&params).to_string());
+                tool_data.input_hash = Some(hash_json(&params));
+                tool_data.execution_path =
+                    is_sensitive_write(&tc.name, &params).then(|| "sensitive_write".to_string());
 
                 let params_for_post_hook = params.clone();
 
@@ -1569,13 +1702,15 @@ impl CoshCore {
                                 ApprovalResult::HostExecutedShell {
                                     llm_content,
                                     exit_code,
+                                    metadata,
                                 } => {
                                     self.metrics.approval_allow += 1;
-                                    let is_error = exit_code.is_some_and(|c| c != 0);
-                                    ToolResult {
-                                        output: llm_content,
-                                        is_error,
-                                    }
+                                    host_shell_result(
+                                        llm_content,
+                                        exit_code,
+                                        metadata.as_ref(),
+                                        &mut tool_data,
+                                    )
                                 }
                                 ApprovalResult::HostExecutedCheckpoint { result } => {
                                     self.metrics.approval_allow += 1;
@@ -1592,6 +1727,18 @@ impl CoshCore {
                                     self.metrics.approval_deny += 1;
                                     interrupted = true;
                                     ToolResult::error("Interrupted by user")
+                                }
+                                ApprovalResult::HostExecuteUnknown(reason) => {
+                                    self.metrics.approval_unknown += 1;
+                                    hold_host_execute_unknown_fatal(
+                                        &mut fatal_turn,
+                                        &request_id,
+                                        reason.as_deref(),
+                                    );
+                                    ToolResult::error(format!(
+                                        "foreground execute outcome is unknown: {}; the action may still have run",
+                                        reason.unwrap_or_else(|| "no reason given".to_string())
+                                    ))
                                 }
                                 ApprovalResult::TimedOut => {
                                     self.metrics.approval_deny += 1;
@@ -1818,12 +1965,14 @@ impl CoshCore {
                                 ApprovalResult::HostExecutedShell {
                                     llm_content,
                                     exit_code,
+                                    metadata,
                                 } => {
-                                    let is_error = exit_code.is_some_and(|c| c != 0);
-                                    result = ToolResult {
-                                        output: llm_content,
-                                        is_error,
-                                    };
+                                    result = host_shell_result(
+                                        llm_content,
+                                        exit_code,
+                                        metadata.as_ref(),
+                                        &mut tool_data,
+                                    );
                                 }
                                 ApprovalResult::HostExecutedCheckpoint { .. } => {
                                     // Sandbox bypass can only resolve a legacy shell tool.
@@ -1834,6 +1983,13 @@ impl CoshCore {
                                 // failure stays as this call's tool result.
                                 ApprovalResult::TimedOut => {
                                     hold_approval_timeout_fatal(&mut fatal_turn, &request_id);
+                                }
+                                ApprovalResult::HostExecuteUnknown(reason) => {
+                                    hold_host_execute_unknown_fatal(
+                                        &mut fatal_turn,
+                                        &request_id,
+                                        reason.as_deref(),
+                                    );
                                 }
                                 _ => { /* denied / interrupted: keep original error */ }
                             }
@@ -1859,21 +2015,20 @@ impl CoshCore {
                     self.messages
                         .push(Message::system(LoopDetector::loop_warning()));
                 }
-
-                if interrupted {
-                    self.audit.record_turn_terminal(
-                        turn_scope,
-                        AuditOutcomeStatus::Cancelled,
-                        Some("interrupted"),
-                    );
-                    return Ok(AgentTurnOutcome::Completed);
-                }
             }
             // Also checked after the last call: a failure there never re-enters
             // the loop boundary above.
             self.promote_control_transport_failure(&mut fatal_turn);
             // A turn terminal is emitted only after every declared call has a
             // terminal event and a paired history result.
+            if interrupted {
+                self.audit.record_turn_terminal(
+                    turn_scope,
+                    AuditOutcomeStatus::Cancelled,
+                    Some("interrupted"),
+                );
+                return Ok(AgentTurnOutcome::Interrupted);
+            }
             if let Some(fatal) = fatal_turn {
                 self.audit.record_turn_terminal(
                     turn_scope,
@@ -1960,7 +2115,7 @@ impl CoshCore {
         expected_request_id: &str,
         reader: &mut tokio::io::Lines<R>,
     ) -> Option<String> {
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Ok(Some(line)) = self.next_input_line(reader).await {
             let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
@@ -2136,7 +2291,7 @@ impl CoshCore {
         expected_request_id: &str,
         reader: &mut tokio::io::Lines<R>,
     ) -> ToolResult {
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Ok(Some(line)) = self.next_input_line(reader).await {
             let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
@@ -2228,7 +2383,7 @@ impl CoshCore {
         loop {
             let line = match deadline {
                 Some(deadline) => {
-                    match tokio::time::timeout_at(deadline, reader.next_line()).await {
+                    match tokio::time::timeout_at(deadline, self.next_input_line(reader)).await {
                         Ok(Ok(Some(line))) => line,
                         Ok(Ok(None)) | Ok(Err(_)) => return ApprovalResult::Interrupted,
                         Err(_) => {
@@ -2237,7 +2392,7 @@ impl CoshCore {
                         }
                     }
                 }
-                None => match reader.next_line().await {
+                None => match self.next_input_line(reader).await {
                     Ok(Some(line)) => line,
                     Ok(None) | Err(_) => return ApprovalResult::Interrupted,
                 },
@@ -2279,6 +2434,9 @@ impl CoshCore {
                             return ApprovalResult::Allowed;
                         }
                         Some("deny") => return ApprovalResult::Denied(response.response.message),
+                        Some("host_execute_unknown") => {
+                            return ApprovalResult::HostExecuteUnknown(response.response.message);
+                        }
                         Some("host_executed_shell") => {
                             if accepted_tool_kind != Some(ToolKind::ShellExec)
                                 || self.execution_profile.is_brokered()
@@ -2301,6 +2459,7 @@ impl CoshCore {
                             return ApprovalResult::HostExecutedShell {
                                 llm_content: result.llm_content,
                                 exit_code,
+                                metadata: result.metadata,
                             };
                         }
                         Some("host_executed_checkpoint_create") => {
@@ -2400,6 +2559,10 @@ const CONTROL_TRANSPORT_AUDIT_REASON: &str = "control_transport_failed";
 /// decision surface before the residual deadline (#1940).
 const APPROVAL_TIMEOUT_AUDIT_REASON: &str = "approval_timeout";
 
+/// Audit reason code for a turn ended by a foreground execute whose outcome
+/// the host reported as UNKNOWN.
+const HOST_EXECUTE_UNKNOWN_AUDIT_REASON: &str = "host_execute_unknown";
+
 /// One fatal turn outcome held until every declared tool call is closed.
 struct FatalTurn {
     error: String,
@@ -2416,6 +2579,25 @@ impl FatalTurn {
 /// fatal in the batch. The batch still answers every declared call, then
 /// the turn ends before another provider generation so a late shell-side
 /// decision can never split state against a recorded "not executed".
+/// Holds the turn-fatal for an UNKNOWN foreground execute. Same fail-closed
+/// contract as the timeout guard, but the recorded fact is "may still have
+/// run", never "not executed".
+fn hold_host_execute_unknown_fatal(
+    fatal_turn: &mut Option<FatalTurn>,
+    request_id: &str,
+    reason: Option<&str>,
+) {
+    if fatal_turn.is_none() {
+        *fatal_turn = Some(FatalTurn::new(
+            format!(
+                "foreground execute outcome is unknown (request_id={request_id}): {}; the action may still have run and the turn ends here so a late result cannot split state",
+                reason.unwrap_or("no reason given")
+            ),
+            HOST_EXECUTE_UNKNOWN_AUDIT_REASON,
+        ));
+    }
+}
+
 fn hold_approval_timeout_fatal(fatal_turn: &mut Option<FatalTurn>, request_id: &str) {
     if fatal_turn.is_none() {
         *fatal_turn = Some(FatalTurn::new(
@@ -2573,11 +2755,18 @@ enum ApprovalResult {
     HostExecutedShell {
         llm_content: String,
         exit_code: Option<i32>,
+        /// Verbatim host metadata, so the audit keeps the facts the shell
+        /// observed instead of only the parsed exit code.
+        metadata: Option<serde_json::Value>,
     },
     HostExecutedCheckpoint {
         result: ToolResult,
     },
     Interrupted,
+    /// The host reported UNKNOWN for a foreground execute: ownership was lost
+    /// after a possible dispatch, so the action may still have run. Fails the
+    /// turn closed instead of recording a definite non-execution.
+    HostExecuteUnknown(Option<String>),
     /// #1940 residual guard: the wait exceeded the last-resort deadline,
     /// meaning the request never reached a decision surface on the shell
     /// side. Always fails the turn closed, never ends in an execution.
@@ -2664,6 +2853,10 @@ fn approval_audit_outcome(approval: &ApprovalResult) -> (AuditOutcomeStatus, &'s
         | ApprovalResult::HostExecutedCheckpoint { .. } => (AuditOutcomeStatus::Allowed, "allow"),
         ApprovalResult::Denied(_) => (AuditOutcomeStatus::Denied, "deny"),
         ApprovalResult::TimedOut => (AuditOutcomeStatus::Denied, "timeout"),
+        ApprovalResult::HostExecuteUnknown(_) => (
+            AuditOutcomeStatus::Failed,
+            HOST_EXECUTE_UNKNOWN_AUDIT_REASON,
+        ),
         ApprovalResult::Interrupted => (AuditOutcomeStatus::Cancelled, "interrupted"),
     }
 }
@@ -2685,4 +2878,8 @@ struct PendingToolCall {
 
 #[cfg(test)]
 #[path = "core/tests.rs"]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "core/runtime_contract_tests.rs"]
+mod runtime_contract_tests;

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod acp;
 mod audit;
 mod auth;
 mod brokered_profile;
@@ -25,6 +26,7 @@ mod redaction;
 mod registry;
 mod session;
 mod session_control;
+mod settlement;
 mod skill;
 mod sls;
 mod state;
@@ -45,6 +47,27 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     if resolved.provider_type == "mock" {
         if resolved.model == "mock-partial-error" {
             return Box::new(provider::mock::MockProvider::partial_error());
+        }
+        if resolved.model == "mock-toolturn" {
+            return Box::new(provider::mock::MockProvider::tool_turn());
+        }
+        if resolved.model == "mock-toolread" {
+            return Box::new(provider::mock::MockProvider::tool_read());
+        }
+        if resolved.model == "mock-toolmulti" {
+            return Box::new(provider::mock::MockProvider::tool_multi());
+        }
+        if resolved.model == "mock-toolwrite" {
+            return Box::new(provider::mock::MockProvider::tool_write());
+        }
+        if resolved.model == "mock-taskmix" {
+            return Box::new(provider::mock::MockProvider::task_mix());
+        }
+        if resolved.model == "mock-flood" {
+            return Box::new(provider::mock::MockProvider::flood(
+                4096,
+                "0123456789abcdefghij",
+            ));
         }
         if resolved.model == "mock-compact-summary" {
             // Deterministic bounded output for compaction lifecycle tests.
@@ -210,6 +233,14 @@ async fn run() {
     logging::init_logging(&log_level);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-core starting");
 
+    if args.acp {
+        if args.execution_profile.is_brokered() {
+            eprintln!("[cosh-core] --acp serves the legacy execution boundary only");
+            std::process::exit(2);
+        }
+        std::process::exit(acp::run(config).await);
+    }
+
     if let Some(cli::Command::Mcp(mcp)) = args.command {
         if let Err(error) = tool::mcp::run_command(mcp, &config, &project_root).await {
             eprintln!("MCP command failed: {error}");
@@ -238,7 +269,11 @@ async fn run() {
 }
 
 fn is_agent_headless_mode(args: &cli::CliArgs) -> bool {
-    args.command.is_none() && !args.is_registry() && !args.is_compact() && args.is_headless()
+    args.command.is_none()
+        && !args.is_registry()
+        && !args.is_compact()
+        && !args.acp
+        && args.is_headless()
 }
 
 #[cfg(unix)]

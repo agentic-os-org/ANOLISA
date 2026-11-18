@@ -1904,7 +1904,8 @@ async fn checkpoint_profile_never_executes_the_hosted_tool_locally() {
 /// Serializes the two tests that mutate the process-wide
 /// `COSH_CORE_APPROVAL_TIMEOUT_SECS`; without it a concurrent
 /// `remove_var` could send the hanging test back to the 6h default.
-static APPROVAL_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static APPROVAL_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 #[test]
 fn one_shot_approval_uses_a_short_default_timeout() {

@@ -571,7 +571,10 @@ mod tests {
     #[test]
     fn pre_commit_failure_keeps_target_and_cleans_unique_same_directory_temp() {
         let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("config.toml");
+        // WorkspaceFs canonicalizes its root, so the expected parent is the
+        // resolved path; macOS puts the system temp dir under /var.
+        let root = directory.path().canonicalize().unwrap();
+        let target = root.join("config.toml");
         fs::write(&target, b"stable").unwrap();
         let write_target = prepare_test_target(&target);
         let mut temporary_path = None;
@@ -593,7 +596,7 @@ mod tests {
         .unwrap_err();
 
         let temporary_path = temporary_path.unwrap();
-        assert_eq!(temporary_path.parent(), Some(directory.path()));
+        assert_eq!(temporary_path.parent(), Some(root.as_path()));
         assert!(temporary_path
             .file_name()
             .unwrap()

@@ -22,6 +22,7 @@ pub mod write_file;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -280,6 +281,25 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     skill_manager: Option<Arc<SkillManager>>,
     ask_user_question_enabled: bool,
+    /// Set for one turn that must cause no side effect. This is visibility, not
+    /// a second approval policy: declarations, budgets and lookup all read it,
+    /// so a hidden tool can neither be offered nor reached.
+    read_only_turn: AtomicBool,
+}
+
+/// Restores the previous visibility when the restricted turn ends, including on
+/// an early return or unwind, so a later turn is never silently restricted.
+pub(crate) struct ReadOnlyTurn<'a> {
+    registry: &'a ToolRegistry,
+    previous: bool,
+}
+
+impl Drop for ReadOnlyTurn<'_> {
+    fn drop(&mut self) {
+        self.registry
+            .read_only_turn
+            .store(self.previous, Ordering::SeqCst);
+    }
 }
 
 impl ToolRegistry {
@@ -288,7 +308,21 @@ impl ToolRegistry {
             tools: HashMap::new(),
             skill_manager: None,
             ask_user_question_enabled: true,
+            read_only_turn: AtomicBool::new(false),
         }
+    }
+
+    /// Hides every tool that is not read-only until the guard is dropped.
+    pub(crate) fn restrict_read_only(&self) -> ReadOnlyTurn<'_> {
+        let previous = self.read_only_turn.swap(true, Ordering::SeqCst);
+        ReadOnlyTurn {
+            registry: self,
+            previous,
+        }
+    }
+
+    fn visible(&self, tool: &dyn Tool) -> bool {
+        !self.read_only_turn.load(Ordering::SeqCst) || tool.kind() == ToolKind::ReadOnly
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
@@ -296,17 +330,27 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name).map(|t| t.as_ref())
+        self.tools
+            .get(name)
+            .map(|t| t.as_ref())
+            .filter(|tool| self.visible(*tool))
     }
 
-    /// Returns whether a tool name has already been registered.
+    /// Returns whether a tool name is registered and currently visible.
     pub fn contains(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.tools
+            .get(name)
+            .is_some_and(|tool| self.visible(tool.as_ref()))
     }
 
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self.tools.keys().cloned().collect();
-        if self.ask_user_question_enabled {
+        let mut names: Vec<_> = self
+            .tools
+            .values()
+            .filter(|tool| self.visible(tool.as_ref()))
+            .map(|tool| tool.name().to_string())
+            .collect();
+        if self.supports_ask_user_question() {
             names.push("ask_user_question".to_string());
         }
         names.sort();
@@ -347,7 +391,7 @@ impl ToolRegistry {
     }
 
     pub fn supports_ask_user_question(&self) -> bool {
-        self.ask_user_question_enabled
+        self.ask_user_question_enabled && !self.read_only_turn.load(Ordering::SeqCst)
     }
 
     pub fn with_defaults(skill_manager: Arc<SkillManager>) -> Self {
@@ -444,13 +488,14 @@ impl ToolRegistry {
         let mut decls: Vec<_> = self
             .tools
             .values()
+            .filter(|tool| self.visible(tool.as_ref()))
             .map(|t| ToolDeclaration {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters_schema(),
             })
             .collect();
-        if self.ask_user_question_enabled {
+        if self.supports_ask_user_question() {
             decls.push(ask_user_question::declaration());
         }
         decls.sort_by(|a, b| a.name.cmp(&b.name));

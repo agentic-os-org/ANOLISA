@@ -320,6 +320,14 @@ pub(super) fn runtime_identity(adapter: &AdapterInstance, state: &InlineState) -
                 },
             }
         }
+        // The ACP peer owns its provider; Shell only knows the entry name and
+        // whatever model the foreground reported.
+        AdapterInstance::Acp(_) => RuntimeIdentity {
+            provider_id: Some("acp".to_string()),
+            provider_type: Some("ACP Agent".to_string()),
+            model: observed_model,
+            provider_details_available: false,
+        },
     }
 }
 

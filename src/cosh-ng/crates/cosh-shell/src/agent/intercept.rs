@@ -131,6 +131,7 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
                     )?;
                 }
             }
+            fill_shell_reported_cwd(&mut request, state);
             let user_input = request.user_input.clone();
             if let Some(input) = user_input.as_deref() {
                 bind_pending_input_ghost_context(&mut request, state, event);
@@ -153,6 +154,23 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
     }
 
     Ok(())
+}
+
+/// Intercepted input carries no directory of its own, so a request still
+/// holding the placeholder takes the shell's own reported directory. With no
+/// report the placeholder stays: adapters that require a real directory then
+/// fail closed instead of running against a guessed process directory.
+fn fill_shell_reported_cwd(request: &mut AgentRequest, state: &InlineState) {
+    let cwd = &request.command_block.cwd;
+    if !cwd.is_empty() && cwd != "<unknown>" {
+        return;
+    }
+    let Some(live) = crate::agent::approval_bridge::live_shell_cwd(state) else {
+        return;
+    };
+    let live = live.to_string_lossy().into_owned();
+    request.command_block.cwd = live.clone();
+    request.command_block.end_cwd = live;
 }
 
 fn render_path_prompt_notice<W: Write>(

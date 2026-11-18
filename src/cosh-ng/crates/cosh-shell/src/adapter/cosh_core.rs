@@ -8,7 +8,7 @@ use super::prompt::provider_prompt_contract_for_request_with_evidence_access;
 use super::{
     prompt_from_request_with_evidence_policy, start_threaded_adapter_run, AdapterError,
     AdapterInstance, AgentAdapter, AgentBackendCapabilities, AgentRunHandle, FreshSessionOutcome,
-    PreparedInvocation,
+    PreambleTools, PreparedInvocation,
 };
 
 pub(super) mod question_ingress;
@@ -461,6 +461,7 @@ fn cosh_core_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode)
         request,
         access,
         mode != CoshApprovalMode::Recommend,
+        PreambleTools::ProviderBash,
     );
     format!(
         "{}{}",

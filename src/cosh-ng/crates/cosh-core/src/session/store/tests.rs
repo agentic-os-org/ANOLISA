@@ -299,8 +299,12 @@ fn summaries_are_newest_first_and_derive_metadata() {
     store.persist(&mut older).unwrap();
     let mut newer = new_session(&store, "second prompt");
     store.persist(&mut newer).unwrap();
-    set_mtime(&store.session_file(&older.session_id), 1_000);
-    set_mtime(&store.session_file(&newer.session_id), 2_000);
+    newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
+    store.persist(&mut newer).unwrap();
+    // Listing orders by file mtime, so pin it instead of relying on write order.
+    let now = now_ms();
+    set_mtime(&store.session_file(&older.session_id), now);
+    set_mtime(&store.session_file(&newer.session_id), now + 10);
 
     let (summaries, cursor) = store.list(10, None, false).unwrap();
 
@@ -683,8 +687,10 @@ cwd: /root\n\n\
     store.persist(&mut older).unwrap();
     let mut newer = new_session(&store, &envelope("帮我检查 nginx 服务状态"));
     store.persist(&mut newer).unwrap();
-    set_mtime(&store.session_file(&older.session_id), 1_000);
-    set_mtime(&store.session_file(&newer.session_id), 2_000);
+    // Listing orders by file mtime, so pin it instead of relying on write order.
+    let now = now_ms();
+    set_mtime(&store.session_file(&older.session_id), now);
+    set_mtime(&store.session_file(&newer.session_id), now + 10);
 
     let (summaries, _) = store.list(10, None, false).unwrap();
 
@@ -1854,12 +1860,15 @@ fn task_budget_counts_keep_session_temporary_bytes() {
 #[test]
 fn task_budget_counts_temporary_across_registered_scopes() {
     let temp = tempfile::tempdir().unwrap();
-    let namespace = temp.path().join("budget");
-    let first = workspace_store(temp.path().join("first").to_str().unwrap(), temp.path())
+    // A budget namespace is opened component-wise with O_NOFOLLOW, which
+    // refuses the macOS /var symlink, so resolve the temp root before use.
+    let root_temp = temp.path().canonicalize().unwrap();
+    let namespace = root_temp.join("budget");
+    let first = workspace_store(root_temp.join("first").to_str().unwrap(), &root_temp)
         .unwrap()
         .with_task_budget(7, 1024)
         .with_budget_namespace(namespace.clone());
-    let second = workspace_store(temp.path().join("second").to_str().unwrap(), temp.path())
+    let second = workspace_store(root_temp.join("second").to_str().unwrap(), &root_temp)
         .unwrap()
         .with_task_budget(7, 1024)
         .with_budget_namespace(namespace);
@@ -3079,7 +3088,11 @@ fn historical_legacy_marker_loss_does_not_reauthorize_current_or_absolute_roots(
 #[test]
 fn legacy_eviction_revalidates_the_pinned_directory_generation() {
     let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
+    // The store canonicalizes its workspace and opens storage components with
+    // O_NOFOLLOW, so the fixture must use the resolved root: on macOS the
+    // system temp dir lives under the /var symlink.
+    let root_temp = temp.path().canonicalize().unwrap();
+    let workspace = root_temp.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let store = workspace_store("project-sessions", &workspace).unwrap();
     store

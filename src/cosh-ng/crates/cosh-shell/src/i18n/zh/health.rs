@@ -142,7 +142,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "为 adapter '{adapter}' 配置凭据（环境变量或 config.toml），或运行 /auth"
         }
         MessageId::HealthRemediationUnknownAdapter => {
-            "'{adapter}' 不是受支持的 adapter；请将 adapter_default 设为以下之一：fake, claude-code, qwen-cli, cosh-core"
+            "'{adapter}' 不是受支持的 adapter；请将 adapter_default 设为以下之一：fake, claude-code, qwen-cli, cosh-core, acp"
         }
         MessageId::HealthRemediationConfig => {
             "设置 HOME，以便 cosh-shell 解析 ~/.copilot-shell 并加载配置"
