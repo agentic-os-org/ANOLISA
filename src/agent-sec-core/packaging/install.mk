@@ -360,23 +360,23 @@ uninstall-cosh-hook: ## Remove linux-sandbox and cosh extension
 
 .PHONY: uninstall-openclaw-plugin
 uninstall-openclaw-plugin: ## Remove openclaw plugin
-	rm -rf $(DESTDIR)$(OPENCLAW_PLUGIN_DIR)
+	rm -rf $(call sandbox_shell_quote,$(DESTDIR)$(OPENCLAW_PLUGIN_DIR))
 
 .PHONY: uninstall-hermes-plugin
 uninstall-hermes-plugin: ## Remove hermes plugin
-	rm -rf $(DESTDIR)$(HERMES_PLUGIN_DIR)
+	rm -rf $(call sandbox_shell_quote,$(DESTDIR)$(HERMES_PLUGIN_DIR))
 
 .PHONY: uninstall-qwen-code-extension
 uninstall-qwen-code-extension: ## Remove Qwen Code extension
-	rm -rf $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)
+	rm -rf $(call sandbox_shell_quote,$(DESTDIR)$(QWEN_CODE_EXTENSION_DIR))
 
 .PHONY: uninstall-codex-plugin
 uninstall-codex-plugin: ## Remove codex plugin
-	rm -rf $(DESTDIR)$(CODEX_PLUGIN_DIR)
+	rm -rf $(call sandbox_shell_quote,$(DESTDIR)$(CODEX_PLUGIN_DIR))
 
 .PHONY: uninstall-qoder-plugin
 uninstall-qoder-plugin: ## Remove qoder plugin
-	rm -rf $(DESTDIR)$(QODER_PLUGIN_DIR)
+	rm -rf $(call sandbox_shell_quote,$(DESTDIR)$(QODER_PLUGIN_DIR))
 
 .PHONY: uninstall-skills
 uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
@@ -391,29 +391,27 @@ uninstall-component-manifest: ## Remove component manifest
 	rm -rf $(DESTDIR)$(COMPONENT_DIR)
 
 .PHONY: uninstall
-uninstall: INSTALL_PROFILE := system
-uninstall: uninstall-all-source-v2 ## Uninstall all V2 source-build artifacts
 
 .PHONY: uninstall-source-v2-host
 uninstall-source-v2-host: uninstall-cli-v2-source uninstall-source-v2-sandbox uninstall-systemd-system-source ## Remove V2 source-build host runtime
 
 .PHONY: uninstall-source-v2-sandbox
 uninstall-source-v2-sandbox: ## Remove the V2 source-build sandbox binary
-	rm -f $(DESTDIR)$(BINDIR)/linux-sandbox
+	rm -f $(call sandbox_shell_quote,$(DESTDIR)$(BINDIR)/linux-sandbox)
 
 .PHONY: uninstall-cli-v2-source
 uninstall-cli-v2-source: ## Remove V2 source-build CLI and daemon binaries
-	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
-	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon
-	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon-health
+	rm -f $(call sandbox_shell_quote,$(DESTDIR)$(BINDIR)/agent-sec-cli)
+	rm -f $(call sandbox_shell_quote,$(DESTDIR)$(BINDIR)/agent-sec-daemon)
+	rm -f $(call sandbox_shell_quote,$(DESTDIR)$(BINDIR)/agent-sec-daemon-health)
 
 .PHONY: uninstall-systemd-system-source
 uninstall-systemd-system-source: ## Remove V2 source-build system unit
-	rm -f $(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	rm -f $(call sandbox_shell_quote,$(DESTDIR)$(SOURCE_SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service)
 
 .PHONY: uninstall-source-v2-cosh-extension
 uninstall-source-v2-cosh-extension: ## Remove the V2 source-build cosh extension
-	rm -rf $(DESTDIR)$(EXTENSIONDIR)
+	rm -rf $(call sandbox_shell_quote,$(DESTDIR)$(EXTENSIONDIR))
 
 .PHONY: uninstall-source-v2-assets
 uninstall-source-v2-assets: uninstall-source-v2-cosh-extension uninstall-codex-plugin uninstall-qoder-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-qwen-code-extension uninstall-skills ## Remove source-build integration assets

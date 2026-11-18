@@ -233,6 +233,29 @@ is outside systemd's unit search paths, link its `agent-sec-core.service` with
 `sudo systemctl link /absolute/path/to/agent-sec-core.service` before reloading
 and starting it.
 
+### Remove a source installation
+
+Run `make -C src/agent-sec-core uninstall` with the same public layout values
+used for installation (`PREFIX`, `AWPRJ`, and any path overrides). Use the same
+`DESTDIR` when removing a staged installation. Like installation, uninstall
+rejects staging paths containing spaces or shell metacharacters before removing
+files. Layout validation completes before any removal, including with `make -j`.
+
+Before removing a live installation, withdraw active gateway routing with
+`agent-sec-cli gateway disable`, then stop and disable `agent-sec-core.service`.
+After removal, run `systemctl daemon-reload`. Uninstall retains the gateway
+withdrawal guard; it does not stop or disable the core service for you.
+
+Keep `ADAPTERDIR` private to sec-core: uninstall removes the complete `codex`,
+`qoder`, `openclaw`, `hermes`, and `qwencode` subdirectories. It preserves
+configuration, `DATADIR/LICENSE`, and unrelated sibling resources. The default
+public layout does not clean up legacy
+`/etc/systemd/system/agent-sec-core.service` or
+`PREFIX/lib/anolisa/sec-core/*-plugin` installations; use the matching legacy
+removal procedure or manual migration for those paths. If a legacy location was
+explicitly selected as part of the public layout, uninstall follows that layout
+and removes its owned files there.
+
 ## Quick Start
 
 ```bash

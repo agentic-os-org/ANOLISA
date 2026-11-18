@@ -602,6 +602,122 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
 
+    def test_uninstall_rejects_invalid_layout_before_any_removal(self):
+        stage = self.base / "reject-uninstall"
+        for jobs in ("-j1", "-j8"):
+            for name in ("ADAPTERDIR", "UNITDIR", "BINDIR", "SKILLDIR"):
+                for value in ("relative", "/srv/one two", "/srv/*", "/srv/../bad"):
+                    with self.subTest(jobs=jobs, name=name, value=value):
+                        installed = self.make("install", f"DESTDIR={stage}")
+                        self.assertEqual(installed.returncode, 0, installed.stderr)
+                        before = {
+                            path.relative_to(stage): path.read_bytes()
+                            for path in stage.rglob("*")
+                            if path.is_file()
+                        }
+                        result = self.make(
+                            "uninstall",
+                            jobs,
+                            "PREFIX=/usr",
+                            f"DESTDIR={stage}",
+                            f"{name}={value}",
+                        )
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        after = {
+                            path.relative_to(stage): path.read_bytes()
+                            for path in stage.rglob("*")
+                            if path.is_file()
+                        }
+                        self.assertEqual(before, after)
+
+    def test_parallel_uninstall_waits_for_failed_validation(self):
+        stage = self.base / "parallel"
+        result = self.make("install", f"DESTDIR={stage}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before = {
+            path.relative_to(stage): path.read_bytes()
+            for path in stage.rglob("*")
+            if path.is_file()
+        }
+        # Delay the failure so a sibling removal prerequisite would have time
+        # to run. Validation must gate the entire recursive removal graph.
+        with (self.source / "Makefile").open("a") as makefile:
+            makefile.write(
+                "\n.PHONY: fail-uninstall-validation\n"
+                "delivery-validate-uninstall: fail-uninstall-validation\n"
+                "fail-uninstall-validation:\n\t@sleep 0.2; exit 1\n"
+            )
+        result = self.make("uninstall", "-j8", "PREFIX=/usr", f"DESTDIR={stage}")
+        self.assertNotEqual(result.returncode, 0)
+        after = {
+            path.relative_to(stage): path.read_bytes()
+            for path in stage.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(before, after)
+
+    def test_uninstall_rejects_unsafe_destdir_and_shell_input(self):
+        marker = self.base / "injected"
+        values = (
+            "relative",
+            "/",
+            "//",
+            str(self.base / "stage space"),
+            f"{self.base}/stage*",
+            f"{self.base}/../bad",
+            f"{self.base}/`touch {marker}`",
+            f"{self.base}/$$(touch {marker})",
+            f"{self.base}/a'`touch {marker}`",
+            f"{self.base}/a'$$(touch {marker})",
+            f'{self.base}/";touch {marker};#',
+            f"{self.base}/'quoted",
+        )
+        for name in ("DESTDIR", "ADAPTERDIR", "UNITDIR"):
+            for value in values:
+                # Root is a valid system layout path, but not a staging root.
+                if name != "DESTDIR" and value in ("/", "//"):
+                    continue
+                with self.subTest(name=name, value=value):
+                    result = self.make(
+                        "uninstall",
+                        "-j8",
+                        f"DESTDIR={self.base}/safe",
+                        f"{name}={value}",
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse(marker.exists())
+
+    def test_uninstall_uses_environment_layout(self):
+        source_skill = self.source / "skills/demo/SKILL.md"
+        source_skill.parent.mkdir(parents=True)
+        source_skill.write_text("demo skill\n")
+        stage = self.base / "environment"
+        environment = {
+            "PREFIX": "/opt/suite",
+            "AWPRJ": "work",
+            "DESTDIR": str(stage),
+            "BINDIR": "/srv/bin",
+            "ADAPTERDIR": "/srv/adapters",
+            "UNITDIR": "/srv/units",
+            "SKILLDIR": "/srv/skills",
+        }
+        installed = self.make("install", env_overrides=environment)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        removed = self.make("uninstall", "-j8", env_overrides=environment)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        for path in (
+            "srv/bin/agent-sec-cli",
+            "srv/bin/agent-sec-daemon",
+            "srv/units/agent-sec-core.service",
+            "srv/adapters/codex",
+            "srv/skills/demo",
+        ):
+            self.assertFalse((stage / path).exists(), path)
+        self.assertTrue((stage / "opt/suite/etc/agent-sec/skillsec.json").is_file())
+        self.assertTrue(
+            (stage / "opt/suite/share/work/agent-sec-core/LICENSE").is_file()
+        )
+
     def test_uninstall_removes_matching_units_and_adapters(self):
         for prefix, namespace, overrides in (
             ("/usr/local", "anolisa", ()),
