@@ -52,7 +52,7 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
         | ("qwenpaw", "app")
         | ("qoder-sdk", "sdk-worker")
         | ("openclaw", "gateway")
-        | ("hermes", "chat") => Ok(()),
+        | ("hermes", "chat" | "gateway") => Ok(()),
         _ => Err("runtime policy updates require a verified native entrypoint".into()),
     }
 }
@@ -113,6 +113,14 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?;
     let steps =
         aw_core::admission::preflight(&config, target, capabilities).map_err(|e| e.to_string())?;
+    if capabilities.adapter == "hermes"
+        && capabilities.entrypoint == "gateway"
+        && steps
+            .iter()
+            .any(|step| crate::adapters::sdk_tools::checks_skill_tool(step, "hermes", "skill_view"))
+    {
+        return Err("Hermes Gateway attachment does not support Skill checking".into());
+    }
     if capabilities.adapter != "hermes"
         && steps
             .iter()
@@ -295,7 +303,7 @@ pub enum ExecutionClaim {
 ///
 /// # Errors
 /// Reject unsupported native adapters and missing or inconsistent identities.
-pub fn execution_claim(adapter: &str, event: &Value) -> Result<ExecutionClaim> {
+pub fn execution_claim(adapter: &str, entrypoint: &str, event: &Value) -> Result<ExecutionClaim> {
     let identity = |value: &Value| -> Result<String> {
         value
             .as_str()
@@ -323,6 +331,9 @@ pub fn execution_claim(adapter: &str, event: &Value) -> Result<ExecutionClaim> {
                 let call = identity(&event["tool"]["call_id"])?;
                 Ok(ExecutionClaim::Tool(tool_key(&session, &call)?))
             }
+        }
+        "hermes" if entrypoint == "gateway" => {
+            Err("Hermes Gateway callbacks require a Scope".into())
         }
         // Hermes' admitted chat loop is serial; its private request UUID does
         // not appear in native tool callbacks. Ambiguity is rejected by runtime.

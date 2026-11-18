@@ -8,6 +8,7 @@ fn observation_only_launch_registers_two_noop_callbacks() {
     let files = crate::test_support::Artifacts(directory);
     let mut prepared = Prepared {
         revision: "a".repeat(40),
+        gateway: false,
         input: LaunchInput {
             document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":"auto"}}},
                 "execution":{"default_event_budget_ms":1000},"events":{}}}),
@@ -108,6 +109,7 @@ fn empty_policy_keeps_native_command_and_zero_hook_readiness() {
     };
     let mut prepared = Prepared {
         revision: "a".repeat(40),
+        gateway: false,
         input: LaunchInput {
             document: json!({"spec":{"providers":{},"events":{}}}),
             target: "hermes".into(),
@@ -223,6 +225,7 @@ fn generated_profile_marks_only_the_admitted_replacement_step() {
         .collect();
     let mut prepared = Prepared {
         revision: "a".repeat(40),
+        gateway: false,
         input: LaunchInput {
             document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
             target: "hermes".into(),

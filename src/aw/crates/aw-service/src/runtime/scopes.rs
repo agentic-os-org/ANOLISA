@@ -187,14 +187,14 @@ impl Runtime {
         &self,
         parent: &str,
         pid: u32,
-        context: ProcessContext,
+        mut context: ProcessContext,
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
         let process = Process::read(pid)?.watch()?;
         let id = self.identifier()?;
         let cancellation = Arc::new(AtomicBool::new(false));
-        let (bytes, target, capabilities) = {
+        let (bytes, target, capabilities, prepared_host) = {
             // Match close's lock order. The reservation is visible before preparation starts.
             let mut instances = self
                 .instances
@@ -206,22 +206,31 @@ impl Runtime {
                 .and_then(Option::as_ref)
                 .filter(|instance| {
                     !instance.closing
-                        && instance
-                            .reload
-                            .as_ref()
-                            .is_none_or(|reload| reload.resident)
+                        && (instance.hermes_gateway()
+                            || instance
+                                .reload
+                                .as_ref()
+                                .is_none_or(|reload| reload.resident))
                 })
                 .ok_or_else(|| rejected("scope_parent_unavailable"))?;
             let owner = owners
                 .get(parent)
                 .filter(|owner| {
-                    !owner.native
-                        && owner.parent.is_none()
+                    owner.parent.is_none()
+                        && (!owner.native || instance.hermes_gateway())
                         && !owner.cancelled.load(Ordering::Acquire)
                 })
                 .ok_or_else(|| rejected("scope_parent_unowned"))?;
             owner.process.corroborate(pid)?;
-            if let Some(reload) = &instance.reload {
+            if owner.native {
+                instance
+                    .reload
+                    .as_ref()
+                    .ok_or_else(|| rejected("bridge_not_ready"))?
+                    .admit_gateway_scope(pid)?;
+                context.environment = instance.context.environment.clone();
+                context.stderr_bytes = instance.context.stderr_bytes;
+            } else if let Some(reload) = &instance.reload {
                 reload.admit_scope(pid)?;
             }
             if owner.acknowledge_by.is_some() {
@@ -229,7 +238,7 @@ impl Runtime {
             }
             let independent = owner.independent;
             let sdk = owner.sdk;
-            let policy_confirmed = instance.reload.is_none() && sdk.is_none();
+            let policy_confirmed = owner.native || (instance.reload.is_none() && sdk.is_none());
             if instances.len() >= self.limits.bindings {
                 return Err(self.overload("binding_limit"));
             }
@@ -237,6 +246,8 @@ impl Runtime {
                 instance.bytes.clone(),
                 instance.host.target().to_owned(),
                 instance.host.capabilities().clone().into(),
+                (owner.native && context.cwd == instance.context.cwd)
+                    .then(|| Arc::clone(&instance.host)),
             );
             instances.insert(id.clone(), None);
             owners.insert(
@@ -257,31 +268,35 @@ impl Runtime {
         };
         // Host accepts one cancellation flag; propagate connection loss into the
         // same flag used by parent close and process-death maintenance.
-        let finished = AtomicBool::new(false);
-        let prepared = thread::scope(|scope| {
-            scope.spawn(|| {
-                while !finished.load(Ordering::Acquire) {
-                    if cancelled.load(Ordering::Acquire)
-                        || self.stopped.load(Ordering::Acquire)
-                        || Instant::now() >= deadline
-                    {
-                        cancellation.store(true, Ordering::Release);
-                        break;
+        let prepared = if let Some(host) = prepared_host {
+            Ok(host)
+        } else {
+            let finished = AtomicBool::new(false);
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !finished.load(Ordering::Acquire) {
+                        if cancelled.load(Ordering::Acquire)
+                            || self.stopped.load(Ordering::Acquire)
+                            || Instant::now() >= deadline
+                        {
+                            cancellation.store(true, Ordering::Release);
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(2));
                     }
-                    thread::sleep(Duration::from_millis(2));
-                }
-            });
-            let result = self.prepare(
-                &bytes,
-                &id,
-                &target,
-                capabilities,
-                context.clone(),
-                (deadline, &cancellation),
-            );
-            finished.store(true, Ordering::Release);
-            result
-        });
+                });
+                let result = self.prepare(
+                    &bytes,
+                    &id,
+                    &target,
+                    capabilities,
+                    context.clone(),
+                    (deadline, &cancellation),
+                );
+                finished.store(true, Ordering::Release);
+                result.map(Arc::new)
+            })
+        };
         let mut instances = self
             .instances
             .lock()

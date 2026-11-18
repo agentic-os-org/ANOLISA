@@ -23,6 +23,8 @@ pub use adapter::{
     OBSERVE_STEP,
 };
 
+pub use adapters::hermes::prepare_gateway as prepare_hermes_gateway;
+
 /// Native callback status; only the CLI delivers signals or exits its process.
 pub enum NativeExit {
     /// Native numeric exit code.

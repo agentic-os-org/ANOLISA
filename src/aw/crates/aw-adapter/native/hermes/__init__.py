@@ -47,13 +47,29 @@ def _read_launch(path: str) -> dict[str, Any]:
     return launch
 
 
+def _gateway_run(argv: list[str]) -> bool:
+    from hermes_cli._parser import build_top_level_parser, command_argv
+
+    if command_argv(argv)[:1] != ["gateway"]:
+        return False
+    from hermes_cli.subcommands.gateway import build_gateway_parser
+
+    parser, subcommands, _ = build_top_level_parser()
+    build_gateway_parser(subcommands, cmd_gateway=None, cmd_proxy=None, cmd_gateway_enroll=None)
+    args = parser.parse_args(argv)
+    return args.command == "gateway" and args.gateway_command in (None, "run")
+
+
 def register(ctx: Any) -> None:
-    """An installed plugin is inert unless this process was launched by AW."""
+    """Register managed hooks or the opt-in native Gateway connection."""
     session = sys.modules.get("_aw_hermes_session")
     if session is None:
         if hasattr(ctx, "register_rpc"):
             from . import aw_gateway
-            aw_gateway.register(ctx, _read_launch)
+            config = os.environ.get("AW_HERMES_GATEWAY_CONFIG")
+            if config is not None and not _gateway_run(sys.argv[1:]):
+                config = None
+            aw_gateway.register(ctx, _read_launch, gateway_config=config)
         return
 
     from agent.shell_hooks import ShellHookSpec, _make_callback

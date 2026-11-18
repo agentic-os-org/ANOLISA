@@ -579,7 +579,7 @@ fn native_execution_claims_match_each_bridges_lifecycle_identity() {
     let native = json!({"native":{"context":{"sessionId":"session","runId":"run"},
         "event":{"runId":"run"}}});
     assert_eq!(
-        execution_claim("openclaw", &native).unwrap(),
+        execution_claim("openclaw", "gateway", &native).unwrap(),
         ExecutionClaim::Request(tool_key("session", "run").unwrap())
     );
     let mut fallback = native.clone();
@@ -588,20 +588,21 @@ fn native_execution_claims_match_each_bridges_lifecycle_identity() {
         .unwrap()
         .remove("runId");
     assert_eq!(
-        execution_claim("openclaw", &fallback).unwrap(),
+        execution_claim("openclaw", "gateway", &fallback).unwrap(),
         ExecutionClaim::Request(tool_key("session", "run").unwrap())
     );
     let mut mismatch = native.clone();
     mismatch["native"]["event"]["runId"] = json!("another-run");
-    assert!(execution_claim("openclaw", &mismatch).is_err());
+    assert!(execution_claim("openclaw", "gateway", &mismatch).is_err());
     for identity in [Value::Null, json!(""), json!("x".repeat(513))] {
         let mut invalid = native.clone();
         invalid["native"]["context"]["sessionId"] = identity;
-        assert!(execution_claim("openclaw", &invalid).is_err());
+        assert!(execution_claim("openclaw", "gateway", &invalid).is_err());
     }
     assert_eq!(
         execution_claim(
             "qoder",
+            "print",
             &json!({"name":"input.submit","session_id":"session"})
         )
         .unwrap(),
@@ -611,6 +612,7 @@ fn native_execution_claims_match_each_bridges_lifecycle_identity() {
         assert_eq!(
             execution_claim(
                 "qoder",
+                "print",
                 &json!({"name":event,"session_id":"session",
             "tool":{"call_id":"call"}})
             )
@@ -620,14 +622,16 @@ fn native_execution_claims_match_each_bridges_lifecycle_identity() {
     }
     assert!(execution_claim(
         "qoder",
+        "print",
         &json!({"name":"tool.before","session_id":"session"})
     )
     .is_err());
     assert_eq!(
-        execution_claim("hermes", &json!({})).unwrap(),
+        execution_claim("hermes", "chat", &json!({})).unwrap(),
         ExecutionClaim::SerialRequest
     );
-    assert!(execution_claim("unsupported", &native).is_err());
+    assert!(execution_claim("hermes", "gateway", &json!({})).is_err());
+    assert!(execution_claim("unsupported", "application", &native).is_err());
 }
 
 #[test]

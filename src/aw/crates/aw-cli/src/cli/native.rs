@@ -66,6 +66,8 @@ pub(super) fn prepare_with(
             "--native-settings",
             "--native-profile",
             "--native-state-dir",
+            "--gateway-revision",
+            "--gateway-hook-timeout",
         ],
         false,
     )?;
@@ -77,6 +79,10 @@ pub(super) fn prepare_with(
     let name = agent["adapter"]
         .as_str()
         .ok_or("configured Agent target not found")?;
+    let gateway = args.flags.get("--gateway-revision");
+    if gateway.is_some() && name != "hermes" {
+        return Err("Gateway preparation requires the Hermes adapter".into());
+    }
     let native = matches!(name, "openclaw" | "hermes" | "qoder");
     if !native
         && !matches!(
@@ -121,21 +127,25 @@ pub(super) fn prepare_with(
     // The CLI transport is a direct child; a controller cannot nominate another PID.
     let pid = unsafe { libc::getppid() } as u32;
     let owner = ProcessIdentity::read(pid)?;
-    let mut prepared = aw_adapter::select(name)?.prepare(
-        LaunchInput {
-            document: config.as_value().clone(),
-            target: target.into(),
-            options: NativeOptions {
-                resident_policy_reload: !native,
-                reloadable: native,
-                settings: args.flags.get("--native-settings").cloned(),
-                profile: args.flags.get("--native-profile").cloned(),
-                state_dir: args.flags.get("--native-state-dir").cloned(),
-            },
-            command,
+    let input = LaunchInput {
+        document: config.as_value().clone(),
+        target: target.into(),
+        options: NativeOptions {
+            resident_policy_reload: !native,
+            reloadable: native,
+            settings: args.flags.get("--native-settings").cloned(),
+            profile: args.flags.get("--native-profile").cloned(),
+            state_dir: args.flags.get("--native-state-dir").cloned(),
         },
-        &super::run::CANCELLED,
-    )?;
+        command,
+    };
+    let mut prepared = if let Some(revision) = gateway {
+        let executable = fs::read_link(format!("/proc/{pid}/exe"))?;
+        let timeout = args.required("--gateway-hook-timeout")?.parse()?;
+        aw_adapter::prepare_hermes_gateway(input, &executable, revision, timeout)?
+    } else {
+        aw_adapter::select(name)?.prepare(input, &super::run::CANCELLED)?
+    };
     let capabilities = prepared.capabilities();
     if native {
         aw_adapter::reload::supported(&capabilities)?;
@@ -147,10 +157,11 @@ pub(super) fn prepare_with(
     let deadline = Instant::now() + Duration::from_secs(30);
     let selected = super::connection::selected(&configuration, deadline, true)?;
     let service = if selected.is_none() {
-        Some(launch_service::ensure_service(
+        Some(ensure_service(
             &bytes,
             &executable,
             deadline,
+            gateway.is_some(),
         )?)
     } else {
         None
@@ -277,6 +288,30 @@ pub(super) fn prepare_with(
     result?;
     files.retained = true;
     Ok(Exit::Code(0))
+}
+
+fn ensure_service(
+    bytes: &[u8],
+    executable: &Path,
+    deadline: Instant,
+    gateway: bool,
+) -> Result<launch_service::EnsuredService> {
+    loop {
+        match launch_service::ensure_service(bytes, executable, deadline) {
+            Err(aw_service::Error::Io(error))
+                if gateway
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    )
+                    && Instant::now() < deadline
+                    && !super::run::CANCELLED.load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return Ok(result?),
+        }
+    }
 }
 
 pub(super) fn ready(

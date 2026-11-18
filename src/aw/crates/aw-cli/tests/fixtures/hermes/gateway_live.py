@@ -1,6 +1,7 @@
 """Require model adoption of an AW replacement through Hermes 0.23.1 CLI/Gateway."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -19,10 +20,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--hermes", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--attach", action="store_true")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 requests = []
 deny_marker = None
+parallel = threading.Barrier(2, timeout=40)
 
 
 class Model(BaseHTTPRequestHandler):
@@ -38,6 +41,10 @@ class Model(BaseHTTPRequestHandler):
                    if message.get("role") == "tool"]
         requests.append(results)
         if results:
+            if args.attach and any("AW_PARALLEL" in str(message.get("content"))
+                                   for message in request.get("messages", [])
+                                   if message.get("role") == "user"):
+                parallel.wait()
             delta, finish = {"role": "assistant", "content": "Complete"}, "stop"
         else:
             denied = any("AW_DENY_TEST" in json.dumps(message)
@@ -87,6 +94,105 @@ def run(argv: list[str], cwd: Path, env: dict[str, str], log: Path,
             child.wait(timeout=5)
             raise
         return subprocess.CompletedProcess(argv, child.returncode)
+
+
+def test_attachment(stack, env, root, profile, work, state, config_path):
+    gateway_env = {**env, "AW_HERMES_GATEWAY_CONFIG": str(config_path),
+                   "AW_HERMES_GATEWAY_BINARY": str(args.aw.resolve())}
+    with (args.output / "gateway.log").open("w") as stream:
+        gateway = subprocess.Popen(
+            [str(args.hermes), "gateway", "--accept-hooks", "run"],
+            cwd=work, env=gateway_env, stdin=subprocess.DEVNULL, stdout=stream,
+            stderr=subprocess.STDOUT, start_new_session=True)
+
+    def stop_gateway():
+        if gateway.poll() is None:
+            os.killpg(gateway.pid, signal.SIGTERM)
+            try:
+                gateway.wait(timeout=40)
+            except subprocess.TimeoutExpired:
+                os.killpg(gateway.pid, signal.SIGKILL)
+                gateway.wait(timeout=5)
+                raise
+
+    stack.callback(stop_gateway)
+    log = profile / "logs" / "gateway.log"
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if log.exists() and "AW Hermes attach ready" in log.read_text():
+            break
+        if gateway.poll() is not None:
+            raise RuntimeError("native Hermes Gateway exited before attachment")
+        time.sleep(.05)
+    else:
+        if log.exists():
+            (args.output / "gateway-runtime.log").write_bytes(log.read_bytes())
+        raise TimeoutError("native Hermes Gateway attachment")
+    assert len(list(state.glob("native-*"))) == 1
+
+    def chat(query, cwd, name):
+        argv = [str(args.hermes), "chat", "--cli", "--oneshot", "--quiet",
+                "--max-turns", "4", "--run-budget", "120", "--toolsets", "terminal", "--query", query]
+        result = run(argv, cwd, env, args.output / (name + ".log"), 150)
+        assert result.returncode == 0, (name, (args.output / (name + ".log")).read_text())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        left = pool.submit(chat, "AW_PARALLEL left terminal", work, "left")
+        right = pool.submit(chat, "AW_PARALLEL right terminal", work, "right")
+        left.result(timeout=160)
+        right.result(timeout=160)
+    original = config_path.read_bytes()
+    candidate = json.loads(original)
+    candidate["spec"]["providers"]["policy"]["config"]["replacement"] = "UPDATED_POLICY_REPLACEMENT"
+    next_policy = root / "next-policy.json"
+    next_policy.write_text(json.dumps(candidate))
+    update = run([str(args.aw), "update", "--config", str(config_path), "--policy",
+                  str(next_policy), "--agent", "hermes"], work, env, args.output / "update.log", 35)
+    assert update.returncode == 0, (args.output / "update.log").read_text()
+    workspace = root / "other-workspace"
+    workspace.mkdir()
+    chat("Use terminal from another workspace", workspace, "workspace")
+    events = [json.loads(line) for line in (root / "provider.jsonl").read_text().splitlines()]
+    before = [event for event in events if event["name"] == "tool.before"]
+    after = [event for event in events if event["name"] == "tool.after"]
+    cwd = [event["native"]["cwd"] for event in before]
+    scopes = [event["agent"]["instance_id"] for event in before]
+    model_visible = [output for group in requests for output in group]
+    if log.exists():
+        (args.output / "gateway-runtime.log").write_bytes(log.read_bytes())
+    (args.output / "model-requests.json").write_text(json.dumps(requests, indent=2))
+    status = run([str(args.aw), "service", "status", "--config", str(config_path)],
+                 work, env, args.output / "scope-status.log", 20)
+    assert status.returncode == 0
+    bindings = json.loads((args.output / "scope-status.log").read_text())["result"]["bindings"]
+    scopes_released = bindings == 1 and not list(state.glob("native-*/workspace-*"))
+    # The native stop command's process scan recognizes the adjacent "gateway run" form.
+    gateway.send_signal(signal.SIGINT)
+    gateway.wait(timeout=10)
+    report = {
+        "status": "passed",
+        "parallel_tools": len(set(scopes)) == 3 and cwd.count(str(work)) == 2,
+        "alternate_workspace": cwd.count(str(workspace)) == 1
+        and all(event["fixture_provider_cwd"] == event["native"]["cwd"] for event in events),
+        "pre_events": len(before),
+        "after_events": len(after),
+        "model_saw_replacement": len(model_visible) == 3
+        and all("MODEL_VISIBLE_REPLACEMENT" in str(result) for result in model_visible[:2]),
+        "updated_workspace_policy": config_path.read_bytes() == original
+        and "UPDATED_POLICY_REPLACEMENT" in str(model_visible[-1])
+        and before[0]["fixture_revision"] != before[-1]["fixture_revision"],
+        "workspace_scopes_released": scopes_released,
+        "launch_assets_released": not list(state.glob("native-*")),
+        "gateway_stopped": gateway.returncode == 0,
+    }
+    assert report == {
+        "status": "passed", "parallel_tools": True, "alternate_workspace": True,
+        "pre_events": 3, "after_events": 3, "model_saw_replacement": True,
+        "updated_workspace_policy": True, "workspace_scopes_released": True,
+        "launch_assets_released": True, "gateway_stopped": True,
+    }, report
+    (args.output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report))
 
 
 def main() -> None:
@@ -181,7 +287,8 @@ def main() -> None:
                     daemon.wait(timeout=5)
 
             stack.callback(stop_daemon)
-            stack.callback(stop_gateway)
+            if not args.attach:
+                stack.callback(stop_gateway)
             deadline = time.monotonic() + 10
             while not (state / "aw.sock").exists() and time.monotonic() < deadline:
                 if daemon.poll() is not None:
@@ -189,6 +296,9 @@ def main() -> None:
                 time.sleep(0.05)
             if not (state / "aw.sock").exists():
                 raise TimeoutError("AW daemon readiness timed out")
+            if args.attach:
+                test_attachment(stack, env, root, profile, work, state, config_path)
+                return
             checked([base[0], "run", *base[1:], "--", "--oneshot", "--quiet",
                      "--max-turns", "4", "--run-budget", "60", "--toolsets", "terminal",
                      "--query", "Use the terminal tool once."], "chat", 180)

@@ -29,6 +29,41 @@ struct Prepared {
     python: PathBuf,
     callback_timeout: f64,
     revision: String,
+    gateway: bool,
+}
+
+/// Prepare a verified running Gateway without executing the Hermes CLI again.
+pub fn prepare_gateway(
+    mut input: LaunchInput,
+    owner_executable: &std::path::Path,
+    revision: &str,
+    callback_timeout: f64,
+) -> Result<Box<dyn PreparedLaunch>> {
+    const VERIFIED_GATEWAY: &str = "3b421578588243f920886e6fe79a6faa87ea026e";
+    if revision != VERIFIED_GATEWAY || !callback_timeout.is_finite() || callback_timeout < 0.0 {
+        return Err("unsupported Hermes Gateway revision or callback timeout".into());
+    }
+    if input.options.settings.is_some() || input.options.state_dir.is_some() {
+        return Err("Hermes Gateway requires a native profile".into());
+    }
+    let profile =
+        install::profile(input.options.profile.as_ref().ok_or(
+            "Hermes Gateway requires --native-profile pointing to its installed profile",
+        )?)?;
+    install::installed(&profile)?;
+    check_args(&input.command.args)?;
+    let python = preflight::python_entrypoint(&mut input.command)?;
+    if python.canonicalize()? != owner_executable {
+        return Err("Hermes Gateway owner does not use the configured interpreter".into());
+    }
+    Ok(Box::new(Prepared {
+        input,
+        profile,
+        python,
+        callback_timeout,
+        revision: revision.into(),
+        gateway: true,
+    }))
 }
 
 impl Adapter for Hermes {
@@ -69,6 +104,7 @@ impl Adapter for Hermes {
             python,
             callback_timeout: timeout,
             revision,
+            gateway: false,
         }))
     }
 
@@ -289,7 +325,13 @@ fn installed_output(
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::HERMES.capabilities(&self.revision, "chat")
+        let entrypoint = if self.gateway { "gateway" } else { "chat" };
+        let mut capabilities =
+            super::super::adapter::catalog::HERMES.capabilities(&self.revision, entrypoint);
+        if self.gateway {
+            capabilities.events.remove("input.submit");
+        }
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -369,7 +411,7 @@ impl PreparedLaunch for Prepared {
             for event in events.values_mut() {
                 event.budget_ms = 55000;
             }
-            if check_submission_args(&self.input.command.args).is_ok() {
+            if !self.gateway && check_submission_args(&self.input.command.args).is_ok() {
                 events.insert(
                     "input.submit".into(),
                     HookEvent {

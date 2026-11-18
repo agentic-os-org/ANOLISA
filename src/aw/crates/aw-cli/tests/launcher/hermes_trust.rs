@@ -179,6 +179,7 @@ fn installed_hermes_fixture() -> (Fixture, PathBuf) {
         "plugin.yaml",
         "__init__.py",
         "aw_gateway.py",
+        "aw_gateway_attach.py",
         "aw_gateway_lifecycle.py",
         "aw_skill.py",
     ] {
@@ -446,6 +447,7 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
         "plugin.yaml",
         "__init__.py",
         "aw_gateway.py",
+        "aw_gateway_attach.py",
         "aw_gateway_lifecycle.py",
         "aw_skill.py",
     ] {
