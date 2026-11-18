@@ -87,11 +87,42 @@ def main(binary: str) -> None:
             )
         )
         descriptor.chmod(0o600)
+        pi_deployment = json.loads((package.parent / "tests/fixtures/deployment.json").read_text())[
+            "configuration"
+        ]
+        pi_deployment["spec"]["agents"]["app"]["adapter"] = "pi"
+        pi_deployment["spec"]["daemon"]["state_dir"] = str(root / "state")
+        pi_config = root / "pi-config.json"
+        pi_config.write_text(json.dumps(pi_deployment))
+        pi_config.chmod(0o600)
+        pi_descriptor = root / "pi-deployment.json"
+        pi_descriptor.write_text(
+            run(
+                [
+                    str(Path(binary).resolve()),
+                    "config",
+                    "descriptor",
+                    "--config",
+                    str(pi_config),
+                    "--agent",
+                    "app",
+                    "--profile",
+                    "pi-worker-hooks",
+                ],
+                root,
+                environment,
+            )
+        )
+        pi_descriptor.chmod(0o600)
+        pi_worker = root / "pi-worker.mjs"
+        pi_worker.write_text("export function createSession() {}\n")
         consumer = root / "consumer.mjs"
         consumer.write_text("""import assert from 'node:assert/strict';
 import { Instance } from '@anolisa/aw-sdk';
+import { runPiWorker } from '@anolisa/aw-sdk/pi';
 import { qoderOptions, createQoderBridge } from '@anolisa/aw-sdk/qoder';
 assert.equal(typeof createQoderBridge,'function');
+assert.equal(typeof runPiWorker,'function');
 const instance = new Instance({endpoint: process.argv[2], target:'app',
   availability:'native_fallback', capabilities:{}, install:()=>true});
 assert.equal(await instance.connect(),false);
@@ -103,9 +134,23 @@ const bridge = await createQoderBridge({configFile:process.argv[3], descriptorFi
   availability:'required', executable:'/missing/aw',
   query(){ throw new Error('native Query must not start'); }});
 await bridge.close();
+await assert.rejects(
+  runPiWorker({application:process.argv[5], configFile:process.argv[6],
+    descriptorFile:process.argv[7], executable:'/missing/aw'}),
+  /Cannot resolve installed @earendil-works\\/pi-coding-agent/,
+);
 """)
         run(
-            ["node", str(consumer), str(root / "missing.sock"), str(config), str(descriptor)],
+            [
+                "node",
+                str(consumer),
+                str(root / "missing.sock"),
+                str(config),
+                str(descriptor),
+                str(pi_worker),
+                str(pi_config),
+                str(pi_descriptor),
+            ],
             root,
             environment,
         )

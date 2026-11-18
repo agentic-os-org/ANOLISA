@@ -10,6 +10,10 @@ export function configuration(config = JSON.parse(readFileSync(process.env.AW_NA
     if (typeof config[key] !== "string" || !config[key])
       throw new Error(`Missing AW ${key}`);
   }
+  return validateRoutes(config);
+}
+
+export function validateRoutes(config) {
   if (!Array.isArray(config.hooks))
     throw new Error("AW hooks must be an array");
   for (const hook of config.hooks) {
@@ -131,7 +135,7 @@ function validateReplacement(result, replacement) {
 
 /** Install after createAgentSession returns; resolve durable session identity at each preparation. */
 export function installSessionBridge(session, scope = null, policy = configuration()) {
-  const config = { ...configuration(policy), scope };
+  const config = { ...(scope ? validateRoutes(policy) : configuration(policy)), scope };
   const agent = session.agent;
   if (!agent || typeof session.sessionManager?.getSessionId !== "function") {
     throw new Error("AW requires a Pi Coding AgentSession");

@@ -3,7 +3,8 @@ import { mkdir, copyFile, rm, readFile, writeFile } from "node:fs/promises";
 const root = new URL("../", import.meta.url);
 const output = new URL("dist/", root);
 await rm(output, { recursive: true, force: true });
-await mkdir(new URL("native/qoder-sdk/", output), { recursive: true });
+await mkdir(output, { recursive: true });
+
 for (const file of [
   "client.mjs",
   "admission.mjs",
@@ -13,23 +14,36 @@ for (const file of [
   "control.mjs",
   "index.d.ts",
   "qoder.d.ts",
+  "pi.d.ts",
 ])
   await copyFile(new URL(`src/${file}`, root), new URL(file, output));
-for (const file of ["sdk.mjs", "callback.mjs", "skills.mjs"])
-  await copyFile(
-    new URL(`../../crates/aw-adapter/native/qoder-sdk/${file}`, root),
-    new URL(`native/qoder-sdk/${file}`, output),
-  );
 
 await copyFile(
   new URL("../../../../LICENSE", root),
   new URL("LICENSE", output),
 );
 
-await writeFile(
-  new URL("qoder.mjs", output),
-  (await readFile(new URL("src/qoder.mjs", root), "utf8")).replace(
-    "../../../crates/aw-adapter/native/qoder-sdk/sdk.mjs",
-    "./native/qoder-sdk/sdk.mjs",
-  ),
-);
+// Framework entries import canonical Adapter files; the package keeps them in native/.
+for (const file of ["qoder.mjs", "pi.mjs", "task-scope.mjs"])
+  await writeFile(
+    new URL(file, output),
+    (await readFile(new URL(`src/${file}`, root), "utf8")).replaceAll(
+      "../../../crates/aw-adapter/native/",
+      "./native/",
+    ),
+  );
+
+for (const [directory, files] of [
+  ["qoder-sdk", ["sdk.mjs", "callback.mjs", "skills.mjs"]],
+  ["pi", ["entrypoint.mjs", "resident.mjs", "bridge.mjs", "producer.mjs",
+    "scope.mjs", "skills.mjs", "submission.mjs", "transport.mjs", "sdk.mjs",
+    "capabilities.json"]],
+  ["shared", ["scope.mjs", "transport.mjs"]],
+]) {
+  await mkdir(new URL(`native/${directory}/`, output), { recursive: true });
+  for (const file of files)
+    await copyFile(
+      new URL(`../../crates/aw-adapter/native/${directory}/${file}`, root),
+      new URL(`native/${directory}/${file}`, output),
+    );
+}

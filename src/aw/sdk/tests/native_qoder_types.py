@@ -50,15 +50,20 @@ def main() -> None:
         consumer = root / "consumer.mts"
         consumer.write_text(
             "import { query } from " + json.dumps(str(sdk / "dist/index.js")) + ";\n"
-            'import { Instance } from "@anolisa/aw-sdk";\n'
+            'import { Admission, Instance } from "@anolisa/aw-sdk";\n'
+            'import { runPiWorker } from "@anolisa/aw-sdk/pi";\n'
             'import { createQoderBridge, qoderOptions } from "@anolisa/aw-sdk/qoder";\n'
             "export async function consumer(instance: Instance) {\n"
             ' const bridge = await createQoderBridge({configFile:"/tmp/aw.yaml", query, availability:"native_fallback"});\n'
             ' const session = bridge.query({prompt:"text"});\n'
             " await session.initializationResult();\n"
-            " const task = await instance.task();\n"
+            " const gate = new Admission(instance, {events:[\"tool.before\"], deferAcknowledgement:true});\n"
+            " await gate.prepare();\n"
+            " const task = await instance.task({deferAcknowledgement:true});\n"
+            " await task.acknowledge();\n"
             ' const native = qoderOptions(task).bind(query({prompt:"text"}));\n'
             " await native.initializationResult();\n"
+            ' void runPiWorker({application:"/app/worker.mjs", configFile:"/tmp/aw.yaml", descriptorFile:"/tmp/d.json"});\n'
             " return session;\n}\n"
         )
         result = subprocess.run(
