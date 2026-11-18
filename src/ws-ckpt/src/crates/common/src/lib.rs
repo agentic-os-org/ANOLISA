@@ -240,6 +240,23 @@ pub enum Request {
     /// positionally, so inserting a field would break older clients and
     /// the cosh-ng mirror of the status layout.
     WatcherHealth,
+    /// Create an independent writable workspace from a snapshot of an
+    /// already registered workspace, then register it at `destination`.
+    Fork {
+        /// Source workspace path or ID.
+        workspace: String,
+        /// Source snapshot ID or unique prefix.
+        snapshot: String,
+        /// New workspace path; it must be absent and its parent must exist.
+        destination: String,
+    },
+    /// Read the fork provenance tree around `workspace`.
+    WorkspaceTree {
+        /// Workspace path or ID.
+        workspace: String,
+        /// Walk up to the root and include every descendant.
+        all: bool,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -429,9 +446,40 @@ pub enum Response {
         workspaces_without_watcher: Vec<String>,
         /// Cumulative inotify queue overflows observed on the shared
         /// watcher instance. Each one interrupted event delivery; the
-        /// daemon treats every watched workspace as actively written
+        /// daemon treats every workspace as actively written
         /// across an overflow until quiescence is re-observed.
         watcher_queue_overflows: u64,
+    },
+    /// A forked workspace is published, registered and has its initial
+    /// read-only checkpoint.
+    ForkOk {
+        /// Fresh workspace ID, allocated by the same history as `init`.
+        ws_id: String,
+        /// Registered workspace path (the `destination` the caller asked for).
+        path: String,
+        /// Workspace the content was forked from.
+        source_ws_id: String,
+        /// Snapshot the content was forked from.
+        source_snapshot_id: String,
+        /// Read-only checkpoint created from the forked content.
+        initial_snapshot_id: String,
+        /// Conditions that left the workspace usable but not fully durable.
+        ///
+        /// Empty on a clean fork. A non-empty entry means the workspace works
+        /// now but its registration is not guaranteed to survive a daemon
+        /// restart, so the caller must not treat it as permanent.
+        warnings: Vec<String>,
+    },
+    /// Fork provenance tree, ordered so parents precede their children.
+    WorkspaceTreeOk {
+        /// Workspace the query named.
+        target_ws_id: String,
+        /// Title of the displayed tree (the root workspace ID).
+        root_ws_id: String,
+        /// Nodes in display order; `depth` is the distance from the root.
+        nodes: Vec<WorkspaceTreeNode>,
+        /// Provenance records that could not be read or no longer resolve.
+        warnings: Vec<String>,
     },
 }
 
@@ -1153,6 +1201,26 @@ pub struct WorkspaceInfo {
     pub path: String,
     pub snapshot_count: u32,
 }
+
+/// One node of the workspace fork provenance tree.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceTreeNode {
+    pub ws_id: String,
+    pub path: String,
+    /// Distance from the root of the displayed tree.
+    pub depth: u32,
+    /// Workspace this one was forked from, when a provenance record exists.
+    pub source_ws_id: Option<String>,
+    /// Snapshot this workspace was forked from.
+    pub source_snapshot_id: Option<String>,
+    /// Whether the source workspace is still registered.
+    pub source_registered: bool,
+    /// Whether this is the workspace the query named.
+    pub target: bool,
+}
+
+/// Schema identifier for `ws-ckpt tree -w --format json`.
+pub const WORKSPACE_TREE_JSON_SCHEMA: &str = "ws-ckpt/tree/v1";
 
 /// Status report for the daemon and its managed workspaces.
 ///
@@ -2613,6 +2681,102 @@ mod tests {
             size, max: MAX_FRAME_SIZE,
         }) if size == u64::from(MAX_FRAME_SIZE) + 1)
         );
+    }
+
+    #[test]
+    fn fork_request_and_response_round_trip() {
+        let request = Request::Fork {
+            workspace: "/tmp/source".to_string(),
+            snapshot: "snap-1".to_string(),
+            destination: "/tmp/forked".to_string(),
+        };
+        assert!(matches!(
+            round_trip_request(&request),
+            Request::Fork { workspace, snapshot, destination }
+                if workspace == "/tmp/source"
+                    && snapshot == "snap-1"
+                    && destination == "/tmp/forked"
+        ));
+
+        let response = Response::ForkOk {
+            ws_id: "ws-forked".to_string(),
+            path: "/tmp/forked".to_string(),
+            source_ws_id: "ws-source".to_string(),
+            source_snapshot_id: "snap-1".to_string(),
+            initial_snapshot_id: "fork-initial".to_string(),
+            warnings: vec!["state manifest write failed".to_string()],
+        };
+        let frame = encode_frame(&response).expect("encode_frame failed");
+        let decoded: Response = decode_payload(&frame[4..]).expect("decode_payload failed");
+        assert!(matches!(
+            decoded,
+            Response::ForkOk { ws_id, path, source_ws_id, source_snapshot_id,
+                               initial_snapshot_id, warnings }
+                if ws_id == "ws-forked"
+                    && path == "/tmp/forked"
+                    && source_ws_id == "ws-source"
+                    && source_snapshot_id == "snap-1"
+                    && initial_snapshot_id == "fork-initial"
+                    && warnings == ["state manifest write failed"]
+        ));
+    }
+
+    #[test]
+    fn workspace_tree_round_trip() {
+        let request = Request::WorkspaceTree {
+            workspace: "/tmp/forked".to_string(),
+            all: true,
+        };
+        assert!(matches!(
+            round_trip_request(&request),
+            Request::WorkspaceTree { workspace, all }
+                if workspace == "/tmp/forked" && all
+        ));
+
+        let response = Response::WorkspaceTreeOk {
+            target_ws_id: "ws-forked".to_string(),
+            root_ws_id: "ws-source".to_string(),
+            nodes: vec![
+                WorkspaceTreeNode {
+                    ws_id: "ws-source".to_string(),
+                    path: "/tmp/source".to_string(),
+                    depth: 0,
+                    source_ws_id: None,
+                    source_snapshot_id: None,
+                    source_registered: false,
+                    target: false,
+                },
+                WorkspaceTreeNode {
+                    ws_id: "ws-forked".to_string(),
+                    path: "/tmp/forked".to_string(),
+                    depth: 1,
+                    source_ws_id: Some("ws-source".to_string()),
+                    source_snapshot_id: Some("snap-1".to_string()),
+                    source_registered: true,
+                    target: true,
+                },
+            ],
+            warnings: vec!["ws-gone: forked from ws-gone, which is not registered".to_string()],
+        };
+        let frame = encode_frame(&response).expect("encode_frame failed");
+        let decoded: Response = decode_payload(&frame[4..]).expect("decode_payload failed");
+        match decoded {
+            Response::WorkspaceTreeOk {
+                target_ws_id,
+                root_ws_id,
+                nodes,
+                warnings,
+            } => {
+                assert_eq!(target_ws_id, "ws-forked");
+                assert_eq!(root_ws_id, "ws-source");
+                assert_eq!(nodes.len(), 2);
+                assert_eq!(nodes[1].depth, 1);
+                assert_eq!(nodes[1].source_snapshot_id.as_deref(), Some("snap-1"));
+                assert!(nodes[1].target);
+                assert_eq!(warnings.len(), 1);
+            }
+            other => panic!("expected WorkspaceTreeOk, got {other:?}"),
+        }
     }
 
     #[test]
