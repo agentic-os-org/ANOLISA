@@ -59,6 +59,7 @@ export class Instance {
     signal?: AbortSignal;
     cwd?: string;
     environment?: Record<string, string>;
+    deferAcknowledgement?: boolean;
   }): Promise<Task>;
   close(): Promise<void>;
 }
@@ -66,6 +67,8 @@ export class Task {
   private constructor();
   readonly fallback: boolean;
   readonly routes: Routes;
+  /** Confirm a Task opened with deferAcknowledgement after native installation. */
+  acknowledge(): Promise<void>;
   /** Requires the sdk profile; the application must adopt block before native work. */
   emit(
     event: "input.submit",
@@ -116,6 +119,7 @@ export class Admission {
       timeoutMs?: number;
       cwd?: string;
       environment?: Record<string, string>;
+      deferAcknowledgement?: boolean;
     },
   );
   readonly task?: Task;

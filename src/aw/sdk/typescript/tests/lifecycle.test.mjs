@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { Admission, Instance } from "../src/client.mjs";
+import { TaskScope } from "../src/task-scope.mjs";
 import { rpc } from "../src/transport.mjs";
 const binary =
   process.env.AW_TEST_BINARY ??
@@ -447,6 +448,84 @@ test(
       assert.equal(
         (await rpc(server.endpoint, null, { method: "status" }, 500)).result
           .bindings,
+        0,
+      );
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  },
+);
+
+test(
+  "deferred Scope acknowledgement permits wiring before execution and releases failed wiring",
+  { timeout: 15000 },
+  async () => {
+    const server = await setup();
+    const client = instance(server.endpoint, { availability: "required" });
+    try {
+      await server.start();
+      await client.connect();
+      const uninstalled = await client.task({ deferAcknowledgement: true });
+      assert.equal(uninstalled.routes.hooks[0].event, "tool.before");
+      await assert.rejects(
+        uninstalled.invokeStep(uninstalled.routes.hooks[0], payload()),
+        (error) => error.code === "scope_unacknowledged",
+      );
+      await uninstalled.close();
+
+      const task = await client.task({ deferAcknowledgement: true });
+      await task.acknowledge();
+      assert.equal((await task.invoke(task.routes.hooks[0], payload())).code, 0);
+      await client.close();
+      assert.equal(
+        (await rpc(server.endpoint, null, { method: "status" }, 500)).result.bindings,
+        0,
+      );
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  },
+);
+
+test(
+  "SDK TaskScope carries the shared resident Scope protocol over one Task",
+  { timeout: 15000 },
+  async () => {
+    const server = await setup();
+    const client = instance(server.endpoint, { availability: "required" });
+    try {
+      await server.start();
+      await client.connect();
+      const scope = new TaskScope(client, { timeoutMs: 2000 });
+      await scope.open(process.cwd(), {});
+      const routes = await scope.policy();
+      const hook = routes.hooks.find((route) => route.event === "tool.before");
+      // Native wiring installs from the snapshot before the Scope is acknowledged.
+      await assert.rejects(
+        scope.task.invokeStep(hook, payload()),
+        (error) => error.code === "scope_unacknowledged",
+      );
+      await scope.acknowledge();
+      assert.ok(scope.invocationLimit > 0);
+      scope.begin();
+      const { tool_use_id, tool_name, tool_input } = payload();
+      await scope.register(tool_use_id, tool_name, tool_input);
+      assert.equal((await scope.invoke(hook, payload())).code, 0);
+      await scope.drain();
+      await assert.rejects(
+        scope.command("ready", {}),
+        (error) => error.code === "unsupported_scope_operation",
+      );
+      await scope.close();
+      assert.equal(
+        (await rpc(server.endpoint, null, { method: "status" }, 500)).result.bindings,
+        1,
+      );
+      await client.close();
+      assert.equal(
+        (await rpc(server.endpoint, null, { method: "status" }, 500)).result.bindings,
         0,
       );
     } finally {

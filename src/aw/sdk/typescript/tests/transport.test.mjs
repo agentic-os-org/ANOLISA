@@ -163,3 +163,55 @@ test("timeout sends once and ignores late replies; cancellation remains cancella
     await peer.close();
   }
 });
+
+test("deferred Task release tolerates unacknowledged lease expiry and rejects post-ack loss", async () => {
+  let nextId = 0;
+  const peer = await server((operation, reply) => {
+    if (operation.method === "status")
+      return reply({ sdk_protocol: contract.sdk_protocol });
+    if (operation.method === "registration") {
+      if (operation.command.action === "register_sdk")
+        return reply({
+          state: "pending_ready",
+          handle: { binding: { instance_id: "root" } },
+          policy_revision: "r",
+          routes: { events: {}, hooks: [] },
+        });
+      return reply({ state: "ready" });
+    }
+    if (operation.method === "open_scope")
+      return reply({ instance_id: `scope-${++nextId}` });
+    if (operation.method === "scope_policy")
+      return reply({ events: {}, hooks: [] });
+    if (operation.method === "acknowledge_scope") return reply({});
+    if (operation.method === "release_instance") {
+      if (operation.instance_id === "root") return reply({});
+      return reply(null, "unknown_instance");
+    }
+    reply({});
+  });
+  const instance = new Instance({
+    endpoint: peer.endpoint,
+    target: "app",
+    capabilities: {},
+    availability: "required",
+    install: () => true,
+  });
+  try {
+    assert.equal(await instance.connect(), true);
+    const unacknowledged = await instance.task({ deferAcknowledgement: true });
+    await unacknowledged.close();
+
+    const acknowledged = await instance.task({ deferAcknowledgement: true });
+    await acknowledged.acknowledge();
+    await assert.rejects(
+      acknowledged.close(),
+      (error) => error.code === "unknown_instance",
+    );
+    instance.tasks.delete(acknowledged);
+  } finally {
+    instance.tasks.clear();
+    await instance.close().catch(() => {});
+    await peer.close();
+  }
+});
