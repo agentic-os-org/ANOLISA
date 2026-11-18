@@ -24,6 +24,7 @@ const PROFILES: &[ProfileDefinition] = &[
             capabilities
                 .events
                 .insert("tool.after".into(), vec!["observe".into()]);
+            observe_or_block_before(&mut capabilities);
             DeploymentProfile {
                 capabilities,
                 requires_service: false,
@@ -38,6 +39,31 @@ const PROFILES: &[ProfileDefinition] = &[
             capabilities
                 .failure_actions
                 .insert("tool.after".into(), vec!["withhold_result".into()]);
+            observe_or_block_before(&mut capabilities);
+            DeploymentProfile {
+                capabilities,
+                requires_service: true,
+            }
+        },
+    },
+    // Cooperative resident workers reuse the managed bridges and their fail-closed
+    // cleanup, so AW must be available for every admitted Task.
+    ProfileDefinition {
+        name: "claude-resident-hooks",
+        build: || DeploymentProfile {
+            capabilities: catalog::CLAUDE_SDK.capabilities("resident-hooks/v1", "sdk-worker"),
+            requires_service: true,
+        },
+    },
+    ProfileDefinition {
+        name: "pi-worker-hooks",
+        build: || {
+            // The ceiling includes strict output; an installed release outside the
+            // verified range registers without it and the Service rejects that policy.
+            let mut capabilities = catalog::PI.capabilities("worker-hooks/v1", "sdk");
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
             DeploymentProfile {
                 capabilities,
                 requires_service: true,
@@ -46,6 +72,13 @@ const PROFILES: &[ProfileDefinition] = &[
     },
 ];
 
+/// These SDK bindings capture the public before boundary without input rewriting.
+fn observe_or_block_before(capabilities: &mut AdapterCapabilities) {
+    capabilities
+        .events
+        .insert("tool.before".into(), vec!["observe".into(), "block".into()]);
+}
+
 /// Names accepted by [`profile`], in presentation order.
 pub fn profile_names() -> impl Iterator<Item = &'static str> {
     PROFILES.iter().map(|profile| profile.name)
@@ -53,8 +86,8 @@ pub fn profile_names() -> impl Iterator<Item = &'static str> {
 
 /// Selects an existing SDK wiring contract without probing or installing an Agent.
 ///
-/// These declarations describe the public Qoder bridge and configured QwenPaw
-/// plugin. They do not certify installed callbacks or actual effect adoption.
+/// These declarations describe the public SDK integrations. They do not certify
+/// installed callbacks, the installed native release or actual effect adoption.
 ///
 /// # Errors
 /// Rejects unknown profiles instead of using a broader Adapter default.
@@ -64,11 +97,6 @@ pub fn profile(name: &str, input_enabled: bool) -> Result<DeploymentProfile> {
         .find(|profile| profile.name == name)
         .ok_or_else(|| format!("unsupported deployment profile: {name}"))?;
     let mut profile = (definition.build)();
-    // These SDK bindings capture the public before boundary without input rewriting.
-    profile
-        .capabilities
-        .events
-        .insert("tool.before".into(), vec!["observe".into(), "block".into()]);
     if !input_enabled {
         profile.capabilities.events.remove("input.submit");
     }
@@ -100,6 +128,9 @@ mod tests {
         for name in ["qoder-public-hooks", "qwenpaw-installed-native-hooks"] {
             let enabled = profile(name, true).unwrap().capabilities;
             assert_eq!(enabled.events["tool.before"], ["observe", "block"]);
+        }
+        for name in profile_names() {
+            let enabled = profile(name, true).unwrap().capabilities;
             assert_eq!(enabled.events["input.submit"], ["observe", "block"]);
             assert!(!profile(name, false)
                 .unwrap()
@@ -109,5 +140,44 @@ mod tests {
             assert!(!enabled.events.contains_key("security.violation"));
         }
         assert!(profile("qoder-sdk", true).is_err());
+    }
+
+    #[test]
+    fn resident_worker_profiles_require_the_service_and_keep_rewrites() {
+        for (name, adapter, version, entrypoint, withheld) in [
+            (
+                "claude-resident-hooks",
+                "claude-sdk",
+                "resident-hooks/v1",
+                "sdk-worker",
+                false,
+            ),
+            ("pi-worker-hooks", "pi", "worker-hooks/v1", "sdk", true),
+        ] {
+            let profile = profile(name, true).unwrap();
+            assert!(profile.requires_service, "{name}");
+            let capabilities = profile.capabilities;
+            assert_eq!(
+                (
+                    capabilities.adapter.as_str(),
+                    capabilities.version.as_str(),
+                    capabilities.entrypoint.as_str()
+                ),
+                (adapter, version, entrypoint)
+            );
+            assert_eq!(
+                capabilities.events["tool.before"],
+                ["observe", "block", "replace_input"]
+            );
+            assert_eq!(
+                capabilities.events["tool.after"],
+                ["observe", "replace_result"]
+            );
+            assert_eq!(
+                capabilities.failure_actions.contains_key("tool.after"),
+                withheld,
+                "{name}"
+            );
+        }
     }
 }
