@@ -100,7 +100,20 @@ ws-ckpt rollback --workspace ~/my-workspace -s initial
 
 # Delete a snapshot
 ws-ckpt delete --workspace ~/my-workspace -s feature
+
+# Fork a snapshot into an independent workspace
+# (the parent directory must exist and the destination must be absent)
+ws-ckpt fork --workspace ~/my-workspace -s initial --destination ~/my-workspace-variant
+
+# Show the fork provenance tree
+ws-ckpt tree --workspace ~/my-workspace-variant
 ```
+
+A forked workspace has its own writable subvolume and a pinned `fork-initial`
+checkpoint, so later writes in the source and the fork stay independent. The
+source is recorded in `fork-origin.json` beside the fork's snapshot index;
+`tree --all` shows the whole provenance tree. See the
+[user guide](../../docs/user-guide/en/ws-ckpt/index.md#creating-an-independent-workspace-from-a-snapshot).
 
 ### Snapshot Management
 
