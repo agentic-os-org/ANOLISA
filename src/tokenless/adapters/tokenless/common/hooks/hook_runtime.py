@@ -22,7 +22,9 @@ from result_utils import error_content
 _PRE_TOOL_TIMEOUT = 8
 
 
-def pre_tool(adapter: ModuleType, agent_id: str) -> None:
+def pre_tool(
+    adapter: ModuleType, agent_id: str, *, recovery_only: bool = False
+) -> None:
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError, ValueError):
@@ -33,6 +35,16 @@ def pre_tool(adapter: ModuleType, agent_id: str) -> None:
         # rewrite; take the same silent path as undecodable input instead
         # of raising, as the sibling schema hook already does.
         skip()
+
+    if recovery_only:
+        recover = getattr(adapter, "recovery_pre_tool_input", None)
+        if recover is None:
+            skip()
+        recovery_input = recover(input_data)
+        if recovery_input is None:
+            skip()
+        print(json.dumps(adapter.pre_tool_output(recovery_input)))
+        return
 
     input_data = adapter.prepare_input(input_data)
     tokenless_bin = resolve_binary(
@@ -159,8 +171,8 @@ def post_tool(adapter: ModuleType, agent_id: str) -> None:
 
 
 def run_hook(operation: str, adapter: ModuleType, agent_id: str) -> None:
-    if operation == "pre_tool":
-        pre_tool(adapter, agent_id)
+    if operation in ("pre_tool", "pre_tool_recovery"):
+        pre_tool(adapter, agent_id, recovery_only=operation == "pre_tool_recovery")
     elif operation == "post_tool":
         post_tool(adapter, agent_id)
     elif operation == "before_model":

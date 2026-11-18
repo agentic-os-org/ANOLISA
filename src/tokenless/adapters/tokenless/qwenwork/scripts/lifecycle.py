@@ -303,17 +303,15 @@ def _install(data: Path, target: Path, previous: dict | None) -> None:
         shutil.copytree(PLUGIN_ROOT, new, symlinks=False, ignore=_ignored)
         if platform.system() == "Windows":
             hooks = _read_json(new / "hooks/hooks.json")
-            for event, groups in hooks["hooks"].items():
+            hooks["hooks"].pop("PreToolUse", None)
+            for groups in hooks["hooks"].values():
                 for group in groups:
-                    if event == "PreToolUse":
-                        group["matcher"] = f"{group['matcher']}|PowerShell"
-                    script = "rewrite_hook.py" if event == "PreToolUse" else "compress_response_hook.py"
                     python = sys.executable.replace("'", "''")
                     for hook in group["hooks"]:
                         hook["shell"] = "powershell"
                         hook["command"] = (
                             f"& '{python}' -X utf8 -B "
-                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/{script}" --agent-id qwenwork'
+                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/compress_response_hook.py" --agent-id qwenwork'
                         )
             (new / "hooks/hooks.json").write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
         _validate_runtime(new)

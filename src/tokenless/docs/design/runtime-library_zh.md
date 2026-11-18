@@ -84,12 +84,16 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
-千问办公的 Hook Adapter 在两个生命周期请求之前，将识别到的工作区 Shell MCP 名称统一为
-`Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
-确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置，仅将单流 `stdout` 替换进宿主文本槽，对多流、失败或未知
-Shell 包装保持透传，并按最终交付文本核验净节省。插件私有二进制也由 Adapter 解析；macOS 上经验证的 PreTool 桥接将
-独立恢复命令绑定到该二进制及相同的状态、Stash 选择和归属。桥接不可用时，私有运行时
-路径声明 `recovery.kind = none`。桥接和精确恢复识别由千问办公适配器独立负责。
+macOS 千问办公注册 PostToolUse 和仅用于恢复的 PreToolUse。PostTool 将识别到的工作区
+Shell MCP 名称统一为 `Bash`。
+仅解包恰好一个普通文本块，未知块数组直接透传。原生 Bash 仅将单流 `stdout` 替换进宿主
+文本槽，对多流、失败或未知 Shell 包装保持透传，并按最终交付文本核验净节省。
+
+PostTool 使用配置的 Tokenless 数据目录，可以调用插件自带的二进制。macOS 上，PreTool 为独立的
+恢复命令提供插件自带的可执行文件和相同的数据目录，其他命令保持透传。此路径不可用时，
+工作区 Shell 和使用插件私有 CLI 的环境不声明恢复能力。使用独立安装 CLI 的原生 Shell 可以
+通过 `PATH` 恢复。恢复命令以只读方式打开已有的 Stash。写入端保留 SQLite WAL 辅助文件供
+只读恢复使用，并清理过期记录。
 
 非法输入、内置 `tokenless` 可执行文件缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选

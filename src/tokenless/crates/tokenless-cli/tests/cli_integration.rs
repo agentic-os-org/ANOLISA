@@ -170,17 +170,29 @@ fn data_dir_env_routes_stats_and_stash_databases() {
         );
     }
 
-    let stash_output = fixture
+    let stash_db = fixture.data_dir.join("stash.db");
+    let missing_output = fixture
         .command()
         .args(["retrieve", "abcdef0123456789abcdef01"])
         .output()
         .unwrap();
-    assert!(!stash_output.status.success());
-    assert!(
-        fixture.data_dir.join("stash.db").is_file(),
-        "retrieve stderr: {}",
-        String::from_utf8_lossy(&stash_output.stderr)
-    );
+    assert_eq!(missing_output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&missing_output.stderr);
+    assert!(error.contains("stash database not found at"), "{error}");
+    assert!(error.contains(&*stash_db.to_string_lossy()), "{error}");
+    assert!(!stash_db.exists());
+
+    let payload = "payload from the data directory";
+    let store = SqliteStore::new(&stash_db).unwrap();
+    let hash = store.stash(payload).unwrap().key;
+    drop(store);
+    let output = fixture
+        .command()
+        .args(["retrieve", &hash])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout.as_slice(), payload.as_bytes());
 }
 
 #[test]
@@ -217,15 +229,19 @@ fn stash_db_env_takes_precedence_over_data_dir() {
     let explicit_dir = fixture.data_dir.join("explicit");
     std::fs::create_dir_all(&explicit_dir).unwrap();
     let explicit_db = explicit_dir.join("stash.db");
+    let payload = "payload from the explicit stash";
+    let store = SqliteStore::new(&explicit_db).unwrap();
+    let hash = store.stash(payload).unwrap().key;
+    drop(store);
 
     let output = fixture
         .command()
         .env("TOKENLESS_STASH_DB", &explicit_db)
-        .args(["retrieve", "abcdef0123456789abcdef01"])
+        .args(["retrieve", &hash])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(explicit_db.is_file());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout.as_slice(), payload.as_bytes());
     assert!(!fixture.data_dir.join("stash.db").exists());
 }
 
@@ -979,21 +995,33 @@ fn write_only_compression_reclaims_expired_stash_payloads() {
 
 #[test]
 fn retrieve_missing_hash() {
-    let output = tokenless_bin()
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    drop(SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap());
+    let output = fixture
+        .command()
         .args(["retrieve", "000000000000000000000000"])
         .output()
         .unwrap();
-    // Should fail gracefully (hash not found), not panic
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no stashed payload for hash"));
 }
 
 #[test]
 fn retrieve_invalid_hash() {
-    let output = tokenless_bin()
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let output = fixture
+        .command()
         .args(["retrieve", "not-a-valid-hash"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid stash hash"));
+    assert!(!fixture.data_dir.exists());
 }
 
 #[test]
@@ -2003,7 +2031,7 @@ fn spawn_with_stdin(
 }
 
 #[test]
-fn locked_stats_warn_without_changing_compression_or_retrieval() {
+fn locked_stats_do_not_change_compression_or_retrieval() {
     let fixture = TempDataDir::new().expect("create isolated data directory");
     std::fs::create_dir_all(&fixture.data_dir).unwrap();
     let stats_db = fixture.data_dir.join("stats.db");
@@ -2069,7 +2097,7 @@ fn locked_stats_warn_without_changing_compression_or_retrieval() {
             assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
             assert_eq!(output.stdout, baseline.stdout, "{args:?}");
             let stderr = String::from_utf8(output.stderr).unwrap();
-            if enabled == "1" {
+            if enabled == "1" && args[0] != "retrieve" {
                 assert_eq!(
                     stderr.matches("[tokenless-stats] WARNING:").count(),
                     1,
@@ -4283,57 +4311,134 @@ fn corrupt_stats_warnings_survive_an_unwritable_stderr() {
     );
 }
 
+#[cfg(unix)]
 #[test]
-#[cfg(target_os = "linux")]
-fn stash_purge_warning_survives_an_unwritable_stderr() {
+fn retrieve_from_nonwritable_directory_after_last_writer_closes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: geteuid only reads the process's effective UID.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let Some(fixture) = TempDataDir::new() else {
         return;
     };
-    let stash_db = fixture.data_dir.join("stash-no-purge.db");
     std::fs::create_dir_all(&fixture.data_dir).unwrap();
-    // A real stash table whose rows cannot be deleted (a BEFORE DELETE
-    // trigger that aborts): the store opens cleanly — none of its
-    // open-time statements delete — but the lazy-purge sweep on every
-    // retrieve fails, while the retrieve SELECT keeps working.
-    let payload = "stash-purge-payload";
-    let hash = tokenless_ccr::compute_key(payload.as_bytes());
+    let stash = fixture.data_dir.join("stash.db");
+    let writer = SqliteStore::new(&stash).unwrap();
+    let payload = "read-only directory stash payload";
+    let hash = writer.stash(payload).unwrap().key;
+    drop(writer);
+
+    let entries = || {
+        let mut names: Vec<_> = std::fs::read_dir(&fixture.data_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    let retrieve = || {
+        std::fs::set_permissions(&fixture.data_dir, std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let output = fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .args(["retrieve", &hash])
+            .output();
+        std::fs::set_permissions(&fixture.data_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        output.unwrap()
+    };
+
+    // An older writer or an external SQLite connection leaves only the main DB.
+    let legacy = rusqlite::Connection::open(&stash).unwrap();
+    legacy
+        .execute(
+            "UPDATE stash SET payload = ? WHERE hash = ?",
+            [payload, &hash],
+        )
+        .unwrap();
+    drop(legacy);
+    assert_eq!(entries(), ["stash.db"]);
+    let output = retrieve();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(entries(), ["stash.db"]);
+
+    // The updated writer retains the sidecars even for existing entries.
+    drop(SqliteStore::new(&stash).unwrap());
+    let original_entries = entries();
+    assert_eq!(
+        original_entries,
+        ["stash.db", "stash.db-shm", "stash.db-wal"]
+    );
+    let original_stash = std::fs::read(&stash).unwrap();
+    let output = retrieve();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, payload.as_bytes());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(entries(), original_entries);
+    assert_eq!(std::fs::read(&stash).unwrap(), original_stash);
+}
+
+#[test]
+fn retrieve_leaves_the_stash_unchanged_when_stats_are_unavailable() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    std::fs::write(&stats_db, b"invalid SQLite file").unwrap();
+    let payload = "read-only stash payload";
+    let store = SqliteStore::new(&stash_db).unwrap();
+    let hash = store.stash(payload).unwrap().key;
     let conn = rusqlite::Connection::open(&stash_db).unwrap();
-    conn.execute_batch(&format!(
-        "CREATE TABLE stash (
-             hash TEXT PRIMARY KEY,
-             payload TEXT NOT NULL,
-             expires_at INTEGER NOT NULL,
-             generation INTEGER NOT NULL DEFAULT 0
-         );
-         CREATE TABLE stash_metadata(
-             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-             last_generation INTEGER NOT NULL CHECK(last_generation >= 0));
-         CREATE TRIGGER block_lazy_purge BEFORE DELETE ON stash
-         BEGIN SELECT RAISE(ABORT, 'lazy purge blocked'); END;
-         INSERT INTO stash(hash, payload, expires_at, generation)
-         VALUES ('{hash}', '{payload}', 9999999999, 0);
-         INSERT INTO stash(hash, payload, expires_at, generation)
-         VALUES ('bbbbbbbbbbbbbbbbbbbbbbbb', 'expired-payload', 0, 0);"
-    ))
+    conn.execute(
+        "INSERT INTO stash(hash, payload, expires_at)
+         VALUES ('bbbbbbbbbbbbbbbbbbbbbbbb', 'expired-payload', 0)",
+        [],
+    )
     .unwrap();
     drop(conn);
+    drop(store);
+    let original_stash = std::fs::read(&stash_db).unwrap();
 
-    let mut command = fixture.command();
-    command
-        .env("TOKENLESS_STATS_ENABLED", "0")
-        .env("TOKENLESS_SLS_ENABLED", "0")
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
         .args(["retrieve", &hash])
-        .arg("--stash-db")
-        .arg(&stash_db)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::from(dev_full()));
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "the stash lazy-purge warning must not kill the retrieval (exit {})",
-        output.status.code().unwrap_or(-1)
-    );
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout.as_slice(), payload.as_bytes());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(std::fs::read(&stash_db).unwrap(), original_stash);
+}
+
+#[test]
+fn retrieve_with_rejected_stats_override_keeps_captured_output_clean() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let writer = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    let payload = "payload despite a rejected stats override";
+    let hash = writer.stash(payload).unwrap().key;
+    drop(writer);
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_STATS_DB", "relative-stats.db")
+        .args(["retrieve", &hash])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, payload.as_bytes());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(fixture.data_dir.join("stats.db").is_file());
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 在模型消费前替换单文本工具结果 | Core 为可替换文本选择 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
-| 千问办公（macOS） | `qwenwork` | — | 替换原生 Bash 和工作区 Shell 输入 | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
+| 千问办公（macOS） | `qwenwork` | — | 将独立恢复命令转发给随插件提供的 CLI | 替换符合条件的完整结果；仅提供遥测的 MCP 包装工具透传 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
@@ -47,7 +47,7 @@ HTML 和 Diff 裁剪。内容来源、可恢复性和收益门禁仍然生效，
 | Cosh-NG／旧版 Copilot Shell | Cosh-NG 能替换受支持的结果，但 Common BeforeModel Hook 无法发布可执行的静态恢复工具。旧版 Copilot Shell 不能替换 PostTool 结果。 |
 | OpenCode V1 插件 | `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，且不覆盖 MCP 定义，因此 Schema 保持原样。OpenCode V2 插件 API 需要单独迁移，当前 V1 Adapter 不支持；这不表示 V2 协议无法支持 Schema 压缩。 |
 | Qoder、千问办公、Hermes、DSH | 当前集成接口没有同时提供可修改的模型工具 Schema 列表和静态恢复授权。Hermes、DSH 的 RTK 使用阻止后建议重试；DSH 在 pre-execute 前已冻结并审计参数，禁止直接修改。 |
-| 千问办公工作区 Shell 或插件私有 CLI | macOS 的完整恢复桥接会把 Marker 命令改写为插件私有二进制，并携带匹配的状态和归属信息。缺少桥接时（包括 Windows 私有运行时）仅接受无损候选。 |
+| 千问办公 Shell 恢复 | macOS 恢复 Hook 使用随插件提供的 CLI 和同一份 Stash。此路径不可用时，工作区 Shell 和使用插件私有 CLI 的环境仅接受无损候选。 |
 | QwenPaw／AgentScope | 已接入全部现有 Core 领域，包括 Schema 和静态恢复。中间流式 Chunk 与非文本块保持不变；AgentScope 自定义工具需要明确的内容来源契约。 |
 
 OpenClaw 恢复授权来自当前历史中的 Marker 和刚交付的压缩结果，按会话 UUID 隔离。
@@ -64,8 +64,8 @@ OpenClaw 恢复授权来自当前历史中的 Marker 和刚交付的压缩结果
 
 Cosh-NG、Qoder、千问办公、Claude Code 和 OpenCode 各自的 PostTool 适配器会向 `tokenless compress`
 发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
-解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；千问办公也可使用经验证的
-macOS 私有恢复桥接。没有恢复路径时，Core 只接受无损候选。
+解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容。
+没有恢复路径时，Core 只接受无损候选。
 所有非 `applied` Disposition 都保留原文。当前路由如下：
 
 | 内容 | 当前共享 Hook 行为 |
@@ -143,6 +143,8 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 重启千问办公，在应用内按需启用 Tokenless 插件，再开启新的本地会话。
 之后照常使用千问办公，受支持的输出会自动精简。
 
+适配器注册 `PostToolUse` 来压缩工具输出。Shell 命令按原始参数执行。
+
 如果找不到 Python，可在上述命令后添加 `-Python 'C:/path/to/python.exe'`。
 千问办公安装在自定义位置时，先将 `TOKENLESS_QWENWORK_APP` 设置为包含
 `QwenWorkCN.exe` 的目录，再执行安装命令。
@@ -156,25 +158,22 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 ### 千问办公（macOS）
 
 `qwenwork` Adapter 面向千问办公 QwenWorkCN，与 Qoder CLI、Qwen Code、QwenPaw 独立。
-已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 改写、完整 MCP 响应替换、
+已在 QwenWorkCN 1.2.5 的 macOS 本地会话中实测 Bash 输出压缩、完整 MCP 响应替换、
 JSON 转 TOON 输出及 Read 透传。适配器也接受 QwenWorkCN 1.3.2 中观察到的
 macOS 工作区 Shell 契约。Linux VM 执行仍不受支持，Hook 在非 macOS 环境直接透传。
 
-PreToolUse 匹配 `Bash`、`mcp__workspace__bash`、
-`mcp__qw-builtin__mcp_workspace_bash` 和 `mcp__qw-builtin__mcp__workspace__bash`，
-使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
-符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
+适配器仅对独立的 `tokenless retrieve <hash>` 命令使用 `PreToolUse`。普通 Shell 命令按原始参数执行。
+`PostToolUse` 将符合条件的完整 Bash 及非 Bash 结果交给公共策略。`mcp_list`、`mcp_get`、`mcp_call`
 仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
 被接受的结果通过 `updatedToolOutput` 替换原文：单流原生 Shell 的 `stdout` 与纯文本槽返回字符串
 （文本槽可使用 TOON，不把 Shell 包装序列化进输出），非 Shell 的结构化 MCP 对象和数组在最终交付文本同时减少字符数与估算 Token 数时保留类型。
-文件内容保护、不支持内容透传及 RTK 去重规则保持不变。统计使用独立 Agent ID `qwenwork`，
-不注册 Tool Ready 或 Schema Hook。
+文件内容受保护，不支持的内容原样返回。统计使用独立 Agent ID `qwenwork`。
 
 工作区 Shell 的结果恰好包含一个普通 MCP 文本块时，内容进入文本槽，支持 JSON 转 TOON。
 多个块、混合媒体或带注解的块数组保持透传，其他 MCP 工具保留已有结构化结果处理。
-千问办公工作区 Shell Hook 的 Tokenless 数据库和 Pre/Post 去重状态使用默认的
+千问办公工作区 Shell Hook 的 Tokenless 数据库使用默认的
 `~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的绝对路径。
-默认家目录与 CLI/RTK 一致，按操作系统用户身份解析，不读取 `$HOME`。
+默认家目录按操作系统用户身份解析。
 Adapter 保留该环境变量，
 不再自动选择工作区内的数据目录。已有的 `<cwd>/.tokenless` 数据库不会自动迁移；
 查询历史记录时，需要显式指定原目录。
@@ -183,26 +182,19 @@ Adapter 保留该环境变量，
 根目录、父目录遍历、非目录目标或无法解析的链接），工作区 Shell Hook 原样放行，
 不创建数据目录。系统家目录不可用且未设置覆盖路径时，也按此处理。
 
-如果 Shell 沙箱无法写入所选目录，RTK 的 Tokenless 统计和执行回执可能缺失，
-但命令仍可执行。缺少回执时会保守跳过后续压缩。
-PostTool 压缩统计由 Hook 进程写入，是否成功取决于该进程的权限。
-因此，即使 Agent 完成任务，统计也可能不完整；失败的 RTK 记录不会排队补写。
+Hook 进程在权限允许时写入压缩统计。安装和检测会显示各自进程解析出的数据目录。
 
-RTK 原生数据库有独立的路径配置，不受 `TOKENLESS_DATA_DIR` 控制。
-它的写入同样受 Shell 沙箱约束，Adapter 保留这一行为。
+插件自带 `bin/tokenless` 时，恢复 Hook 将独立恢复命令转发给该程序，读取 PostTool 写入的同一份 Stash。
+此路径不可用时，工作区 Shell 和使用插件私有 CLI 的环境仅做无损压缩。原生 Shell 的 `PATH`
+可以使用独立安装的 CLI 恢复，前提是适配器使用同一个 CLI 和同一份 Stash。恢复命令以只读模式
+打开已有的 Stash。精确匹配的恢复结果会跳过压缩。
 
-安装和检测输出会显示当前进程的数据目录、配置来源及上述沙箱限制。
-这不是沙箱可写性检测，也不证明桌面进程继承了终端环境变量。
-提示不会加入 Hook 结果或模型上下文。需要完整的 RTK 记录时，应选择 Shell 已获准写入的目录。
-Adapter 不修改沙箱权限，也不跨沙箱转存记录。
-
-独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。macOS 上完整的 PreTool 桥接会将
-独立的 `tokenless retrieve` 命令改写为私有二进制，并携带相同的数据目录、Stash 选择、会话
-和调用归属。精确匹配的恢复结果跳过压缩；桥接不可用时，这些私有运行时路径只接受无损压缩。
+升级后，如果 Stash 最后由旧版写入端关闭，SQLite 的 WAL 辅助文件可能已被清理。
+若工具 Shell 无法写入该目录，先让更新后的插件完成一次向同一份 Stash 写入原文的压缩，
+再使用升级前的恢复提示。更新后的写入端关闭时会保留两个辅助文件。
 
 先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
-和 Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK；缺少 RTK 会显示警告。
-确保桌面会话能够找到这些二进制，而不只是交互式终端能够找到。
+和 Tokenless 二进制。请在实际使用插件的桌面会话中确认这些二进制可用。
 
 安装或升级前退出千问办公，然后执行：
 

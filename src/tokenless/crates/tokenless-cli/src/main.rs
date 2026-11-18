@@ -13,8 +13,8 @@ use tokenless_ccr::{SqliteStore, StashStore};
 use tokenless_protocol::{Disposition, Request, RequestEnvelope, Response};
 use tokenless_runtime::{
     CompressOptions, CompressResult, EntryOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS,
-    compress_response_with_store, compress_toon, dispatch_with_store, record_compression,
-    retrieve_recorded,
+    compress_response_with_store, compress_toon, dispatch_with_store, normalize_hash,
+    record_compression, retrieve_recorded,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
@@ -467,15 +467,19 @@ impl DatabasePathResolver {
 /// is validated against the user's home and selected data directory;
 /// otherwise `TOKENLESS_DATA_DIR` and then the default data directory are
 /// used.
-fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
+fn get_db_path_with(
+    paths: &DatabasePathResolver,
+    warn_on_rejected_override: bool,
+) -> Result<PathBuf, String> {
     let home = paths.home();
     let data_dir = paths.data_dir();
     if let Some(env_path) = state_path_override("TOKENLESS_STATS_DB", "DSH_TOKENLESS_STATS_DB") {
         match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
             Ok(path) => return Ok(path),
-            Err(reason) => warn_soft(&format!(
+            Err(reason) if warn_on_rejected_override => warn_soft(&format!(
                 "[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"
             )),
+            Err(_) => {}
         }
     }
     let data_dir = data_dir.map_err(str::to_string)?;
@@ -504,18 +508,21 @@ fn ensure_db_dir(db_path: &Path) -> Result<(), (String, i32)> {
 }
 
 fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
-    open_recorder_with(&DatabasePathResolver::default())
+    open_recorder_with(&DatabasePathResolver::default(), true)
 }
 
-fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (String, i32)> {
-    let db_path = get_db_path_with(paths)
+fn open_recorder_with(
+    paths: &DatabasePathResolver,
+    warn_on_rejected_override: bool,
+) -> Result<StatsRecorder, (String, i32)> {
+    let db_path = get_db_path_with(paths, warn_on_rejected_override)
         .map_err(|error| (format!("Stats database unavailable: {error}"), 1))?;
     ensure_db_dir(&db_path)?;
     StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {e}"), 1))
 }
 
 fn try_open_recorder(paths: &DatabasePathResolver) -> Option<StatsRecorder> {
-    match open_recorder_with(paths) {
+    match open_recorder_with(paths, true) {
         Ok(recorder) => Some(recorder),
         Err((message, _)) => {
             warn_soft(&format!(
@@ -654,9 +661,21 @@ fn get_stash_db_path_with(
     validate_db_path(&path, home, Some(data_dir))
 }
 
-/// Open a stash store, returning the specific failure cause. Used by
-/// user-initiated paths (`retrieve`) where a generic "unavailable" message
-/// would hide the real reason (invalid data dir, path rejected, corrupt DB, …).
+/// Open an existing stash for retrieval without creating state.
+fn open_stash_reader(
+    paths: &DatabasePathResolver,
+    override_path: Option<&str>,
+) -> Result<Arc<dyn StashStore>, String> {
+    let path = get_stash_db_path_with(paths, override_path)?;
+    if matches!(path.try_exists(), Ok(false)) {
+        return Err(format!("stash database not found at {}", path.display()));
+    }
+    SqliteStore::open_read_only(&path)
+        .map(|store| Arc::new(store) as Arc<dyn StashStore>)
+        .map_err(|e| format!("cannot open stash db at {}: {e}", path.display()))
+}
+
+#[cfg(test)]
 fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashStore>, String> {
     open_stash_store_or_err_with(&DatabasePathResolver::default(), override_path)
 }
@@ -1045,18 +1064,18 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             );
         }
         Commands::Retrieve { hash, stash_db } => {
-            let store = match open_stash_store_or_err(stash_db.as_deref()) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Err((format!("stash unavailable: {e}"), 1));
-                }
-            };
-            // Retrieve events are attribution, never a gate: a recorder that
-            // fails to open degrades to unrecorded retrieval.
-            let recorder = if TokenlessConfig::load().is_stats_enabled() {
-                try_open_recorder(&DatabasePathResolver::default())
-            } else {
+            let hash = normalize_hash(&hash).map_err(|error| (error.to_string(), 1))?;
+            let paths = DatabasePathResolver::default();
+            let store = open_stash_reader(&paths, stash_db.as_deref())
+                .map_err(|error| (format!("stash unavailable: {error}"), 1))?;
+            // Keep interactive diagnostics without adding stats setup warnings
+            // to the output of a model's recovery tool.
+            let recorder = if !TokenlessConfig::load().is_stats_enabled() {
                 None
+            } else if io::stderr().is_terminal() {
+                try_open_recorder(&paths)
+            } else {
+                open_recorder_with(&paths, false).ok()
             };
             let payload = retrieve_recorded(store.as_ref(), &hash, recorder.as_ref(), "cli")
                 .map_err(|error| (error.to_string(), 1))?;

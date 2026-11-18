@@ -382,25 +382,18 @@ Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安�
 源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
 不需要 Git Bash 或 WSL。
 
-Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。
-是否改写由 RTK 决定，不支持的命令透传。PowerShell PostTool 输出按共享命令输出策略处理，
-保留 RTK 去重和文件内容保护。
+Python Adapter 注册 PowerShell `PostToolUse` Hook。Bash 和 PowerShell 命令按原始参数执行。
+PostTool 使用共享命令输出策略并保护文件内容。
 参见[Windows 安装与验证](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公windows-x64-本地模式)。
 
 ### 千问办公插件（macOS）
 
 `qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。
-PreToolUse 匹配两种 Shell 的工具名；
-PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
+适配器为**所有工具**注册 `PostToolUse`，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
-保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
-与 Qoder CLI、Qwen Code、QwenPaw 独立。千问办公工作区 Shell Hook 的数据库和
-Pre/Post 状态使用系统用户默认的 `~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的
-有效绝对路径；`$HOME` 不会改变默认目录。路径无效时原样放行，不创建状态。
-已有工作区数据库不会自动迁移。
-Shell 沙箱限制可能导致 RTK 统计和执行回执无法保存，但命令和宿主 Hook 压缩仍可正常工作。
-安装/检测输出会说明这一限制及当前进程的数据目录，不执行沙箱可写性检测。
-RTK 原生数据库保留自身的路径配置。
+统计归属为 `qwenwork`。工作区 Shell Hook 的数据库使用系统用户的 `~/.tokenless`，
+或 `TOKENLESS_DATA_DIR` 指定的有效绝对路径。仅用于恢复的 `PreToolUse` Hook 将独立的
+`tokenless retrieve <hash>` 命令转发给插件自带的 CLI（如果存在），并以只读方式打开同一份 Stash。
 
 运行 `anolisa install tokenless` 后，退出千问办公，再显式旁加载插件：
 

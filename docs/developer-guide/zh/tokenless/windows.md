@@ -21,9 +21,9 @@ Hook 命令的 PowerShell；前述 manifest 标记识别的是工具使用的 Sh
 已验证的宿主会忽略普通 Hook 执行失败，保持工具输入不变；退出码 2 专用于阻断决定。
 因此，Python 解释器或共享 Hook 资源缺失时，该次调用会失去优化，无需额外分发脚本。
 
-PreTool 匹配 `Bash`、`PowerShell`、`mcp__workspace__bash`、
-`mcp__qw-builtin__mcp_workspace_bash` 和 `mcp__qw-builtin__mcp__workspace__bash`，
-由 RTK 决定每条命令是否改写。PowerShell 调用
+Windows 安装器只注册 `PostToolUse`。
+
+以下 RTK 行为适用于旧版 PreTool 注册和直接运行的兼容性测试。由 RTK 决定每条命令是否改写。PowerShell 调用
 通过原生 `tokenless.exe` 运行 RTK，并在该次调用内设置归属环境变量。PostTool 将 PowerShell 输出归类为
 命令输出，保留文件内容保护，避免对 RTK 输出重复压缩。不支持的命令透传。
 
