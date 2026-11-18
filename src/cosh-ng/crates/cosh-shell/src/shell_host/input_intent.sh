@@ -152,7 +152,7 @@ _cosh_arguments_have_no_unquoted_expansion() {
   local length="${#input}"
   local byte
   local next
-  local previous
+  local probe
   local word_start=0
   local word_carrier=0
 
@@ -176,16 +176,18 @@ _cosh_arguments_have_no_unquoted_expansion() {
         started=1
         ;;
       ' '|$'\t')
-        if [[ -z "$quote" && "$started" == 1 ]]; then
-          if (( word_carrier == 1 )) \
-             && _cosh_word_globs_to_files \
-                  "${input:$word_start:$((index - 1 - word_start))}" \
-                  "$_cosh_caller_lc_all" "$_cosh_caller_lang"; then
-            return 1
+        if [[ -z "$quote" ]]; then
+          if (( started == 1 )); then
+            if (( word_carrier == 1 )) \
+               && _cosh_word_globs_to_files \
+                    "${input:$word_start:$((index - 1 - word_start))}" \
+                    "$_cosh_caller_lc_all" "$_cosh_caller_lang"; then
+              return 1
+            fi
+            word_carrier=0
+            after_first_word=1
           fi
-          word_carrier=0
           word_start=$index
-          after_first_word=1
         fi
         ;;
       '?')
@@ -194,15 +196,28 @@ _cosh_arguments_have_no_unquoted_expansion() {
           started=1
           continue
         fi
-        # A `?` that closes a word after non-ASCII text is the question mark of
-        # a Han sentence (`你好你是谁?`, `你还好吗? 我想问问`), not a glob: a
-        # one-character glob would have to match a file, and the question mark
-        # of an ASCII question (`why?`) stays a carrier because that word can
-        # glob (`why1`) as readily as it can be a question.
-        next="${input:$index:1}"
-        previous="${input:$((index - 2)):1}"
-        if [[ -z "$next" || "$next" == ' ' || "$next" == $'\t' ]] \
-           && [[ "$previous" == [!\ -~] ]]; then
+        # A `?` run that closes a word carrying non-ASCII text is the question
+        # mark of a Han sentence (`你好你是谁?`, `你还好吗?我想问问`,
+        # `什么是mutex??`), not a glob. Consume the whole run so a second `?`
+        # is not re-read as another command-position carrier, and judge the
+        # word before the run rather than the byte before each `?`. A run
+        # followed by ASCII text (`中文?abc`) stays a glob candidate, and an
+        # ASCII question (`why?`) stays a carrier because that word can glob
+        # (`why1`) as readily as it can be a question.
+        #
+        # The class excludes ASCII control characters as well as printable
+        # ASCII: `[!\ -~]` alone also matches a leading tab or other control
+        # byte, which would let `\twhy?` slip past the shell-owned boundary.
+        # `[!\ -~[:cntrl:]]` matches only the high bytes 0x80..0xFF in C.
+        probe=$index
+        while [[ "${input:$probe:1}" == '?' ]]; do
+          (( probe += 1 ))
+        done
+        next="${input:$probe:1}"
+        if [[ "${input:$word_start:$((index - 1 - word_start))}" == *[!\ -~[:cntrl:]]* ]] \
+           && { [[ -z "$next" || "$next" == ' ' || "$next" == $'\t' ]] \
+                || [[ "$next" == [!\ -~[:cntrl:]] ]]; }; then
+          index=$probe
           started=1
           continue
         fi
