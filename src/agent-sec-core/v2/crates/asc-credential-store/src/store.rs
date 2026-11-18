@@ -7,7 +7,7 @@ use std::path::Path;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::{Deserialize, Serialize};
 
-use crate::filesystem::{DirectoryAccess, PinnedDirectory};
+use crate::filesystem::{DirectoryAccess, DirectoryLock, PinnedDirectory};
 use crate::secret::validate_token_value;
 use crate::{CredentialId, CredentialStoreError, ScopeId, Secret, validate_pair};
 
@@ -105,6 +105,7 @@ type Registrations = BTreeMap<String, Vec<CredentialId>>;
 /// Retired fakes never become available again, even under a new pair identifier.
 pub struct CredentialStore {
     pub(crate) directory: PinnedDirectory,
+    _lock: DirectoryLock,
     pub(crate) records: Records,
     registrations: Registrations,
     random: SystemRandom,
@@ -132,7 +133,7 @@ impl CredentialStore {
     }
 
     fn load(directory: PinnedDirectory) -> Result<Self, CredentialStoreError> {
-        directory.lock_exclusive()?;
+        let lock = directory.lock_exclusive()?;
         let (records, registrations) =
             match directory.read_file(STORE_FILE_NAME, STORE_FILE_MODE, MAX_STORE_BYTES)? {
                 Some(bytes) => decode(&bytes)?,
@@ -142,6 +143,7 @@ impl CredentialStore {
         directory.remove_temporaries()?;
         Ok(Self {
             directory,
+            _lock: lock,
             records,
             registrations,
             random: SystemRandom::new(),
