@@ -392,6 +392,27 @@ fn an_escaped_quote_does_not_hide_a_chain() {
     );
 }
 
+#[test]
+fn an_unclosed_quote_does_not_hide_a_chain() {
+    // An unmatched quote — whether from a malformed shell line or an
+    // apostrophe inside an argv element joined by `command_of` — must not
+    // leave the scanner inside quotes through the end of the line and swallow
+    // a real command chain behind a leading probe.
+    for command in [
+        "test -f /tmp/o'brien && rm -rf /tmp/cache",
+        r#"test -d "unclosed && mkdir -p /tmp/out"#,
+        r#"pgrep -f "agent|worker" && test -f /tmp/o'brien || rm -rf /tmp/cache"#,
+    ] {
+        let v = classify(&bash_call(command), "(exit code 1)");
+        assert_ne!(
+            v.status,
+            CallStatus::OkProbe,
+            "an unclosed quote must not hide the chain in `{command}` ({})",
+            v.matched_rule
+        );
+    }
+}
+
 /// A shell call whose command is an argv array is still a shell call.
 ///
 /// `agentsight-trajectory-collector` maps a Codex rollout's

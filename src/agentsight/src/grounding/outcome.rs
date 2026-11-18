@@ -548,7 +548,9 @@ fn is_probe(call: &ToolCall) -> bool {
 /// and splitting at the quoted `|` gave the probe a second head that is not a
 /// probe command. Inside double quotes a backslash escapes the next byte;
 /// inside single quotes nothing does. Outside quotes a backslash escapes the
-/// next byte as well (`\;`, `\|`, `\"`).
+/// next byte as well (`\;`, `\|`, `\"`). An opening quote only enters quoted
+/// mode when a matching closing quote follows, so an unmatched quote cannot
+/// swallow a later command chain.
 fn command_segments(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
@@ -576,7 +578,7 @@ fn command_segments(command: &str) -> Vec<&str> {
             i += 2;
             continue;
         }
-        if byte == b'\'' || byte == b'"' {
+        if (byte == b'\'' || byte == b'"') && has_closing_quote(bytes, i + 1, byte) {
             quote = Some(byte);
             i += 1;
             continue;
@@ -605,6 +607,21 @@ fn command_segments(command: &str) -> Vec<&str> {
     segments.push(command[start..].trim());
     segments.retain(|segment| !segment.is_empty());
     segments
+}
+
+fn has_closing_quote(bytes: &[u8], mut i: usize, delimiter: u8) -> bool {
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\\' && delimiter == b'"' {
+            i += 2;
+            continue;
+        }
+        if byte == delimiter {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Shell command carried by a call, when it has one.
