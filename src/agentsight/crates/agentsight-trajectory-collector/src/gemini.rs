@@ -26,8 +26,8 @@ use agentsight_atif::{
 /// existing negative-fingerprint namespace to invalidate pre-fix byte sizes.
 pub(crate) fn scan_fingerprint(project: &str, file_size: i64, mtime_ns: i64) -> i64 {
     let mut digest = Sha256::new();
-    // Refresh stored snapshots that predate tool-input accounting.
-    digest.update(b"agentsight-gemini-project-v2\0");
+    // Refresh stored snapshots that predate $patch tool-outcome and metadata merging.
+    digest.update(b"agentsight-gemini-project-v3\0");
     digest.update(file_size.to_le_bytes());
     digest.update(mtime_ns.to_le_bytes());
     digest.update(project.as_bytes());
@@ -346,7 +346,7 @@ fn apply_patch(messages: &mut Vec<serde_json::Value>, patch: &serde_json::Value)
     }
 }
 
-/// Patch one message: replace `content`, merge tool-call `result`s by id.
+/// Patch one message: merge message-level fields and per-tool-call fields by id.
 fn apply_single_patch(messages: &mut [serde_json::Value], patch: &serde_json::Value) {
     let Some(id) = patch.get("id").and_then(|v| v.as_str()) else {
         return;
@@ -354,18 +354,33 @@ fn apply_single_patch(messages: &mut [serde_json::Value], patch: &serde_json::Va
     let Some(target) = messages.iter_mut().find(|m| message_id(m) == Some(id)) else {
         return;
     };
-    if let Some(content) = patch.get("content").filter(|v| !v.is_null()) {
-        if let Some(fields) = target.as_object_mut() {
-            fields.insert("content".to_string(), content.clone());
+    let Some(target_fields) = target.as_object_mut() else {
+        return;
+    };
+    for key in ["content", "thoughts", "tokens", "model", "timestamp"] {
+        if let Some(value) = patch.get(key).filter(|v| !v.is_null()) {
+            target_fields.insert(key.to_string(), value.clone());
         }
     }
     if let Some(call_patches) = patch.get("toolCalls").and_then(|v| v.as_array()) {
-        if let Some(calls) = target.get_mut("toolCalls").and_then(|v| v.as_array_mut()) {
+        if !target_fields
+            .get("toolCalls")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            target_fields.insert(
+                "toolCalls".to_string(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
+        if let Some(calls) = target_fields
+            .get_mut("toolCalls")
+            .and_then(|v| v.as_array_mut())
+        {
             for call_patch in call_patches {
-                let Some(call_id) = call_patch.get("id").and_then(|v| v.as_str()) else {
+                let Some(patch_fields) = call_patch.as_object() else {
                     continue;
                 };
-                let Some(result) = call_patch.get("result") else {
+                let Some(call_id) = patch_fields.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
                 if let Some(call) = calls
@@ -373,8 +388,14 @@ fn apply_single_patch(messages: &mut [serde_json::Value], patch: &serde_json::Va
                     .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(call_id))
                 {
                     if let Some(fields) = call.as_object_mut() {
-                        fields.insert("result".to_string(), result.clone());
+                        for (key, value) in patch_fields {
+                            if key != "id" && !value.is_null() {
+                                fields.insert(key.clone(), value.clone());
+                            }
+                        }
                     }
+                } else {
+                    calls.push(call_patch.clone());
                 }
             }
         }
@@ -797,5 +818,100 @@ mod tests {
         let extra = extract_private_metadata(&events, "proj");
         assert_eq!(extra["user_message_count"], serde_json::json!(1));
         assert_eq!(extra["project"], serde_json::json!("proj"));
+    }
+
+    #[test]
+    fn test_patch_preserves_tool_call_status_for_is_error() {
+        let content = concat!(
+            "{\"sessionId\":\"s-patch-status\",\"projectHash\":\"h\"}\n",
+            "{\"id\":\"u1\",\"timestamp\":\"2026-10-22T09:00:01Z\",\"type\":\"user\",\"content\":\"check error logs\"}\n",
+            "{\"id\":\"g1\",\"timestamp\":\"2026-10-22T09:00:02Z\",\"type\":\"gemini\",\"content\":\"\",\"model\":\"gemini-2.5-pro\",\"toolCalls\":[{\"id\":\"tc-ok\",\"name\":\"read_file\",\"args\":{\"path\":\"errors.log\"},\"status\":\"scheduled\"},{\"id\":\"tc-err\",\"name\":\"read_file\",\"args\":{\"path\":\"missing.toml\"},\"status\":\"scheduled\"}]}\n",
+            "{\"$patch\":{\"updates\":[{\"id\":\"g1\",\"toolCalls\":[{\"id\":\"tc-ok\",\"status\":\"success\",\"result\":[{\"functionResponse\":{\"id\":\"tc-ok\",\"name\":\"read_file\",\"response\":{\"output\":\"Error: recorded in yesterday's log\"}}}]},{\"id\":\"tc-err\",\"status\":\"error\",\"result\":\"The requested resource is unavailable\"}]}]}}\n",
+        );
+        let traj = convert_gemini_events(&load_jsonl_events(content), "gemini-cli").unwrap();
+        let obs = traj.steps[1].observation.as_ref().unwrap();
+        assert_eq!(
+            obs.results[0]
+                .extra
+                .as_ref()
+                .and_then(|e| e.get(EXTRA_IS_ERROR)),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            obs.results[1]
+                .extra
+                .as_ref()
+                .and_then(|e| e.get(EXTRA_IS_ERROR)),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn test_patch_preserves_tool_outcome_status_and_streamed_fields() {
+        // Gemini CLI >= 0.39 appends an initial gemini record with scheduled
+        // tool calls (or an empty streaming placeholder) and later writes
+        // {$patch: ...} records carrying terminal tool status ("success" /
+        // "error"), results, thoughts, model, and token summaries.
+        let content = concat!(
+            "{\"sessionId\":\"s-patch-outcomes\",\"projectHash\":\"h\"}\n",
+            "{\"id\":\"u1\",\"timestamp\":\"2026-10-22T09:00:01Z\",\"type\":\"user\",\"content\":\"check error logs and missing config\"}\n",
+            "{\"id\":\"g1\",\"timestamp\":\"2026-10-22T09:00:02Z\",\"type\":\"gemini\",\"content\":\"\",\"toolCalls\":[{\"id\":\"tc-ok\",\"name\":\"read_file\",\"args\":{\"path\":\"errors.log\"},\"status\":\"scheduled\"},{\"id\":\"tc-err\",\"name\":\"read_file\",\"args\":{\"path\":\"missing.toml\"},\"status\":\"scheduled\"}]}\n",
+            "{\"$patch\":{\"id\":\"g1\",\"toolCalls\":[{\"id\":\"tc-ok\",\"status\":\"executing\"}]}}\n",
+            "{\"$patch\":{\"updates\":[{\"id\":\"g1\",\"model\":\"gemini-2.5-pro\",\"thoughts\":[{\"description\":\"inspect both files\"}],\"toolCalls\":[{\"id\":\"tc-ok\",\"status\":\"success\",\"result\":[{\"functionResponse\":{\"id\":\"tc-ok\",\"name\":\"read_file\",\"response\":{\"output\":\"Error: recorded in yesterday's log\"}}}]},{\"id\":\"tc-err\",\"status\":\"error\",\"result\":\"The requested resource is unavailable\"}],\"tokens\":{\"input\":120,\"tool\":30,\"cached\":20,\"output\":15,\"thoughts\":5}}]}}\n",
+            "{\"id\":\"g2\",\"timestamp\":\"2026-10-22T09:00:05Z\",\"type\":\"gemini\",\"content\":\"\"}\n",
+            "{\"$patch\":{\"id\":\"g2\",\"content\":[{\"text\":\"Summarizing.\"}],\"toolCalls\":[{\"id\":\"tc-late\",\"name\":\"run_shell_command\",\"args\":{\"command\":\"true\"},\"status\":\"success\",\"result\":\"done\"}],\"tokens\":{\"input\":180,\"output\":10}}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_gemini_events(&events, "gemini-cli").unwrap();
+        assert_eq!(traj.agent.model_name.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(traj.steps.len(), 3);
+
+        let first = &traj.steps[1];
+        assert_eq!(first.model_name.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(
+            first.reasoning_content.as_deref(),
+            Some("inspect both files")
+        );
+        let obs = first.observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 2);
+        assert_eq!(
+            obs.results[0].extra.as_ref().unwrap()[EXTRA_IS_ERROR],
+            serde_json::json!(false),
+            "patched success status must set is_error=false even when output mentions Error"
+        );
+        assert_eq!(
+            obs.results[1].extra.as_ref().unwrap()[EXTRA_IS_ERROR],
+            serde_json::json!(true),
+            "patched error status must set is_error=true regardless of output wording"
+        );
+        let metrics = first.metrics.as_ref().unwrap();
+        assert_eq!(metrics.prompt_tokens, Some(150));
+        assert_eq!(metrics.completion_tokens, Some(20));
+        assert_eq!(metrics.cached_tokens, Some(20));
+
+        // Placeholder gemini record whose toolCalls arrived via $patch is kept and counted.
+        let second = &traj.steps[2];
+        assert_eq!(second.message, "Summarizing.");
+        let late_obs = second.observation.as_ref().unwrap();
+        assert_eq!(
+            late_obs.results[0].extra.as_ref().unwrap()[EXTRA_IS_ERROR],
+            serde_json::json!(false)
+        );
+        let extra = extract_private_metadata(&events, "proj");
+        assert_eq!(extra["assistant_message_count"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn test_scan_fingerprint_invalidates_v2_snapshots() {
+        let mut v2 = Sha256::new();
+        v2.update(b"agentsight-gemini-project-v2\0");
+        v2.update(512_i64.to_le_bytes());
+        v2.update(1_700_000_000_i64.to_le_bytes());
+        v2.update(b"/workspace/proj");
+        let hash = v2.finalize();
+        let old_fp = i64::from_le_bytes(hash[..8].try_into().unwrap()) | i64::MIN;
+        let new_fp = scan_fingerprint("/workspace/proj", 512, 1_700_000_000);
+        assert_ne!(new_fp, old_fp);
+        assert!(new_fp < 0);
     }
 }
