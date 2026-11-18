@@ -56,8 +56,10 @@ _SHELL_ENVELOPE_KEYS = frozenset(
 _MULTIMODAL_BLOCK_TYPES = frozenset(
     {"image", "audio", "resource", "resource_link", "embedded_resource"}
 )
+_PRE_TOOL_ENABLED = os.environ.get("TOKENLESS_QWENWORK_PRETOOL_ENABLED") == "1"
 _QWENWORK_PRIVATE_RUNTIME = False
 _QWENWORK_RECOVERY: dict[str, str] | None = None
+_QWENWORK_SHELL_RECOVERY = False
 
 
 def _prepare_qwenwork_recovery(
@@ -169,8 +171,12 @@ def is_retrieve_result(tool_name: str, arguments: object) -> bool:
 
 def prepare_hook_input(input_data: dict) -> dict:
     """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _QWENWORK_PRIVATE_RUNTIME, _QWENWORK_RECOVERY
+    global _QWENWORK_PRIVATE_RUNTIME, _QWENWORK_RECOVERY, _QWENWORK_SHELL_RECOVERY
     _QWENWORK_RECOVERY = None
+    # Without PreTool, only the tool shell's original PATH can provide recovery.
+    _QWENWORK_SHELL_RECOVERY = (
+        not _PRE_TOOL_ENABLED and tokenless_retrieve_command_available()
+    )
 
     plugin_root = os.environ.get("QODER_PLUGIN_ROOT", "")
     private_bin = os.path.join(plugin_root, "bin")
@@ -180,7 +186,8 @@ def prepare_hook_input(input_data: dict) -> dict:
         # The hook's private PATH is not the model's shell PATH.
         _QWENWORK_PRIVATE_RUNTIME = True
 
-    _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(plugin_root, input_data)
+    if _PRE_TOOL_ENABLED:
+        _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(plugin_root, input_data)
 
     tool_name = input_data.get("tool_name")
     if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
@@ -218,6 +225,8 @@ def prepare_hook_input(input_data: dict) -> dict:
 
 
 def recovery_available() -> bool:
+    if not _PRE_TOOL_ENABLED:
+        return _QWENWORK_SHELL_RECOVERY
     return _QWENWORK_RECOVERY is not None or (
         not _QWENWORK_PRIVATE_RUNTIME and tokenless_retrieve_command_available()
     )
@@ -232,6 +241,8 @@ def tool_call_id(data: dict) -> str:
 
 
 def pre_tool_input(data: dict) -> tuple[str, dict | None]:
+    if not _PRE_TOOL_ENABLED:
+        skip()
     name = data.get("tool_name", "")
     recovery_input = rewrite_qwenwork_retrieve(name, data.get("tool_input", {}))
     if (

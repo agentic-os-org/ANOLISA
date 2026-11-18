@@ -367,6 +367,7 @@ class RtkIntegrationTest(unittest.TestCase):
     def test_native_find_hooks_keep_paths_when_pinned_rtk_would_rewrite(self) -> None:
         (self.bin_dir / "tokenless").symlink_to(TOKENLESS)
         self.env["TOKENLESS_AGENT_ID"] = "qwenwork"
+        self.env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"] = "1"
         self.env["HOME"] = str(self.root / "home")
         Path(self.env["HOME"]).mkdir()
         hooks = ROOT / "adapters/tokenless/common/hooks"

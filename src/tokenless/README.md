@@ -736,16 +736,18 @@ with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Git Bash and WSL are not required.
 
-The Python adapter registers PowerShell hook commands and handles both Bash and
-PowerShell PreTool inputs. RTK decides which commands can be rewritten;
-unsupported commands pass through. PowerShell PostTool output uses the shared
+The Python adapter registers PowerShell hook commands. PreToolUse passes commands
+through by default. Set `TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` in the hook environment
+to enable RTK rewriting for supported Bash and PowerShell commands. PowerShell PostTool output uses the shared
 command-output policy, including RTK deduplication and file-content protection.
 See [Windows installation and validation](../../docs/user-guide/en/tokenless/framework-integration.md#qwenwork-windows-x64-local-mode).
 
 ## QwenWork Plugin (macOS)
 
 The `qwenwork` adapter targets QwenWorkCN (千问办公) native Bash and macOS workspace
-Shell sessions. PreToolUse rewrites both shell tool names; PostToolUse observes
+Shell sessions. PreToolUse passes commands through by default. Set
+`TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` in the hook environment to enable RTK rewriting.
+PostToolUse observes
 **all tools** and compresses eligible full results through the shared policy. Metadata-only callbacks from
 `mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
 output; full MCP responses remain compressible. File-content protection and RTK

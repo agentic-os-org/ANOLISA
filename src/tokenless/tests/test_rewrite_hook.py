@@ -229,6 +229,7 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
 
     def test_qwenwork_rewrite_and_response_share_rtk_state(self) -> None:
+        self.env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"] = "1"
         rewritten = self.run_hook(
             corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", "qwenwork"
         )

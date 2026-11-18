@@ -159,6 +159,9 @@ Restart QwenWorkCN, enable the Tokenless plugin in the application if needed,
 and open a new local session. Continue using QwenWork as usual; supported output
 is reduced automatically.
 
+PreToolUse passes commands through by default. To enable RTK command rewriting,
+set `TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` in the QwenWorkCN hook environment.
+
 If Python cannot be found, add `-Python 'C:/path/to/python.exe'` to the commands
 above. For a custom QwenWork installation, set `TOKENLESS_QWENWORK_APP` to the
 directory containing `QwenWorkCN.exe` before running them.
@@ -178,7 +181,9 @@ passthrough. The adapter also accepts the macOS workspace Shell contract observe
 in QwenWorkCN 1.3.2. Linux VM execution remains unsupported; the hook dispatcher
 passes through outside macOS.
 
-PreToolUse matches `Bash`, `mcp__workspace__bash`,
+PreToolUse passes commands through by default. Set
+`TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` in the QwenWorkCN hook environment to enable
+RTK command rewriting. When enabled, PreToolUse matches `Bash`, `mcp__workspace__bash`,
 `mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`,
 and rewrites supported commands through RTK.
 PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results enter
@@ -230,10 +235,12 @@ change sandbox permissions or transfer records across that boundary.
 
 If a standalone installation includes `bin/` inside the plugin, the adapter uses
 those binaries.
-On macOS, a complete PreTool bridge rewrites standalone `tokenless retrieve` commands
-to the private binary with the same state directory, Stash selection, session and call
-attribution. Exact recovery results bypass compression. If the bridge is unavailable,
-these private runtime paths accept only lossless compression.
+On macOS, an enabled and complete PreTool bridge rewrites standalone
+`tokenless retrieve` commands to the private binary with the same state directory,
+Stash selection, session and call attribution. With PreTool disabled, recovery
+uses `tokenless` on the tool shell's `PATH` and requires access to the same Stash.
+Where recovery is unavailable, only lossless compression applies. Exact recovery
+results bypass compression.
 
 Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
 Python 3.9+, and the Tokenless binary. RTK is required for command rewriting but

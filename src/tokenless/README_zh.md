@@ -382,15 +382,16 @@ Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安�
 源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
 不需要 Git Bash 或 WSL。
 
-Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。
-是否改写由 RTK 决定，不支持的命令透传。PowerShell PostTool 输出按共享命令输出策略处理，
+Python Adapter 注册 PowerShell Hook 命令。PreToolUse 默认原样放行命令。
+让 Hook 进程继承 `TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` 可对受支持的 Bash 和 PowerShell 命令启用 RTK 改写。
+PowerShell PostTool 输出按共享命令输出策略处理，
 保留 RTK 去重和文件内容保护。
 参见[Windows 安装与验证](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公windows-x64-本地模式)。
 
 ### 千问办公插件（macOS）
 
 `qwenwork` Adapter 同时支持千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell。
-PreToolUse 匹配两种 Shell 的工具名；
+PreToolUse 默认原样放行命令。让 Hook 进程继承 `TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` 可开启 RTK 改写。
 PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
 保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，

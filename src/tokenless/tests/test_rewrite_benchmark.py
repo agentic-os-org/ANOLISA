@@ -177,7 +177,10 @@ class RewriteBenchmarkTest(unittest.TestCase):
                 (plugin / "bin").mkdir(parents=True)
                 (plugin / "bin/tokenless").write_bytes(b"fixture")
                 variants[label] = plugin
-            overrides = {"DSH_SHELL": "1"}
+            overrides = {
+                "DSH_SHELL": "1",
+                "TOKENLESS_QWENWORK_PRETOOL_ENABLED": "0",
+            }
             for prefix in ("TOKENLESS", "DSH_TOKENLESS"):
                 for name in ("DATA_DIR", "STATS_DB", "STASH_DB"):
                     overrides[f"{prefix}_{name}"] = str(root / "external")
@@ -190,6 +193,7 @@ class RewriteBenchmarkTest(unittest.TestCase):
                 observed[state.name] = state
                 self.assertEqual(env["TOKENLESS_STATS_DB"], str(state / "stats.db"))
                 self.assertEqual(env["TOKENLESS_STASH_DB"], str(state / "stash.db"))
+                self.assertEqual(env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"], "1")
                 for name in ("DATA_DIR", "STATS_DB", "STASH_DB"):
                     self.assertNotIn(f"DSH_TOKENLESS_{name}", env)
                 if args[-1] == "--version":

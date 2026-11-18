@@ -143,6 +143,9 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 重启千问办公，在应用内按需启用 Tokenless 插件，再开启新的本地会话。
 之后照常使用千问办公，受支持的输出会自动精简。
 
+PreToolUse 默认原样放行命令。让千问办公的 Hook 进程继承
+`TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` 可开启 RTK 命令改写。
+
 如果找不到 Python，可在上述命令后添加 `-Python 'C:/path/to/python.exe'`。
 千问办公安装在自定义位置时，先将 `TOKENLESS_QWENWORK_APP` 设置为包含
 `QwenWorkCN.exe` 的目录，再执行安装命令。
@@ -160,7 +163,9 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 JSON 转 TOON 输出及 Read 透传。适配器也接受 QwenWorkCN 1.3.2 中观察到的
 macOS 工作区 Shell 契约。Linux VM 执行仍不受支持，Hook 在非 macOS 环境直接透传。
 
-PreToolUse 匹配 `Bash`、`mcp__workspace__bash`、
+PreToolUse 默认原样放行命令。让千问办公的 Hook 进程继承
+`TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` 可开启 RTK 命令改写。
+开启后，PreToolUse 匹配 `Bash`、`mcp__workspace__bash`、
 `mcp__qw-builtin__mcp_workspace_bash` 和 `mcp__qw-builtin__mcp__workspace__bash`，
 使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
 符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
@@ -196,9 +201,11 @@ RTK 原生数据库有独立的路径配置，不受 `TOKENLESS_DATA_DIR` 控制
 提示不会加入 Hook 结果或模型上下文。需要完整的 RTK 记录时，应选择 Shell 已获准写入的目录。
 Adapter 不修改沙箱权限，也不跨沙箱转存记录。
 
-独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。macOS 上完整的 PreTool 桥接会将
-独立的 `tokenless retrieve` 命令改写为私有二进制，并携带相同的数据目录、Stash 选择、会话
-和调用归属。精确匹配的恢复结果跳过压缩；桥接不可用时，这些私有运行时路径只接受无损压缩。
+独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。macOS 上启用完整的 PreTool 桥接后，
+独立的 `tokenless retrieve` 命令会改写为通过私有二进制执行，并携带相同的数据目录、
+Stash 选择、会话和调用归属。PreTool 关闭时，恢复使用工具 Shell 的 `PATH` 上的
+`tokenless`，并要求能访问同一份 Stash。恢复不可用时仅做无损压缩。
+精确匹配的恢复结果会跳过压缩。
 
 先通过 `anolisa install tokenless` 安装 Tokenless。本 Adapter 需要 Bash、Python 3.9+
 和 Tokenless 二进制。命令改写需要 RTK，响应压缩不依赖 RTK；缺少 RTK 会显示警告。

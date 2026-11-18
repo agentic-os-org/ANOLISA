@@ -39,7 +39,8 @@ class WindowsHookTests(unittest.TestCase):
         self.lifecycle = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.lifecycle)
         self.env = {
-            "HOME": str(self.root), "USERPROFILE": str(self.root),
+            "HOME": str(self.root),
+            "USERPROFILE": str(self.root),
             "TOKENLESS_QWENWORK_HOME": str(self.data),
             "TOKENLESS_DATA_DIR": str(self.root / "databases"),
             "RTK_DB_PATH": str(self.root / "rtk.db"),
@@ -47,6 +48,7 @@ class WindowsHookTests(unittest.TestCase):
             "QODER_PLUGIN_ROOT": str(self.plugin),
             "PYTHONDONTWRITEBYTECODE": "1",
             "TOKENLESS_COMPRESSION_ENABLED": "1",
+            "TOKENLESS_QWENWORK_PRETOOL_ENABLED": "1",
             "QWENWORK_PLUGIN_HOOK_COMPATIBILITY": "",
         }
         patcher = mock.patch.dict(os.environ, self.env)

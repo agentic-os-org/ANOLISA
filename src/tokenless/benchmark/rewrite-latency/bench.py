@@ -226,6 +226,7 @@ def benchmark(
                 "TOKENLESS_STATS_ENABLED": "1",
                 "TOKENLESS_SLS_ENABLED": "0",
                 "TOKENLESS_COMPRESSION_ENABLED": "1",
+                "TOKENLESS_QWENWORK_PRETOOL_ENABLED": "1",
             }
             for name in ("DATA_DIR", "STATS_DB", "STASH_DB"):
                 env.pop(f"DSH_TOKENLESS_{name}", None)

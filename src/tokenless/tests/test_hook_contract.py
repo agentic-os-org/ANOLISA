@@ -35,7 +35,10 @@ FAIL_OPEN_BEHAVIORS = [
 PRE_TOOL_AGENTS = {
     "claude-code": {"TOKENLESS_AGENT_ID": "claude-code"},
     "qoder-cli": {"TOKENLESS_AGENT_ID": "qoder-cli"},
-    "qwenwork": {"TOKENLESS_AGENT_ID": "qwenwork"},
+    "qwenwork": {
+        "TOKENLESS_AGENT_ID": "qwenwork",
+        "TOKENLESS_QWENWORK_PRETOOL_ENABLED": "1",
+    },
     "opencode": {"TOKENLESS_AGENT_ID": "opencode"},
     "qwencode": {"TOKENLESS_AGENT_ID": "qwencode"},
     "cosh-ng": {"COSH_NG_VERSION": "0.5.0"},

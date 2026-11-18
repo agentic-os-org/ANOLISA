@@ -28,7 +28,9 @@ input unchanged; exit code 2 is reserved for blocking decisions. A missing
 Python interpreter or shared hook resource therefore disables optimization for
 that invocation without requiring another dispatcher.
 
-PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`,
+PreTool passes commands through by default. With
+`TOKENLESS_QWENWORK_PRETOOL_ENABLED=1` in the hook environment, PreTool matches
+`Bash`, `PowerShell`, `mcp__workspace__bash`,
 `mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`;
 RTK decides whether to rewrite each command.
 PowerShell calls run RTK through the native `tokenless.exe` and scope attribution

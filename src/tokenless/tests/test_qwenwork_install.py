@@ -744,6 +744,16 @@ class QwenWorkInstallTests(unittest.TestCase):
         (self.bin / "tokenless").chmod(0o755)
         self.env["TOKENLESS_MOCK_REQUEST_LOG"] = str(self.root / "requests.jsonl")
 
+    def test_pretool_passes_through_by_default(self) -> None:
+        self.prepare_detached_plugin()
+        self.use_contract_mock()
+        payload = self.payload("", "Bash")
+        for command in ("git status", "tokenless retrieve abcdef0123456789abcdef01"):
+            with self.subTest(command=command):
+                payload["tool_input"] = {"command": command}
+                self.assertEqual(self.replay("PreToolUse", payload), {})
+        self.assertFalse((self.root / "requests.jsonl").exists())
+
     def test_workspace_shell_aliases_leave_other_agents_unchanged(self) -> None:
         before = snapshot(self.root)
         for tool in WORKSPACE_SHELL_TOOLS:
@@ -756,6 +766,7 @@ class QwenWorkInstallTests(unittest.TestCase):
     def test_workspace_shell_aliases_rewrite_preserve_arguments_and_deduplicate(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
+        self.env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"] = "1"
         for tool in WORKSPACE_SHELL_TOOLS:
             with self.subTest(tool=tool):
                 payload = self.payload("", tool)
@@ -788,6 +799,7 @@ class QwenWorkInstallTests(unittest.TestCase):
     def test_workspace_data_directory_preserves_environment_across_cwds(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
+        self.env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"] = "1"
         mock_path = self.bin / "tokenless"
         mock_path.rename(self.bin / "contract.py")
         self.executable("tokenless", """#!/usr/bin/env python3
@@ -936,7 +948,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                 request = json.loads((self.bin / "request.json").read_text())
                 self.assertEqual(request["content"], text)
                 self.assertEqual(request["tool_name"], "Bash")
-                self.assertEqual(request["capabilities"]["recovery"], {"kind": "none"})
+                self.assertEqual(request["capabilities"]["recovery"], {"kind": "shell"})
                 self.assertTrue(request["capabilities"]["replace_with_text"])
                 payload["is_error"] = True
                 self.assertEqual(self.replay("PostToolUse", payload), {})
@@ -995,14 +1007,16 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         )
         self.assertFalse((self.bin / "spawn_log").exists())
         request = json.loads((private_bin / "request.json").read_text())
-        self.assertEqual(
-            request["capabilities"]["recovery"],
-            {"kind": "shell" if sys.platform == "darwin" else "none"},
-        )
+        self.assertEqual(request["capabilities"]["recovery"], {"kind": "shell"})
+        (self.bin / "tokenless").unlink()
+        self.replay("PostToolUse", self.payload(response, "Bash"))
+        request = json.loads((private_bin / "request.json").read_text())
+        self.assertEqual(request["capabilities"]["recovery"], {"kind": "none"})
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS private recovery bridge")
     def test_private_recovery_without_global_path_and_concurrent_attribution(self) -> None:
         self.prepare_detached_plugin()
+        self.env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"] = "1"
         private = self.target / "bin/tokenless"
         private.parent.mkdir()
         private.write_text(
@@ -1060,7 +1074,9 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         payload = self.payload("", "Bash")
         with mock.patch.dict(
             os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}
-        ), mock.patch.object(sys, "platform", "darwin"):
+        ), mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            qwenwork_adapter, "_PRE_TOOL_ENABLED", True
+        ):
             self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
             qwenwork_adapter.prepare_input(payload)
             self.assertTrue(qwenwork_adapter.recovery_available())
@@ -1099,6 +1115,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
     def test_registered_array_and_pretool_attribution(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
+        self.env["TOKENLESS_QWENWORK_PRETOOL_ENABLED"] = "1"
         result = self.replay("PostToolUse", self.payload([{"body": "x" * 500}]))
         self.assertEqual(result["hookSpecificOutput"]["updatedToolOutput"], [{"body": "x" * 20}])
         payload = {
