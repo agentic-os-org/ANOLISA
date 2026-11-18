@@ -34,6 +34,12 @@ for line in sys.stdin:
             os.unlink(path)
         elif op == 'rename':
             os.rename(path, path + '.renamed')
+        elif op == 'renameparent':
+            parent = os.path.dirname(path)
+            os.rename(parent, parent + '.moved')
+        elif op == 'renameroot':
+            anc = os.path.dirname(os.path.dirname(path))
+            os.rename(anc, anc + '.moved')
         elif op == 'readfd':
             os.lseek(fd, 0, os.SEEK_SET)
             os.read(fd, 4096)
@@ -1785,10 +1791,69 @@ fn private_tmp_credential_binding_on_live_kernel() {
         .expect("detach credential policy");
 }
 
+fn private_tmp_file_guard() {
+    let files = Files::new("agent-file-guard");
+    let root = files.root.to_str().expect("ASCII fixture root");
+    let nested = format!("{root}/ns/keep");
+    assert!(nested.len() <= 63);
+    let mut worker = Worker::spawn_private_tmp(&nested);
+    // `files.root` exists in the enforcer's /tmp with a distinct host inode,
+    // while `files.root/ns` exists only inside the worker's private /tmp tmpfs.
+    assert!(files.root.exists());
+    assert!(!files.root.join("ns").exists());
+
+    let backend = ActPlaneBackend::open().expect("file guard runtime");
+    let health = backend.health().expect("health");
+    assert!(health.capabilities.file_delete_guard);
+    let events = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
+    let binding_id = Uuid::new_v4();
+    let binding = backend
+        .apply(ApplyPolicy {
+            binding_id,
+            agent_id: "inode-test".into(),
+            session_id: None,
+            root_pid: worker.pid(),
+            process_start_time: worker.start_time(),
+            policy_id: "private-tmp-inode-guard".into(),
+            policy_revision: "1".into(),
+            policy_dsl: format!(
+                "source AGENT = exec \"**\"\nrule protected:\nblock unlink file \"{nested}\" if AGENT\nbecause \"keep private-tmp fixture\"\n"
+            ),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: None,
+        })
+        .expect("apply file guard through target mount namespace");
+    assert_eq!(binding.state, BindingState::Enforced);
+
+    for operation in ["unlink", "rename"] {
+        assert_eq!(
+            worker.run(operation),
+            "errno=1",
+            "{operation} must be denied inside target private /tmp mount namespace"
+        );
+    }
+    if health.capabilities.file_delete_guard_mode.as_deref() == Some("inode") {
+        for operation in ["renameparent", "renameroot"] {
+            assert_eq!(
+                worker.run(operation),
+                "errno=1",
+                "{operation} must be denied on target mount namespace ancestor inode"
+            );
+        }
+    }
+
+    backend
+        .detach(binding_id)
+        .expect("detach private-tmp guard");
+    while events.try_recv().is_ok() {}
+    assert_eq!(worker.run("renameparent"), "ok");
+}
+
 #[test]
 #[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
 fn file_guard_on_live_kernel() {
     file_guard();
+    private_tmp_file_guard();
 }
 
 #[test]
