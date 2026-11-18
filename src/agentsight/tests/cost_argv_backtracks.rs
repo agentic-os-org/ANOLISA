@@ -115,3 +115,170 @@ fn codex_local_shell_rollback_reaches_the_cost_ledger() {
     assert!(set.ledger[0].backtrack);
     assert!(!set.ledger[0].is_error);
 }
+
+#[test]
+fn codex_cmd_and_argv_calls_preserve_distinct_and_recurring_action_sigs() {
+    let turn = |id: &str, call_item: Value, output_item: Value| -> Vec<Value> {
+        vec![
+            json!({"type":"event_msg","payload":{"type":"user_message","message":format!("step {id}")}}),
+            call_item,
+            output_item,
+        ]
+    };
+    let distinct_events: Vec<Value> = [
+        turn(
+            "1",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","call_id":"c1","name":"exec_command",
+                "arguments":"{\"cmd\":\"cargo check\"}"
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"c1","output":"ok"
+            }}),
+        ),
+        turn(
+            "2",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","call_id":"c2","name":"exec_command",
+                "arguments":"{\"cmd\":\"cargo test\"}"
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"c2","output":"ok"
+            }}),
+        ),
+        turn(
+            "3",
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call","call_id":"c3",
+                "action":{"type":"exec","command":["git","status"]}
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call_output","id":"c3","output":"clean"
+            }}),
+        ),
+        turn(
+            "4",
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call","call_id":"c4",
+                "action":{"type":"exec","command":["git","diff"]}
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call_output","id":"c4","output":""
+            }}),
+        ),
+        turn(
+            "5",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","call_id":"c5","name":"Edit",
+                "arguments":"{\"filePath\":\"src/lib.rs\"}"
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"c5","output":"edited"
+            }}),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let collected = convert_codex_events(&distinct_events, "codex-distinct-sigs").unwrap();
+    let trajectory =
+        AtifTrajectory::from_json(&serde_json::to_string(&collected).unwrap()).unwrap();
+    let set = extract_waste_candidates(&trajectory).unwrap();
+    let detour = set.candidates.iter().find(|c| c.id == "detour").unwrap();
+    assert_eq!(
+        (
+            set.ledger
+                .iter()
+                .map(|row| row.action_sig.as_str())
+                .collect::<Vec<_>>(),
+            detour.facts.contains("重复动作签名无"),
+        ),
+        (
+            vec![
+                "exec_command:cargo check",
+                "exec_command:cargo test",
+                "shell:git status",
+                "shell:git diff",
+                "Edit:src/lib.rs",
+            ],
+            true,
+        ),
+        "detour.facts={}",
+        detour.facts
+    );
+
+    // Repeating the same normalized command across different files still marks
+    // "重复动作签名存在".
+    let repeated_events: Vec<Value> = [
+        turn(
+            "1",
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call","call_id":"r1",
+                "action":{"type":"exec","command":["rg","parse","src/a.rs"]}
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call_output","id":"r1","output":"hit a"
+            }}),
+        ),
+        turn(
+            "2",
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call","call_id":"r2",
+                "action":{"type":"exec","command":["rg","parse","src/b.rs"]}
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"local_shell_call_output","id":"r2","output":"hit b"
+            }}),
+        ),
+        turn(
+            "3",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","call_id":"r3","name":"exec_command",
+                "arguments":"{\"cmd\":\"cargo check\"}"
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"r3","output":"ok"
+            }}),
+        ),
+        turn(
+            "4",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","call_id":"r4","name":"exec_command",
+                "arguments":"{\"cmd\":\"cargo test\"}"
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"r4","output":"ok"
+            }}),
+        ),
+        turn(
+            "5",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","call_id":"r5","name":"Edit",
+                "arguments":"{\"filePath\":\"src/main.rs\"}"
+            }}),
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"r5","output":"ok"
+            }}),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let repeated_collected = convert_codex_events(&repeated_events, "codex-repeated-sigs").unwrap();
+    let repeated_traj =
+        AtifTrajectory::from_json(&serde_json::to_string(&repeated_collected).unwrap()).unwrap();
+    let repeated_set = extract_waste_candidates(&repeated_traj).unwrap();
+    assert_eq!(repeated_set.ledger[0].action_sig, "shell:rg parse <path>");
+    assert_eq!(repeated_set.ledger[1].action_sig, "shell:rg parse <path>");
+    let repeated_detour = repeated_set
+        .candidates
+        .iter()
+        .find(|c| c.id == "detour")
+        .unwrap();
+    assert!(
+        repeated_detour.facts.contains("重复动作签名存在"),
+        "recurring normalized argv command must report repeated action signature: {}",
+        repeated_detour.facts
+    );
+}
