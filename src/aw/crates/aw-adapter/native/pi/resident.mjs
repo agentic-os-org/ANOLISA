@@ -1,6 +1,6 @@
 /** Resident hosts create/dispose task sessions; tenant context never lives in a global current session. */
 import { realpathSync } from "node:fs";
-import { configuration, installSessionBridge, publishReady } from "./bridge.mjs";
+import { configuration, installSessionBridge, publishReady, validateRoutes } from "./bridge.mjs";
 import { Scope } from "./scope.mjs";
 import { randomUUID } from "node:crypto";
 import { inputBoundary } from "./submission.mjs";
@@ -15,8 +15,14 @@ async function bounded(promise, milliseconds) {
   } finally { clearTimeout(timer); }
 }
 
-export async function runWorker(app, sdk, core, args) {
-  const startup = configuration();
+export async function runWorker(app, sdk, core, args, {
+  startup = configuration(),
+  createScope = () => new Scope(),
+  ready = async () => {
+    if (startup.resident_policy_reload) await new Scope().ready();
+    publishReady(startup);
+  },
+} = {}) {
   const active = new Map();
   const closed = new WeakSet();
   let poisoned = false;
@@ -56,7 +62,7 @@ export async function runWorker(app, sdk, core, args) {
 
   const createSession = async (options = {}) => {
     if (poisoned) throw new Error("AW worker requires restart after failed task cleanup");
-    const scope = new Scope();
+    const scope = createScope();
     const cwd = realpathSync(options.cwd ?? process.cwd());
     let session;
     let record;
@@ -69,7 +75,7 @@ export async function runWorker(app, sdk, core, args) {
         const snapshot = await scope.policy();
         if (!snapshot || !/^[a-f0-9]{64}$/.test(snapshot.policy_revision))
           throw new Error("AW resident policy handoff is malformed");
-        policy = configuration({ ...startup, hooks: snapshot.hooks,
+        policy = validateRoutes({ ...startup, hooks: snapshot.hooks,
           replacement_step: snapshot.events?.["tool.after"]?.replacement_step ?? null });
         if (policy.hooks.some(hook => hook.on_error === "withhold_result") &&
             startup.strict_output_supported !== true)
@@ -199,8 +205,7 @@ export async function runWorker(app, sdk, core, args) {
     finally { await result.close(); }
   };
 
-  if (startup.resident_policy_reload) await new Scope().ready();
-  publishReady(startup);
+  await ready();
   try {
     await app.runWorker({ args, createSession, closeSession, withSession });
   } finally {

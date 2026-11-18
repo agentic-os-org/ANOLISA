@@ -6,26 +6,11 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
-import subprocess
 import tempfile
 import threading
 import time
 
-
-def call(argv, cwd, env, timeout=45):
-    with subprocess.Popen(list(map(str, argv)), cwd=cwd, env=env, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          start_new_session=True) as process:
-        try:
-            out, err = process.communicate(timeout=timeout)
-            return process.returncode, out, err
-        finally:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+from sdk_attach import call, run_application
 
 
 def main():
@@ -34,6 +19,8 @@ def main():
     parser.add_argument('--root', type=Path, required=True, help='locked npm installation')
     parser.add_argument('--sec-core-provider', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--sdk-bridge', type=Path,
+                        help='SDK pi.mjs module to exercise cooperative attach')
     parser.add_argument('--capacity', action='store_true', help='check 1024 denials and recovery in one session')
     args = parser.parse_args()
     output = args.output.resolve()
@@ -132,9 +119,13 @@ def main():
                     {'id': 'after', 'provider': 'after', 'effects': ['observe'], 'on_error': 'report'}]}
             path = root / 'aw.json'
             path.write_text(json.dumps(config))
+            path.chmod(0o600)
             aw = str(args.aw.resolve())
             try:
-                code, out, err = call([aw, 'run', '--config', path, '--agent', 'pi'], root, env, timeout=900 if args.capacity else 45)
+                code, out, err = run_application(
+                    aw, root / 'submission-native.mjs', path, root, env,
+                    bridge=args.sdk_bridge, timeout=900 if args.capacity else 45,
+                )
                 (output / (name + '.stderr')).write_text(err)
                 (output / (name + '-model.json')).write_text(json.dumps(requests, ensure_ascii=False, indent=2))
                 for filename in ['scanner.jsonl', 'submissions.jsonl']:

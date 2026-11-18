@@ -6,26 +6,11 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
-import subprocess
 import tempfile
 import threading
 import time
 
-
-def call(argv, cwd, env, timeout=45):
-    with subprocess.Popen(list(map(str, argv)), cwd=cwd, env=env, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          start_new_session=True) as process:
-        try:
-            out, err = process.communicate(timeout=timeout)
-            return process.returncode, out, err
-        finally:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+from sdk_attach import call, run_application
 
 
 def main():
@@ -34,6 +19,8 @@ def main():
     parser.add_argument('--root', type=Path, required=True, help='locked npm installation')
     parser.add_argument('--sec-core-provider', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--sdk-bridge', type=Path,
+                        help='SDK pi.mjs module to exercise cooperative attach')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -102,9 +89,12 @@ def main():
                      'effects': ['observe', 'replace_result'], 'on_error': 'withhold_result'}]}}}}
             path = root / 'aw.json'
             path.write_text(json.dumps(config))
+            path.chmod(0o600)
             aw = str(args.aw.resolve())
             try:
-                code, out, err = call([aw, 'run', '--config', path, '--agent', 'pi'], root, env)
+                code, out, err = run_application(
+                    aw, root / 'strict-native.mjs', path, root, env, bridge=args.sdk_bridge,
+                )
                 (output / (scenario + '.stderr')).write_text(err)
                 (output / (scenario + '-model.json')).write_text(json.dumps(requests, indent=2))
                 assert not forbidden, ('unchecked output reached HTTP model', scenario, forbidden)

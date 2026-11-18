@@ -4,7 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-function packages(application) {
+export function packages(application) {
   let require = createRequire(pathToFileURL(application));
   const resolved = {};
   for (const name of ["pi-coding-agent", "pi-agent-core"]) {
@@ -53,11 +53,17 @@ export async function runNativeWorker({ application, args = [] }) {
   if (startup.hooks.some(hook => hook.on_error === "withhold_result") &&
       startup.strict_output_supported !== true)
     throw new Error("AW strict Pi output requires a verified SDK pair");
+  const { worker, sdk, core } = await loadWorker(application, args, resolved, startup.strict_output_supported);
+  const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
+  await runWorker(worker, sdk, core, args);
+}
+
+export async function loadWorker(application, args, resolved, strictOutput) {
   const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
   const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
   if (typeof sdk.AgentSession !== "function" || typeof core.Agent !== "function")
     throw new Error("AW Pi SDK requires native AgentSession and Agent");
-  if (startup.strict_output_supported === true &&
+  if (strictOutput &&
       typeof core.Agent.prototype.processEvents !== "function")
     throw new Error("AW strict Pi output requires the native event dispatch seam");
   const app = await import(pathToFileURL(application).href);
@@ -73,8 +79,7 @@ export async function runNativeWorker({ application, args = [] }) {
       await app.run(session, { args, createSession, closeSession });
     },
   };
-  const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
-  await runWorker(worker, sdk, core, args);
+  return { worker, sdk, core };
 }
 
 if (process.env.AW_PI_PROBE === "1") {

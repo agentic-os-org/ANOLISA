@@ -15,6 +15,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/client.mjs"
     },
+    "./pi": {
+      "types": "./dist/pi.d.ts",
+      "import": "./dist/pi.mjs"
+    },
     "./qoder": {
       "types": "./dist/qoder.d.ts",
       "import": "./dist/qoder.mjs"
