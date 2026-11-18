@@ -13,6 +13,7 @@ asc-action-runtime = { workspace = true }
 asc-action-types = { workspace = true }
 asc-model-client = { workspace = true }
 fancy-regex = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

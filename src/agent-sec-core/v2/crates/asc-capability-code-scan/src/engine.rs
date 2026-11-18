@@ -14,6 +14,8 @@ use crate::errors::CodeScanError;
 use crate::findings::Finding;
 use crate::rules::{Language, RuleDefinition};
 
+mod prefilter;
+
 /// Minimum work budget for a single shipped-rule match.
 ///
 /// Python's V1 `re` engine has no equivalent 1-million-step ceiling. This floor
@@ -193,10 +195,27 @@ pub(crate) fn run_regex_rules_for_inputs(
             .flatten()
             .map(|target| compile(target, &rule.rule_id, input_len))
             .collect::<Result<Vec<_>, _>>()?;
+        // At 250,000 bytes the scaled budget reaches its absolute ceiling.
+        // input_len is the maximum input length, including for batched scans.
+        let large_plain_bash_rule = language == Language::Bash
+            && targets.is_empty()
+            && input_len >= MAX_BACKTRACK_LIMIT / BACKTRACK_STEPS_PER_BYTE;
+        let prefilter = if large_plain_bash_rule {
+            prefilter::Prefilter::new(&rule.regex)
+        } else {
+            None
+        };
         let mut evidence = Vec::new();
         // Match independently: joining calls could manufacture a shell pipeline.
         for code in inputs {
             if targets.is_empty() {
+                if let Some(matches) = prefilter
+                    .as_ref()
+                    .and_then(|matcher| matcher.find_all(code))
+                {
+                    evidence.extend(matches);
+                    continue;
+                }
                 for found in pattern.find_iter(code) {
                     let text = found.map_err(|_| CodeScanError::EngineResource)?;
                     evidence.push(text.as_str().to_owned());

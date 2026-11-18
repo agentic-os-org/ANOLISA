@@ -156,6 +156,7 @@ dependencies = [
  "asc-action-types",
  "asc-model-client",
  "fancy-regex",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",
