@@ -1346,4 +1346,141 @@ mod tests {
             "sibling evidence survives"
         );
     }
+
+    #[test]
+    fn http2_active_stream_defers_end_stream_until_continuation_finishes() {
+        for retain_raw_sse in [false, true] {
+            let mut aggregator = Aggregator::with_limits(
+                8,
+                &RuntimeLimits {
+                    retain_raw_sse,
+                    ..Default::default()
+                },
+            );
+            let mut requests = hpack::Encoder::new();
+            let mut responses = hpack::Encoder::new();
+
+            let req1 = requests.encode([
+                (b":method".as_slice(), b"POST".as_slice()),
+                (
+                    b":path".as_slice(),
+                    b"/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse".as_slice(),
+                ),
+                (b"x-client".as_slice(), b"agent-fixture".as_slice()),
+            ]);
+            let resp1 = responses.encode([
+                (b":status".as_slice(), b"200".as_slice()),
+                (b"content-type".as_slice(), b"text/event-stream".as_slice()),
+            ]);
+            let trailers1 = responses.encode([(
+                b"x-trailer-token".as_slice(),
+                b"keep-hpack-alive".as_slice(),
+            )]);
+            assert!(trailers1.len() >= 3);
+
+            // Request HEADERS carries END_STREAM (0x01) while CONTINUATION carries END_HEADERS (0x04).
+            assert!(
+                feed_http2(
+                    &mut aggregator,
+                    vec![
+                        test_frame(1, 1, 1, req1[..2].to_vec(), test_event(42, 1, 1, 100)),
+                        test_frame(1, 9, 4, req1[2..].to_vec(), test_event(42, 1, 1, 150)),
+                        test_frame(1, 1, 4, resp1, test_event(42, 1, 0, 200)),
+                        test_frame(
+                            1,
+                            0,
+                            0,
+                            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+                                .to_vec(),
+                            test_event(42, 1, 0, 300),
+                        ),
+                        // Active-stream trailers with END_STREAM on HEADERS and END_HEADERS on the
+                        // final CONTINUATION must not finalize early or reset the HPACK table.
+                        test_frame(1, 1, 1, trailers1[..1].to_vec(), test_event(42, 1, 0, 400)),
+                        test_frame(1, 9, 0, trailers1[1..2].to_vec(), test_event(42, 1, 0, 500)),
+                    ],
+                )
+                .is_empty(),
+                "stream must remain open until the final CONTINUATION carries END_HEADERS"
+            );
+
+            let completed = feed_http2(
+                &mut aggregator,
+                vec![test_frame(
+                    1,
+                    9,
+                    4,
+                    trailers1[2..].to_vec(),
+                    test_event(42, 1, 0, 600),
+                )],
+            );
+            let [AggregatedResult::Http2StreamComplete(stream1)] = completed.as_slice() else {
+                panic!("final CONTINUATION must complete stream 1, got {completed:?}");
+            };
+            assert_eq!(stream1.status_code(), 200);
+            assert_eq!(
+                stream1.path(),
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            );
+            assert!(
+                String::from_utf8_lossy(&stream1.response_body()).contains("hello"),
+                "SSE body must survive trailer completion"
+            );
+
+            // Stream 3 reuses both the request and response dynamic tables and answers with a
+            // header-only 429 split across HEADERS(END_STREAM) + CONTINUATION(END_HEADERS).
+            let req3 = requests.encode([
+                (b":method".as_slice(), b"POST".as_slice()),
+                (
+                    b":path".as_slice(),
+                    b"/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse".as_slice(),
+                ),
+                (b"x-client".as_slice(), b"agent-fixture".as_slice()),
+            ]);
+            let resp3 = responses.encode([
+                (b":status".as_slice(), b"429".as_slice()),
+                (
+                    b"x-trailer-token".as_slice(),
+                    b"keep-hpack-alive".as_slice(),
+                ),
+            ]);
+            assert!(resp3.len() >= 2);
+            assert!(
+                feed_http2(
+                    &mut aggregator,
+                    vec![
+                        test_frame(3, 1, 5, req3, test_event(42, 1, 1, 700)),
+                        test_frame(3, 1, 1, resp3[..1].to_vec(), test_event(42, 1, 0, 800)),
+                    ],
+                )
+                .is_empty(),
+                "header-only response must wait for CONTINUATION before completing"
+            );
+
+            let completed3 = feed_http2(
+                &mut aggregator,
+                vec![test_frame(
+                    3,
+                    9,
+                    4,
+                    resp3[1..].to_vec(),
+                    test_event(42, 1, 0, 900),
+                )],
+            );
+            let [AggregatedResult::Http2StreamComplete(stream3)] = completed3.as_slice() else {
+                panic!("final CONTINUATION must complete stream 3, got {completed3:?}");
+            };
+            assert_eq!(stream3.status_code(), 429);
+            assert_eq!(stream3.end_timestamp_ns, 900);
+            assert!(
+                stream3
+                    .decoded_response_headers
+                    .as_ref()
+                    .expect("HPACK dynamic table from stream 1 trailers must remain intact")
+                    .iter()
+                    .any(|(k, v)| k == "x-trailer-token" && v == "keep-hpack-alive")
+            );
+            assert!(!aggregator.has_pending());
+        }
+    }
 }
