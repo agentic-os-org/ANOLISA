@@ -40,7 +40,12 @@ impl Runtime {
                 .and_then(Option::as_ref)
                 .filter(|instance| !instance.closing)
                 .ok_or_else(|| rejected("scope_unavailable"))?;
-            self.check_scope_owner(id)?;
+            // Bridge expiry fences execution; the acknowledged owner can still drain events.
+            if close {
+                self.check_scope_cleanup(id)?;
+            } else {
+                self.check_scope_owner(id)?;
+            }
             let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
             if !owners
                 .get(id)

@@ -195,6 +195,83 @@ fn sdk_callbacks_require_ready_owned_scopes_and_execute_once() {
 }
 
 #[test]
+fn sdk_can_close_an_existing_event_after_bridge_expiry() {
+    let mut f = Fixture::new();
+    let mut document: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    let steps = document["spec"]["events"]["tool.before"]["steps"]
+        .as_array_mut()
+        .unwrap();
+    let mut later = steps[0].clone();
+    later["id"] = json!("later");
+    steps.push(later);
+    f.runtime = Runtime::new(
+        serde_json::to_vec(&document).unwrap(),
+        &f.directory.path().join("sdk-cleanup-audit"),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    let (root, id) = task(&f, "cleanup");
+    let root_id = &root.binding.instance_id;
+    let peer = Process::read(std::process::id()).unwrap();
+    let close = |id: &str| {
+        let mut operation = callback(&f, id);
+        if let Operation::SdkCallback { close, .. } = &mut operation {
+            *close = true;
+        }
+        operation
+    };
+    let handle = |operation| {
+        f.runtime.handle(
+            operation,
+            Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
+        )
+    };
+    let unacknowledged = f.open(root_id).unwrap();
+    code(
+        handle(close(unacknowledged["instance_id"].as_str().unwrap())),
+        "scope_unacknowledged",
+    );
+    code(handle(close("unknown")), "scope_unavailable");
+    code(
+        f.runtime
+            .authorize_registration_peer(&close(root_id), Some(&peer))
+            .map(|()| json!({})),
+        "registration_requires_scope",
+    );
+    code(
+        f.runtime
+            .authorize_registration_peer(&close(&id), None)
+            .map(|()| json!({})),
+        "registration_peer_mismatch",
+    );
+
+    f.runtime.watch_scope(&id, std::process::id()).unwrap();
+    handle(callback(&f, &id)).unwrap();
+    assert_eq!(f.runtime.events.lock().unwrap().len(), 1);
+    f.runtime.expire_scope_bridge(&id);
+    code(handle(callback(&f, &id)), "scope_bridge_expired");
+    f.runtime
+        .authorize_registration_peer(&close(&id), Some(&peer))
+        .unwrap();
+    assert_eq!(
+        handle(close(&id)).unwrap(),
+        json!({"code":0,"stdout":[],"stderr":[]})
+    );
+    assert!(f.runtime.events.lock().unwrap().is_empty());
+
+    f.runtime
+        .owners
+        .lock()
+        .unwrap()
+        .get(root_id)
+        .unwrap()
+        .cancelled
+        .store(true, Ordering::Release);
+    code(handle(close(&id)), "scope_closing");
+}
+
+#[test]
 fn sdk_callback_cannot_replace_the_server_selected_step_or_native_identity() {
     let f = Fixture::new();
     let (_, id) = task(&f, "input");
