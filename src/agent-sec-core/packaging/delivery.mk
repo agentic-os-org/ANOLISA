@@ -46,23 +46,32 @@ DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUIL
 
 .PHONY: delivery-validate-layout delivery-validate-install layout install test-packaging
 
-# The public uninstall must use the same layout as the public installer.
-uninstall: SKILLDIR := $(DELIVERY_SKILLDIR)
-uninstall: EXTENSIONDIR := $(DELIVERY_EXTENSIONDIR)
-uninstall: SOURCE_SYSTEMD_SYSTEM_UNIT_DIR := $(DELIVERY_UNITDIR)
-uninstall: OPENCLAW_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/openclaw
-uninstall: HERMES_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/hermes
-uninstall: CODEX_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/codex
-uninstall: QODER_PLUGIN_DIR := $(DELIVERY_ADAPTERDIR)/qoder
-uninstall: QWEN_CODE_EXTENSION_DIR := $(DELIVERY_ADAPTERDIR)/qwencode
-uninstall: GATEWAY_DATADIR := $(DELIVERY_DATADIR)/gateway
-uninstall: SYSTEMD_SYSTEM_UNIT_DIR := $(DELIVERY_UNITDIR)
-uninstall: uninstall-gateway
+# Keep validation outside the removal graph, including under parallel make.
+# Pass the public layout explicitly so environment and command-line inputs agree.
+DELIVERY_UNINSTALL_ARGS = INSTALL_PROFILE=system DESTDIR="$(DELIVERY_DESTDIR)" \
+	PREFIX="$(DELIVERY_PREFIX)" BINDIR="$(DELIVERY_BINDIR)" \
+	SKILLDIR="$(DELIVERY_SKILLDIR)" EXTENSIONDIR="$(DELIVERY_EXTENSIONDIR)" \
+	SOURCE_SYSTEMD_SYSTEM_UNIT_DIR="$(DELIVERY_UNITDIR)" \
+	SYSTEMD_SYSTEM_UNIT_DIR="$(DELIVERY_UNITDIR)" \
+	OPENCLAW_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/openclaw" \
+	HERMES_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/hermes" \
+	CODEX_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/codex" \
+	QODER_PLUGIN_DIR="$(DELIVERY_ADAPTERDIR)/qoder" \
+	QWEN_CODE_EXTENSION_DIR="$(DELIVERY_ADAPTERDIR)/qwencode" \
+	GATEWAY_DATADIR="$(DELIVERY_DATADIR)/gateway"
+
+.PHONY: delivery-validate-uninstall
+uninstall: delivery-validate-uninstall ## Remove files owned by the public install layout
+	$(MAKE) $(DELIVERY_UNINSTALL_ARGS) uninstall-all-source-v2 uninstall-gateway
+
+delivery-validate-uninstall: delivery-validate-layout
+	python3 "$(DELIVERY_ROOT)/packaging/validate-stage.py" \
+		--destdir $(call sandbox_shell_quote,$(DELIVERY_DESTDIR))
 
 delivery-validate-layout:
-	@test "$(DELIVERY_INSTALL_PROFILE)" = system || { echo 'Public install supports INSTALL_PROFILE=system only; use an explicit legacy installer for other profiles' >&2; exit 1; }
-	@case "$(DELIVERY_AWPRJ)" in *[!a-zA-Z0-9._-]*|.|..) echo 'AWPRJ must be empty or a single namespace name' >&2; exit 1;; esac
-	@for path in "$(DELIVERY_PREFIX)" "$(DELIVERY_BINDIR)" "$(DELIVERY_LIBDIR)" "$(DELIVERY_LIBEXECDIR)" "$(DELIVERY_DATADIR)" "$(DELIVERY_ADAPTERDIR)" "$(DELIVERY_EXTENSIONDIR)" "$(DELIVERY_SKILLDIR)" "$(DELIVERY_UNITDIR)" "$(DELIVERY_SYSCONFDIR)" "$(DELIVERY_CONFIGDIR)"; do \
+	@test $(call sandbox_shell_quote,$(DELIVERY_INSTALL_PROFILE)) = system || { echo 'Public install supports INSTALL_PROFILE=system only; use an explicit legacy installer for other profiles' >&2; exit 1; }
+	@case $(call sandbox_shell_quote,$(DELIVERY_AWPRJ)) in *[!a-zA-Z0-9._-]*|.|..) echo 'AWPRJ must be empty or a single namespace name' >&2; exit 1;; esac
+	@for path in $(call sandbox_shell_quote,$(DELIVERY_PREFIX)) $(call sandbox_shell_quote,$(DELIVERY_BINDIR)) $(call sandbox_shell_quote,$(DELIVERY_LIBDIR)) $(call sandbox_shell_quote,$(DELIVERY_LIBEXECDIR)) $(call sandbox_shell_quote,$(DELIVERY_DATADIR)) $(call sandbox_shell_quote,$(DELIVERY_ADAPTERDIR)) $(call sandbox_shell_quote,$(DELIVERY_EXTENSIONDIR)) $(call sandbox_shell_quote,$(DELIVERY_SKILLDIR)) $(call sandbox_shell_quote,$(DELIVERY_UNITDIR)) $(call sandbox_shell_quote,$(DELIVERY_SYSCONFDIR)) $(call sandbox_shell_quote,$(DELIVERY_CONFIGDIR)); do \
 		case "$$path" in /*) ;; *) echo "Expected an absolute system path: $$path" >&2; exit 1;; esac; \
 		case "$$path" in *[!a-zA-Z0-9_./-]*|*/../*|*/./*|*/..|*/.) echo "Expected a normalized system path using letters, digits, _, ., / or -: $$path" >&2; exit 1;; esac; \
 	done

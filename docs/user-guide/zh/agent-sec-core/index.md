@@ -211,6 +211,24 @@ make -C src/agent-sec-core layout PREFIX=/usr/local AWPRJ=anolisa
 的 unit 搜索路径中，请先执行
 `sudo systemctl link /absolute/path/to/agent-sec-core.service`，再重新加载并启动服务。
 
+### 移除源码安装
+
+执行 `make -C src/agent-sec-core uninstall` 时，传入与安装一致的公共布局参数
+（`PREFIX`、`AWPRJ` 及自定义路径）。移除暂存安装时也应使用相同的 `DESTDIR`。
+与安装一致，卸载会在删除文件前拒绝含空格或 shell 元字符的暂存路径。即使使用
+`make -j`，也必须完成布局验证后才会开始任何删除。
+
+移除真实主机上的安装前，先用 `agent-sec-cli gateway disable` 撤回生效的网关路由，
+再停止并禁用 `agent-sec-core.service`；移除后执行 `systemctl daemon-reload`。
+卸载保留网关撤回检查，但不会自动停止或禁用 core 服务。
+
+`ADAPTERDIR` 应为 sec-core 专用：卸载会删除 `codex`、`qoder`、`openclaw`、
+`hermes` 和 `qwencode` 整个子目录。配置、`DATADIR/LICENSE` 和无关同级资源会
+保留。默认公共布局不会清理旧版 `/etc/systemd/system/agent-sec-core.service` 或
+`PREFIX/lib/anolisa/sec-core/*-plugin` 安装；这些路径需要使用匹配的旧版卸载流程
+或手工迁移。如果旧位置已显式选作公共布局的一部分，则卸载会遵循该布局，删除
+其中归其管理的文件。
+
 ## 快速开始
 
 ```bash
