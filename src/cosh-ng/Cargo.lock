@@ -712,6 +712,8 @@ dependencies = [
  "globset",
  "hex",
  "hmac",
+ "http",
+ "hyper-util",
  "ignore",
  "keyring",
  "nix 0.29.0",
