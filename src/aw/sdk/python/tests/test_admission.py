@@ -107,3 +107,55 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.client.tasks)
         with self.assertRaisesRegex(AwError, "admission_closed"):
             await gate.prepare()
+
+    async def test_task_install_precedes_scope_acknowledgement(self) -> None:
+        installing = asyncio.Event()
+        installed = asyncio.Event()
+
+        async def install(routes: dict) -> bool:
+            self.assertIn("policy_revision", routes)
+            installing.set()
+            await installed.wait()
+            return True
+
+        await self.fixture.start()
+        await self.client.connect()
+        gate = self.gate(["tool.before"], install=install)
+        preparing = asyncio.create_task(gate.prepare())
+        try:
+            await asyncio.wait_for(installing.wait(), 2)
+            (child,) = self.client.tasks
+            hook = next(route for route in child.routes["hooks"] if route["event"] == "tool.before")
+            operation = {
+                "method": "sdk_callback",
+                "instance_id": child.binding["instance_id"],
+                "event": "tool.before",
+                "step_id": hook["step"],
+                "native_input": {
+                    "api_version": "aw-hook-source/v1",
+                    "event": "tool.before",
+                    "session_id": "session",
+                    "call_id": "before-ack",
+                    "name": "tool",
+                    "input": {},
+                },
+                "close": False,
+            }
+            with self.assertRaisesRegex(AwError, "scope_unacknowledged"):
+                await child.call(operation)
+            installed.set()
+            await preparing
+            self.assertEqual((await child.call(operation))["code"], 0)
+        finally:
+            installed.set()
+            await asyncio.gather(preparing, return_exceptions=True)
+        await gate.close()
+        self.assertFalse(self.client.tasks)
+
+    async def test_task_install_failure_releases_the_unacknowledged_scope(self) -> None:
+        await self.fixture.start()
+        await self.client.connect()
+        gate = self.gate(["tool.before"], install=lambda _: False)
+        with self.assertRaisesRegex(AwError, "ready_not_confirmed"):
+            await gate.prepare()
+        self.assertFalse(self.client.tasks)

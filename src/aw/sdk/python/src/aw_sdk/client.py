@@ -60,8 +60,8 @@ class Instance:
     def availability(self) -> str:
         return self._availability
 
-    async def installed(self, routes: dict) -> None:
-        ready = self.install(routes)
+    async def installed(self, routes: dict, install: Callable | None = None) -> None:
+        ready = (self.install if install is None else install)(routes)
         if inspect.isawaitable(ready):
             ready = await ready
         if ready is not True:
@@ -256,7 +256,9 @@ class Instance:
         *,
         cwd: str | None = None,
         environment: dict[str, str] | None = None,
+        install: Callable | None = None,
     ) -> "Task":
+        """Open a Scope after optional task-specific native installation confirms its routes."""
         if self.detaching:
             raise AwError("sdk_control_busy")
         if self.closed:
@@ -270,7 +272,7 @@ class Instance:
         task = Task(self, self.connection, cwd=cwd, environment=environment)
         self.tasks.add(task)
         try:
-            await task.open()
+            await task.open(install=install)
             return task
         except BaseException:
             try:
@@ -355,7 +357,7 @@ class Task:
                     return None
             raise
 
-    async def open(self) -> None:
+    async def open(self, *, install: Callable | None = None) -> None:
         if self.fallback:
             return
         self.binding = await self.call(
@@ -374,7 +376,7 @@ class Task:
             await self.call({"method": "scope_policy", "instance_id": instance_id}) or self.routes
         )
         if not self.fallback:
-            await self.instance.installed(self.routes)
+            await self.instance.installed(self.routes, install=install)
             await self.call({"method": "acknowledge_scope", "instance_id": instance_id})
 
     async def watch_scope(

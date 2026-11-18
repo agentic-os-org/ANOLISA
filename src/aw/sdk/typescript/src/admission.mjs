@@ -4,7 +4,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { AwError } from "./transport.mjs";
 
 export class Admission {
-  constructor(instance, { events, timeoutMs = 5000, cwd, environment }) {
+  constructor(
+    instance,
+    { events, timeoutMs = 5000, cwd, environment, deferAcknowledgement },
+  ) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60000)
       throw new AwError("invalid_attach_timeout");
     if (
@@ -20,6 +23,7 @@ export class Admission {
       timeoutMs,
       cwd,
       environment: environment && { ...environment },
+      deferAcknowledgement,
     };
     this.controller = new AbortController();
     // Native Sources install these callbacks before the Task routes are available.
@@ -85,6 +89,7 @@ export class Admission {
       signal: this.controller.signal,
       cwd: this.options.cwd,
       environment: this.options.environment,
+      deferAcknowledgement: this.options.deferAcknowledgement,
     });
   }
   async emit(event, payload, signal) {

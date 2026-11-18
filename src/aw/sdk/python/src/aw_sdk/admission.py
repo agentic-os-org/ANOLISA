@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from typing import Callable
 
 from aw_sdk.client import Instance, Task
 from aw_sdk.transport import AwError
@@ -18,6 +19,7 @@ class Admission:
         timeout_ms: int = 5000,
         cwd: str | None = None,
         environment: dict[str, str] | None = None,
+        install: Callable | None = None,
     ) -> None:
         if type(timeout_ms) is not int or not 100 <= timeout_ms <= 60000:
             raise AwError("invalid_attach_timeout")
@@ -29,6 +31,7 @@ class Admission:
         self.events = list(dict.fromkeys(events))
         self.timeout_ms, self.cwd = timeout_ms, cwd
         self.environment = None if environment is None else dict(environment)
+        self.install = install
         self.task: Task | None = None
         self.preparing: asyncio.Task | None = None
         self.closing: asyncio.Task | None = None
@@ -73,7 +76,9 @@ class Admission:
                     raise
         if self.cancelled:
             raise AwError("admission_closed")
-        self.task = await self.instance.task(cwd=self.cwd, environment=self.environment)
+        self.task = await self.instance.task(
+            cwd=self.cwd, environment=self.environment, install=self.install
+        )
 
     async def emit(self, event: str, payload: dict) -> dict[str, str]:
         await self.prepare()

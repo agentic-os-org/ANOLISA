@@ -229,7 +229,12 @@ export class Instance {
         task.fallback = this.options.availability === "native_fallback";
       }
   }
-  async task({ signal, cwd, environment } = {}) {
+  async task({
+    signal,
+    cwd,
+    environment,
+    deferAcknowledgement = false,
+  } = {}) {
     signal?.throwIfAborted();
     if (this.detaching) throw new AwError("sdk_control_busy");
     if (this.closed) throw new AwError("instance_closed");
@@ -239,7 +244,7 @@ export class Instance {
     const task = new Task(this, this.connection, signal, cwd, environment);
     this.tasks.add(task);
     try {
-      await task.open();
+      await task.open(deferAcknowledgement);
       return task;
     } catch (error) {
       try {
@@ -327,7 +332,7 @@ export class Task {
       throw error;
     }
   }
-  async open() {
+  async open(deferAcknowledgement) {
     if (this.fallback) return;
     this.cwd = await realpath(this.cwd);
     const binding = await this.call({
@@ -339,6 +344,8 @@ export class Task {
     });
     if (!binding) return;
     this.binding = binding;
+    // Native factories may need the snapshot before they can install callbacks.
+    this.acknowledgementDeferred = deferAcknowledgement;
     this.routes =
       (await this.call({
         method: "scope_policy",
@@ -348,11 +355,15 @@ export class Task {
     if (!this.fallback) {
       if ((await this.instance.options.install(this.routes)) !== true)
         throw new AwError("ready_not_confirmed");
-      await this.call({
-        method: "acknowledge_scope",
-        instance_id: binding.instance_id,
-      });
+      if (!deferAcknowledgement) await this.acknowledge();
     }
+  }
+  async acknowledge() {
+    await this.call({
+      method: "acknowledge_scope",
+      instance_id: this.binding.instance_id,
+    });
+    this.acknowledgementDeferred = false;
   }
   async invoke(hook, payload, signal = this.signal) {
     try {
@@ -472,11 +483,13 @@ export class Task {
           this.instance.options.timeoutMs,
         );
       } catch (error) {
-        if (
-          !(this.fallback || this.connectionError) ||
-          !(error.unavailable || error.code === "stale_service")
-        )
-          throw error;
+        // Deferred native wiring can outlast the unacknowledged Scope lease.
+        const expired =
+          this.acknowledgementDeferred && error.code === "unknown_instance";
+        const lost =
+          (this.fallback || this.connectionError) &&
+          (error.unavailable || error.code === "stale_service");
+        if (!expired && !lost) throw error;
       }
     }
     this.closed = true;
