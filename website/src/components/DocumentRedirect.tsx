@@ -4,6 +4,7 @@ import Head from '@docusaurus/Head';
 export default function DocumentRedirect({destination}: {destination: {to: string}}) {
   useEffect(() => {
     const target = new URL(destination.to, window.location.href);
+    if (target.origin === window.location.origin && !target.search) target.search = window.location.search;
     if (window.location.hash) target.hash = window.location.hash;
     window.location.replace(target.href);
   }, [destination.to]);
