@@ -57,6 +57,11 @@ def test_counter_golden_values_and_tolerant_lines(
     lines = [
         "",
         "{broken",
+        "null",
+        "[]",
+        '"non-record"',
+        "42",
+        "false",
         json.dumps({"message": {"role": "user"}}),
         json.dumps(_record(reader)),
         json.dumps(_record(reader)),

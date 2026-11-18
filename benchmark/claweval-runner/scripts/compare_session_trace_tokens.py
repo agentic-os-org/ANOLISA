@@ -35,7 +35,8 @@ def _iter_jsonl_records(path: Path) -> Iterator[Any]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            yield record
+            if isinstance(record, dict):
+                yield record
 
 
 def session_totals(path: Path) -> dict:
