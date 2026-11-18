@@ -189,6 +189,11 @@ fn unquoted_expansion_guard_matrix() {
         "你好你是谁?",
         "你还好吗? 我想问问",
         "这个是干什么的?",
+        // Mid-sentence `?` before more Han text and a doubled `??` are the
+        // same question punctuation, not command-position globs (#10267).
+        "你还好吗?我想问问",
+        "什么是mutex??",
+        "你还好吗?我想问问?",
         // Quoting suppresses expansion, so a quoted carrier never reaches the
         // classifier as a rewritten word.
         "解释 \"文?.log\" 好吗",
@@ -210,6 +215,10 @@ fn unquoted_expansion_guard_matrix() {
         // Documented boundary: an ASCII word cannot be told apart from a glob
         // and `_cosh_literal_first_word_matches` rejects the same carriers.
         "why?",
+        // A leading control byte must not pass as non-ASCII punctuation: the
+        // word before the `?` is still ASCII, so these stay shell-owned.
+        "\twhy?",
+        "\t?",
     ];
     for shell in ["bash", "zsh"] {
         if !shell_available(shell) {
@@ -668,6 +677,8 @@ fn routing_c1_classifier_han_tier_matrix() {
             "natural_language",
         ),
         ("你还好吗？ 我想问问", "你还好吗？", "natural_language"),
+        ("你还好吗?我想问问", "你还好吗?我想问问", "natural_language"),
+        ("什么是mutex??", "什么是mutex??", "natural_language"),
         ("解释 ps aux | grep java", "解释", "command"),
         ("解释 true && touch x", "解释", "command"),
         ("解释 false || touch x", "解释", "command"),
