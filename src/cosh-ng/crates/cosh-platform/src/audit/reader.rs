@@ -64,6 +64,9 @@ pub enum AuditDiagnosticKind {
     InvalidRecord,
     /// An incomplete final line was omitted.
     TrailingPartialRecord,
+    /// A version 1 segment's sequences are not contiguous from zero, indicating
+    /// deleted, duplicated, or reordered records.
+    SequenceGap,
     /// A source could not be read safely.
     ReadError,
     /// Reader safety limits truncated discovery.
@@ -240,6 +243,7 @@ fn read_v1_file(path: &Path, segment_id: String, result: &mut AuditReadResult) {
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut line_number = 0_u64;
+    let mut next_sequence = 0_u64;
     loop {
         line.clear();
         let (bytes, oversized) = match read_bounded_line(&mut reader, &mut line) {
@@ -291,11 +295,23 @@ fn read_v1_file(path: &Path, segment_id: String, result: &mut AuditReadResult) {
         }
         match serde_json::from_slice::<AuditEventV1>(&line) {
             Ok(event) => match event.validate() {
-                Ok(()) => result.events.push(AuditStoredEvent {
-                    event,
-                    generation: AuditSchemaGeneration::V1,
-                    segment_id: segment_id.clone(),
-                }),
+                Ok(()) => {
+                    if event.sequence != next_sequence {
+                        push_diagnostic(
+                            result,
+                            AuditDiagnosticKind::SequenceGap,
+                            &name,
+                            Some(line_number),
+                        );
+                    }
+                    // Resynchronize on the observed record so one deletion reports once.
+                    next_sequence = event.sequence.saturating_add(1);
+                    result.events.push(AuditStoredEvent {
+                        event,
+                        generation: AuditSchemaGeneration::V1,
+                        segment_id: segment_id.clone(),
+                    });
+                }
                 Err(_) => push_diagnostic(
                     result,
                     AuditDiagnosticKind::InvalidRecord,

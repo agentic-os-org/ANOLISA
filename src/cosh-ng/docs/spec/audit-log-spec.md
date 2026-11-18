@@ -170,8 +170,9 @@ Tests compare exact field names, types, enum strings, and units, not only round-
 - Discover active/closed version 1 segments and legacy files under bounded file, byte, record, and
   result limits.
 - Honor `COSH_AUDIT_LOG` only as a legacy-reader override.
-- Report invalid interior JSON, unsupported schema, read error, and active/final partial tail as
-  distinct diagnostics. Only an incomplete final line may be omitted from results.
+- Report invalid interior JSON, unsupported schema, version 1 sequence discontinuity
+  (`sequence_gap`), read error, and active/final partial tail as distinct diagnostics. Only an
+  incomplete final line may be omitted from results.
 - Project legacy records with `legacy_schema = 0` and a stable synthetic ID derived from source
   identity, byte offset, and record hash. Never write the projection back.
 - Order by `occurred_at`, `observed_at`, component, segment ID, and sequence.
@@ -233,7 +234,8 @@ Keep `audit log` for one compatibility cycle as a deprecated alias for
 ### Status, events, and trace
 
 - Status reports root/source, mode, retention/source, state health, last errors, segment counts and
-  bytes, event time bounds, reader diagnostics, and legacy discovery.
+  bytes, event time bounds, reader diagnostics, legacy discovery, and a fixed local integrity
+  boundary (no cryptographic tamper evidence, no non-repudiation claim).
 - Status may return a degraded payload when diagnostics are available; it fails only when evaluation
   cannot proceed safely. Paths are safe basenames/root labels only.
 - Events supports time, event, component, outcome, identity, and schema-generation filters.
