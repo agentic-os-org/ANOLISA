@@ -426,3 +426,34 @@ fn hermes_preserves_terminal_envelope_and_file_origin() {
     let result: Value = serde_json::from_str(response["aw_replacement"].as_str().unwrap()).unwrap();
     assert_eq!(result, json!({"output":"compact","exit_code":0}));
 }
+
+#[test]
+fn hermes_after_callbacks_correlate_the_same_decoded_result() {
+    let envelope = json!({"output":"sensitive", "exit_code":0, "error":null});
+    let mut native = json!({"hook_event_name":"transform_tool_result", "cwd":"/work",
+        "session_id":"session", "tool_name":"terminal", "tool_input":{"command":"printf data"},
+        "extra":{"tool_call_id":"call", "api_request_id":"request", "result":envelope.to_string(),
+            "status":"ok"}});
+    for event_name in ["post_tool_call", "transform_tool_result"] {
+        native["hook_event_name"] = json!(event_name);
+        let (event, raw, _) = crate::callback::normalize(
+            crate::select("hermes").unwrap(),
+            "hermes",
+            &crate::NativeContext {
+                target: "hermes".into(),
+                instance_id: "instance".into(),
+                cwd: "/work".into(),
+            },
+            "tool.after",
+            serde_json::to_vec(&native).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(event["tool"]["result"], envelope);
+        assert_eq!(
+            event["tool"]["result_projection"]["text"],
+            envelope["output"]
+        );
+        assert_eq!(raw, native);
+    }
+}

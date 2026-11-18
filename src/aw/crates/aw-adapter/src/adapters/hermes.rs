@@ -102,13 +102,19 @@ impl Adapter for Hermes {
             input["skill"] = input["name"].clone();
             native["aw_skill"] = native["extra"]["aw_skill"].clone();
         }
+        // Observation and replacement must retain the same result correlation.
+        let result = if event == "tool.after" {
+            crate::projection::decoded_result("hermes", &native)
+        } else {
+            native["extra"]["result"].clone()
+        };
         Ok(json!({
             "name": event,
             "agent": {"adapter": "hermes", "binding_id": binding.target,
                       "instance_id": binding.instance_id},
             "session_id": session,
             "tool": {"name": tool, "native_name": tool, "call_id": call,
-                     "input": input, "result": native["extra"]["result"]},
+                     "input": input, "result": result},
             "native": native,
         }))
     }

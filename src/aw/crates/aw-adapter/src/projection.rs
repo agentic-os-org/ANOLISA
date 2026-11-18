@@ -116,7 +116,7 @@ fn tool<'a>(adapter: &str, native: &'a Value) -> (&'a str, &'a Value) {
     }
 }
 
-fn decoded_result(adapter: &str, native: &Value) -> Value {
+pub(crate) fn decoded_result(adapter: &str, native: &Value) -> Value {
     let value = result(adapter, native);
     if adapter == "codex"
         && value["content"].as_array().is_some_and(|blocks| {
