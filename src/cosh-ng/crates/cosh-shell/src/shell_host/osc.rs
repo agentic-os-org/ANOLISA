@@ -607,6 +607,15 @@ impl OscParser {
     }
 
     fn append_clean(&mut self, data: &[u8]) -> io::Result<()> {
+        // All recognized clean controls start with ESC and the only other
+        // special byte is backspace. With no pending partial control and
+        // neither byte present, the per-byte loop would push every byte into
+        // one run and append it once, so append the chunk directly.
+        if self.pending_clean_control.is_empty()
+            && !data.iter().any(|byte| *byte == 0x1b || *byte == 0x08)
+        {
+            return self.clean.append(data);
+        }
         let mut bytes = Vec::new();
         if !self.pending_clean_control.is_empty() {
             bytes.append(&mut self.pending_clean_control);
