@@ -449,7 +449,7 @@ impl Runtime {
             .map_err(|_| rejected("state_poisoned"))?
             .get(id)
             .and_then(|owner| owner.sdk);
-        super::sdk::validate_availability(candidate.as_value(), sdk)?;
+        super::sdk::validate_availability(&candidate, &target, sdk)?;
         if resident {
             aw_adapter::reload::validate_resident(candidate.as_value(), &target, &capabilities)
                 .map_err(|_| rejected("native_policy_unsupported"))?;

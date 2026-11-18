@@ -52,6 +52,17 @@ impl StepRequirement<'_> {
     }
 }
 
+/// Whether an applicable enabled event requires Service for this target.
+///
+/// Reuses [`project`], retaining empty events and uncertain native aliases while
+/// excluding only requirements whose selectors cannot apply to this target.
+///
+/// # Errors
+/// Rejects an unknown target or an inconsistent bundled configuration schema.
+pub fn requires_service(config: &Configuration, target: &str) -> Result<bool, Error> {
+    Ok(project(config, target)?.iter().any(|event| event.required))
+}
+
 /// Projects desired requirements for one configured target without invoking it.
 ///
 /// All entry modes use this same projection. Disabled events and steps are

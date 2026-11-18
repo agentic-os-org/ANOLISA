@@ -24,13 +24,8 @@ pub(super) fn run(options: Options) -> crate::cli::Result<crate::cli::Exit> {
     let events = &configuration.as_value()["spec"]["events"];
     let input_enabled = events["input.submit"]["enabled"] == true;
     let profile = aw_adapter::deployment::profile(&options.profile, input_enabled)?;
-    // Preserve the Service availability conflict rule across all configured events.
     let required = profile.requires_service
-        || events.as_object().is_some_and(|events| {
-            events
-                .values()
-                .any(|event| event["enabled"] == true && event["required"] == true)
-        });
+        || aw_config::requirements::requires_service(&configuration, &options.agent)?;
     let descriptor = aw_core::descriptor::compile(
         &bytes,
         &options.agent,

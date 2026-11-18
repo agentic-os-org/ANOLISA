@@ -118,6 +118,44 @@ fn descriptor_binds_exact_configuration_and_selects_native_waiting() {
 }
 
 #[test]
+fn descriptor_availability_uses_target_requirements_and_profile_minimum() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    for (adapter, profile, always_required) in [
+        ("qoder-sdk", "qoder-public-hooks", false),
+        ("qwenpaw", "qwenpaw-installed-native-hooks", true),
+    ] {
+        for (selector, applicable) in [
+            ("native:pi:Shell".to_owned(), false),
+            (format!("native:{adapter}:Shell"), true),
+            ("*".to_owned(), true),
+        ] {
+            let mut document = configuration(directory.path(), adapter);
+            document["spec"]["agents"]["pi"] = json!({"adapter":"pi","argv":["/absent/agent"]});
+            document["spec"]["events"]["tool.before"] = json!({
+                "enabled":true,"required":true,"steps":[],"match":{"tools":[selector]}
+            });
+            let output = invoke(directory.path(), &document, profile);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                value["availability"],
+                if always_required || applicable {
+                    "required"
+                } else {
+                    "native_fallback"
+                }
+            );
+        }
+    }
+    assert!(!directory.path().join("state").exists());
+}
+
+#[test]
 fn descriptor_rejects_profile_mismatch_and_unsupported_empty_hooks() {
     let directory = tempfile::tempdir().unwrap();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -178,4 +216,67 @@ fn descriptor_retains_configuration_file_trust_checks() {
     rejected();
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(run().status.success());
+}
+
+#[test]
+fn show_selects_only_one_matching_target_without_disclosing_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.path().join("aw.json");
+    let mut document = configuration(directory.path(), "qoder-sdk");
+    let show = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_aw"))
+            .args(["config", "show", "--config"])
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    document["spec"]["agents"]["second"] = document["spec"]["agents"]["business"].clone();
+    fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    for args in [
+        vec!["--sdk-target", "qoder-sdk"],
+        vec!["--sdk-target", "qwenpaw/business"],
+        vec!["--sdk-target", "qoder-sdk/missing"],
+    ] {
+        let output = show(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"target":null})
+        );
+    }
+    let output = show(&["--sdk-target", "qoder-sdk/second"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({
+            "target": "second", "daemon": {"state_dir": directory.path().join("state"), "endpoint": "auto"},
+            "input_enabled": false, "target_requires_service": false
+        })
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&show(&[]).stdout).unwrap(),
+        document
+    );
+    assert!(!show(&["--agent", "second"]).status.success());
+    assert!(
+        !show(&["--sdk-target", "qoder-sdk", "--event", "tool.before"])
+            .status
+            .success()
+    );
+    assert!(!show(&["--sdk-target", "qoder-sdk", "--id", "step"])
+        .status
+        .success());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(!show(&["--sdk-target", "qoder-sdk"]).status.success());
 }

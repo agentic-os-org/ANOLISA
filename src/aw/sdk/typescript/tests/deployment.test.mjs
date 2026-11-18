@@ -27,6 +27,11 @@ const fixture = JSON.parse(
   ),
 );
 const binary = process.env.AW_TEST_BINARY;
+const multiAdapter = JSON.parse(
+  await readFile(
+    new URL("../../tests/fixtures/target-availability.json", import.meta.url),
+  ),
+);
 async function setup(t) {
   const root = await mkdtemp("/tmp/aw-js-descriptor-");
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -443,4 +448,78 @@ test("omitting the descriptor retains canonical parser target selection", async 
   assert.equal(wiring.target, "app");
   assert.equal(wiring.inputEnabled, true);
   assert.equal(wiring.availability, "required");
+});
+
+test("two adapters share target-scoped parser and descriptor availability", async (t) => {
+  const f = await setup(t);
+  const document = structuredClone(multiAdapter);
+  for (const applicable of [false, true]) {
+    document.spec.events["tool.before"].match.tools = [
+      applicable ? "native:qoder-sdk:Shell" : "native:qwenpaw:Shell",
+    ];
+    await writeFile(f.options.configFile, JSON.stringify(document));
+    const { stdout } = await execute(
+      binary,
+      [
+        "config", "descriptor", "--config", f.options.configFile,
+        "--agent", "qoder", "--profile", "qoder-public-hooks",
+      ],
+      { timeout: 10000 },
+    );
+    await writeFile(f.options.descriptorFile, stdout);
+    for (const target of [undefined, "qoder"]) {
+      const options = { ...f.options, target, executable: binary };
+      const parsed = await loadConfiguration({ ...options, descriptorFile: undefined });
+      assert.equal(parsed.target, "qoder");
+      assert.equal(parsed.inputEnabled, true);
+      assert.equal(parsed.availability, applicable ? "required" : "native_fallback");
+      assert.deepEqual(
+        await loadConfiguration({ ...options, executable: "/missing/aw" }),
+        parsed,
+      );
+      for (const descriptorFile of [undefined, f.options.descriptorFile]) {
+        const bridgeOptions = {
+          ...options, descriptorFile, availability: "native_fallback",
+          executable: descriptorFile ? "/missing/aw" : binary,
+          query() {
+            throw new Error("unexpected native Query");
+          },
+        };
+        if (applicable) {
+          await assert.rejects(
+            () => createQoderBridge(bridgeOptions),
+            code("sdk_required_policy_conflict"),
+          );
+        } else {
+          const bridge = await createQoderBridge(bridgeOptions);
+          await bridge.close();
+        }
+      }
+    }
+    await assert.rejects(
+      () => loadConfiguration({
+        ...f.options, target: "app", descriptorFile: undefined, executable: binary,
+      }),
+      code("sdk_target_required"),
+    );
+  }
+});
+
+test("parser preserves hyphen targets and never truncates slash targets", async (t) => {
+  const f = await setup(t);
+  const document = structuredClone(multiAdapter);
+  document.spec.agents["-qoder"] = document.spec.agents.qoder;
+  delete document.spec.agents.qoder;
+  await writeFile(f.options.configFile, JSON.stringify(document));
+  const options = { ...f.options, descriptorFile: undefined, executable: binary };
+  for (const target of [undefined, "-qoder"]) {
+    const wiring = await loadConfiguration({ ...options, target });
+    assert.equal(wiring.target, "-qoder");
+  }
+  for (const target of ["", "-qoder/other", "/-qoder", "-qoder/"]) {
+    await assert.rejects(
+      () => loadConfiguration({ ...options, target }),
+      code("sdk_target_required"),
+    );
+  }
 });

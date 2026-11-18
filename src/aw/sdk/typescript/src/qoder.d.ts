@@ -27,7 +27,7 @@ export function createQoderBridge<
   /** Trusted deployment hints bound to the exact configFile bytes. */
   descriptorFile?: string;
   query: (input: I) => Q;
-  /** Defaults to native_fallback; enabled required events need required mode. */
+  /** Defaults to native_fallback; applicable enabled required events need required mode. */
   availability?: Availability;
   target?: string;
   executable?: string;

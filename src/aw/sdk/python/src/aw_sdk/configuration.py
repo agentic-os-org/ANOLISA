@@ -32,35 +32,38 @@ def load_configuration(
             target,
             requires_service=requires_service,
         )
-    spec = json.loads(_configuration_output(executable, config_file))["spec"]
-    candidates = [
-        name for name, agent in spec["agents"].items() if agent["adapter"] == profile["adapter"]
-    ]
-    if target is None and len(candidates) == 1:
-        target = candidates[0]
-    if target not in candidates:
+    projection = json.loads(
+        _configuration_output(executable, config_file, profile["adapter"], target)
+    )
+    selected = projection.get("target")
+    if not isinstance(selected, str) or not selected or (target is not None and target != selected):
         raise AwError("sdk_target_required")
-    daemon = spec["daemon"]
+    if any(
+        type(projection.get(key)) is not bool
+        for key in ("input_enabled", "target_requires_service")
+    ):
+        raise AwError("sdk_configuration_invalid")
+    daemon = projection["daemon"]
     endpoint = daemon["endpoint"]
     if endpoint == "auto":
         endpoint = str(Path(daemon["state_dir"]) / "aw.sock")
     if not Path(endpoint).is_absolute():
         raise AwError("sdk_explicit_service_path_required")
     return {
-        "target": target,
+        "target": selected,
         "endpoint": endpoint,
-        "input_enabled": spec["events"].get("input.submit", {}).get("enabled") is True,
+        "input_enabled": projection["input_enabled"],
         "availability": (
             "required"
-            if requires_service
-            or any(event.get("enabled") and event.get("required") for event in spec["events"].values())
+            if requires_service or projection["target_requires_service"]
             else "native_fallback"
         ),
     }
 
 
-def _configuration_output(executable: str, config_file: str) -> bytes:
-    command = [executable, "config", "show", "--config", config_file]
+def _configuration_output(executable: str, config_file: str, adapter: str, target: str | None) -> bytes:
+    selection = adapter if target is None else f"{adapter}/{target}"
+    command = [executable, "config", "show", "--config", config_file, "--sdk-target", selection]
     deadline = time.monotonic() + 5
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     limits = {"stdout": 9 * 1024 * 1024, "stderr": 65536}

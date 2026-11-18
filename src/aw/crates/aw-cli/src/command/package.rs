@@ -120,6 +120,9 @@ pub(super) struct Configuration {
 pub(super) struct Show {
     #[command(flatten)]
     pub configuration: Configuration,
+    /// Show SDK settings for the Adapter's unique or named target
+    #[arg(long, value_name = "ADAPTER[/TARGET]", conflicts_with_all = ["event", "provider", "id"])]
+    pub sdk_target: Option<String>,
     /// Select one Provider, including private parameters
     #[arg(
         long,
@@ -215,4 +218,31 @@ pub(super) struct RemoveNativeSource {
     pub id: String,
     #[command(flatten)]
     pub output: crate::output::Options,
+}
+
+pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<crate::cli::Exit> {
+    let (adapter, target) = selection
+        .split_once('/')
+        .map_or((selection, None), |(adapter, target)| {
+            (adapter, Some(target))
+        });
+    let config = aw_package::config_edit::read_configuration(std::path::Path::new(path))?;
+    let spec = &config.as_value()["spec"];
+    let agents = spec["agents"]
+        .as_object()
+        .ok_or(aw_config::Error::InvalidSchema)?;
+    let mut matches = agents.iter().filter(|(name, agent)| {
+        agent["adapter"] == adapter && target.is_none_or(|target| target == name.as_str())
+    });
+    let view = match (matches.next(), matches.next()) {
+        (Some((name, _)), None) => serde_json::json!({
+            "target": name,
+            "daemon": {"endpoint": spec["daemon"]["endpoint"], "state_dir": spec["daemon"]["state_dir"]},
+            "input_enabled": spec["events"]["input.submit"]["enabled"] == true,
+            "target_requires_service": aw_config::requirements::requires_service(&config, name)?,
+        }),
+        _ => serde_json::json!({"target": null}),
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &view)?;
+    Ok(crate::cli::Exit::Code(0))
 }

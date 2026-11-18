@@ -78,8 +78,8 @@ Descriptor 仅携带原始字节 `configuration_sha256`、配置目标 `target`�
 进程，不执行安装。
 
 启用的 `input.submit` 要求输入等待，包括可选且没有步骤的事件；静态准入仍检查
-Profile 是否支持它。`NativeFallback` 与任一全局启用且 required 的事件冲突，
-保持 Service 的可用性检查，即使该事件被选择器排除在当前目标之外。Adapter 负责
+Profile 是否支持它。`NativeFallback` 与当前目标适用的已启用 required 事件冲突。
+编译、SDK 启动、Service 注册和策略更新均按同一目标投影判定；适用且没有启用步骤的事件也计入。Adapter 负责
 Profile 身份、能力声明和更严格的服务要求；CLI 从 Adapter 声明生成可选 Profile。
 原生 SDK 接点向公共读取器传入预期身份和服务要求，公共读取器执行通用校验，
 不按框架名称分支；Core 对所有传入的 Profile 执行相同的静态准入。

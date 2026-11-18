@@ -23,9 +23,9 @@ key after a lost registration response; inspect terminal failure inside a
 successful response. The replay limit, owner-loss cleanup and generation checks
 remain those of [independent registration](local-service.md#independent-registration).
 
-For `native_fallback`, every enabled event in the supplied policy must have
-`required: false`. This conservative check also applies to policy updates,
-including events excluded by selectors. Providers may still explicitly deny,
+For `native_fallback`, each enabled event applicable to the registering target must have
+`required: false`. Policy updates apply the same check to the candidate revision
+and the registered target. A conflicting update leaves the active policy intact. Providers may still explicitly deny,
 and `on_error: block` retains its online behavior. Neither a policy error nor a
 Provider failure establishes transport unavailability.
 
@@ -170,7 +170,7 @@ back at its admitted deadline, while explicit errors and cancellation propagate.
 
 Qoder public Hooks reuse Admission for readiness, cancellation and one Task.
 The bridge defaults to explicit `native_fallback` availability and rejects an
-enabled required policy before installing its listener. Callers select `required`
+applicable enabled required event before installing its listener. Callers select `required`
 availability explicitly; Service repeats the policy compatibility check on registration and updates.
 QwenPaw's configured native plugin does the same through DeferredScope, extending
 it only with resident invocation ledger activation, Coordinator streams, native
@@ -191,8 +191,9 @@ individual waiter cancellation from the shared operation and internal close.
 Configuration loaders reuse AW's canonical offline parser. Service retains
 capability admission, Ready, Scope revisions and the common Hook execution path
 through Host/executor/Provider. Adapter bindings retain native field mapping and
-effect adoption; they do not implement another policy engine. Deployment
-Descriptor generation and a general Source resolver remain unimplemented.
+effect adoption; they do not implement another policy engine.
+The CLI can compile the target settings into a deployment Descriptor before
+SDK startup. A general Source resolver remains a development target.
 
 `--sdk-pid` is a cooperative application selector. The CLI pins the existing
 ProcessIdentity before service startup, ensures AW through launch_service, waits

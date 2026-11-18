@@ -1,6 +1,9 @@
 //! Desired requirements preserve empty events, selector scope and policy ordering.
 
-use aw_config::{requirements::project, Validator};
+use aw_config::{
+    requirements::{project, requires_service},
+    Validator,
+};
 use serde_json::{json, Value};
 
 fn document() -> Value {
@@ -21,6 +24,88 @@ fn document() -> Value {
 fn step(id: &str, tools: Value) -> Value {
     json!({"id":id,"provider":"check","effects":["observe"],
         "on_error":"report","match":{"tools":tools}})
+}
+
+#[test]
+fn service_availability_follows_target_selector_projection() {
+    for (outer, steps, applicable) in [
+        (json!(["*"]), json!([]), true),
+        (json!(["native:pi:Shell"]), json!([]), false),
+        (json!(["native:qoder:Shell"]), json!([]), true),
+        (
+            json!(["*"]),
+            json!([step("foreign", json!(["native:pi:Shell"]))]),
+            false,
+        ),
+        (
+            json!(["bash"]),
+            json!([step("disjoint", json!(["file_read"]))]),
+            false,
+        ),
+        (
+            json!(["bash"]),
+            json!([step("alias", json!(["native:qoder:Shell"]))]),
+            true,
+        ),
+        (
+            json!(["native:qoder:Shell"]),
+            json!([step("alias", json!(["bash"]))]),
+            true,
+        ),
+        (
+            json!(["*"]),
+            json!([
+                step("foreign", json!(["native:pi:Shell"])),
+                step("own", json!(["native:qoder:Shell"]))
+            ]),
+            true,
+        ),
+        (
+            json!(["*"]),
+            json!([{
+                "id":"disabled", "enabled":false, "provider":"check",
+                "effects":["observe"], "on_error":"report", "match":{"tools":["native:pi:Shell"]}
+            }]),
+            true,
+        ),
+    ] {
+        for required in [false, true] {
+            let mut value = document();
+            value["spec"]["events"] = json!({"tool.before":{
+                "enabled":true,"required":required,"match":{"tools":outer},"steps":steps
+            }});
+            let config = Validator::new()
+                .unwrap()
+                .parse(&serde_json::to_vec(&value).unwrap())
+                .unwrap();
+            assert_eq!(
+                requires_service(&config, "qoder").unwrap(),
+                required && applicable,
+                "outer={outer}, steps={steps}, required={required}"
+            );
+        }
+    }
+}
+
+#[test]
+fn service_availability_keeps_required_input_and_rejects_unknown_targets() {
+    for (enabled, required) in [(false, false), (true, false), (true, true)] {
+        let mut value = document();
+        value["spec"]["events"] = json!({"input.submit":{
+            "enabled":enabled,"required":required,"steps":[]
+        }});
+        let config = Validator::new()
+            .unwrap()
+            .parse(&serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        for target in ["qoder", "pi"] {
+            assert_eq!(
+                requires_service(&config, target).unwrap(),
+                enabled && required
+            );
+        }
+        assert!(requires_service(&config, "missing").is_err());
+    }
 }
 
 #[test]

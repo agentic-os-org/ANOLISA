@@ -6,15 +6,13 @@ use aw_adapter::{HookEvent, NativeContext, NativeExit};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-pub(super) fn validate_availability(document: &Value, mode: Option<Availability>) -> Result<()> {
+pub(super) fn validate_availability(
+    configuration: &aw_config::Configuration,
+    target: &str,
+    mode: Option<Availability>,
+) -> Result<()> {
     if mode == Some(Availability::NativeFallback)
-        && document["spec"]["events"]
-            .as_object()
-            .is_some_and(|events| {
-                events
-                    .values()
-                    .any(|event| event["enabled"] == true && event["required"] == true)
-            })
+        && aw_config::requirements::requires_service(configuration, target)?
     {
         return Err(rejected("sdk_required_policy_conflict"));
     }

@@ -17,8 +17,8 @@
 回复内的失败终态。防重放容量、owner 退出清理和代际检查沿用
 [独立登记](local-service.md#independent-registration)。
 
-`native_fallback` 要求输入策略中每个已启用事件都设置 `required: false`。策略更新同样执行
-这一保守检查，包含被 selector 排除的事件。Provider 仍可明确拒绝，`on_error: block` 保留在线
+`native_fallback` 要求注册目标适用的已启用事件都设置 `required: false`。策略更新按同一目标校验
+候选配置；如有冲突，当前策略继续生效。Provider 仍可明确拒绝，`on_error: block` 保留在线
 行为。策略错误和 Provider 故障均不能作为传输不可用的依据。
 
 ## 通用语义入口
@@ -138,7 +138,8 @@ TypeScript Admission 将各等待者的取消与共享操作、内部关闭分�
 
 配置加载继续复用 AW 权威离线解析器。Service 保留能力准入、Ready、Scope 修订，
 Hook 经 Host／executor／Provider 执行；Adapter 保留原生字段映射和效果采纳。
-部署 Descriptor 与通用 Source resolver 尚未实现。
+部署时可以通过 CLI 预编译目标的 Descriptor，供 SDK 启动时读取。
+通用 Source resolver 仍待实现。
 
 `--sdk-pid` 选择已预装 SDK 的协作应用。CLI 在启动服务前固定既有 ProcessIdentity，
 通过 launch_service 准备 AW，等待唯一匹配的 SDK 声明，再发送原控制意图。
@@ -147,7 +148,7 @@ SDK 确认及进程所有权仍由应用持有。后端启动沿外部部署，�
 
 ## Qoder 公开 Hook 的延迟准入
 
-配置式接入默认采用 `native_fallback`，在安装监听器前拒绝启用的 required 策略。
+配置式接入默认采用 `native_fallback`，在安装监听器前拒绝适用于该目标的已启用 required 事件。
 调用方可显式选择 `required`；Service 在登记和策略更新时继续执行可用性兼容校验。
 接入模块在创建 Query 前安装原生公开回调。未启用 input.submit 时，模型派发不创建
 Scope；首次工具前回调等待协作 Ready，并按该 Query 的目录和复制后的环境创建一个

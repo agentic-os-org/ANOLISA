@@ -324,7 +324,7 @@ impl Runtime {
                 .admission
                 .preflight(bytes, &target, capabilities.clone().into())
                 .map_err(|_| rejected("binding_preflight"))?;
-            super::sdk::validate_availability(document.as_value(), sdk)?;
+            super::sdk::validate_availability(&document, &target, sdk)?;
             // Use the ordinary factory's route projection, including native input,
             // Skill and result handling constraints; no restricted reload profile.
             let routes = if native {

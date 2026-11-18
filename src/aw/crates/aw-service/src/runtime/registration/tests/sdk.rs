@@ -97,6 +97,61 @@ fn fallback_rejects_required_events_and_accepts_explicit_optional_policy() {
     assert_eq!(f.call(cmd).unwrap()["availability"], "native_fallback");
 }
 
+fn multi_target_fixture() -> Fixture {
+    let mut f = Fixture::new();
+    let mut document: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    document["spec"]["agents"]["other"] = json!({"adapter":"qwenpaw","argv":["/bin/true"]});
+    document["spec"]["events"]["tool.before"]["match"] =
+        json!({"tools":["native:qwenpaw:execute_shell_command"]});
+    document["spec"]["events"]["tool.after"]["required"] = json!(false);
+    f.runtime = Runtime::new(
+        serde_json::to_vec(&document).unwrap(),
+        &f.directory.path().join("targets-audit"),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    f
+}
+
+#[test]
+fn fallback_registration_uses_the_candidate_and_actual_target() {
+    let f = multi_target_fixture();
+    let snapshot = f
+        .call(command(
+            &f,
+            "foreign-required",
+            Availability::NativeFallback,
+        ))
+        .unwrap();
+    assert_eq!(snapshot["availability"], "native_fallback");
+    for mode in [Availability::NativeFallback, Availability::Required] {
+        let mut cmd = command(&f, &format!("other-{mode:?}"), mode);
+        if let RegistrationCommand::RegisterSdk {
+            target,
+            capabilities,
+            ..
+        } = &mut cmd
+        {
+            *target = "other".into();
+            capabilities.adapter = "qwenpaw".into();
+            capabilities.entrypoint = "app".into();
+        }
+        if mode == Availability::NativeFallback {
+            code(f.call(cmd), "sdk_required_policy_conflict");
+        } else {
+            f.call(cmd).unwrap();
+        }
+    }
+    let mut candidate: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    candidate["spec"]["events"]["tool.before"]["match"] =
+        json!({"tools":["native:qoder-sdk:Bash"]});
+    let mut cmd = command(&f, "candidate-required", Availability::NativeFallback);
+    if let RegistrationCommand::RegisterSdk { config, .. } = &mut cmd {
+        *config = Some(serde_json::to_string(&candidate).unwrap());
+    }
+    code(f.call(cmd), "sdk_required_policy_conflict");
+}
+
 #[test]
 fn sdk_callbacks_require_ready_owned_scopes_and_execute_once() {
     let f = Fixture::new();
@@ -295,4 +350,71 @@ fn fallback_updates_reject_required_policy_and_busy_scopes() {
         f.query("update")["policy_revision"],
         snapshot["policy_revision"]
     );
+}
+
+#[test]
+fn fallback_updates_project_the_candidate_and_preserve_rejected_policy() {
+    let f = multi_target_fixture();
+    let snapshot = f
+        .call(command(&f, "target-update", Availability::NativeFallback))
+        .unwrap();
+    let h = handle(&snapshot);
+    let id = &h.binding.instance_id;
+    let pid = std::process::id();
+    f.runtime.enable_reload(id).unwrap();
+    f.call(RegistrationCommand::Ready {
+        handle: h.clone(),
+        policy_revision: snapshot["policy_revision"].as_str().unwrap().into(),
+    })
+    .unwrap();
+    f.runtime.associate_process(id, pid).unwrap();
+    f.runtime
+        .lifecycle(id, pid, crate::LifecyclePhase::Ready, "")
+        .unwrap();
+    let update = |candidate: &Value, revision: &str| {
+        let request = crate::Request {
+            api_version: crate::VERSION.into(),
+            identity: Some(f.runtime.identity.clone()),
+            deadline_ns: crate::deadline::encode(Instant::now() + Duration::from_secs(5)).unwrap(),
+            operation: Operation::UpdatePolicy {
+                instance_id: id.clone(),
+                expected_revision: revision.into(),
+                config: serde_json::to_string(candidate).unwrap(),
+            },
+        };
+        // SAFETY: geteuid only reads this test process's effective UID.
+        f.runtime.update_policy(
+            &request,
+            (unsafe { libc::geteuid() }, pid as i32),
+            &Arc::new(AtomicBool::new(false)),
+        )
+    };
+    let mut accepted: Value = serde_json::from_slice(&f.runtime.bytes).unwrap();
+    accepted["spec"]["events"]["tool.before"]["budget_ms"] = json!(4000);
+    let result = update(&accepted, snapshot["policy_revision"].as_str().unwrap()).unwrap();
+    let revision = result["policy_revision"].as_str().unwrap();
+    assert_ne!(result["policy_revision"], snapshot["policy_revision"]);
+
+    let mut rejected = accepted.clone();
+    rejected["spec"]["events"]["tool.before"]["match"] = json!({"tools":["native:qoder-sdk:Bash"]});
+    assert!(
+        matches!(update(&rejected, revision), Err(Error::Attempt { code, .. }) if code == "sdk_required_policy_conflict")
+    );
+    {
+        let instances = f.runtime.instances.lock().unwrap();
+        let active = instances.get(id).unwrap().as_ref().unwrap();
+        assert_eq!(active.host.revision(), revision);
+        assert_eq!(active.host.configuration().as_value(), &accepted);
+        assert_eq!(active.bytes, serde_json::to_vec(&accepted).unwrap());
+    }
+    rejected["spec"]["events"]["tool.before"]["required"] = json!(false);
+    let optional = update(&rejected, revision).unwrap();
+    assert_ne!(optional["policy_revision"], revision);
+    let instances = f.runtime.instances.lock().unwrap();
+    let active = instances.get(id).unwrap().as_ref().unwrap();
+    assert_eq!(
+        active.host.revision(),
+        optional["policy_revision"].as_str().unwrap()
+    );
+    assert_eq!(active.host.configuration().as_value(), &rejected);
 }

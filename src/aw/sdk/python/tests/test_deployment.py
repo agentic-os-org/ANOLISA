@@ -21,6 +21,9 @@ from aw_sdk.deployment import LIMIT, check_filesystems, load_descriptor, read_fi
 FIXTURE = json.loads(
     (Path(__file__).resolve().parents[2] / "tests/fixtures/deployment.json").read_text()
 )
+MULTI_ADAPTER = json.loads(
+    (Path(__file__).resolve().parents[2] / "tests/fixtures/target-availability.json").read_text()
+)
 BINARY = os.environ["AW_TEST_BINARY"]
 QWENPAW_PROFILE = {
     "adapter": "qwenpaw",
@@ -313,6 +316,53 @@ class Deployment(unittest.TestCase):
                     descriptor_file=str(self.descriptor),
                     requires_service=True,
                 )
+
+    def test_target_scoped_parser_matches_descriptor_for_both_adapters(self) -> None:
+        self.config.write_text(json.dumps(MULTI_ADAPTER))
+        for selected, profile_name, profile, requires_service, availability in (
+            ("qoder", "qoder-public-hooks", self.profile, False, "native_fallback"),
+            ("app", "qwenpaw-installed-native-hooks", QWENPAW_PROFILE, True, "required"),
+        ):
+            result = subprocess.run(
+                [BINARY, "config", "descriptor", "--config", str(self.config),
+                 "--agent", selected, "--profile", profile_name],
+                check=True, capture_output=True, timeout=10,
+            )
+            self.descriptor.write_bytes(result.stdout)
+            for target in (None, selected):
+                parsed = load_configuration(
+                    str(self.config), profile, target, BINARY,
+                    requires_service=requires_service,
+                )
+                self.assertEqual(parsed["target"], selected)
+                self.assertEqual(parsed["availability"], availability)
+                self.assertTrue(parsed["input_enabled"])
+                with patch(
+                    "aw_sdk.configuration.subprocess.Popen",
+                    side_effect=AssertionError("descriptor invoked parser"),
+                ):
+                    self.assertEqual(
+                        load_configuration(
+                            str(self.config), profile, target, "/missing/aw",
+                            descriptor_file=str(self.descriptor),
+                            requires_service=requires_service,
+                        ),
+                        parsed,
+                    )
+            other = "app" if selected == "qoder" else "qoder"
+            with self.assertRaisesRegex(AwError, "sdk_target_required"):
+                load_configuration(str(self.config), profile, other, BINARY)
+
+    def test_parser_keeps_explicit_hyphen_and_slash_target_identity(self) -> None:
+        document = deepcopy(MULTI_ADAPTER)
+        document["spec"]["agents"]["-app"] = document["spec"]["agents"].pop("app")
+        self.config.write_text(json.dumps(document))
+        for target in (None, "-app"):
+            wiring = load_configuration(str(self.config), QWENPAW_PROFILE, target, BINARY)
+            self.assertEqual(wiring["target"], "-app")
+        for target in ("", "-app/other", "/-app", "-app/"):
+            with self.assertRaisesRegex(AwError, "sdk_target_required"):
+                load_configuration(str(self.config), QWENPAW_PROFILE, target, BINARY)
 
     def test_legacy_parser_keeps_target_selection(self) -> None:
         document = deepcopy(FIXTURE["configuration"])

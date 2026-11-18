@@ -171,7 +171,9 @@ AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续�
 SHA256、目标、Profile、明确的服务 endpoint、输入等待标志和可用性，不包含 Provider
 参数或凭据。适用事件、效果或失败动作不受支持时，在输出前拒绝。
 
-Descriptor 与对应的完整部署配置一起保存；配置或接线变更后重新生成。它不证明接点
+Descriptor 与对应的完整部署配置一起保存；配置或接线变更后重新生成。启用目标级可用性时，部署匹配的
+AW CLI、Service 和 SDK，并重新生成既有 Descriptor。旧 Descriptor 可能对同一配置保留
+更严格的服务要求，调用方仍可显式选择 required。它不证明接点
 已安装、Ready 或运行准入。部署操作见
 [SDK 部署指南](../../../developer-guide/zh/aw/deployment/native-sdk.md)。
 
@@ -183,6 +185,9 @@ Descriptor 与对应的完整部署配置一起保存；配置或接线变更后
 | `--provider NAME` | 可选 | 选择 Provider，与 `--event` 互斥 |
 | `--event EVENT` | 可选 | 选择事件 |
 | `--id ID` | 可选；要求 `--event` | 选择事件内的 Hook 步骤 |
+| `--sdk-target ADAPTER[/TARGET]` | 可选，与 Provider、事件、Hook 选择互斥 | 打印使用该 Adapter 的唯一目标或具名目标的 SDK 启动设置 |
+
+按 Adapter 查询会返回目标名、服务套接字和状态目录、输入标志及 `target_requires_service`。找不到唯一匹配目标时返回 `{"target":null}`。服务标志反映当前目标的策略要求，Adapter 本身也可要求服务必须在线。
 
 不提供选择条件时，以 JSON 打印完整配置。输出包含 Provider 私有值，分享前先检查。
 

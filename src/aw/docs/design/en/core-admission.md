@@ -92,9 +92,9 @@ The compiler reads no environment, starts no process and performs no installatio
 
 An enabled `input.submit` requires input waiting, including an optional event
 with an empty step list. Static admission still checks that the supplied profile
-supports it. `NativeFallback` conflicts with any globally enabled required event,
-matching Service availability checks even when selectors exclude that event
-from this target. Adapters own profile identities, capability declarations and
+supports it. `NativeFallback` conflicts with an enabled required event that can apply to the target.
+Compilation, SDK startup, Service registration and policy updates use the same
+target projection. An applicable event with no enabled steps still counts. Adapters own profile identities, capability declarations and
 stricter service requirements. The CLI derives its profile choices from the
 Adapter declarations. Native SDK bindings pass their expected identity and service
 requirement to the shared readers, which validate them without framework-name

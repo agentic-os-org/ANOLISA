@@ -26,18 +26,26 @@ export async function loadConfiguration({
       requiresService,
     });
   }
-  const { stdout } = await execute(
-    executable,
-    ["config", "show", "--config", configFile],
-    { timeout: 5000, maxBuffer: 9 * 1024 * 1024, env: environment },
-  );
-  const document = JSON.parse(stdout).spec;
-  const candidates = Object.entries(document.agents).filter(
-    ([, agent]) => agent.adapter === profile.adapter,
-  );
-  target ??= candidates.length === 1 ? candidates[0][0] : undefined;
-  if (!candidates.some(([name]) => name === target))
+  const selection = target == null ? profile.adapter : `${profile.adapter}/${target}`;
+  const args = [
+    "config", "show", "--config", configFile, "--sdk-target", selection,
+  ];
+  const { stdout } = await execute(executable, args, {
+    timeout: 5000,
+    maxBuffer: 9 * 1024 * 1024,
+    env: environment,
+  });
+  const document = JSON.parse(stdout);
+  if (
+    typeof document.target !== "string" || !document.target ||
+    (target != null && target !== document.target)
+  )
     throw new AwError("sdk_target_required");
+  if (
+    typeof document.input_enabled !== "boolean" ||
+    typeof document.target_requires_service !== "boolean"
+  )
+    throw new AwError("sdk_configuration_invalid");
   const daemon = document.daemon;
   const endpoint =
     daemon.endpoint !== "auto"
@@ -48,12 +56,11 @@ export async function loadConfiguration({
   if (!endpoint || !isAbsolute(endpoint))
     throw new AwError("sdk_explicit_service_path_required");
   return {
-    target,
+    target: document.target,
     endpoint,
-    inputEnabled: document.events["input.submit"]?.enabled === true,
+    inputEnabled: document.input_enabled,
     availability:
-      requiresService ||
-      Object.values(document.events).some((event) => event.enabled && event.required)
+      requiresService || document.target_requires_service
         ? "required"
         : "native_fallback",
   };

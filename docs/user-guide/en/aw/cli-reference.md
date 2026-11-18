@@ -175,7 +175,10 @@ availability. Provider parameters and credentials are omitted. Unsupported
 applicable events, effects or failure actions are rejected before output.
 
 Keep the descriptor with its exact deployment configuration and regenerate it
-when the configuration or wiring changes. It does not establish installed
+when the configuration or wiring changes. To adopt target-scoped availability, deploy matching
+AW CLI, Service and SDK packages and regenerate existing descriptors. An older descriptor may
+retain a stricter service requirement for the same configuration. Existing callers can continue
+to select required mode. It does not establish installed
 callbacks, Ready status or runtime admission. See the
 [SDK deployment guide](../../../developer-guide/en/aw/deployment/native-sdk.md).
 
@@ -187,6 +190,9 @@ callbacks, Ready status or runtime admission. See the
 | `--provider NAME` | Optional | Select a Provider; conflicts with `--event` |
 | `--event EVENT` | Optional | Select one event |
 | `--id ID` | Optional; requires `--event` | Select a Hook step within the event |
+| `--sdk-target ADAPTER[/TARGET]` | Optional; exclusive with Provider/event/Hook selection | Print SDK startup settings for the unique or named target using this Adapter |
+
+Adapter selection returns the target, daemon endpoint and state directory, input flag, and `target_requires_service`. An unknown or ambiguous selection returns `{"target":null}`. The service flag covers policy requirements for that target. An Adapter can require Service even for optional policy.
 
 With no selector, print the complete configuration as JSON. Output includes private Provider values; inspect before sharing.
 

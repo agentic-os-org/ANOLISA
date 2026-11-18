@@ -35,8 +35,8 @@ await aw.close();
 将 `spec.daemon.endpoint` 或 `spec.daemon.state_dir` 设置为私有目录中的绝对路径；
 两项同时为 `auto` 时，本接入模块拒绝初始化。配置只有一个 `qoder-sdk` 目标时自动选择，
 多个目标时传入 `target`。接入模块默认采用 `availability: "native_fallback"`，AW 失联后
-原生 Query、Hook、工具和模型继续运行。每个启用事件设置 `required: false`；AW 可达时，
-`on_error: block` 和明确拒绝仍然生效。配置含 required 事件时，回退模式拒绝初始化。
+原生 Query、Hook、工具和模型继续运行。该目标适用的每个启用事件设置 `required: false`；AW 可达时，
+`on_error: block` 和明确拒绝仍然生效。该目标适用的启用事件要求 required 时，回退模式拒绝初始化。
 需要在 AW 失联时停止受保护操作，可显式传入 `availability: "required"`。
 可用性属于 SDK 生命周期选项，策略统一留在文件中。支持已配置输入的观察／阻断、工具前观察／阻断和
 工具后观察；不支持的效果和 Skill 路由在准入时拒绝。结果替换与最终结果门继续使用既有
@@ -103,7 +103,7 @@ QwenPaw 选择 `qwenpaw-installed-native-hooks` 及其配置目标，并向
 [Python 工厂](python-sdk.md#安装与接入)传入 `descriptor_file`。
 编译复用现有能力准入，记录目标、Profile、明确的 socket、输入边界与可用性；
 不启动 Service、Provider 或原生应用。QwenPaw Profile 要求服务可用，Qoder 记录
-已启用事件的保护要求。两条加载路径均保留 Qoder 调用方选择的可用性，默认仍为
+目标适用事件的保护要求。两条加载路径均保留 Qoder 调用方选择的可用性，默认仍为
 `native_fallback`。Descriptor 要求保护时须显式传入 `availability: "required"`；
 冲突选择会在安装监听前失败。
 
@@ -157,7 +157,7 @@ npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
 ```
 
 使用应用用户持有的私有目录中的绝对 socket 路径。同用户运行 AW，完整配置中设置
-`agents.qoder.adapter: qoder-sdk`。选择 `native_fallback` 时，所有已启用事件均需
+`agents.qoder.adapter: qoder-sdk`。选择 `native_fallback` 时，该目标适用的已启用事件均需
 设置 `required: false`；Provider 的明确拒绝继续生效。独立执行
 `aw service serve --config /absolute/aw.yaml`，使用该服务报告的 socket。
 SDK 不启动服务或 Agent。
