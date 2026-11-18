@@ -9,6 +9,7 @@
 //! The overall Linux sandbox is composed of:
 //! - seccomp + `PR_SET_NO_NEW_PRIVS` applied in-process, and
 //! - bubblewrap used to construct the filesystem view before exec.
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fs::File;
@@ -198,9 +199,24 @@ fn create_filesystem_args(
 ) -> Result<BwrapArgs> {
     let writable_roots = file_system_sandbox_policy.get_writable_roots_with_cwd(cwd);
     let unreadable_roots = file_system_sandbox_policy.get_unreadable_roots_with_cwd(cwd);
-    ensure_mount_targets_exist(&writable_roots)?;
+    let readable_roots = file_system_sandbox_policy.get_readable_roots_with_cwd(cwd);
+    let full_read = file_system_sandbox_policy.has_full_disk_read_access()
+        || readable_roots
+            .iter()
+            .any(|path| path.as_path() == Path::new("/"));
+    let canonical_writable_roots = resolve_writable_roots(&writable_roots)?;
+    let unreadable_paths: HashSet<&Path> = unreadable_roots
+        .iter()
+        .map(AbsolutePathBuf::as_path)
+        .collect();
+    let explicit_read_targets = resolve_read_subpaths(
+        file_system_sandbox_policy,
+        cwd,
+        &canonical_writable_roots,
+        &unreadable_paths,
+    )?;
 
-    let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
+    let mut args = if full_read {
         // Read-only root, then mount a minimal device tree.
         // In bubblewrap (`bubblewrap.c`, `SETUP_MOUNT_DEV`), `--dev /dev`
         // creates the standard minimal nodes: null, zero, full, random,
@@ -223,11 +239,8 @@ fn create_filesystem_args(
             "/dev".to_string(),
         ];
 
-        let mut readable_roots: BTreeSet<PathBuf> = file_system_sandbox_policy
-            .get_readable_roots_with_cwd(cwd)
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let mut readable_roots: BTreeSet<PathBuf> =
+            readable_roots.into_iter().map(PathBuf::from).collect();
         if file_system_sandbox_policy.include_platform_defaults() {
             readable_roots.extend(
                 LINUX_PLATFORM_DEFAULT_READ_ROOTS
@@ -237,26 +250,13 @@ fn create_filesystem_args(
             );
         }
 
-        // A restricted policy can still explicitly request `/`, which is
-        // the broad read baseline. Explicit unreadable carveouts are
-        // re-applied later.
-        if readable_roots.iter().any(|root| root == Path::new("/")) {
-            args = vec![
-                "--ro-bind".to_string(),
-                "/".to_string(),
-                "/".to_string(),
-                "--dev".to_string(),
-                "/dev".to_string(),
-            ];
-        } else {
-            for root in readable_roots {
-                if !root.exists() {
-                    continue;
-                }
-                args.push("--ro-bind".to_string());
-                args.push(path_to_string(&root));
-                args.push(path_to_string(&root));
+        for root in readable_roots {
+            if !root.exists() {
+                continue;
             }
+            args.push("--ro-bind".to_string());
+            args.push(path_to_string(&root));
+            args.push(path_to_string(&root));
         }
 
         args
@@ -265,10 +265,6 @@ fn create_filesystem_args(
     let allowed_write_paths: Vec<PathBuf> = writable_roots
         .iter()
         .map(|writable_root| writable_root.root.as_path().to_path_buf())
-        .collect();
-    let unreadable_paths: HashSet<PathBuf> = unreadable_roots
-        .iter()
-        .map(|path| path.as_path().to_path_buf())
         .collect();
     let mut sorted_writable_roots = writable_roots;
     sorted_writable_roots.sort_by_key(|writable_root| path_depth(writable_root.root.as_path()));
@@ -316,15 +312,32 @@ fn create_filesystem_args(
         args.push(path_to_string(root));
         args.push(path_to_string(root));
 
-        let mut read_only_subpaths: Vec<PathBuf> = writable_root
+        let mut read_only_subpaths: BTreeMap<&Path, bool> = writable_root
             .read_only_subpaths
             .iter()
-            .map(|path| path.as_path().to_path_buf())
-            .filter(|path| !unreadable_paths.contains(path))
+            .map(|path| (path.as_path(), false))
             .collect();
-        read_only_subpaths.sort_by_key(|path| path_depth(path));
-        for subpath in read_only_subpaths {
-            append_read_only_subpath_args(&mut args, &subpath, &allowed_write_paths);
+        for target in &explicit_read_targets {
+            if target != root && target.starts_with(root) {
+                read_only_subpaths.entry(target).or_insert(true);
+            }
+        }
+        let mut read_only_subpaths: Vec<_> = read_only_subpaths.into_iter().collect();
+        read_only_subpaths.sort_by_key(|(path, _)| path_depth(path));
+        for (subpath, explicit) in read_only_subpaths {
+            if unreadable_paths.contains(subpath) {
+                continue;
+            }
+            if explicit {
+                let path = subpath.to_str().ok_or_else(|| {
+                    SandboxError::UnsupportedOperation(format!(
+                        "read-only mount target is not valid UTF-8: {subpath:?}"
+                    ))
+                })?;
+                args.extend(["--ro-bind", path, path].map(str::to_owned));
+            } else {
+                append_read_only_subpath_args(&mut args, subpath, &allowed_write_paths);
+            }
         }
         let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
             .iter()
@@ -368,21 +381,137 @@ fn create_filesystem_args(
     })
 }
 
-/// Validate that writable roots exist before constructing mounts.
-///
-/// Bubblewrap requires bind mount targets to exist. We fail fast with a clear
-/// error so callers can present an actionable message.
-fn ensure_mount_targets_exist(writable_roots: &[WritableRoot]) -> Result<()> {
-    for writable_root in writable_roots {
-        let root = writable_root.root.as_path();
-        if !root.exists() {
-            return Err(SandboxError::UnsupportedOperation(format!(
-                "Sandbox expected writable root {root}, but it does not exist.",
-                root = root.display()
-            )));
+fn resolve_writable_roots(writable_roots: &[WritableRoot]) -> Result<Vec<(&Path, PathBuf)>> {
+    writable_roots
+        .iter()
+        .map(|writable_root| {
+            let root = writable_root.root.as_path();
+            let canonical = root.canonicalize().map_err(|err| {
+                SandboxError::UnsupportedOperation(format!(
+                    "cannot resolve writable root {}: {err}",
+                    root.display()
+                ))
+            })?;
+            Ok((root, canonical))
+        })
+        .collect()
+}
+
+fn resolve_read_subpaths(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    writable_roots: &[(&Path, PathBuf)],
+    unreadable_paths: &HashSet<&Path>,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut read_targets = BTreeSet::new();
+    for read_path in policy.get_explicit_read_only_paths_with_cwd(cwd) {
+        let path = read_path.as_path();
+        if unreadable_paths.contains(path) {
+            continue;
+        }
+        let inside_writable_root = writable_roots
+            .iter()
+            .any(|(root, _)| path != *root && path.starts_with(root));
+        let canonical = path.canonicalize();
+        if !writable_roots.is_empty() && !canonical.as_deref().is_ok_and(|target| target == path) {
+            validate_read_symlinks(path, writable_roots)?;
+        }
+        let target = match canonical {
+            Ok(target) => target,
+            Err(err) => {
+                let existing_parent = path.ancestors().skip(1).find_map(|p| p.canonicalize().ok());
+                if inside_writable_root
+                    || existing_parent.is_some_and(|parent| {
+                        writable_roots
+                            .iter()
+                            .any(|(_, root)| parent.starts_with(root))
+                    })
+                {
+                    // An absent target cannot be remounted without changing the host.
+                    return Err(SandboxError::UnsupportedOperation(format!(
+                        "cannot resolve read-only subpath {}: {err}",
+                        path.display()
+                    )));
+                }
+                continue;
+            }
+        };
+        for (root, canonical) in writable_roots {
+            let target_is_descendant = target != *canonical && target.starts_with(canonical);
+            if target_is_descendant || (path != *root && path.starts_with(root)) {
+                // A bind through an alias may select a different mount destination.
+                if *root != canonical {
+                    return Err(SandboxError::UnsupportedOperation(format!(
+                        "read-only subpath {} requires writable root {} to use its canonical path {}",
+                        path.display(),
+                        root.display(),
+                        canonical.display()
+                    )));
+                }
+                if target_is_descendant {
+                    read_targets.insert(target.clone());
+                }
+            }
         }
     }
-    Ok(())
+    Ok(read_targets)
+}
+
+// Check each link before following it. A read-only alias can itself refer to a
+// second link in a writable directory, which canonicalize alone would hide.
+fn validate_read_symlinks(path: &Path, writable_roots: &[(&Path, PathBuf)]) -> Result<()> {
+    let mut spelling = path.to_owned();
+    // Linux permits up to 40 symlink traversals in one pathname lookup.
+    'expand: for _ in 0..=40 {
+        let mut prefix = PathBuf::new();
+        let mut parts = spelling.components();
+        while let Some(part) = parts.next() {
+            if part == std::path::Component::ParentDir {
+                prefix.pop();
+                continue;
+            }
+            prefix.push(part);
+            let target = match std::fs::read_link(&prefix) {
+                Ok(target) => target,
+                Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => continue,
+                Err(err) => {
+                    if !writable_roots
+                        .iter()
+                        .any(|(_, root)| prefix.starts_with(root))
+                        && matches!(
+                            err.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        )
+                    {
+                        return Ok(());
+                    }
+                    return Err(SandboxError::UnsupportedOperation(format!(
+                        "cannot resolve read-only subpath {} at {}: {err}",
+                        path.display(),
+                        prefix.display()
+                    )));
+                }
+            };
+            if writable_roots
+                .iter()
+                .any(|(_, root)| prefix != *root && prefix.starts_with(root))
+            {
+                return Err(SandboxError::UnsupportedOperation(format!(
+                    "read-only subpath {} crosses writable symlink {}. Configure the canonical read-only path",
+                    path.display(),
+                    prefix.display()
+                )));
+            }
+            prefix.pop();
+            spelling = prefix.join(target).join(parts.as_path());
+            continue 'expand;
+        }
+        return Ok(());
+    }
+    Err(SandboxError::UnsupportedOperation(format!(
+        "too many symlinks while resolving read-only subpath {}",
+        path.display()
+    )))
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -860,16 +989,12 @@ mod tests {
         let docs = AbsolutePathBuf::from_absolute_path(&docs).expect("absolute docs");
         let docs_public =
             AbsolutePathBuf::from_absolute_path(&docs_public).expect("absolute docs/public");
-        let policy = FileSystemSandboxPolicy::restricted(vec![
+        let entries = vec![
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
-                    path: writable_root,
+                    path: writable_root.clone(),
                 },
                 access: FileSystemAccessMode::Write,
-            },
-            FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: docs.clone() },
-                access: FileSystemAccessMode::Read,
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
@@ -877,29 +1002,44 @@ mod tests {
                 },
                 access: FileSystemAccessMode::Write,
             },
-        ]);
+        ];
 
-        let args = create_filesystem_args(&policy, temp_dir.path()).expect("filesystem args");
+        let writable_root_str = path_to_string(writable_root.as_path());
         let docs_str = path_to_string(docs.as_path());
         let docs_public_str = path_to_string(docs_public.as_path());
-        let docs_ro_index = args
-            .args
-            .windows(3)
-            .position(|window| window == ["--ro-bind", docs_str.as_str(), docs_str.as_str()])
-            .expect("docs should be remounted read-only");
-        let docs_public_rw_index = args
-            .args
-            .windows(3)
-            .position(|window| {
-                window == ["--bind", docs_public_str.as_str(), docs_public_str.as_str()]
-            })
-            .expect("docs/public should be rebound writable");
 
-        assert!(
-            docs_ro_index < docs_public_rw_index,
-            "expected read-only parent remount before nested writable bind: {:#?}",
-            args.args
-        );
+        for full_read in [false, true] {
+            let mut entries = entries.clone();
+            entries.push(FileSystemSandboxEntry {
+                path: FileSystemPath::Path { path: docs.clone() },
+                access: FileSystemAccessMode::Read,
+            });
+            if full_read {
+                entries.push(FileSystemSandboxEntry {
+                    path: FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    },
+                    access: FileSystemAccessMode::Read,
+                });
+            }
+            let policy = FileSystemSandboxPolicy::restricted(entries);
+            let args = create_filesystem_args(&policy, temp_dir.path()).expect("filesystem args");
+            let last_mount_index = |flag: &str, path: &str| {
+                args.args
+                    .windows(3)
+                    .rposition(|window| window == [flag, path, path])
+                    .unwrap_or_else(|| panic!("missing {flag} for {path} (full_read={full_read})"))
+            };
+            let writable_root_bind_index = last_mount_index("--bind", &writable_root_str);
+            let docs_ro_index = last_mount_index("--ro-bind", &docs_str);
+            let docs_public_rw_index = last_mount_index("--bind", &docs_public_str);
+
+            assert!(
+                writable_root_bind_index < docs_ro_index && docs_ro_index < docs_public_rw_index,
+                "expected workspace write, docs read, docs/public write in order (full_read={full_read}): {:#?}",
+                args.args
+            );
+        }
     }
 
     #[test]

@@ -229,6 +229,15 @@ impl FileSystemSandboxPolicy {
             .collect()
     }
 
+    /// Resolve explicitly configured read-only paths against the policy cwd.
+    pub(crate) fn get_explicit_read_only_paths_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::Read)
+            .filter_map(|entry| self.resolve_path(&entry.path, cwd))
+            .collect()
+    }
+
     pub fn get_unreadable_roots_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
         self.entries
             .iter()

@@ -66,6 +66,8 @@ linux-sandbox \
 
 ### 可写工作区模式
 
+为工作区中的子目录配置只读权限时，请使用真实绝对路径。策略路径经过可写目录内的符号链接会导致启动失败。详见[文件系统策略](docs/user-guide.md#策略条目-entries)。
+
 ```bash
 mkdir -p /tmp/workspace
 
