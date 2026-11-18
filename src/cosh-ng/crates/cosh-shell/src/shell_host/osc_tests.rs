@@ -18,6 +18,9 @@ const TEST_MARKER_TOKEN: &str = "test-marker-token";
 
 #[test]
 fn bounded_raw_session_spools_output_without_materializing_result() {
+    // Serialize with process-wide PATH rewrites so a concurrent env-guard
+    // holder cannot change PATH while this test spawns bash.
+    let _env_guard = crate::diagnostics::test_env::env_guard();
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-bounded-raw-session-{}-{:?}",
         std::process::id(),
