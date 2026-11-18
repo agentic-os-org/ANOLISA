@@ -45,9 +45,9 @@ use recommendations::{
     render_pending_upgrade_notice, write_startup_suggestions,
 };
 pub(crate) use recommendations::{
-    render_pending_recommendation_notice, render_pending_upgrade_notice_at_idle_prompt,
-    render_pending_upgrade_notice_at_prompt_boundary, render_startup_banner,
-    render_startup_health_banner,
+    precompute_startup_suggestions, render_pending_recommendation_notice,
+    render_pending_upgrade_notice_at_idle_prompt, render_pending_upgrade_notice_at_prompt_boundary,
+    render_startup_banner, render_startup_health_banner, ComputedStartup,
 };
 
 fn restore_startup_prompt<W: Write>(
@@ -58,7 +58,7 @@ fn restore_startup_prompt<W: Write>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupSuggestionMode {
+pub(crate) enum StartupSuggestionMode {
     Hidden,
     ReadOnly,
     Interactive,

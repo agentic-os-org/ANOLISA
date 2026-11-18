@@ -380,6 +380,12 @@ pub(crate) fn run_raw(
     //
     // Abort, SIGSEGV, and other non-unwinding process death remain the separate
     // minimal login launcher's responsibility.
+    // A38: precompute startup suggestions before the relay loop so the first
+    // prompt-boundary observe only renders cheaply under the input_mode lock.
+    crate::runtime::startup::precompute_startup_suggestions(
+        &mut inline_state,
+        &config.work_dir.to_string_lossy(),
+    );
     let relay_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(debug_assertions)]
         maybe_inject_failopen_panic("pre-spawn", &effects);

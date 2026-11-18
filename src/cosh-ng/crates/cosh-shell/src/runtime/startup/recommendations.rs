@@ -5,6 +5,35 @@ mod health;
 const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(100);
 const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
 
+/// A38: precompute startup suggestions before the relay loop starts so the
+/// first prompt-boundary observe only renders cheaply under the input_mode
+/// lock. The expensive reads (health/auth polls, personalization polls, git
+/// context, eligible candidates) run here, before the input thread exists;
+/// render_startup_banner consumes the cache. Side effects (claim, ghost input)
+/// happen here, ahead of any concurrent input-thread mode write.
+pub(crate) fn precompute_startup_suggestions(state: &mut InlineState, cwd: &str) {
+    if state.startup_session.compact || state.rendered_startup_banner || !startup_banner_enabled() {
+        return;
+    }
+    // Poll health non-blocking: wait_ready shortens the live scan and its child
+    // deadline to that window, so a scan that would finish during the Bash
+    // startup overlap is sealed early as a degraded report. The pending
+    // deadline and the final closure stay with ShellReady.
+    state.startup_health.poll_ready();
+    // Poll auth non-blocking: a managed Bash login defers the credential probe
+    // until the startup PATH observer fires after spawn, so waiting here would
+    // burn the full hint window before the shell exists. An unresolved auth (or
+    // not-ready health) is transient: render waits again and prepares against the
+    // resolved ShellReady state (e.g. late unconfigured -> hidden), so do not
+    // freeze it into the cache.
+    state.startup_auth.poll_ready();
+    if state.startup_health.report.is_none() || state.startup_auth.resolved.is_none() {
+        return;
+    }
+    let computed = compute_startup_suggestions(state, cwd);
+    state.startup_suggestions_cache = Some(computed);
+}
+
 pub(crate) fn render_startup_banner<W: Write>(
     events: &[ShellEvent],
     adapter: &AdapterInstance,
@@ -42,7 +71,10 @@ pub(crate) fn render_startup_banner<W: Write>(
     state.startup_auth.wait_ready(STARTUP_AUTH_HINT_WAIT);
     let mut welcome = super::welcome::welcome_model(state, Some((shell_label, cwd)));
     let recommendation_notice = recommendation_notice_required(state);
-    let suggestions = prepare_startup_suggestions(state, cwd);
+    let suggestions = match state.startup_suggestions_cache.take() {
+        Some(cached) if cached.cwd == cwd => commit_startup_suggestions(state, cached),
+        _ => prepare_startup_suggestions(state, cwd),
+    };
     if let Some(markdown) = startup_hook {
         for line in renderer.markdown_text_lines(&markdown) {
             welcome.extra.push(line);
@@ -287,20 +319,31 @@ pub(crate) fn render_startup_health_banner<W: Write>(
     output.flush()
 }
 
-pub(super) struct PreparedStartupSuggestions {
-    pub(super) mode: StartupSuggestionMode,
-    pub(super) candidates: Vec<PlannerCandidate>,
+pub(crate) struct PreparedStartupSuggestions {
+    pub(crate) mode: StartupSuggestionMode,
+    pub(crate) candidates: Vec<PlannerCandidate>,
 }
 
-pub(super) fn prepare_startup_suggestions(
-    state: &mut InlineState,
-    cwd: &str,
-) -> PreparedStartupSuggestions {
+pub(crate) struct ComputedStartup {
+    pub(crate) cwd: String,
+    pub(crate) mode: StartupSuggestionMode,
+    pub(crate) candidates: Vec<PlannerCandidate>,
+    pub(crate) profile_generation: u64,
+}
+
+/// A38: expensive reads and candidate planning without committing the
+/// cwd-sensitive side effects (health claim, ghost input, prompt bindings).
+/// Those are committed at render against the actual ShellReady cwd, so a
+/// precompute whose cwd differs from the shell's first real cwd cannot leak
+/// wrong-directory candidates or suppress the fallback's health claim.
+fn compute_startup_suggestions(state: &mut InlineState, cwd: &str) -> ComputedStartup {
     let Some(report) = state.startup_health.report.clone() else {
         state.personalization.startup_suppressed = true;
-        return PreparedStartupSuggestions {
+        return ComputedStartup {
+            cwd: cwd.to_string(),
             mode: StartupSuggestionMode::Hidden,
             candidates: Vec::new(),
+            profile_generation: 0,
         };
     };
     state.startup_auth.poll_ready();
@@ -315,9 +358,11 @@ pub(super) fn prepare_startup_suggestions(
     };
     if mode == StartupSuggestionMode::Hidden {
         state.personalization.startup_suppressed = true;
-        return PreparedStartupSuggestions {
+        return ComputedStartup {
+            cwd: cwd.to_string(),
             mode,
             candidates: Vec::new(),
+            profile_generation: 0,
         };
     }
     state.personalization.poll_ready();
@@ -377,12 +422,44 @@ pub(super) fn prepare_startup_suggestions(
             }
         }
     }
+    ComputedStartup {
+        cwd: cwd.to_string(),
+        mode,
+        candidates: visible_all,
+        profile_generation,
+    }
+}
+
+/// Commits the cwd-sensitive startup side effects (health claim, prompt
+/// bindings, ghost input) for the actual ShellReady cwd. Kept separate from
+/// compute so the precomputed cache is reused only when its cwd matches.
+fn commit_startup_suggestions(
+    state: &mut InlineState,
+    computed: ComputedStartup,
+) -> PreparedStartupSuggestions {
+    let ComputedStartup {
+        mode,
+        candidates,
+        profile_generation,
+        ..
+    } = computed;
+    let mut visible_all = candidates;
+    let report = state.startup_health.report.clone();
+    let health = report
+        .as_ref()
+        .map(|report| {
+            health::prepare_session(report, state.language, !state.personalization.ai_disabled)
+        })
+        .unwrap_or_else(health::PreparedHealth::empty);
     let displayed_health_ids = visible_all
         .iter()
         .filter(|candidate| candidate.source == CandidateSource::Health)
         .map(|candidate| candidate.candidate_id.clone())
         .collect::<Vec<_>>();
-    let claimed = health::claim_displayed_health(&health, &report, &displayed_health_ids);
+    let claimed = match report.as_ref() {
+        Some(report) => health::claim_displayed_health(&health, report, &displayed_health_ids),
+        None => Vec::new(),
+    };
     if !displayed_health_ids.is_empty() && claimed.len() < displayed_health_ids.len() {
         tracing::warn!(
             requested = displayed_health_ids.len(),
@@ -456,6 +533,14 @@ pub(super) fn prepare_startup_suggestions(
         mode,
         candidates: visible_all,
     }
+}
+
+pub(super) fn prepare_startup_suggestions(
+    state: &mut InlineState,
+    cwd: &str,
+) -> PreparedStartupSuggestions {
+    let computed = compute_startup_suggestions(state, cwd);
+    commit_startup_suggestions(state, computed)
 }
 
 pub(crate) fn record_visible_personal_impressions(state: &mut InlineState, cwd: &str) {
@@ -591,61 +676,5 @@ fn now_hour_bucket() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_disclosure_is_two_short_lines_with_controls() {
-        let lines = recommendation_notice_lines(&I18n::new(Language::ZhCn));
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|line| line.chars().count() <= 70));
-        let text = lines.join("\n");
-        assert!(text.contains("/recommendations off"));
-        assert!(text.contains("/recommendations privacy"));
-    }
-
-    #[test]
-    fn review_regression_first_disclosure_limits_redaction_guarantees() {
-        for (language, required) in [
-            (Language::ZhCn, ["尝试", "常见凭证", "不能保证"]),
-            (
-                Language::EnUs,
-                ["attempt", "common credentials", "cannot guarantee"],
-            ),
-        ] {
-            let text = recommendation_notice_lines(&I18n::new(language)).join("\n");
-            for term in required {
-                assert!(text.contains(term), "missing {term}: {text}");
-            }
-            assert!(text.contains("/recommendations off"));
-            assert!(text.contains("/recommendations privacy"));
-        }
-    }
-    #[test]
-    fn known_unconfigured_auth_hides_suggestions_without_blocking_unknown_auth() {
-        let _guard = crate::diagnostics::test_env::env_guard();
-        let names = ["COSH_SHELL_ISOLATED", "TERM"];
-        let saved = names.map(|name| (name, std::env::var_os(name)));
-        std::env::remove_var("COSH_SHELL_ISOLATED");
-        std::env::set_var("TERM", "xterm-256color");
-        let mut modes = Vec::new();
-        for auth in [None, Some(true), Some(false)] {
-            let mut state = InlineState::default();
-            state.startup_auth.resolved = auth;
-            state.startup_health.report = Some(HealthScanReport::new("auth-gate", 1000));
-            let prepared = prepare_startup_suggestions(&mut state, "/tmp");
-            modes.push(prepared.mode);
-            assert!(state.startup_health.report.is_some());
-        }
-        for (name, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-        assert_ne!(modes[0], StartupSuggestionMode::Hidden);
-        assert_ne!(modes[1], StartupSuggestionMode::Hidden);
-        assert_eq!(modes[2], StartupSuggestionMode::Hidden);
-    }
-}
+#[path = "recommendations_tests.rs"]
+mod tests;
