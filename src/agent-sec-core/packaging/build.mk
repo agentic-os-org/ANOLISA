@@ -158,6 +158,12 @@ stage-gateway: ## Stage static secret gateway assets without installing mitmprox
 build-all-v2: $(call component_build_targets,build-cli-v2) stage-gateway ## Build all components with the V2 Rust CLI/daemon
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
+.PHONY: build-core
+build-core: build-sandbox build-cli-v2 stage-gateway stage-skills stage-component-manifest ## Prepare V2 core and skills without framework plugins
+
+.PHONY: build-core-with-cosh
+build-core-with-cosh: build-core stage-cosh-extension ## Prepare V2 core, skills and the Cosh extension
+
 .PHONY: build-all-v2-offline
 build-all-v2-offline: OFFLINE_BUILD := 1
 build-all-v2-offline: $(call component_build_targets,build-cli-v2) stage-gateway ## Build V2 components from vendored dependencies only

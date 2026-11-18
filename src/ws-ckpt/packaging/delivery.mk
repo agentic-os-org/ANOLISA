@@ -80,7 +80,7 @@ ifeq ($(DELIVERY_PROFILE),legacy-anolisa)
 DELIVERY_CORE_WRITE_TARGETS += $(call delivery-quote,file:$(DELIVERY_COMPONENTDIR)/component.toml)
 endif
 
-.PHONY: install-core install-plugins install-skills delivery-check-core-install \
+.PHONY: install-core install-plugins install-skills install-core-and-skills delivery-check-core-install \
         delivery-check-plugins-install delivery-check-skills-install delivery-check-core-inputs \
         delivery-check-plugins-inputs delivery-check-skills-inputs
 
@@ -135,6 +135,10 @@ install-plugins: delivery-check-plugins-install delivery-check-plugins-inputs ##
 
 install-skills: delivery-check-skills-install delivery-check-skills-inputs ## Install the bundled checkpoint skill without a binary build
 	$(MAKE) -C $(call delivery-quote,$(DELIVERY_ROOT)) install-skills-files $(DELIVERY_INSTALL_ARGS)
+
+install-core-and-skills: delivery-check-core-install delivery-check-skills-install delivery-check-core-inputs delivery-check-skills-inputs ## Install core and skills after validating both groups
+	$(MAKE) -C $(call delivery-quote,$(DELIVERY_ROOT)) install-core install-skills $(DELIVERY_INSTALL_ARGS) \
+		$(call delivery-quote,SKILLDIR=$(DELIVERY_SKILLDIR)) $(call delivery-quote,SECOND_SKILLDIR=$(DELIVERY_SECOND_SKILLDIR))
 
 install: delivery-check-install delivery-check-inputs ## Install all prebuilt groups without building or activation
 	$(MAKE) -C $(call delivery-quote,$(DELIVERY_ROOT)) install-core install-plugins install-skills $(DELIVERY_INSTALL_ARGS) \

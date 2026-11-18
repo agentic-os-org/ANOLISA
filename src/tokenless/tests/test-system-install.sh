@@ -413,7 +413,54 @@ env -u AWPRJ make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" DESTDIR="$TMP/
 test -x "$TMP/core-default/usr/bin/tokenless"
 test ! -e "$TMP/core-default/usr/share/anolisa/adapters/tokenless"
 test ! -e "$TMP/core-default/usr/share/anolisa/extensions/tokenless"
+mv "$ADAPTERS/dsh/dist/index.js" "$TMP/group-dsh.saved"
+mv "$ADAPTERS/manifest.json" "$TMP/group-manifest.saved"
+env -u AWPRJ make -s -C "$SOURCE" install-core-with-cosh BIN_DIR="$TMP/bin" DESTDIR="$TMP/core-with-cosh"
+test -x "$TMP/core-with-cosh/usr/bin/tokenless"
+test ! -e "$TMP/core-with-cosh/usr/share/anolisa/adapters/tokenless"
+cosh_extension="$TMP/core-with-cosh/usr/share/anolisa/extensions/tokenless"
+cmp "$ADAPTERS/common/cosh-extension.json" "$cosh_extension/cosh-extension.json"
+test -x "$cosh_extension/hooks/rewrite_hook.py"
+test "$(cat "$cosh_extension/.tokenless-owner")" = source-install:tokenless
+env -u AWPRJ make -s -C "$SOURCE" uninstall DESTDIR="$TMP/core-with-cosh"
+test ! -e "$cosh_extension"
+
+env -u AWPRJ make -s -C "$SOURCE" install-core-with-cosh INSTALL_PROFILE=user PREFIX="$TMP/user-prefix" \
+    BIN_DIR="$TMP/bin" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data"
+test -x "$TMP/user-prefix/bin/tokenless"
+test -f "$TMP/user-data/anolisa/extensions/tokenless/cosh-extension.json"
+test ! -e "$TMP/user-data/anolisa/adapters/tokenless"
+env -u AWPRJ make -s -C "$SOURCE" uninstall INSTALL_PROFILE=user PREFIX="$TMP/user-prefix" \
+    HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data"
+
+mv "$TMP/group-manifest.saved" "$ADAPTERS/manifest.json"
+mv "$TMP/group-dsh.saved" "$ADAPTERS/dsh/dist/index.js"
 mv "$TMP/group-plugin.saved" "$ADAPTERS/openclaw/dist/index.js"
+
+check_missing_input() {
+    local target="$1" relative="$2" diagnostic="$3"
+    local stage="$TMP/missing-input" input="$ADAPTERS/$relative"
+    mv "$input" "$TMP/missing-input.saved"
+    if env -u AWPRJ make -s -C "$SOURCE" "$target" BIN_DIR="$TMP/bin" \
+        DESTDIR="$stage" >"$TMP/missing-input.log" 2>&1; then
+        printf 'ERROR: %s accepted missing input: %s\n' "$target" "$relative" >&2
+        exit 1
+    fi
+    grep -Fq "$diagnostic: $input" "$TMP/missing-input.log"
+    test ! -e "$stage"
+    mv "$TMP/missing-input.saved" "$input"
+}
+
+for relative in common/cosh-extension.json cosh-ng/hook_adapter.py; do
+    check_missing_input install-core-with-cosh "$relative" 'missing prebuilt plugin input'
+done
+for relative in common/hooks common/commands; do
+    check_missing_input install-core-with-cosh "$relative" 'missing plugin resource directory'
+done
+for relative in manifest.json dsh/dist/index.js; do
+    check_missing_input install-plugins "$relative" 'missing prebuilt plugin input'
+done
+
 mv "$TMP/bin" "$TMP/group-binaries.saved"
 make -s -C "$SOURCE" install-plugins BIN_DIR="$TMP/bin" DESTDIR="$TMP/plugins-only"
 test -f "$TMP/plugins-only/usr/share/tokenless/adapters/openclaw/dist/index.js"
@@ -423,6 +470,8 @@ test ! -e "$TMP/plugins-only/usr/libexec"
 mv "$TMP/group-binaries.saved" "$TMP/bin"
 make -s -j4 -C "$SOURCE" install-core install-plugins BIN_DIR="$TMP/bin" DESTDIR="$TMP/group-union" AWPRJ=example
 make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/group-all" AWPRJ=example
+# Upgrading the core and Cosh extension must preserve the existing adapter inventory.
+make -s -C "$SOURCE" install-core-with-cosh BIN_DIR="$TMP/bin" DESTDIR="$TMP/group-union" AWPRJ=example
 python3 - "$TMP/group-union" "$TMP/group-all" <<'PYGROUP'
 from pathlib import Path
 import sys

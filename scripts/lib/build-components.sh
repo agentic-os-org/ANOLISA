@@ -48,3 +48,18 @@ component_dir() {
         *) printf '%s/src/%s\n' "$PROJECT_ROOT" "$1" ;;
     esac
 }
+
+component_selected() {
+    local selected
+    for selected in "${COMPONENTS[@]}"; do
+        if [[ "$selected" == "$1" ]]; then return 0; fi
+    done
+    return 1
+}
+
+skip_component_plugins() {
+    case "$1" in
+        agent-memory|agent-sec-core|agentsight|tokenless|ws-ckpt) component_selected aw ;;
+        *) return 1 ;;
+    esac
+}
