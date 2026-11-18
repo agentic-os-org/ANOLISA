@@ -806,6 +806,7 @@ impl Http2Stream {
 struct DecodedHeadersPair {
     request: Option<Vec<(String, String)>>,
     response: Option<Vec<(String, String)>>,
+    pending_end_stream: Option<StreamDirection>,
 }
 
 impl DecodedHeadersPair {
@@ -972,7 +973,22 @@ impl Http2StreamAggregator {
 
         // Handle CONTINUATION frames: buffer until END_HEADERS
         if frame.frame_type == Http2FrameType::Continuation {
+            let had_continuation = self.continuation_buffers.contains_key(&stream_id);
             self.handle_continuation_frame(&frame, stream_id, connection_id, direction);
+            if had_continuation
+                && !self.continuation_buffers.contains_key(&stream_id)
+                && let Some(end_dir) = self
+                    .decoded_headers_store
+                    .get_mut(&stream_id)
+                    .and_then(|pair| pair.pending_end_stream.take())
+            {
+                self.complete_deferred_end_stream(
+                    stream_id,
+                    end_dir,
+                    frame.source_event.timestamp_ns,
+                    completed,
+                );
+            }
             return;
         }
 
@@ -992,6 +1008,16 @@ impl Http2StreamAggregator {
                             direction,
                         },
                     );
+                    if frame.has_end_stream() {
+                        // Per RFC 7540 §6.2 & §6.10, END_STREAM rides the
+                        // HEADERS frame while END_HEADERS waits for the final
+                        // CONTINUATION frame; defer closing until that block
+                        // finishes decoding.
+                        self.decoded_headers_store
+                            .entry(stream_id)
+                            .or_default()
+                            .pending_end_stream = Some(direction);
+                    }
                 } else {
                     log::warn!(
                         "HEADERS block for stream {stream_id:?} exceeds \
@@ -1469,13 +1495,67 @@ impl Http2StreamAggregator {
         }
     }
 
-    /// Process a single frame within the context of a stream state
-    ///
-    /// The receiver is part of the state-handler shape (like `stream_from_state`)
-    /// and stays unused except for the `WaitingRequestData` re-entry, where a
-    /// response frame that beat the request's END_STREAM is handed to the
-    /// `RequestComplete` arm instead of being dropped.
-    #[allow(clippy::only_used_in_recursion)]
+    /// Apply a deferred `END_STREAM` once the trailing `CONTINUATION` sequence finishes.
+    fn complete_deferred_end_stream(
+        &mut self,
+        stream_id: StreamId,
+        direction: StreamDirection,
+        end_timestamp_ns: u64,
+        completed: &mut Vec<Http2Stream>,
+    ) {
+        let Some(state) = self.streams.pop(&stream_id) else {
+            return;
+        };
+        match (state, direction) {
+            (
+                Http2StreamState::WaitingRequestData {
+                    request_headers,
+                    request_data_frames,
+                },
+                StreamDirection::Request,
+            ) => {
+                self.insert_stream_state(
+                    stream_id,
+                    Http2StreamState::RequestComplete {
+                        request_headers,
+                        request_data_frames,
+                    },
+                );
+            }
+            (
+                Http2StreamState::ReceivingResponse {
+                    request_headers,
+                    request_data_frames,
+                    response_headers,
+                    response_data_frames,
+                },
+                StreamDirection::Response,
+            ) => {
+                let mut stream = Http2Stream::new(
+                    stream_id,
+                    request_headers
+                        .as_ref()
+                        .map(|h| h.source_event.timestamp_ns)
+                        .unwrap_or(end_timestamp_ns),
+                );
+                stream.request_headers = request_headers;
+                stream.request_data_frames = request_data_frames;
+                stream.request_complete = true;
+                stream.response_headers = response_headers;
+                stream.response_data_frames = response_data_frames;
+                stream.response_complete = true;
+                stream.end_timestamp_ns = end_timestamp_ns;
+                let stream = self.finalize_completed(stream_id, stream);
+                self.closed_streams.pop(&stream_id);
+                completed.push(stream);
+            }
+            (other, _) => {
+                self.insert_stream_state(stream_id, other);
+            }
+        }
+    }
+
+    /// Process a single frame within the context of a stream state.
     fn process_frame_in_state(
         &self,
         state: Http2StreamState,
@@ -1488,6 +1568,8 @@ impl Http2StreamAggregator {
             state.state_name(),
             stream_id
         );
+        let header_ended_stream = frame.has_end_stream()
+            && (frame.has_end_headers() || !self.continuation_buffers.contains_key(stream_id));
         match state {
             Http2StreamState::WaitingRequestData {
                 mut request_headers,
@@ -1501,7 +1583,7 @@ impl Http2StreamAggregator {
                         if request_headers.is_none() {
                             request_headers = Some(frame.clone());
                         }
-                        if frame.has_end_stream() {
+                        if header_ended_stream {
                             // Request is complete (no body)
                             return Http2StreamState::RequestComplete {
                                 request_headers,
@@ -1561,7 +1643,7 @@ impl Http2StreamAggregator {
 
                     if frame.is_headers() {
                         response_headers = Some(frame.clone());
-                        if frame.has_end_stream() {
+                        if header_ended_stream {
                             // Response is complete (no body)
                             let mut stream = Http2Stream::new(
                                 *stream_id,
@@ -1634,7 +1716,7 @@ impl Http2StreamAggregator {
                         if response_headers.is_none() {
                             response_headers = Some(frame.clone());
                         }
-                        if frame.has_end_stream() {
+                        if header_ended_stream {
                             // Response is complete
                             let mut stream = Http2Stream::new(
                                 *stream_id,
@@ -2597,6 +2679,7 @@ mod tests {
             DecodedHeadersPair {
                 request: Some(vec![("x".into(), "abc".into())]),
                 response: Some(vec![("y".into(), "ok".into())]),
+                pending_end_stream: None,
             },
         );
         aggregator.refresh_retained(stream_id);
@@ -3818,5 +3901,44 @@ mod tests {
             aggregator.metrics().connection_cache_bytes,
             HPACK_TABLE_SIZE_CAP
         );
+    }
+
+    #[test]
+    fn continuation_overflow_still_completes_deferred_end_stream() {
+        let mut aggregator = Http2StreamAggregator::new();
+        let req = hpack::Encoder::new().encode([
+            (b":method".as_slice(), b"GET".as_slice()),
+            (b":path".as_slice(), b"/fixture".as_slice()),
+        ]);
+        let resp = hpack::Encoder::new().encode([(b":status".as_slice(), b"204".as_slice())]);
+
+        // Response-only split HEADERS before any request head stays in WaitingRequestData.
+        assert!(
+            aggregator
+                .process_frames(vec![
+                    create_test_frame(9, 0x01, 0x01, resp.clone(), create_test_event(7, 9, 0, 10)),
+                    create_test_frame(9, 0x09, 0x04, Vec::new(), create_test_event(7, 9, 0, 20)),
+                ])
+                .is_empty()
+        );
+
+        assert!(
+            aggregator
+                .process_frames(vec![
+                    create_test_frame(1, 0x01, 0x05, req, create_test_event(7, 1, 1, 100)),
+                    create_test_frame(1, 0x01, 0x01, resp, create_test_event(7, 1, 0, 200)),
+                ])
+                .is_empty()
+        );
+        let completed = aggregator.process_frames(vec![create_test_frame(
+            1,
+            0x09,
+            0x04,
+            vec![0x88; MAX_CONTINUATION_BUFFER + 1],
+            create_test_event(7, 1, 0, 300),
+        )]);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].end_timestamp_ns, 300);
+        assert!(completed[0].decoded_response_headers.is_none());
     }
 }
