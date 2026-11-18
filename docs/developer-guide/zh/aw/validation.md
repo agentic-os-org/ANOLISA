@@ -49,7 +49,7 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home "$AW_BIN" run \
 阅读 Hermes 的 [profile 要求](agents/hermes.md)后，安装并启动：
 
 ```bash
-"$AW_BIN" install --config "$AW_CONFIG" --agent hermes \
+"$AW_BIN" connect --config "$AW_CONFIG" --agent hermes \
   --native-profile /absolute/hermes-profile
 "$AW_BIN" run --config "$AW_CONFIG" --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -77,7 +77,7 @@ printf 'Use your shell tool exactly once to run `printf AW_DENY_TEST > "%s/%s.bl
 ```bash
 cat "$AW_DEMO/workspace/$AW_TARGET.allowed"
 test ! -e "$AW_DEMO/workspace/$AW_TARGET.blocked"
-"$AW_BIN" status --config "$AW_CONFIG"
+"$AW_BIN" service status --config "$AW_CONFIG"
 ls "$AW_DEMO/state/journal"
 ```
 
@@ -115,7 +115,7 @@ Qoder 仅报告成功工具，不应要求为每次被拒绝的调用补造 afte
 进程退出后，再停止共享 AW 服务：
 
 ```bash
-"$AW_BIN" stop --config "$AW_CONFIG"
+"$AW_BIN" service stop --config "$AW_CONFIG"
 ```
 
 停止响应只确认收到请求；等待记录的 daemon PID 退出且 `aw.sock` 消失。

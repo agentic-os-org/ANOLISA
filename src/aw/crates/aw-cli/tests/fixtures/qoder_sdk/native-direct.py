@@ -112,6 +112,7 @@ with tempfile.TemporaryDirectory(prefix="aw-sdk-direct-") as temporary:
             "service",
             [
                 str(args.aw.resolve()),
+                "service",
                 "serve",
                 "--config",
                 str(config),
@@ -132,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix="aw-sdk-direct-") as temporary:
         ), "direct/prewarm native application failed; inspect native-app.log"
         status = json.loads(
             subprocess.check_output(
-                [str(args.aw.resolve()), "status", "--config", str(config)],
+                [str(args.aw.resolve()), "service", "status", "--config", str(config)],
                 cwd=case / "work",
                 env=environment,
                 text=True,

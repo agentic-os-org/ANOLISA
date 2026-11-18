@@ -93,7 +93,7 @@ def main() -> None:
         path.write_text(json.dumps(config))
         (args.output / "config.json").write_text(json.dumps(config, indent=2))
         logs = (args.output / "serve.log").open("w")
-        cmd = [str(aw), "serve", "--config", str(path), "--state-dir", str(state)]
+        cmd = [str(aw), "service", "serve", "--config", str(path), "--state-dir", str(state)]
         proc = subprocess.Popen(cmd, cwd=root, stdout=logs, stderr=logs, start_new_session=True)
         record = {"command": cmd, "cwd": str(root), "pid": proc.pid,
                   "stop": f"kill -TERM -- -{proc.pid}", "lifetime_seconds": 300}
@@ -136,7 +136,7 @@ def main() -> None:
             # The process scope closes at worker exit: no binding, event or
             # correlation may remain on the service.
             status = subprocess.run(
-                [str(aw), "status", "--config", str(path)],
+                [str(aw), "service", "status", "--config", str(path)],
                 capture_output=True, text=True, timeout=10,
             )
             assert status.returncode == 0, status.stderr[-2000:]
@@ -152,7 +152,7 @@ def main() -> None:
             )
         finally:
             try:
-                subprocess.run([str(aw), "stop", "--socket", str(state / "aw.sock")],
+                subprocess.run([str(aw), "service", "stop", "--socket", str(state / "aw.sock")],
                                timeout=5, capture_output=True)
                 proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, FileNotFoundError):

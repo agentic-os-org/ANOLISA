@@ -253,7 +253,7 @@ export async function run(session) {{
             result:{{content:[{{type:'text',text:'okay'}}],details:{{}}}},isError:false }};
         const directive = await session.agent.beforeToolCall(context);
         if ((directive?.block === true) !== (i < 40)) throw Error('wrong denial');
-        const status = spawnSync(config.executable, ['status','--socket',binding.socket], {{encoding:'utf8',timeout:2000}});
+        const status = spawnSync(config.executable, ['service','status','--socket',binding.socket], {{encoding:'utf8',timeout:2000}});
         if (status.status !== 0 || (i < 40 && JSON.parse(status.stdout).result.events !== 0)) throw Error('live event leaked at '+i+': '+status.status+' '+status.stdout+' '+status.stderr);
         if (i === 40) await session.agent.afterToolCall(context);
     }}

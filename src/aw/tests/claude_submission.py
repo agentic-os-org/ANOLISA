@@ -71,7 +71,7 @@ def main():
                            "SUBMISSION_CONFIG": str(case / "aw.json")}
                     run = Processes(case, evidence, env)
                     try:
-                        run.start("service", [binaries / "aw", "serve", "--config", case / "aw.json",
+                        run.start("service", [binaries / "aw", "service", "serve", "--config", case / "aw.json",
                                               "--state-dir", case / "s"])
                         await_condition(lambda: (case / "s/aw.sock").exists(), 10, "service startup")
                         child = run.start("worker", [binaries / "aw", "run", "--config",
@@ -80,7 +80,7 @@ def main():
                         run.stop(child)
                         result = json.loads((work / "result.json").read_text())
                         current = json.loads(subprocess.check_output([
-                            binaries / "aw", "status", "--config", case / "aw.json",
+                            binaries / "aw", "service", "status", "--config", case / "aw.json",
                         ], env=env, timeout=5))["result"]
                         assert current["bindings"] == current["events"] == 0, current
                         assert current["audit_healthy"], current

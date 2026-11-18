@@ -279,8 +279,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         selection = ("--config", str(self.config)) if configuration else ("--socket", self.endpoint)
         process = await asyncio.create_subprocess_exec(
             BINARY,
-            "instance",
-            action,
+            *(("instance", action) if action == "list" else (action,)),
             *selection,
             *args,
             env=dict(os.environ, XDG_RUNTIME_DIR=str(self.root)),
@@ -320,7 +319,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         instance.listen()
         for _ in range(2):
             await self.start()
-            await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+            await self.cli("connect", "--sdk-pid", str(os.getpid()), configuration=True)
             self.assertEqual(instance.state, "ready")
             self.stop()
             await self.until(lambda: instance.state != "ready")
@@ -329,7 +328,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         await self.start()
         instance = self.instance(reconnect_ms=100)
         instance.listen()
-        await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+        await self.cli("connect", "--sdk-pid", str(os.getpid()), configuration=True)
         identity = instance.connection["identity"]
         original = self.config.read_bytes()
         edited = json.loads(original)
@@ -338,11 +337,11 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
             with self.subTest(contents=contents):
                 self.config.write_bytes(contents)
                 await self.cli(
-                    "detach", "--sdk-instance", instance.application_id, configuration=True
+                    "disconnect", "--sdk-instance", instance.application_id, configuration=True
                 )
                 self.assertEqual(instance.state, "detached")
                 with self.assertRaisesRegex(RuntimeError, "configuration.*does not match"):
-                    await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+                    await self.cli("connect", "--sdk-pid", str(os.getpid()), configuration=True)
                 self.assertEqual(instance.state, "detached")
                 self.assertEqual(
                     (await rpc(self.endpoint, None, {"method": "status"}, 500))["result"][
@@ -351,7 +350,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
                     0,
                 )
                 self.config.write_bytes(original)
-                await self.cli("attach", "--sdk-pid", str(os.getpid()), configuration=True)
+                await self.cli("connect", "--sdk-pid", str(os.getpid()), configuration=True)
                 self.assertEqual(instance.connection["identity"], identity)
                 self.assertEqual(instance.state, "ready")
 
@@ -362,9 +361,9 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         second.listen()
         await self.until(lambda: first.application_id and second.application_id)
         with self.assertRaisesRegex(RuntimeError, "sdk_control_ambiguous_process"):
-            await self.cli("attach", "--sdk-pid", str(os.getpid()))
+            await self.cli("connect", "--sdk-pid", str(os.getpid()))
         await second.stop()
-        result = await self.cli("attach", "--sdk-pid", str(os.getpid()))
+        result = await self.cli("connect", "--sdk-pid", str(os.getpid()))
         self.assertEqual(result["result"]["state"], "completed")
         self.assertEqual(first.state, "ready")
 
@@ -392,19 +391,19 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
             while len((await self.cli("list"))["applications"]) != 2:
                 await asyncio.sleep(0.01)
         original_id = first.application_id
-        await self.cli("attach", "--sdk-instance", first.application_id)
+        await self.cli("connect", "--sdk-instance", first.application_id)
         await self.until(lambda: first.state == "ready")
         self.assertEqual(second.state, "detached")
         self.assertTrue(absent.fallback)
         task = await first.task()
         with self.assertRaisesRegex(RuntimeError, "sdk_control_busy"):
-            await self.cli("detach", "--sdk-instance", first.application_id)
+            await self.cli("disconnect", "--sdk-instance", first.application_id)
         self.assertEqual(first.state, "ready")
         self.assertFalse(task.fallback)
         await task.close()
-        await self.cli("detach", "--sdk-instance", first.application_id)
+        await self.cli("disconnect", "--sdk-instance", first.application_id)
         await self.until(lambda: first.state == "detached")
-        await self.cli("attach", "--sdk-instance", second.application_id)
+        await self.cli("connect", "--sdk-instance", second.application_id)
         await self.until(lambda: second.state == "ready")
         retained = await second.task()
         self.stop()
@@ -414,7 +413,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(retained.fallback)
         self.assertEqual(first.state, "detached")
         with self.assertRaises(RuntimeError):
-            await self.cli("attach", "--sdk-instance", original_id)
+            await self.cli("connect", "--sdk-instance", original_id)
         await first.close()
         await second.close()
         self.assertEqual((await self.cli("list"))["applications"], [])
@@ -432,7 +431,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         instance.listen()
         await self.until(lambda: instance.application_id)
         request = asyncio.create_task(
-            self.cli("attach", "--sdk-instance", instance.application_id, "--timeout-ms", "150")
+            self.cli("connect", "--sdk-instance", instance.application_id, "--timeout-ms", "150")
         )
         try:
             async with asyncio.timeout(5):
@@ -462,7 +461,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await instance.task()).fallback)
         status = await rpc(self.endpoint, None, {"method": "status"}, 500)
         self.assertEqual(status["result"]["instances"], [])
-        await self.cli("attach", "--sdk-instance", instance.application_id)
+        await self.cli("connect", "--sdk-instance", instance.application_id)
         await self.until(lambda: instance.state == "ready")
 
     async def test_explicit_error_is_not_fallback(self) -> None:

@@ -112,7 +112,7 @@ def case(args, mode):
         base = [str(args.aw), "run", "--config", str(config), "--agent", "codex", "--",
                 "--ephemeral", "--json", "--skip-git-repo-check"]
         try:
-            run([str(args.aw), "install", "--config", str(config), "--agent", "codex"], workspace, environment, evidence)
+            run([str(args.aw), "connect", "--config", str(config), "--agent", "codex"], workspace, environment, evidence)
             hooks = home / "hooks.json"
             installed = hooks.read_bytes()
             if mode == "native-deny":
@@ -231,13 +231,13 @@ def case(args, mode):
                 if mode == "retry":
                     assert len({r["event"]["tool"]["call_id"] for r in events if "tool" in r["event"]}) == 2
                     assert "Retry with" in outputs and "blocked" in outputs.lower(), outputs
-                status = json.loads(run([str(args.aw), "status", "--config", str(config)], workspace, environment, evidence))["result"]
+                status = json.loads(run([str(args.aw), "service", "status", "--config", str(config)], workspace, environment, evidence))["result"]
                 assert status["bindings"] == 0 and status["events"] == 0, status
                 assert not list(state.glob("launch-*"))
         finally:
             try:
                 if (state / "aw.sock").exists():
-                    run([str(args.aw), "stop", "--config", str(config)], workspace, environment, evidence)
+                    run([str(args.aw), "service", "stop", "--config", str(config)], workspace, environment, evidence)
                     deadline = time.monotonic() + 5
                     while (state / "aw.sock").exists() and time.monotonic() < deadline:
                         time.sleep(0.02)

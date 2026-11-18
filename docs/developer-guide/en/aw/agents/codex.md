@@ -14,16 +14,16 @@ Install Codex and sign in separately. From the directory where
 `aw.yaml` resides, run:
 
 ```bash
-aw validate --config aw.yaml
-aw install --config aw.yaml --agent codex
+aw config validate --config aw.yaml
+aw connect --config aw.yaml --agent codex
 codex
 # In Codex, run /hooks and trust the three exact AW command definitions; then exit.
 aw run --config aw.yaml --agent codex
-aw status --config aw.yaml
-aw stop --config aw.yaml
+aw service status --config aw.yaml
+aw service stop --config aw.yaml
 ```
 
-`aw install` adds stable definitions to `CODEX_HOME/hooks.json` (or
+`aw connect` adds stable definitions to `CODEX_HOME/hooks.json` (or
 `~/.codex/hooks.json`) and preserves existing Hooks. It does not grant trust.
 `aw run` records the reported Codex version and checks the enabled Hook inventory, trust, and the selected
 AW policy before starting a session. A direct Codex launch leaves the installed

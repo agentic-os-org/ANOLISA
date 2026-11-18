@@ -11,7 +11,7 @@ const registration = JSON.parse(prepared.stdout);
 assert.equal(typeof registration.instance_id, "string");
 try {
   const inspected = spawnSync(process.env.AW_TEST_EXECUTABLE,
-    ["status", "--config", process.env.AW_TEST_CONFIG],
+    ["service", "status", "--config", process.env.AW_TEST_CONFIG],
     { encoding: "utf8", timeout: 10000 });
   assert.equal(inspected.status, 0, inspected.stderr);
   const pending = JSON.parse(inspected.stdout).result.instances.find(

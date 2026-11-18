@@ -3,7 +3,7 @@
 [中文版](../../zh/adapters/codex-adapter.md)
 
 The `codex` Adapter uses `aw run` to bind a local Codex process to the shared
-Service and Provider chain. `aw install` writes one stable AW command Hook for
+Service and Provider chain. `aw connect` writes one stable AW command Hook for
 each of UserPromptSubmit, PreToolUse and PostToolUse. Codex owns session, model,
 sandbox, approval and native Hook scheduling. AW owns launch admission, ordered
 Provider steps within each AW command, and the resulting allow/block decision.

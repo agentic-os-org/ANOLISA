@@ -125,7 +125,7 @@ Hermes 从 profile 目录读取 `config.yaml`。该版本没有临时配置覆�
 且只加载已启用的插件，因此 AW 提供显式安装步骤：
 
 ```bash
-aw install --config aw.yaml --agent hermes --native-profile /absolute/profile
+aw connect --config aw.yaml --agent hermes --native-profile /absolute/profile
 aw run --config aw.yaml --agent hermes --native-profile /absolute/profile -- chat
 ```
 
@@ -345,7 +345,7 @@ before/after 命令、profile 与原生 YAML 值保留、回调环境、实例�
 
 ## 回退
 
-先停止会话与配置写入者，再恢复 `aw install` 返回的文件。检查并合并
+先停止会话与配置写入者，再恢复 `aw connect` 返回的文件。检查并合并
 `displaced` 中的并发或迟到修改；`backup` 保存最初的原始字节。将选定文件
 恢复到同一 profile 的 `config.yaml`，删除 AW 创建的 `plugins/aw-native-hooks`
 和 `.aw-install.lock`。两个恢复文件按用户的保留策略处理。普通 Hermes 启动也可以

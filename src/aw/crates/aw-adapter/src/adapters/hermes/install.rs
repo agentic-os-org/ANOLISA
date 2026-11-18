@@ -152,7 +152,7 @@ fn check_plugin(plugin: &Path) -> Result<()> {
     directory(plugin)?;
     let mismatch = |reason: String| {
         format!(
-            "refusing to use or overwrite an unusable Hermes aw-native-hooks plugin at {}: {reason}; stop Hermes sessions, move this directory to a backup outside the profile's plugins directory, then rerun aw install",
+            "refusing to use or overwrite an unusable Hermes aw-native-hooks plugin at {}: {reason}; stop Hermes sessions, move this directory to a backup outside the profile's plugins directory, then rerun aw connect",
             plugin.display()
         )
     };

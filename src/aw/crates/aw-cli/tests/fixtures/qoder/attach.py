@@ -90,7 +90,7 @@ def execute(args):
         def control(*argv):
             return json.loads(docker("exec", "--user", f"{os.getuid()}:{os.getgid()}", name, "/aw", *argv))
         def status():
-            return control("status", "--config", "/probe/aw.json")["result"]
+            return control("service", "status", "--config", "/probe/aw.json")["result"]
         try:
             child = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
             os.close(slave)
@@ -143,7 +143,7 @@ def execute(args):
             }}
             (root / "aw.json").write_text(json.dumps(document))
             started = time.monotonic()
-            attached = control("install", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid)
+            attached = control("connect", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid)
             report["attach_ms"] = (time.monotonic() - started) * 1000
             assert attached["attached"] and status()["instances"][0]["ready"]
             assert not (root / "hook-seen").exists()
@@ -162,9 +162,8 @@ def execute(args):
                 drain(.05)
                 if (root / "hook-seen").exists() and not busy_checked:
                     started = time.monotonic()
-                    removal = subprocess.run(["docker", "exec", name, "/aw", "agent", "connect",
-                        "--config", "/probe/aw.json", "--agent", "native", "--pid", str(native_pid),
-                        "--remove"], env=controls, capture_output=True, text=True, timeout=10)
+                    removal = subprocess.run(["docker", "exec", name, "/aw", "disconnect",
+                        "--config", "/probe/aw.json", "--agent", "native", "--pid", str(native_pid)], env=controls, capture_output=True, text=True, timeout=10)
                     report["busy_detach_ms"] = (time.monotonic() - started) * 1000
                     assert removal.returncode != 0 and "busy" in removal.stderr, removal.stderr
                     assert (home / ".qoder/.aw-attachment.json").exists()
@@ -200,7 +199,7 @@ def execute(args):
             temporary.write_text(json.dumps(original))
             temporary.chmod(0o600)
             temporary.replace(settings)
-            detached = control("install", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid, "--remove")
+            detached = control("disconnect", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid)
             assert detached["detached"] and status()["bindings"] == 0
             assert not (home / ".qoder/.aw-attachment.json").exists()
             assert not list((root / "state").glob("attach-*"))
@@ -213,12 +212,12 @@ def execute(args):
             assert Path(f"/proc/{host_pid}/stat").read_text().rsplit(")", 1)[1].split()[19] == identity
             assert child.poll() is None
             report["cases"].append({"case": "detach-preserves-process-and-edits", "passed": True})
-            control("install", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid)
-            control("install", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid, "--remove")
+            control("connect", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid)
+            control("disconnect", "--config", "/probe/aw.json", "--agent", "native", "--pid", native_pid)
             report["cases"].append({"case": "reattach", "passed": True})
             report.update(passed=True, same_process=True, instance_released=True,
                           binary_sha256=hashlib.sha256((args.bin / "aw").read_bytes()).hexdigest())
-            control("stop", "--config", "/probe/aw.json")
+            control("service", "stop", "--config", "/probe/aw.json")
         finally:
             docker("rm", "-f", name)
             if child is not None:

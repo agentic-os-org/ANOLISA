@@ -16,7 +16,7 @@ registration = json.loads(prepared.stdout)
 assert isinstance(registration["instance_id"], str)
 try:
     status = json.loads(subprocess.check_output(
-        [os.environ["AW_TEST_EXECUTABLE"], "status", "--config", os.environ["AW_TEST_CONFIG"]],
+        [os.environ["AW_TEST_EXECUTABLE"], "service", "status", "--config", os.environ["AW_TEST_CONFIG"]],
         text=True, timeout=10,
     ))
     pending = next(item for item in status["result"]["instances"]

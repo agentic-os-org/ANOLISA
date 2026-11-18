@@ -87,7 +87,7 @@ async def worker() -> None:
 
     def status() -> dict[str, Any]:
         return json.loads(
-            subprocess.check_output([aw, "status", "--socket", str(socket)], timeout=3)
+            subprocess.check_output([aw, "service", "status", "--socket", str(socket)], timeout=3)
         )["result"]
 
     def turn(mode: str) -> Any:
@@ -522,7 +522,7 @@ def main() -> None:
         path.write_text(json.dumps(config))
         env = {**os.environ, "AW_TEST_ROOT": str(root), "AW_TEST_BINARY": aw}
         with owned(
-            [aw, "serve", "--config", str(path), "--state-dir", str(state)],
+            [aw, "service", "serve", "--config", str(path), "--state-dir", str(state)],
             root,
             output,
             "serve",
@@ -548,7 +548,7 @@ def main() -> None:
                     assert child.returncode == 0, (output / "worker.stderr").read_text()
                 status = json.loads(
                     subprocess.check_output(
-                        [aw, "status", "--socket", str(state / "aw.sock")], timeout=3
+                        [aw, "service", "status", "--socket", str(state / "aw.sock")], timeout=3
                     )
                 )["result"]
                 assert status["bindings"] == 0 and status["events"] == 0, status
@@ -585,7 +585,7 @@ def main() -> None:
                 if (root / "callbacks.jsonl").exists():
                     (output / "callbacks.jsonl").write_text((root / "callbacks.jsonl").read_text())
                 subprocess.run(
-                    [aw, "stop", "--socket", str(state / "aw.sock")], timeout=5, capture_output=True
+                    [aw, "service", "stop", "--socket", str(state / "aw.sock")], timeout=5, capture_output=True
                 )
                 service.wait(timeout=5)
     print(

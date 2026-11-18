@@ -22,9 +22,9 @@
 4. 按[Agent 指南](../native-agents.md)准备 `current.yaml`，运行 connect。成功返回实例、策略版本和进程身份后再派发。
 
 ```bash
-aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
+aw connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
 aw update --config current.yaml --agent TARGET
-aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
+aw disconnect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
 ```
 
 上面三条分别是接入、[空闲更新](policy-updates.md)和移除；按所需阶段执行。
@@ -39,7 +39,7 @@ aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remo
 
 ## 清理失败
 
-无法确认原生卸载时，AW 保留所有权及桥接文件。恢复原生回调或插件 API 后，用同一条 `--remove` 命令重试。
+无法确认原生卸载时，AW 保留所有权及桥接文件。恢复原生回调或插件 API 后，用同一条 `aw disconnect` 命令重试。
 插件目录被删除但仍加载时，先恢复原目录。Qoder 的 AW 配置组被移动时，先恢复原组。
 
 强制终止安装可能留下暂存文件或未记录绑定。按所属 supervisor 停止受影响服务，核对并清理其私有状态；当前没有自动崩溃回收器。

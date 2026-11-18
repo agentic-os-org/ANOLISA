@@ -5,9 +5,9 @@
 ## Inspect and stop
 
 ```bash
-aw status --config "$HOME/aw/aw.yaml"
+aw service status --config "$HOME/aw/aw.yaml"
 aw inspect --config "$HOME/aw/aw.yaml" --json
-aw stop --config "$HOME/aw/aw.yaml"
+aw service stop --config "$HOME/aw/aw.yaml"
 ```
 
 `status` lists instances; `inspect` shows Provider summaries. Exit all Agents sharing this configuration before stopping AW, then use `status` to confirm shutdown. sec-core and AgentSight services have their own owners.

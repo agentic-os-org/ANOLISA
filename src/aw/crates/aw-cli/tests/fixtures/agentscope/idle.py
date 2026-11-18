@@ -53,11 +53,11 @@ def main():
         results = []
 
         def status():
-            return json.loads(checked([aw, "status", "--config", config], env=env).stdout)["result"]
+            return json.loads(checked([aw, "service", "status", "--config", config], env=env).stdout)["result"]
 
         def update(value, busy=False):
             save(candidate, value)
-            command = ([aw, "instance", "update", "--instance", status()["instances"][0]["instance_id"]]
+            command = ([aw, "update", "--instance", status()["instances"][0]["instance_id"]]
                        if args.native_start else [aw, "update", "--agent", "sdk"])
             completed = subprocess.run([*command, "--config", config, "--policy", candidate],
                                        env=env, capture_output=True, text=True, timeout=15)
@@ -82,7 +82,7 @@ def main():
             return len(path.read_text().splitlines()) if path.exists() else 0
 
         try:
-            daemon = processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", root / "state"])
+            daemon = processes.start("daemon", [aw, "service", "serve", "--config", config, "--state-dir", root / "state"])
             await_condition(lambda: (root / "state/aw.sock").exists(), 10, "service startup")
             if args.native_start:
                 env.update(AW_TEST_EXECUTABLE=str(aw), AW_TEST_CONFIG=str(config))

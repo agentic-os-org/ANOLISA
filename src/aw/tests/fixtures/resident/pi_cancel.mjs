@@ -84,7 +84,7 @@ async function executing({ createSession, root, evidence, config }, timeout) {
     () => ({ rejected: false }), () => ({ rejected: true }));
   let closing;
   const status = () => JSON.parse(execFileSync(config.executable,
-    ["status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
+    ["service", "status", "--config", join(root, "aw.json")], { encoding: "utf8", timeout: 3000 })).result;
   try {
     await bounded(entered);
     let settled = false;

@@ -366,7 +366,7 @@ impl Service {
     pub fn start_saved(fixture: &Fixture, state: &Path) -> Self {
         let mut command = fixture.command();
         command
-            .args(["serve", "--config"])
+            .args(["service", "serve", "--config"])
             .arg(fixture.root.join("aw.json"))
             .arg("--state-dir")
             .arg(state);

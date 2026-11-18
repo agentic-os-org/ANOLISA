@@ -1,4 +1,4 @@
-//! Canonical validation shares presentation while legacy output remains unchanged.
+//! Public validation reports policy checks without activating runtime work.
 
 use super::{output::invoke, *};
 
@@ -19,8 +19,9 @@ fn canonical_validation_reports_success_and_scope_without_runtime_work() {
     let inode = fs::metadata(&f.config).unwrap().ino();
     let current = invoke(&validate(&f));
     let legacy = invoke(f.command().args(["validate", "--config"]).arg(&f.config));
-    assert!(current.status.success() && legacy.status.success());
-    assert_eq!(current.stdout, legacy.stdout);
+    assert!(current.status.success());
+    assert!(!legacy.status.success() && legacy.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("unrecognized"));
     assert_eq!(current.stdout, b"configuration valid\n");
     for against in [false, true] {
         let mut command = validate(&f);
@@ -90,25 +91,20 @@ fn validation_reports_target_projection_without_private_values_or_runtime_work()
     );
     for against in [false, true] {
         let mut canonical = validate(&f);
-        let mut legacy = f.command();
-        legacy.args(["validate", "--config"]).arg(&f.config);
         if against {
             canonical.arg("--against").arg(&f.config);
-            legacy.arg("--against").arg(&f.config);
         }
         let summary = if against {
             "policy update scope valid; runtime activation is not checked\n"
         } else {
             "configuration valid\n"
         };
-        for command in [&canonical, &legacy] {
-            let output = invoke(command);
-            assert!(output.status.success() && output.stderr.is_empty());
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                format!("{summary}{details}")
-            );
-        }
+        let output = invoke(&canonical);
+        assert!(output.status.success() && output.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{summary}{details}")
+        );
         let output = invoke(canonical.arg("--json"));
         assert!(output.status.success() && output.stderr.is_empty());
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -207,29 +203,21 @@ fn validation_enforces_the_binding_step_limit_after_target_projection() {
         });
         let bytes = serde_json::to_vec(&config).unwrap();
         fs::write(&f.config, &bytes).unwrap();
-        for legacy in [false, true] {
-            let mut command = if legacy {
-                let mut command = f.command();
-                command.args(["validate", "--config"]).arg(&f.config);
-                command
-            } else {
-                validate(&f)
-            };
-            for against in [false, true] {
-                if against {
-                    command.arg("--against").arg(&f.config);
-                }
-                let output = invoke(&command);
-                assert_eq!(
-                    output.status.success(),
-                    valid,
-                    "{before}/{after}/{disabled}/{excluded}"
-                );
-                if !valid {
-                    assert!(output.stdout.is_empty());
-                    assert!(String::from_utf8_lossy(&output.stderr)
-                        .contains("maximum_steps_per_binding: 64"));
-                }
+        for against in [false, true] {
+            let mut command = validate(&f);
+            if against {
+                command.arg("--against").arg(&f.config);
+            }
+            let output = invoke(&command);
+            assert_eq!(
+                output.status.success(),
+                valid,
+                "{before}/{after}/{disabled}/{excluded}"
+            );
+            if !valid {
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("maximum_steps_per_binding: 64"));
             }
         }
         let output = invoke(validate(&f).arg("--json"));

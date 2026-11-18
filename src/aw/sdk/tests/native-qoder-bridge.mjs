@@ -92,8 +92,7 @@ async function prepare() {
   const response = await execute(
     binary,
     [
-      "instance",
-      "attach",
+      "connect",
       "--socket",
       root + "/state/aw.sock",
       "--sdk-pid",

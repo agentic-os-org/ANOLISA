@@ -53,7 +53,7 @@ test(
         (
           await execute(
             binary,
-            ["instance", action, "--socket", endpoint, ...args],
+            [...(action === "list" ? ["instance", action] : [action]), "--socket", endpoint, ...args],
             { timeout: 10000 },
           )
         ).stdout,
@@ -120,21 +120,21 @@ test(
       second.listen();
       await until(async () => (await cli("list")).applications.length === 2);
       const initialId = first.applicationId;
-      await cli("attach", "--sdk-instance", first.applicationId);
+      await cli("connect", "--sdk-instance", first.applicationId);
       await until(() => first.state === "ready");
       assert.equal(second.state, "detached");
       assert(native.fallback);
       const active = await first.task();
       await assert.rejects(
-        cli("detach", "--sdk-instance", first.applicationId),
+        cli("disconnect", "--sdk-instance", first.applicationId),
         (error) => JSON.parse(error.stdout).result.error === "sdk_control_busy",
       );
       assert.equal(first.state, "ready");
       assert(!active.fallback);
-      await cli("attach", "--sdk-instance", second.applicationId);
+      await cli("connect", "--sdk-instance", second.applicationId);
       await until(() => second.state === "ready");
       await active.close();
-      await cli("detach", "--sdk-instance", first.applicationId);
+      await cli("disconnect", "--sdk-instance", first.applicationId);
       await until(() => first.state === "detached");
       assert.equal(second.state, "ready");
       const retained = await second.task();
@@ -146,7 +146,7 @@ test(
       );
       assert(retained.fallback);
       assert.equal(first.state, "detached");
-      await assert.rejects(cli("attach", "--sdk-instance", initialId));
+      await assert.rejects(cli("connect", "--sdk-instance", initialId));
       await first.close();
       await second.close();
       assert.equal((await cli("list")).applications.length, 0);
@@ -169,7 +169,7 @@ test(
         await until(() => slow.applicationId);
         const request = assert.rejects(
           cli(
-            "attach",
+            "connect",
             "--sdk-instance",
             slow.applicationId,
             "--timeout-ms",
@@ -198,7 +198,7 @@ test(
         );
         assert.equal(slow.connection, undefined);
         assert((await slow.task()).fallback);
-        await cli("attach", "--sdk-instance", slow.applicationId);
+        await cli("connect", "--sdk-instance", slow.applicationId);
         await until(() => slow.state === "ready");
       } finally {
         release();

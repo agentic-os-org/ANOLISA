@@ -53,7 +53,7 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home "$AW_BIN" run \
 Install and launch Hermes after reading its [profile requirements](agents/hermes.md):
 
 ```bash
-"$AW_BIN" install --config "$AW_CONFIG" --agent hermes \
+"$AW_BIN" connect --config "$AW_CONFIG" --agent hermes \
   --native-profile /absolute/hermes-profile
 "$AW_BIN" run --config "$AW_CONFIG" --agent hermes \
   --native-profile /absolute/hermes-profile
@@ -84,7 +84,7 @@ the policy's deny marker. After the turns, check:
 ```bash
 cat "$AW_DEMO/workspace/$AW_TARGET.allowed"
 test ! -e "$AW_DEMO/workspace/$AW_TARGET.blocked"
-"$AW_BIN" status --config "$AW_CONFIG"
+"$AW_BIN" service status --config "$AW_CONFIG"
 ls "$AW_DEMO/state/journal"
 ```
 
@@ -126,7 +126,7 @@ Exit Qoder/Hermes and use Ctrl-C in the owned OpenClaw/QwenPaw server terminals.
 Wait for those processes to exit, then stop the shared AW service:
 
 ```bash
-"$AW_BIN" stop --config "$AW_CONFIG"
+"$AW_BIN" service stop --config "$AW_CONFIG"
 ```
 
 The stop response acknowledges the request; wait for the recorded daemon PID

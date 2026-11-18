@@ -25,14 +25,7 @@ fn qoder_input_policy(delayed: bool) {
     fs::write(&config, serde_json::to_vec(&document).unwrap()).unwrap();
     let (_native, pid) = native(&fixture);
     let mut attach = fixture.command();
-    attach.args([
-        "instance",
-        "attach",
-        "--agent",
-        "qoder",
-        "--pid",
-        &pid.to_string(),
-    ]);
+    attach.args(["connect", "--agent", "qoder", "--pid", &pid.to_string()]);
     success(fixture.run(attach));
     action(&fixture, 0, "turn");
     assert!(fixture.root.join("model-dispatch-0.json").exists());
@@ -52,7 +45,7 @@ fn qoder_input_policy(delayed: bool) {
             "effects":["observe","block"],"on_error":"block"}]});
     fs::write(&config, serde_json::to_vec(&document).unwrap()).unwrap();
     let mut update = fixture.command();
-    update.args(["instance", "update", "--agent", "qoder"]);
+    update.args(["update", "--agent", "qoder"]);
     success(fixture.run(update));
     assert!(action(&fixture, 1, "turn")
         .as_array()
@@ -68,20 +61,12 @@ fn qoder_input_policy(delayed: bool) {
     document["spec"]["events"]["input.submit"]["steps"] = json!([]);
     fs::write(&config, serde_json::to_vec(&document).unwrap()).unwrap();
     let mut update = fixture.command();
-    update.args(["instance", "update", "--agent", "qoder"]);
+    update.args(["update", "--agent", "qoder"]);
     success(fixture.run(update));
     action(&fixture, 2, "turn");
     assert!(fixture.root.join("model-dispatch-2.json").exists());
     let mut detach = fixture.command();
-    detach.args([
-        "instance",
-        "attach",
-        "--agent",
-        "qoder",
-        "--pid",
-        &pid.to_string(),
-        "--remove",
-    ]);
+    detach.args(["disconnect", "--agent", "qoder", "--pid", &pid.to_string()]);
     success(fixture.run(detach));
     assert_eq!(service.status()["bindings"], 0);
     fs::write(
@@ -109,14 +94,7 @@ fn qoder_instance_uses_one_default_configuration_and_preserves_native_process() 
     let (_native, pid) = native(&fixture);
     let identity = aw_service::ProcessIdentity::read(pid).unwrap();
     let mut attach = fixture.command();
-    attach.args([
-        "instance",
-        "attach",
-        "--agent",
-        "qoder",
-        "--pid",
-        &pid.to_string(),
-    ]);
+    attach.args(["connect", "--agent", "qoder", "--pid", &pid.to_string()]);
     let installed = success(fixture.run(attach));
     assert_eq!(installed["attached"], true);
     let instance = service.status()["instances"][0]["instance_id"]
@@ -134,7 +112,7 @@ fn qoder_instance_uses_one_default_configuration_and_preserves_native_process() 
     fs::write(&config, serde_json::to_vec(&document).unwrap()).unwrap();
     action(&fixture, 1, "begin");
     let mut update = fixture.command();
-    update.args(["instance", "update", "--instance", &instance]);
+    update.args(["update", "--instance", &instance]);
     let rejected = fixture.run(update);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("busy"));
@@ -144,7 +122,7 @@ fn qoder_instance_uses_one_default_configuration_and_preserves_native_process() 
     );
     action(&fixture, 2, "end");
     let mut update = fixture.command();
-    update.args(["instance", "update", "--instance", &instance]);
+    update.args(["update", "--instance", &instance]);
     let updated = success(fixture.run(update));
     assert_ne!(updated["policy_revision"], revision);
     assert!(action(&fixture, 3, "turn")
@@ -155,15 +133,7 @@ fn qoder_instance_uses_one_default_configuration_and_preserves_native_process() 
     identity.check().unwrap();
 
     let mut remove = fixture.command();
-    remove.args([
-        "instance",
-        "attach",
-        "--agent",
-        "qoder",
-        "--pid",
-        &pid.to_string(),
-        "--remove",
-    ]);
+    remove.args(["disconnect", "--agent", "qoder", "--pid", &pid.to_string()]);
     success(fixture.run(remove));
     assert_eq!(service.status()["bindings"], 0);
     assert_eq!(action(&fixture, 4, "turn"), json!([]));

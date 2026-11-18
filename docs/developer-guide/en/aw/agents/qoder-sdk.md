@@ -67,10 +67,10 @@ try {
 ## Launch and validate
 
 ```bash
-aw validate --config /absolute/aw.yaml
+aw config validate --config /absolute/aw.yaml
 aw run --config /absolute/aw.yaml --agent sdk -- "Your task"
-aw status --config /absolute/aw.yaml
-aw stop --config /absolute/aw.yaml
+aw service status --config /absolute/aw.yaml
+aw service stop --config /absolute/aw.yaml
 ```
 
 `startDaemon()` confirms daemon readiness; `createQuery()` confirms Query readiness after the SDK handshake. [Validate native behavior](../validation.md), including allow, block, Post failure and cleanup.
@@ -120,13 +120,13 @@ From the directory containing `aw.yaml`, start and inspect the application:
 
 ```bash
 node /absolute/application/worker.mjs
-aw status --config aw.yaml
-aw instance update --agent sdk
+aw service status --config aw.yaml
+aw update --agent sdk
 ```
 
 Run the status and update commands in another terminal. Edit `aw.yaml` before
 updating; pause Query creation and close active Queries first. Multiple workers
-require `aw instance update --instance INSTANCE` to select one explicitly.
+require `aw update --instance INSTANCE` to select one explicitly.
 The same resident policy, native configuration and cleanup rules apply to both
 startup modes. After closing all Queries and stopping the daemon, release the
 prepared instance in the application's `finally` block:

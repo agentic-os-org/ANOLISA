@@ -61,7 +61,7 @@ HTTPS 需增加 `token_file: /absolute/private/agentsight-token`。文件必须�
 
 ```bash
 aw run --config ./aw.yaml --agent qoder
-aw status --config ./aw.yaml
+aw service status --config ./aw.yaml
 ```
 
 启动输出观测审计 key 和来源查询状态。status 展示活动观测、原生关联、来源结果与

@@ -21,7 +21,7 @@ In a second terminal in `src/aw`, use the printed absolute socket path:
 
 ```bash
 AW_DEMO_SOCKET=/absolute/socket/path/printed/above
-target/debug/aw status --socket "$AW_DEMO_SOCKET"
+target/debug/aw service status --socket "$AW_DEMO_SOCKET"
 cargo run --locked -p aw-service --example local -- "$AW_DEMO_SOCKET"
 ```
 
@@ -33,7 +33,7 @@ event ID to inspect its records:
 ```bash
 printf '%s\n' '{"method":"audit","key":"AUDIT_KEY"}' | \
   target/debug/aw request --socket "$AW_DEMO_SOCKET"
-target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+target/debug/aw service stop --socket "$AW_DEMO_SOCKET"
 ```
 
 `terminal: false` means no terminal record is present; the operation may be

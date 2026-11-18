@@ -243,7 +243,7 @@ selects Qoder's exact `Bash` name. There are no regex or glob patterns; `*` is t
 only wildcard. Provider-private tool mappings remain independently configured.
 
 Before startup, AW projects event and step selectors for the selected Adapter, excluding steps whose intersection is provably empty. Only remaining steps participate in Provider preparation and effect admission; structure and references are still checked across the complete configuration.
-`aw validate` reports projected-out steps for each target. `aw config validate --json` uses `result.projected_out_steps` with target, event and step_id.
+`aw config validate` reports projected-out steps for each target. `aw config validate --json` uses `result.projected_out_steps` with target, event and step_id.
 OpenClaw after normalizes `bash`, `apply-patch` and `cron` to `exec`, `apply_patch` and `automations`; native_name retains the callback's original name.
 
 Selection occurs in the shared Host after callback normalization, binding checks

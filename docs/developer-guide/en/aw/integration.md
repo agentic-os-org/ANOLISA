@@ -39,7 +39,7 @@ Applications with installed core can instead use `aw config init` for Qoder/Open
 ## 2. Verify the rule
 
 ```bash
-"$AW_BIN" validate --config "$AW_CONFIG"
+"$AW_BIN" config validate --config "$AW_CONFIG"
 cd "$AW_DEMO/workspace"
 timeout 15s "$AW_HOST" "$AW_CONFIG" tool.before demo_shell '{"command":"printf AW_OK"}'
 timeout 15s "$AW_HOST" "$AW_CONFIG" tool.before demo_shell '{"command":"printf AW_DENY_TEST"}'

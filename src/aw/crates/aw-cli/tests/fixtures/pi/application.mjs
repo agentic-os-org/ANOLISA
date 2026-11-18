@@ -339,7 +339,7 @@ export async function run(session, { createSession }) {
       const binding = JSON.parse(readFileSync(native.binding, "utf8"));
       const status = spawnSync(
         native.executable,
-        ["status", "--socket", binding.socket],
+        ["service", "status", "--socket", binding.socket],
         { encoding: "utf8", timeout: 5000 },
       );
       if (status.status !== 0)

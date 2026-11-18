@@ -26,7 +26,8 @@ aw config init --help
 | 命令 | 用途 |
 | --- | --- |
 | `aw run` | 通过 AW 启动已配置的 Agent |
-| `aw agent connect` | 注册原生 Hooks，或连接受支持的现有进程 |
+| `aw connect` | 注册原生 Hooks，或连接受支持的原生／SDK 应用 |
+| `aw disconnect` | 断开原生／SDK 应用的活连接，保留进程 |
 | `aw config init` | 离线生成配置 |
 | `aw config descriptor` | 编译绑定配置的 SDK 部署提示 |
 | `aw config show` | 以 JSON 打印全部或部分配置 |
@@ -44,7 +45,7 @@ aw config init --help
 | `aw service stop` | 请求服务退出 |
 | `aw update` | 对一个受支持且空闲的实例启用新策略 |
 | `aw inspect` | 查询服务及可选的 Provider 摘要 |
-| `aw install` | 安装本地 Provider 扩展；也保留旧版原生 Hook 连接语法 |
+| `aw install` | 安装本地 Provider 扩展 |
 | `aw uninstall` | 卸载本地管理的 Provider 扩展 |
 | `aw list` | 列出已记录的本地 Provider 安装 |
 | `aw doctor` | 检查安装文件 |
@@ -54,8 +55,7 @@ aw config init --help
 | `aw instance setup` | 在明确选择的私有目录安装启动组件 |
 | `aw instance prepare` | 准备调用方应用的原生工厂与实例登记 |
 | `aw instance release` | 释放 owner 的登记与临时资产 |
-| `aw instance attach` | 接入或移除选定进程的受支持原生 Hook |
-| `aw instance update` | 默认使用共享 `aw.yaml` 更新策略 |
+| `aw instance list` | 发现已安装 SDK 协作接线的应用 |
 | `aw instance` | 使用 JSON 登记、确认、查询和释放业务自管实例 |
 | `aw audit-export` | 无需控制连接，读取一页保留的公共审计元数据 |
 | `aw request` | 将 stdin JSON 操作发送给服务，供集成与诊断使用 |
@@ -63,7 +63,7 @@ aw config init --help
 
 ## 输出选项
 
-以下管理命令支持共用输出选项：本地扩展模式的 `install`、`uninstall`、`list`、`doctor`、`recover`，以及 `config init`、`config validate`、`config add-provider`、`config remove-provider`、`config add-event`、`config add-hook`、`config remove-hook`、`config add-native-source`、`config remove-native-source`。
+以下管理命令支持共用输出选项：`install`、`uninstall`、`list`、`doctor`、`recover`，以及 `config init`、`config validate`、`config add-provider`、`config remove-provider`、`config add-event`、`config add-hook`、`config remove-hook`、`config add-native-source`、`config remove-native-source`。
 
 | 选项 | 默认值与含义 |
 | --- | --- |
@@ -74,7 +74,9 @@ aw config init --help
 
 `--json` 与其他三个面向人的输出选项互斥；`--quiet` 与 `--verbose` 互斥。`--color` 可与任一面向人的输出选项组合。这些选项不改变原生 Agent 或协议流。
 
-`service status`、`service stop`、`update`、`request`、`config show` 和 `config native-sources` 已经输出 JSON，不接受 `--json`。`inspect` 必须带 `--json`。`run` 保留 Agent 的输出、退出码和信号。JSON 报告字段与脚本退出码见 [CLI 自动化参考](../../../developer-guide/zh/aw/reference/cli.md)。
+`service status`、`service stop`、连接运行中应用的 `connect`、`disconnect`、`update`、`request`、`config show` 和 `config native-sources` 已经输出 JSON，不接受 `--json`。`inspect` 必须带 `--json`。`run` 保留 Agent 的输出、退出码和信号。JSON 报告字段与脚本退出码见 [CLI 自动化参考](../../../developer-guide/zh/aw/reference/cli.md)。
+
+持久 Hook 安装使用 `aw connect --agent TARGET`，脚本检查退出码。Adapter 可输出后续设置提示。
 
 ## 启动与连接
 
@@ -101,17 +103,32 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directo
 
 AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续复用。查询和退出方法见[服务与策略更新](#服务与策略更新)。
 
-### `aw agent connect`
+### `aw connect`
 
 | 参数 | 必填 / 默认值 | 含义 |
 | --- | --- | --- |
-| `--config FILE` | 必填 | AW 配置 |
-| `--agent TARGET` | 必填 | 配置中的原生目标 |
-| `--native-profile NAME` | 取决于 Adapter | 持久注册时使用的原生 profile |
-| `--pid PID` | 可选正整数 | 连接调用者所有、空闲且受支持的 Qoder TUI 或 QwenPaw App 进程 |
-| `--remove` | 默认关闭；要求 `--pid` | 移除 AW 管理的连接 Hooks，保留原生进程运行 |
+| `--config FILE` | 默认当前目录的 `aw.yaml` | AW 配置；与显式 `--socket` 互斥 |
+| `--agent TARGET` | 原生注册或接入时必填 | 配置中的原生目标；与 SDK 选择器互斥 |
+| `--native-profile NAME` | 取决于 Adapter | 持久注册使用的原生 profile；与 PID 和 SDK 选择器互斥 |
+| `--pid PID` | 配合 `--agent` 的可选正整数 | 接入调用者所有、空闲且受支持的 Qoder TUI 或 QwenPaw App 进程 |
+| `--sdk-pid PID` 或 `--sdk-instance ID` | SDK 接入时二选一 | 选择已安装 SDK 接线的应用；与原生选择器互斥 |
+| `--socket ABS_PATH` | SDK 接入时可选 | 直接选择已有 Service，代替从配置解析 |
+| `--timeout-ms N` | SDK 确认期限：`100..30000`，默认 `5000` | 有界等待应用确认接入 |
 
-`--pid` 与 `--native-profile` 互斥。不带 `--pid` 时，执行 Adapter 支持的持久注册，不会安装 Agent 软件。带 `--pid` 时，需要通过就绪、所有权与空闲检查。前置条件和断开行为见[进程连接](../../../developer-guide/zh/aw/deployment/process-attach.md)。
+提供 `--agent` 且不带 `--pid` 时，执行 Adapter 支持的持久注册；带 `--pid` 时，
+需要通过就绪、所有权与空闲检查。SDK 接入要求应用已安装监听，复用 SDK 直接接入的
+登记与 Ready 流程。前置条件见[进程接入](../../../developer-guide/zh/aw/deployment/process-attach.md)
+和[已安装 SDK 的应用](#已安装-sdk-的应用)。
+
+### `aw disconnect`
+
+原生接入使用 `--agent TARGET --pid PID`，SDK 应用使用准确的 `--sdk-instance ID`，
+两种选择方式互斥。`--config FILE` 默认 `aw.yaml`；SDK 断开也可使用 `--socket ABS_PATH`
+代替配置，并接受 `--timeout-ms N`（`100..30000`，默认 `5000`）。通过 `aw instance list`
+获取 SDK 应用的准确 ID；SDK 断开不接受 PID 选择器。
+
+断开要求连接空闲，保留原生进程与 Service。持久启动接线仍保留；移除已停用的 Qoder
+启动接线使用独立的 `aw instance setup --remove` 操作。
 
 ## 配置
 
@@ -156,7 +173,9 @@ AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续�
 已禁用的事件和步骤，以及被目标工具选择器排除的步骤，不计入上限。
 此检查沿用服务绑定上限，离线执行，不启动 Agent 或 Provider。
 超限时退出码为 1，JSON 输出报告 `invalid_configuration`。
-旧别名 `aw validate` 执行相同检查。
+默认人类输出为 `configuration valid`；使用 `--against` 时输出
+`policy update scope valid; runtime activation is not checked`。自动化应使用 `--json`，
+管理报告合同见 [CLI 自动化](../../../developer-guide/zh/aw/reference/cli.md)。
 
 ### `aw config descriptor`
 
@@ -232,7 +251,7 @@ AW CLI、Service 和 SDK，并重新生成既有 Descriptor。旧 Descriptor 可
 
 | 参数 | 必填 / 默认值 | 含义 |
 | --- | --- | --- |
-| `--config FILE` 或 `--socket ABS_PATH` | 二选一 | 选择已有服务 |
+| `--config FILE` 或 `--socket ABS_PATH` | 默认 `--config aw.yaml` | 选择已有服务 |
 | `--agent TARGET` | 未提供 `--instance` 时必填 | 选择配置目标；匹配多个根实例时还需 `--instance` |
 | `--instance ID` | 未提供 `--agent` 时必填 | 选择实例；可与 `--agent` 组合，要求同时匹配 |
 | `--policy FILE` | 使用 `--socket` 时必填，否则默认用 `--config` | 完整候选配置 |
@@ -252,13 +271,12 @@ AW CLI、Service 和 SDK，并重新生成既有 Descriptor。旧 Descriptor 可
 
 | 参数 | 必填 / 默认值 | 含义 |
 | --- | --- | --- |
-| `--bundle ABS_DIR` | 安装扩展时必填 | 本地已解压的 Provider 包 |
-| `--prefix ABS_DIR` | 安装扩展时必填 | 目标安装目录 |
+| `--bundle ABS_DIR` | 必填 | 本地已解压的 Provider 包 |
+| `--prefix ABS_DIR` | 必填 | 目标安装目录 |
 | `--dry-run` | 默认关闭 | 显示文件、包和冲突，不写入 |
 | `--scope user\|system` | 默认 `user` | 包数据库范围；system 写操作要求 root |
 | 共用输出选项 | 可选 | 见[输出选项](#输出选项) |
 
-旧的原生连接形式见[兼容与内部入口](#兼容与内部入口)，不能与扩展安装选项混用。
 
 ### `aw uninstall`
 
@@ -309,13 +327,22 @@ aw completion bash > aw.bash
 
 ## 兼容与内部入口
 
-| 保留的命令 | 推荐命令及差异 |
+以下重复命令已移除。替换 AW 前先更新脚本，保留原有配置、目标与进程选择参数。
+
+| 已移除命令 | 当前命令 |
 | --- | --- |
-| `aw serve --config FILE --state-dir ABS_DIR` | `aw service serve`，参数相同 |
-| `aw status (--config FILE \| --socket ABS_PATH)` | `aw service status`，参数相同 |
-| `aw stop (--config FILE \| --socket ABS_PATH)` | `aw service stop`，参数相同 |
-| `aw validate --config FILE [--against BASELINE_FILE]` | `aw config validate`；旧别名不接受共用输出选项 |
-| `aw install --config FILE --agent TARGET [--native-profile NAME] [--pid PID] [--remove]` | `aw agent connect`；原生连接限制相同，不接受共用输出选项或扩展选项 |
+| `aw serve` | `aw service serve`；参数相同 |
+| `aw status` | `aw service status`；参数和 JSON 相同 |
+| `aw stop` | `aw service stop`；参数和 JSON 相同 |
+| `aw validate` | `aw config validate`；保留人类摘要，自动化使用 `--json` |
+| `aw agent connect`、原生 `aw install --config FILE --agent TARGET`、`aw instance attach` | `aw connect`；`--config` 默认 `aw.yaml`，保留原生或 SDK 选择器 |
+| 原生 `aw connect --pid PID --remove` 或 `aw instance attach --pid PID --remove` | `aw disconnect --agent TARGET --pid PID`；保留已传入的 `--config` |
+| `aw instance detach --sdk-instance ID` | `aw disconnect --sdk-instance ID`；保留 `--config` 或 `--socket` 及超时参数 |
+| `aw instance update` | `aw update`；更新参数和默认 `aw.yaml` 相同 |
+
+`config validate --json` 输出带 `format: 1`、`status` 及 `result` 或 `error` 的管理报告，
+成功退出 0，失败退出 1。脚本应读取这些字段，避免解析人类诊断。语法错误继续输出到
+stderr，stdout 为空。本地 Provider 安装继续使用 `aw install --prefix DIR --bundle DIR`。
 
 以下隐藏命令由 Adapter 自动生成并调用，不是用户的配置步骤，不出现在 `aw commands` 或补全中。它们的私有 binding 与 stdin 协议必须匹配已安装 AW 的版本，请勿手工拼接调用或在 worker 间复制 binding。它们使用独立协议解析器，公开命令帮助和 `aw commands --json` 不枚举其接受的生命周期动作或消息。
 
@@ -357,22 +384,25 @@ Hermes 本机 chat 和 QwenPaw App 安装启动组件。SDK 应用在自身启�
 成功退出码为 0，并删除该登记的临时目录；应用、其他实例和 daemon 继续由各自所有者管理。
 binding 须保持私有。崩溃清理与启动组件移除见[独立实例接入](../../../developer-guide/zh/aw/deployment/independent-instances.md)。
 
-## `aw instance attach` 与 `aw instance update`
+<a id="aw-instance-attach-与-aw-update"></a>
+
+## `aw connect` 与 `aw update`
 
 在共享 `aw.yaml` 所在目录执行以下命令，或显式传入 `--config FILE`。当前接入支持
 Qoder TUI 和 QwenPaw App，须满足[外部进程接入条件](../../../developer-guide/zh/aw/deployment/process-attach.md)。
 接入前暂停派发请求，等待原生确认后恢复。命令不会启动或重启 Agent。
 
 ```bash
-aw instance attach --agent TARGET --pid NATIVE_PID
-aw instance update --agent TARGET
-aw instance update --instance INSTANCE_ID --policy next.yaml
-aw instance attach --agent TARGET --pid NATIVE_PID --remove
+aw connect --agent TARGET --pid NATIVE_PID
+aw update --agent TARGET
+aw update --instance INSTANCE_ID --policy next.yaml
+aw disconnect --agent TARGET --pid NATIVE_PID
 ```
 
 将 `TARGET`、`NATIVE_PID`、`INSTANCE_ID` 分别替换为配置目标名、选定的进程和返回的
 实例 ID。attach 核验进程身份并等待原生 Hook 加载确认；移除保留原进程及其他 Hook。
-接入和移除均接受 `--config FILE`、`--agent TARGET`、`--pid PID`，通过 `--remove` 选择移除。
+接入和断开均接受 `--config FILE`、`--agent TARGET`、`--pid PID`；选定实例空闲后执行
+`aw disconnect`。
 
 update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deployment/policy-updates.md)，
 接受 `--config FILE`、`--agent TARGET`、`--instance ID`、`--policy FILE` 和
@@ -381,7 +411,7 @@ update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deploymen
 实例不存在会报错，不会触发自动接入。
 
 这些命令沿用现有接入和更新的 JSON 响应。update 也支持链接指南中的已准备原生模式，
-attach 仍限于文档列出的入口。下述业务自管 JSON 协议不能与这些子命令混用。
+attach 仍限于文档列出的入口。下述业务自管 JSON 协议使用独立的 `aw instance` 命令。
 
 ### 已安装 SDK 的应用
 
@@ -389,12 +419,13 @@ attach 仍限于文档列出的入口。下述业务自管 JSON 协议不能与�
 按应用 PID 选择监听并按需启动或复用 AW：
 
 ```bash
-aw instance attach --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+aw connect --config aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
 ```
 
 同一进程有多个 SDK 监听时，使用 `aw instance list --config aw.yaml` 返回的
 `--sdk-instance ID`。指定 `--socket PATH` 时选择已有服务。该命令要求应用已安装接点。
-QwenPaw 先启动、AW 后接入的方式见
+SDK 应用空闲后，通过 `aw disconnect --sdk-instance ID` 断开，沿用相同配置或 socket。
+发现应用继续使用 `aw instance list`。QwenPaw 先启动、AW 后接入的方式见
 [仅工具后插件](../../../developer-guide/zh/aw/deployment/python-sdk.md#工具后的延迟接入)。
 
 ## `aw instance`

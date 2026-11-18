@@ -85,7 +85,7 @@ The internal admission gate does not execute an unconfigured before policy.
 A tool-only reply without tools creates no remote Scope.
 
 After HTTP readiness, prepare sec-core through deployment and run
-`aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`.
+`aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`.
 This cooperative selector needs the installed plugin; it does not inject into an
 arbitrary PID. The configured resident path uses required availability, a default
 5000 ms attachment wait, native before blocking and after result replacement or
@@ -167,7 +167,7 @@ prewarm sec-core through its existing deployment entrypoint and attach from a
 second terminal, using the actual application PID:
 
 ```bash
-aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID \
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID \
   --timeout-ms 10000
 ```
 

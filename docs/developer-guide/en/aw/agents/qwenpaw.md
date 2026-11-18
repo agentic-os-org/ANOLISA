@@ -163,8 +163,8 @@ cannot build an Agent. A different native command fails before App startup.
 Edit `aw.yaml`, pause dispatch and update from another terminal:
 
 ```bash
-aw status --config aw.yaml
-aw instance update --agent qwenpaw
+aw service status --config aw.yaml
+aw update --agent qwenpaw
 ```
 
 The ordinary input, tool, strict-after and reply cleanup boundaries remain active;
@@ -191,6 +191,6 @@ to retain Console assets. With an unpatched version, keep native MCP configurati
 and permissions unchanged while the App runs; make changes after exit, verify
 persisted configuration, then restart.
 
-`aw instance update` changes AW policy at the reply idle boundary. AW
+`aw update` changes AW policy at the reply idle boundary. AW
 `tool.before` denial protects subsequent calls that pass through its Hooks;
 the QwenPaw fix supplies native driver concurrency control.

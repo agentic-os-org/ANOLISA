@@ -59,7 +59,7 @@ work moved before traffic admission still contributes to total startup time.
 
 ## Stop and upgrade
 
-Stop dispatch, drain tasks and close SDK clients, then exit the Agent and run `aw stop --config FILE`.
+Stop dispatch, drain tasks and close SDK clients, then exit the Agent and run `aw service stop --config FILE`.
 Wait for the recorded daemon PID to exit and its socket to disappear. After forced termination, remove only its stale `aw.sock` once exit is confirmed; retain journal.
 
 CLI and daemon use `aw-service/v1alpha7`. Stop old services with the old binary before upgrading or rolling both binaries back together.
@@ -83,7 +83,7 @@ budget in `TimeoutStopSec`.
 All modes forcibly clean the owned group when the worker exits or time expires.
 
 This controls foreground launcher shutdown by external signal. Internal readiness/lifecycle failure retains a two-second grace; natural exit immediately cleans up remaining children.
-`aw stop` and externally attached processes have separate lifecycle controls. Coordinate application drain deadlines with the container shutdown budget.
+`aw service stop` and externally attached processes have separate lifecycle controls. Coordinate application drain deadlines with the container shutdown budget.
 Changes require launcher restart. Old AW versions reject this field; remove it when rolling configuration back.
 
 ## Budget a resident SDK container
@@ -155,6 +155,6 @@ spec:
 | connections | Active service connections including control RPC; 16 additional connections reserve control and cleanup access |
 | invocations_per_binding | Active model tool invocations for one resident client |
 
-Inspect `resources.limits`, `resources.usage`, `peak_invocations_per_binding`, `admission_rejections` and `rejection_reasons` in `aw status`. Drain and restart the service after changing limits.
+Inspect `resources.limits`, `resources.usage`, `peak_invocations_per_binding`, `admission_rejections` and `rejection_reasons` in `aw service status`. Drain and restart the service after changing limits.
 Legacy task entrypoints and restricted Qoder SDK retain the 1024 native event association limit per instance; restart the instance on `native_event_limit`.
 Set audit disk and SDK history retention separately. See the [resident SDK contract](../../../../../src/aw/docs/design/en/adapters/resident-sdk.md).

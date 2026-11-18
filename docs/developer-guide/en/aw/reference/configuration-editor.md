@@ -24,7 +24,7 @@ Use an absolute, symlink-free `--config` path owned by the current user. Neither
 Definition files hold one complete YAML/JSON object, at most 4 MiB and 32 levels. `show` exposes private values.
 
 Adding an identical definition or removing an absent object preserves the file; different definitions under the same name conflict. Remove referencing steps before their Provider. Each command publishes independently and atomically, rewriting comments and formatting; back up first.
-`validate` checks fields and references and accepts relative paths. See the [editing contract](../../../../../src/aw/docs/design/en/configuration/configuration-editing.md) for file safety and concurrency.
+`aw config validate` checks fields and references and accepts relative paths. See the [editing contract](../../../../../src/aw/docs/design/en/configuration/configuration-editing.md) for file safety and concurrency.
 
 ## Add a rule to an empty configuration
 
@@ -81,7 +81,7 @@ After launch, ask the tool to print `AW_OK` and `AW_DENY_TEST`. The first should
 
 ```bash
 aw run --config "$AW_DEMO/aw-core.yaml" --agent qoder
-aw stop --config "$AW_DEMO/aw-core.yaml"
+aw service stop --config "$AW_DEMO/aw-core.yaml"
 rm -r -- "$AW_DEMO"
 ```
 
@@ -100,7 +100,7 @@ the existing atomic editor. Removing a descriptor does not uninstall a native
 object. Removing the last descriptor drops the optional `native_config` section;
 remove that section from every target before downgrading to an older AW build. The AW YAML file is rewritten on edits; original native files retain
 bytes, comments and unknown fields. Native source descriptors are launch settings:
-`validate --against` rejects changing them during an AW policy update. Native
+`aw config validate --against` rejects changing them during an AW policy update. Native
 file watchers and dynamic configuration stay owned by the native loader.
 
 `native-sources` returns `native: declared_not_loaded` and `aw: not_admitted`.

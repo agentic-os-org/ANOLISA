@@ -57,9 +57,9 @@ sec-core Provider 可在 Qoder SDK 和 QwenPaw 加载本地 Skill 指令前校�
 core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
 工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
 
-使用 `aw instance attach --agent TARGET --pid PID` 接入受支持的原生进程，再用 `aw instance update --agent TARGET` 在空闲时应用策略。两个命令默认读取当前目录的 `aw.yaml`；前提和显式配置选择见[命令参考](../../docs/user-guide/zh/aw/cli-reference.md#aw-instance-attach-与-aw-instance-update)。
+使用 `aw connect --agent TARGET --pid PID` 接入受支持的原生进程，再用 `aw update --agent TARGET` 在空闲时应用策略。两个命令默认读取当前目录的 `aw.yaml`；前提和显式配置选择见[命令参考](../../docs/user-guide/zh/aw/cli-reference.md#aw-connect-与-aw-update)。
 
-八个受支持 Adapter 完成一次接入后，可通过 `aw instance setup` 或应用自管的 `prepare` 保留原生启动方式。原生就绪确认后完成登记，`aw instance update` 在任务完整结束后更新策略。SDK 工厂和 QwenPaw 使用任务 Scope，Qoder、OpenClaw、Hermes 使用原生请求边界。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
+八个受支持 Adapter 完成一次接入后，可通过 `aw instance setup` 或应用自管的 `prepare` 保留原生启动方式。原生就绪确认后完成登记，`aw update` 在任务完整结束后更新策略。SDK 工厂和 QwenPaw 使用任务 Scope，Qoder、OpenClaw、Hermes 使用原生请求边界。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
 
 ## Hook 支持矩阵
 
@@ -143,5 +143,5 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用可�
 所属状态目录与有界读取接口见[审计导出](../../docs/user-guide/zh/aw/cli-reference.md#aw-audit-export)。
 
 原生 QwenPaw 启动后的实验性协作接入见 [工具后延迟接入](../../docs/developer-guide/zh/aw/deployment/python-sdk.md#工具后的延迟接入)。
-预装插件在首次工具前等待就绪；`aw instance attach --config aw.yaml --sdk-pid PID`
+预装插件在首次工具前等待就绪；`aw connect --config aw.yaml --sdk-pid PID`
 启动或复用 AW，业务 Agent 继续由原生命令启动。

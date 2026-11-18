@@ -81,7 +81,6 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
     }
     let flags = &args.flags;
     let allowed: &[&str] = match command {
-        "validate" => &["--config", "--against"],
         "serve" => &["--config", "--state-dir"],
         "status" | "stop" => &["--socket", "--config"],
         "request" => &["--socket", "--timeout-ms"],
@@ -90,37 +89,15 @@ fn runtime(command: &str, args: &cli::Arguments) -> cli::Result<cli::Exit> {
     args.check(allowed, false)?;
     let required = |name: &str| args.required(name);
     match command {
-        "validate" if flags.contains_key("--against") => {
-            let validator = aw_config::Validator::new()?;
-            let load = |path: &str| -> cli::Result<_> {
-                let bytes = cli::read_file(path, aw_config::MAX_DOCUMENT_BYTES)?;
-                Ok(validator.parse(&bytes)?)
-            };
-            let candidate =
-                load(required("--config")?).map_err(|error| format!("candidate: {error}"))?;
-            let baseline =
-                load(required("--against")?).map_err(|error| format!("baseline: {error}"))?;
-            baseline.validate_policy_update(&candidate)?;
-            let projected_out_steps = output::projection::collect(&candidate)?;
-            println!("policy update scope valid; runtime activation is not checked");
-            output::projection::human(&projected_out_steps, &mut std::io::stdout().lock())?;
-        }
-        "validate" | "serve" => {
+        "serve" => {
             let mut bytes = Vec::new();
             std::fs::File::open(required("--config")?)?
                 .take(4 * 1024 * 1024 + 1)
                 .read_to_end(&mut bytes)?;
-            if command == "validate" {
-                let config = aw_config::Validator::new()?.parse(&bytes)?;
-                let projected_out_steps = output::projection::collect(&config)?;
-                println!("configuration valid");
-                output::projection::human(&projected_out_steps, &mut std::io::stdout().lock())?;
-            } else {
-                let server = Server::bind(bytes, PathBuf::from(required("--state-dir")?))?;
-                install_stop_signals()?;
-                eprintln!("AW service listening on {}", server.socket_path().display());
-                server.run(&STOP)?;
-            }
+            let server = Server::bind(bytes, PathBuf::from(required("--state-dir")?))?;
+            install_stop_signals()?;
+            eprintln!("AW service listening on {}", server.socket_path().display());
+            server.run(&STOP)?;
         }
         _ => {
             let budget: u64 = flags

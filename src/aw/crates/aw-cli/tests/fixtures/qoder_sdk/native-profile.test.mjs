@@ -78,7 +78,7 @@ test("installed Bridge acknowledges profile and retires snapshots across two dae
     return exited;
   };
   try {
-    start("service", ["serve", "--config", file, "--state-dir", join(f.root, "state")]);
+    start("service", ["service", "serve", "--config", file, "--state-dir", join(f.root, "state")]);
     for (let attempt = 0; attempt < 100; attempt++) {
       try { await access(join(f.root, "state/aw.sock")); break; }
       catch { await new Promise(resolve => setTimeout(resolve, 50)); }

@@ -42,9 +42,9 @@ impl Fixture {
     }
     fn register(&self, service: &EnsuredService) {
         fs::write(self.0.join("process.json"), json!({"pid":service.pid,"socket":service.paths.socket,
-            "command":[env!("CARGO_BIN_EXE_aw"),"serve","--config",service.paths.state_dir.join(format!("config-{}.yaml", service.paths.config_revision)),"--state-dir",service.paths.state_dir],
+            "command":[env!("CARGO_BIN_EXE_aw"),"service","serve","--config",service.paths.state_dir.join(format!("config-{}.yaml", service.paths.config_revision)),"--state-dir",service.paths.state_dir],
             "cwd":service.paths.state_dir,"log":service.paths.state_dir.join("service.log"),"ports":[],
-            "expected_lifetime":"until this bounded test teardown", "stop":[env!("CARGO_BIN_EXE_aw"),"stop","--socket",service.paths.socket]}).to_string()).unwrap();
+            "expected_lifetime":"until this bounded test teardown", "stop":[env!("CARGO_BIN_EXE_aw"),"service","stop","--socket",service.paths.socket]}).to_string()).unwrap();
     }
 }
 impl Drop for Fixture {

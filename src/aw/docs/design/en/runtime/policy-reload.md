@@ -8,7 +8,7 @@ The restricted bridge is opt-in through `aw run --reloadable`. Verified baseline
 are Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App and Qoder SDK
 1.0.56 / bundled Worker 1.1.78. Admission checks the supported entrypoint and native
 idle/update protocol for each installed release. External attachment supports the TUI and App
-through `aw agent connect --pid PID`; SDK daemon attachment and steer remain
+through `aw connect --pid PID`; SDK daemon attachment and steer remain
 planned. For `qoder-sdk`, ordinary `aw run` opens a resident child scope for each
 managed Query. Ordinary QwenPaw App launches open a task scope for each managed
 Agent reply. Both ordinary resident paths support explicit idle policy updates;
@@ -48,8 +48,8 @@ limit. Missing snapshots, expired acknowledgement and stale owners prevent work.
 
 `aw update --config aw.yaml --agent TARGET` selects a root instance in the same
 configured service. Multiple matches require `--instance ID`. PID-based bootstrap
-through the existing `aw agent connect --pid` / `aw install --pid` interfaces and
-their `--remove` flow remains supported for Qoder TUI and QwenPaw App. A convenience
+through `aw connect --agent TARGET --pid PID` and
+`aw disconnect --agent TARGET --pid PID` remains supported for Qoder TUI and QwenPaw App. A convenience
 `aw update --pid` selector is deferred independently of Adapter integration;
 service-side process association and identity checks remain required. This update
 path does not add cross-namespace control. The control plane selects the execution container,
@@ -133,14 +133,15 @@ services start, native versions are probed or capabilities are granted.
 Errors report a public section without printing configuration values.
 
 ```bash
-aw validate --config next.yaml --against current.yaml
+aw config validate --config next.yaml --against current.yaml
 ```
 
 Success prints `policy update scope valid; runtime activation is not checked`.
 This means only that the change is confined to policy fields. Provider discovery,
 private configuration checks, native support, readiness, idle confirmation and
 activation still require runtime admission. A missing or invalid baseline fails.
-Plain `aw validate --config FILE` retains its existing output and semantics.
+Without `--against`, `aw config validate --config FILE` validates the candidate
+and prints `configuration valid`. Automation uses `--json` management reports.
 The comparison applies to any configured Adapter and is not proof that any
 framework supports runtime reload.
 
@@ -155,7 +156,7 @@ cleanup holds occupancy. Native model, credential and Session configuration stay
 with the framework; this operation changes only the AW policy fields listed above.
 
 `aw run --config current.yaml --agent TARGET --reloadable` preinstalls stable
-callbacks even when the default policy has no user hooks. `aw status` reports
+callbacks even when the default policy has no user hooks. `aw service status` reports
 instance IDs, active policy revisions, readiness, request/tool counts and process
 metadata. Use `aw update --config current.yaml --agent TARGET`
 to apply the same edited document, select the unique target instance and read its
@@ -353,7 +354,7 @@ record for retry; a replaced process or service generation is rejected.
    the native inventory requires a separate Qoder 1.1.73 TUI startup/idle-switch
    case before dispatch. Full hosted TUI tool-turn adoption and QwenPaw App
    reload acceptance remain separate checks. The 1.1.64 print lane is retained.
-3. Native attach/detach through `aw install --pid` / `--remove`, with scoped
+3. Native attach/detach through `aw connect --agent TARGET --pid PID` / `aw disconnect --agent TARGET --pid PID`, with scoped
    registration, native confirmation and unchanged PID/start-ticks acceptance.
 4. Incremental Adapter support for other frameworks. OpenClaw/Hermes and then
    Pi/Claude SDK/AgentScope are candidates; reload and attachment are independent

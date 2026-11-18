@@ -150,7 +150,7 @@ pub(super) fn hooks(
             .ok_or("missing Codex Hook inventory")?;
         if matches.len() != 1 {
             return Err(format!(
-                "Codex {event} requires exactly one installed AW hook; run aw install first"
+                "Codex {event} requires exactly one installed AW hook; run aw connect first"
             )
             .into());
         }

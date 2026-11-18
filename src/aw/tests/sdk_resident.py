@@ -113,7 +113,7 @@ def main():
     command = [str(aw), "run", "--config", str(config), "--agent", args.agent]
     record = {"command": command, "cwd": str(output), "ports": "per-task endpoint.json",
               "timeout_seconds": timeout, "state": str(state_parent), "pid": None,
-              "stop": [str(aw), "stop", "--config", str(config)]}
+              "stop": [str(aw), "service", "stop", "--config", str(config)]}
     (output / "process.json").write_text(json.dumps(record))
     process = None
     own_children()
@@ -168,7 +168,7 @@ def main():
             result.update(task_observation=True, source_association="unverified", coverage="unknown",
                           closed_observation_scopes=len(observed))
             (output / "result.json").write_text(json.dumps(result))
-        status = json.loads(subprocess.check_output([str(aw), "status", "--config", str(config)], env=env, timeout=10))["result"]
+        status = json.loads(subprocess.check_output([str(aw), "service", "status", "--config", str(config)], env=env, timeout=10))["result"]
         assert status["bindings"] == status["events"] == 0, status
         if args.scenario in {"mcp", "mcp-failure"}:
             events = []
@@ -222,7 +222,7 @@ def main():
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=10)
-            stopped = subprocess.run([str(aw), "stop", "--config", str(config)], env=env, capture_output=True, timeout=15)
+            stopped = subprocess.run([str(aw), "service", "stop", "--config", str(config)], env=env, capture_output=True, timeout=15)
             assert stopped.returncode == 0, stopped.stderr.decode()
             deadline = time.monotonic() + 15
             while (state_parent / "s/aw.sock").exists() and time.monotonic() < deadline:

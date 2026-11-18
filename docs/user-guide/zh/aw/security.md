@@ -50,7 +50,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "SEC_CORE_CLI=$AW_SEC_CLI" --template-var "SOCKET=$AW_SEC_SOCKET" \
   --qoder "$AW_QODER"
-aw validate --config "$AW_HOME/security.yaml"
+aw config validate --config "$AW_HOME/security.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
@@ -131,7 +131,7 @@ headless DSH 的 sec-core 示例和接入步骤见
 
 ## 停止与扩展
 
-退出 Agent 后执行 `aw stop --config "$AW_HOME/security.yaml"`。
+退出 Agent 后执行 `aw service stop --config "$AW_HOME/security.yaml"`。
 后台服务继续按 sec-core 安装指南维护。
 卸载 AW 保留外部后台配置和数据。
 

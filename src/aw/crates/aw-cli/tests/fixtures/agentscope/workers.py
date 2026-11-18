@@ -43,7 +43,7 @@ def main():
         save(config, document)
 
         def status():
-            return json.loads(checked([aw, "status", "--config", config]).stdout)["result"]
+            return json.loads(checked([aw, "service", "status", "--config", config]).stdout)["result"]
 
         def roots():
             return [row for row in status()["instances"] if row["parent_instance_id"] is None]
@@ -66,7 +66,7 @@ def main():
                                        "--policy", candidate]).stdout)
 
         try:
-            processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", root / "state"])
+            processes.start("daemon", [aw, "service", "serve", "--config", config, "--state-dir", root / "state"])
             await_condition(lambda: (root / "state/aw.sock").exists(), 10, "service startup")
             workers = {}
             for name in ["a", "b"]:

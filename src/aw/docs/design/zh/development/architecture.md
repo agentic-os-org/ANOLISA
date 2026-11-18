@@ -60,8 +60,7 @@ AW 包查询和变更拒绝外部包管理器 locator。离线配置不需要 AW
 运行时文件租约由 `aw-exec` 管理，无需读取包数据库。
 文件所有权保持唯一，不在数据库间自动转移。已安装 Provider 可直接通过显式
 `transport.argv` 和进程协议接入，无需 AW 包记录；RPM 管理的文件保留 RPM 所有权。
-兼容原生 `aw install --config ... --agent ...`，同时提供 `aw agent connect`；混合
-包管理与原生接入参数必须在写入前拒绝。
+原生 Hook 注册使用 `aw connect`，本地 Provider 扩展安装使用 `aw install`。
 
 Adapter 只接收 NativeContext 与类型化选项；调用方提供取消和启动文件访问，Adapter
 返回计划、比较数据及原生回复。原始回调验证保留严格解码，不能信任回调自报的验证状态。

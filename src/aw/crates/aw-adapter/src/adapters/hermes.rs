@@ -48,7 +48,7 @@ impl Adapter for Hermes {
         check_args(&input.command.args)?;
         install::installed(&profile).map_err(|error| {
             format!(
-                "{error}; run aw install --config FILE --agent {} --native-profile {}",
+                "{error}; run aw connect --config FILE --agent {} --native-profile {}",
                 input.target,
                 profile.display()
             )

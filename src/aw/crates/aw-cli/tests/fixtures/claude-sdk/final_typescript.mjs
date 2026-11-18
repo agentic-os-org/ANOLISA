@@ -77,7 +77,7 @@ try {
         if (post) {
           // CLI completion follows Provider output. Poll the live service event ledger too.
           const status = JSON.parse(execFileSync(process.env.CLAUDE_TEST_AW,
-            ['status', '--config', process.env.CLAUDE_TEST_CONFIG], { timeout: 5000 })).result;
+            ['service', 'status', '--config', process.env.CLAUDE_TEST_CONFIG], { timeout: 5000 })).result;
           if (status.events === 0) { trace.push({ phase: 'aw_post_returned', call_id: call, input: post }); break; }
         }
         assert(Date.now() < deadline, 'AW Post did not finish');
@@ -93,7 +93,7 @@ try {
   } });
   for await (const message of query) messages.push(message);
   const status = JSON.parse(execFileSync(process.env.CLAUDE_TEST_AW,
-    ['status', '--config', process.env.CLAUDE_TEST_CONFIG], { timeout: 5000 })).result;
+    ['service', 'status', '--config', process.env.CLAUDE_TEST_CONFIG], { timeout: 5000 })).result;
   assert.equal(status.events, 0);
   assert.equal(requests.length, toolCount + 1);
   assert.equal(trace.length, toolCount * 2);

@@ -69,7 +69,7 @@ accelerated = prepare_runtime()  # Before QwenPaw starts loading plugins.
 Ready 并固定 Scope。内部准入门不执行未配置的 before 策略；工具策略下的纯文本回复不建远端 Scope。
 
 HTTP 就绪后，部署方准备 sec-core，再执行
-`aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`。
+`aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID`。
 此协作式选择需要已安装插件。配置式 resident 路径采用 required 可用性，默认等待
 5000 ms，支持工具前阻断与工具后替换／扣留；原生生成器、后台任务和最终结果交付
 沿用 resident 保障。每个 App 使用一种 AW 接线。
@@ -132,7 +132,7 @@ Service 仍可达时，回调取消或失败先等待事件清理，再传播原
 再从另一个终端使用应用的实际 PID 接入：
 
 ```bash
-aw instance attach --config /absolute/aw.yaml --sdk-pid APPLICATION_PID \
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID \
   --timeout-ms 10000
 ```
 

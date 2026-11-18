@@ -15,8 +15,8 @@ AgentScope 2.0.10。其他版本可通过相同的公共工厂与 middleware 合
 
 ```bash
 target/debug/aw run --config crates/aw-service/examples/aw.agentscope.yaml --agent agentscope
-target/debug/aw status --config crates/aw-service/examples/aw.agentscope.yaml
-target/debug/aw stop --config crates/aw-service/examples/aw.agentscope.yaml
+target/debug/aw service status --config crates/aw-service/examples/aw.agentscope.yaml
+target/debug/aw service stop --config crates/aw-service/examples/aw.agentscope.yaml
 ```
 
 示例使用确定性的离线 model 与本地 Echo 工具，无需凭据。before 布尔 Hook 返回
@@ -79,12 +79,12 @@ from aw_agentscope import AwBridge
 
 ```bash
 python /absolute/application/worker.py
-aw status --config aw.yaml
-aw instance update --agent agentscope
+aw service status --config aw.yaml
+aw update --agent agentscope
 ```
 
 更新前暂停新回复，并完整排空已有回复。下一次回复通过既有常驻工厂采用更新后的输入和工具路由。
-多个 worker 使用 `aw instance update --instance INSTANCE` 选择一个实例。
+多个 worker 使用 `aw update --instance INSTANCE` 选择一个实例。
 所有回复流和执行租约关闭后，在应用的 `finally` 中释放实例：
 
 ```python
@@ -192,7 +192,7 @@ Agent 和原生状态继续保留；下一次回复先取得不可变策略快�
 
 ```bash
 aw update --config current.yaml --agent agentscope --policy next.yaml
-aw status --config current.yaml
+aw service status --config current.yaml
 ```
 
 更新前暂停派发。模型执行、活跃工具任务和未确认的清理都会保持 busy；
@@ -217,7 +217,7 @@ aw run --config current.yaml --agent agentscope
 status 中该 worker 的 `instance_id`：
 
 ```bash
-aw status --config current.yaml
+aw service status --config current.yaml
 aw update --config current.yaml --instance INSTANCE --policy next.yaml
 ```
 

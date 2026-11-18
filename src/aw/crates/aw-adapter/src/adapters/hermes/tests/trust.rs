@@ -124,7 +124,7 @@ fn mismatched_or_incomplete_plugins_support_explicit_reinstallation() {
             assert!(error.contains(plugin.to_str().unwrap()), "{error}");
             assert!(error.contains("stop Hermes sessions"));
             assert!(error.contains("move this directory to a backup outside"));
-            assert!(error.contains("rerun aw install"));
+            assert!(error.contains("rerun aw connect"));
             if let Some(name) = missing {
                 assert!(error.contains(name) && error.contains("No such file or directory"));
             }

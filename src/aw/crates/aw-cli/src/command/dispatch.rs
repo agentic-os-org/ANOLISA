@@ -1,6 +1,6 @@
 //! Adapt admitted typed options to existing handlers without reparsing argv.
 
-use super::{Agent, Command, Config, Endpoint, Native, Service, Validate};
+use super::{Command, Config, Endpoint, Native, Service};
 use crate::cli::{Arguments, Exit, Result};
 use std::collections::BTreeMap;
 
@@ -22,26 +22,8 @@ fn native(value: Native) -> Arguments {
     ])
 }
 
-fn attachment(mut args: Arguments, value: super::Attachment) -> Arguments {
-    args.flags.extend(
-        options([
-            ("pid", value.pid.map(|pid| pid.to_string())),
-            ("remove", value.remove.then(|| "true".into())),
-        ])
-        .flags,
-    );
-    args
-}
-
 fn endpoint(value: Endpoint) -> Arguments {
     options([("config", value.config), ("socket", value.socket)])
-}
-
-fn validate(value: Validate) -> Result<Exit> {
-    crate::runtime(
-        "validate",
-        &options([("config", Some(value.config)), ("against", value.against)]),
-    )
 }
 
 fn service(value: Service) -> Result<Exit> {
@@ -75,23 +57,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
             args.native = value.arguments;
             crate::runtime("run", &args)
         }
-        Command::Install(value) => {
-            if value.config.is_some() {
-                crate::runtime(
-                    "install",
-                    &attachment(
-                        options([
-                            ("config", value.config),
-                            ("agent", value.agent),
-                            ("native-profile", value.native_profile),
-                        ]),
-                        value.attachment,
-                    ),
-                )
-            } else {
-                super::management::install(value)
-            }
-        }
+        Command::Install(value) => super::management::install(value),
         Command::Uninstall(value) => match super::confirmation::check(&value)? {
             Some(reason) => crate::output::unconfirmed(value.prefix.output, reason),
             None => super::management::uninstall(value),
@@ -99,18 +65,21 @@ pub(super) fn run(command: Command) -> Result<Exit> {
         Command::List(value) => super::inventory::run("list", value.query),
         Command::Doctor(value) => super::inventory::run("doctor", value),
         Command::Recover(value) => super::management::recover(value),
-        Command::Agent(Agent::Connect(value)) => crate::runtime(
-            "install",
-            &attachment(native(value.native), value.attachment),
-        ),
+        Command::Connect(value) => {
+            let (command, args) = super::connection::connect(value);
+            crate::runtime(command, &args)
+        }
+        Command::Disconnect(value) => {
+            let (command, args) = super::connection::disconnect(value);
+            crate::runtime(command, &args)
+        }
         Command::Config(value) => config(value),
         Command::Service(value) => service(value),
-        Command::Serve(value) => service(Service::Serve(value)),
-        Command::Status(value) => service(Service::Status(value)),
-        Command::Stop(value) => service(Service::Stop(value)),
-        Command::Validate(value) => validate(value),
         Command::Update(value) => {
-            let mut args = endpoint(value.endpoint);
+            let mut args = options([
+                ("config", value.socket.is_none().then_some(value.config)),
+                ("socket", value.socket),
+            ]);
             args.flags.extend(
                 options([
                     ("agent", value.agent),

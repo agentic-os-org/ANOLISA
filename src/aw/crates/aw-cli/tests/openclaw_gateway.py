@@ -288,7 +288,7 @@ print(json.dumps({{'ok': True,
             environment["AW_FINAL_GATE_ORDER_PROBE"] = "1"
         if args.compile_cache:
             environment["NODE_COMPILE_CACHE"] = str(runtime / "compile-cache")
-        daemon = start("daemon",[args.aw,"serve","--config",config_file,"--state-dir",state],environment)
+        daemon = start("daemon",[args.aw,"service","serve","--config",config_file,"--state-dir",state],environment)
         deadline = time.monotonic()+10
         while not (state / "aw.sock").exists():
             assert daemon.poll() is None and time.monotonic()<deadline,"fixture daemon did not become ready"
@@ -324,7 +324,7 @@ print(json.dumps({{'ok': True,
                 if args.native_start:
                     config["spec"]["providers"]["policy"]["timeout_ms"] -= 10
                     write(config_file, config)
-                    update = subprocess.run([str(args.aw), "instance", "update", "--config", str(config_file),
+                    update = subprocess.run([str(args.aw), "update", "--config", str(config_file),
                         "--agent", "openclaw"], cwd=runtime, env=environment,
                         capture_output=True, timeout=15, check=False)
                     assert update.returncode == 0, update.stderr.decode()
@@ -410,7 +410,7 @@ print(json.dumps({{'ok': True,
         assert (profile / "credential-marker").read_text() == "fixture-persistent-state"
         assert (runtime / "barrier-after-one").exists() and (runtime / "barrier-after-two").exists()
         stop(gateway)
-        status = start("status",[args.aw,"status","--config",config_file],environment)
+        status = start("status",[args.aw,"service","status","--config",config_file],environment)
         assert status.wait(timeout=8)==0
         state_report = json.loads((args.output / "status.log").read_text())["result"]
         assert state_report["bindings"] == 0 and state_report["events"] == 0,state_report

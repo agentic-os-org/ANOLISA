@@ -14,69 +14,57 @@ fn command_declaration_is_internally_consistent() {
 }
 
 #[test]
-fn native_install_and_connect_share_exact_runtime_arguments() {
-    let Command::Install(old) =
-        parse("install --config local.yaml --agent hermes --native-profile work").unwrap()
-    else {
-        panic!("expected legacy installation")
-    };
-    let Command::Agent(Agent::Connect(new)) =
-        parse("agent connect --config local.yaml --agent hermes --native-profile work").unwrap()
-    else {
-        panic!("expected native connection")
-    };
-    assert_eq!(old.config, Some(new.native.config));
-    assert_eq!(old.agent, Some(new.native.agent));
-    assert_eq!(old.native_profile, new.native.native_profile);
-    assert!(old.prefix.is_none() && old.bundle.is_none());
+fn obsolete_public_spellings_are_rejected() {
+    for old in [
+        "install --config local.yaml --agent target",
+        "agent connect --config local.yaml --agent target",
+        "instance update --instance one",
+        "instance attach --agent target --pid 123",
+        "instance attach --sdk-instance one",
+        "instance detach --sdk-instance one",
+        "serve --config aw.yaml --state-dir /private/state",
+        "status --config aw.yaml",
+        "stop --config aw.yaml",
+        "validate --config aw.yaml",
+    ] {
+        assert!(parse(old).is_err(), "{old}");
+    }
 }
 
 #[test]
-fn configuration_validation_keeps_legacy_scope_comparison() {
-    let Command::Validate(old) =
-        parse("validate --config candidate.yaml --against original.yaml").unwrap()
-    else {
-        panic!("expected legacy validation")
-    };
-    let Command::Config(Config::Validate(new)) =
-        parse("config validate --config candidate.yaml --against original.yaml").unwrap()
+fn configuration_validation_preserves_scope_and_output_options() {
+    let Command::Config(Config::Validate(value)) =
+        parse("config validate --config candidate.yaml --against original.yaml --json").unwrap()
     else {
         panic!("expected config validation")
     };
-    assert_eq!(old, new.validation);
+    assert_eq!(value.config, "candidate.yaml");
+    assert_eq!(value.against.as_deref(), Some("original.yaml"));
+    assert!(value.output.json);
 }
 
 #[test]
 fn service_groups_preserve_runtime_arguments() {
-    let Command::Serve(old) = parse("serve --config aw.yaml --state-dir /private/state").unwrap()
-    else {
-        panic!("expected legacy serve")
-    };
-    let Command::Service(Service::Serve(new)) =
+    let Command::Service(Service::Serve(value)) =
         parse("service serve --config aw.yaml --state-dir /private/state").unwrap()
     else {
         panic!("expected serve")
     };
-    assert_eq!(old, new);
-    for (old, new) in [
-        (
-            parse("status --config aw.yaml"),
-            parse("service status --config aw.yaml"),
-        ),
-        (
-            parse("stop --config aw.yaml"),
-            parse("service stop --config aw.yaml"),
-        ),
-    ] {
-        let old = match old.unwrap() {
-            Command::Status(value) | Command::Stop(value) => value,
-            _ => panic!("expected legacy endpoint"),
-        };
-        let new = match new.unwrap() {
-            Command::Service(Service::Status(value) | Service::Stop(value)) => value,
-            _ => panic!("expected endpoint"),
-        };
-        assert_eq!(old, new);
+    assert_eq!(value.config, "aw.yaml");
+    assert_eq!(value.state_dir, "/private/state");
+    for action in ["status", "stop"] {
+        for (selection, config, socket) in [
+            ("--config aw.yaml", Some("aw.yaml"), None),
+            ("--socket /socket", None, Some("/socket")),
+        ] {
+            let Command::Service(Service::Status(value) | Service::Stop(value)) =
+                parse(&format!("service {action} {selection}")).unwrap()
+            else {
+                panic!("expected endpoint")
+            };
+            assert_eq!(value.config.as_deref(), config);
+            assert_eq!(value.socket.as_deref(), socket);
+        }
     }
     for command in [
         "service",
@@ -96,7 +84,10 @@ fn package_commands_share_one_frontend_without_native_dispatch() {
         "config init --prefix /private/prefix --config /private/aw.yaml --state-dir /private/state --qoder /bin/qoder",
         "config add-provider --config /private/aw.yaml --name external --definition provider.yaml",
     ] {
-        assert!(matches!(parse(input).unwrap(), Command::Install(_) | Command::Uninstall(_) | Command::Config(_)));
+        assert!(matches!(
+            parse(input).unwrap(),
+            Command::Install(_) | Command::Uninstall(_) | Command::Config(_)
+        ));
     }
 }
 
@@ -122,20 +113,13 @@ fn unsupported_agent_commands_do_not_fall_through_to_installation() {
 }
 
 #[test]
-fn option_values_do_not_select_another_installation_mode() {
-    let Command::Install(native) = parse("install --config=--prefix --agent target").unwrap()
-    else {
-        panic!("expected installation")
-    };
-    assert_eq!(native.config.as_deref(), Some("--prefix"));
-    assert!(native.prefix.is_none());
+fn option_values_do_not_select_another_command() {
     let Command::Install(package) =
         parse("install --prefix=--config --bundle /private/bundle").unwrap()
     else {
         panic!("expected installation")
     };
-    assert_eq!(package.prefix.as_deref(), Some("--config"));
-    assert!(package.config.is_none());
+    assert_eq!(package.prefix, "--config");
 }
 
 #[test]
@@ -267,6 +251,20 @@ fn invalid_utf8_returns_an_error_without_panicking() {
 
 #[test]
 fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
+    for command in ["update --instance one", "update --agent qoder"] {
+        let Command::Update(value) = parse(command).unwrap() else {
+            panic!("expected update");
+        };
+        assert_eq!(value.config, "aw.yaml");
+        assert!(value.socket.is_none() && value.policy.is_none());
+    }
+    let Command::Update(value) =
+        parse("update --socket /socket --instance one --policy next.yaml").unwrap()
+    else {
+        panic!("expected socket update");
+    };
+    assert_eq!(value.socket.as_deref(), Some("/socket"));
+    assert_eq!(value.policy.as_deref(), Some("next.yaml"));
     assert!(matches!(
         parse("update --config aw.yaml --agent qoder").unwrap(),
         Command::Update(Update { policy: None, .. })
@@ -287,27 +285,7 @@ fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
 }
 
 #[test]
-fn attachment_options_preserve_native_routing_and_reject_mixed_modes() {
-    for suffix in ["--pid 123", "--pid 123 --remove"] {
-        let Command::Install(old) =
-            parse(&format!("install --config aw.yaml --agent target {suffix}")).unwrap()
-        else {
-            panic!("expected legacy install")
-        };
-        let Command::Agent(Agent::Connect(new)) = parse(&format!(
-            "agent connect --config aw.yaml --agent target {suffix}"
-        ))
-        .unwrap() else {
-            panic!("expected connect")
-        };
-        assert_eq!(old.attachment, new.attachment);
-        assert_eq!(old.attachment.pid, Some(123));
-    }
-    for entry in ["install", "agent connect"] {
-        for suffix in ["--remove", "--pid 0", "--pid 1 --native-profile work"] {
-            assert!(parse(&format!("{entry} --config aw.yaml --agent target {suffix}")).is_err());
-        }
-    }
+fn attachment_options_do_not_leak_into_other_commands() {
     for input in [
         "run --config aw.yaml --agent target --pid 1",
         "run --config aw.yaml --agent target --remove",

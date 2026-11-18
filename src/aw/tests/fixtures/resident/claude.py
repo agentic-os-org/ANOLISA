@@ -59,7 +59,7 @@ async def lifecycle():
         assert all(not Path(f"/proc/{pid}").exists() for pid in pids), (index, pids)
         status = json.loads(
             subprocess.check_output(
-                [config["executable"], "status", "--config", str(ROOT / "aw.json")],
+                [config["executable"], "service", "status", "--config", str(ROOT / "aw.json")],
                 timeout=5,
             )
         )["result"]

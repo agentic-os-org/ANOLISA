@@ -34,7 +34,7 @@ def rows(name):
 
 def clean():
     result = json.loads(subprocess.check_output(
-        [AW, "status", "--socket", str(SOCKET)], timeout=5
+        [AW, "service", "status", "--socket", str(SOCKET)], timeout=5
     ))["result"]
     # The aw run root binding lives until this worker exits.
     assert result["bindings"] == 1 and result["events"] == 0, result
@@ -207,7 +207,7 @@ async def main():
                     else:
                         raise AssertionError("reply admitted during tool teardown")
                     status = json.loads(subprocess.check_output(
-                        [AW, "status", "--socket", str(SOCKET)], timeout=5
+                        [AW, "service", "status", "--socket", str(SOCKET)], timeout=5
                     ))["result"]
                     assert status["bindings"] == 2, status
                 finally:

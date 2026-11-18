@@ -127,7 +127,7 @@ else:
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("TMPDIR", profile.parent().unwrap());
             command
-                .args([if installing { "install" } else { "run" }, "--config"])
+                .args([if installing { "connect" } else { "run" }, "--config"])
                 .arg(fixture.root.join("aw.json"))
                 .args(["--agent", "hermes", "--native-profile"])
                 .arg(&profile);

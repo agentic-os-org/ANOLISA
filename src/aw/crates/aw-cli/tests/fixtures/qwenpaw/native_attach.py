@@ -82,14 +82,12 @@ class NativeAttachTests(unittest.TestCase):
                 }}
                 save(config, document)
                 aw = self.binary
-                daemon = processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", case / "state"])
+                daemon = processes.start("daemon", [aw, "service", "serve", "--config", config, "--state-dir", case / "state"])
                 await_condition(lambda: (case / "state/aw.sock").exists() or processes.exited(daemon), 5, "AW startup")
                 def status():
-                    return json.loads(checked([aw, "status", "--config", config], env=environment).stdout)["result"]
+                    return json.loads(checked([aw, "service", "status", "--config", config], env=environment).stdout)["result"]
                 def install(remove=False, success=True):
-                    command = [aw, "instance", "attach", "--config", config, "--agent", "native", "--pid", str(child.pid)]
-                    if remove:
-                        command.append("--remove")
+                    command = [aw, "disconnect" if remove else "connect", "--config", config, "--agent", "native", "--pid", str(child.pid)]
                     result = __import__("subprocess").run(list(map(str, command)), env=environment, capture_output=True, timeout=45)
                     self.assertEqual(result.returncode == 0, success, result.stderr.decode())
                     return result
@@ -121,7 +119,7 @@ class NativeAttachTests(unittest.TestCase):
                 allowed = copy.deepcopy(document)
                 allowed["spec"]["events"] = {}
                 save(config, allowed)
-                checked([aw, "instance", "update", "--config", config, "--agent", "native"], env=environment)
+                checked([aw, "update", "--config", config, "--agent", "native"], env=environment)
                 report["checks"].append("single-config-update")
                 (case / "tool-command.txt").write_text("sleep 2; printf attached > " + shlex.quote(str(case / "work/marker")))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

@@ -77,7 +77,7 @@ fn hermes_install_rejects_configured_entrypoints_before_probing_or_writing() {
         fixture.save(&document);
         let mut command = fixture.command();
         command
-            .args(["install", "--config"])
+            .args(["connect", "--config"])
             .arg(fixture.root.join("aw.json"))
             .args(["--agent", "hermes", "--native-profile"])
             .arg(&profile);
@@ -314,7 +314,7 @@ fn validated_integral_float_budgets_launch_before_and_after_hooks() {
     let service = Service::start(&fixture, &document);
     let mut validate = fixture.command();
     validate
-        .args(["validate", "--config"])
+        .args(["config", "validate", "--config"])
         .arg(fixture.root.join("aw.json"));
     assert!(fixture.run(validate).status.success());
     let report = fixture.successful(fixture.launch(&["--run-id", "float"], None));

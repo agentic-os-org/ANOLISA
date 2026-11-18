@@ -203,7 +203,7 @@ Session 提交前的 Agent loop 结果，支持 `observe`/`block`；结果替换
 唯一通配符为 `*`。Provider 私有工具映射独立配置。
 
 启动前，AW 根据所选 Adapter 投影事件与步骤选择器，排除交集确定无法匹配的步骤。仅剩余步骤参与 Provider 准备和效果准入，配置结构与引用仍全量校验。
-`aw validate` 列出各 target 被投影掉的步骤；`aw config validate --json` 使用 `result.projected_out_steps`，包含 target、event 和 step_id。
+`aw config validate` 列出各 target 被投影掉的步骤；`aw config validate --json` 使用 `result.projected_out_steps`，包含 target、event 和 step_id。
 OpenClaw after 将 `bash`、`apply-patch`、`cron` 分别规范化为 `exec`、`apply_patch`、`automations`；native_name 保留原回调名称。
 
 共享 Host 在回调归一化、绑定检查和步骤单次占用之后执行选择。

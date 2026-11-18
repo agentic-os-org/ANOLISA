@@ -100,15 +100,15 @@ DSH 插件还注册原生 `tools.guard`：它在执行前同步复核 `tool.befo
 在 `src/aw` 目录运行：
 
 ```bash
-target/debug/aw validate --config ./aw.yaml
+target/debug/aw config validate --config ./aw.yaml
 target/debug/aw run --config ./aw.yaml --agent dsh -- "Review this repository"
-target/debug/aw status --config ./aw.yaml
+target/debug/aw service status --config ./aw.yaml
 ```
 
-`validate` 检查配置；`run` 还会完成 Provider 准入、插件注册及实际 Hook 调用。
+`aw config validate` 检查配置；`run` 还会完成 Provider 准入、插件注册及实际 Hook 调用。
 验证策略时分别触发允许、工具前阻断、工具后替换和最终结果阻断：被拒绝的工具
 不应执行；headless 顶层最终结果被阻断时，模型和 CLI 只接收暂扣错误结果。
-需要停止按需启动的 AW 服务时运行 `target/debug/aw stop --config ./aw.yaml`。
+需要停止按需启动的 AW 服务时运行 `target/debug/aw service stop --config ./aw.yaml`。
 
 ## 适用范围
 

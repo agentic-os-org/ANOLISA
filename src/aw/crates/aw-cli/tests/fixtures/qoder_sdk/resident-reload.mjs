@@ -20,7 +20,7 @@ const status = () => {
 const update = (name, busy = false) => {
   const previous = status().policy_revision;
   const command = process.env.AW_TEST_CONFIG
-    ? ["instance", "update", "--config", process.env.AW_TEST_CONFIG,
+    ? ["update", "--config", process.env.AW_TEST_CONFIG,
       "--instance", binding.binding.instance_id]
     : ["update", "--socket", binding.socket, "--agent", "sdk"];
   const result = aw([...command, "--policy", path.resolve(name)]);

@@ -8,7 +8,7 @@ pub(super) fn install_command(
     profile: &std::path::Path,
     state: &str,
 ) -> Command {
-    let mut command = command(fixture, profile, "install");
+    let mut command = command(fixture, profile, "connect");
     if state.starts_with("context-ceiling-") {
         command.current_dir(profile.parent().unwrap().join("ceiling/launch"));
     }

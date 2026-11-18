@@ -34,7 +34,7 @@
 先退出使用这份配置的 Agent，再停止服务并备份。
 
 ```bash
-aw stop --config "$AW_HOME/aw.yaml"
+aw service stop --config "$AW_HOME/aw.yaml"
 cp "$AW_HOME/aw.yaml" "$AW_HOME/aw.yaml.bak"
 aw config show --config "$AW_HOME/aw.yaml"
 ```
@@ -44,7 +44,7 @@ aw config show --config "$AW_HOME/aw.yaml"
 修改后校验并重新启动。
 
 ```bash
-aw validate --config "$AW_HOME/aw.yaml"
+aw config validate --config "$AW_HOME/aw.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```

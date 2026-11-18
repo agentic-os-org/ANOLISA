@@ -53,7 +53,7 @@ def main():
         env = {"PATH": os.environ["PATH"], "HOME": str(root / "home"), "LANG": "C.UTF-8",
                "AW_TEST_EXECUTABLE": aw, "FAKE_ROOT": str(root), "AW_TEST_ROOT": str(root)}
         with (args.output / "service.log").open("wb") as log:
-            service = subprocess.Popen([aw, "serve", "--config", root / "aw.yaml", "--state-dir", root / "s"],
+            service = subprocess.Popen([aw, "service", "serve", "--config", root / "aw.yaml", "--state-dir", root / "s"],
                 cwd=root, env=env, stdout=log, stderr=log, start_new_session=True)
             try:
                 deadline = time.monotonic() + 15
@@ -74,7 +74,7 @@ def main():
                 result["versions"] = {name: json.loads((npm / "node_modules/@earendil-works" /
                     name / "package.json").read_text())["version"] for name in ["pi-coding-agent", "pi-agent-core"]}
                 (args.output / "result.json").write_text(json.dumps(result))
-                state = json.loads(subprocess.check_output([aw, "status", "--config", root / "aw.yaml"],
+                state = json.loads(subprocess.check_output([aw, "service", "status", "--config", root / "aw.yaml"],
                     text=True, timeout=5))["result"]
                 assert state["bindings"] == state["events"] == 0, state
             finally:

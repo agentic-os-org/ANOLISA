@@ -13,7 +13,7 @@ const options = { cwd: process.cwd(), settingSources: [], persistSession: false,
   auth: { type: "accessToken", accessToken: { envVar: "QODER_PERSONAL_ACCESS_TOKEN" } } };
 const run = args => spawnSync(config.executable, args, { encoding: "utf8", timeout: 15000 });
 function status() {
-  const reply = run(["status", "--socket", binding.socket]);
+  const reply = run(["service", "status", "--socket", binding.socket]);
   assert.equal(reply.status, 0, reply.stderr);
   return JSON.parse(reply.stdout).result;
 }
@@ -43,7 +43,7 @@ for (const mode of ["direct-first", "prewarm", "direct-reuse", "unused-prewarm"]
     children = identities();
     nativeWorkers = workers().filter(id => !previousWorkers.has(id));
     assert.equal(nativeWorkers.length, 1, "native Query did not initialize its bundled Worker thread");
-    const busy = run(["instance", "update",
+    const busy = run(["update",
       "--instance", binding.binding.instance_id, "--config", process.env.AW_TEST_CONFIG]);
     assert.notEqual(busy.status, 0);
     assert.match(busy.stderr, /busy/);
@@ -59,7 +59,7 @@ for (const mode of ["direct-first", "prewarm", "direct-reuse", "unused-prewarm"]
   assert.equal(instance().requests, 0);
   assert.equal(status().bindings, 1);
   assert.equal(status().events, 0);
-  const updated = run(["instance", "update",
+  const updated = run(["update",
     "--instance", binding.binding.instance_id, "--config", process.env.AW_TEST_CONFIG]);
   assert.equal(updated.status, 0, updated.stderr);
   records.push({ case: mode, passed: true, workers_stopped: nativeWorkers.length, child_processes_stopped: children.length });

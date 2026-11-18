@@ -87,7 +87,7 @@ def run_profile(profile: str, bin_dir: Path, npm: Path, model: Path, output: Pat
                 _, stderr = child.communicate(timeout=5)
             if (state / "state/aw.sock").exists():
                 stopped = subprocess.run(
-                    [str(bin_dir / "aw"), "stop", "--config", str(config_path)],
+                    [str(bin_dir / "aw"), "service", "stop", "--config", str(config_path)],
                     cwd=state, env=env, capture_output=True, text=True, timeout=10,
                 )
                 assert stopped.returncode == 0, stopped.stderr

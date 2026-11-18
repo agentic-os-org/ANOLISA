@@ -67,10 +67,10 @@ try {
 ## 启动与验证
 
 ```bash
-aw validate --config /absolute/aw.yaml
+aw config validate --config /absolute/aw.yaml
 aw run --config /absolute/aw.yaml --agent sdk -- "Your task"
-aw status --config /absolute/aw.yaml
-aw stop --config /absolute/aw.yaml
+aw service status --config /absolute/aw.yaml
+aw service stop --config /absolute/aw.yaml
 ```
 
 `startDaemon()` 确认 daemon 就绪；`createQuery()` 在 SDK 握手后确认 Query 就绪。按[原生验收](../validation.md)检查允许、阻断、后置故障和清理。
@@ -114,12 +114,12 @@ Object.assign(process.env, instance.environment);
 
 ```bash
 node /absolute/application/worker.mjs
-aw status --config aw.yaml
-aw instance update --agent sdk
+aw service status --config aw.yaml
+aw update --agent sdk
 ```
 
 在另一个终端执行状态和更新命令。修改 `aw.yaml` 后，暂停新建 Query、关闭现有 Query，
-再执行更新。多个 worker 使用 `aw instance update --instance INSTANCE` 明确选择实例。
+再执行更新。多个 worker 使用 `aw update --instance INSTANCE` 明确选择实例。
 两种启动方式沿用相同的常驻策略、原生配置和清理规则。所有 Query 关闭、daemon 停止后，
 在应用的 `finally` 中释放准备的实例：
 

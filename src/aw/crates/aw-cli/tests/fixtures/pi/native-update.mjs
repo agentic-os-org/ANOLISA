@@ -13,7 +13,7 @@ let disposals = 0;
 export async function createSession({ sdk, cwd, args }) {
   assert.deepEqual(args, ["task with spaces", "--native-option=kept"]);
   const duringPreparation = spawnSync(process.env.AW_TEST_EXECUTABLE,
-    ["instance", "update", "--instance", process.env.AW_TEST_INSTANCE,
+    ["update", "--instance", process.env.AW_TEST_INSTANCE,
       "--policy", join(root, "deny.json")], { encoding: "utf8", timeout: 35000 });
   assert.notEqual(duringPreparation.status, 0, "factory preparation must retain occupancy");
   assert.match(duringPreparation.stderr, /busy/);
@@ -29,7 +29,7 @@ export async function runWorker({ createSession, args }) {
   const config = JSON.parse(readFileSync(process.env.AW_NATIVE_CONFIG, "utf8"));
   const binding = JSON.parse(readFileSync(config.binding, "utf8"));
   const update = (name = "deny.json") => spawnSync(config.executable,
-    ["instance", "update", "--instance", process.env.AW_TEST_INSTANCE,
+    ["update", "--instance", process.env.AW_TEST_INSTANCE,
       "--policy", join(root, name)], { encoding: "utf8", timeout: 35000 });
   if (process.env.PI_REJECT_STRICT === "1") {
     const unsupported = update("strict.json");

@@ -169,9 +169,9 @@ def main() -> None:
                     raise RuntimeError(f"{name} exited {result.returncode}: " +
                                        (args.output / f"{name}.log").read_text()[-1200:])
 
-            checked([base[0], "agent", "connect", *base[1:]], "connect")
+            checked([base[0], "connect", *base[1:]], "connect")
             with (args.output / "daemon.log").open("w") as stream:
-                daemon = subprocess.Popen([str(args.aw), "serve", "--config", str(config_path),
+                daemon = subprocess.Popen([str(args.aw), "service", "serve", "--config", str(config_path),
                                            "--state-dir", str(state)], cwd=work, env=env,
                                           stdin=subprocess.DEVNULL, stdout=stream,
                                           stderr=subprocess.STDOUT, start_new_session=True)
@@ -207,9 +207,9 @@ def main() -> None:
                 json.loads(line).get("record", {}).get("policy_block") is True
                 for journal in state.rglob("*.jsonl") for line in journal.read_text().splitlines())
             checked([str(args.hermes), "gateway", "stop"], "gateway-stop", 30)
-            checked([base[0], "status", "--config", str(config_path)], "status")
+            checked([base[0], "service", "status", "--config", str(config_path)], "status")
             status = json.loads((args.output / "status.log").read_text())
-            checked([base[0], "stop", "--config", str(config_path)], "aw-stop")
+            checked([base[0], "service", "stop", "--config", str(config_path)], "aw-stop")
             daemon.wait(timeout=10)
             report = {"status": "passed", "model_saw_replacement":
                       "MODEL_VISIBLE_REPLACEMENT" in result_text,

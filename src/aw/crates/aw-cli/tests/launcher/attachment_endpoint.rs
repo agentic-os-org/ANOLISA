@@ -54,7 +54,7 @@ fn qwenpaw_port_replaced_during_bind_never_receives_plugin_install() {
     let (_native, pid) = app(&fixture, port, true);
     let mut command = fixture.command();
     command
-        .args(["agent", "connect", "--config"])
+        .args(["connect", "--config"])
         .arg(fixture.root.join("aw.json"))
         .args(["--agent", "qoder", "--pid"])
         .arg(pid.to_string());

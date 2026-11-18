@@ -21,7 +21,7 @@ target/debug/aw service serve --config crates/aw-service/examples/aw.yaml \
 
 ```bash
 AW_DEMO_SOCKET=/absolute/socket/path/printed/above
-target/debug/aw status --socket "$AW_DEMO_SOCKET"
+target/debug/aw service status --socket "$AW_DEMO_SOCKET"
 cargo run --locked -p aw-service --example local -- "$AW_DEMO_SOCKET"
 ```
 
@@ -32,7 +32,7 @@ cargo run --locked -p aw-service --example local -- "$AW_DEMO_SOCKET"
 ```bash
 printf '%s\n' '{"method":"audit","key":"AUDIT_KEY"}' | \
   target/debug/aw request --socket "$AW_DEMO_SOCKET"
-target/debug/aw stop --socket "$AW_DEMO_SOCKET"
+target/debug/aw service stop --socket "$AW_DEMO_SOCKET"
 ```
 
 `terminal: false` 表示尚无终结记录，可能仍在运行，也可能已中断。调用超时后不得

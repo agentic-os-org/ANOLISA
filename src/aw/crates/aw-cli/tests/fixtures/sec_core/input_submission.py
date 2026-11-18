@@ -88,7 +88,7 @@ def main():
                     for name, operation in [("prompt", "scan_prompt"), ("pii", "scan_user_input")]
                 ]}}
             save(root / "aw.json", config)
-            processes.start("aw-service", [binaries / "aw", "serve", "--config", root / "aw.json",
+            processes.start("aw-service", [binaries / "aw", "service", "serve", "--config", root / "aw.json",
                                            "--state-dir", root / "state"])
             await_condition(lambda: (root / "state/aw.sock").exists(), 10, "AW readiness")
             if args.agent == "qwenpaw":

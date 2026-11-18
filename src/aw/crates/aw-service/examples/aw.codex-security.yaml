@@ -1,5 +1,5 @@
 # Replace executable and socket paths before use. Start the sec-core daemon separately.
-# Install the three AW hooks once with `aw install`, then review them in Codex `/hooks`.
+# Install the three AW hooks once with `aw connect`, then review them in Codex `/hooks`.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
 metadata: {name: codex-security}

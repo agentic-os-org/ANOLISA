@@ -222,7 +222,7 @@ def main():
             snapshot = {p: p.read_bytes() for p in native_files}
             save(root / "aw.json", policy(args.agent, argv, binaries, root, backend.socket))
             aw = binaries / "aw"
-            processes.start("service", [aw, "serve", "--config", root / "aw.json", "--state-dir", root / "state"])
+            processes.start("service", [aw, "service", "serve", "--config", root / "aw.json", "--state-dir", root / "state"])
             await_condition(lambda: (root / "state/aw.sock").exists(), 10, "AW service readiness")
             if args.fault:
                 backend.inject("timeout-block" if args.fault == "cancel" else args.fault)

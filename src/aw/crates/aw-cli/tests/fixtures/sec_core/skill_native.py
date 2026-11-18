@@ -196,7 +196,7 @@ def run(args):
                         workflow.parent.mkdir(parents=True, exist_ok=True)
                         name = "Workflow-case" if case == "workflow-case" else case
                         workflow.write_text(f'export const meta = {{name: "{name}", description: "UNCHECKED_WORKFLOW_INSTRUCTIONS"}}; return {{}};')
-                    service = processes.start("service-" + case, [args.bin / "aw", "serve", "--config", root / "aw.json", "--state-dir", state])
+                    service = processes.start("service-" + case, [args.bin / "aw", "service", "serve", "--config", root / "aw.json", "--state-dir", state])
                     await_condition(lambda:(state / "aw.sock").exists() or processes.exited(service), 10, "AW service")
                     if case == "timeout":
                         backend.pause()

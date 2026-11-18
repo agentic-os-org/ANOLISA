@@ -136,10 +136,10 @@ def main(args):
                     save(path, config)
                     base = [args.aw, "--config", path, "--agent", "hermes", "--native-profile", profile]
                     if case == CASES[0]:
-                        child = processes.start("install", [base[0], "install", *base[1:]])
+                        child = processes.start("install", [base[0], "connect", *base[1:]])
                         assert processes.wait(child, 60) == 0
                         processes.stop(child)
-                    service = processes.start("service-" + case, [args.aw, "serve", "--config", path, "--state-dir", state])
+                    service = processes.start("service-" + case, [args.aw, "service", "serve", "--config", path, "--state-dir", state])
                     await_condition(lambda: (state / "aw.sock").exists(), 10, "AW socket")
                     if args.native_site_packages:
                         if not assets:
@@ -162,7 +162,7 @@ def main(args):
                     delivered = json.dumps(server.requests[-1]["messages"]) if server.requests else ""
                     expected_delivery = skill == "signed" and not denied
                     assert ("PRIVATE_SKILL_BODY" in delivered) == expected_delivery, (case, delivered)
-                    status = json.loads(checked([args.aw, "status", "--socket", state / "aw.sock"], env=env).stdout)["result"]
+                    status = json.loads(checked([args.aw, "service", "status", "--socket", state / "aw.sock"], env=env).stdout)["result"]
                     assert status["bindings"] == status["events"] == 0, status
                     reports.append({"case": case, "instructions_delivered": expected_delivery,
                                     "model_requests": len(server.requests), "http_posts": server.posts})

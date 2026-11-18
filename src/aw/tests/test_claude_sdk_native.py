@@ -233,7 +233,7 @@ def run_case(
             assert not (case / "effect").exists()
             status = json.loads(
                 subprocess.check_output(
-                    [str(aw), "status", "--config", str(config)], env=env, timeout=10
+                    [str(aw), "service", "status", "--config", str(config)], env=env, timeout=10
                 )
             )
             assert status["result"]["bindings"] == status["result"]["events"] == 0
@@ -242,7 +242,7 @@ def run_case(
         assert "AW claude-sdk native hooks ready" in stderr
         status = json.loads(
             subprocess.check_output(
-                [str(aw), "status", "--config", str(config)], env=env, timeout=10
+                [str(aw), "service", "status", "--config", str(config)], env=env, timeout=10
             )
         )
         assert status["result"]["bindings"] == status["result"]["events"] == 0, status
@@ -253,7 +253,7 @@ def run_case(
                     "pid": daemon_pid,
                     "state": str(state),
                     "socket": str(state / "aw.sock"),
-                    "stop": [str(aw), "stop", "--config", str(config)],
+                    "stop": [str(aw), "service", "stop", "--config", str(config)],
                 }
             )
         )
@@ -513,7 +513,7 @@ def run_case(
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
         stopped = subprocess.run(
-            [str(aw), "stop", "--config", str(config)],
+            [str(aw), "service", "stop", "--config", str(config)],
             env=env,
             capture_output=True,
             text=True,

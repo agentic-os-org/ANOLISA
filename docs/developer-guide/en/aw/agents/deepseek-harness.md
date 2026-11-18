@@ -113,17 +113,17 @@ separate reference that runtime admission does not yet support; leave it unset.
 From `src/aw`, run:
 
 ```bash
-target/debug/aw validate --config ./aw.yaml
+target/debug/aw config validate --config ./aw.yaml
 target/debug/aw run --config ./aw.yaml --agent dsh -- "Review this repository"
-target/debug/aw status --config ./aw.yaml
+target/debug/aw service status --config ./aw.yaml
 ```
 
-`validate` checks the configuration; `run` also performs Provider admission,
+`aw config validate` checks the configuration; `run` also performs Provider admission,
 plugin registration, and actual Hook calls. Exercise an allowed call,
 before-tool denial, post-tool replacement, and final-result denial. A denied
 tool must not execute. For a blocked headless top-level final result, the model
 and CLI receive only a withheld error result. To stop the on-demand AW service,
-run `target/debug/aw stop --config ./aw.yaml`.
+run `target/debug/aw service stop --config ./aw.yaml`.
 
 ## Coverage
 

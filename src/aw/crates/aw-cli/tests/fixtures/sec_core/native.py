@@ -242,7 +242,7 @@ def run(args, mode, root):
         save(config, configuration(args.agent, argv, args.bin, state, backend.socket))
         daemon = processes.start(
             "daemon",
-            [str(aw), "serve", "--config", str(config), "--state-dir", str(state)],
+            [str(aw), "service", "serve", "--config", str(config), "--state-dir", str(state)],
         )
         await_condition(
             lambda: (state / "aw.sock").exists() or processes.exited(daemon),
@@ -268,7 +268,7 @@ def run(args, mode, root):
         # Reap the launcher and descendants before checking zero live bindings.
         processes.stop(child)
         report["final_status"] = json.loads(
-            checked([aw, "status", "--config", config], env=environment).stdout
+            checked([aw, "service", "status", "--config", config], env=environment).stdout
         )
         backend.recover()
         if mode != "backend-error":

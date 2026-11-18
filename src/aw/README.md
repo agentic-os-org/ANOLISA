@@ -57,9 +57,9 @@ The sec-core Provider can check locally resolved Skills before Qoder SDK and Qwe
 Core works independently. Install and enable the corresponding Providers for security checks and compression.
 Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
 
-Use `aw instance attach --agent TARGET --pid PID` to attach a supported native process, then `aw instance update --agent TARGET` to apply policy while idle. Both commands default to `aw.yaml` in the current directory; see the [command reference](../../docs/user-guide/en/aw/cli-reference.md#aw-instance-attach-and-aw-instance-update) for prerequisites and explicit configuration selection.
+Use `aw connect --agent TARGET --pid PID` to attach a supported native process, then `aw update --agent TARGET` to apply policy while idle. Both commands default to `aw.yaml` in the current directory; see the [command reference](../../docs/user-guide/en/aw/cli-reference.md#aw-connect-and-aw-update) for prerequisites and explicit configuration selection.
 
-Use `aw instance setup` or an application-owned `prepare` call to retain native startup across the eight supported Adapters after one-time integration. Native readiness confirms registration, and `aw instance update` applies policy between completed tasks. SDK factories and QwenPaw use task Scopes; Qoder, OpenClaw and Hermes use native request boundaries. See [independent instances](../../docs/developer-guide/en/aw/deployment/independent-instances.md).
+Use `aw instance setup` or an application-owned `prepare` call to retain native startup across the eight supported Adapters after one-time integration. Native readiness confirms registration, and `aw update` applies policy between completed tasks. SDK factories and QwenPaw use task Scopes; Qoder, OpenClaw and Hermes use native request boundaries. See [independent instances](../../docs/developer-guide/en/aw/deployment/independent-instances.md).
 
 ## Hook support matrix
 
@@ -148,5 +148,5 @@ for the owned state directory and bounded read interface.
 
 For experimental native QwenPaw startup followed by cooperative attachment,
 see [deferred tool-after integration](../../docs/developer-guide/en/aw/deployment/python-sdk.md#deferred-tool-after-attachment).
-The installed plugin holds the first tool until ready; `aw instance attach
+The installed plugin holds the first tool until ready; `aw connect
 --config aw.yaml --sdk-pid PID` starts or reuses AW without launching the Agent.

@@ -51,7 +51,7 @@ aw config init --prefix "$AW_EXTENSION_PREFIX" \
   --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
   --template-var "SEC_CORE_CLI=$AW_SEC_CLI" --template-var "SOCKET=$AW_SEC_SOCKET" \
   --qoder "$AW_QODER"
-aw validate --config "$AW_HOME/security.yaml"
+aw config validate --config "$AW_HOME/security.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/security.yaml" --agent qoder
 ```
@@ -155,7 +155,7 @@ safely replaced or the backend fails.
 
 ## Stop and extend
 
-After exiting the Agent, run `aw stop --config "$AW_HOME/security.yaml"`.
+After exiting the Agent, run `aw service stop --config "$AW_HOME/security.yaml"`.
 Backend services remain managed through the sec-core installation guide.
 Uninstalling AW preserves external backend configuration and data.
 

@@ -22,9 +22,9 @@ The ordinary Qoder CLI minimum version range does not apply to this mode.
 4. Prepare `current.yaml` with the [Agent guide](../native-agents.md), then connect. Dispatch only after success returns instance, policy revision and process identity.
 
 ```bash
-aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
+aw connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
 aw update --config current.yaml --agent TARGET
-aw agent connect --config current.yaml --agent TARGET --pid "$NATIVE_PID" --remove
+aw disconnect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
 ```
 
 The three commands cover attachment, [idle update](policy-updates.md) and removal; run each at its appropriate stage.
@@ -39,7 +39,7 @@ The controller maintains profile exclusivity. Remove AW before stopping the exte
 
 ## Cleanup failures
 
-When native removal cannot be confirmed, AW retains ownership and bridge files. Restore native callbacks or the plugin API, then retry the same `--remove` command.
+When native removal cannot be confirmed, AW retains ownership and bridge files. Restore native callbacks or the plugin API, then retry the same `aw disconnect` command.
 Restore a deleted plugin directory if it remains loaded. Restore Qoder's original AW configuration group if it was moved.
 
 Forced termination during installation can leave staging files or unrecorded bindings. Use the owning supervisor to stop affected services, then inspect and clean their private state; automatic crash collection is not implemented.

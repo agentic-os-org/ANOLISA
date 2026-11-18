@@ -18,15 +18,7 @@ pub(super) struct Recover {
 pub(super) fn install(value: package::Install) -> crate::cli::Result<crate::cli::Exit> {
     let result = (|| {
         let paths = scope::paths(value.scope)?;
-        let prefix = value
-            .prefix
-            .as_deref()
-            .ok_or_else(|| aw_package::Error::Invalid("missing --prefix".into()))?;
-        let bundle = value
-            .bundle
-            .as_deref()
-            .ok_or_else(|| aw_package::Error::Invalid("missing --bundle".into()))?;
-        let plan = plan::install(&paths, Path::new(bundle), Path::new(prefix))?;
+        let plan = plan::install(&paths, Path::new(&value.bundle), Path::new(&value.prefix))?;
         Ok((paths, plan))
     })();
     complete("install", value.dry_run, value.output, result)

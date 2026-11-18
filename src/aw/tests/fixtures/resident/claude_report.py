@@ -84,7 +84,7 @@ async def run(root, source):
                         ledger = client._aw_bridge.invocations
                         assert not ledger.active and not ledger.pending and not ledger.running
                         status = json.loads(subprocess.check_output(
-                            [executable, "status", "--config", str(root / "aw.json")], timeout=5))["result"]
+                            [executable, "service", "status", "--config", str(root / "aw.json")], timeout=5))["result"]
                         assert status["events"] == 0, status
                         assert all(status["resources"]["usage"][key] == 0
                                    for key in ("invocations", "correlations", "calls")), status

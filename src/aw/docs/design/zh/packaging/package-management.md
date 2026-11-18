@@ -63,7 +63,7 @@ prefix 读锁。CLI、服务和 Host 在所属进程运行与清理期间保留�
 
 这些引用不能发现任意外部进程或 shell 动态生成的路径，因此包卸载只检查能够
 建立的证据；后端生命周期与原生包卸载仍由其 owner 负责。原生 Hook 注册使用
-`aw agent connect`，与 Provider bundle 安装分开。
+`aw connect`，与 Provider bundle 安装分开。
 
 ## 验证
 

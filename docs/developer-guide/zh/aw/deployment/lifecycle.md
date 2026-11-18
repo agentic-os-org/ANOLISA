@@ -52,7 +52,7 @@ Query/session，包括尚未使用的预热对象。策略更新或关闭前停�
 
 ## 停止与升级
 
-先停止派发、排空任务并关闭 SDK 客户端，再退出 Agent，最后执行 `aw stop --config FILE`。
+先停止派发、排空任务并关闭 SDK 客户端，再退出 Agent，最后执行 `aw service stop --config FILE`。
 等待记录的 daemon PID 退出和 socket 消失。强制终止后，仅在确认旧服务退出后删除它的遗留 `aw.sock`，保留 journal。
 
 CLI 与 daemon 使用 `aw-service/v1alpha7`。升级或回退前用旧二进制停止旧服务，再一起更换二者。
@@ -72,7 +72,7 @@ CLI 与 daemon 使用 `aw-service/v1alpha7`。升级或回退前用旧二进制�
 所有模式都在 worker 退出或期限结束后强制清理自有组。
 
 该值用于前台 launcher 的外部信号退出；内部 readiness/lifecycle 失败沿用两秒清理宽限，自然退出立即清理遗留子进程。
-`aw stop` 和外部 attach 的进程由各自生命周期控制。部署方需协调应用排空期限与容器退出预算。
+`aw service stop` 和外部 attach 的进程由各自生命周期控制。部署方需协调应用排空期限与容器退出预算。
 修改需重启 launcher；旧版 AW 不支持此字段，回退配置时删除它。
 
 ## 配置常驻 SDK 容器的停止预算
@@ -137,6 +137,6 @@ spec:
 | connections | 活动服务连接，含控制 RPC；另有 16 条保留连接仅供控制和清理 |
 | invocations_per_binding | 单个常驻客户端活动的模型工具调用 |
 
-`aw status` 的 `resources.limits`、`resources.usage`、`peak_invocations_per_binding`、`admission_rejections` 和 `rejection_reasons` 用于核对负载。修改 limits 后排空并重启服务。
+`aw service status` 的 `resources.limits`、`resources.usage`、`peak_invocations_per_binding`、`admission_rejections` 和 `rejection_reasons` 用于核对负载。修改 limits 后排空并重启服务。
 旧任务入口及受限 Qoder SDK 路径仍保留每实例 1024 条原生事件关联上限；出现 `native_event_limit` 时重启实例。
 审计磁盘和 SDK 历史另设留存策略。接入合同见[常驻 SDK](../../../../../src/aw/docs/design/zh/adapters/resident-sdk.md)。

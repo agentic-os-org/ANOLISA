@@ -90,7 +90,7 @@ Schema/BeforeModel、Retrieve 的请求/效果准入和授权依赖见
 原生运行时，并在启动前按配置的 socket 启动 sec-core：
 
 ```bash
-aw validate --config /absolute/path/aw.sdk-security.yaml
+aw config validate --config /absolute/path/aw.sdk-security.yaml
 aw run --config /absolute/path/aw.sdk-security.yaml --agent qoder-sdk -- "your prompt"
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home aw run \
   --config /absolute/path/aw.sdk-security.yaml --agent qwenpaw

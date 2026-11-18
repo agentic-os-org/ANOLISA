@@ -1,6 +1,7 @@
 //! One typed declaration defines the public command tree, options and help.
 
 mod confirmation;
+mod connection;
 mod descriptor;
 mod discovery;
 mod dispatch;
@@ -23,7 +24,7 @@ use package::{Configure, Edit, Install, Show};
     about = "Run native Agents and manage local AW software and configuration",
     disable_help_subcommand = true,
     arg_required_else_help = true,
-    after_help = "Install accepts local unpacked Provider bundles with package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
+    after_help = "Install accepts local unpacked Provider bundles with package.json.\nUse aw connect and aw disconnect for native Hooks or cooperative SDK connections.\nOptions are command-local; --json is not a global output mode."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -46,7 +47,7 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
-    /// Install a local Provider extension, or connect native Hooks
+    /// Install a local Provider extension
     Install(Install),
     /// Remove selected packages or an entire installation, preserving unknown files
     Uninstall(package::Uninstall),
@@ -56,9 +57,10 @@ enum Command {
     Doctor(inventory::Query),
     /// Recover interrupted package operations from their durable local records
     Recover(management::Recover),
-    /// Connect a configured Agent's persistent native Hooks
-    #[command(subcommand)]
-    Agent(Agent),
+    /// Connect native Hooks or a cooperative SDK application
+    Connect(connection::Connect),
+    /// Disconnect an idle native process or cooperative SDK application
+    Disconnect(connection::Disconnect),
     /// Generate, inspect, validate or edit offline configuration
     #[command(subcommand)]
     Config(Config),
@@ -74,24 +76,12 @@ enum Command {
     Inspect(Inspect),
     /// Read one public audit page without connecting to the control socket
     AuditExport(AuditExport),
-    /// Attach a native process, update policy, or exchange application-owned instance JSON
+    /// Manage native startup assets or exchange application-owned instance JSON
     Instance(instance::Instance),
     /// Send one operation from stdin JSON to an existing service
     Request(Request),
     /// Serve the command Provider stdin/stdout protocol
     Policy,
-    /// Compatibility alias for service serve
-    #[command(hide = true)]
-    Serve(Serve),
-    /// Compatibility alias for service status
-    #[command(hide = true)]
-    Status(Endpoint),
-    /// Compatibility alias for service stop
-    #[command(hide = true)]
-    Stop(Endpoint),
-    /// Compatibility alias for config validate
-    #[command(hide = true)]
-    Validate(Validate),
     /// Internal native callback protocol
     #[command(hide = true)]
     Hook(Hook),
@@ -101,12 +91,6 @@ enum Command {
     /// Internal resident SDK task lifecycle protocol
     #[command(hide = true)]
     Scope(Scope),
-}
-
-#[derive(Subcommand, Debug, PartialEq)]
-enum Agent {
-    /// Connect supported native Hooks; does not install Agent software
-    Connect(Connect),
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -134,7 +118,7 @@ enum Config {
     /// Print configuration JSON, including private Provider values
     Show(Show),
     /// Check configuration; optionally compare a policy update's scope
-    Validate(ManagedValidate),
+    Validate(Validate),
     /// Add a complete Provider definition without starting a service
     AddProvider(Edit),
     /// Remove an unreferenced Provider definition
@@ -158,25 +142,6 @@ struct Native {
     /// Native framework profile, not an AW deployment profile
     #[arg(long, value_name = "NAME")]
     native_profile: Option<String>,
-}
-
-#[derive(Args, Debug, PartialEq)]
-struct Connect {
-    #[command(flatten)]
-    native: Native,
-    #[command(flatten)]
-    attachment: Attachment,
-}
-
-#[derive(Args, Debug, PartialEq)]
-#[group(multiple = true)]
-struct Attachment {
-    /// Attach to an idle caller-owned Qoder TUI or QwenPaw App process
-    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..), requires_all = ["config", "agent"], conflicts_with = "native_profile")]
-    pid: Option<u32>,
-    /// Detach owned Hooks while idle; leave the native process running
-    #[arg(long, requires = "pid")]
-    remove: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -226,20 +191,23 @@ struct Validate {
     /// Baseline for policy-only scope comparison; does not activate changes
     #[arg(long, value_name = "BASELINE_FILE")]
     against: Option<String>,
-}
-
-#[derive(Args, Debug, PartialEq)]
-struct ManagedValidate {
-    #[command(flatten)]
-    validation: Validate,
     #[command(flatten)]
     output: crate::output::Options,
 }
 
 #[derive(Args, Debug, PartialEq)]
 struct Update {
-    #[command(flatten)]
-    endpoint: Endpoint,
+    /// Original launch configuration; defaults to aw.yaml without --socket
+    #[arg(
+        long,
+        default_value = "aw.yaml",
+        value_name = "FILE",
+        conflicts_with = "socket"
+    )]
+    config: String,
+    /// Explicit service socket; requires a separate --policy
+    #[arg(long, value_name = "ABS_PATH", requires = "policy")]
+    socket: Option<String>,
     /// Select a configured target; combine with --instance to disambiguate
     #[arg(long, value_name = "TARGET", required_unless_present = "instance")]
     agent: Option<String>,
@@ -247,7 +215,7 @@ struct Update {
     #[arg(long, value_name = "ID", required_unless_present = "agent")]
     instance: Option<String>,
     /// Separate candidate; defaults to --config for an existing connection
-    #[arg(long, value_name = "FILE", required_unless_present = "config")]
+    #[arg(long, value_name = "FILE")]
     policy: Option<String>,
     /// Optimistic concurrency precondition; no automatic retry on conflict
     #[arg(long, value_name = "SHA256")]
