@@ -43,6 +43,16 @@ impl Reload {
             .ok_or_else(|| rejected("process_not_associated"))?
             .corroborate(pid)
     }
+
+    pub(super) fn admit_gateway_scope(&self, pid: u32) -> Result<()> {
+        if !self.ready {
+            return Err(rejected("bridge_not_ready"));
+        }
+        self.process
+            .as_ref()
+            .ok_or_else(|| rejected("process_not_associated"))?
+            .matches(pid)
+    }
 }
 
 impl Runtime {
@@ -231,18 +241,20 @@ impl Runtime {
             .map_err(|_| rejected("state_poisoned"))?;
         let instance = instance(&mut instances, id)?;
         self.execution_admission(instance, id)?;
-        let state = instance
-            .reload
-            .as_ref()
-            .ok_or_else(|| rejected("unsupported"))?;
-        if !state.ready || (state.requests.is_empty() && state.tools.is_empty()) {
-            return Err(rejected("request_not_admitted"));
+        if !instance.hermes_gateway() || !self.gateway_scope(id)? {
+            let state = instance
+                .reload
+                .as_ref()
+                .ok_or_else(|| rejected("unsupported"))?;
+            if !state.ready || (state.requests.is_empty() && state.tools.is_empty()) {
+                return Err(rejected("request_not_admitted"));
+            }
+            state
+                .process
+                .as_ref()
+                .ok_or_else(|| rejected("process_not_associated"))?
+                .check()?;
         }
-        state
-            .process
-            .as_ref()
-            .ok_or_else(|| rejected("process_not_associated"))?
-            .check()?;
         let plan = aw_adapter::reload::plan(
             instance.host.configuration().as_value(),
             instance.host.target(),
@@ -288,7 +300,7 @@ impl Runtime {
         if state.resident || self.native_root(id)? {
             self.check_scope_cleanup(id)?;
         }
-        if state.resident {
+        if state.resident || instance.hermes_gateway() {
             self.no_scope_children(id)?;
         }
         if !state.ready

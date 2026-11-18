@@ -25,11 +25,23 @@ enum Action {
     /// Install one-time native startup wiring in an explicit private directory
     Setup(Setup),
     /// Prepare bridge assets for the calling application's native factory
-    Prepare(Prepare),
+    Prepare(PrepareCommand),
     /// Release the calling application's registration and staged bridge assets
     Release(Release),
     /// List live applications that published cooperative SDK support
     List(SdkList),
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct PrepareCommand {
+    #[command(flatten)]
+    native: Prepare,
+    /// Verified running Hermes Gateway source revision
+    #[arg(long, hide = true, requires = "gateway_hook_timeout")]
+    gateway_revision: Option<String>,
+    /// Resolved callback deadline of the running native owner
+    #[arg(long, hide = true, requires = "gateway_revision")]
+    gateway_hook_timeout: Option<String>,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -97,11 +109,13 @@ pub(super) fn run(value: Instance) -> Result<Exit> {
         Some(Action::Prepare(value)) => crate::runtime(
             "native-prepare",
             &options([
-                ("config", Some(value.config)),
-                ("agent", Some(value.agent)),
-                ("native-settings", value.native_settings),
-                ("native-profile", value.native_profile),
-                ("native-state-dir", value.native_state_dir),
+                ("config", Some(value.native.config)),
+                ("agent", Some(value.native.agent)),
+                ("native-settings", value.native.native_settings),
+                ("native-profile", value.native.native_profile),
+                ("native-state-dir", value.native.native_state_dir),
+                ("gateway-revision", value.gateway_revision),
+                ("gateway-hook-timeout", value.gateway_hook_timeout),
             ]),
         ),
         Some(Action::Release(value)) => crate::runtime(

@@ -36,9 +36,13 @@ impl Runtime {
         if !self.native_root(id)? {
             return Ok(None);
         }
-        let claim =
-            aw_adapter::reload::execution_claim(&instance.host.capabilities().adapter, value)
-                .map_err(|_| rejected("native_reservation_identity"))?;
+        let capabilities = instance.host.capabilities();
+        let claim = aw_adapter::reload::execution_claim(
+            &capabilities.adapter,
+            &capabilities.entrypoint,
+            value,
+        )
+        .map_err(|_| rejected("native_reservation_identity"))?;
         let generation = instance
             .reload
             .as_ref()

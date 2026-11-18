@@ -32,5 +32,6 @@ if __name__ == "__main__":
     else:
         from native_gateway import GatewayTests  # noqa: F401
         from native_gateway_lifecycle import GatewayLifecycleTests  # noqa: F401
-        __all__.extend(("GatewayTests", "GatewayLifecycleTests"))
+        from native_gateway_attach import GatewayAttachTests  # noqa: F401
+        __all__.extend(("GatewayTests", "GatewayLifecycleTests", "GatewayAttachTests"))
     unittest.main(argv=[sys.argv[0]])

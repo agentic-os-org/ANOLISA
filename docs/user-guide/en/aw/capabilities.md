@@ -164,6 +164,7 @@ Native acceptance is registered as `private-lease` and `private-native` in the
 | Pi SDK | MCP clients exposed as managed custom tools | Prepared native worker factory; all sessions must close |
 | OpenClaw Gateway | Exposed native tool callbacks | Prepared native Gateway; successful run completion and drained tool callbacks |
 | Hermes local chat | Exposed native tool callbacks | Prepared native chat; confirmed completed turn and drained callbacks |
+| [Hermes Gateway](../../../developer-guide/en/aw/agents/hermes.md#run-a-native-gateway-with-background-attachment) | Native in-process tool callbacks | After protected turns and their workspace bindings drain |
 | Qoder CLI | Exposed native tool callbacks | Prepared native TUI/print; TUI also supports pre-request attachment or `--reloadable`; requests and cleanup must finish |
 
 Each native startup route requires the framework's documented preparation. SDK

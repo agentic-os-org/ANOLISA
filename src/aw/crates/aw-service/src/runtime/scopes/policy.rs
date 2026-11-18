@@ -2,7 +2,23 @@
 
 use super::*;
 
+impl Instance {
+    pub(in crate::runtime) fn hermes_gateway(&self) -> bool {
+        let capabilities = self.host.capabilities();
+        capabilities.adapter == "hermes" && capabilities.entrypoint == "gateway"
+    }
+}
+
 impl Runtime {
+    pub(in crate::runtime) fn gateway_scope(&self, id: &str) -> Result<bool> {
+        let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
+        Ok(owners
+            .get(id)
+            .and_then(|child| child.parent.as_ref())
+            .and_then(|parent| owners.get(parent))
+            .is_some_and(|parent| parent.native))
+    }
+
     pub(in crate::runtime) fn native_root(&self, id: &str) -> Result<bool> {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         Ok(owners.get(id).is_some_and(|owner| owner.native))

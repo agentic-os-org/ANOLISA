@@ -95,6 +95,7 @@ else:
                 "plugin.yaml",
                 "__init__.py",
                 "aw_gateway.py",
+                "aw_gateway_attach.py",
                 "aw_gateway_lifecycle.py",
                 "aw_skill.py",
             ] {

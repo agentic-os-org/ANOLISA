@@ -97,7 +97,12 @@ impl Runtime {
 }
 
 impl Instance {
-    pub(super) fn prepared(bytes: Vec<u8>, context: ProcessContext, host: aw_host::Host) -> Self {
+    pub(super) fn prepared(
+        bytes: Vec<u8>,
+        context: ProcessContext,
+        host: impl Into<Arc<aw_host::Host>>,
+    ) -> Self {
+        let host = host.into();
         let routes = Self::prepare_routes(&host);
         Self {
             run: None,
@@ -107,7 +112,7 @@ impl Instance {
             reload: None,
             policy_update: Arc::new(Mutex::new(())),
             release: Arc::new(Mutex::new(())),
-            host: Arc::new(host),
+            host,
             routes,
             closing: false,
             observation: None,

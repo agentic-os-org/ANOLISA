@@ -4,6 +4,8 @@ use super::{adapter::HookBinding, Arguments, Exit, Result};
 use aw_service::{Client, LifecyclePhase, Operation};
 use std::time::{Duration, Instant};
 
+mod gateway;
+
 pub(super) fn binding(path: &str) -> Result<HookBinding> {
     let binding = HookBinding::read(path)?;
     if !binding.reloadable {
@@ -28,10 +30,16 @@ pub(super) fn lifecycle(args: &Arguments) -> Result<Exit> {
 }
 
 fn invoke(args: &Arguments) -> Result<Exit> {
-    args.check(&["--adapter", "--binding", "--confirm"], false)?;
+    args.check(
+        &["--adapter", "--binding", "--confirm", "--gateway-scope"],
+        false,
+    )?;
     let binding = binding(args.required("--binding")?)?;
     if binding.adapter != args.required("--adapter")? {
         return Err("lifecycle adapter mismatch".into());
+    }
+    if let Some(action) = args.flags.get("--gateway-scope") {
+        return gateway::scope(binding, action);
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     let bytes = super::hook::read_input(deadline)?;

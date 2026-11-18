@@ -52,6 +52,47 @@ before confirming, including when the policy has zero tool steps.
 retains the original result if that callback fails or times out; policies that must
 withhold content should deny the tool in `tool.before`.
 
+## Run a native Gateway with background attachment
+
+For a dedicated Hermes 0.23.1 Gateway at the pinned revision above, install the
+Hermes plugin with `aw connect` before deploying the Gateway. Use the same AW
+configuration for the service and plugin. Keep the target's local `chat --cli`
+argv for Adapter selection and configure the tool events. This entrypoint
+requires `gateway.multiplex_profiles: false`, in-process tools and
+`plugins.hook_callback_timeout` of at least 60 seconds or zero (unlimited).
+The plugin uses the Gateway's launch profile. Each turn that calls tools
+opens an AW Scope in the session's working directory and inherits the
+Gateway's active policy. Idle updates apply to subsequent turns in every
+workspace. This entrypoint rejects AW Skill checks during
+admission. Use the local chat entrypoint for directory-based Skill checks.
+
+Run both commands with the Gateway's operating user. Replace the sample
+absolute paths with the actual deployment paths.
+
+```bash
+export HERMES_HOME=/srv/hermes/profile
+export AW_HERMES_GATEWAY_CONFIG=/srv/hermes/aw.yaml
+aw connect --config "$AW_HERMES_GATEWAY_CONFIG" --agent hermes --native-profile "$HERMES_HOME"
+hermes gateway run
+```
+
+For `daemon.startup: external`, the supervisor can start the AW service and the
+configured Provider backends after the Gateway HTTP readiness check succeeds.
+The plugin starts native registration in the background after Hermes publishes
+runtime readiness. The log message `AW Hermes attach ready` confirms the
+registration. Set `AW_HERMES_GATEWAY_TARGET` for a target other than `hermes`,
+or `AW_HERMES_GATEWAY_BINARY` for an absolute AW executable other than
+`/usr/bin/aw`.
+
+This mode supports tool events and admits model requests without an
+`input.submit` hook. The first tool of a turn waits up to
+`AW_HERMES_GATEWAY_WAIT_MS` (default 3000 ms) for attachment and workspace admission. A timeout
+blocks tools in that turn. Set `on_error: block` on required `tool.before`
+steps to block on Provider errors, including an unavailable security backend.
+Restart the Gateway to retry a failed registration or to bind to a restarted
+AW service. Normal Gateway shutdown releases the binding after tool work drains. To return to native operation, stop the Gateway and remove
+`AW_HERMES_GATEWAY_CONFIG` from its launch environment.
+
 ## Upgrade and cleanup
 
 For plugin mismatch, stop Hermes and configuration writers, move `<profile>/plugins/aw-native-hooks` outside plugins as a backup, then run connect again.

@@ -9,9 +9,13 @@ struct Native {
 }
 impl Native {
     fn new() -> Self {
+        Self::gateway("openclaw")
+    }
+
+    fn gateway(adapter: &str) -> Self {
         let mut fixture = Fixture::new();
         let mut document: Value = serde_json::from_slice(&fixture.runtime.bytes).unwrap();
-        document["spec"]["agents"]["target"]["adapter"] = json!("openclaw");
+        document["spec"]["agents"]["target"]["adapter"] = json!(adapter);
         fixture.runtime = Runtime::new(
             serde_json::to_vec(&document).unwrap(),
             &fixture.directory.path().join("native-audit"),
@@ -20,7 +24,7 @@ impl Native {
         .unwrap();
         let mut command = serde_json::to_value(fixture.command("native-execution")).unwrap();
         command["action"] = json!("register_native");
-        command["capabilities"]["adapter"] = json!("openclaw");
+        command["capabilities"]["adapter"] = json!(adapter);
         command["capabilities"]["version"] = json!("2026.9.6");
         command["capabilities"]["entrypoint"] = json!("gateway");
         let snapshot = fixture
@@ -351,4 +355,59 @@ fn native_event_keeps_its_exact_reservation_while_parallel_runs_continue() {
         })
         .unwrap();
     assert!(f.fixture.runtime.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn hermes_gateway_scopes_snapshot_policy_and_reclaim_without_registration() {
+    let f = Native::gateway("hermes");
+    let workspace = f.fixture.directory.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let open = || {
+        f.operation(Operation::OpenScope {
+            parent_id: f.id().into(),
+            pid: std::process::id(),
+            cwd: workspace.to_str().unwrap().into(),
+            environment: BTreeMap::new(),
+        })
+    };
+    let plan = |id: &str| {
+        f.operation(Operation::HookPlan {
+            instance_id: id.into(),
+            event: "tool.before".into(),
+        })
+    };
+    f.associate();
+    code(open(), "bridge_not_ready");
+    f.lifecycle(LifecyclePhase::Ready);
+    let child = open().unwrap()["instance_id"].as_str().unwrap().to_owned();
+    code(plan(&child), "scope_unacknowledged");
+    assert!(matches!(f.update(), Err(Error::Attempt { code, .. }) if code == "busy"));
+    f.operation(Operation::ReleaseInstance { instance_id: child })
+        .unwrap();
+
+    let updated = f.update().unwrap();
+    let policy = updated["policy_revision"].as_str().unwrap();
+    assert_ne!(policy, f.snapshot["policy_revision"]);
+    for _ in 0..4 {
+        let child = open().unwrap()["instance_id"].as_str().unwrap().to_owned();
+        f.operation(Operation::AcknowledgeScope {
+            instance_id: child.clone(),
+        })
+        .unwrap();
+        let snapshot = plan(&child).unwrap();
+        assert_eq!(snapshot["policy_revision"], policy);
+        assert_eq!(snapshot["plan"]["budget_ms"], 4321);
+        assert_eq!(f.fixture.runtime.registrations.lock().unwrap().len(), 1);
+        f.operation(Operation::ReleaseInstance {
+            instance_id: child.clone(),
+        })
+        .unwrap();
+        code(plan(&child), "unknown_or_draining_instance");
+    }
+    f.fixture
+        .call(RegistrationCommand::Release {
+            handle: f.handle.clone(),
+        })
+        .unwrap();
+    assert!(f.fixture.runtime.instances.lock().unwrap().is_empty());
 }

@@ -26,6 +26,8 @@ _skill_restore = None
 _manager_restore = None
 _turn_restore = None
 _alive = False
+_attachment = None
+_deferred = {}
 _expected_input: ContextVar[str | None] = ContextVar("aw_hermes_expected_input", default=None)
 _bridge_call: ContextVar[tuple[str, str, str] | None] = ContextVar(
     "aw_hermes_bridge_call", default=None)
@@ -66,9 +68,15 @@ def _identity(values: dict[str, Any], binding: "Binding") -> tuple[str, str, str
 
 
 def _bound(values: dict[str, Any]) -> "Binding | None":
+    session = values.get("session_id")
+    conversation = values.get("conversation_id")
     with _lock:
-        session = values.get("session_id")
-        conversation = values.get("conversation_id")
+        deferred = _deferred.get(session) if isinstance(session, str) else None
+    if _attachment is not None:
+        if deferred is None:
+            raise RuntimeError("AW Hermes tool has no protected Gateway turn")
+        return deferred.resolve(Binding)
+    with _lock:
         if isinstance(session, str) and session:
             binding = _bindings.get(session)
             if binding is None:
@@ -99,12 +107,14 @@ def _release(binding: "Binding") -> None:
 
 
 class Binding:
-    def __init__(self, path: str, launch: dict[str, Any], ctx: Any, load: Any):
+    def __init__(self, path: str, launch: dict[str, Any], ctx: Any, load: Any,
+                 *, workspace: Path | None = None, scope: str | None = None):
         from agent.shell_hooks import ShellHookSpec
 
         self.path, self.launch, self.ctx, self.load = path, launch, ctx, load
         self.identity = ""
         self.request_id = ""
+        self.cwd = str(workspace) if workspace is not None else launch["cwd"]
         self.admission_id = ""
         self.before, self.after, self.replacement = [], [], None
         seen = set()
@@ -118,7 +128,7 @@ class Binding:
                 raise ValueError("invalid AW Hermes Gateway callback registration")
             seen.add((event, step))
             command = shlex.join([
-                launch["binary"], "hook", "--binding", launch["binding"],
+                launch["binary"], "hook", "--binding", scope or launch["binding"],
                 "--adapter", "hermes", "--event", event, "--step", step,
                 "--on-error", action,
             ])
@@ -139,21 +149,21 @@ class Binding:
         if current != self.launch:
             raise ValueError("AW Hermes Gateway launch changed after binding")
         cwd = self.ctx.session_cwd()
-        if not cwd or Path(cwd).resolve() != Path(self.launch["cwd"]):
+        if not cwd or Path(cwd).resolve() != Path(self.cwd):
             raise ValueError("Hermes Gateway session cwd differs from AW binding")
 
     def invoke(self, hook: dict, spec: Any, event: str, values: dict[str, Any]):
         from agent.shell_hooks import _evaluate_result, _serialize_payload, _spawn
 
         payload = json.loads(_serialize_payload(event, values))
-        payload["cwd"] = self.launch["cwd"]
+        payload["cwd"] = self.cwd
         response = _spawn(spec, json.dumps(payload, ensure_ascii=False))
         return _evaluate_result(spec, response), response
 
 
-def register(ctx: Any, load: Any) -> None:
+def register(ctx: Any, load: Any, *, gateway_config: str | None = None) -> None:
     """Install dormant Gateway callbacks; an authorized session RPC activates one launch."""
-    global _alive
+    global _alive, _attachment
     from hermes_cli.version_info import get_version_info
     from hermes_constants import get_hermes_home
 
@@ -202,6 +212,11 @@ def register(ctx: Any, load: Any) -> None:
                    for value in (old, new)):
             return
         with _lock:
+            deferred = _deferred.get(old)
+            if deferred is not None:
+                if new in _deferred and _deferred[new] is not deferred:
+                    raise ValueError("Hermes compressed session belongs to another AW turn")
+                _deferred[new] = deferred
             binding = _bindings.get(old)
             if binding is None:
                 return
@@ -285,7 +300,7 @@ def register(ctx: Any, load: Any) -> None:
                 return None
             _, spec = binding.replacement
             binding.check()
-            payload = {"hook_event_name": "transform_tool_result", "cwd": binding.launch["cwd"],
+            payload = {"hook_event_name": "transform_tool_result", "cwd": binding.cwd,
                        "session_id": values.get("session_id"), "tool_name": values.get("tool_name"),
                        "tool_input": values.get("args"),
                        "extra": {**values, "result": values.get("result")}}
@@ -318,7 +333,42 @@ def register(ctx: Any, load: Any) -> None:
     ctx.register_rpc("prime", prime)
     register_retirement(ctx, _known, _active, _release, _lock, load)
     ctx.on_unload(_unload)
-    _guard_turns()
+    if gateway_config is not None:
+        from .aw_gateway_attach import Attachment
+
+        def verify_hooks() -> None:
+            manager = ctx._manager
+            with manager._discovery_lock:
+                if not _alive or any(
+                        not any(active is callback for active in manager._hooks.get(name, ()))
+                        for name, callback in bridge_hooks):
+                    raise RuntimeError("AW Hermes Gateway callbacks are not active")
+
+        _attachment = Attachment(gateway_config, ctx, load, verify_hooks)
+        _guard_manager(ctx)
+        def add_turn(turn):
+            with _lock:
+                if turn.session in _deferred:
+                    raise RuntimeError("AW Hermes Gateway turn is still active")
+                _install_guards(None)
+                _deferred[turn.session] = turn
+
+        def remove_turn(turn):
+            with _lock:
+                for session, active in list(_deferred.items()):
+                    if active is turn:
+                        _deferred.pop(session)
+                for key in list(_checked):
+                    if key[0] == turn.session:
+                        _checked.pop(key)
+
+        def idle():
+            with _lock:
+                return not _deferred
+
+        _attachment.install(lambda: _install_guards(None), add_turn, remove_turn, idle)
+    else:
+        _guard_turns()
 
 
 def _guard_turns() -> None:
@@ -378,7 +428,7 @@ def _guard_manager(ctx: Any) -> None:
 
     def unload(*args: Any, **kwargs: Any) -> Any:
         with discovery if discovery is not None else nullcontext(), _lock:
-            if _known:
+            if _known or _attachment is not None:
                 raise RuntimeError("AW Hermes active turn or registered session prevents plugin unload")
             return original(*args, **kwargs)
 
@@ -386,10 +436,11 @@ def _guard_manager(ctx: Any) -> None:
     _manager_restore = manager, original, unload
 
 
-def _install_guards(binding: Binding) -> None:
+def _install_guards(binding: Binding | None) -> None:
     global _skill_restore
+    needs_skill = binding is not None and any(hook.get("skill_check") for hook, _ in binding.before)
     if _restores:
-        if _skill_restore is None and any(hook.get("skill_check") for hook, _ in binding.before):
+        if _skill_restore is None and needs_skill:
             _skill_restore = aw_skill.install()
         return
     import model_tools
@@ -402,6 +453,24 @@ def _install_guards(binding: Binding) -> None:
     original_execution = middleware.run_tool_execution_middleware
     original_coerce = model_tools.coerce_tool_args
     signature = inspect.signature(original_handle)
+
+    if _attachment is not None:
+        from hermes_cli import plugins_dispatch
+
+        native_hook_identity = plugins_dispatch._hook_call_identity
+
+        def hook_identity(values: dict, hook_name: str = "") -> Any:
+            call = native_hook_identity(values, hook_name)
+            if hook_name in ("pre_tool_call", "post_tool_call", "transform_tool_result"):
+                session, request = values.get("session_id"), values.get("api_request_id")
+                if call and isinstance(session, str) and isinstance(request, str):
+                    # A provider may reuse its call ID in different turns. Keep native
+                    # callback timeouts and deduplication scoped to the actual tool call.
+                    return session, request, call
+            return call
+
+        plugins_dispatch._hook_call_identity = hook_identity
+        _restores.append((plugins_dispatch, "_hook_call_identity", native_hook_identity, hook_identity))
 
     def coerce(tool_name: str, arguments: dict) -> dict:
         effective = original_coerce(tool_name, arguments)
@@ -437,8 +506,8 @@ def _install_guards(binding: Binding) -> None:
         values = signature.bind_partial(function_name, function_args, *args, **kwargs).arguments
         try:
             binding = _bound(values)
-        except ValueError:
-            return tool_error("AW Hermes compressed session has no verified lineage")
+        except (ValueError, RuntimeError) as error:
+            return tool_error(str(error))
         if binding is None or not binding.before:
             return original_handle(function_name, function_args, *args, **kwargs)
         if not _json_native(function_args):
@@ -485,8 +554,8 @@ def _install_guards(binding: Binding) -> None:
     def execution(tool_name: str, arguments: dict, next_call: Any, **context: Any) -> Any:
         try:
             binding = _bound(context)
-        except ValueError:
-            return tool_error("AW Hermes compressed session has no verified lineage")
+        except (ValueError, RuntimeError) as error:
+            return tool_error(str(error))
         if binding is None or not binding.before:
             return original_execution(tool_name, arguments, next_call, **context)
         if not _json_native(arguments):
@@ -556,7 +625,7 @@ def _install_guards(binding: Binding) -> None:
     inline_tool_executors._coerced = (
         lambda name, executor: guard_inline(name, original_coerced(name, executor)))
 
-    if any(hook.get("skill_check") for hook, _ in binding.before):
+    if needs_skill:
         _skill_restore = aw_skill.install()
     model_tools.handle_function_call = handle
     model_tools.coerce_tool_args = coerce

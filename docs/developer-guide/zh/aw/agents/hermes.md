@@ -46,6 +46,39 @@ Gateway 确认绑定前会检查原生 Hook 注册表中的四个桥接回调；
 该回调失败或超时后，Hermes 会保留原始结果；必须阻止内容进入模型时，在
 `tool.before` 拒绝工具调用。
 
+## 原生 Gateway 启动与后台挂接
+
+独立部署的 Hermes 0.23.1 Gateway 使用上文固定源码版本。部署前用
+`aw connect` 安装 Hermes 插件。AW 服务和插件使用同一份 AW 配置，
+目标保留 `chat --cli` argv 供 Adapter 识别，配置需要的工具事件。
+Gateway 配置要求 `gateway.multiplex_profiles: false`、在本进程执行工具，
+并将 `plugins.hook_callback_timeout` 设为至少 60 秒或零（无限制）。
+插件沿用 Gateway 的启动 profile。每轮工具调用在会话的工作目录中打开 AW Scope，
+继承 Gateway 当前生效的策略。空闲时更新策略后，各工作目录的后续轮次均使用新策略。
+此入口在准入时拒绝 AW Skill 检查策略。目录型 Skill 检查使用本地 chat 入口。
+
+用 Gateway 的运行用户执行下列命令，并替换为部署环境中的绝对路径。
+
+```bash
+export HERMES_HOME=/srv/hermes/profile
+export AW_HERMES_GATEWAY_CONFIG=/srv/hermes/aw.yaml
+aw connect --config "$AW_HERMES_GATEWAY_CONFIG" --agent hermes --native-profile "$HERMES_HOME"
+hermes gateway run
+```
+
+配置 `daemon.startup: external` 时，进程管理器可以在 Gateway HTTP
+就绪探针通过后启动 AW 服务和 Provider 后端。Hermes 发布运行时就绪后，
+插件在后台登记，`AW Hermes attach ready` 表示挂接完成。AW 目标名
+默认为 `hermes`，可用 `AW_HERMES_GATEWAY_TARGET` 指定。AW 默认使用
+`/usr/bin/aw`，可用 `AW_HERMES_GATEWAY_BINARY` 指定其他绝对路径。
+
+该入口支持工具事件，模型请求可以直接发出。每轮首次工具调用等待挂接与工作目录准入，
+最长为 `AW_HERMES_GATEWAY_WAIT_MS`（默认 3000 ms），超时后本轮工具被拦截。
+要求后端故障时阻断的 `tool.before` 步骤使用 `on_error: block`。
+挂接失败或 AW 服务重启后，重启 Gateway 可重新登记。正常关闭 Gateway 时，
+待工具执行排空后释放绑定。恢复原生运行时，
+停止 Gateway，从启动环境移除 `AW_HERMES_GATEWAY_CONFIG` 后再启动。
+
 ## 升级与清理
 
 插件不匹配时，先停止 Hermes 与配置写入者，把 `<profile>/plugins/aw-native-hooks` 移到 plugins 目录之外备份，再运行 connect。

@@ -4,6 +4,7 @@ use aw_core::admission::StepExecution;
 fn prepared(profile: &Profile, mode: &str) -> Prepared {
     Prepared {
         revision: "a".repeat(40),
+        gateway: false,
         input: LaunchInput {
             document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":mode}}},
                 "execution":{"default_event_budget_ms":1001},"events":{}}}),
@@ -153,4 +154,40 @@ fn reloadable_routes_preserve_the_full_hermes_budget() {
     }
     prepared.input.document["spec"]["execution"]["default_event_budget_ms"] = json!(55001);
     assert!(prepared.validate_steps(&[]).is_err());
+}
+
+#[test]
+fn hermes_gateway_refuses_skill_check_for_each_failure_action() {
+    let validator = aw_config::Validator::new().unwrap();
+    let mut config = validator
+        .parse(include_bytes!(
+            "../../../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    config["spec"]["agents"]["hermes"] = json!({"adapter":"hermes","argv":["hermes","chat"]});
+    config["spec"]["providers"]["security"] = json!({
+        "protocol":"aw-provider/v1alpha1",
+        "transport":{"type":"stdio","location":"agent","argv":["/bin/true"]},
+        "timeout_ms":1000,"max_output_bytes":4096,"config":{}
+    });
+    let hermes = crate::adapter::catalog::HERMES;
+    for failure in ["report", "block"] {
+        config["spec"]["events"]["tool.before"]["steps"] = json!([{
+            "id":"skill","provider":"security","operation":"check_skill",
+            "match":{"tools":["native:hermes:skill_view"]},
+            "effects":["observe","block"],"on_error":failure
+        }]);
+        let error =
+            crate::reload::validate(&config, "hermes", &hermes.capabilities("0.23.1", "gateway"))
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not support Skill checking"),
+            "{error}"
+        );
+        crate::reload::validate(&config, "hermes", &hermes.capabilities("0.23.1", "chat")).unwrap();
+    }
 }

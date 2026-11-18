@@ -1853,7 +1853,7 @@
         "url": "https://github.com/NousResearch/hermes-agent.git",
         "revision": "3b421578588243f920886e6fe79a6faa87ea026e"
       },
-      "boundary": "Official Hermes v0.23.1 CLI/Gateway hooks on a pinned source checkout. Native contract covers active Gateway Hook registration, server-owned admission binding, automatic and manually resolved unknown admission settlement, idempotent drained session retirement, adopted queued turns, compaction lineage, registered-session reload rejection, JSON argument freezing, deferred Tool Search dispatch, denial, and model-bound text replacement. The live CLI/Gateway case checks both model-visible replacement and tool denial. The older in-process baseline runs in the separate hermes job.",
+      "boundary": "Official Hermes v0.23.1 CLI/Gateway hooks on a pinned source checkout. Native contract covers active Gateway Hook registration, server-owned admission binding, automatic and manually resolved unknown admission settlement, idempotent drained session retirement, adopted queued turns, compaction lineage, registered-session reload rejection, JSON argument freezing, deferred Tool Search dispatch, denial, and model-bound text replacement. The live CLI/Gateway case checks both model-visible replacement and tool denial. The attach contract covers native argument parsing, fail-closed options, workspace binding, cancellation, and normal release. The older in-process baseline runs in the separate hermes job.",
       "cases": [
         {
           "name": "gateway-contract",
@@ -1868,7 +1868,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 78
+          "tests": 83
         },
         {
           "name": "gateway-live",
@@ -1898,6 +1898,40 @@
                 "pre_events": 2,
                 "after_events": 1,
                 "instance_released": true,
+                "gateway_stopped": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "gateway-attach",
+          "argv": [
+            "{python}",
+            "-B",
+            "crates/aw-cli/tests/fixtures/hermes/gateway_live.py",
+            "--aw",
+            "{bin}/aw",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--output",
+            "{output}/gateway-attach",
+            "--attach"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/gateway-attach/result.json",
+              "values": {
+                "status": "passed",
+                "parallel_tools": true,
+                "alternate_workspace": true,
+                "pre_events": 3,
+                "after_events": 3,
+                "model_saw_replacement": true,
+                "updated_workspace_policy": true,
+                "workspace_scopes_released": true,
+                "launch_assets_released": true,
                 "gateway_stopped": true
               }
             }

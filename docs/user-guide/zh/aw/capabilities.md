@@ -136,6 +136,7 @@ AgentScope SDK 2.0.6 工厂回复支持应用自有私有租约。工具显式�
 | Pi SDK | 通过受管自定义工具接入 MCP 客户端 | 已准备的原生 worker 工厂；全部 Session 关闭后更新 |
 | OpenClaw Gateway | 覆盖已暴露的原生工具回调 | 已准备的原生 Gateway；成功完成 run 并排空工具回调后更新 |
 | Hermes 本机 chat | 覆盖已暴露的原生工具回调 | 已准备的原生 chat；确认轮次完成并排空回调后更新 |
+| [Hermes Gateway](../../../developer-guide/zh/aw/agents/hermes.md#原生-gateway-启动与后台挂接) | 进程内原生工具回调 | 受控轮次和对应工作区绑定排空后更新 |
 | Qoder CLI | 原生工具回调 | 已准备的原生 TUI／print；TUI 也支持首请求前 attach 或 `--reloadable`；须等待请求与清理结束 |
 
 原生启动需要先按框架文档完成准备。SDK 应用保留 AW 工厂接入；OpenClaw、Hermes 和
