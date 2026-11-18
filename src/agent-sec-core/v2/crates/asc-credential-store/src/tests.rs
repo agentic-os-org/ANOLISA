@@ -229,6 +229,25 @@ fn registration_reuses_opaque_identity_in_order_across_reopen_without_rewriting(
 }
 
 #[test]
+fn dropping_a_store_releases_its_lock_while_a_forked_child_shares_the_descriptor() {
+    let fixture = fixture();
+    let store = CredentialStore::create(&fixture.store_dir).unwrap();
+    // A child between fork and exec shares the open file description like this duplicate.
+    let inherited = store.directory.file.try_clone().unwrap();
+    assert!(matches!(
+        CredentialStore::open(&fixture.store_dir),
+        Err(CredentialStoreError::Locked { .. })
+    ));
+    drop(store);
+    let reopened = CredentialStore::open(&fixture.store_dir).unwrap();
+    assert!(matches!(
+        CredentialStore::open(&fixture.store_dir),
+        Err(CredentialStoreError::Locked { .. })
+    ));
+    drop((reopened, inherited));
+}
+
+#[test]
 fn policy_registration_reopens_without_input_files_and_preserves_order_and_shared_pairs() {
     let fixture = fixture();
     let mut store = CredentialStore::create(&fixture.store_dir).unwrap();

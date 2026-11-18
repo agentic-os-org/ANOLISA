@@ -40,8 +40,37 @@ pub(crate) struct WriteFailure {
 
 /// A directory opened without following symlinks and owned by the effective user.
 pub(crate) struct PinnedDirectory {
-    file: File,
+    pub(crate) file: File,
     path: PathBuf,
+}
+
+/// Exclusive advisory directory lock, released explicitly when dropped.
+///
+/// `flock` belongs to the open file description, which a concurrently forked child
+/// shares until its `exec` closes the CLOEXEC descriptor. Closing our descriptor alone
+/// would leave the lock held through that copy, so drop unlocks the description itself.
+#[derive(Debug)]
+pub struct DirectoryLock {
+    file: File,
+}
+
+impl DirectoryLock {
+    fn acquire(file: File, path: &Path) -> Result<Self, CredentialStoreError> {
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Self { file }),
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                Err(CredentialStoreError::Locked { path: path.into() })
+            }
+            Err(error) => Err(io_error(path, error)),
+        }
+    }
+}
+
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        // Unlocking a valid descriptor that holds the lock cannot fail.
+        let _ = flock(&self.file, FlockOperation::Unlock);
+    }
 }
 
 impl PinnedDirectory {
@@ -98,15 +127,13 @@ impl PinnedDirectory {
         &self.path
     }
 
-    /// Takes an exclusive advisory lock held until this handle is dropped.
-    pub(crate) fn lock_exclusive(&self) -> Result<(), CredentialStoreError> {
-        match flock(&self.file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(()),
-            Err(rustix::io::Errno::WOULDBLOCK) => Err(CredentialStoreError::Locked {
-                path: self.path.clone(),
-            }),
-            Err(error) => Err(io_error(&self.path, error)),
-        }
+    /// Takes an exclusive advisory lock held until the returned guard is dropped.
+    pub(crate) fn lock_exclusive(&self) -> Result<DirectoryLock, CredentialStoreError> {
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|error| io_error(&self.path, error))?;
+        DirectoryLock::acquire(file, &self.path)
     }
 
     /// Returns whether `other` is the same directory inode.
@@ -470,24 +497,16 @@ fn create_owner_directories(
     Ok(current)
 }
 
-/// Holds an exclusive lock on a root-trusted directory until the returned file is dropped.
+/// Holds an exclusive lock on a root-trusted directory until the returned guard is dropped.
 ///
 /// # Errors
 /// Rejects non-root callers, unsafe directories and competing lock holders.
-pub fn lock_root_directory(path: &Path) -> Result<File, CredentialStoreError> {
+pub fn lock_root_directory(path: &Path) -> Result<DirectoryLock, CredentialStoreError> {
     if !rustix::process::geteuid().is_root() {
         return Err(unsafe_path(path, "directory locking requires root"));
     }
     normalized_absolute(path)?;
-    let directory = create_owner_directories(path, 0, 0)?;
-    flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-        if error == rustix::io::Errno::WOULDBLOCK {
-            CredentialStoreError::Locked { path: path.into() }
-        } else {
-            io_error(path, error)
-        }
-    })?;
-    Ok(directory)
+    DirectoryLock::acquire(create_owner_directories(path, 0, 0)?, path)
 }
 
 fn normalized_absolute(path: &Path) -> Result<(), CredentialStoreError> {
