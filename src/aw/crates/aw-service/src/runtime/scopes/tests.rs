@@ -523,6 +523,20 @@ fn bridge_watch_rejects_wrong_worker_and_revision_without_reviving_old_scope() {
         .is_err());
 }
 
+impl Runtime {
+    pub(in crate::runtime) fn expire_scope_bridge(&self, id: &str) {
+        self.owners
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .unwrap()
+            .validity
+            .as_mut()
+            .unwrap()
+            .deadline = Instant::now();
+    }
+}
+
 #[test]
 fn expired_bridge_cannot_renew_or_reclaim_live_owner() {
     let fixture = Fixture::new();
@@ -532,17 +546,7 @@ fn expired_bridge_cannot_renew_or_reclaim_live_owner() {
         .runtime
         .watch_scope(&task.instance_id, std::process::id())
         .unwrap();
-    fixture
-        .runtime
-        .owners
-        .lock()
-        .unwrap()
-        .get_mut(&task.instance_id)
-        .unwrap()
-        .validity
-        .as_mut()
-        .unwrap()
-        .deadline = Instant::now();
+    fixture.runtime.expire_scope_bridge(&task.instance_id);
     let revision = watch["policy_revision"].as_str().unwrap();
     assert!(
         matches!(fixture.runtime.check_scope(&task.instance_id, std::process::id(), revision, true),
