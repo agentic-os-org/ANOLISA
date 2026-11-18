@@ -13,8 +13,12 @@ from urllib.request import proxy_bypass_environment
 
 import httpx
 
-from aw_claude import CallbackFailure
-from aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
+if __package__:
+    from .aw_claude import CallbackFailure
+    from .aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
+else:
+    from aw_claude import CallbackFailure
+    from aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
 
 MAX_REQUEST = 32 * 1024 * 1024
 MAX_HANDSHAKES = 32

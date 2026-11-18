@@ -15,9 +15,14 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python PYTHONDONTWRITEBYTECODE=1
 COPY requirements.txt /opt/requirements.txt
 COPY python-version.txt /opt/python-version.txt
 RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=bind,source=wheel-source,target=/opt/wheel-source,rw \
     uv venv --python "$(cat /opt/python-version.txt)" /opt/venv \
     && uv pip install --python /opt/venv/bin/python -r /opt/requirements.txt \
-    && rm -rf /root/.cache/uv
+    && uv build --wheel --python /opt/venv/bin/python \
+       --out-dir /tmp/aw-wheel /opt/wheel-source/src/aw/sdk/python \
+    && (cd /tmp/aw-wheel && sha256sum *.whl) > /opt/aw-sdk-wheel.sha256 \
+    && uv pip install --offline --no-deps --python /opt/venv/bin/python /tmp/aw-wheel/*.whl \
+    && rm -rf /root/.cache/uv /tmp/aw-wheel
 COPY payload/ /opt/aw/bin/
 COPY source/ /opt/project/src/aw/
 RUN useradd --uid 10001 --create-home aw \
@@ -26,7 +31,8 @@ RUN useradd --uid 10001 --create-home aw \
     && chown aw:aw /evidence /work /opt/pi \
     && chmod 700 /evidence /work /home/aw
 ENV PATH=/opt/venv/bin:/opt/aw/bin:/usr/local/bin:/usr/bin:/bin \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    AW_RESIDENT_PYTHON_WHEEL=/opt/aw-sdk-wheel.sha256
 USER aw
 WORKDIR /opt/project/src/aw
 ENTRYPOINT ["/opt/venv/bin/python", "-B", "tests/resident_image.py"]

@@ -150,3 +150,5 @@ For experimental native QwenPaw startup followed by cooperative attachment,
 see [deferred tool-after integration](../../docs/developer-guide/en/aw/deployment/python-sdk.md#deferred-tool-after-attachment).
 The installed plugin holds the first tool until ready; `aw connect
 --config aw.yaml --sdk-pid PID` starts or reuses AW without launching the Agent.
+
+Application-owned resident Claude and Pi workers can also publish an SDK attach listener. The controller attaches each worker by PID before protected work begins. These entries always require AW and cover configured `input.submit`, `tool.before` (including `replace_input`) and `tool.after` (including `replace_result`); other Hooks are rejected at admission. A Claude worker whose native cleanup cannot be confirmed is terminated with its process group. Pi strict result protection follows the managed 0.84.2–1.5.2 release range. [Claude Python worker](../../docs/developer-guide/en/aw/agents/claude-sdk.md) · [Pi TypeScript worker](../../docs/developer-guide/en/aw/deployment/native-sdk.md#pi-worker-integration)

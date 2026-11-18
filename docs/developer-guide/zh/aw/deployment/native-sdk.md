@@ -61,6 +61,48 @@ Node 应用。服务准备可与模型推理重叠；未配置 `input.submit` �
 不进入 AW Hook 环境。其他敏感变量通过接入模块的 `environment` 选项排除。
 同一 Query 保留一种 AW 接线。该路径使用公开 Hook，不向原 SDK 添加模块补丁或 preload。
 
+## Pi Worker 接入
+
+在 Node.js 22.19 及以上使用可选入口 `@anolisa/aw-sdk/pi`。业务模块导出
+`createSession({ sdk, cwd, args, ...options })` 和
+`runWorker({ args, createSession, closeSession, withSession })`。模型、设置、工具和
+原生回调仍在业务工厂配置。受保护操作通过传入的 `createSession` 和
+`session.prompt()` 执行。
+
+```javascript
+import { runPiWorker } from "@anolisa/aw-sdk/pi";
+
+await runPiWorker({
+  application: "/absolute/pi-worker.mjs",
+  configFile: "/absolute/aw.yaml",
+  descriptorFile: "/absolute/aw-pi.descriptor.json",
+  args: process.argv.slice(2),
+});
+```
+
+部署阶段用 `pi-worker-hooks` Profile 编译 Descriptor，Worker 启动时不再调用
+`aw config show`；省略 `descriptorFile` 时使用离线解析。在配置中选择 Pi 目标，
+显式指定 daemon endpoint 或状态目录。进程进入 Worker 前启动 SDK 监听，部署侧以应用所属
+Linux 用户接入。该入口始终要求 AW 可用。
+
+```bash
+aw config descriptor --config /absolute/aw.yaml --agent pi \
+  --profile pi-worker-hooks > /absolute/aw-pi.descriptor.json
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+版本支持与 `aw run` 托管入口共用 Pi Adapter 的同一份能力声明，SDK 入口不另设版本判断。
+Coding Agent 与 Agent Core 的已安装版本均被接受；仅当两者为相同的正式版本且位于已验收的
+0.84.2–1.5.2 区间、并具备原生事件派发接点时，Worker 才声明 `withhold_result`。
+区间外的版本照常提供工具 Hook，但需要严格结果保护的配置会在注册时被拒绝，不会静默降级。
+本次 SDK 接入的输入检查和严格结果套件在 0.84.2、1.3.0、1.5.2 三个固定版本上验收。
+
+创建会话须等待 AW Ready，`attachTimeoutMs` 默认 5000 毫秒。每个会话使用一个确认后的
+Scope，Worker 验证并安装原生 Hook 后确认，关闭会话时排空工作并释放该策略快照。
+会话 Scope 复用托管入口的常驻 Scope 协议，由 SDK Task 承载注册、确认、续租与释放。
+工具策略也支持现有 `run(session, { args, createSession, closeSession })` 工厂。
+输入检查要求 `runWorker`，从仅工具配置切换为启用输入检查时须重启 Worker。
+
 ## 公共准入边界
 
 TypeScript、Python 均在 Instance／Task 旁导出 `Admission`。
@@ -100,7 +142,9 @@ const aw = await createQoderBridge({
 ```
 
 QwenPaw 选择 `qwenpaw-installed-native-hooks` 及其配置目标，并向
-[Python 工厂](python-sdk.md#安装与接入)传入 `descriptor_file`。
+[Python 工厂](python-sdk.md#安装与接入)传入 `descriptor_file`。Claude 协作式 worker
+使用 `claude-resident-hooks`，Pi Worker 使用 `pi-worker-hooks`；两者的 Profile
+均要求服务可用。Profile 版本是 Hook 合同标识，不随原生包版本变化。
 编译复用现有能力准入，记录目标、Profile、明确的 socket、输入边界与可用性；
 不启动 Service、Provider 或原生应用。QwenPaw Profile 要求服务可用，Qoder 记录
 目标适用事件的保护要求。两条加载路径均保留 Qoder 调用方选择的可用性，默认仍为

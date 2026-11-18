@@ -78,6 +78,56 @@ AW Hook environments. Other sensitive variables should be excluded through the
 bridge's `environment` option. Keep one AW integration per Query. This path uses
 public Hooks and adds no module patch or preload to the native SDK.
 
+## Pi worker integration
+
+Use the optional `@anolisa/aw-sdk/pi` entrypoint on Node.js 22.19 or later.
+Existing application modules export `createSession({ sdk, cwd, args, ...options })`
+and `runWorker({ args, createSession, closeSession, withSession })`. Keep native
+model setup, settings, tools and callbacks in the application factory. Use the
+supplied `createSession` and `session.prompt()` for protected work.
+
+```javascript
+import { runPiWorker } from "@anolisa/aw-sdk/pi";
+
+await runPiWorker({
+  application: "/absolute/pi-worker.mjs",
+  configFile: "/absolute/aw.yaml",
+  descriptorFile: "/absolute/aw-pi.descriptor.json",
+  args: process.argv.slice(2),
+});
+```
+
+Compile the descriptor with the `pi-worker-hooks` profile at deployment so the
+worker starts without `aw config show`; omit `descriptorFile` to use the offline
+parser. Configure a Pi target with an explicit daemon endpoint or state
+directory. The process publishes the SDK listener before entering the worker.
+Deployment attaches under the application's Linux user. AW is always required.
+
+```bash
+aw config descriptor --config /absolute/aw.yaml --agent pi \
+  --profile pi-worker-hooks > /absolute/aw-pi.descriptor.json
+aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 10000
+```
+
+Release support comes from the same Pi Adapter capability declaration that
+`aw run` uses; the SDK entry adds no version check of its own. Any installed
+Coding Agent and Agent Core release is accepted. The worker declares
+`withhold_result` only for an identical stable pair inside the verified
+0.84.2–1.5.2 range that also exposes the native event dispatch seam. Other
+releases keep the tool Hooks, and a configuration that needs strict result
+protection is rejected at registration rather than silently degraded. The SDK
+input and strict-output suites run on the pinned 0.84.2, 1.3.0 and 1.5.2 releases.
+
+AW is required for session creation. `attachTimeoutMs` bounds the wait for Ready
+and defaults to 5000 ms. Each session uses one acknowledged Scope. The worker
+validates and installs the native hooks before acknowledging the Scope. Close
+the session to drain work and release its policy snapshot. Session Scopes reuse
+the managed resident Scope protocol, carried by an SDK Task that owns
+registration, acknowledgement, renewal and release. The existing
+`run(session, { args, createSession, closeSession })` factory is also supported
+with tool policies. Input submission requires `runWorker`; enabling it for a
+worker that started with tool-only configuration requires a restart.
+
 ## Shared admission boundary
 
 TypeScript and Python export `Admission` alongside `Instance` and `Task`.
@@ -126,6 +176,9 @@ const aw = await createQoderBridge({
 
 For QwenPaw, select `qwenpaw-installed-native-hooks` and its configured target;
 pass `descriptor_file` to [the Python factory](python-sdk.md#install-and-integrate).
+Cooperative Claude workers use `claude-resident-hooks` and Pi workers use
+`pi-worker-hooks`; both profiles require the Service. A profile version names
+the Hook contract and does not track the native package version.
 Compilation applies the existing capability admission rules and records the
 target, profile, explicit socket, input boundary and availability. It starts no
 Service, Provider or native application. The QwenPaw profile requires service

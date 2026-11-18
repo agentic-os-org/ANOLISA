@@ -145,3 +145,5 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用可�
 原生 QwenPaw 启动后的实验性协作接入见 [工具后延迟接入](../../docs/developer-guide/zh/aw/deployment/python-sdk.md#工具后的延迟接入)。
 预装插件在首次工具前等待就绪；`aw connect --config aw.yaml --sdk-pid PID`
 启动或复用 AW，业务 Agent 继续由原生命令启动。
+
+常驻 Claude 和 Pi worker 可以原生启动并发布 SDK 监听。控制器按 worker PID 接入，准入后再放行受保护的任务。这两个入口始终要求 AW 可用，覆盖已配置的 `input.submit`、`tool.before`（含 `replace_input`）和 `tool.after`（含 `replace_result`），其他 Hook 在准入时拒绝。Claude worker 原生清理无法确认时，连同其进程组被终止。Pi 严格结果保护沿用托管入口的 0.84.2–1.5.2 版本区间。 [Claude Python 工厂](../../docs/developer-guide/zh/aw/agents/claude-sdk.md) · [Pi TypeScript 工厂](../../docs/developer-guide/zh/aw/deployment/native-sdk.md#pi-worker-接入)

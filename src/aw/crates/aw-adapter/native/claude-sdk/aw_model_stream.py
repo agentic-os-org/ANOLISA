@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from aw_claude import CallbackFailure
-from aw_invocations import Invocations, Invocation
+if __package__:
+    from .aw_claude import CallbackFailure
+    from .aw_invocations import Invocations, Invocation
+else:
+    from aw_claude import CallbackFailure
+    from aw_invocations import Invocations, Invocation
 
 MAX_FRAME = 1024 * 1024
 

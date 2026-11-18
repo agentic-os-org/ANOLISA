@@ -8,6 +8,8 @@ Application-owned QwenPaw Apps can use the [Python SDK](../../../developer-guide
 
 Application-owned Qoder Queries can use the [TypeScript SDK](../../../developer-guide/en/aw/deployment/native-sdk.md) with explicit native fallback. Its public-Hook coverage and acceptance are listed separately from resident `aw run`.
 
+Application-owned resident Claude and Pi workers can also publish an SDK attach listener. The controller attaches each worker by PID before protected work begins. These entries always require AW and cover configured `input.submit`, `tool.before` (including `replace_input`) and `tool.after` (including `replace_result`); other Hooks are rejected at admission. A Claude worker whose native cleanup cannot be confirmed is terminated with its process group. Pi strict result protection follows the managed 0.84.2–1.5.2 release range. [Claude Python worker](../../../developer-guide/en/aw/agents/claude-sdk.md) · [Pi TypeScript worker](../../../developer-guide/en/aw/deployment/native-sdk.md#pi-worker-integration)
+
 AW shares tool checks, result processing and custom rules across Agents. Adapters connect these capabilities to native tool execution. See the [Agent index](../../../developer-guide/en/aw/native-agents.md) for versions and setup.
 
 The `sdk/application` profile accepts framework-free input and tool callbacks in

@@ -9,7 +9,10 @@ from uuid import uuid4
 
 import anyio
 
-from aw_claude import CallbackFailure
+if __package__:
+    from .aw_claude import CallbackFailure
+else:
+    from aw_claude import CallbackFailure
 
 
 class SubmissionDenied(ValueError):
@@ -58,7 +61,10 @@ async def prepare(prompt: Any, session: str, cwd: str, budget_ms: int) -> tuple[
     if isinstance(prompt, str):
         text = prompt
     else:
-        from aw_transport import single_input
+        if __package__:
+            from .aw_transport import single_input
+        else:
+            from aw_transport import single_input
 
         async with asyncio.timeout(budget_ms / 1000):
             message = await single_input(prompt)

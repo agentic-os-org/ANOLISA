@@ -11,7 +11,6 @@ import threading
 from contextlib import aclosing
 from http.server import ThreadingHTTPServer
 
-from aw_claude import create_client
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage
 
 ROOT = Path(os.environ["AW_TEST_ROOT"])
@@ -104,7 +103,11 @@ async def lifecycle():
     )
 
 
-async def task(index, mode, consumer="response", settings_origin=None):
+async def task(index, mode, consumer="response", settings_origin=None, factory=None):
+    if factory is None:
+        from aw_claude import create_client
+
+        factory = create_client
     directory = ROOT / str(index)
     directory.mkdir()
     spec = importlib.util.spec_from_file_location(f"model_{index}", SOURCE)
@@ -170,7 +173,7 @@ async def task(index, mode, consumer="response", settings_origin=None):
         options, native_files = configure(
             options, directory, settings_origin, f"http://127.0.0.1:{server.server_port}"
         )
-    client = create_client(options)
+    client = factory(options)
     failed = False
     try:
         async with client:
@@ -228,6 +231,8 @@ async def task(index, mode, consumer="response", settings_origin=None):
             assert fixture.ORIGINAL not in json.dumps(requests)
         else:
             assert len(requests) == 2 * turns, (mode, len(requests))
+        if mode == "allow" and os.environ.get("AW_TEST_SCENARIO") == "cooperative-attach":
+            assert fixture.ORIGINAL in json.dumps(requests[1]), requests
         assert native.count("PreToolUse") == turns, native
         assert native.count("PostToolUse") == turns * (mode in {"allow", "after-error"}), native
         RESULTS.append(
@@ -245,12 +250,36 @@ async def task(index, mode, consumer="response", settings_origin=None):
         assert not thread.is_alive()
 
 
+async def cooperative_attach():
+    from aw_sdk.claude import ResidentClaude
+
+    worker = ResidentClaude.from_config(
+        os.environ["AW_TEST_CONFIG"],
+        target="claude",
+        descriptor_file=os.environ["AW_TEST_DESCRIPTOR"],
+        executable="/nonexistent/aw",
+        attach_timeout_ms=15000,
+    )
+    worker.listen()
+    (ROOT / "application-started").write_text("started")
+    try:
+        await task(0, "allow", factory=worker.create_client)
+        await task(1, "deny", factory=worker.create_client)
+    finally:
+        await worker.close()
+    assert RESULTS[0]["instance"] != RESULTS[1]["instance"]
+    (ROOT / "result.json").write_text(json.dumps({"tasks": 2, "cases": RESULTS, "passed": True}))
+
+
 async def main():
+    scenario = os.environ.get("AW_TEST_SCENARIO", "lifecycle")
+    if scenario == "cooperative-attach":
+        await cooperative_attach()
+        return
     (ROOT / "application-started").write_text("started")
     # Host readiness must precede the first task/client.
     config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
     assert Path(config["ready_path"]).exists()
-    scenario = os.environ.get("AW_TEST_SCENARIO", "lifecycle")
     if scenario == "settings":
         from claude_settings import run
 

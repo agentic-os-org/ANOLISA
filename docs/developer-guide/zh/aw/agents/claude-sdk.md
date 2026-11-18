@@ -206,6 +206,71 @@ Ready 后执行 `aw update --agent claude`，会加载同一份默认
 MCP 检查。准备和销毁期间均保留准入占用，更新无法越过这些边界。
 没有独立进程组的宿主会在 Ready 前被拒绝。
 
+## 原生 Python worker 协作式挂接
+
+在业务 Python 环境安装包含 `aw_sdk.claude` 的 AW Python SDK wheel 和 Claude
+Agent SDK 0.2.88，业务 worker 与 Service 使用同一用户。部署阶段用
+`claude-resident-hooks` Profile 编译 Descriptor，worker 启动时不再运行配置解析：
+
+```bash
+aw config descriptor --config /absolute/aw.yaml --agent claude \
+  --profile claude-resident-hooks > /absolute/aw-claude.descriptor.json
+```
+
+`ResidentClaude.from_config()` 读取同一份配置并按 Descriptor 选择目标、Service
+路径和输入保护；省略 `descriptor_file` 时改用 `aw config show` 离线解析。
+Profile 版本 `resident-hooks/v1` 是 Hook 合同标识，不随 Claude SDK 包版本变化。
+
+该入口始终要求 AW 可用，不支持 `native_fallback`。它复用常驻 Bridge 的失败关闭
+清理：SDK 无法确认中断、排空超时或清理状态未知时，AW 对该 worker 的进程组发送
+SIGKILL，同组的原生子进程一并退出。因此独立 worker 使用 `setsid python worker.py`
+启动；Gunicorn 在 `post_fork` 中调用 `os.setsid()`，并在 fork 后的 worker 内创建
+各自的工厂，使强制退出不影响 master 和其他 worker。没有独立会话的进程在创建
+工厂时即被拒绝。业务需要按 worker 可被替换来部署，例如由 Gunicorn 重新拉起。
+
+业务启动期间在 worker 事件循环调用 `startup()`。新客户端在 `connect()`
+等待 AW Ready，再启动原生 SDK。默认等待 5 秒，可用 `attach_timeout_ms` 调整。
+使用 `listen(automatic=True)` 可在配置的 Service 就绪时自动挂接。
+
+```python
+from aw_sdk.claude import ResidentClaude
+from claude_agent_sdk import ClaudeAgentOptions
+
+async def startup():
+    worker = ResidentClaude.from_config(
+        "/absolute/aw.yaml",
+        target="claude",
+        descriptor_file="/absolute/aw-claude.descriptor.json",
+    )
+    worker.listen()
+    return worker
+
+async def ask(worker, prompt):
+    async with worker.create_client(ClaudeAgentOptions()) as client:
+        await client.query(prompt)
+        async for message in client.receive_response():
+            yield message
+
+async def shutdown(worker):
+    await worker.close()
+```
+
+将 `WORKER_PID` 设为调用 `startup()` 的 worker PID。`aw connect` 返回
+`application_id`，断开时将该 ID 传入 `AW_SDK_INSTANCE`，`AW_SOCKET` 取
+Descriptor 的 `endpoint`。在 `aw disconnect`
+或关闭 worker 前，排空响应迭代器并断开客户端。客户端在连接期间固定策略版本，
+客户端仍持有 AW Task 时，`aw disconnect` 返回忙。
+
+```bash
+aw connect --config /absolute/aw.yaml --sdk-pid "$WORKER_PID"
+aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+```
+
+在客户端 options 中使用 `aw_sdk.claude.create_sdk_mcp_server` 创建受管的进程内 MCP
+服务。对提交检查拒绝，在 query 外层捕获 `aw_sdk.claude.SubmissionDenied`。
+协作式工厂准入已配置的 `input.submit`、含 `replace_input` 的 `tool.before` 和含
+`replace_result` 的 `tool.after`。最终工具结果安全检查沿用对应的前台入口。
+
 ## 提交前检查用户文本
 
 使用 [Claude 提交配置](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)

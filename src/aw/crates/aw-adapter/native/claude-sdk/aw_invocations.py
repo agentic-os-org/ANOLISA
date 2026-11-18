@@ -11,7 +11,10 @@ import json
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from aw_claude import CallbackFailure
+if __package__:
+    from .aw_claude import CallbackFailure
+else:
+    from aw_claude import CallbackFailure
 
 
 def digest(value: Any) -> bytes:
