@@ -143,8 +143,22 @@ fn strict_output_release(sdk: &str, core: &str) -> bool {
     if !version.pre.is_empty() || !version.build.is_empty() {
         return false;
     }
-    // Bound admission to published releases covered by native acceptance.
-    version >= semver::Version::new(0, 84, 2) && version <= semver::Version::new(1, 5, 2)
+    // Bound admission to published releases covered by native acceptance. Managed
+    // launch and the SDK worker read the same range; extending it is a data change.
+    let Ok(range) =
+        serde_json::from_str::<Value>(include_str!("../../native/pi/capabilities.json"))
+    else {
+        return false;
+    };
+    let bound = |name: &str| {
+        range["strict_output_releases"][name]
+            .as_str()
+            .and_then(|value| semver::Version::parse(value).ok())
+    };
+    let (Some(minimum), Some(maximum)) = (bound("minimum"), bound("maximum")) else {
+        return false;
+    };
+    version >= minimum && version <= maximum
 }
 
 impl PreparedLaunch for Prepared {
@@ -284,6 +298,21 @@ pub(crate) fn routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_output_uses_the_shared_release_declaration() {
+        for (sdk, core, admitted) in [
+            ("0.84.2", "0.84.2", true),
+            ("1.3.0", "1.3.0", true),
+            ("1.5.2", "1.5.2", true),
+            ("0.84.1", "0.84.1", false),
+            ("1.5.3", "1.5.3", false),
+            ("1.5.2", "1.5.1", false),
+            ("1.5.2-rc.1", "1.5.2-rc.1", false),
+        ] {
+            assert_eq!(strict_output_release(sdk, core), admitted, "{sdk}:{core}");
+        }
+    }
 
     #[test]
     fn correlation_requires_canonical_per_invocation_uuid() {

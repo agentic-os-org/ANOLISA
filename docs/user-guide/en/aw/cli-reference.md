@@ -185,7 +185,8 @@ Automation should use `--json` and the versioned management report described in
 ### `aw config descriptor`
 
 Requires `--config FILE --agent TARGET --profile PROFILE`. The supported profiles
-are `qoder-public-hooks` and `qwenpaw-installed-native-hooks`. Output is an
+are `qoder-public-hooks`, `qwenpaw-installed-native-hooks`, `claude-resident-hooks`
+and `pi-worker-hooks`. Output is an
 `aw-deployment/v1alpha1` JSON descriptor; no `--json` flag is needed. The input
 uses the same owned-file, path and ACL checks as `aw config show`; pass an absolute
 configuration path and publish the output as an application-user-owned private file.

@@ -180,7 +180,8 @@ AW 可按需启动本地服务；Agent 退出后，服务可能保留供后续�
 ### `aw config descriptor`
 
 要求 `--config FILE --agent TARGET --profile PROFILE`。支持
-`qoder-public-hooks` 和 `qwenpaw-installed-native-hooks` 两种 Profile。
+`qoder-public-hooks`、`qwenpaw-installed-native-hooks`、`claude-resident-hooks` 和
+`pi-worker-hooks` 四种 Profile。
 输出 `aw-deployment/v1alpha1` JSON Descriptor，无需 `--json`。输入沿用
 `aw config show` 的文件归属、路径和 ACL 检查；配置使用绝对路径，输出应发布为
 应用用户持有的私有文件。
