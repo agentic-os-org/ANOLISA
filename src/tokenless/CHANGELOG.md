@@ -9,6 +9,24 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-11-19
+
+### Added
+
+- PostTool compacts repeated records in recognized Maven and Gradle logs without requiring Stash. The compact output preserves record order, download or task details, and build diagnostics. Logs anchored by a command and exit status can still use retrievable progress reduction when no layout edits apply and the host supports recovery. ([#9975](https://github.com/agentic-os-org/ANOLISA/pull/9975), [#10249](https://github.com/agentic-os-org/ANOLISA/pull/10249))
+- Set `TOKENLESS_MIXED_CONTENT_ENABLED=1` to compress fenced JSON, CSV, and TSV blocks and bracket-balanced bare JSON documents embedded in otherwise unhandled PostTool output. Surrounding text stays byte-for-byte. The feature is off by default, and Python callers can override the environment setting with `mixed_content_enabled`. ([#9370](https://github.com/agentic-os-org/ANOLISA/pull/9370))
+
+### Changed
+
+- Eligible HTML strings inside JSON can combine Markdown with retained markup such as inline SVG, JSON data scripts, semantic attributes, and subtrees with unclassified inline styles. Styles that can affect visibility or other elements still keep the original string. Recovery returns the exact original HTML. ([#10068](https://github.com/agentic-os-org/ANOLISA/pull/10068), [#10183](https://github.com/agentic-os-org/ANOLISA/pull/10183))
+- On macOS, QwenWork runs ordinary shell commands with their original arguments. PreTool handles standalone `tokenless retrieve <hash>` and routes it to the bundled CLI and the same Stash when available. Workspace Shell and plugin-private runtimes use lossless compression when that recovery route is unavailable. ([#10289](https://github.com/agentic-os-org/ANOLISA/pull/10289))
+
+### Fixed
+
+- QwenWork replaces eligible single-stream Bash output with plain text when the delivered result decreases both characters and estimated tokens. Failed, multi-stream, and multimodal results retain their original output. ([#10042](https://github.com/agentic-os-org/ANOLISA/pull/10042))
+- `tokenless retrieve <hash>` opens the existing Stash read-only and reports the database path if it is missing. Updated Stash writers retain SQLite sidecar files so later reads can succeed in a read-only directory. If an older writer left the Stash without sidecars, first run a compression that writes to the same Stash with the updated plugin or CLI, then retry sandboxed retrieval. ([#10289](https://github.com/agentic-os-org/ANOLISA/pull/10289))
+- Packaging validators report the path and decoding error for malformed UTF-8 in manifests, install contracts, and generated requirements files. ([#9769](https://github.com/agentic-os-org/ANOLISA/pull/9769))
+
 ## [0.9.5] - 2026-11-12
 
 ### Added

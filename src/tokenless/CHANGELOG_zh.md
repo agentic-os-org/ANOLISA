@@ -9,6 +9,24 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.6] - 2026-11-19
+
+### 新增
+
+- PostTool 无需 Stash 即可压缩可识别的 Maven 和 Gradle 日志中的重复记录。压缩后的输出保留记录顺序、下载或任务详情以及构建诊断。由命令和退出状态标记的日志在没有适用的排版压缩且宿主支持恢复时，仍可精简进度记录并保留恢复能力。([#9975](https://github.com/agentic-os-org/ANOLISA/pull/9975)、[#10249](https://github.com/agentic-os-org/ANOLISA/pull/10249))
+- 设置 `TOKENLESS_MIXED_CONTENT_ENABLED=1`，即可压缩其他压缩策略未处理的 PostTool 输出中嵌入的 JSON、CSV 和 TSV 围栏代码块，以及括号配对、无围栏的 JSON 文档。周围文本逐字节保留。该功能默认关闭，Python 调用方可通过 `mixed_content_enabled` 覆盖环境变量设置。([#9370](https://github.com/agentic-os-org/ANOLISA/pull/9370))
+
+### 变更
+
+- JSON 中符合条件的 HTML 字符串可混合使用 Markdown 和保留的标记，包括内联 SVG、JSON 数据脚本、语义属性和包含未分类内联样式的子树。可能影响可见性或其他元素的样式仍会使原始字符串保持原样。恢复可逐字节取回原始 HTML。([#10068](https://github.com/agentic-os-org/ANOLISA/pull/10068)、[#10183](https://github.com/agentic-os-org/ANOLISA/pull/10183))
+- 在 macOS 上，QwenWork 使用原始参数执行普通 shell 命令。PreTool 处理独立的 `tokenless retrieve <hash>` 命令，并在可用时将其路由到插件内置的 CLI 和同一个 Stash。恢复路径不可用时，工作区 Shell 和插件私有运行环境使用无损压缩。([#10289](https://github.com/agentic-os-org/ANOLISA/pull/10289))
+
+### 修复
+
+- 当模型收到的结果同时减少字符数和估算 Token 数时，QwenWork 将符合条件的单流 Bash 输出替换为纯文本。失败、多流和多模态结果保留原始输出。([#10042](https://github.com/agentic-os-org/ANOLISA/pull/10042))
+- `tokenless retrieve <hash>` 以只读模式打开已有的 Stash，并在数据库缺失时报告其路径。更新后的 Stash 写入方保留 SQLite 附属文件，以便之后在只读目录中读取。如果旧版写入方留下的 Stash 缺少附属文件，请先用新版插件或 CLI 执行一次写入同一 Stash 的压缩，再重试沙箱中的恢复命令。([#10289](https://github.com/agentic-os-org/ANOLISA/pull/10289))
+- 打包校验遇到清单、安装契约或生成的依赖文件包含无法解码的 UTF-8 时，会报告文件路径和解码错误。([#9769](https://github.com/agentic-os-org/ANOLISA/pull/9769))
+
 ## [0.9.5] - 2026-11-12
 
 ### 新增

@@ -400,7 +400,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Nov 12 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Nov 19 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Compact recognized Maven and Gradle build output in PostTool
+- Add opt-in mixed-content compression and hybrid HTML views inside JSON
+- Refine QwenWork output replacement and limit macOS PreTool to recovery
+- Open Stash read-only for retrieval and report undecodable packaging metadata
+
+* Thu Nov 12 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.5-1
 - Render recoverable HTML inside JSON values and compact recognized pnpm output
 - Enable recoverable diff compression by default and extend host recovery support
 - Reduce POSIX rewrite process overhead and preserve Qoder result envelopes
