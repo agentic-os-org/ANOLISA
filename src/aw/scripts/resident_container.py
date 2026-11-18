@@ -42,6 +42,21 @@ def source_files(root: Path) -> list[Path]:
     return paths
 
 
+def wheel_sources(root: Path) -> list[Path]:
+    """Allowlist wheel build inputs separately from runtime fixtures."""
+    package = root / "sdk/python"
+    paths = [root.parents[1] / "LICENSE", package / "pyproject.toml", package / "setup.py"]
+    paths.extend(sorted((package / "src/aw_sdk").glob("*.py")))
+    paths.append(package / "src/aw_sdk/py.typed")
+    for pattern in ("*.py", "*.json"):
+        paths.extend(sorted((package / "examples").rglob(pattern)))
+    for adapter in ("claude-sdk", "qwenpaw"):
+        paths.extend(sorted((root / "crates/aw-adapter/native" / adapter).glob("*.py")))
+    if any(path.is_symlink() or not path.is_file() for path in paths):
+        raise ValueError("resident wheel requires regular allowlisted source files")
+    return paths
+
+
 def stage(
     root: Path, binaries: Path, context: Path, expected: str, manifest: dict
 ) -> dict:
@@ -52,6 +67,12 @@ def stage(
     for source in source_files(root):
         relative = source.relative_to(root)
         target = context / "source" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        record[str(relative)] = hashlib.sha256(source.read_bytes()).hexdigest()
+    for source in wheel_sources(root):
+        relative = Path("wheel-source") / source.relative_to(root.parents[1])
+        target = context / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         record[str(relative)] = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -228,7 +249,7 @@ def main() -> None:
     expected = sha(args.candidate_sha)
     if git("rev-parse", "HEAD") != expected:
         raise ValueError("resident image checkout differs from candidate")
-    paths = [str(path.relative_to(REPO)) for path in source_files(AW)]
+    paths = [str(path.relative_to(REPO)) for path in (*source_files(AW), *wheel_sources(AW))]
     paths += ["src/aw/tests/container/Dockerfile", "src/aw/crates/aw-cli/tests/fixtures/pi"]
     if git("status", "--porcelain", "--untracked-files=all", "--", *paths):
         raise ValueError("resident image inputs contain uncommitted changes")

@@ -12,7 +12,6 @@ from pathlib import Path
 import threading
 from typing import Any
 
-from aw_claude import create_client
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     HookMatcher,
@@ -261,6 +260,8 @@ async def permission(name: str, tool_input: dict[str, Any], context: Any) -> Any
 
 
 async def run(server: ThreadingHTTPServer) -> None:
+    from aw_claude import create_client
+
     opts = ClaudeAgentOptions(
         model="claude-sonnet-4-6",
         cwd=str(ROOT),

@@ -11,7 +11,7 @@ from pathlib import Path
 import runpy
 import signal
 import sys
-from typing import Any, AsyncIterable, AsyncIterator
+from typing import Any, AsyncIterable, AsyncIterator, Callable
 
 import anyio
 from claude_agent_sdk import (
@@ -20,32 +20,42 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ResultMessage,
 )
-from aw_claude import Bridge, CallbackFailure, _deny
-from aw_scope import Scope
-from aw_invocations import Invocations, digest
-from aw_model import ModelRelay
-from aw_transport import ManagedTransport
+if __package__:
+    from .aw_claude import Bridge, CallbackFailure, _deny
+    from .aw_scope import Scope
+    from .aw_invocations import Invocations, digest
+    from .aw_model import ModelRelay
+    from .aw_transport import ManagedTransport
+else:
+    from aw_claude import Bridge, CallbackFailure, _deny
+    from aw_scope import Scope
+    from aw_invocations import Invocations, digest
+    from aw_model import ModelRelay
+    from aw_transport import ManagedTransport
 
 _active: set[ManagedClient] = set()
 _poisoned = False
 
 
-def fail_stop() -> None:
-    """Kill the AW-owned foreground group when SDK interruption cannot be acknowledged."""
-    group = int(os.environ["AW_CLAUDE_RESIDENT_GROUP"])
+def fail_stop(group: int) -> None:
+    """Terminate the resident worker group when native cleanup cannot be confirmed."""
     if group != os.getpgrp():
         raise RuntimeError("Resident SDK host left its owned process group")
-    # main admits only the foreground group created by aw-exec. Forked workers
-    # retain that group; escalation terminates their shared host and SDK children.
+    # aw run owns its foreground group. Cooperative workers must start a private
+    # session so escalation cannot reach the launcher or sibling workers.
     os.killpg(group, signal.SIGKILL)
 
 
 class ResidentBridge(Bridge):
     """A failed managed callback stops delivery and permanently poisons its task."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.scope = Scope(self.config)
+    def __init__(self, group: int, scope: Any = None) -> None:
+        super().__init__(
+            None if scope is None else {"hooks": [], "resident_policy_reload": True},
+            launch_bound=scope is None,
+        )
+        self.group = group
+        self.scope = Scope(self.config) if scope is None else scope
         self.scope.on_failure = self.scope_failed
         self.failure: str | None = None
         self.mcp_names: set[str] = set()
@@ -123,21 +133,33 @@ class ResidentBridge(Bridge):
                 file=sys.stderr,
                 flush=True,
             )
-            fail_stop()
+            fail_stop(self.group)
             raise
 
 
 class ManagedClient(ClaudeSDKClient):
     """A public SDK client retains its conversation across drained executions."""
 
-    def __init__(self, options: ClaudeAgentOptions) -> None:
+    def __init__(
+        self,
+        options: ClaudeAgentOptions,
+        *,
+        scope_factory: Callable[[Callable[[dict], bool]], Any] | None = None,
+    ) -> None:
         if sys.version_info < (3, 11):
             raise RuntimeError("AW resident Claude SDK requires Python >=3.11")
-        if int(os.environ["AW_CLAUDE_RESIDENT_GROUP"]) != os.getpgrp():
-            raise RuntimeError("Resident clients require the AW-owned foreground group")
         self._aw_pid = os.getpid()
-        self._aw_bridge = ResidentBridge()
-        self._aw_bridge.stop = self.interrupt
+        group = os.getpgrp()
+        if scope_factory is None:
+            if int(os.environ["AW_CLAUDE_RESIDENT_GROUP"]) != group:
+                raise RuntimeError("Resident clients require the AW-owned foreground group")
+        elif self._aw_pid != group or os.getsid(0) != group:
+            raise RuntimeError("Cooperative Claude requires an isolated process started with setsid")
+        self._aw_cooperative = scope_factory is not None
+        self._aw_bridge = ResidentBridge(
+            group, None if scope_factory is None else scope_factory(self._aw_install_routes)
+        )
+        self._aw_bridge.stop = self._aw_stop_native
         self._aw_cwd = str(Path(options.cwd or os.getcwd()).resolve())
         self._aw_environment = {**os.environ, **options.env}
         self._aw_state = "new"
@@ -149,7 +171,10 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_lock = asyncio.Lock()
         self._aw_completion = asyncio.Lock()
         self._aw_connect_task: asyncio.Task[Any] | None = None
-        from aw_mcp import snapshot_servers
+        if __package__:
+            from .aw_mcp import snapshot_servers
+        else:
+            from aw_mcp import snapshot_servers
 
         self._aw_options = replace(options, cwd=self._aw_cwd, env=dict(options.env),
                                    mcp_servers=snapshot_servers(options.mcp_servers))
@@ -158,8 +183,21 @@ class ManagedClient(ClaudeSDKClient):
         if not self._aw_bridge.config.get("resident_policy_reload"):
             self._aw_compose(self._aw_options)
 
+    def _aw_install_routes(self, snapshot: dict) -> bool:
+        if (
+            not isinstance(snapshot, dict)
+            or re.fullmatch(r"[a-f0-9]{64}", snapshot.get("policy_revision", "")) is None
+        ):
+            raise ValueError("AW resident policy handoff is malformed")
+        self._aw_bridge.set_routes(snapshot["hooks"])
+        self._aw_compose(self._aw_options)
+        return True
+
     def _aw_compose(self, options: ClaudeAgentOptions) -> None:
-        from aw_mcp import claim_servers
+        if __package__:
+            from .aw_mcp import claim_servers
+        else:
+            from aw_mcp import claim_servers
 
         composed = self._aw_bridge.options(options)
         # Track caller hooks as well as AW hooks: SDK cancellation removes its
@@ -229,18 +267,12 @@ class ManagedClient(ClaudeSDKClient):
                         "can_use_tool callback requires streaming mode when connecting with a prompt"
                     )
                 reloadable = self._aw_bridge.config.get("resident_policy_reload", False)
-                if reloadable:
+                if reloadable and not self._aw_cooperative:
                     await self._aw_bridge.scope.reserve()
                 await self._aw_bridge.scope.open(self._aw_cwd, self._aw_environment,
                                                  acknowledge=not reloadable)
-                if reloadable:
-                    snapshot = await self._aw_bridge.scope.policy()
-                    if (not isinstance(snapshot, dict) or
-                            re.fullmatch(r"[a-f0-9]{64}", snapshot.get("policy_revision", "")) is None):
-                        raise ValueError("AW resident policy handoff is malformed")
-                    self._aw_bridge.config = Bridge({**self._aw_bridge.config,
-                                                    "hooks": snapshot["hooks"]}).config
-                    self._aw_compose(self._aw_options)
+                if reloadable and not self._aw_cooperative:
+                    self._aw_install_routes(await self._aw_bridge.scope.policy())
                 checked_input = any(hook["event"] == "input.submit"
                                     for hook in self._aw_bridge.config["hooks"])
                 self._aw_check()
@@ -271,6 +303,11 @@ class ManagedClient(ClaudeSDKClient):
                 finally:
                     self._aw_connect_task = None
                 self._aw_check()
+                if self._aw_bridge.failure:
+                    if self._aw_bridge.stop_future is not None:
+                        await asyncio.shield(self._aw_bridge.stop_future)
+                    raise CallbackFailure(self._aw_bridge.failure)
+                self._aw_bridge.scope.check()
                 self._aw_task_started = False
                 self._aw_state = "connected"
                 if prompt is not None and not checked_input:
@@ -315,7 +352,10 @@ class ManagedClient(ClaudeSDKClient):
             hooks = [hook for hook in self._aw_bridge.config["hooks"]
                      if hook["event"] == "input.submit"]
             if hooks:
-                from aw_submission import check, prepare, SubmissionDenied
+                if __package__:
+                    from .aw_submission import check, prepare, SubmissionDenied
+                else:
+                    from aw_submission import check, prepare, SubmissionDenied
 
                 prompt, payload = await prepare(
                     prompt, session_id, self._aw_cwd, hooks[0]["budget_ms"],
@@ -333,7 +373,10 @@ class ManagedClient(ClaudeSDKClient):
                 if self._aw_bridge.failure:
                     raise CallbackFailure(self._aw_bridge.failure)
             elif not isinstance(prompt, str):
-                from aw_transport import single_input
+                if __package__:
+                    from .aw_transport import single_input
+                else:
+                    from aw_transport import single_input
 
                 message = await single_input(prompt)
 
@@ -368,7 +411,7 @@ class ManagedClient(ClaudeSDKClient):
                 self._aw_bridge.failure_reply("tool.after", {})
                 await self._aw_bridge.stop_task()
                 if isinstance(error, TimeoutError):
-                    fail_stop()
+                    fail_stop(self._aw_bridge.group)
                 raise
             self._aw_query_finished = True
             self._aw_task_started = False
@@ -403,6 +446,17 @@ class ManagedClient(ClaudeSDKClient):
                 if isinstance(message, ResultMessage):
                     return
 
+    async def _aw_stop_native(self) -> None:
+        if self._aw_pid != os.getpid():
+            raise RuntimeError("A forked worker cannot interrupt an inherited client")
+        # Before super().connect(None) binds _query (or after a drained disconnect),
+        # no native work can be running; SDK "Not connected" is a confirmed no-op.
+        if getattr(self, "_query", None) is None and (
+            not self._aw_task_started or self._aw_query_finished
+        ):
+            return
+        await self.interrupt()
+
     async def interrupt(self) -> None:
         if self._aw_pid != os.getpid():
             raise RuntimeError("A forked worker cannot interrupt an inherited client")
@@ -424,7 +478,7 @@ class ManagedClient(ClaudeSDKClient):
                         try:
                             await self._aw_bridge.stop_task()
                         except BaseException:
-                            fail_stop()
+                            fail_stop(self._aw_bridge.group)
                             raise
                     try:
                         async with asyncio.timeout(12):
@@ -441,17 +495,21 @@ class ManagedClient(ClaudeSDKClient):
                     finally:
                         for server in self._aw_mcp:
                             server.release()
-                if self._aw_bridge.config.get("resident_policy_reload"):
+                if self._aw_bridge.config.get("resident_policy_reload") and not self._aw_cooperative:
                     await self._aw_bridge.scope.release()
         except BaseException:
             _poisoned = True
             # An undrained callback may still execute caller code. Close the
             # AW-owned process group rather than returning a reusable host.
-            fail_stop()
+            fail_stop(self._aw_bridge.group)
             raise
         else:
             _active.discard(self)
             self._aw_state = "closed"
+
+    @property
+    def _aw_live(self) -> bool:
+        return self._aw_state not in {"new", "closed"}
 
     async def disconnect(self) -> None:
         if self._aw_pid != os.getpid():

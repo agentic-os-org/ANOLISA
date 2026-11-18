@@ -245,6 +245,81 @@ native callback composition and managed MCP checks. Preparation and teardown
 hold the same admission reservation, so updates cannot race their completion.
 A host without its own process group is rejected before readiness.
 
+## Cooperative attach for a native Python worker
+
+Install the AW Python SDK wheel containing `aw_sdk.claude` and Claude Agent SDK
+0.2.88 in the application's Python environment; the worker and Service run as
+the same user. Compile a descriptor with the `claude-resident-hooks` profile at
+deployment so the worker starts without the configuration parser:
+
+```bash
+aw config descriptor --config /absolute/aw.yaml --agent claude \
+  --profile claude-resident-hooks > /absolute/aw-claude.descriptor.json
+```
+
+`ResidentClaude.from_config()` reads the same configuration and takes the
+target, Service path and input protection from the descriptor. Without
+`descriptor_file` it runs the `aw config show` offline parser instead. The
+profile version `resident-hooks/v1` identifies the Hook contract and does not
+change with the Claude SDK package version.
+
+This entry always requires AW and does not support `native_fallback`. It reuses
+the resident Bridge's fail-closed cleanup: when the SDK cannot confirm an
+interruption, drain times out or cleanup state is unknown, AW sends SIGKILL to
+the worker's process group, including its native children. Start a standalone
+worker with `setsid python worker.py`. For Gunicorn, call `os.setsid()` from
+`post_fork` and create the factory in each worker after fork, so termination
+never reaches the master or sibling workers. A process without its own session
+is rejected when the factory is created. Deploy workers as replaceable units,
+for example restarted by Gunicorn.
+
+Call `startup()` on the worker event loop during application startup. A new
+client waits for AW Ready at `connect()`, before starting the native SDK.
+The default wait is 5 seconds and `attach_timeout_ms` can change it. The optional
+`listen(automatic=True)` attaches when the configured Service is available.
+
+```python
+from aw_sdk.claude import ResidentClaude
+from claude_agent_sdk import ClaudeAgentOptions
+
+async def startup():
+    worker = ResidentClaude.from_config(
+        "/absolute/aw.yaml",
+        target="claude",
+        descriptor_file="/absolute/aw-claude.descriptor.json",
+    )
+    worker.listen()
+    return worker
+
+async def ask(worker, prompt):
+    async with worker.create_client(ClaudeAgentOptions()) as client:
+        await client.query(prompt)
+        async for message in client.receive_response():
+            yield message
+
+async def shutdown(worker):
+    await worker.close()
+```
+
+Set `WORKER_PID` to the worker that called `startup()`. The `aw connect` reply
+returns an `application_id`; set `AW_SDK_INSTANCE` to that ID and `AW_SOCKET`
+to the descriptor's `endpoint` for `aw disconnect`.
+Drain response iterators and disconnect clients before disconnecting or shutting
+down. Each open client keeps its policy through disconnect, and `aw disconnect`
+returns busy while a client owns an AW Task.
+
+```bash
+aw connect --config /absolute/aw.yaml --sdk-pid "$WORKER_PID"
+aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
+```
+
+For managed in-process MCP handlers, use
+`aw_sdk.claude.create_sdk_mcp_server` in the client's options. Catch
+`aw_sdk.claude.SubmissionDenied` around a guarded query. The cooperative
+factory admits `input.submit` (when configured), `tool.before` with
+`replace_input` and `tool.after` with `replace_result`. The final tool-result
+security boundary uses the separate foreground entrypoint.
+
 ## Check user text before submission
 
 Use [the Claude submission configuration](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)

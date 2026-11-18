@@ -1,7 +1,10 @@
 """Pinned native resident acceptance; one configuration, two named targets."""
 import argparse
+from hashlib import sha256
+from importlib.metadata import version
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -28,6 +31,61 @@ def assert_reaped(pid: int) -> None:
         time.sleep(0.01)
 
 
+def prepare_claude_wheel(
+    fixture: Path, directory: Path, environment: dict, output: Path,
+) -> dict:
+    """Use the image installation or install the checkout wheel in a private directory."""
+    if receipt := environment.get("AW_RESIDENT_PYTHON_WHEEL"):
+        digest, name = Path(receipt).read_text().split()
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), digest
+        assert name == f"anolisa_aw_sdk-{version('anolisa-aw-sdk')}-py3-none-any.whl", name
+        environment.pop("PYTHONPATH", None)
+        return {"name": name, "sha256": digest, "installation": "image"}
+    package = fixture.parents[2] / "sdk/python"
+    wheel_directory = directory / "wheel"
+    installed = directory / "installed"
+    with (output / "wheel.log").open("w") as log:
+        subprocess.run(
+            ["uv", "build", "--wheel", "--python", sys.executable,
+             "--out-dir", str(wheel_directory), str(package)],
+            stdout=log, stderr=subprocess.STDOUT, check=True, timeout=120,
+        )
+        (wheel,) = wheel_directory.glob("*.whl")
+        subprocess.run(
+            ["uv", "pip", "install", "--python", sys.executable, "--target", str(installed),
+             "--no-deps", str(wheel)],
+            stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60,
+        )
+    environment["PYTHONPATH"] = str(installed)
+    return {
+        "name": wheel.name, "sha256": sha256(wheel.read_bytes()).hexdigest(),
+        "installation": "private",
+    }
+
+
+def attach_claude_worker(
+    process: subprocess.Popen, aw: Path, config: Path, output: Path, env: dict,
+) -> None:
+    deadline = time.monotonic() + 10
+    while not (output / "application-started").exists():
+        assert process.poll() is None, (output / "stderr.log").read_text()
+        assert time.monotonic() < deadline, "native Claude worker did not start"
+        time.sleep(0.025)
+    # The native process starts independently. Required admission blocks the
+    # model request while the application waits for the cooperative attach.
+    assert not list(output.glob("*/requests.json"))
+    result = subprocess.run(
+        [str(aw), "connect", "--config", str(config), "--sdk-pid",
+         str(process.pid), "--timeout-ms", "10000"],
+        cwd=output, env=env, capture_output=True, text=True, timeout=15,
+    )
+    (output / "attach.log").write_text(result.stderr)
+    assert result.returncode == 0, result.stderr + result.stdout
+    document = json.loads(result.stdout)
+    assert document["result"]["state"] == "completed", document
+    (output / "attach.json").write_text(json.dumps(document))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--aw", type=Path, required=True)
@@ -35,11 +93,15 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--npm", type=Path)
     parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup",
-                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries", "settings", "report"], default="lifecycle")
+                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries", "settings", "report",
+                        "cooperative-attach"], default="lifecycle")
     parser.add_argument("--evidence-mode", choices=["auto", "off"])
     parser.add_argument("--tokenless", type=Path)
     parser.add_argument("--tokenless-provider", type=Path)
     args = parser.parse_args()
+    cooperative = args.scenario == "cooperative-attach"
+    if cooperative and args.agent != "claude":
+        parser.error("cooperative-attach requires --agent claude")
     aw, output = args.aw.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     fixture = Path(__file__).resolve().parent / "fixtures/resident"
@@ -118,10 +180,32 @@ def main():
     process = None
     own_children()
     try:
+        if cooperative:
+            # Deployment compiles wiring once from a private copy of the same bytes;
+            # the worker never runs the offline parser.
+            deployed, descriptor = state_parent / "aw.json", state_parent / "descriptor.json"
+            shutil.copyfile(config, deployed)
+            deployed.chmod(0o600)
+            compiled = subprocess.run(
+                [str(aw), "config", "descriptor", "--config", str(deployed), "--agent", "claude",
+                 "--profile", "claude-resident-hooks"],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            assert compiled.returncode == 0, compiled.stderr
+            descriptor.write_text(compiled.stdout)
+            descriptor.chmod(0o600)
+            shutil.copyfile(descriptor, output / "descriptor.json")
+            env.update(AW_TEST_CONFIG=str(deployed), AW_TEST_DESCRIPTOR=str(descriptor))
+            wheel = prepare_claude_wheel(fixture, state_parent, env, output)
+            # Keep the adjacent mcp fixture from shadowing the installed MCP package.
+            command = [sys.executable, "-P", str(fixture / "claude.py")]
+            record["command"] = command
         with (output / "stdout.log").open("w") as stdout, (output / "stderr.log").open("w") as stderr:
             process = subprocess.Popen(command, cwd=output, env=env, stdout=stdout, stderr=stderr, start_new_session=True)
             record.update(pid=process.pid, stop_worker=f"kill -TERM -- -{process.pid}")
             (output / "process.json").write_text(json.dumps(record))
+            if cooperative:
+                attach_claude_worker(process, aw, config, output, env)
             expected = (-9 if args.scenario in {"stop-failure", "eof-stop-failure", "drain-timeout"}
                         else 1 if args.scenario == "close-timeout" else 0)
             assert process.wait(timeout=timeout) == expected, (output / "stderr.log").read_text()[-6000:]
@@ -213,6 +297,8 @@ def main():
         result = json.loads((output / "result.json").read_text())
         result["status"] = status
         result["scenario"] = args.scenario
+        if cooperative:
+            result["wheel"] = wheel
         (output / "result.json").write_text(json.dumps(result))
     finally:
         try:
@@ -222,8 +308,9 @@ def main():
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=10)
-            stopped = subprocess.run([str(aw), "service", "stop", "--config", str(config)], env=env, capture_output=True, timeout=15)
-            assert stopped.returncode == 0, stopped.stderr.decode()
+            if not cooperative or (state_parent / "s/aw.sock").exists():
+                stopped = subprocess.run([str(aw), "service", "stop", "--config", str(config)], env=env, capture_output=True, timeout=15)
+                assert stopped.returncode == 0, stopped.stderr.decode()
             deadline = time.monotonic() + 15
             while (state_parent / "s/aw.sock").exists() and time.monotonic() < deadline:
                 time.sleep(0.05)

@@ -9,8 +9,12 @@ from typing import Any, AsyncGenerator, AsyncIterable, AsyncIterator
 from claude_agent_sdk import ClaudeAgentOptions, Transport
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-from aw_claude import CallbackFailure
-from aw_invocations import dispatch
+if __package__:
+    from .aw_claude import CallbackFailure
+    from .aw_invocations import dispatch
+else:
+    from aw_claude import CallbackFailure
+    from aw_invocations import dispatch
 
 
 async def empty_input() -> AsyncIterator[dict[str, Any]]:

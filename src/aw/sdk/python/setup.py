@@ -36,7 +36,24 @@ class Build(build_py):
             "aw_mcp.py",
         ):
             shutil.copyfile(NATIVE / name, native / name)
-        shutil.copyfile(NATIVE / "../claude-sdk/aw_scope.py", native / "aw_scope.py")
+        claude_source = NATIVE / "../claude-sdk"
+        shutil.copyfile(claude_source / "aw_scope.py", native / "aw_scope.py")
+        claude = package / "_native/claude"
+        claude.mkdir(parents=True, exist_ok=True)
+        (claude / "__init__.py").write_text("")
+        for name in (
+            "aw_claude.py",
+            "aw_invocations.py",
+            "aw_mcp.py",
+            "aw_model.py",
+            "aw_model_stream.py",
+            "aw_resident.py",
+            "aw_scope.py",
+            "aw_sdk_scope.py",
+            "aw_submission.py",
+            "aw_transport.py",
+        ):
+            shutil.copyfile(claude_source / name, claude / name)
         shutil.copyfile(ROOT / "../../../../LICENSE", package / "LICENSE")
 
 

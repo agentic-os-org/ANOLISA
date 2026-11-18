@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 
 from native_reports import validate_case, verify_case
@@ -73,6 +74,15 @@ def verify_shard(directory: Path, manifest: dict, expected: str, shard: str) -> 
     for agent, row in selected.items():
         for case in row["cases"]:
             verify_case(case, "", directory / agent)
+            if case["name"] == "resident-cooperative-attach":
+                evidence = json.loads(
+                    (directory / agent / case["results"][0]["file"]).read_text()
+                )["wheel"]
+                if (
+                    evidence["installation"] != "image"
+                    or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])
+                ):
+                    raise ValueError("resident Claude requires the image-installed SDK wheel")
     runtime = report["runtime"]
     if runtime["python"] != next(iter(selected.values()))["python"]:
         raise ValueError("resident Python version differs from the native inventory")

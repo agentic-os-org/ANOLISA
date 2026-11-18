@@ -10,7 +10,10 @@ from typing import Any
 import weakref
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server as sdk_server
-from aw_claude import CallbackFailure, _copy_json
+if __package__:
+    from .aw_claude import CallbackFailure, _copy_json
+else:
+    from aw_claude import CallbackFailure, _copy_json
 
 SOURCE = "claude-sdk-mcp/v1"
 _servers = weakref.WeakKeyDictionary()

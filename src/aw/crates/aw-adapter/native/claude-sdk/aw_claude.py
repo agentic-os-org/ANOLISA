@@ -42,12 +42,25 @@ def _copy_json(value: Any) -> Any:
 class Bridge:
     """Compose one foreground SDK client with its private AW launch binding."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, config: dict[str, Any] | None = None, *, launch_bound: bool = True
+    ) -> None:
         self.config = config if config is not None else json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
+        if launch_bound:
+            self._validate_launch()
+        self.set_routes(self.config.get("hooks"))
+        self.final = None
+        if self.config.get("final_profile"):
+            from aw_final import FinalGate
+
+            self.final = FinalGate(self.config)
+
+    def _validate_launch(self) -> None:
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
                 raise ValueError(f"AW configuration requires {key}")
-        hooks = self.config.get("hooks")
+    def set_routes(self, hooks: list[dict[str, Any]]) -> None:
+        """Install the immutable Adapter projection for this client."""
         if not isinstance(hooks, list):
             raise ValueError("AW configuration requires hooks")
         for hook in hooks:
@@ -61,10 +74,7 @@ class Bridge:
                 or not 1 <= hook["budget_ms"] <= 55000
             ):
                 raise ValueError("Invalid AW hook route")
-        self.final = None
-        if self.config.get("final_profile"):
-            from aw_final import FinalGate
-            self.final = FinalGate(self.config)
+        self.config = {**self.config, "hooks": hooks}
 
     async def _transport(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
@@ -340,7 +350,10 @@ async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[Clau
 def create_client(options: ClaudeAgentOptions) -> Any:
     """Use the public client factory in task workers and resident AW hosts."""
     if os.environ.get("AW_CLAUDE_RESIDENT") == "1":
-        from aw_resident import ManagedClient
+        if __package__:
+            from .aw_resident import ManagedClient
+        else:
+            from aw_resident import ManagedClient
         return ManagedClient(options)
     return _create_task_client(options)
 
@@ -349,10 +362,16 @@ def create_sdk_mcp_server(name: str, version: str = "1.0.0", tools: Any = None) 
     """Create an explicitly managed in-process MCP server for a resident task client."""
     if os.environ.get("AW_CLAUDE_RESIDENT") != "1":
         raise RuntimeError("Managed MCP requires the AW resident entrypoint")
-    from aw_mcp import create_sdk_mcp_server as factory
+    if __package__:
+        from .aw_mcp import create_sdk_mcp_server as factory
+    else:
+        from aw_mcp import create_sdk_mcp_server as factory
     return factory(name, version, tools)
 
 
 if __name__ == "__main__":
-    from aw_resident import main
+    if __package__:
+        from .aw_resident import main
+    else:
+        from aw_resident import main
     main()

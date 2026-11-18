@@ -15,7 +15,7 @@ from test_ci_checks import AW, GateFixture
 import resident_container
 from check_native import load, select
 from native_acceptance import verify_bundle
-from resident_container import source_files, stage
+from resident_container import source_files, stage, wheel_sources
 from resident_contract import BINARIES, shards, suites, verify, verify_shard
 
 
@@ -46,6 +46,13 @@ class ResidentContainerTests(GateFixture):
             }
             cleanup = {"candidate_sha": "a" * 40, "shard": shard, "network": "none",
                        "mounts": [], "removed": True, "image_removed": True, "image": "fixture-image"}
+            for case in plan["cases"]:
+                if case["name"] == "resident-cooperative-attach":
+                    wheel_result = directory / plan["agent"] / case["results"][0]["file"]
+                    wheel_result.parent.mkdir(parents=True)
+                    wheel_result.write_text(json.dumps({
+                        "wheel": {"installation": "image", "sha256": "c" * 64},
+                    }))
             (directory / "result.json").write_text(json.dumps(report))
             (directory / "container.json").write_text(json.dumps(cleanup))
             result[shard] = (directory, report, cleanup)
@@ -99,7 +106,27 @@ class ResidentContainerTests(GateFixture):
         (binaries / "source-sha.txt").write_text("a" * 40)
         for name in (".env", "credentials.json", "deployment.yaml"):
             (binaries / name).write_text("excluded-fixture-content")
-        stage(AW, binaries, context, "a" * 40, self.manifest)
+        inputs = stage(AW, binaries, context, "a" * 40, self.manifest)
+        expected = {
+            Path("wheel-source") / path.relative_to(AW.parents[1]) for path in wheel_sources(AW)
+        }
+        self.assertEqual(
+            {path.relative_to(context) for path in (context / "wheel-source").rglob("*")
+             if path.is_file()},
+            expected,
+        )
+        for required in (
+            "LICENSE",
+            "src/aw/sdk/python/pyproject.toml",
+            "src/aw/sdk/python/setup.py",
+            "src/aw/sdk/python/src/aw_sdk/claude.py",
+            "src/aw/crates/aw-adapter/native/claude-sdk/aw_sdk_scope.py",
+            "src/aw/crates/aw-adapter/native/qwenpaw/sdk.py",
+        ):
+            path = Path("wheel-source") / required
+            self.assertIn(path, expected)
+            self.assertEqual(inputs[str(path)], hashlib.sha256((context / path).read_bytes()).hexdigest())
+        self.assertFalse((context / "source/sdk/python").exists())
         self.assertEqual(
             {p.name for p in (context / "payload").iterdir()},
             {"aw", "aw-provider-tokenless", "tokenless", "SHA256SUMS", "source-sha.txt"},
@@ -119,7 +146,7 @@ class ResidentContainerTests(GateFixture):
         with patch("resident_contract.verify_case") as check:
             result = verify(self.root, self.manifest, "a" * 40)
             self.assertEqual(check.call_count, len(result["suites"]))
-            self.assertEqual(len(result["suites"]), 26)
+            self.assertEqual(len(result["suites"]), 27)
         for shard, (directory, report, cleanup) in reports.items():
             for field, value in (("passed", False), ("candidate_sha", "b" * 40),
                                  ("shard", "unknown"), ("suites", report["suites"][:-1])):
@@ -150,12 +177,27 @@ class ResidentContainerTests(GateFixture):
         self.assertIn(("claude-sdk", "resident-model-boundaries"), actual)
         self.assertIn(("claude-sdk", "resident-model-settings"), actual)
         self.assertIn(("claude-sdk", "resident-native-denial"), actual)
+        self.assertIn(("claude-sdk", "resident-cooperative-attach"), actual)
         for agent in ("claude-sdk", "pi"):
             self.assertIn((agent, "resident-long"), actual)
             self.assertIn((agent, "resident-drain"), actual)
         for plan in planned.values():
             self.assertGreater(plan["timeout_seconds"], sum(c["timeout_seconds"] for c in plan["cases"]))
             self.assertGreaterEqual(plan["job_minutes"] * 60, plan["timeout_seconds"] + 900)
+
+    def test_cooperative_case_requires_the_image_installed_wheel(self):
+        directory, _, _ = self.reports()["claude-sdk-regular"]
+        plan = shards(self.manifest)["claude-sdk-regular"]
+        case = next(case for case in plan["cases"] if case["name"] == "resident-cooperative-attach")
+        result = directory / "claude-sdk" / case["results"][0]["file"]
+        with patch("resident_contract.verify_case"):
+            verify_shard(directory, self.manifest, "a" * 40, "claude-sdk-regular")
+            for installation, digest in (("private", "c" * 64), ("image", "missing")):
+                result.write_text(json.dumps({
+                    "wheel": {"installation": installation, "sha256": digest},
+                }))
+                with self.assertRaisesRegex(ValueError, "image-installed"):
+                    verify_shard(directory, self.manifest, "a" * 40, "claude-sdk-regular")
 
     def test_versions_build_identity_and_duplicate_shards_cannot_report_success(self):
         reports = self.reports()

@@ -8,6 +8,8 @@
 
 应用自行持有的 Qoder Query 可通过 [TypeScript SDK](../../../developer-guide/zh/aw/deployment/native-sdk.md) 显式选择原生回退。公开 Hook 接线的覆盖与验收范围单独列出。
 
+常驻 Claude 和 Pi worker 可以原生启动并发布 SDK 监听。控制器按 worker PID 接入，准入后再放行受保护的任务。这两个入口始终要求 AW 可用，覆盖已配置的 `input.submit`、`tool.before`（含 `replace_input`）和 `tool.after`（含 `replace_result`），其他 Hook 在准入时拒绝。Claude worker 原生清理无法确认时，连同其进程组被终止。Pi 严格结果保护沿用托管入口的 0.84.2–1.5.2 版本区间。 [Claude Python 工厂](../../../developer-guide/zh/aw/agents/claude-sdk.md) · [Pi TypeScript 工厂](../../../developer-guide/zh/aw/deployment/native-sdk.md#pi-worker-接入)
+
 AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下能力由 Adapter 接入原生工具流程；具体版本和启动步骤见[Agent 接入索引](../../../developer-guide/zh/aw/native-agents.md)。
 
 两种语言包均可通过 `sdk/application` profile 接入无框架依赖的输入与工具回调，
