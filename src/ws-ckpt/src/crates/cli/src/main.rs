@@ -16,6 +16,7 @@ use ws_ckpt_common::{
     DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, DEFAULT_MOUNT_PATH, DEFAULT_SOCKET_PATH,
     GLOBAL_CONFIG_JSON_SCHEMA, MAX_FRAME_SIZE, MAX_LIST_PAGE_ITEMS, OVERVIEW_JSON_SCHEMA,
+    WORKSPACE_TREE_JSON_SCHEMA,
 };
 
 use std::cell::RefCell;
@@ -148,6 +149,39 @@ enum Commands {
         workspace: String,
     },
 
+    /// Create an independent workspace from a snapshot of another workspace
+    Fork {
+        /// Source workspace path or ID (absolute path, relative path, or workspace ID)
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
+        workspace: String,
+
+        /// Source snapshot (ID or unique prefix)
+        #[arg(long = "snapshot", short = 's', value_parser = snapshot_id_value_parser())]
+        snapshot: String,
+
+        /// New workspace path; the parent directory must exist and the path must be absent
+        #[arg(long)]
+        destination: PathBuf,
+
+        /// Output format: text or json (default: text)
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+    },
+
+    /// Show which workspaces were forked from which snapshots
+    Tree {
+        /// Workspace path or ID (absolute path, relative path, or workspace ID)
+        #[arg(long, short = 'w', value_parser = workspace_value_parser())]
+        workspace: String,
+
+        /// Walk to the root and show every descendant
+        #[arg(long)]
+        all: bool,
+
+        /// Output format: text or json (default: text)
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+    },
     /// Create a checkpoint (readonly snapshot)
     Checkpoint {
         /// Workspace path or ID (absolute path, relative path, or workspace ID)
@@ -461,6 +495,141 @@ async fn run(cli: Cli) -> Result<()> {
             let request = Request::Init { workspace };
             let response = send_request_to_daemon(&request).await?;
             handle_response(response, &request).await?;
+        }
+        Commands::Fork {
+            workspace,
+            snapshot,
+            destination,
+            format,
+        } => {
+            // Resolve a relative destination against this CLI's cwd so the
+            // request carries one unambiguous path to the daemon.
+            let destination = if destination.is_absolute() {
+                destination
+            } else {
+                std::env::current_dir()
+                    .context("cannot resolve the current directory")?
+                    .join(destination)
+            };
+            let request = Request::Fork {
+                workspace: resolve_workspace_arg(&workspace),
+                snapshot,
+                destination: destination.to_string_lossy().to_string(),
+            };
+            let response = send_request_to_daemon(&request).await?;
+            match response {
+                Response::ForkOk {
+                    ws_id,
+                    path,
+                    source_ws_id,
+                    source_snapshot_id,
+                    initial_snapshot_id,
+                } => {
+                    if format == "json" {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "schema": "ws-ckpt/fork/v1",
+                                "ws_id": ws_id,
+                                "path": path,
+                                "source": {
+                                    "ws_id": source_ws_id,
+                                    "snapshot_id": source_snapshot_id,
+                                },
+                                "initial_snapshot_id": initial_snapshot_id,
+                            })
+                        );
+                    } else {
+                        println!(
+                            "\x1b[32m✓ Workspace forked: {}\x1b[0m",
+                            escape_terminal_text(&ws_id)
+                        );
+                        println!("  Path: {}", escape_terminal_text(&path));
+                        println!(
+                            "  Forked from: {}/{}",
+                            escape_terminal_text(&source_ws_id),
+                            escape_terminal_text(&source_snapshot_id)
+                        );
+                        println!(
+                            "  Initial checkpoint: {}",
+                            escape_terminal_text(&initial_snapshot_id)
+                        );
+                    }
+                }
+                other => handle_response(other, &request).await?,
+            }
+        }
+        Commands::Tree {
+            workspace,
+            all,
+            format,
+        } => {
+            let request = Request::WorkspaceTree {
+                workspace: resolve_workspace_arg(&workspace),
+                all,
+            };
+            let response = send_request_to_daemon(&request).await?;
+            match response {
+                Response::WorkspaceTreeOk {
+                    target_ws_id,
+                    root_ws_id,
+                    nodes,
+                    warnings,
+                } => {
+                    if format == "json" {
+                        emit_json(serde_json::json!({
+                            "schema": WORKSPACE_TREE_JSON_SCHEMA,
+                            "all": all,
+                            "target_ws_id": target_ws_id,
+                            "root_ws_id": root_ws_id,
+                            "nodes": nodes
+                                .iter()
+                                .map(|node| serde_json::json!({
+                                    "ws_id": node.ws_id,
+                                    "path": node.path,
+                                    "depth": node.depth,
+                                    "source": node.source_ws_id.as_ref().map(|source| serde_json::json!({
+                                        "ws_id": source,
+                                        "snapshot_id": node.source_snapshot_id,
+                                        "registered": node.source_registered,
+                                    })),
+                                    "target": node.target,
+                                }))
+                                .collect::<Vec<_>>(),
+                            "warnings": warnings,
+                        }));
+                    } else {
+                        println!(
+                            "\x1b[1mWorkspace forks\x1b[0m (root: {})",
+                            escape_terminal_text(&root_ws_id)
+                        );
+                        for node in &nodes {
+                            let indent = "  ".repeat(node.depth as usize);
+                            let marker = if node.target { " *" } else { "" };
+                            let source = match (&node.source_ws_id, &node.source_snapshot_id) {
+                                (Some(source_ws_id), Some(snapshot_id)) => format!(
+                                    "  from {}/{}",
+                                    escape_terminal_text(source_ws_id),
+                                    escape_terminal_text(snapshot_id)
+                                ),
+                                _ => String::new(),
+                            };
+                            println!(
+                                "{}- {} {}{}{}",
+                                indent,
+                                escape_terminal_text(&node.ws_id),
+                                escape_terminal_text(&node.path),
+                                source,
+                                marker
+                            );
+                        }
+                        for warning in &warnings {
+                            println!("warning: {}", escape_terminal_text(warning));
+                        }
+                    }
+                }
+                other => handle_response(other, &request).await?,
+            }
         }
         Commands::Checkpoint {
             workspace,
@@ -3013,6 +3182,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_fork() {
+        let cli = Cli::try_parse_from([
+            "ws-ckpt",
+            "fork",
+            "-w",
+            "/tmp/source",
+            "-s",
+            "snap-1",
+            "--destination",
+            "/tmp/forked",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Fork {
+                workspace,
+                snapshot,
+                destination,
+                format,
+            } => {
+                assert_eq!(workspace, "/tmp/source");
+                assert_eq!(snapshot, "snap-1");
+                assert_eq!(destination, PathBuf::from("/tmp/forked"));
+                assert_eq!(format, "json");
+            }
+            _ => panic!("expected Fork"),
+        }
+    }
+
+    #[test]
+    fn parse_tree() {
+        let cli = Cli::try_parse_from(["ws-ckpt", "tree", "-w", "/tmp/forked", "--all"]).unwrap();
+        match cli.command {
+            Commands::Tree {
+                workspace,
+                all,
+                format,
+            } => {
+                assert_eq!(workspace, "/tmp/forked");
+                assert!(all);
+                assert_eq!(format, "text");
+            }
+            _ => panic!("expected Tree"),
+        }
+
+        let cli = Cli::try_parse_from(["ws-ckpt", "tree", "-w", "/tmp/forked", "--format", "json"])
+            .unwrap();
+        match cli.command {
+            Commands::Tree { all, format, .. } => {
+                assert!(!all);
+                assert_eq!(format, "json");
+            }
+            _ => panic!("expected Tree"),
+        }
+    }
+
+    #[test]
     fn parse_rejects_empty_or_whitespace_workspace_on_every_subcommand() {
         let subcommands: &[&[&str]] = &[
             &["init", "-w"],
@@ -3024,6 +3251,7 @@ mod tests {
             &["status", "-w"],
             &["cleanup", "-w"],
             &["recover", "-w"],
+            &["fork", "-w"],
         ];
         // Trailing args needed to satisfy required-flag validation for some
         // subcommands. Tested independently for each blank value.
@@ -3037,6 +3265,7 @@ mod tests {
             ("status", &[]),
             ("cleanup", &[]),
             ("recover", &[]),
+            ("fork", &["-s", "snap-1", "--destination", "/tmp/forked"]),
         ];
         for blank in ["", "   ", "\t"] {
             for sub in subcommands {

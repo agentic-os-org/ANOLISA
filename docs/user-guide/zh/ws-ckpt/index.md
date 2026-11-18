@@ -102,6 +102,8 @@ OpenClaw 插件要求 OpenClaw >= 2026.2.13；这是 config 写入路径首次�
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | 删除指定检查点 |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | 查看工作区状态 |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | 清理旧检查点 |
+| `ws-ckpt fork -w <workspace> -s <snapshot> --destination <path> [--format text\|json]` | 从快照创建独立工作区 |
+| `ws-ckpt tree -w <workspace> [--all] [--format text\|json]` | 查看工作区派生自哪个快照的 fork 树 |
 | `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | 查看/编辑配置 |
 | `ws-ckpt plugin install --runtime openclaw\|hermes` | 安装运行时插件 |
 | `ws-ckpt plugin uninstall --runtime openclaw\|hermes` | 卸载运行时插件 |
@@ -175,6 +177,33 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 # 为工作区启用自动清理
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### 从快照创建独立工作区
+
+`fork` 将某个快照复制为一个拥有独立可写子卷的新工作区。源工作区与 fork 之后的写入
+互不可见，且 fork 自带一个 pinned 的 `fork-initial` 检查点，可随时回滚到起始状态。
+
+```bash
+# 从快照派生新工作区；父目录必须存在，目标路径必须不存在
+ws-ckpt fork -w /home/user/projects/my-project -s snap-001 \
+  --destination /home/user/projects/my-project-variant
+
+# JSON 输出，包含来源工作区与来源快照
+ws-ckpt fork -w /home/user/projects/my-project -s snap-001 \
+  --destination /home/user/projects/my-project-variant --format json
+
+# 查看某工作区周边的 fork 来源树
+ws-ckpt tree -w /home/user/projects/my-project-variant
+
+# 一直追溯到根并展示全部后代
+ws-ckpt tree -w /home/user/projects/my-project-variant --all --format json
+```
+
+每个 fork 会在新工作区的快照索引旁写入 `fork-origin.json` 记录来源。`tree` 读取这些
+记录，默认展示目标、其父节点、兄弟节点和直接子节点；`--all` 展示根之下的整棵树。
+来源记录不可读时只作为警告返回，不影响其余结果；来源成环时返回错误而不是死循环。
+同一快照的并发 fork 是受支持的：同一个目标路径只会有一个 fork 成功，失败的 fork
+不会触碰胜出者的注册。
 
 ### cleanup 中断后的快照恢复
 

@@ -96,7 +96,18 @@ ws-ckpt rollback --workspace ~/my-workspace -s initial
 
 # 删除快照
 ws-ckpt delete --workspace ~/my-workspace -s feature
+
+# 从快照派生一个独立工作区（父目录需存在，目标路径需不存在）
+ws-ckpt fork --workspace ~/my-workspace -s initial --destination ~/my-workspace-variant
+
+# 查看工作区的 fork 来源树
+ws-ckpt tree --workspace ~/my-workspace-variant
 ```
+
+`fork` 创建的工作区拥有独立可写子卷和一个 pinned 的 `fork-initial` 检查点，源工作区
+与 fork 的后续写入互不影响。来源记录保存在新工作区的 `fork-origin.json` 中，可用
+`tree --all` 查看整棵派生树。详见
+[用户指南](../../docs/user-guide/zh/ws-ckpt/index.md#从快照创建独立工作区)。
 
 ### 快照管理
 

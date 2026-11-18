@@ -17,6 +17,7 @@ mod startup;
 pub mod state;
 mod util;
 pub mod workspace_mgr;
+pub mod workspace_tree;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -103,6 +103,8 @@ The OpenClaw plugin requires OpenClaw >= 2026.2.13, the first release whose conf
 | `ws-ckpt delete [-w <workspace>] -s <complete-id> [--force]` | Delete a specific checkpoint |
 | `ws-ckpt status [-w <workspace>] [--format table\|json]` | Show current workspace status |
 | `ws-ckpt cleanup -w <workspace> [--keep 20]` | Remove old checkpoints |
+| `ws-ckpt fork -w <workspace> -s <snapshot> --destination <path> [--format text\|json]` | Create an independent workspace from a snapshot |
+| `ws-ckpt tree -w <workspace> [--all] [--format text\|json]` | Show which workspaces were forked from which snapshots |
 | `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | View/edit configuration |
 | `ws-ckpt plugin install --runtime openclaw\|hermes` | Install runtime plugin |
 | `ws-ckpt plugin uninstall --runtime openclaw\|hermes` | Uninstall runtime plugin |
@@ -186,6 +188,38 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 # Enable auto-cleanup for workspace
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+### Creating an independent workspace from a snapshot
+
+`fork` copies one snapshot into a new workspace that has its own writable
+subvolume. The source workspace and the fork never see each other's writes, and
+the fork starts with a pinned `fork-initial` checkpoint so it can be rolled back
+to its starting point.
+
+```bash
+# Fork a snapshot into a new workspace; the parent directory must exist and
+# the destination must not exist yet
+ws-ckpt fork -w /home/user/projects/my-project -s snap-001 \
+  --destination /home/user/projects/my-project-variant
+
+# Machine-readable output, including the source workspace and snapshot
+ws-ckpt fork -w /home/user/projects/my-project -s snap-001 \
+  --destination /home/user/projects/my-project-variant --format json
+
+# Show the fork provenance around a workspace
+ws-ckpt tree -w /home/user/projects/my-project-variant
+
+# Walk to the root and show every descendant
+ws-ckpt tree -w /home/user/projects/my-project-variant --all --format json
+```
+
+Each fork records its source in `fork-origin.json` beside the new workspace's
+snapshot index. `tree` reads those records and shows the target, its parent, its
+siblings and its direct children; `--all` shows the whole tree under the root.
+Unreadable provenance becomes a warning instead of an error, and a provenance
+cycle is reported as an error instead of looping. Forking the same snapshot
+concurrently is supported: exactly one fork owns a destination, and a losing fork
+fails without touching the winner's registration.
 
 ### Snapshot recovery after an interrupted cleanup
 
