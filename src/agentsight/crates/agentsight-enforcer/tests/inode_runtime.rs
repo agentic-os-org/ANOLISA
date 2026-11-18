@@ -193,6 +193,8 @@ for line in sys.stdin:
             os.unlink(parts[1])
         elif op == 'openfd':
             openfds[parts[1]] = os.open(parts[1], os.O_RDWR)
+        elif op == 'closefd':
+            os.close(openfds.pop(parts[1]))
         elif op == 'writefd':
             os.write(openfds[parts[1]], b'-writefd')
         elif op == 'pwritefd':
@@ -349,7 +351,7 @@ impl TreeWorker {
                 "unlink" | "rmdir" => assert!(after[0].is_none()),
                 "touch" | "create_empty" | "mkdir" => assert!(after[0].is_some()),
                 "bind" => assert!(after[1].is_some()),
-                "read" | "readfd" | "openfd" => assert_eq!(after, before),
+                "read" | "readfd" | "openfd" | "closefd" => assert_eq!(after, before),
                 "write" | "pwrite" | "writefd" | "pwritefd" | "truncate" | "ftruncatefd"
                 | "otrunc" | "mmap_write" => {
                     assert_eq!(
@@ -965,15 +967,11 @@ fn structured_policy_classifier() {
     let tree_entry = files.root.join("existing");
     let tree_hardlink = files.outside.join("tree-hardlink");
     fs::hard_link(&tree_entry, &tree_hardlink).expect("pre-existing outside tree hardlink");
-    assert_eq!(
-        worker.run("openfd", &[TreeFiles::text(&write_only)]),
-        "ok",
-        "the descriptor must predate policy activation"
-    );
-    assert_eq!(
-        worker.run("openfd", &[TreeFiles::text(&ordinary_out_of_scope)]),
-        "ok"
-    );
+    // Writable descriptors held before activation can later be mapped
+    // shared-writable without another open, so apply must reject them.
+    for path in [&write_only, &ordinary_out_of_scope] {
+        assert_eq!(worker.run("openfd", &[TreeFiles::text(path)]), "ok");
+    }
     assert_eq!(
         worker.run("ftruncatefd", &[TreeFiles::text(&ordinary_out_of_scope)]),
         "ok"
@@ -1031,119 +1029,136 @@ fn structured_policy_classifier() {
         assert!(backend.bindings().expect("no partial binding").is_empty());
         assert_eq!(worker.run("write", &[TreeFiles::text(&write_only)]), "ok");
     }
+    let request = ApplyPolicy {
+        binding_id,
+        agent_id: "structured-kernel-test".into(),
+        session_id: None,
+        root_pid: worker.pid(),
+        process_start_time: worker.start_time(),
+        policy_id: "structured-classifier-kernel".into(),
+        policy_revision: "1".into(),
+        policy_dsl: String::new(),
+        policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![
+                protected(
+                    &exact,
+                    FileProtectionTargetKind::ExactFile,
+                    true,
+                    false,
+                    vec![],
+                ),
+                protected(
+                    &files.root,
+                    FileProtectionTargetKind::DirectoryTree,
+                    true,
+                    true,
+                    vec![
+                        FileProtectionExclusion {
+                            path: TreeFiles::text(&exact_exclusion).into(),
+                            kind: FileProtectionExclusionKind::ExactEntry,
+                        },
+                        FileProtectionExclusion {
+                            path: TreeFiles::text(&excluded).into(),
+                            kind: FileProtectionExclusionKind::DirectorySubtree,
+                        },
+                        FileProtectionExclusion {
+                            path: TreeFiles::text(&future_excluded_dir).into(),
+                            kind: FileProtectionExclusionKind::DirectorySubtree,
+                        },
+                    ],
+                ),
+                protected(
+                    &authored_alias_tree,
+                    FileProtectionTargetKind::DirectoryTree,
+                    true,
+                    true,
+                    vec![],
+                ),
+                protected(
+                    &nested_direct,
+                    FileProtectionTargetKind::ExactFile,
+                    true,
+                    true,
+                    vec![],
+                ),
+                protected(
+                    &overlap,
+                    FileProtectionTargetKind::DirectoryTree,
+                    true,
+                    false,
+                    vec![],
+                ),
+                protected(
+                    &second_root,
+                    FileProtectionTargetKind::DirectoryTree,
+                    true,
+                    false,
+                    vec![],
+                ),
+                protected(
+                    &write_only,
+                    FileProtectionTargetKind::ExactFile,
+                    false,
+                    true,
+                    vec![],
+                ),
+                protected(
+                    &ordinary_out_of_scope,
+                    FileProtectionTargetKind::ExactFile,
+                    false,
+                    true,
+                    vec![],
+                ),
+                protected(
+                    &deep_exact,
+                    FileProtectionTargetKind::ExactFile,
+                    true,
+                    true,
+                    vec![],
+                ),
+                protected(
+                    &deep_root,
+                    FileProtectionTargetKind::DirectoryTree,
+                    true,
+                    true,
+                    vec![],
+                ),
+            ],
+        }),
+    };
+    let error = backend
+        .apply(request.clone())
+        .expect_err("held writable descriptors must reject apply");
+    assert!(
+        matches!(&error, BackendError::PreexistingWritableFd { path, .. }
+            if path == TreeFiles::text(&write_only)
+                || path == TreeFiles::text(&ordinary_out_of_scope)),
+        "{error:?}"
+    );
+    assert!(backend.bindings().expect("no partial binding").is_empty());
+    assert_eq!(
+        worker.run("write", &[TreeFiles::text(&write_only)]),
+        "ok",
+        "a rejected apply must not leave kernel state behind"
+    );
+    for path in [&write_only, &ordinary_out_of_scope] {
+        assert_eq!(worker.run("closefd", &[TreeFiles::text(path)]), "ok");
+    }
     let binding = backend
-        .apply(ApplyPolicy {
-            binding_id,
-            agent_id: "structured-kernel-test".into(),
-            session_id: None,
-            root_pid: worker.pid(),
-            process_start_time: worker.start_time(),
-            policy_id: "structured-classifier-kernel".into(),
-            policy_revision: "1".into(),
-            policy_dsl: String::new(),
-            policy_mode: Some(PolicyMode::Enforce),
-            file_protection_policy: Some(FileProtectionPolicy {
-                version: FILE_PROTECTION_POLICY_VERSION,
-                topology_mode: FileProtectionTopologyMode::StaticAtApply,
-                targets: vec![
-                    protected(
-                        &exact,
-                        FileProtectionTargetKind::ExactFile,
-                        true,
-                        false,
-                        vec![],
-                    ),
-                    protected(
-                        &files.root,
-                        FileProtectionTargetKind::DirectoryTree,
-                        true,
-                        true,
-                        vec![
-                            FileProtectionExclusion {
-                                path: TreeFiles::text(&exact_exclusion).into(),
-                                kind: FileProtectionExclusionKind::ExactEntry,
-                            },
-                            FileProtectionExclusion {
-                                path: TreeFiles::text(&excluded).into(),
-                                kind: FileProtectionExclusionKind::DirectorySubtree,
-                            },
-                            FileProtectionExclusion {
-                                path: TreeFiles::text(&future_excluded_dir).into(),
-                                kind: FileProtectionExclusionKind::DirectorySubtree,
-                            },
-                        ],
-                    ),
-                    protected(
-                        &authored_alias_tree,
-                        FileProtectionTargetKind::DirectoryTree,
-                        true,
-                        true,
-                        vec![],
-                    ),
-                    protected(
-                        &nested_direct,
-                        FileProtectionTargetKind::ExactFile,
-                        true,
-                        true,
-                        vec![],
-                    ),
-                    protected(
-                        &overlap,
-                        FileProtectionTargetKind::DirectoryTree,
-                        true,
-                        false,
-                        vec![],
-                    ),
-                    protected(
-                        &second_root,
-                        FileProtectionTargetKind::DirectoryTree,
-                        true,
-                        false,
-                        vec![],
-                    ),
-                    protected(
-                        &write_only,
-                        FileProtectionTargetKind::ExactFile,
-                        false,
-                        true,
-                        vec![],
-                    ),
-                    protected(
-                        &ordinary_out_of_scope,
-                        FileProtectionTargetKind::ExactFile,
-                        false,
-                        true,
-                        vec![],
-                    ),
-                    protected(
-                        &deep_exact,
-                        FileProtectionTargetKind::ExactFile,
-                        true,
-                        true,
-                        vec![],
-                    ),
-                    protected(
-                        &deep_root,
-                        FileProtectionTargetKind::DirectoryTree,
-                        true,
-                        true,
-                        vec![],
-                    ),
-                ],
-            }),
-        })
+        .apply(request)
         .expect("apply structured classifier policy");
     assert!(binding.domain_id.is_some());
 
     assert_eq!(worker.run("read", &[TreeFiles::text(&exact)]), "ok");
     assert_eq!(worker.run("write", &[TreeFiles::text(&exact)]), "ok");
-    assert_eq!(worker.run("readfd", &[TreeFiles::text(&write_only)]), "ok");
+    // Exact write targets carry an inode write guard, so a writable
+    // descriptor cannot be obtained after activation either. Writes through
+    // a descriptor are covered by the tree entry opened below.
     assert_eq!(
-        worker.run("writefd", &[TreeFiles::text(&write_only)]),
-        "errno=1"
-    );
-    assert_eq!(
-        worker.run("pwritefd", &[TreeFiles::text(&write_only)]),
+        worker.run("openfd", &[TreeFiles::text(&write_only)]),
         "errno=1"
     );
     assert_eq!(worker.run("read", &[TreeFiles::text(&write_only)]), "ok");
@@ -1155,9 +1170,11 @@ fn structured_policy_classifier() {
         worker.run("pwrite", &[TreeFiles::text(&write_only)]),
         "errno=1"
     );
-    for (protected_path, outside_link) in [
-        (&write_only, &write_hardlink),
-        (&tree_entry, &tree_hardlink),
+    // The exact target's inode write guard follows every name of the inode;
+    // a tree entry is classified by path, so its outside alias stays writable.
+    for (protected_path, outside_link, alias_writable) in [
+        (&write_only, &write_hardlink, false),
+        (&tree_entry, &tree_hardlink, true),
     ] {
         let identity = fs::metadata(protected_path)
             .expect("protected hardlink inode")
@@ -1166,7 +1183,9 @@ fn structured_policy_classifier() {
             let before = fs::read(protected_path).expect("protected content before alias write");
             assert_eq!(
                 worker.run(operation, &[TreeFiles::text(outside_link)]),
-                "ok"
+                if alias_writable { "ok" } else { "errno=1" },
+                "{operation} through {}",
+                outside_link.display()
             );
             assert_eq!(
                 fs::metadata(protected_path)
@@ -1174,9 +1193,9 @@ fn structured_policy_classifier() {
                     .ino(),
                 identity
             );
-            assert_ne!(
-                fs::read(protected_path).expect("protected content after alias write"),
-                before
+            assert_eq!(
+                fs::read(protected_path).expect("protected content after alias write") != before,
+                alias_writable
             );
             assert_eq!(
                 worker.run(operation, &[TreeFiles::text(protected_path)]),
@@ -1211,11 +1230,12 @@ fn structured_policy_classifier() {
         worker.run("write", &[TreeFiles::text(&ordinary_out_of_scope)]),
         "errno=1"
     );
-    for operation in ["truncate", "ftruncatefd", "otrunc", "mmap_write"] {
-        fs::write(&ordinary_out_of_scope, b"reset").expect("reset scope fixture");
+    // Content-loss entries beyond write(2) are mediated for exact targets.
+    for operation in ["truncate", "otrunc", "mmap_write", "openfd"] {
         assert_eq!(
             worker.run(operation, &[TreeFiles::text(&ordinary_out_of_scope)]),
-            "ok"
+            "errno=1",
+            "{operation} on an exact ordinary-write target"
         );
     }
     assert_eq!(
@@ -1604,11 +1624,13 @@ fn structured_policy_classifier() {
     backend
         .detach(binding_id)
         .expect("detach structured binding");
-    fs::write(&ordinary_out_of_scope, b"reset").expect("reset after detach");
-    assert_eq!(
-        worker.run("ftruncatefd", &[TreeFiles::text(&ordinary_out_of_scope)]),
-        "ok"
-    );
+    for operation in ["openfd", "ftruncatefd"] {
+        assert_eq!(
+            worker.run(operation, &[TreeFiles::text(&ordinary_out_of_scope)]),
+            "ok",
+            "{operation} after detach"
+        );
+    }
     assert_eq!(worker.run("write", &[TreeFiles::text(&write_only)]), "ok");
     assert_eq!(worker.run("unlink", &[TreeFiles::text(&exact)]), "ok");
 }
