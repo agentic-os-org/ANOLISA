@@ -662,19 +662,21 @@ async fn api_joins_cli_pages_and_rejects_mixed_revisions() {
             awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
         assert_eq!(response.status(), expected, "{uri}");
     }
-    let response = awtest::call_service(
-        &app,
-        awtest::TestRequest::get()
-            .uri("/ws-ckpt/trajectory/fixture-session/snapshots?cursor=not-base64")
-            .to_request(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: Value = awtest::read_body_json(response).await;
-    assert_eq!(
-        body["error"], "invalid cursor",
-        "a malformed cursor must not expose the base64 decoder's internals"
-    );
+    for malformed_cursor in [
+        "not-base64".to_string(),
+        URL_SAFE_NO_PAD.encode(b"not json"),
+    ] {
+        let uri =
+            format!("/ws-ckpt/trajectory/fixture-session/snapshots?cursor={malformed_cursor}");
+        let response =
+            awtest::call_service(&app, awtest::TestRequest::get().uri(&uri).to_request()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body: Value = awtest::read_body_json(response).await;
+        assert_eq!(
+            body["error"], "invalid cursor",
+            "a malformed cursor must not expose decoder or parser internals ({uri})"
+        );
+    }
     let first: Value = awtest::call_and_read_body_json(
         &app,
         awtest::TestRequest::get()
