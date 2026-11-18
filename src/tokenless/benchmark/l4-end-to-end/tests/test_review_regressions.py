@@ -1069,6 +1069,70 @@ def test_interrupted_sweep_revokes_previous_clean_verdict(
     assert repro.read_cell(str(tmp_path), "host1", 1, "b") is None
 
 
+@pytest.mark.parametrize(
+    ("root_name", "host", "arm", "decoy_root"),
+    [
+        ("runs[ab]", "hostX-1", "a", "runsa"),
+        ("runs", "host[Y]-1", "b[z]", None),
+    ],
+)
+def test_reproducibility_reads_literal_run_paths(
+    tmp_path: Path, root_name: str, host: str, arm: str, decoy_root: str | None
+) -> None:
+    def write_runs(root: Path, host_name: str, arm_name: str, tokens: int) -> None:
+        for repeat in (1, 2):
+            run = root / host_name / "out" / f"repeat-{repeat}"
+            base = run / f"arm-{arm_name}"
+            results = base / "run" / "results"
+            results.mkdir(parents=True)
+            (run / "sweep-summary.txt").write_text(
+                f"[sweep] sweep repeat={repeat} arms={arm_name} instances=1\n"
+                "[sweep] all arms produced evidence-backed results\n",
+                encoding="utf-8",
+            )
+            (base / "report.json").write_text(
+                json.dumps({"instances": {"case": {"prompt_tokens": tokens}}}),
+                encoding="utf-8",
+            )
+            (results / "case.json").write_text(
+                json.dumps(
+                    {"instance_id": "case", "success": True, "patch_produced": True}
+                ),
+                encoding="utf-8",
+            )
+
+    runs = tmp_path / root_name
+    write_runs(runs, host, arm, 100)
+    if decoy_root is not None:
+        write_runs(tmp_path / decoy_root, "hostDECOY-1", "decoy", 999)
+
+    output = tmp_path / "output" / "reproducibility.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "analyze_reproducibility.py"),
+            "--runs",
+            str(runs),
+            "--repeats",
+            "1,2",
+            "--out",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(output.read_text(encoding="utf-8"))
+    host_key = host.split("-", 1)[0]
+    assert report["repeats_present_by_arm_host"] == {arm: {host_key: [1, 2]}}
+    assert set(report["by_arm"]) == {arm}
+    assert report["by_arm"][arm]["instances_compared"] == 1
+    assert report["by_arm"][arm]["instances_bit_identical_prompt_tokens"] == 1
+
+
+
 @pytest.mark.parametrize("broken", ["mismatch", "unreadable"])
 def test_pilot_ledger_refuses_unreliable_usage(tmp_path: Path, broken: str) -> None:
     sweep = tmp_path / "out" / "repeat-1"

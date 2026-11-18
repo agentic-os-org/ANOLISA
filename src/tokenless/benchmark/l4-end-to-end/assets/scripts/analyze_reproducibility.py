@@ -32,7 +32,7 @@ L4 = os.path.normpath(os.path.join(HERE, "..", ".."))
 
 def hosts(runs):
     out = {}
-    for d in sorted(glob.glob(f"{runs}/host*")):
+    for d in sorted(glob.glob(f"{glob.escape(runs)}/host*")):
         out[os.path.basename(d).split("-", 1)[0]] = os.path.basename(d)
     if not out:
         raise SystemExit(f"no host* run trees under {runs}")
@@ -71,7 +71,7 @@ def read_cell(runs, hdir, repeat, arm):
         return None
     inst = json.load(open(rep_path)).get("instances", {})
     out = {}
-    for f in glob.glob(f"{base}/run/results/*.json"):
+    for f in glob.glob(f"{glob.escape(base)}/run/results/*.json"):
         res = json.load(open(f))
         iid = res["instance_id"]
         tok = inst.get(iid)
@@ -154,7 +154,9 @@ def main():
             os.path.basename(d).split("-", 1)[1]
             for hdir in hosts_map.values()
             for r in repeats
-            for d in glob.glob(f"{args.runs}/{hdir}/out/repeat-{r}/arm-*")
+            for d in glob.glob(
+                f"{glob.escape(args.runs)}/{glob.escape(hdir)}/out/repeat-{r}/arm-*"
+            )
             if os.path.basename(d).split("-", 1)[1]
         }
     )
