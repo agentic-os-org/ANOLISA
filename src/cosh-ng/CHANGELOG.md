@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-19
+
+### Added
+
+- Bash can remain the default login shell while Cosh provides opt-in guidance: a bounded login health banner with resource facts and an AI invitation, persistent `cosh guide` controls, and reversible login-shell switching gated by an explicit capability. Bash owns input and execution until Cosh is started explicitly — no automatic natural-language routing, output capture, or default-shell change; user hooks win, and the RPM does not edit system profile files (#9914)
+- `cosh --help` shows read-only Cosh help instead of forwarding to Bash help, and a bilingual `cosh guide` wizard covers language, AI-service handoff, guidance and recommendation controls, login health, login-shell actions and getting started, with `cosh guide --plain` for non-interactive output; legacy `guide on/off/status` and inline `/help` are retained (#10103)
+- `cosh guide` focuses on setup and learning: the home page leads with the quick guide, then default login shell, AI service, login health, language and more settings; it no longer opens a working shell, explains `cosh --ask`, continued interaction and contextual `exit`, confirms login changes and history import once with Cancel selected, and pages long results (#10266)
+- Startup renders one suggestion area shared by health and personal candidates — up to three, numbered, with a single active marker — instead of a separate health invitation and recommendation card; one snapshot feeds the display, input ghost text and key bindings, and health facts render only once (#10205)
+- Bash login health banners run within a unified 300 ms budget covering preparation, per-source collection, process cleanup and output; `cosh health banner` now defaults to 300 ms (previously 500 ms), `--budget-ms` values above 300 clamp to 300 while smaller budgets still apply, and repeated OOM advice stays suppressed for the same event across log-source changes until a new event or higher severity appears (#10271)
+
+### Changed
+
+- **BREAKING**: The `cosh-switch` package-switch command is removed. Use `cosh login set/restore/status` to change login shells; controlled package replacement, downgrade and erase with account protections remain available (#9968)
+- **BREAKING**: sec-core adds an opt-in mode, enabled with `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`, that sends every hooked shell invocation — including `sudo` — through the existing approval and sandbox chain using an installed default permission request; explicit block rules still apply and the mode stays off by default. `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` is removed in favor of an administrator-owned `sandbox/permissions.json.template`; the sandbox permits reads and writes under the working directory, `/tmp` and an absolute `$TMPDIR`, disables IP networking, and protects existing `.git` directories (#9954)
+
+### Fixed
+
+- In native Bash mode, command lines edited with Tab completion or arrow keys before submission are recorded in Bash history again — successful and failing commands alike; secret lines and lines with a user-leading space stay hidden (#10189)
+- `cosh login set` works on standard ALinux4 RPM installs: the login lifecycle capability is enabled by default (opt out with `--without login_lifecycle`), supports the current user or an explicitly named local user under existing authorization checks, and accepts the distribution's execute-only sudo; package erase guards all Cosh entry paths, and installing leaves every account's current login shell unchanged (#10001)
+- Chinese sentences containing glob characters, such as `列出所有 *.log 文件`, reach AI routing instead of failing with `command not found`; expansion-sensitive command positions such as `~/run.sh` still run as ordinary shell commands (#9588)
+- `git grep` no longer executes automatically: with `--no-index`, or outside a repository when Git's fallback is enabled, it can read arbitrary filesystem paths, so it now follows the normal approval policy; `git status` and `git ls-files` remain automatic (#10264)
+- Keyboard echo stays responsive under large command output: output without control sequences takes a fast path through the terminal-output parser, cutting loaded echo latency roughly tenfold with output bytes unchanged (#10275)
+- Sanitized UI text no longer carries terminal metadata such as hyperlink targets or window titles; visible hyperlink labels are preserved and display widths stay correct (#9579)
+- When a multi-line Bash command is blocked at shell handoff, the agent receives the specific reason and a rewrite hint — join lines with `;` or `&&`, or pass multi-line code as a single-quoted argument — instead of a fixed denial, so it corrects the command on the first retry (#10177)
+- Welcome and health cards share one width capped at the terminal size; ECS startup says "Ask directly to start an AI conversation" instead of implying model setup is required; disabled automatic access is distinguished from missing configuration with actionable permission-error guidance; approval, trust and privacy wording is corrected, and host-owned command feedback follows the shell language (#9977)
+- Managing the AI service from `cosh guide` runs as a finite task that returns to the guide automatically, instead of opening a full Cosh shell that requires `exit`; Back always returns to the page that opened a setting, simple settings stay on their page after saving, and destructive actions ask for confirmation (#10219)
+- On zero-config ECS hosts, `cosh guide` shows "Zero-config automatic access; ask directly" and defaults to Start asking questions with Manage AI service secondary, instead of directing users to manual configuration; opening the guide performs no identity probe or model request (#10173)
+- Health reports with incomplete collection show a neutral "some checks incomplete" status instead of a green all-clear, while available load, memory and disk values stay visible; the status appears once even on narrow terminals (#9998)
+- Health evidence is more accurate: a single OOM event is counted once across systemd versions, large kernel logs no longer fail the whole check because reads are bounded and confirmed records survive, and small noncritical filesystems turn critical only at 85% usage with less than 2 GiB free (#9999)
+- Failure-context collection yields to user prompt configuration: it stops recording when the guidance-owned prompt entry is replaced, preserves the original exit status, and leaves no active trap behind when it cannot clean up safely (#10000)
+- The guide's default-login-shell page offers only state-valid actions — a restored Bash account no longer sees Restore, conflicts offer Reread, and Other user shows the administrator commands `cosh login status|set|restore --user USER`; a failed re-read reports the failure instead of claiming success, and messages follow the host language (#10178, #10188)
+- Startup and login health banners render exactly one blank line above and below on both interactive and login paths, and the Cosh AI invitation uses the same cyan `┃ Cosh AI` brand line as the Bash invitation; plain and NO_COLOR output is unchanged (#10182, #10194)
+
 ## [0.29.1] - 2026-11-12
 
 ### Changed
