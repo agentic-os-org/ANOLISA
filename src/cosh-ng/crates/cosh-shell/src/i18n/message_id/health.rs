@@ -144,6 +144,13 @@ macro_rules! health_volume_ids {
             HealthFindingMountReadonly,
             HealthInsightMountReadonly,
             HealthEvidenceMountReadonly,
+            HealthFindingCgroupMemoryPressure,
+            HealthInsightCgroupMemoryPressure,
+            HealthEvidenceCgroupQuota,
+            HealthEvidenceCgroupQuotaZero,
+            HealthFindingPressureHigh,
+            HealthInsightPressureHigh,
+            HealthEvidencePressureAvg,
         );
     };
 }

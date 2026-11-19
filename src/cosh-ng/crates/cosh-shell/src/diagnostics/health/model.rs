@@ -417,6 +417,8 @@ pub(crate) enum HealthMessageId {
     HealthInsightSwapPressure,
     HealthInsightServiceState,
     HealthInsightGeneric,
+    HealthInsightCgroupMemoryPressure,
+    HealthInsightPressureHigh,
     HealthUnavailablePermissionDenied,
     HealthUnavailableCommandMissing,
     HealthUnavailableTimeout,
@@ -433,6 +435,8 @@ pub(crate) enum HealthMessageId {
     HealthFindingKernelPanic,
     HealthFindingServiceFailed,
     HealthFindingServiceInactive,
+    HealthFindingCgroupMemoryPressure,
+    HealthFindingPressureHigh,
     HealthFindingProviderUnconfigured,
     HealthFindingConfigUnavailable,
     HealthFindingHooksUntrusted,
@@ -513,6 +517,10 @@ impl HealthMessageId {
             Self::HealthInsightSwapPressure => crate::MessageId::HealthInsightSwapPressure,
             Self::HealthInsightServiceState => crate::MessageId::HealthInsightServiceState,
             Self::HealthInsightGeneric => crate::MessageId::HealthInsightGeneric,
+            Self::HealthInsightCgroupMemoryPressure => {
+                crate::MessageId::HealthInsightCgroupMemoryPressure
+            }
+            Self::HealthInsightPressureHigh => crate::MessageId::HealthInsightPressureHigh,
             Self::HealthUnavailablePermissionDenied => {
                 crate::MessageId::HealthUnavailablePermissionDenied
             }
@@ -539,6 +547,10 @@ impl HealthMessageId {
             Self::HealthFindingKernelPanic => crate::MessageId::HealthFindingKernelPanic,
             Self::HealthFindingServiceFailed => crate::MessageId::HealthFindingServiceFailed,
             Self::HealthFindingServiceInactive => crate::MessageId::HealthFindingServiceInactive,
+            Self::HealthFindingCgroupMemoryPressure => {
+                crate::MessageId::HealthFindingCgroupMemoryPressure
+            }
+            Self::HealthFindingPressureHigh => crate::MessageId::HealthFindingPressureHigh,
             Self::HealthFindingProviderUnconfigured => {
                 crate::MessageId::HealthFindingProviderUnconfigured
             }

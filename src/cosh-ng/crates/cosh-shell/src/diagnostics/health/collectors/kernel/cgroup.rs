@@ -47,6 +47,24 @@ pub(super) fn parse_events_oom_kill(content: &str) -> Option<u64> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotaValue {
+    Unlimited,
+    Finite(u64),
+}
+
+pub(super) fn parse_quota_limit(content: &str) -> Option<QuotaValue> {
+    let trimmed = content.trim();
+    if trimmed == "max" {
+        return Some(QuotaValue::Unlimited);
+    }
+    trimmed.parse::<u64>().ok().map(QuotaValue::Finite)
+}
+
+pub(super) fn parse_quota_current(content: &str) -> Option<u64> {
+    content.trim().parse::<u64>().ok()
+}
+
 pub(super) fn normalize_path(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -260,6 +278,15 @@ mod linux {
                 started.elapsed().as_millis(),
             );
         }
+        if let (Some(dir), Some(object_id)) = (dir.as_deref(), object_id.as_ref()) {
+            record_quota_pressure(
+                builder,
+                dir,
+                &path,
+                object_id,
+                started.elapsed().as_millis(),
+            );
+        }
         record(
             builder,
             &CgroupFacts {
@@ -272,6 +299,117 @@ mod linux {
             },
             started.elapsed().as_millis(),
         );
+    }
+
+    fn record_quota_pressure(
+        builder: &mut HealthReportBuilder,
+        dir: &Path,
+        path: &str,
+        object_id: &str,
+        elapsed_ms: u128,
+    ) {
+        use crate::diagnostics::health::collectors::{read_pressure, record_pressure};
+        fn add(
+            builder: &mut HealthReportBuilder,
+            key: &str,
+            value: HealthFactValue,
+            unit: Option<String>,
+            elapsed_ms: u128,
+        ) {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                key,
+                value,
+                unit,
+                HealthFactSource::Derived,
+                elapsed_ms,
+            );
+        }
+        let current = read_bounded(&dir.join("memory.current"), SCALAR_MAX_BYTES)
+            .and_then(|content| parse_quota_current(&content));
+        let max = read_bounded(&dir.join("memory.max"), SCALAR_MAX_BYTES)
+            .and_then(|content| parse_quota_limit(&content));
+        let high = read_bounded(&dir.join("memory.high"), SCALAR_MAX_BYTES)
+            .and_then(|content| parse_quota_limit(&content));
+        let quota_present = current.is_some() || max.is_some() || high.is_some();
+        let mut psi_present = false;
+        builder.set_scope(HealthFactScope::Cgroup(path.to_string()));
+        if let Some(current) = current {
+            add(
+                builder,
+                "kernel.cgroup_memory_current_bytes",
+                HealthFactValue::Unsigned(current),
+                Some("bytes".to_string()),
+                elapsed_ms,
+            );
+        }
+        for (name, limit) in [("max", max), ("high", high)] {
+            match limit {
+                Some(QuotaValue::Finite(bytes)) => add(
+                    builder,
+                    &format!("kernel.cgroup_memory_{name}_bytes"),
+                    HealthFactValue::Unsigned(bytes),
+                    Some("bytes".to_string()),
+                    elapsed_ms,
+                ),
+                Some(QuotaValue::Unlimited) => add(
+                    builder,
+                    &format!("kernel.cgroup_memory_{name}_unlimited"),
+                    HealthFactValue::Bool(true),
+                    None,
+                    elapsed_ms,
+                ),
+                None => {}
+            }
+        }
+        if quota_present {
+            add(
+                builder,
+                "kernel.cgroup_memory_object_id",
+                HealthFactValue::String(object_id.to_string()),
+                None,
+                elapsed_ms,
+            );
+        }
+        for resource in ["memory", "io", "cpu"] {
+            let Some(sample) = read_pressure(&dir.join(format!("{resource}.pressure"))) else {
+                continue;
+            };
+            if sample.some.is_some() || sample.full.is_some() {
+                psi_present = true;
+            }
+            let prefix = format!("kernel.cgroup_psi_{resource}");
+            record_pressure(
+                builder,
+                &prefix,
+                HealthFactCategory::Kernel,
+                &sample,
+                elapsed_ms,
+            );
+            if resource != "cpu" {
+                if let Some(level) = crate::diagnostics::health::rules::psi::pressure_level(
+                    sample.full.map(|line| (line.avg10, line.avg60)),
+                ) {
+                    add(
+                        builder,
+                        &format!("{prefix}_level"),
+                        HealthFactValue::String(level.to_string()),
+                        None,
+                        elapsed_ms,
+                    );
+                }
+            }
+        }
+        if psi_present {
+            add(
+                builder,
+                "kernel.cgroup_psi_object_id",
+                HealthFactValue::String(object_id.to_string()),
+                None,
+                elapsed_ms,
+            );
+        }
+        builder.set_scope(HealthFactScope::Host);
     }
 }
 

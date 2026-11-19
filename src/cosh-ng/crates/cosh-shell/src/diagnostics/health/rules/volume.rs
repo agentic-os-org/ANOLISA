@@ -27,7 +27,7 @@ pub(crate) struct MemberJudgement {
 }
 
 impl MemberJudgement {
-    const UNKNOWN: Self = Self {
+    pub(crate) const UNKNOWN: Self = Self {
         entry: None,
         exit: false,
         valid: false,

@@ -247,3 +247,98 @@ fn legacy_oom_tiers_remain_without_cgroup_collection() {
     ];
     assert_eq!(ids(&report_with(facts)), vec!["J05", "J13"]);
 }
+
+fn pressure_notice_facts() -> Vec<HealthFact> {
+    vec![
+        fact(
+            "host.pressure_memory_full_avg10",
+            HealthFactValue::Float(6.0),
+        ),
+        fact(
+            "host.pressure_memory_full_avg60",
+            HealthFactValue::Float(2.0),
+        ),
+        fact(
+            "kernel.current_cgroup_id",
+            HealthFactValue::String("1:2".into()),
+        ),
+        fact(
+            "kernel.cgroup_memory_object_id",
+            HealthFactValue::String("1:2".into()),
+        ),
+        fact(
+            "kernel.cgroup_psi_object_id",
+            HealthFactValue::String("1:2".into()),
+        ),
+        fact(
+            "kernel.cgroup_memory_current_bytes",
+            HealthFactValue::Unsigned(96 * 1024 * 1024),
+        ),
+        fact(
+            "kernel.cgroup_memory_max_bytes",
+            HealthFactValue::Unsigned(100 * 1024 * 1024),
+        ),
+        fact(
+            "kernel.cgroup_psi_memory_full_avg10",
+            HealthFactValue::Float(25.0),
+        ),
+        fact(
+            "kernel.cgroup_psi_memory_full_avg60",
+            HealthFactValue::Float(12.0),
+        ),
+    ]
+}
+
+fn host_qualified_report(facts: Vec<HealthFact>) -> HealthScanReport {
+    let mut report = report_with(facts);
+    report
+        .check_results
+        .push(crate::diagnostics::health::model::HealthCheckResult {
+            id: "host.uptime".into(),
+            collector: Some(crate::diagnostics::health::model::HealthCollector::Host),
+            status: crate::diagnostics::health::model::HealthCheckStatus::Ok,
+            fact_ids: Vec::new(),
+            gaps: Vec::new(),
+            elapsed_ms: 0,
+        });
+    report
+}
+
+#[test]
+fn pressure_notices_default_off_keeps_findings_silent() {
+    let report = host_qualified_report(pressure_notice_facts());
+    let findings = evaluate_judgement_rules(&report, &crate::config::HealthConfig::default());
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn pressure_notices_enabled_emits_combo_and_psi_warnings() {
+    let report = host_qualified_report(pressure_notice_facts());
+    let config = crate::config::HealthConfig {
+        pressure_notices: true,
+        ..Default::default()
+    };
+    let mut ids: Vec<String> = evaluate_judgement_rules(&report, &config)
+        .into_iter()
+        .map(|finding| finding.id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["J19", "J20", "J20:cgroup"]);
+    for finding in evaluate_judgement_rules(&report, &config) {
+        assert_eq!(finding.severity, HealthSeverity::Warning);
+    }
+}
+
+#[test]
+fn unqualified_host_keeps_cgroup_combo_but_drops_host_psi() {
+    let report = report_with(pressure_notice_facts());
+    let config = crate::config::HealthConfig {
+        pressure_notices: true,
+        ..Default::default()
+    };
+    let ids: Vec<String> = evaluate_judgement_rules(&report, &config)
+        .into_iter()
+        .map(|finding| finding.id)
+        .collect();
+    assert_eq!(ids, vec!["J19", "J20:cgroup"]);
+}

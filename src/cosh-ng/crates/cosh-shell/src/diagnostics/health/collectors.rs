@@ -14,6 +14,7 @@ mod command;
 mod disk;
 mod kernel;
 mod memory;
+mod pressure;
 mod service;
 #[cfg(test)]
 use disk::collect_disk;
@@ -23,6 +24,7 @@ pub(crate) use disk::{parse_df_p, DiskFacts};
 mod system;
 pub(super) use memory::read_memory;
 pub(crate) use memory::{parse_proc_meminfo, MemoryFacts};
+pub(crate) use pressure::{parse_pressure, read_pressure, record_pressure, PressureSample};
 use system::run_system_command;
 
 pub(super) use command::{
@@ -182,6 +184,36 @@ pub(crate) fn collect_host(builder: &mut HealthReportBuilder) {
                 HealthSeverity::Unavailable,
                 started.elapsed().as_millis(),
             );
+        }
+    }
+    collect_host_pressure(builder, started.elapsed().as_millis());
+}
+
+fn collect_host_pressure(builder: &mut HealthReportBuilder, elapsed_ms: u128) {
+    for (resource, category) in [
+        ("memory", HealthFactCategory::Memory),
+        ("io", HealthFactCategory::Disk),
+        ("cpu", HealthFactCategory::Cpu),
+    ] {
+        let path = format!("/proc/pressure/{resource}");
+        let Some(sample) = read_pressure(Path::new(&path)) else {
+            continue;
+        };
+        let prefix = format!("host.pressure_{resource}");
+        record_pressure(builder, &prefix, category, &sample, elapsed_ms);
+        if resource != "cpu" {
+            if let Some(level) =
+                super::rules::psi::pressure_level(sample.full.map(|line| (line.avg10, line.avg60)))
+            {
+                builder.add_fact(
+                    category,
+                    format!("{prefix}_level"),
+                    HealthFactValue::String(level.to_string()),
+                    None,
+                    HealthFactSource::Derived,
+                    elapsed_ms,
+                );
+            }
         }
     }
 }

@@ -9,9 +9,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::private_state;
 
-use super::super::model::{HealthCheckStatus, HealthCollector, HealthFactValue, HealthScanReport};
-use super::super::rules::memory::{memory_active, memory_judgement};
-use super::super::rules::volume::{evaluate_volumes, MemberLevel};
+use super::super::model::HealthScanReport;
+use super::super::rules::memory::memory_active;
+use super::super::rules::quota;
+use super::super::rules::volume::MemberLevel;
+
+mod signals;
+pub(crate) use signals::{counter_sample, signals_from_report};
+use signals::{string_fact, unsigned_fact};
 
 const FILE: &str = "health-episodes-v1.json";
 const MAX_BYTES: usize = 64 * 1024;
@@ -25,6 +30,19 @@ pub(crate) const EVENT_MERGE_MS: u64 = 10 * 60 * 1000;
 pub(crate) struct VolumeEpisode {
     pub severity: u8,
     pub last_delivered_ms: u64,
+}
+
+/// Branch-aware R05 combination episode: max/high enter independently and the
+/// combination closes only when every entered branch has validly exited with
+/// no unknown branch left, or when same-group PSI proves dual-window recovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct QuotaEpisode {
+    pub severity: u8,
+    pub last_delivered_ms: u64,
+    pub max_entered: bool,
+    pub high_entered: bool,
+    pub max_exited: bool,
+    pub high_exited: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -69,6 +87,8 @@ pub(crate) struct EpisodeLedger {
     #[serde(default)]
     pub volume: BTreeMap<String, VolumeEpisode>,
     #[serde(default)]
+    pub quota: BTreeMap<String, QuotaEpisode>,
+    #[serde(default)]
     pub recoveries: BTreeMap<String, VolumeRecovery>,
     #[serde(default)]
     pub counter: Option<CounterBaseline>,
@@ -85,6 +105,7 @@ pub(crate) struct EpisodeLedger {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EpisodeSignal {
     pub volume: Vec<VolumeMemberSignal>,
+    pub quota: Vec<QuotaComboSignal>,
     pub counter: Option<CounterSample>,
     pub candidate: Option<CandidateEpisode>,
 }
@@ -95,6 +116,22 @@ pub(crate) struct VolumeMemberSignal {
     pub entered: bool,
     pub exit: bool,
     pub valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuotaBranchSignal {
+    pub entry: bool,
+    pub exit: bool,
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuotaComboSignal {
+    pub key: String,
+    pub max: QuotaBranchSignal,
+    pub high: QuotaBranchSignal,
+    pub psi_valid: bool,
+    pub psi_recovery: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +151,7 @@ pub(crate) struct CandidateEpisode {
     pub severity: u8,
     pub epoch: Option<u64>,
     pub counter_window: Option<(u64, u64)>,
+    pub quota_branches: Option<(bool, bool)>,
 }
 
 pub(crate) fn ledger_path() -> Option<PathBuf> {
@@ -140,6 +178,7 @@ fn parse_ledger(bytes: &[u8]) -> Option<EpisodeLedger> {
     let ledger: EpisodeLedger = serde_json::from_slice(bytes).ok()?;
     if ledger.version != 1
         || ledger.volume.len()
+            + ledger.quota.len()
             + ledger.recoveries.len()
             + ledger.events.len()
             + ledger.channels.len()
@@ -158,115 +197,8 @@ pub(crate) fn write(path: &Path, ledger: &EpisodeLedger) -> Result<(), private_s
     private_state::atomic_write(path, &bytes, MAX_BYTES)
 }
 
-fn string_fact(report: &HealthScanReport, key: &str) -> Option<String> {
-    report.facts.iter().find_map(|fact| {
-        (fact.key == key).then(|| match &fact.value {
-            HealthFactValue::String(value) => value.clone(),
-            _ => String::new(),
-        })
-    })
-}
-
-fn unsigned_fact(report: &HealthScanReport, key: &str) -> Option<u64> {
-    report.facts.iter().find_map(|fact| {
-        (fact.key == key).then(|| match &fact.value {
-            HealthFactValue::Unsigned(value) => Some(*value),
-            HealthFactValue::Integer(value) => u64::try_from(*value).ok(),
-            _ => None,
-        })?
-    })
-}
-
 pub(crate) fn volume_member_key(mount: &str, member: &str, device: &str, fsid: &str) -> String {
     format!("{mount}|{member}|{device}|{fsid}")
-}
-
-pub(crate) fn signals_from_report(report: &HealthScanReport) -> EpisodeSignal {
-    let mut volume = Vec::new();
-    for judgement in evaluate_volumes(&report.facts) {
-        let device = judgement.device.clone().unwrap_or_default();
-        let fsid = judgement.fsid.clone().unwrap_or_default();
-        for (member, signal) in [("bytes", judgement.bytes), ("inode", judgement.inodes)] {
-            volume.push(VolumeMemberSignal {
-                key: volume_member_key(&judgement.mount, member, &device, &fsid),
-                entered: signal.entry == Some(MemberLevel::Critical),
-                exit: signal.exit,
-                valid: signal.valid,
-            });
-        }
-        let ro = super::super::rules::ro::ro_judgement(&report.facts, &judgement.mount);
-        if ro.valid {
-            volume.push(VolumeMemberSignal {
-                key: volume_member_key(&judgement.mount, "ro", &device, &fsid),
-                entered: ro.entry == Some(MemberLevel::Warning),
-                exit: ro.exit,
-                valid: ro.valid,
-            });
-        }
-    }
-    let counter = counter_sample(report);
-    let host_qualified = report.check_results.iter().any(|check| {
-        check.collector == Some(HealthCollector::Host) && check.status == HealthCheckStatus::Ok
-    });
-    let memory = memory_judgement(&report.facts, host_qualified);
-    if memory.valid {
-        volume.push(VolumeMemberSignal {
-            key: "host|memory".to_string(),
-            entered: memory.entry == Some(MemberLevel::Critical),
-            exit: memory.exit,
-            valid: memory.valid,
-        });
-    }
-    for fact in &report.facts {
-        let Some(name) = fact
-            .key
-            .strip_prefix("service.")
-            .and_then(|suffix| suffix.strip_suffix(".persistent_qualified"))
-        else {
-            continue;
-        };
-        let expected = match string_fact(report, &format!("service.{name}.expected")).as_deref() {
-            Some("inactive") => crate::config::HealthServiceExpectedState::Inactive,
-            _ => crate::config::HealthServiceExpectedState::Active,
-        };
-        let signal = super::super::rules::service::service_judgement(&report.facts, name, expected);
-        if signal.valid {
-            volume.push(VolumeMemberSignal {
-                key: format!("service|{name}"),
-                entered: signal.entry == Some(MemberLevel::Warning),
-                exit: signal.exit,
-                valid: signal.valid,
-            });
-        }
-    }
-    EpisodeSignal {
-        volume,
-        counter,
-        candidate: None,
-    }
-}
-
-pub(crate) fn counter_sample(report: &HealthScanReport) -> Option<CounterSample> {
-    match (
-        string_fact(report, "kernel.boot_id"),
-        string_fact(report, "kernel.current_cgroup_id"),
-        string_fact(report, "kernel.cgroup_oom_kill_source"),
-        unsigned_fact(report, "kernel.cgroup_oom_kill_count"),
-        unsigned_fact(report, "kernel.cgroup_oom_kill_sampled_epoch"),
-    ) {
-        (Some(boot_id), Some(cgroup_id), Some(source), Some(count), Some(sampled_epoch))
-            if !boot_id.is_empty() && !cgroup_id.is_empty() =>
-        {
-            Some(CounterSample {
-                boot_id,
-                cgroup_id,
-                source,
-                count,
-                sampled_epoch,
-            })
-        }
-        _ => None,
-    }
 }
 
 /// Read-only increment proof for the scan path; the baseline itself is only
@@ -325,6 +257,7 @@ pub(crate) fn candidate_for_finding(
             severity,
             epoch: None,
             counter_window: None,
+            quota_branches: None,
         });
     }
     if matches!(base, "J05") && memory_active(&report.facts) {
@@ -335,6 +268,7 @@ pub(crate) fn candidate_for_finding(
             severity,
             epoch: None,
             counter_window: None,
+            quota_branches: None,
         });
     }
     if matches!(base, "J18") && volume_active {
@@ -352,6 +286,7 @@ pub(crate) fn candidate_for_finding(
             severity,
             epoch: None,
             counter_window: None,
+            quota_branches: None,
         });
     }
     if matches!(base, "J15" | "J16") {
@@ -364,6 +299,7 @@ pub(crate) fn candidate_for_finding(
                     severity,
                     epoch: None,
                     counter_window: None,
+                    quota_branches: None,
                 });
             }
         }
@@ -385,6 +321,7 @@ pub(crate) fn candidate_for_finding(
                 severity,
                 epoch: unsigned_fact(report, "kernel.oom_attributed_epoch"),
                 counter_window: None,
+                quota_branches: None,
             });
         }
         let sample = counter_sample(report)?;
@@ -403,6 +340,48 @@ pub(crate) fn candidate_for_finding(
             severity,
             epoch: Some(window.1),
             counter_window: Some(window),
+            quota_branches: None,
+        });
+    }
+    if base == "J19" {
+        let id = string_fact(report, "kernel.current_cgroup_id").filter(|id| !id.is_empty())?;
+        let judgement = quota::quota_judgement(&report.facts);
+        return Some(CandidateEpisode {
+            event: false,
+            key: format!("cgroup|{id}|quota"),
+            problem: problem.to_string(),
+            severity,
+            epoch: None,
+            counter_window: None,
+            quota_branches: Some((
+                judgement.max.entry == Some(MemberLevel::Critical),
+                judgement.high.entry.is_some(),
+            )),
+        });
+    }
+    if matches!(base, "J20" | "J21" | "J22") {
+        let resource = match base {
+            "J20" => "memory",
+            "J21" => "io",
+            _ => "cpu",
+        };
+        let key = if finding_id
+            .split_once(':')
+            .is_some_and(|(_, suffix)| suffix == "cgroup")
+        {
+            let id = string_fact(report, "kernel.current_cgroup_id").filter(|id| !id.is_empty())?;
+            format!("cgroup|{id}|psi_{resource}")
+        } else {
+            format!("host|psi_{resource}")
+        };
+        return Some(CandidateEpisode {
+            event: false,
+            key,
+            problem: problem.to_string(),
+            severity,
+            epoch: None,
+            counter_window: None,
+            quota_branches: None,
         });
     }
     None
@@ -424,6 +403,37 @@ pub(crate) fn sync(
             if let Some(episode) = ledger.volume.remove(&member.key) {
                 ledger.recoveries.insert(
                     member.key.clone(),
+                    VolumeRecovery {
+                        recovered_ms: now_ms,
+                        last_delivered_ms: episode.last_delivered_ms,
+                    },
+                );
+            }
+        }
+    }
+    for combo in &signal.quota {
+        let Some(episode) = ledger.quota.get_mut(&combo.key) else {
+            continue;
+        };
+        apply_quota_branch(
+            &mut episode.max_entered,
+            &mut episode.max_exited,
+            &combo.max,
+        );
+        apply_quota_branch(
+            &mut episode.high_entered,
+            &mut episode.high_exited,
+            &combo.high,
+        );
+        let entered_all_exited = (!episode.max_entered || episode.max_exited)
+            && (!episode.high_entered || episode.high_exited);
+        let branches_known = combo.max.valid && combo.high.valid;
+        let closed =
+            (combo.psi_valid && combo.psi_recovery) || (entered_all_exited && branches_known);
+        if closed {
+            if let Some(episode) = ledger.quota.remove(&combo.key) {
+                ledger.recoveries.insert(
+                    combo.key.clone(),
                     VolumeRecovery {
                         recovered_ms: now_ms,
                         last_delivered_ms: episode.last_delivered_ms,
@@ -461,9 +471,24 @@ pub(crate) fn sync(
     increment
 }
 
+fn apply_quota_branch(entered: &mut bool, exited: &mut bool, signal: &QuotaBranchSignal) {
+    if !signal.valid {
+        return;
+    }
+    if signal.entry {
+        *entered = true;
+        *exited = false;
+    } else if signal.exit && *entered {
+        *exited = true;
+    }
+}
+
 fn prune(ledger: &mut EpisodeLedger, now_ms: u64) {
     ledger
         .volume
+        .retain(|_, episode| now_ms.saturating_sub(episode.last_delivered_ms) < VOLUME_RETAIN_MS);
+    ledger
+        .quota
         .retain(|_, episode| now_ms.saturating_sub(episode.last_delivered_ms) < VOLUME_RETAIN_MS);
     ledger
         .recoveries
@@ -523,6 +548,14 @@ pub(crate) fn deliverable(
         }
         return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
     }
+    if candidate.quota_branches.is_some() {
+        if let Some(episode) = ledger.quota.get(&candidate.key) {
+            if candidate.severity > episode.severity {
+                return true;
+            }
+            return now_ms.saturating_sub(episode.last_delivered_ms) >= STATE_COOLDOWN_MS;
+        }
+    }
     if let Some(recovery) = ledger.recoveries.get(&candidate.key) {
         return now_ms.saturating_sub(recovery.last_delivered_ms) >= RECURRENCE_GATE_MS;
     }
@@ -560,13 +593,29 @@ pub(crate) fn record_delivery(
         }
     } else {
         ledger.recoveries.remove(&candidate.key);
-        ledger.volume.insert(
-            candidate.key.clone(),
-            VolumeEpisode {
-                severity: candidate.severity,
-                last_delivered_ms: now_ms,
-            },
-        );
+        if let Some((max_entry, high_entry)) = candidate.quota_branches {
+            let episode = ledger
+                .quota
+                .entry(candidate.key.clone())
+                .or_insert(QuotaEpisode {
+                    severity: candidate.severity,
+                    last_delivered_ms: now_ms,
+                    max_entered: max_entry,
+                    high_entered: high_entry,
+                    max_exited: false,
+                    high_exited: false,
+                });
+            episode.severity = candidate.severity;
+            episode.last_delivered_ms = now_ms;
+        } else {
+            ledger.volume.insert(
+                candidate.key.clone(),
+                VolumeEpisode {
+                    severity: candidate.severity,
+                    last_delivered_ms: now_ms,
+                },
+            );
+        }
     }
     prune(ledger, now_ms);
 }

@@ -276,6 +276,11 @@ pub(crate) fn evaluate_judgement_rules(
         }
     }
 
+    if config.pressure_notices {
+        findings.extend(psi::pressure_findings(facts, host_qualified));
+        findings.extend(quota::quota_findings(facts));
+    }
+
     findings.sort_by_key(|finding| {
         (
             std::cmp::Reverse(finding.severity.precedence()),
@@ -558,6 +563,8 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
 }
 
 pub(crate) mod memory;
+pub(crate) mod psi;
+pub(crate) mod quota;
 pub(crate) mod ro;
 pub(crate) mod service;
 pub(crate) mod volume;
