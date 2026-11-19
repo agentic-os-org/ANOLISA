@@ -330,6 +330,25 @@ fn recovery_record_rejects_wrong_name_schema_and_non_system_shell_paths() {
 }
 
 #[test]
+fn identity_mismatch_names_both_identities_and_the_review_command() {
+    let renamed = Account {
+        name: "alice-renamed".into(),
+        ..account(COSH_PATH)
+    };
+    let error = record(Phase::Applied).validate(&renamed).unwrap_err();
+    assert!(error.message.contains("alice"), "{error}");
+    assert!(error.message.contains("alice-renamed"), "{error}");
+    assert!(error.message.contains("1001"), "{error}");
+    assert!(error.message.contains("reconcile"), "{error}");
+    let reused = Account {
+        uid: 1002,
+        ..account(COSH_PATH)
+    };
+    let error = record(Phase::Applied).validate(&reused).unwrap_err();
+    assert!(error.message.contains("1002"), "{error}");
+}
+
+#[test]
 fn read_only_status_projection_exposes_only_valid_managed_recovery_paths() {
     let managed =
         LoginStatus::from(status(account(COSH_PATH), Some(&record(Phase::Applied))).unwrap());

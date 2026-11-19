@@ -356,3 +356,208 @@ fn compatible_target_still_refuses_orphan_or_conflicting_records() {
     assert!(check_state(&[record(Phase::Conflict)], &[account(COSH_PATH)], true).is_err());
     assert!(check_state(&[record(Phase::Applied)], &[account(COSH_PATH)], true).is_ok());
 }
+
+fn named_record(name: &str, uid: u32, phase: Phase) -> Record {
+    Record {
+        username: name.into(),
+        uid,
+        ..record(phase)
+    }
+}
+
+fn renamed_account() -> Account {
+    Account {
+        name: "alice-renamed".into(),
+        ..account(COSH_PATH)
+    }
+}
+
+#[test]
+fn reconcile_previews_identity_drift_without_touching_records() {
+    let (_directory, store) = state_fixture();
+    let drifted = named_record("alice", 1001, Phase::Applied);
+    let orphan = named_record("bob", 1002, Phase::Restored);
+    store.write(&drifted).unwrap();
+    store.write(&orphan).unwrap();
+    let accounts = vec![renamed_account()];
+    let error = reconcile(&store, false, || Ok(accounts.clone())).unwrap_err();
+    assert!(error.message.contains("reconcile --yes"), "{error}");
+    assert_eq!(store.read(1001).unwrap(), Some(drifted));
+    assert_eq!(store.read(1002).unwrap(), Some(orphan));
+}
+
+#[test]
+fn reconcile_rebinds_renamed_uid_and_removes_record_of_absent_account() {
+    let (_directory, store) = state_fixture();
+    let drifted = named_record("alice", 1001, Phase::Applied);
+    let orphan = named_record("bob", 1002, Phase::Restored);
+    store.write(&drifted).unwrap();
+    store.write(&orphan).unwrap();
+    let current = renamed_account();
+    reconcile(&store, true, || Ok(vec![current.clone()])).unwrap();
+    let rebound = store.read(1001).unwrap().unwrap();
+    assert_eq!(rebound.username, current.name);
+    assert_eq!(rebound.uid, drifted.uid);
+    assert_eq!(rebound.phase, drifted.phase);
+    assert_eq!(rebound.original_shell, drifted.original_shell);
+    assert_eq!(rebound.original_sha256, drifted.original_sha256);
+    rebound.validate(&current).unwrap();
+    assert_eq!(store.read(1002).unwrap(), None);
+}
+
+#[test]
+fn reconcile_keeps_matching_records_and_reports_a_clean_store() {
+    let (_directory, store) = state_fixture();
+    let matched = named_record("alice", 1001, Phase::Applied);
+    store.write(&matched).unwrap();
+    reconcile(&store, false, || Ok(vec![account(COSH_PATH)])).unwrap();
+    reconcile(&store, true, || Ok(vec![account(COSH_PATH)])).unwrap();
+    assert_eq!(store.read(1001).unwrap(), Some(matched));
+}
+
+#[test]
+fn reconcile_refuses_a_current_name_that_records_cannot_represent() {
+    let (_directory, store) = state_fixture();
+    let drifted = named_record("alice", 1001, Phase::Applied);
+    store.write(&drifted).unwrap();
+    let directory_name = Account {
+        name: "alice@directory.example".into(),
+        ..account(COSH_PATH)
+    };
+    let error = reconcile(&store, true, || Ok(vec![directory_name])).unwrap_err();
+    assert!(error
+        .message
+        .contains("not a supported login management name"));
+    assert_eq!(store.read(1001).unwrap(), Some(drifted));
+}
+
+#[test]
+fn shared_uid_is_never_rebound_to_an_arbitrary_owner() {
+    let (_directory, store) = state_fixture();
+    let drifted = named_record("alice", 1001, Phase::Applied);
+    store.write(&drifted).unwrap();
+    let shared = vec![
+        Account {
+            name: "alice-renamed".into(),
+            ..account(COSH_PATH)
+        },
+        Account {
+            name: "second-owner".into(),
+            ..account("/bin/bash")
+        },
+    ];
+    for apply in [false, true] {
+        let error = reconcile(&store, apply, || Ok(shared.clone())).unwrap_err();
+        assert!(error.message.contains("share that UID"), "{error}");
+        assert_eq!(store.read(1001).unwrap(), Some(drifted.clone()));
+    }
+}
+
+#[test]
+fn orphan_removal_refuses_a_record_that_changed_under_the_lock() {
+    let (_directory, store) = state_fixture();
+    let orphan = named_record("bob", 1002, Phase::Applied);
+    store.write(&orphan).unwrap();
+    store
+        .write(&Record {
+            phase: Phase::Restored,
+            ..orphan.clone()
+        })
+        .unwrap();
+    assert!(store.remove_orphan(&orphan).is_err());
+    assert!(store.read(1002).unwrap().is_some());
+}
+
+#[test]
+fn drift_errors_name_the_record_account_and_recovery_action() {
+    let (_directory, store) = state_fixture();
+    let drifted = named_record("alice", 1001, Phase::Applied);
+    let renamed = drift_error(&store, &drifted, Some("alice-renamed")).message;
+    assert!(renamed.contains("1001.json"), "{renamed}");
+    assert!(renamed.contains("alice"), "{renamed}");
+    assert!(renamed.contains("alice-renamed"), "{renamed}");
+    assert!(renamed.contains("re-bind"), "{renamed}");
+    assert!(renamed.contains("reconcile --yes"), "{renamed}");
+    let orphan = drift_error(&store, &drifted, None).message;
+    assert!(orphan.contains("1001.json"), "{orphan}");
+    assert!(orphan.contains("has no account"), "{orphan}");
+    assert!(orphan.contains("remove the record"), "{orphan}");
+}
+
+#[test]
+fn reconcile_arguments_require_an_explicit_apply_flag() {
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+    assert_eq!(
+        parse(&args(&["reconcile"])).unwrap(),
+        Action::Reconcile { apply: false }
+    );
+    assert_eq!(
+        parse(&args(&["reconcile", "--yes"])).unwrap(),
+        Action::Reconcile { apply: true }
+    );
+    for invalid in [
+        vec!["reconcile", "--yes", "extra"],
+        vec!["reconcile", "--user", "alice"],
+        vec!["reconcile", "-y"],
+    ] {
+        assert!(parse(&args(&invalid)).is_err());
+    }
+    assert!(admit(&Action::Reconcile { apply: false }, 1001).is_err());
+    assert!(admit(&Action::Reconcile { apply: true }, 0).is_ok());
+}
+
+#[test]
+fn audit_reports_a_renamed_uid_instead_of_failing_the_recorded_name_lookup() {
+    let (_directory, store) = state_fixture();
+    store
+        .write(&named_record("alice", 1001, Phase::Applied))
+        .unwrap();
+    for compatible in [true, false] {
+        let error = audit(&store, compatible, || Ok(vec![renamed_account()])).unwrap_err();
+        assert!(error.message.contains("1001.json"), "{error}");
+        assert!(error.message.contains("alice-renamed"), "{error}");
+        assert!(error.message.contains("re-bind"), "{error}");
+        assert!(error.message.contains("reconcile --yes"), "{error}");
+        assert!(
+            !error.message.contains("unable to resolve account identity"),
+            "the drift guard must fire before the recorded name lookup: {error}"
+        );
+    }
+}
+
+#[test]
+fn audit_reports_an_orphan_record_instead_of_failing_the_recorded_name_lookup() {
+    let (_directory, store) = state_fixture();
+    store
+        .write(&named_record("bob", 1002, Phase::Restored))
+        .unwrap();
+    for compatible in [true, false] {
+        let error = audit(&store, compatible, || Ok(Vec::new())).unwrap_err();
+        assert!(error.message.contains("1002.json"), "{error}");
+        assert!(error.message.contains("has no account"), "{error}");
+        assert!(error.message.contains("remove the record"), "{error}");
+        assert!(
+            !error.message.contains("unable to resolve account identity"),
+            "the drift guard must fire before the recorded name lookup: {error}"
+        );
+    }
+}
+
+#[test]
+fn audit_refuses_a_record_whose_uid_has_several_owners() {
+    let (_directory, store) = state_fixture();
+    let drifted = named_record("alice", 1001, Phase::Applied);
+    store.write(&drifted).unwrap();
+    let shared = vec![
+        renamed_account(),
+        Account {
+            name: "second-owner".into(),
+            ..account("/bin/bash")
+        },
+    ];
+    let error = audit(&store, true, || Ok(shared)).unwrap_err();
+    assert!(error.message.contains("share that UID"), "{error}");
+    assert_eq!(store.read(1001).unwrap(), Some(drifted));
+}

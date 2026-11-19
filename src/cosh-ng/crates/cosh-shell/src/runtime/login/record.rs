@@ -39,9 +39,11 @@ impl Record {
     pub fn validate(&self, account: &Account) -> Result<()> {
         self.validate_shape()?;
         if self.username != account.name || self.uid != account.uid {
-            return Err(Error::new(
-                "login record identity does not match the account",
-            ));
+            return Err(Error::new(format!(
+                "login record for {} (UID {}) does not match account {} (UID {}); \
+                     administrator review is required through login-preflight reconcile",
+                self.username, self.uid, account.name, account.uid
+            )));
         }
         Ok(())
     }
@@ -77,6 +79,11 @@ impl Store {
             #[cfg(test)]
             fixture: false,
         }
+    }
+
+    /// Path of the record file for `uid`, named `<uid>.json` under the store directory.
+    pub fn record_path(&self, uid: u32) -> PathBuf {
+        self.path.join(format!("{uid}.json"))
     }
 
     #[cfg(test)]

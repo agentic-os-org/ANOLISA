@@ -38,6 +38,23 @@ impl Store {
         self.records_at(&directory, true)
     }
 
+    /// Removes one record whose UID no longer has an account, after re-reading it
+    /// under the caller's transaction lock so a concurrent edit is never dropped.
+    pub fn remove_orphan(&self, expected: &Record) -> Result<()> {
+        let directory = self
+            .directory(false)?
+            .ok_or_else(|| Error::new("login records changed before cleanup"))?;
+        if self.read_at(&directory, expected.uid)?.as_ref() != Some(expected) {
+            return Err(Error::new("login record changed before cleanup"));
+        }
+        let name = CString::new(format!("{}.json", expected.uid))
+            .map_err(|_| Error::new("invalid login record filename"))?;
+        if unsafe { nix::libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(Error::io(std::io::Error::last_os_error()));
+        }
+        directory.sync_all().map_err(Error::io)
+    }
+
     fn records_at(&self, directory: &File, accept_temporary: bool) -> Result<Vec<Record>> {
         let mut entries = nix::dir::Dir::from(directory.try_clone().map_err(Error::io)?)
             .map_err(|error| Error::io(error.into()))?;

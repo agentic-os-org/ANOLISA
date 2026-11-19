@@ -100,7 +100,13 @@ pub(super) fn lookup_nss(name: Option<&str>, euid: u32) -> Result<Account> {
         }
     };
     if status != 0 || result.is_null() {
-        return Err(Error::new("unable to resolve account identity"));
+        return Err(Error::new(match &name {
+            Some(name) => format!(
+                "unable to resolve account identity for {}",
+                name.to_string_lossy()
+            ),
+            None => format!("unable to resolve account identity for UID {euid}"),
+        }));
     }
     let entry = unsafe { entry.assume_init() };
     let account = account_from_entry(&entry)?;
