@@ -150,6 +150,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthEvidenceMountReadonly => {
             "mount {mount} is read-only, configured expected writable"
         }
+        MessageId::HealthFindingCgroupMemoryPressure => "cgroup memory quota pressure",
+        MessageId::HealthInsightCgroupMemoryPressure => {
+            "cgroup memory quota is tight with sustained PSI stall"
+        }
+        MessageId::HealthEvidenceCgroupQuota => {
+            "quota {percent}% used, {remaining_mib} MiB headroom"
+        }
+        MessageId::HealthEvidenceCgroupQuotaZero => "memory.max=0, no allocable quota",
+        MessageId::HealthFindingPressureHigh => "{resource} pressure high",
+        MessageId::HealthInsightPressureHigh => {
+            "{resource} {kind} pressure stayed high across windows"
+        }
+        MessageId::HealthEvidencePressureAvg => {
+            "{resource} {kind} avg10 {avg10}% · avg60 {avg60}%"
+        }
         MessageId::HealthFindingRecentOom => "recent OOM signal",
         MessageId::HealthFindingKernelPanic => "recent kernel panic",
         MessageId::HealthFindingServiceFailed => "service failed",

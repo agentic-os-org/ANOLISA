@@ -137,6 +137,10 @@ pub(super) fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId
         | HealthMessageId::HealthFindingServiceInactive => {
             HealthMessageId::HealthInsightServiceState
         }
+        HealthMessageId::HealthFindingCgroupMemoryPressure => {
+            HealthMessageId::HealthInsightCgroupMemoryPressure
+        }
+        HealthMessageId::HealthFindingPressureHigh => HealthMessageId::HealthInsightPressureHigh,
         _ => HealthMessageId::HealthInsightGeneric,
     }
 }
@@ -155,7 +159,24 @@ pub(super) fn insight_text_for_finding(
         }
         return format_health_message(i18n, finding.title_id, &finding.detail_args);
     }
+    if finding.title_id == HealthMessageId::HealthFindingPressureHigh {
+        return format_health_message(i18n, insight_id, &pressure_args(finding, i18n));
+    }
     format_health_message(i18n, insight_id, &finding.detail_args)
+}
+
+fn pressure_args(finding: &HealthFinding, i18n: crate::I18n) -> BTreeMap<String, String> {
+    let mut args = finding.detail_args.clone();
+    if let Some(resource) = finding.detail_args.get("resource") {
+        let label = match resource.as_str() {
+            "memory" => i18n.t(crate::MessageId::HealthMetricMemory),
+            "io" => i18n.t(crate::MessageId::HealthMetricDisk),
+            "cpu" => i18n.t(crate::MessageId::HealthMetricCpu),
+            _ => resource.as_str(),
+        };
+        args.insert("resource".into(), label.to_string());
+    }
+    args
 }
 
 pub(super) fn append_evidence_sentence(insight: &str, evidence: &str, i18n: crate::I18n) -> String {
@@ -214,6 +235,16 @@ pub(super) fn evidence_text(
             return text;
         }
     }
+    if finding.title_id == HealthMessageId::HealthFindingPressureHigh {
+        if let Some(text) = pressure_evidence_text(finding, i18n) {
+            return text;
+        }
+    }
+    if finding.title_id == HealthMessageId::HealthFindingCgroupMemoryPressure {
+        if let Some(text) = quota_evidence_text(finding, i18n) {
+            return text;
+        }
+    }
 
     let mut pieces = Vec::new();
     for fact_id in &finding.evidence_fact_ids {
@@ -236,6 +267,56 @@ pub(super) fn pieces_with_candidate(pieces: &[String], candidate: &str) -> Vec<S
     let mut values = pieces.to_vec();
     values.push(candidate.to_string());
     values
+}
+
+fn pressure_evidence_text(finding: &HealthFinding, i18n: crate::I18n) -> Option<String> {
+    let args = pressure_args(finding, i18n);
+    Some(i18n.format(
+        crate::MessageId::HealthEvidencePressureAvg,
+        &[
+            ("resource", args.get("resource")?),
+            ("kind", args.get("kind")?),
+            ("avg10", args.get("avg10")?),
+            ("avg60", args.get("avg60")?),
+        ],
+    ))
+}
+
+fn quota_evidence_text(finding: &HealthFinding, i18n: crate::I18n) -> Option<String> {
+    let mut pieces = Vec::new();
+    if finding
+        .detail_args
+        .get("max_zero")
+        .is_some_and(|value| value == "true")
+    {
+        pieces.push(
+            i18n.t(crate::MessageId::HealthEvidenceCgroupQuotaZero)
+                .to_string(),
+        );
+    } else if let (Some(percent), Some(remaining)) = (
+        finding.detail_args.get("percent"),
+        finding.detail_args.get("remaining_mib"),
+    ) {
+        pieces.push(i18n.format(
+            crate::MessageId::HealthEvidenceCgroupQuota,
+            &[("percent", percent), ("remaining_mib", remaining)],
+        ));
+    }
+    if let (Some(avg10), Some(avg60)) = (
+        finding.detail_args.get("avg10"),
+        finding.detail_args.get("avg60"),
+    ) {
+        pieces.push(i18n.format(
+            crate::MessageId::HealthEvidencePressureAvg,
+            &[
+                ("resource", i18n.t(crate::MessageId::HealthMetricMemory)),
+                ("kind", "full"),
+                ("avg10", avg10),
+                ("avg60", avg60),
+            ],
+        ));
+    }
+    (!pieces.is_empty()).then(|| pieces.join(" · "))
 }
 
 pub(super) fn memory_available_evidence_text(

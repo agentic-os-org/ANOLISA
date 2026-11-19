@@ -130,3 +130,45 @@ fn equal_resource_evidence_uses_equal_rules_and_candidates_across_entries() {
         }
     }
 }
+
+#[test]
+fn pressure_fixture_gates_notices_and_signals_recovery() {
+    let config = HealthConfig {
+        pressure_notices: true,
+        ..HealthConfig::default()
+    };
+    let report = fixture_report("linux-pressure", &config, &options());
+    let mut ids: Vec<String> = report
+        .findings
+        .iter()
+        .map(|finding| finding.id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["J19", "J20", "J20:cgroup", "J21", "J22"]);
+    assert!(report
+        .findings
+        .iter()
+        .all(|finding| finding.severity == HealthSeverity::Warning));
+    let off = fixture_report("linux-pressure", &HealthConfig::default(), &options());
+    assert!(off.findings.is_empty());
+    let low = fixture_report("linux-pressure-low", &config, &options());
+    assert!(low.findings.is_empty());
+    let entry = crate::diagnostics::health::suppression::episode::signals_from_report(&report);
+    assert!(entry
+        .quota
+        .iter()
+        .any(|combo| combo.key == "cgroup|7:77|quota" && combo.max.entry));
+    assert!(entry
+        .volume
+        .iter()
+        .any(|member| member.key == "host|psi_memory" && member.entered));
+    let exit = crate::diagnostics::health::suppression::episode::signals_from_report(&low);
+    assert!(exit
+        .quota
+        .iter()
+        .any(|combo| combo.psi_recovery && combo.max.exit && combo.high.exit));
+    assert!(exit
+        .volume
+        .iter()
+        .any(|member| member.key == "host|psi_memory" && member.exit && member.valid));
+}

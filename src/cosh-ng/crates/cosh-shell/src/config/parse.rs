@@ -58,6 +58,9 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "health.memory_sensitive" => {
                     config.health.memory_sensitive = parse_bool_value(value);
                 }
+                "health.pressure_notices" => {
+                    config.health.pressure_notices = parse_bool_value(value);
+                }
                 "health.verbose" => config.health.verbose = parse_bool_value(value),
                 _ => {}
             }
@@ -245,6 +248,12 @@ pub(super) fn parse_health_toml_config(value: &toml::Value, config: &mut CoshCon
         .and_then(toml::Value::as_bool)
     {
         config.health.memory_sensitive = memory_sensitive;
+    }
+    if let Some(pressure_notices) = health
+        .get("pressure_notices")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.pressure_notices = pressure_notices;
     }
     if let Some(verbose) = health.get("verbose").and_then(toml::Value::as_bool) {
         config.health.verbose = verbose;

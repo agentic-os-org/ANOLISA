@@ -52,3 +52,27 @@ fn path_normalization_handles_trailing_slash_and_relative() {
     assert_eq!(normalize_path(""), "/");
     assert!(in_current_domain("/a/b/", "/a/b"));
 }
+
+#[test]
+fn quota_limits_parse_finite_zero_unlimited_and_reject_malformed() {
+    assert_eq!(parse_quota_limit("max\n"), Some(QuotaValue::Unlimited));
+    assert_eq!(parse_quota_limit("0\n"), Some(QuotaValue::Finite(0)));
+    assert_eq!(
+        parse_quota_limit("1073741824\n"),
+        Some(QuotaValue::Finite(1073741824))
+    );
+    assert_eq!(parse_quota_limit("max"), Some(QuotaValue::Unlimited));
+    assert_eq!(parse_quota_limit("-1"), None);
+    assert_eq!(parse_quota_limit("abc"), None);
+    assert_eq!(parse_quota_limit(""), None);
+    assert_eq!(parse_quota_limit("12.5"), None);
+}
+
+#[test]
+fn quota_current_parses_bytes_only() {
+    assert_eq!(parse_quota_current("0\n"), Some(0));
+    assert_eq!(parse_quota_current("1048576"), Some(1048576));
+    assert_eq!(parse_quota_current("max"), None);
+    assert_eq!(parse_quota_current("-5"), None);
+    assert_eq!(parse_quota_current(""), None);
+}

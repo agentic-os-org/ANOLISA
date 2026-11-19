@@ -145,6 +145,10 @@ fn fixture_source(name: &str) -> Option<&'static str> {
         "linux-critical" | "critical" => Some(include_str!("../fixtures/linux-critical.health")),
         "linux-degraded" | "degraded" => Some(include_str!("../fixtures/linux-degraded.health")),
         "linux-partial" | "partial" => Some(include_str!("../fixtures/linux-partial.health")),
+        "linux-pressure" | "pressure" => Some(include_str!("../fixtures/linux-pressure.health")),
+        "linux-pressure-low" | "pressure-low" => {
+            Some(include_str!("../fixtures/linux-pressure-low.health"))
+        }
         _ => None,
     }
 }
