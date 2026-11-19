@@ -1,12 +1,12 @@
 use crate::runtime::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ApprovedBashExecutionPath {
+pub(crate) enum ApprovedBashExecutionPath {
     ForegroundShellPty,
     Blocked,
 }
 
-pub(super) fn fallback_bash_execution_path(command: &str) -> ApprovedBashExecutionPath {
+pub(crate) fn fallback_bash_execution_path(command: &str) -> ApprovedBashExecutionPath {
     if shell_handoff_validation_error(command).is_some() {
         ApprovedBashExecutionPath::Blocked
     } else {

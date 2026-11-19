@@ -1,3 +1,7 @@
+use crate::approval::approved_tool::request_is_executable_bash_tool;
+use crate::approval::handoff::{
+    fallback_bash_execution_path, shell_handoff_command_from_request, ApprovedBashExecutionPath,
+};
 use crate::approval::journal::{approval_audit_input, approval_journal_entry};
 use crate::runtime::prelude::*;
 use crate::tools::display::{presentation_for_tool, ToolPresentation};
@@ -308,8 +312,25 @@ fn original_user_request(run_request: Option<&AgentRequest>) -> Option<String> {
 pub(crate) fn record_auto_approved_request(
     state: &mut InlineState,
     mut request: RuntimeApprovalRequest,
-) -> RuntimeApprovalRequest {
+    handoff_gated: bool,
+) -> (RuntimeApprovalRequest, usize) {
     request.status = ApprovalRequestStatus::Approved;
+    // #10316: settle the final verdict before the first audit/journal record.
+    // A handoff-validation block must persist as Blocked everywhere (stored
+    // request, journal, audit, provider verdict); approving first and flipping
+    // memory later leaves audit Allowed contradicting the Blocked receipt.
+    if handoff_gated && request_is_executable_bash_tool(&request) {
+        let blocked = match shell_handoff_command_from_request(&request) {
+            Ok(command) => {
+                fallback_bash_execution_path(&command) == ApprovedBashExecutionPath::Blocked
+            }
+            Err(_) => true,
+        };
+        if blocked {
+            request.status = ApprovalRequestStatus::Blocked;
+            request.execution_path = Some("blocked_handoff_validation");
+        }
+    }
     if request.execution_path.is_none() && request.request_id.is_some() {
         request.execution_path = Some("provider_control_protocol");
     }
@@ -335,23 +356,32 @@ pub(crate) fn record_auto_approved_request(
     // A late control-channel verdict converts the provisional
     // staged_unresolved entry into the final approval instead of doubling
     // the journal with a contradictory Blocked+Approved pair (#2156).
-    let reconciled = request.tool_use_id.as_deref().is_some_and(|tool_id| {
+    // Return the journal index this recording actually appended or settled so
+    // a later execution-authorization failure can correct exactly that entry.
+    // Journal ids are display numbers (`req-{requests.len()+1}`) reused across
+    // staged/hook entries that never push into `requests`, so they are not a
+    // safe correction key (#10316 review P1-1).
+    let reconciled_index = request.tool_use_id.as_deref().and_then(|tool_id| {
         reconcile_staged_unresolved_entry(
             state,
             &request.run_id,
             tool_id,
-            ApprovalRequestStatus::Approved,
+            request.status,
             "agent-auto",
             "staged_resolved_late_verdict",
         )
     });
-    if !reconciled {
-        state
-            .approvals
-            .journal
-            .push(approval_journal_entry(&request, "agent-auto"));
-    }
-    request
+    let journal_index = match reconciled_index {
+        Some(index) => index,
+        None => {
+            state
+                .approvals
+                .journal
+                .push(approval_journal_entry(&request, "agent-auto"));
+            state.approvals.journal.len() - 1
+        }
+    };
+    (request, journal_index)
 }
 
 /// Records a shell request the shell-request policy refused (#2639).
@@ -454,18 +484,17 @@ pub(crate) fn reconcile_staged_unresolved_entry(
     decision: ApprovalRequestStatus,
     actor: &'static str,
     execution_path: &'static str,
-) -> bool {
-    let Some(entry) = state.approvals.journal.iter_mut().find(|entry| {
+) -> Option<usize> {
+    let index = state.approvals.journal.iter().position(|entry| {
         entry.run_id == run_id
             && entry.tool_use_id.as_deref() == Some(tool_use_id)
             && entry.execution_path == Some("staged_unresolved")
-    }) else {
-        return false;
-    };
+    })?;
+    let entry = &mut state.approvals.journal[index];
     entry.decision = decision;
     entry.actor = actor;
     entry.execution_path = Some(execution_path);
-    true
+    Some(index)
 }
 
 pub(crate) fn refresh_shell_request_assessment(
