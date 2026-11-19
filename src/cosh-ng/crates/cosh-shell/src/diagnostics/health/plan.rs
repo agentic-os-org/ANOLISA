@@ -362,6 +362,8 @@ pub(crate) const RULE_ADVICE: &[(&str, &[AdviceKind])] = &[
     ("J27", &[AdviceKind::DiskUsage]),
     ("J28", &[AdviceKind::DiskUsage]),
     ("J29", &[AdviceKind::DiskUsage]),
+    ("J30", &[AdviceKind::HighLoad]),
+    ("J31", &[AdviceKind::HighLoad]),
 ];
 
 pub(crate) fn advice_for_rule(finding_id: &str) -> &'static [AdviceKind] {
@@ -540,7 +542,7 @@ mod tests {
     fn rule_advice_declares_every_rule_exactly_once() {
         let mut declared: Vec<&str> = RULE_ADVICE.iter().map(|(rule, _)| *rule).collect();
         declared.sort_unstable();
-        let expected: Vec<String> = (1..=29).map(|index| format!("J{index:02}")).collect();
+        let expected: Vec<String> = (1..=31).map(|index| format!("J{index:02}")).collect();
         assert_eq!(declared, expected);
         assert!(advice_for_rule("J01").is_empty());
         assert!(advice_for_rule("J14").is_empty());

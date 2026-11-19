@@ -426,6 +426,8 @@ pub(crate) enum HealthMessageId {
     HealthInsightJournalError,
     HealthInsightXfsShutdown,
     HealthInsightBlockIoError,
+    HealthInsightHungTask,
+    HealthInsightSoftLockup,
     HealthUnavailablePermissionDenied,
     HealthUnavailableCommandMissing,
     HealthUnavailableTimeout,
@@ -449,6 +451,8 @@ pub(crate) enum HealthMessageId {
     HealthFindingJournalError,
     HealthFindingXfsShutdown,
     HealthFindingBlockIoError,
+    HealthFindingHungTask,
+    HealthFindingSoftLockup,
     HealthFindingProviderUnconfigured,
     HealthFindingConfigUnavailable,
     HealthFindingHooksUntrusted,
@@ -547,6 +551,8 @@ impl HealthMessageId {
             Self::HealthInsightJournalError => crate::MessageId::HealthInsightJournalError,
             Self::HealthInsightXfsShutdown => crate::MessageId::HealthInsightXfsShutdown,
             Self::HealthInsightBlockIoError => crate::MessageId::HealthInsightBlockIoError,
+            Self::HealthInsightHungTask => crate::MessageId::HealthInsightHungTask,
+            Self::HealthInsightSoftLockup => crate::MessageId::HealthInsightSoftLockup,
             Self::HealthUnavailablePermissionDenied => {
                 crate::MessageId::HealthUnavailablePermissionDenied
             }
@@ -584,6 +590,8 @@ impl HealthMessageId {
             Self::HealthFindingJournalError => crate::MessageId::HealthFindingJournalError,
             Self::HealthFindingXfsShutdown => crate::MessageId::HealthFindingXfsShutdown,
             Self::HealthFindingBlockIoError => crate::MessageId::HealthFindingBlockIoError,
+            Self::HealthFindingHungTask => crate::MessageId::HealthFindingHungTask,
+            Self::HealthFindingSoftLockup => crate::MessageId::HealthFindingSoftLockup,
             Self::HealthFindingProviderUnconfigured => {
                 crate::MessageId::HealthFindingProviderUnconfigured
             }

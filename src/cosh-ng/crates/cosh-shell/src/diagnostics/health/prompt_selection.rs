@@ -190,7 +190,7 @@ pub(crate) fn exposure_event(
     let base = item.finding_id.split(':').next();
     if !matches!(
         base,
-        Some("J11" | "J12" | "J13" | "J24" | "J25" | "J26" | "J27" | "J28" | "J29")
+        Some("J11" | "J12" | "J13" | "J24" | "J25" | "J26" | "J27" | "J28" | "J29" | "J30" | "J31")
     ) {
         return Some(("observation-v1", exposure_evidence(report, item)));
     }
@@ -222,6 +222,23 @@ pub(crate) fn exposure_event(
             return None;
         }
         return Some(("fs-event-v1", format!("{identity}|boot:{boot}")));
+    }
+    if matches!(base, Some("J30" | "J31")) {
+        let (kind, identity_key) = if base == Some("J30") {
+            ("hung-task", "kernel.hung_task_event_identity")
+        } else {
+            ("soft-lockup", "kernel.soft_lockup_event_identity")
+        };
+        let Some(super::HealthFactValue::String(identity)) = fact(identity_key) else {
+            return None;
+        };
+        let Some(super::HealthFactValue::String(boot)) = fact("kernel.boot_id") else {
+            return None;
+        };
+        if boot.is_empty() {
+            return None;
+        }
+        return Some(("host-event-v1", format!("{kind}|{identity}|boot:{boot}")));
     }
     if fact("kernel.current_cgroup_version").is_some()
         && fact("kernel.oom_attributed_event_identity").is_none()

@@ -182,6 +182,8 @@ fn candidates_for_finding(
             AdviceKind::HighLoad => {
                 if finding.id == "J03"
                     || (finding.id == "J04" && (config.verbose || has_service_failure(finding_ids)))
+                    || finding.id == "J30"
+                    || finding.id == "J31"
                 {
                     items.push(try_item(
                         definition.legacy_id,

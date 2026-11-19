@@ -166,6 +166,12 @@ macro_rules! health_volume_ids {
             HealthFindingBlockIoError,
             HealthInsightBlockIoError,
             HealthEvidenceFsDevice,
+            HealthFindingHungTask,
+            HealthInsightHungTask,
+            HealthFindingSoftLockup,
+            HealthInsightSoftLockup,
+            HealthEvidenceHungTask,
+            HealthEvidenceSoftLockup,
         );
     };
 }

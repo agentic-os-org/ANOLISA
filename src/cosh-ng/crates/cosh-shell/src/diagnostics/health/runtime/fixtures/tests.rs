@@ -258,3 +258,32 @@ fn fs_events_fixture_emits_proven_chain_findings() {
     .unwrap();
     assert_eq!(block.problem, "block-io|8:1");
 }
+
+#[test]
+fn host_events_fixture_emits_recent_records_only() {
+    let report = fixture_report("linux-host-events", &HealthConfig::default(), &options());
+    let mut found: Vec<(String, HealthSeverity)> = report
+        .findings
+        .iter()
+        .map(|finding| (finding.id.clone(), finding.severity))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            ("J30".into(), HealthSeverity::Warning),
+            ("J31".into(), HealthSeverity::Warning)
+        ]
+    );
+    let hung = crate::diagnostics::health::suppression::episode::candidate_for_finding(
+        &report, "J30", 3, "J30",
+    )
+    .unwrap();
+    assert!(hung.event);
+    assert_eq!(hung.problem, "hung-task|boot-a");
+    let lockup = crate::diagnostics::health::suppression::episode::candidate_for_finding(
+        &report, "J31", 3, "J31",
+    )
+    .unwrap();
+    assert_eq!(lockup.problem, "soft-lockup|boot-a|cpu3");
+}

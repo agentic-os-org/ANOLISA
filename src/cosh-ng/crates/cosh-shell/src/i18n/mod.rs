@@ -435,7 +435,7 @@ mod tests {
             MessageId::HealthOomScopeCurrentCgroup as usize
         );
         assert_eq!(
-            MessageId::HealthEvidenceFsDevice as usize,
+            MessageId::HealthEvidenceSoftLockup as usize,
             MessageId::ALL.len() - 1
         );
     }
