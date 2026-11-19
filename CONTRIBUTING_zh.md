@@ -12,10 +12,11 @@
 
 ## 推荐的贡献方向
 
-如果希望寻找贡献方向，推荐优先参考 [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap) 中的组件专题。
+如果希望寻找适合自身背景与本地环境的切入点，建议先阅读[贡献方向与类目](contribute/zh/tracks.md)，或浏览 [Community Roadmap](https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap) 中的组件专题。
+关于社区角色梯队、分级决策与组件生命周期，请参阅[社区治理](GOVERNANCE_zh.md)。
 也欢迎提交 bug 报告、bug 修复，以及其他 Issue 和 PR。
 
-Roadmap 中的专题是候选方向，不代表排期承诺，也不代表任务已可认领。实现这些方向时，按以下 Issue 流程推进：
+Roadmap 中的专题为候选方向，实际排期与认领以对应 Issue 为准。完整的标签含义与 `/claim` 说明见 [Roadmap、Issue 与认领流程](contribute/zh/workflow.md)，推进步骤如下：
 
 1. 检索是否已有覆盖该方向的 Issue。如果没有，创建 Issue，链接原 Discussion 并说明拟实现的范围。
 2. 开始实现前，与组件 owner 确认当前版本、范围和验收标准。

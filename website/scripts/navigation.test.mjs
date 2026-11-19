@@ -3,6 +3,8 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import yaml from 'js-yaml';
+import {repoRoot} from './lib.mjs';
 import {
   documentSidebar, footerLinks, insertNavigation, loadNavigation, navbarItems,
   navigationTranslations, userGuideSidebar, websiteSidebars,
@@ -85,9 +87,16 @@ test('website navigation separates SDK, AW integration, and contributions using 
   assert.equal(sidebars.sdkGuide[0].items[0].link.id, 'developer-guide/sdk/tokenless/index');
   assert.equal(sidebars.sdkGuide[0].items[0].items[0].id, 'developer-guide/sdk/tokenless/agentscope');
   assert.equal(sidebars.contributeGuide[0].id, 'contribute/index');
-  assert.deepEqual(sidebars.contributeGuide.slice(1).map((item) => item.label), ['AW', 'cosh-ng', 'ws-ckpt']);
-  assert.equal(sidebars.contributeGuide[1].link.id, 'contribute/aw/index');
-  assert.equal(sidebars.contributeGuide[2].link.id, 'contribute/cosh-ng/index');
+  assert.deepEqual(sidebars.contributeGuide.slice(1).map((item) => item.label), [
+    'Ways to Contribute',
+    'Issues, Roadmap & Claiming',
+    'Community Governance',
+    'Component Guides',
+  ]);
+  assert.equal(sidebars.contributeGuide[3].id, 'contribute/governance');
+  assert.deepEqual(sidebars.contributeGuide[4].items.map((item) => item.label), ['AW', 'cosh-ng', 'ws-ckpt']);
+  assert.equal(sidebars.contributeGuide[4].items[0].link.id, 'contribute/aw/index');
+  assert.equal(sidebars.contributeGuide[4].items[1].link.id, 'contribute/cosh-ng/index');
   assert.equal(documentSidebar(navigation, 'developer-guide/sdk/tokenless/index.md'), 'sdkGuide');
   assert.equal(documentSidebar(navigation, 'developer-guide/aw/providers/protocol.md'), 'awGuide');
   assert.equal(documentSidebar(navigation, 'contribute/aw/index.md'), 'contributeGuide');
@@ -168,5 +177,30 @@ test('old routes redirect directly to flat destinations with locale, prefix, and
     const aw = await readFile(path.join(root, locale, 'docs/user-guide/user-entrypoint/aw/index.html'), 'utf8');
     assert.ok(aw.includes(`${prefix}docs/user-guide/aw/`));
     assert.ok(aw.includes('name="robots" content="noindex"'));
+  }
+});
+
+test('Pages workflow path filters match every published root Markdown source', async () => {
+  const workflow = yaml.load(
+    await readFile(path.join(repoRoot, '.github/workflows/pages.yml'), 'utf8'),
+  );
+  const prepareDocs = await readFile(path.join(repoRoot, 'website/scripts/prepare-docs.mjs'), 'utf8');
+  const rootSources = new Set(['CHANGELOG.md', 'CHANGELOG_zh.md']);
+  for (const match of prepareDocs.matchAll(/`([A-Z0-9_-]+)\$\{suffix\}\.md`/g)) {
+    rootSources.add(`${match[1]}.md`);
+    rootSources.add(`${match[1]}_zh.md`);
+  }
+  assert.ok(rootSources.has('CONTRIBUTING.md') && rootSources.has('GOVERNANCE.md'));
+  const globToRegExp = (pattern) => new RegExp(
+    `^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')}$`,
+  );
+  for (const event of ['push', 'pull_request']) {
+    const matchers = (workflow.on?.[event]?.paths ?? []).map(globToRegExp);
+    for (const source of rootSources) {
+      assert.ok(
+        matchers.some((matcher) => matcher.test(source)),
+        `.github/workflows/pages.yml on.${event}.paths must match published root source ${source}`,
+      );
+    }
   }
 });
