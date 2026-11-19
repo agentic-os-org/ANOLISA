@@ -103,8 +103,22 @@ fn needs_auth(config: &CoreConfig) -> bool {
     config.resolve_provider().auth_required()
 }
 
+// cosh-shell executes Core through `/proc/self/fd/<n>` so the verified inode is
+// the one executed, and the kernel names the process after that path. Restore
+// the executable identity so `ps -C`, `pgrep -x` and OOM accounting still see
+// `cosh-core`; the descriptor admission itself is unchanged.
+#[cfg(target_os = "linux")]
+fn restore_process_name() {
+    if let Err(error) = nix::sys::prctl::set_name(c"cosh-core") {
+        eprintln!("[cosh-core] failed to restore process name: {error}");
+    }
+}
+
 #[cfg(unix)]
 fn main() {
+    #[cfg(target_os = "linux")]
+    restore_process_name();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
