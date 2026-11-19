@@ -23,10 +23,9 @@ pub(crate) fn read_limited(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, G
     read_checked(path, limit, None)
 }
 
-/// Like [`read_limited`], but the file must be owned by `uid` and have a single link.
+/// Like [`read_limited`], but requires `uid`, one link and no group/other write access.
 ///
-/// Used for files written by the less privileged gateway account, which could
-/// otherwise hard-link a file it does not own into its directory.
+/// Ownership, links and permissions are checked on the same open file as the read.
 pub(crate) fn read_owned(
     path: &Path,
     limit: u64,
@@ -59,10 +58,10 @@ fn read_checked(
         )));
     }
     if let Some(uid) = owner
-        && (metadata.uid() != uid || metadata.nlink() != 1)
+        && (metadata.uid() != uid || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0)
     {
         return Err(GatewayError::internal(format!(
-            "{} must be owned by uid {uid} and have a single link",
+            "{} must be owned by uid {uid}, have a single link and no group/other write access",
             path.display()
         )));
     }

@@ -8,8 +8,10 @@ use asc_daemon_protocol::method::{
     GATEWAY_CA, GATEWAY_DISABLE, GATEWAY_ENABLE, GATEWAY_KEY_LIST, GATEWAY_KEY_REMOVE,
     GATEWAY_STATUS,
 };
-use asc_daemon_protocol::{DaemonRequest, GatewayKeyRemoveParams};
-use clap::{Args, Subcommand};
+use asc_daemon_protocol::{DaemonRequest, DaemonResponse, GatewayKeyRemoveParams};
+use clap::{Args, Subcommand, ValueEnum};
+use serde::Deserialize;
+use serde_json::Value;
 
 use super::common::encode;
 use crate::InputError;
@@ -26,8 +28,52 @@ pub(crate) enum GatewayCommand {
     /// List or globally retire credential pairs (root only).
     #[command(subcommand)]
     Key(KeyCommand),
-    /// Return the shared public CA bundle path while the gateway is ready.
-    Ca,
+    /// Return shared public PEM and PKCS#12 trust bundle paths while the gateway is ready.
+    Ca(CaArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CaArgs {
+    /// Select one format to display; omit to return both formats.
+    #[arg(long, value_enum)]
+    format: Option<CaFormat>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CaFormat {
+    Pem,
+    Pkcs12,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaResult {
+    ca_bundle_paths: CaPaths,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaPaths {
+    pem: String,
+    pkcs12: String,
+}
+
+/// Validates the complete daemon response before any consumer selects one format.
+pub(super) fn ca_bundle_paths(result: &Value) -> io::Result<Value> {
+    let decoded: CaResult = serde_json::from_value(result.clone())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid gateway CA result"))?;
+    for path in [
+        &decoded.ca_bundle_paths.pem,
+        &decoded.ca_bundle_paths.pkcs12,
+    ] {
+        if !Path::new(path).is_absolute() || path.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gateway CA paths must be valid absolute paths",
+            ));
+        }
+    }
+    Ok(result["caBundlePaths"].clone())
 }
 
 #[derive(Debug, Subcommand)]
@@ -55,6 +101,31 @@ impl GatewayCommand {
         let request = self.request().map_err(io::Error::other)?;
         let response =
             asc_daemon_client::call(socket, &request, timeout).map_err(io::Error::other)?;
+        self.render(response, stdout, stderr)
+    }
+
+    fn render(
+        &self,
+        mut response: DaemonResponse,
+        stdout: &mut impl Write,
+        stderr: &mut impl Write,
+    ) -> io::Result<u8> {
+        if let Self::Ca(args) = self
+            && let DaemonResponse::Success(success) = &mut response
+        {
+            let mut paths = ca_bundle_paths(&success.result)?;
+            if let Some(format) = args.format {
+                let omitted = match format {
+                    CaFormat::Pem => "pkcs12",
+                    CaFormat::Pkcs12 => "pem",
+                };
+                paths
+                    .as_object_mut()
+                    .ok_or_else(|| io::Error::other("invalid gateway CA paths"))?
+                    .remove(omitted);
+            }
+            success.result = serde_json::json!({"caBundlePaths": paths});
+        }
         render_policy(&response, stdout, stderr)
     }
 
@@ -64,7 +135,7 @@ impl GatewayCommand {
             Self::Enable => encode(GATEWAY_ENABLE, &empty),
             Self::Disable => encode(GATEWAY_DISABLE, &empty),
             Self::Status => encode(GATEWAY_STATUS, &empty),
-            Self::Ca => encode(GATEWAY_CA, &empty),
+            Self::Ca(_) => encode(GATEWAY_CA, &empty),
             Self::Key(KeyCommand::List) => encode(GATEWAY_KEY_LIST, &empty),
             Self::Key(KeyCommand::Remove(args)) => encode(
                 GATEWAY_KEY_REMOVE,
@@ -103,6 +174,90 @@ mod tests {
         assert_eq!(request.params, serde_json::json!({}));
         for option in ["--scope", "--uid", "--gid", "--pid"] {
             assert!(Arguments::try_parse_from(["gateway", "ca", option, "1001"]).is_err());
+        }
+        assert!(Arguments::try_parse_from(["gateway", "ca", "--format", "der"]).is_err());
+    }
+
+    #[test]
+    fn ca_format_selects_output_only_and_preserves_daemon_errors() {
+        let result =
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": "/run/ca.p12"}});
+        for (argv, expected) in [
+            (vec!["gateway", "ca"], result.clone()),
+            (
+                vec!["gateway", "ca", "--format", "pem"],
+                serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem"}}),
+            ),
+            (
+                vec!["gateway", "ca", "--format", "pkcs12"],
+                serde_json::json!({"caBundlePaths": {"pkcs12": "/run/ca.p12"}}),
+            ),
+        ] {
+            let command = Arguments::try_parse_from(argv).unwrap().command;
+            assert_eq!(command.request().unwrap().params, serde_json::json!({}));
+            let id = asc_daemon_protocol::RequestId::new("ca-test").unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                command
+                    .render(
+                        DaemonResponse::success(id.clone(), result.clone()),
+                        &mut stdout,
+                        &mut stderr
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(serde_json::from_slice::<Value>(&stdout).unwrap(), expected);
+            assert!(stderr.is_empty());
+            stdout.clear();
+            let response = DaemonResponse::error(id, "unavailable", "CA is not ready");
+            assert_eq!(
+                command
+                    .render(response.clone(), &mut stdout, &mut stderr)
+                    .unwrap(),
+                1
+            );
+            assert!(stdout.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&stderr).unwrap(),
+                serde_json::to_value(response).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn ca_rejects_malformed_success_even_when_selecting_the_other_format() {
+        let command = Arguments::try_parse_from(["gateway", "ca", "--format", "pem"])
+            .unwrap()
+            .command;
+        for result in [
+            Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"caBundlePaths": null}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem"}}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": null}}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": 12}}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": "relative.p12"}}),
+            serde_json::json!({"caBundlePaths": {"pem": "", "pkcs12": "/run/ca.p12"}}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": "/run/ca\0.p12"}}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": "/run/ca.p12", "privateKey": "/secret"}}),
+            serde_json::json!({"caBundlePaths": {"pem": "/run/ca.pem", "pkcs12": "/run/ca.p12"}, "extra": true}),
+        ] {
+            let response = DaemonResponse::success(
+                asc_daemon_protocol::RequestId::new("ca-test").unwrap(),
+                result,
+            );
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                command
+                    .render(response, &mut stdout, &mut stderr)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(stdout.is_empty() && stderr.is_empty());
         }
     }
 }

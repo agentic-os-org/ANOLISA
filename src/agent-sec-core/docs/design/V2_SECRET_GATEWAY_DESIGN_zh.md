@@ -158,7 +158,7 @@ selector 为 `--executable`、`--process-name`、`--cmdline-arg` 三选一，不
 目录执行 chown。`--output-dir` 必须允许 owner 创建文件。
 
 命令不执行 `gateway enable`，不生成 `agent.env` 或环境变量映射。成功输出 JSON：Policy/Scope
-ID、pair ID、fake 文件路径、网关 `enabled/ready` 与 ready 时的 `caBundlePath`、后续步骤及
+ID、pair ID、fake 文件路径、网关 `enabled/ready` 与可用时的 `caBundlePaths` 双路径、后续步骤及
 `teardown` 命令；任何输出都不含 Token 或 fake 值。本次运行使用非默认 daemon socket 时，
 撤销、恢复和后续步骤中的命令都带同一 `--socket`，避免对另一 daemon 执行而误报成功。`--wait-seconds` 等待新 Scope 的 Binding
 全部 READY，超时或失败时仍输出 JSON 并以 1 退出。`--dry-run` 只校验模板并打印计划，不读取
@@ -293,15 +293,28 @@ listener 端口与 Scope 唯一，plan 的 `scopeId` 必须与 listener 相同�
 所属 Scope fake。加载失败保留旧 generation，相同失败五秒内不重试；manifest 删除则清空
 状态，后续请求拒绝。
 
-addon 原子写 `status/health.json` 的 `loadedGeneration/listeners/lastAttempt/caError`，并提供
-`status/ca-cert.pem`。unit 启动前和停止后删除 health，防止旧进程报告充当新进程 readiness。
-这些是内部 readiness 输入。公开 `gateway status` 仅为 `{enabled, ready, scopes}`，Scope 项为
-`{scopeId, bindings}`；`ready` 要求 enabled、cgroup v2 检查通过、unit active、loaded generation
-与当前 generation 匹配、CA 可用。已启用时每次 status 都重新只读检查 cgroup，失败返回
-`ready=false`，不改变状态。`gateway ca` 是认证本机 peer 的 LocalUser 查询，无 Scope
-参数；各 Scope 共用一个公开 CA bundle，仅返回 `{caBundlePath}`。查询重新核验 enabled、
-cgroup v2、unit/generation 和实际 CA ready，未就绪明确失败，不交付 fake/Token/环境映射。
-共享 CA 不是秘密，不要求凭据 owner 判定，也不表示 Scope 证书隔离。
+addon 原子写 `status/health.json` 的 `pid/loadedGeneration/listeners/lastAttempt/caError/caPkcs12`，
+并提供网关单独的公开 `status/ca-cert.pem` 和完整 `status/ca-bundle.p12`。unit 启动前和停止后
+删除 health；daemon 还将 health 的 PID 与 systemd 当前 `MainPID` 对照，并要求 loaded generation
+等于本次持久化的 generation，拒绝旧实例报告。固定 PyInstaller one-file 制品在子进程中运行
+addon，因此 health 的 `pid` 报告 bootloader 父进程 PID（systemd `MainPID`）；非打包运行报告自身 PID。
+代理单独重启时，先验证并复用与当前 PEM 证书集合一致且不含私钥的 root 公开 PKCS12，
+避免随机加密重新生成造成公开文件与 health 摘要不一致。`caPkcs12` 为
+`{pemSha256: string|null, pkcs12Sha256: string|null, error: string|null}`，两个摘要是小写十六进制
+SHA-256，分别关联实际完整 PEM 输入及 PKCS12 输出。error 只能为固定、有界的失败信息，
+不含证书、路径、秘密或异常原文；失败不得保留成功标记。即使旧摘要仍匹配，非 null error
+也阻止 ready。摘要不替代文件身份、权限或证书集合校验。
+
+公开 `gateway status` 仅为 `{enabled, ready, scopes}`，Scope 项为 `{scopeId, bindings}`；
+`ready` 要求 enabled、cgroup v2 检查通过、unit active、当前实例与 generation 匹配、CA 发布及
+plan 加载无当前错误，并且 root 发布的完整 PEM 和 PKCS12 均与 health 的摘要一致。
+已启用时每次 status 都重新只读检查，失败返回 `ready=false`，不改变状态。
+`gateway.ca` 是认证本机 peer 的 LocalUser 查询，params 为 `{}`，无 Scope 或 format 参数；
+始终返回 `{caBundlePaths: {pem: string, pkcs12: string}}`，两个值均为 daemon 主机绝对路径。
+CLI `gateway ca` 默认输出双路径，`--format pem|pkcs12` 只在验证完整成功响应后筛选所选项，
+不改变 RPC 请求；未知格式、缺失/非法路径或未知成功字段明确失败，不输出 null。
+查询重新核验全部 ready 条件，不现场生成或修复文件，不交付 fake/Token/环境映射。
+各 Scope 共用 CA，不要求凭据 owner 判定，也不表示 Scope 证书隔离或远程文件可达。
 generation 与 revoked/tombstone 保留在内部发布、恢复和撤销逻辑中，
 不作为管理查询的展示字段。`enable/disable` 成功返回 `{}`。网关 ready 不替代 Binding `READY`
 及引流完成的等待。
@@ -429,14 +442,33 @@ file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
 管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
 
 每次下发先持久化新的 generation，编号不复用；校验 canonical Scope 与账户隔离，写快照和
-plan，最后发布 manifest，启动 unit，等待 loadedGeneration 匹配（最长 20 秒），拼接系统 CA
-与网关 CA，再刷新 nft 并删除旧 generation。await 后重新验证 canonical 责任，不能使已删除
-Scope 的过时请求恢复授权。准备与查询不需要进程存在，但查询需要真实 readiness。
+plan，最后发布 manifest 并启动 unit。先等待当前实例 loadedGeneration 匹配（最长 20 秒，
+只等待 plan 加载），再由 daemon 合并系统 PEM 根与网关公开 CA，原子发布完整 `ca-bundle.pem`。
+addon 读取此完整输入，转换并核验证书集合与无私钥，原子写 `status/ca-bundle.p12` 及 health。
+daemon 再有界等待匹配转换（最长 20 秒），核验属主、权限、大小和输入/输出摘要后，以 root
+原子发布公开 `ca-bundle.p12`。最终核验双格式、当前进程与 canonical 责任，才刷新 nft 并删除
+旧 generation；失败和超时沿用 fail-closed，不能以旧材料成功。等待 PKCS12 不得阻止 PEM 先发布。
+同 generation 也检查 PEM 内容变化，同输入复用转换；网关重启复用已有 CA，不为格式另建 CA。
+准备与查询不需要 Agent 进程存在，但查询需要真实 readiness。
 
 运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest/plan/secrets 为 0640，
-`status/` 为网关账户拥有的 0755，公开 `ca-bundle.pem` 为 0644。系统 CA 取首个存在的
-`/etc/pki/tls/certs/ca-bundle.crt` 或 `/etc/ssl/certs/ca-certificates.crt`；网关 CA 必须由网关
-账户拥有、单硬链接、有效 PEM。daemon 将网关写入文件视为不可信有界输入。
+`status/` 为网关账户拥有的 0755；root 发布的公开 `ca-bundle.pem` 和 `ca-bundle.p12` 均为 0644。
+系统 CA 取首个存在的 `/etc/pki/tls/certs/ca-bundle.crt` 或 `/etc/ssl/certs/ca-certificates.crt`，
+上限 8 MiB；网关公开 CA 上限 64 KiB，完整 PEM 上限 8 MiB + 64 KiB + 1 字节。
+PKCS12 使用独立 16 MiB 上限，给证书 bag、别名、加密和 MAC 留出空间，不假定其开销总小于 PEM。
+health 上限 64 KiB。daemon 读取网关 CA、health、转换输出及 root 公开文件时，在同一打开的
+fd 上核验普通文件、期望属主、单硬链接、group/other 不可写和大小，拒绝末级 symlink；
+将网关输出视为不可信有界输入。查询以 root 发布文件及当前 health 为准，不从 status 修复。
+
+两种格式以系统 PEM 加网关 CA 为唯一证书集合来源，绝不导出私钥或网关私钥 keystore。
+addon 复用固定 standalone 内置证书库生成 Java trusted certificate entries，完整解析后按 DER
+去重；坏证书、私钥块、缺失转换 API 或不完整处理均失败，不跳过证书、不弱算法降级。
+公开密码 `changeit` 只用于 Java 加载与 MAC 完整性检查，不承担保密或访问控制。
+不增加 Rust crypto 依赖、JDK/keytool/OpenSSL 生产依赖，不改系统根或 JVM `cacerts`。
+JVM 显式选择该库时，用系统加网关根替代默认 JVM 根；JVM 独有企业根须由操作者自行合并。
+信任内容变化要求应用重载 TLS context，网关不修改 Agent 启动参数。
+双格式响应与 health 成套更新、回滚，不增加旧结构兼容、迁移或现有格式版本变更。
+用户配置示例见[双格式指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md#gateway-ca-格式未发布的-v2)。
 
 nft 独占 `inet agent_sec_gateway`，按实例 cgroup 路径分类，同 Scope 实例跳转到共享端口。
 仅已接管且 canonical 有效的实例被引流；cgroup 重建必须刷新 inode 解析。回环不引流；

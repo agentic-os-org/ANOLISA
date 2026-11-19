@@ -11,10 +11,13 @@ never degrades to passthrough.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import stat
+import sys
 import time
 from collections.abc import Iterator
 
@@ -40,6 +43,11 @@ MANIFEST_NAME = "active.json"
 STATUS_DIR = "status"
 HEALTH_NAME = "health.json"
 CA_NAME = "ca-cert.pem"
+CA_BUNDLE_NAME = "ca-bundle.pem"
+CA_PKCS12_NAME = "ca-bundle.p12"
+MAX_CA_BUNDLE_BYTES = 8 * 1024 * 1024 + 64 * 1024 + 1
+MAX_CA_PKCS12_BYTES = 16 * 1024 * 1024
+CA_PKCS12_PASSWORD = b"changeit"
 HEALTH_VERSION = 1
 METADATA_KEY = "agent_sec"
 
@@ -50,6 +58,7 @@ logger = logging.getLogger("agent_sec_gateway")
 _SAFE_DIAGNOSTICS = frozenset(
     {
         "agent-sec-gateway cannot publish the CA certificate",
+        "agent-sec-gateway cannot convert the CA bundle to PKCS#12",
         "agent-sec-gateway reload failed",
         "agent-sec-gateway rejected generation",
         "agent-sec-gateway loaded generation",
@@ -78,13 +87,23 @@ class _SafeDiagnostics(logging.Filter):
         )
 
 
-def _read_runtime_file(directory: str, name: str, limit: int) -> bytes:
+def _read_runtime_file(
+    directory: str, name: str, limit: int, *, public: bool = False
+) -> bytes:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     with os.fdopen(os.open(os.path.join(directory, name), flags), "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             raise policy.LoadError(
                 f"{name} is not a regular file within its size limit"
+            )
+        if public and (
+            info.st_uid not in (0, os.geteuid())
+            or info.st_nlink != 1
+            or info.st_mode & 0o022
+        ):
+            raise policy.LoadError(
+                "public CA material has unsafe ownership or permissions"
             )
         data = handle.read(limit + 1)
     if len(data) > limit:
@@ -100,6 +119,64 @@ def _write_atomic(directory: str, name: str, data: bytes) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, os.path.join(directory, name))
+
+
+def _serialize_truststore(pem: bytes, existing: bytes | None = None) -> bytes:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    labels = re.findall(rb"-----BEGIN ([A-Z0-9 ]+)-----", pem)
+    endings = re.findall(rb"-----END ([A-Z0-9 ]+)-----", pem)
+    if (
+        not labels
+        or labels != endings
+        or any(label != b"CERTIFICATE" for label in labels)
+    ):
+        raise ValueError("CA bundle must contain only complete certificate PEM blocks")
+    certificates = x509.load_pem_x509_certificates(pem)
+    if len(certificates) != len(labels):
+        raise ValueError("CA bundle contains an unparsed certificate")
+    unique = {
+        cert.public_bytes(serialization.Encoding.DER): cert for cert in certificates
+    }
+    if existing is not None:
+        try:
+            loaded = pkcs12.load_pkcs12(existing, CA_PKCS12_PASSWORD)
+        except ValueError:
+            pass
+        else:
+            if (
+                loaded.key is None
+                and loaded.cert is None
+                and {
+                    entry.certificate.public_bytes(serialization.Encoding.DER)
+                    for entry in loaded.additional_certs
+                }
+                == set(unique)
+            ):
+                return existing
+    entries = [
+        pkcs12.PKCS12Certificate(cert, hashlib.sha256(der).hexdigest().encode())
+        for der, cert in sorted(unique.items())
+    ]
+    keystore = pkcs12.serialize_java_truststore(
+        entries, serialization.BestAvailableEncryption(CA_PKCS12_PASSWORD)
+    )
+    if len(keystore) > MAX_CA_PKCS12_BYTES:
+        raise ValueError("PKCS#12 bundle exceeds its size limit")
+    loaded = pkcs12.load_pkcs12(keystore, CA_PKCS12_PASSWORD)
+    if (
+        loaded.key is not None
+        or loaded.cert is not None
+        or {
+            entry.certificate.public_bytes(serialization.Encoding.DER)
+            for entry in loaded.additional_certs
+        }
+        != set(unique)
+    ):
+        raise ValueError("PKCS#12 bundle does not preserve the public certificate set")
+    return keystore
 
 
 def _reject_response(code: str, status: int = 403) -> http.Response:
@@ -244,6 +321,14 @@ class SecretGateway:
         self._last_error: str | None = None
         self._attempted: int | None = None
         self._ca_error: str | None = None
+        self._ca_pkcs12: dict[str, str | None] = {
+            "pemSha256": None,
+            "pkcs12Sha256": None,
+            "error": None,
+        }
+        self._ca_key: tuple[int, int, int, int] | None = None
+        self._pkcs12_key: tuple[int, int, int, int] | None = None
+        self._ca_retry_at = 0.0
         self._health: bytes | None = None
         self._watcher: asyncio.Task[None] | None = None
         self._log_filter = _SafeDiagnostics()
@@ -309,18 +394,24 @@ class SecretGateway:
         except OSError:
             self._ca_error = "cannot publish the CA certificate"
             logger.warning("agent-sec-gateway cannot publish the CA certificate")
+        self._refresh_ca_pkcs12()
         self._write_health()
         self._watcher = asyncio.get_running_loop().create_task(self._watch())
 
     async def done(self) -> None:
         if self._watcher is not None:
             self._watcher.cancel()
+        self.snapshot = None
+        self._ca_pkcs12 = {"pemSha256": None, "pkcs12Sha256": None, "error": None}
+        self._write_health()
 
     async def _watch(self) -> None:
         while True:
             await asyncio.sleep(POLL_SECONDS)
             try:
                 self.reload()
+                self._refresh_ca_pkcs12()
+                self._write_health()
             except Exception:  # noqa: BLE001 - the watcher must outlive any failure
                 logger.error("agent-sec-gateway reload failed")
 
@@ -379,6 +470,9 @@ class SecretGateway:
                     "error": self._last_error,
                 },
                 "caError": self._ca_error,
+                # The fixed PyInstaller one-file bootloader is systemd's MainPID.
+                "pid": os.getppid() if getattr(sys, "frozen", False) else os.getpid(),
+                "caPkcs12": self._ca_pkcs12,
             }
         ).encode()
         if health == self._health:
@@ -389,6 +483,77 @@ class SecretGateway:
             logger.warning("agent-sec-gateway cannot write health")
         else:
             self._health = health
+
+    def _refresh_ca_pkcs12(self) -> None:
+        key = None
+        pem_digest = None
+        now = time.monotonic()
+        status_dir = os.path.join(self._runtime, STATUS_DIR)
+        try:
+            info = os.lstat(os.path.join(self._runtime, CA_BUNDLE_NAME))
+            key = (info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+            if key == self._ca_key:
+                if self._ca_pkcs12["error"] and now < self._ca_retry_at:
+                    return
+                if self._ca_pkcs12["pkcs12Sha256"]:
+                    try:
+                        output = os.lstat(os.path.join(status_dir, CA_PKCS12_NAME))
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if (
+                            output.st_ino,
+                            output.st_mtime_ns,
+                            output.st_ctime_ns,
+                            output.st_size,
+                        ) == self._pkcs12_key:
+                            return
+            pem = _read_runtime_file(
+                self._runtime, CA_BUNDLE_NAME, MAX_CA_BUNDLE_BYTES, public=True
+            )
+            pem_digest = hashlib.sha256(pem).hexdigest()
+            try:
+                existing = _read_runtime_file(
+                    self._runtime, CA_PKCS12_NAME, MAX_CA_PKCS12_BYTES, public=True
+                )
+            except FileNotFoundError:
+                existing = None
+            # Reuse validated public bytes so a proxy-only restart does not change its digest.
+            keystore = (
+                _serialize_truststore(pem)
+                if existing is None
+                else _serialize_truststore(pem, existing)
+            )
+            _write_atomic(status_dir, CA_PKCS12_NAME, keystore)
+            output = os.lstat(os.path.join(status_dir, CA_PKCS12_NAME))
+        except Exception:  # noqa: BLE001 - conversion errors must invalidate readiness
+            error = "cannot convert the CA bundle to PKCS#12"
+            if self._ca_pkcs12["error"] != error:
+                logger.warning(
+                    "agent-sec-gateway cannot convert the CA bundle to PKCS#12"
+                )
+            self._ca_pkcs12 = {
+                "pemSha256": pem_digest,
+                "pkcs12Sha256": None,
+                "error": error,
+            }
+            self._pkcs12_key = None
+            self._ca_retry_at = now + RETRY_SECONDS
+        else:
+            self._ca_pkcs12 = {
+                "pemSha256": pem_digest,
+                "pkcs12Sha256": hashlib.sha256(keystore).hexdigest(),
+                "error": None,
+            }
+            self._pkcs12_key = (
+                output.st_ino,
+                output.st_mtime_ns,
+                output.st_ctime_ns,
+                output.st_size,
+            )
+            self._ca_retry_at = 0.0
+        self._ca_key = key
+        self._write_health()
 
     def _publish_ca(self) -> None:
         confdir = os.path.expanduser(ctx.options.confdir)

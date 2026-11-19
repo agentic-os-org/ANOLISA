@@ -131,7 +131,7 @@ mod tests {
         fn ca(&self, peer: PeerCredentials) -> Result<Value, GatewayFailure> {
             Ok(self.record(
                 format!("ca by {} gid {} pid {}", peer.uid(), peer.gid(), peer.pid()),
-                serde_json::json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"}),
+                serde_json::json!({"caBundlePaths":{"pem":"/run/agent-sec-gateway/ca-bundle.pem","pkcs12":"/run/agent-sec-gateway/ca-bundle.p12"}}),
             ))
         }
     }
@@ -170,7 +170,7 @@ mod tests {
                 handler.handle(request_id(), owner, GatewayMethod::Ca, params),
                 DaemonResponse::success(
                     request_id(),
-                    serde_json::json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"})
+                    serde_json::json!({"caBundlePaths":{"pem":"/run/agent-sec-gateway/ca-bundle.pem","pkcs12":"/run/agent-sec-gateway/ca-bundle.p12"}})
                 )
             );
         }
@@ -194,6 +194,7 @@ mod tests {
             (GatewayMethod::Ca, serde_json::json!({"gid":0})),
             (GatewayMethod::Ca, serde_json::json!({"pid":1})),
             (GatewayMethod::Ca, serde_json::json!({"secret":"dummy"})),
+            (GatewayMethod::Ca, serde_json::json!({"format":"pem"})),
             (GatewayMethod::Ca, serde_json::json!([])),
             (
                 GatewayMethod::KeyRemove,
@@ -298,7 +299,7 @@ mod tests {
             ),
             DaemonResponse::success(
                 request_id(),
-                serde_json::json!({"caBundlePath":"/run/agent-sec-gateway/ca-bundle.pem"})
+                serde_json::json!({"caBundlePaths":{"pem":"/run/agent-sec-gateway/ca-bundle.pem","pkcs12":"/run/agent-sec-gateway/ca-bundle.p12"}})
             )
         );
         for (method, params, error) in [
