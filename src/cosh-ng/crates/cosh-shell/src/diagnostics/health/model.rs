@@ -411,6 +411,7 @@ pub(crate) enum HealthMessageId {
     HealthPromptReviewUnavailableChecks,
     HealthInsightMemoryAvailableLow,
     HealthInsightDiskHigh,
+    HealthInsightMountReadonly,
     HealthInsightRecentOom,
     HealthInsightCpuLoadHigh,
     HealthInsightSwapPressure,
@@ -427,6 +428,7 @@ pub(crate) enum HealthMessageId {
     HealthFindingMemoryAvailableLow,
     HealthFindingSwapPressure,
     HealthFindingDiskHigh,
+    HealthFindingMountReadonly,
     HealthFindingRecentOom,
     HealthFindingKernelPanic,
     HealthFindingServiceFailed,
@@ -505,6 +507,7 @@ impl HealthMessageId {
                 crate::MessageId::HealthInsightMemoryAvailableLow
             }
             Self::HealthInsightDiskHigh => crate::MessageId::HealthInsightDiskHigh,
+            Self::HealthInsightMountReadonly => crate::MessageId::HealthInsightMountReadonly,
             Self::HealthInsightRecentOom => crate::MessageId::HealthInsightRecentOom,
             Self::HealthInsightCpuLoadHigh => crate::MessageId::HealthInsightCpuLoadHigh,
             Self::HealthInsightSwapPressure => crate::MessageId::HealthInsightSwapPressure,
@@ -531,6 +534,7 @@ impl HealthMessageId {
             }
             Self::HealthFindingSwapPressure => crate::MessageId::HealthFindingSwapPressure,
             Self::HealthFindingDiskHigh => crate::MessageId::HealthFindingDiskHigh,
+            Self::HealthFindingMountReadonly => crate::MessageId::HealthFindingMountReadonly,
             Self::HealthFindingRecentOom => crate::MessageId::HealthFindingRecentOom,
             Self::HealthFindingKernelPanic => crate::MessageId::HealthFindingKernelPanic,
             Self::HealthFindingServiceFailed => crate::MessageId::HealthFindingServiceFailed,

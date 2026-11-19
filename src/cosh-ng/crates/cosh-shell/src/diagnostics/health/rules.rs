@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashSet};
 use crate::config::{HealthConfig, HealthServiceExpectedState};
 
 use super::model::{
-    HealthCollector, HealthFact, HealthFactValue, HealthFinding, HealthFindingCategory,
-    HealthMessageId, HealthScanReport, HealthSeverity, HealthUnavailableReason,
+    HealthCheckStatus, HealthCollector, HealthFact, HealthFactValue, HealthFinding,
+    HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
+    HealthUnavailableReason,
 };
 
 pub(crate) fn apply_judgement_rules(report: &mut HealthScanReport, config: &HealthConfig) {
@@ -18,6 +19,9 @@ pub(crate) fn evaluate_judgement_rules(
 ) -> Vec<HealthFinding> {
     let mut findings = Vec::new();
     let facts = &report.facts;
+    let host_qualified = report.check_results.iter().any(|check| {
+        check.collector == Some(HealthCollector::Host) && check.status == HealthCheckStatus::Ok
+    });
     let memory_low = memory_low_level(facts);
     let service_issue = configured_service_issue(facts, config);
     let oom_age = number(facts, "kernel.oom_latest_age_seconds");
@@ -82,7 +86,9 @@ pub(crate) fn evaluate_judgement_rules(
         ));
     }
 
-    if memory_low == Some(HealthSeverity::Critical) {
+    if memory::memory_active(facts) {
+        findings.extend(memory::memory_findings(facts, host_qualified));
+    } else if memory_low == Some(HealthSeverity::Critical) {
         findings.push(finding(
             "J05",
             HealthSeverity::Critical,
@@ -136,6 +142,7 @@ pub(crate) fn evaluate_judgement_rules(
 
     if volume::volume_active(facts) {
         findings.extend(volume::volume_findings(facts));
+        findings.extend(ro::ro_findings(facts));
     } else {
         findings.extend(disk_findings(facts, config));
     }
@@ -234,33 +241,38 @@ pub(crate) fn evaluate_judgement_rules(
         ));
     }
 
-    for service in &config.services {
-        let key = format!("service.{}.status", service.name);
-        let Some(status) = string_value(facts, &key) else {
-            continue;
-        };
-        if status == "failed" {
-            let mut service_finding = finding(
-                format!("J15:{}", service.name),
-                HealthSeverity::Critical,
-                HealthFindingCategory::RootCause,
-                HealthMessageId::HealthFindingServiceFailed,
-                evidence_ids(facts, &[&key]),
-            );
-            service_finding.detail_args =
-                service_detail_args(&service.name, status, service.expected);
-            findings.push(service_finding);
-        } else if status == "inactive" && service.expected == HealthServiceExpectedState::Active {
-            let mut service_finding = finding(
-                format!("J16:{}", service.name),
-                HealthSeverity::Warning,
-                HealthFindingCategory::Anomaly,
-                HealthMessageId::HealthFindingServiceInactive,
-                evidence_ids(facts, &[&key]),
-            );
-            service_finding.detail_args =
-                service_detail_args(&service.name, status, service.expected);
-            findings.push(service_finding);
+    if service::service_active(facts) {
+        findings.extend(service::service_findings(facts, config));
+    } else {
+        for service in &config.services {
+            let key = format!("service.{}.status", service.name);
+            let Some(status) = string_value(facts, &key) else {
+                continue;
+            };
+            if status == "failed" {
+                let mut service_finding = finding(
+                    format!("J15:{}", service.name),
+                    HealthSeverity::Critical,
+                    HealthFindingCategory::RootCause,
+                    HealthMessageId::HealthFindingServiceFailed,
+                    evidence_ids(facts, &[&key]),
+                );
+                service_finding.detail_args =
+                    service_detail_args(&service.name, status, service.expected);
+                findings.push(service_finding);
+            } else if status == "inactive" && service.expected == HealthServiceExpectedState::Active
+            {
+                let mut service_finding = finding(
+                    format!("J16:{}", service.name),
+                    HealthSeverity::Warning,
+                    HealthFindingCategory::Anomaly,
+                    HealthMessageId::HealthFindingServiceInactive,
+                    evidence_ids(facts, &[&key]),
+                );
+                service_finding.detail_args =
+                    service_detail_args(&service.name, status, service.expected);
+                findings.push(service_finding);
+            }
         }
     }
 
@@ -545,6 +557,9 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
     facts.iter().find(|fact| fact.key == key)
 }
 
+pub(crate) mod memory;
+pub(crate) mod ro;
+pub(crate) mod service;
 pub(crate) mod volume;
 
 #[cfg(test)]

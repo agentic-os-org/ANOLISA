@@ -14,6 +14,7 @@ mod command;
 mod disk;
 mod kernel;
 mod memory;
+mod service;
 #[cfg(test)]
 use disk::collect_disk;
 pub(super) use disk::read_disk_sample;
@@ -36,7 +37,8 @@ use kernel::parse_kernel_signals_with_boot_epoch;
 pub(crate) use kernel::{collect_kernel_signals, parse_kernel_signals, KernelSignalFacts};
 
 const SERVICE_COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
-const SERVICE_TOTAL_BUDGET: Duration = Duration::from_millis(800);
+
+pub(crate) use service::collect_configured_services;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CpuLoadFacts {
@@ -210,58 +212,6 @@ pub(crate) fn collect_cpu(builder: &mut HealthReportBuilder) {
     }
 }
 
-pub(crate) fn collect_configured_services(
-    builder: &mut HealthReportBuilder,
-    config: &HealthConfig,
-) {
-    if config.services.is_empty() {
-        return;
-    }
-    let started = Instant::now();
-    let deadline = started + SERVICE_TOTAL_BUDGET;
-    let mut collected = false;
-    for service in &config.services {
-        let Some(timeout) = remaining_service_timeout(deadline) else {
-            builder.add_unavailable(
-                HealthCollector::ConfiguredService,
-                HealthUnavailableReason::Timeout,
-                HealthSeverity::Degraded,
-                started.elapsed().as_millis(),
-            );
-            return;
-        };
-        match run_system_command(
-            "systemctl",
-            &["is-active", service.name.as_str()],
-            HealthCommandConfig {
-                timeout,
-                ..HealthCommandConfig::default()
-            },
-        ) {
-            Ok(output) => match record_configured_service_output(builder, &service.name, &output) {
-                Ok(service_collected) => {
-                    if service_collected {
-                        collected = true;
-                    }
-                }
-                Err(()) => return,
-            },
-            Err(err) => {
-                builder.add_unavailable(
-                    HealthCollector::ConfiguredService,
-                    err.unavailable_reason(),
-                    HealthSeverity::Degraded,
-                    started.elapsed().as_millis(),
-                );
-                return;
-            }
-        }
-    }
-    if collected {
-        builder.add_check_done("configured_service");
-    }
-}
-
 fn record_configured_service_output(
     builder: &mut HealthReportBuilder,
     service_name: &str,
@@ -281,11 +231,6 @@ fn record_configured_service_output(
     } else {
         Ok(false)
     }
-}
-
-fn remaining_service_timeout(deadline: Instant) -> Option<Duration> {
-    let remaining = deadline.checked_duration_since(Instant::now())?;
-    service_timeout_for_remaining(remaining)
 }
 
 fn service_timeout_for_remaining(remaining: Duration) -> Option<Duration> {

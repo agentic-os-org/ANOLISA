@@ -270,6 +270,14 @@ pub(super) fn parse_health_toml_config(value: &toml::Value, config: &mut CoshCon
             );
         }
     }
+    if let Some(mounts) = health.get("expected_writable_mounts") {
+        if let Ok(mounts) = string_array(mounts, "health.expected_writable_mounts") {
+            config.health.expected_writable_mounts = mounts
+                .into_iter()
+                .filter(|mount| !mount.trim().is_empty())
+                .collect();
+        }
+    }
     if let Some(checks) = health.get("checks").and_then(toml::Value::as_table) {
         for (id, enabled) in checks {
             if let Some(enabled) = enabled.as_bool() {
@@ -308,6 +316,11 @@ fn parse_health_service(value: &toml::Value) -> Option<HealthServiceConfig> {
     Some(HealthServiceConfig {
         name: name.to_string(),
         expected,
+        activation: table
+            .get("activation")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("persistent")
+            .to_string(),
     })
 }
 

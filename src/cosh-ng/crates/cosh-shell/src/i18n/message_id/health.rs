@@ -141,6 +141,9 @@ macro_rules! health_volume_ids {
             HealthEvidenceVolumeAvailable,
             HealthEvidenceInodeFree,
             HealthEvidenceOomCounterWindow,
+            HealthFindingMountReadonly,
+            HealthInsightMountReadonly,
+            HealthEvidenceMountReadonly,
         );
     };
 }

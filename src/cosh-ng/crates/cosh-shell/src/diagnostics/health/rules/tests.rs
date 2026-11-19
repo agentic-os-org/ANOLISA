@@ -243,6 +243,7 @@ fn configured_service_inactive_only_warns_when_expected_active() {
     config.services.push(HealthServiceConfig {
         name: "redis".to_string(),
         expected: HealthServiceExpectedState::Inactive,
+        activation: "persistent".to_string(),
     });
 
     apply_judgement_rules(&mut report, &config);
@@ -260,6 +261,7 @@ fn configured_service_failed_records_unit_and_status_detail() {
     config.services.push(HealthServiceConfig {
         name: "redis.service".to_string(),
         expected: HealthServiceExpectedState::Active,
+        activation: "persistent".to_string(),
     });
 
     apply_judgement_rules(&mut report, &config);

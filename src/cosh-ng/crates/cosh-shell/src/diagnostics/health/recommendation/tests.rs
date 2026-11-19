@@ -29,6 +29,7 @@ fn service_try_prompt_identifies_service_in_both_languages() {
             services: vec![HealthServiceConfig {
                 name: service.into(),
                 expected: HealthServiceExpectedState::Active,
+                activation: "persistent".to_string(),
             }],
             ..HealthConfig::default()
         };
@@ -216,6 +217,7 @@ fn cpu_warning_with_service_failure_generates_high_load_try() {
     config.services.push(HealthServiceConfig {
         name: "cosh-failed-probe.service".to_string(),
         expected: HealthServiceExpectedState::Active,
+        activation: "persistent".to_string(),
     });
     apply_judgement_rules(&mut report, &config);
 

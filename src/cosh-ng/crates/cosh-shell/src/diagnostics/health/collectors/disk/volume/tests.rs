@@ -135,6 +135,8 @@ fn proven_root() -> VolumeFacts {
             favail: 500,
         }),
         inode_applicable: true,
+        readonly: Some(false),
+        expected_writable: false,
         unknown: None,
     }
 }
