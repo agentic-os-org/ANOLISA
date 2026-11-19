@@ -176,7 +176,57 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 `entrypoint: application`，按实际安装边界声明事件与效果。应用自行启动，AW Service
 和 Provider 独立部署；该 profile 不提供 `aw run` 启动器。
 
-配置名为 `app` 的目标并保留应用普通 `argv`，安装候选包后设置 `AW_SOCKET`，可运行
+对任意新建 Python 或 Node/JS Agent，无需编写任何框架专属 Rust Adapter，只需安装核心 SDK
+并使用语言级 Source Runtime（Node/TypeScript 使用 `@anolisa/aw-sdk/sources`，Python 使用
+`aw_sdk.sources`）完成声明式包装与对象方法插桩：
+
+- 双语言均通过 `LanguageSource.create(...)` 创建带有标准 `aw-hook-source/v1` 能力声明与
+  路由校验的 `Instance`（支持 `required` 与 `native_fallback`）。
+- 每次请求开启一个独立会话（TypeScript 使用 `source.withSession(...)`／`source.session(...)`，
+  Python 使用 `async with source.session(...)`），持有单一 `Admission` 与不可变 `Task`；
+  缩小会话事件集合无法跳过已准入的 Task 路由（触发 `source_route_coverage_incomplete`）。
+- TypeScript 提供 `session.wrapInput`、`session.wrapTool`、`session.wrapInputStream`／
+  `session.wrapToolStream` 与 `session.instrument`；Python 提供 `session.wrap_input`、
+  `session.wrap_tool` 与 `session.instrument`。`input.submit` 与 `tool.before` 阻断时在
+  原生执行前抛出 `SourceDenied`。输入和工具包装器在准入前深拷贝普通 JSON 参数，
+  提取函数与原生执行共用这份副本，包括流的首次读取。
+  对于类实例等业务参数，可提供 TypeScript 的 `snapshotArg` 或 Python 的 `snapshot_arg`。
+  回调应返回业务函数所需类型的独立对象，并复制函数执行和流迭代期间会读取的可变输入。
+  例如，只有文本字段的请求可以使用 `snapshotArg: req => new RequestData(req.text)`。
+  参数需要独立副本时，缺少回调或返回原对象都会触发 `source_input_snapshot_required`。
+  插桩时，在 `toolMethods` 或 `tool_methods` 的对应方法选项中设置回调。Python 也支持在
+  `instrument` 上设置 `snapshot_arg` 作为各方法的默认值。自定义工具输入提取函数应读取
+  副本，并包含策略需要检查的全部字段。SDK 会在派发前再次核对这些字段。
+- 在 TypeScript 中直接迭代生成器或工厂的结果，使用 `wrapInputStream`、`wrapToolStream`
+  或 `{ stream: true }`。使用自动识别时，原生异步生成器函数的包装器返回迭代器，普通工厂的
+  包装器返回 Promise。两者可以有相同的 TypeScript 函数签名，调用方可先用
+  `await wrapped(...args)` 取得结果。工厂需要 SDK 管理流清理或收集工具结果时，使用显式流包装。
+- Task 准入了 `tool.after` 路由时，SDK 最多收集 `maxStreamItems`／`max_stream_items`
+  项流式输出；提供 `extractResult`／`extract_result` 时接收收集到的原生分块（普通 JSON
+  分块在产出前深拷贝隔离）。仅有前置路由或进入原生回退的 Task 直接传递工具结果和流元素。
+  结果提取、规范化或收集失败时，异常携带 `toolExecuted`／`tool_executed`。
+- 被包装的同步函数运行在事件循环线程上；阻塞型 I/O 或耗时计算应使用 `async` 函数或卸载到
+  后台执行器（例如 Python 的 `asyncio.to_thread`），以免阻塞取消、其他会话和关闭超时。
+- 会话关闭时先停止活动流并等待在途的 `submit`／`beforeTool`／`before_tool` 检查、
+  已准入的原生调用及其 `tool.after` 观察完成，随后才恢复插桩方法并释放 Task。
+  Python 会取消正在进行的读取。
+  Node 应用将 `session.signal` 传给可能阻塞的原生读取。如需支持调用方取消，用
+  `AbortSignal.any` 合并会话和调用方信号，将同一信号传给原生读取并由 `extractSignal` 返回。
+  SDK 保留直接作为参数传入的 `AbortSignal` 引用。
+  等待工作完成超过关闭超时（默认取会话超时，也可在单次关闭传入 `{ timeoutMs }`／`timeout_ms`）后，
+  关闭调用报告 `source_close_pending`，期间继续保留插桩方法并持有 Task。
+  业务解除原生工作阻塞后，可再次等待关闭完成。Source 持有 Instance 时，再次调用 `source.close()`。
+  取消后，会话关闭会在释放 Task 后抛出原生清理错误，包括正在进行的读取或流工厂抛出的错误。
+  `source.close()` 开始后，所有已有会话会并发进入关闭并拒收新调用，新建会话会收到 `source_closed`。
+  若首次关闭超时，重试时仍会收到两次调用之间发生的原生清理错误。
+- 同一对象实例的同一方法同一时刻只能由一个活动 `SourceSession` 插桩（重复插桩报
+  `source_already_instrumented`）；并发处理多会话时请按请求使用独立对象实例或按会话直接包装函数。
+
+完整示例见 [TypeScript Source 示例](../../../../../src/aw/sdk/typescript/examples/language-source.mjs)
+与 [Python Source 示例](../../../../../src/aw/sdk/python/examples/language_source.py)。
+
+如需直接调用底层语义回调，可配置名为 `app` 的目标并保留应用普通 `argv`，安装候选包后设置
+`AW_SOCKET`，运行
 [TypeScript 示例](../../../../../src/aw/sdk/typescript/examples/application.mjs)或
 [Python 示例](../../../../../src/aw/sdk/python/examples/application.py)。示例在工具执行前
 调用 `task.emit`，采用阻断决定，执行后提交结果观察并释放 Task；具体决定来自配置策略。
@@ -185,9 +235,9 @@ TypeScript 与异步 Python SDK 共用注册、Ready、Task/Scope、Provider 执
 
 通用入口支持输入提交、工具调用前和工具调用后，字段与效果见
 [通用语义入口](../../../../../src/aw/docs/design/zh/runtime/native-sdk.md#通用语义入口)。
-具有这些语义的应用可直接复用，无需新增框架专属 Rust Adapter。原生 Hook 或可选
+具有这些语义的应用可通过 SDK 即可复用，无需新增框架专属 Rust Adapter。原生 Hook 或语言级
 插桩来源可向同一入口供给事件；自动发现与覆盖选择属于后续交付。
-Qoder 的丰富原生效果继续使用下述集成，Python/QwenPaw 见 [Python SDK](python-sdk.md)。
+Qoder 的丰富原生效果沿用下述框架集成，Python/QwenPaw 见 [Python SDK](python-sdk.md)。
 
 生命周期 RPC 默认超时 1000 ms；回调 RPC 至少容纳准入事件预算加 1000 ms 传输余量。
 Service 在有序步骤间持续使用同一事件截止时间。

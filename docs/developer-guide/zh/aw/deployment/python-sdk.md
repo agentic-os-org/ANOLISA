@@ -9,7 +9,9 @@
 AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` 的既有发行版会拒绝
 连接；协作式控制还要求 `aw-sdk-control/v1`。安装语言包不会升级 AW。
 
-SDK 也支持无框架依赖的 `task.emit` 语义回调，见 [通用应用接入](native-sdk.md#通用应用接入)。
+通用语言级 Source Runtime（`aw_sdk.sources`）与无框架语义回调（`task.emit`）见
+[通用应用接入](native-sdk.md#通用应用接入)。工具接收类实例时，参照其中的
+`snapshot_arg` 约定提供参数副本，使流迭代沿用已检查的输入。
 
 ## 安装与接入
 

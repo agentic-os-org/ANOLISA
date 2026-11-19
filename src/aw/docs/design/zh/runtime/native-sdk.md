@@ -49,10 +49,11 @@ instance 身份由 Service 填充。来源提供稳定的原生 session/call 身
 未配置策略与传输降级分别报告。`install(routes)` 负责确认实际安装的边界，控制效果
 须经应用侧采用验证后才能声明。
 
-16 个 Hook 保留为统一语义词汇，本入口当前实现上述三个边界。原生 Hook、语言插桩
-可在验证语义及采用行为后向此入口供给事件；Qoder、QwenPaw 已有集成继续使用原生
-映射承接更丰富的效果。自动发现、逐 Hook 来源选择、通用 Python/JavaScript 插桩后端
-和 ptrace 属于后续交付；dowhen 不成为必选依赖。
+公共协议使用统一的 16 个 Hook。Python 的 `aw_sdk.sources` 和 TypeScript 的
+`@anolisa/aw-sdk/sources` 通过显式包装函数或对象方法插桩实现上述三个边界，每个会话使用
+一个 Admission 和一个 Task。Qoder、QwenPaw 通过原生映射支持更丰富的效果。
+原生 Hook 来源验证了事件语义和采用行为后也可接入同一入口。显式包装复用现有执行引擎，
+可独立于 dowhen 运行。自动发现、逐 Hook 来源选择与 ptrace 属于后续交付。
 
 ## Ready、任务 Scope 与回调
 
