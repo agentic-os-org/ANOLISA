@@ -439,6 +439,471 @@ fn verify_guide_exit(signal: Option<i32>) {
     );
 }
 
+// POSIX-only PTY driving with no /proc or vt100 dependency, so these cases also run on macOS.
+struct GuidePty {
+    master: fs::File,
+    child: std::process::Child,
+    raw: Vec<u8>,
+    buffer: [u8; 4096],
+    _root: tempfile::TempDir,
+}
+
+impl GuidePty {
+    fn spawn() -> Self {
+        use std::os::fd::AsRawFd;
+
+        // Guide admits only native executables; run-test-gates.sh builds this sibling before raw_cli.
+        let core = Path::new(env!("CARGO_BIN_EXE_cosh-shell"))
+            .parent()
+            .expect("binary directory")
+            .join("cosh-core");
+        assert!(
+            core.is_file(),
+            "build the core first: cargo build -p cosh-core --bin cosh-core ({})",
+            core.display()
+        );
+        let root = tempfile::tempdir().unwrap();
+        let size = nix::libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = nix::pty::openpty(Some(&size), None).unwrap();
+        let master = fs::File::from(pty.master);
+        let slave = fs::File::from(pty.slave);
+        let flags = unsafe { nix::libc::fcntl(master.as_raw_fd(), nix::libc::F_GETFL) };
+        assert_eq!(
+            unsafe {
+                nix::libc::fcntl(
+                    master.as_raw_fd(),
+                    nix::libc::F_SETFL,
+                    flags | nix::libc::O_NONBLOCK,
+                )
+            },
+            0
+        );
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+        command
+            .arg0("cosh")
+            .arg("guide")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.path())
+            .env("TERM", "xterm-256color")
+            .env("COSH_SHELL_LANG", "en-US")
+            .env("COSH_CORE_PATH", &core)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave.try_clone().unwrap()));
+        unsafe {
+            command.pre_exec(|| {
+                if nix::libc::setsid() < 0
+                    || nix::libc::ioctl(nix::libc::STDIN_FILENO, nix::libc::TIOCSCTTY as _, 0) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        drop(command);
+        drop(slave);
+        Self {
+            master,
+            child,
+            raw: Vec::new(),
+            buffer: [0u8; 4096],
+            _root: root,
+        }
+    }
+
+    fn drain(&mut self, millis: u64) {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + Duration::from_millis(millis);
+        while std::time::Instant::now() < deadline {
+            match self.master.read(&mut self.buffer) {
+                Ok(0) => break,
+                Ok(count) => self.raw.extend_from_slice(&self.buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn pump(&mut self, marker: &str) -> bool {
+        self.pump_from(0, marker)
+    }
+
+    fn pump_from(&mut self, start: usize, marker: &str) -> bool {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match self.master.read(&mut self.buffer) {
+                Ok(0) => break,
+                Ok(count) => self.raw.extend_from_slice(&self.buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+            if String::from_utf8_lossy(&self.raw[start..]).contains(marker) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        let _ = self.master.write_all(bytes);
+    }
+
+    fn open_ai_management(&mut self) {
+        assert!(
+            self.pump("Cosh setup and getting started"),
+            "guide home did not render: {}",
+            String::from_utf8_lossy(&self.raw)
+        );
+        self.send(b"\x1b[B\x1b[B\r");
+        assert!(
+            self.pump("See how to ask"),
+            "AI page did not render: {}",
+            String::from_utf8_lossy(&self.raw)
+        );
+        self.send(b"\x1b[B\r");
+        assert!(
+            self.pump("Provider Management"),
+            "AI management did not open: {}",
+            String::from_utf8_lossy(&self.raw)
+        );
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        use std::os::fd::AsRawFd;
+        let size = nix::libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe { nix::libc::ioctl(self.master.as_raw_fd(), nix::libc::TIOCSWINSZ as _, &size) },
+            0
+        );
+        let _ = unsafe { nix::libc::kill(self.child.id() as i32, nix::libc::SIGWINCH) };
+    }
+
+    fn signal(&mut self, signal: i32) {
+        let _ = unsafe { nix::libc::kill(self.child.id() as i32, signal) };
+    }
+
+    fn wait_exit(&mut self, secs: u64) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            self.drain(40);
+            if let Some(status) = self.child.try_wait().unwrap() {
+                self.drain(120);
+                return Some(status);
+            }
+        }
+        None
+    }
+
+    fn finish(mut self) -> String {
+        self.send(b"\x04");
+        self.drain(900);
+        self.send(b"\x1b");
+        self.drain(300);
+        self.send(b"q");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut status = None;
+        while std::time::Instant::now() < deadline {
+            self.drain(40);
+            status = self.child.try_wait().unwrap();
+            if status.is_some() {
+                break;
+            }
+        }
+        if status.is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            panic!(
+                "guide did not exit within 10s of the quit keys: {}",
+                String::from_utf8_lossy(&self.raw)
+            );
+        }
+        let status = status.expect("exit status");
+        let output = String::from_utf8_lossy(&self.raw).to_string();
+        assert!(
+            status.success(),
+            "guide exited unexpectedly: {status}\n{output}"
+        );
+        output
+    }
+}
+
+impl Drop for GuidePty {
+    fn drop(&mut self) {
+        // An assertion can unwind before finish(), so the child must not outlive the test.
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[test]
+fn guide_ai_management_keeps_a_single_alternate_screen_session() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    let output = pty.finish();
+    assert_eq!(
+        output.matches("\x1b[?1049h").count(),
+        1,
+        "guide entered the alternate screen more than once: {output}"
+    );
+    assert_eq!(
+        output.matches("\x1b[?1049l").count(),
+        1,
+        "AI management handed the alternate screen back to Bash: {output}"
+    );
+}
+
+#[test]
+fn guide_ai_management_repaints_on_resize_without_a_keypress() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    let before = pty.raw.len();
+    pty.resize(30, 120);
+    pty.drain(1500);
+    let repaint = String::from_utf8_lossy(&pty.raw[before..]).to_string();
+    assert!(
+        repaint.contains("Provider Management"),
+        "resize did not repaint the management panel without input: {repaint}"
+    );
+    let output = pty.finish();
+    assert_eq!(
+        output.matches("\x1b[?1049h").count(),
+        1,
+        "resize reopened the alternate screen: {output}"
+    );
+}
+
+#[test]
+fn guide_ai_management_fits_a_shrunk_window_without_a_keypress() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    let before = pty.raw.len();
+    pty.resize(16, 40);
+    pty.drain(1500);
+    let repaint = String::from_utf8_lossy(&pty.raw[before..]).to_string();
+    assert!(
+        repaint.contains("Provider Management"),
+        "shrinking did not repaint the management panel without input: {repaint}"
+    );
+    assert!(
+        repaint.contains("Keys:"),
+        "shrunk management panel lost its action hints: {repaint}"
+    );
+    let panel = repaint
+        .split_once("\x1b[H\x1b[2J")
+        .map(|(_, panel)| panel)
+        .unwrap_or(&repaint);
+    let lines: Vec<String> = panel
+        .lines()
+        .map(|line| {
+            let mut plain = String::new();
+            let mut chars = line.chars();
+            while let Some(current) = chars.next() {
+                if current == '\x1b' {
+                    chars
+                        .by_ref()
+                        .take_while(|c| !c.is_ascii_alphabetic())
+                        .count();
+                    continue;
+                }
+                plain.push(current);
+            }
+            plain
+        })
+        .collect();
+    assert!(
+        lines.len() <= 16,
+        "shrunk management panel used {} lines in a 16-row window: {lines:?}",
+        lines.len()
+    );
+    for line in &lines {
+        assert!(
+            line.chars().count() <= 40,
+            "shrunk management panel kept a wider layout: {line:?}"
+        );
+    }
+    let output = pty.finish();
+    assert_eq!(
+        output.matches("\x1b[?1049h").count(),
+        1,
+        "shrinking reopened the alternate screen: {output}"
+    );
+}
+
+#[test]
+fn guide_ai_management_returns_to_the_wizard_on_sigint() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    let before = pty.raw.len();
+    pty.signal(nix::libc::SIGINT);
+    assert!(
+        pty.pump_from(before, "Cancelled. No configuration changed."),
+        "SIGINT during AI management did not repaint the wizard: {}",
+        String::from_utf8_lossy(&pty.raw[before..])
+    );
+    let output = pty.finish();
+    assert_eq!(
+        output.matches("\x1b[?1049h").count(),
+        1,
+        "returning from AI management reopened the alternate screen: {output}"
+    );
+    assert_eq!(
+        output.matches("\x1b[?1049l").count(),
+        1,
+        "returning from AI management handed the screen back to Bash: {output}"
+    );
+}
+
+#[test]
+fn guide_ai_management_restores_the_terminal_on_sigterm() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    pty.signal(nix::libc::SIGTERM);
+    let status = pty.wait_exit(10);
+    let output = String::from_utf8_lossy(&pty.raw).to_string();
+    assert!(
+        status.is_some(),
+        "guide survived SIGTERM during AI management: {output}"
+    );
+    assert_eq!(
+        output.matches("\x1b[?1049l").count(),
+        1,
+        "SIGTERM during AI management left the alternate screen behind: {output}"
+    );
+    let leave = output.rfind("\x1b[?1049l").expect("alternate screen exit");
+    let show = output.rfind("\x1b[?25h").expect("cursor restore");
+    assert!(
+        show > leave,
+        "SIGTERM during AI management did not restore the cursor: {output}"
+    );
+}
+
+#[test]
+fn guide_add_service_template_list_fits_a_16_row_window() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    pty.resize(16, 40);
+    pty.drain(1200);
+    // A configured profile lists existing services first, so reach "Add AI service"
+    // by the focused row's own text instead of assuming a menu position.
+    let mut focused = false;
+    for _ in 0..6 {
+        let tail =
+            String::from_utf8_lossy(&pty.raw[pty.raw.len().saturating_sub(2400)..]).to_string();
+        if ansi_stripped(&tail)
+            .lines()
+            .any(|line| line.contains('>') && line.contains("Add AI service"))
+        {
+            focused = true;
+            break;
+        }
+        pty.send(b"\x1b[B");
+        pty.drain(500);
+    }
+    assert!(
+        focused,
+        "could not focus Add AI service: {}",
+        String::from_utf8_lossy(&pty.raw)
+    );
+    let before = pty.raw.len();
+    pty.send(b"\r");
+    assert!(
+        pty.pump_from(before, "Authentication Required"),
+        "Add AI service did not open the template list: {}",
+        String::from_utf8_lossy(&pty.raw[before..])
+    );
+    pty.drain(900);
+    let page = String::from_utf8_lossy(&pty.raw[before..]).to_string();
+    assert!(
+        page.contains("Keys:") && page.contains("Esc"),
+        "template list kept question-style keys instead of navigation: {page}"
+    );
+    assert!(
+        !page.contains("Enter send"),
+        "template list still advertises the question send action: {page}"
+    );
+    assert!(
+        card_rows(&page).is_some_and(|rows| (1..=15).contains(&rows)),
+        "template card must be a complete bordered card of 1..=15 rows in a 16-row window, got {:?}: {page}",
+        card_rows(&page)
+    );
+
+    let moved = pty.raw.len();
+    pty.send(b"\x1b[B");
+    pty.drain(900);
+    let after = String::from_utf8_lossy(&pty.raw[moved..]).to_string();
+    assert!(
+        ansi_stripped(&after)
+            .lines()
+            .any(|line| line.contains("> [2]")),
+        "Down did not move the template focus to the second choice: {after}"
+    );
+    assert!(
+        card_rows(&after).is_some_and(|rows| (1..=15).contains(&rows)),
+        "moving the focus must keep a complete bordered card of 1..=15 rows, got {:?}: {after}",
+        card_rows(&after)
+    );
+    let output = pty.finish();
+    assert_eq!(
+        output.matches("\x1b[?1049h").count(),
+        1,
+        "the template list reopened the alternate screen: {output}"
+    );
+}
+
+fn ansi_stripped(segment: &str) -> String {
+    let mut plain = String::new();
+    let mut chars = segment.chars();
+    while let Some(current) = chars.next() {
+        if current == '\x1b' {
+            chars
+                .by_ref()
+                .take_while(|c| !c.is_ascii_alphabetic())
+                .count();
+            continue;
+        }
+        plain.push(current);
+    }
+    plain
+}
+
+/// Physical rows a freshly written panel card occupies, including its trailing newline.
+///
+/// The card is written from the top of the erased panel with one newline per line, so
+/// this is exactly how many rows scroll past on a terminal of that height. `None` means
+/// no complete bordered card was written, which must fail rather than read as zero rows.
+fn card_rows(segment: &str) -> Option<usize> {
+    let start = segment.find('╭')?;
+    let end = segment.rfind('╰')?;
+    if end < start {
+        return None;
+    }
+    let tail = &segment[start..];
+    let bottom_line_end = tail[end - start..]
+        .find('\n')
+        .map(|offset| end - start + offset + 1)
+        .unwrap_or(tail.len());
+    Some(tail[..bottom_line_end].matches('\n').count())
+}
+
 #[test]
 fn guide_management_uses_environment_language_while_plain_uses_saved_language() {
     let root = tempfile::tempdir().unwrap();

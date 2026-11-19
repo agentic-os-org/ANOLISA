@@ -120,15 +120,23 @@ impl GuideInput {
                 if let Some(key) = self.decoder.expire() {
                     return Input::Key(key);
                 }
-                let size = ratatui::crossterm::terminal::size().ok();
-                if size != self.size {
-                    self.size = size;
+                if self.size_changed() {
                     return Input::Resize;
                 }
                 Input::Tick
             }
             Batch::Lost => Input::Lost,
         }
+    }
+
+    /// Reports a terminal geometry change once, so a hosted task can redraw without waiting for a key.
+    pub(crate) fn size_changed(&mut self) -> bool {
+        let size = ratatui::crossterm::terminal::size().ok();
+        if size == self.size {
+            return false;
+        }
+        self.size = size;
+        true
     }
 
     pub(crate) fn read_raw(&mut self) -> Batch {

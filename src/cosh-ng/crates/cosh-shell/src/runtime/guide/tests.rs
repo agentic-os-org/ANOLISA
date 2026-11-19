@@ -314,6 +314,38 @@ fn health_save_reports_the_next_login_scope() {
 }
 
 #[test]
+fn health_save_states_the_saved_result_once() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
+    session.cursor = 0;
+    for _ in 0..3 {
+        session.handle(key(KeyCode::Down));
+    }
+    session.handle(key(KeyCode::Enter));
+    session.handle(key(KeyCode::Down));
+    session.handle(key(KeyCode::Enter));
+    let message = session.view().message.unwrap();
+    assert_eq!(message.matches("Saved").count(), 1, "{message}");
+}
+
+#[test]
+fn login_confirmation_hint_follows_the_focused_action() {
+    let (_guard, _temp, mut session) = login_session(login_status(
+        "/bin/bash",
+        Some("/bin/bash"),
+        "restored",
+        false,
+        false,
+    ));
+    session.handle(key(KeyCode::Enter));
+    let hint = session.view().hint;
+    assert!(hint.contains("Cancel"), "{hint}");
+    session.handle(key(KeyCode::Up));
+    let hint = session.view().hint;
+    assert!(hint.contains("Confirm"), "{hint}");
+}
+
+#[test]
 fn ctrl_c_exits_from_any_page() {
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths.clone(), I18n::new(Language::EnUs));
@@ -1153,6 +1185,24 @@ fn rereview_fix_unknown_login_stays_read_only_after_reread_and_reentry() {
         login_session(login_status("/bin/bash", None, "unmanaged", false, false));
     session.select_home_entry(1);
     session.handle(key(KeyCode::Enter));
+    // A refusal before any grant is certain: it must not hold later writes,
+    // and it must not claim the change may already be committed.
+    session.finish_login("set", Outcome::Denied);
+    assert!(
+        session.blocked_writes.is_empty(),
+        "a certain pre-write refusal must not hold writes: {:?}",
+        session.blocked_writes
+    );
+    let denied = session.message.clone().unwrap_or_default();
+    assert!(
+        denied.contains("Administrator authorization did not complete"),
+        "{denied}"
+    );
+    assert!(!denied.contains("may already be committed"), "{denied}");
+    assert!(
+        !denied.contains("see the sudo message"),
+        "resume clears sudo's output, so the message must not promise to show it: {denied}"
+    );
     session.finish_login("set", Outcome::Unconfirmed);
     assert!(session.blocked_writes.contains(&ActionKind::LoginShell));
     for reread in [
@@ -1345,17 +1395,37 @@ fn sudo_handoff_names_the_target_and_the_terminal_steps_without_a_wizard_page() 
     assert!(set.contains("目标账号："), "{set}");
     assert!(set.contains("UID"), "{set}");
     assert!(set.contains("将默认登录 Shell 设为 /usr/bin/cosh"), "{set}");
-    assert!(
-        set.contains("如 sudo 要求密码，请在当前终端输入。"),
-        "{set}"
-    );
-    assert!(set.contains("输入后按 Enter 继续。"), "{set}");
-    assert!(set.contains("输入通常不显示字符或星号。"), "{set}");
     assert!(set.contains("Ctrl-C 请求取消。"), "{set}");
-    assert!(set.contains("无需密码时直接继续。"), "{set}");
     assert!(!set.contains("Esc"), "{set}");
+    // The fixture account is root, and sudo never asks root for a password.
+    assert!(!set.contains("如 sudo 要求密码"), "{set}");
+    assert!(!set.contains("输入后按 Enter 继续"), "{set}");
+    assert!(!set.contains("输入通常不显示字符或星号"), "{set}");
+    assert!(!set.contains("无需密码时直接继续"), "{set}");
     let restore = session.login_handoff_lines("restore").join("\n");
     assert!(restore.contains("恢复为 /bin/bash"), "{restore}");
+
+    let mut unprivileged = login_status("/bin/bash", Some("/bin/bash"), "restored", false, false);
+    unprivileged.username = "coshtest".into();
+    unprivileged.uid = 1000;
+    session.snapshot.login = Ok(unprivileged);
+    let unprivileged_set = session.login_handoff_lines("set").join("\n");
+    assert!(
+        unprivileged_set.contains("输入后按 Enter 继续。"),
+        "{unprivileged_set}"
+    );
+    assert!(
+        unprivileged_set.contains("如 sudo 要求密码，请在当前终端输入。"),
+        "{unprivileged_set}"
+    );
+    assert!(
+        unprivileged_set.contains("输入通常不显示字符或星号。"),
+        "{unprivileged_set}"
+    );
+    assert!(
+        unprivileged_set.contains("无需密码时直接继续。"),
+        "{unprivileged_set}"
+    );
 }
 
 #[test]

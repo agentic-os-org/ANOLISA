@@ -188,8 +188,16 @@ impl TaskOutcome {
                 &[("actions", &Self::joined(i18n, &unknown))],
             ));
         }
+        let cancelled_without_change = self.reason == EndReason::Cancelled && parts.is_empty();
         if parts.is_empty() {
-            parts.push(i18n.t(MessageId::GuideWizardResultNone).to_string());
+            parts.push(
+                i18n.t(if cancelled_without_change {
+                    MessageId::GuideWizardResultCancelledNone
+                } else {
+                    MessageId::GuideWizardResultNone
+                })
+                .to_string(),
+            );
         }
         for (kind, error) in &self.failures {
             parts.push(i18n.format(
@@ -204,13 +212,13 @@ impl TaskOutcome {
             ));
         }
         match self.reason {
-            EndReason::Cancelled => {
+            EndReason::Cancelled if !cancelled_without_change => {
                 parts.push(i18n.t(MessageId::GuideWizardResultCancelled).to_string())
             }
             EndReason::Interrupted => {
                 parts.push(i18n.t(MessageId::GuideWizardResultInterrupted).to_string())
             }
-            EndReason::Done | EndReason::Failed => {}
+            EndReason::Done | EndReason::Failed | EndReason::Cancelled => {}
         }
         if self.committed_any() || !partial.is_empty() || self.unconfirmed_any() {
             parts.push(i18n.t(MessageId::GuideWizardResultScope).to_string());
@@ -226,6 +234,17 @@ mod tests {
 
     fn i18n() -> I18n {
         I18n::new(Language::EnUs)
+    }
+
+    #[test]
+    fn cancel_without_any_change_does_not_claim_kept_changes() {
+        let outcome = TaskOutcome {
+            reason: EndReason::Cancelled,
+            ..Default::default()
+        };
+        let message = outcome.message(i18n());
+        assert!(message.contains("No configuration changed."), "{message}");
+        assert!(!message.contains("saved changes are kept"), "{message}");
     }
 
     #[test]

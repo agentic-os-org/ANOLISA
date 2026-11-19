@@ -503,7 +503,25 @@ impl GuideStore {
         runtime: Option<&RuntimeState>,
         claim: &Claim,
     ) -> Result<bool, Error> {
-        if claim.runtime_generation != runtime.is_some() {
+        self.guidance_generation_matches(runtime, claim.runtime_generation, &claim.generation)
+    }
+
+    /// Reads the same effective guidance state as a claim check without spending an invitation.
+    pub(crate) fn guidance_still_enabled(
+        &self,
+        runtime: Option<&RuntimeState>,
+        snapshot: &GuideSnapshot,
+    ) -> Result<bool, Error> {
+        self.guidance_generation_matches(runtime, snapshot.runtime_generation, &snapshot.generation)
+    }
+
+    fn guidance_generation_matches(
+        &self,
+        runtime: Option<&RuntimeState>,
+        expected_runtime: bool,
+        expected_generation: &str,
+    ) -> Result<bool, Error> {
+        if expected_runtime != runtime.is_some() {
             return Err(Error::RuntimeUnavailable);
         }
         let _lock = self.lock()?;
@@ -522,7 +540,7 @@ impl GuideStore {
             None => None,
         };
         let generation = generation_token(&preferences.generation, runtime_generation.as_deref());
-        Ok(generation == claim.generation)
+        Ok(generation == expected_generation)
     }
 
     fn read_claims(&self) -> Result<Claims, Error> {

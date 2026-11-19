@@ -4,8 +4,8 @@ use std::io::{self, Write};
 
 use crate::adapter::AdapterInstance;
 use crate::runtime::prelude::{
-    NoticePanelModel, QuestionInputFeedback, QuestionPanelModel, QuestionSelectionMode,
-    RatatuiInlineRenderer,
+    NoticePanelModel, QuestionInputFeedback, QuestionPanelModel, QuestionPanelPresentation,
+    QuestionSelectionMode, RatatuiInlineRenderer,
 };
 
 use super::provider_management::{core_auth_delete, load_core_auth_state, AuthConfigureFailure};
@@ -102,6 +102,7 @@ pub(super) fn render_delete_confirmation<W: Write>(
     provider_idx: usize,
     panel_id: &str,
     renderer: &RatatuiInlineRenderer,
+    presentation: QuestionPanelPresentation<'static>,
     output: &mut W,
 ) -> io::Result<usize> {
     let provider = auth
@@ -113,7 +114,7 @@ pub(super) fn render_delete_confirmation<W: Write>(
         provider.name
     );
     let options = vec!["Cancel".to_string(), "Delete provider".to_string()];
-    renderer.write_question_panel(
+    renderer.write_question_panel_with_presentation(
         output,
         QuestionPanelModel {
             id: panel_id,
@@ -126,6 +127,7 @@ pub(super) fn render_delete_confirmation<W: Write>(
             selection_mode: QuestionSelectionMode::Single,
             input_feedback: QuestionInputFeedback::Disabled,
         },
+        presentation,
     )
 }
 

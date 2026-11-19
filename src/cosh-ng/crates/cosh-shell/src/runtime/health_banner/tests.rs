@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::guide::GuideStore;
+use crate::config::guide::{ClaimDecision, ClaimRequest, GuideStore, InviteKind};
 use crate::diagnostics::health::{
     HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue, HealthScanReport,
 };
@@ -445,6 +445,52 @@ fn management_commands_do_not_open_the_language_config() {
     assert!(
         opened.is_empty(),
         "management opened language config: {opened:?}"
+    );
+}
+
+#[test]
+fn visible_summary_repeats_the_full_entry_without_spending_the_login_invitation() {
+    let (_dir, store) = fixture();
+    let snapshot = store.snapshot(None).unwrap();
+    let report = report();
+    let renderer = RatatuiInlineRenderer::plain_with_width(80);
+    for now in [1000, 1001] {
+        let prepared = presentation::prepare(
+            &report,
+            &renderer,
+            (&store, None, &snapshot),
+            Language::EnUs,
+            true,
+            now,
+        );
+        let text = prepared.final_text(&store, None);
+        assert!(text.contains("Type cosh to ask AI"), "{now}: {text}");
+    }
+    // Read the claim state directly instead of inferring it from the wording:
+    // the visible summary must leave the login-entry invitation unspent.
+    let request = ClaimRequest {
+        kind: InviteKind::LoginEntry,
+        host: report.host.as_deref().unwrap_or("local"),
+        problem: "login-entry",
+        session: report.scan_id.as_str(),
+    };
+    let first = store.claim(None, &snapshot, request, 1002).unwrap();
+    assert!(
+        matches!(first, ClaimDecision::Claimed(_)),
+        "the visible summary spent the login-entry claim: {first:?}"
+    );
+    // Same request again: the claim machinery does suppress a second take, so
+    // the assertion above can actually fail.
+    let request = ClaimRequest {
+        kind: InviteKind::LoginEntry,
+        host: report.host.as_deref().unwrap_or("local"),
+        problem: "login-entry",
+        session: report.scan_id.as_str(),
+    };
+    let second = store.claim(None, &snapshot, request, 1003).unwrap();
+    assert!(
+        matches!(second, ClaimDecision::Suppressed),
+        "a second take must be suppressed, otherwise the check above is vacuous: {second:?}"
     );
 }
 

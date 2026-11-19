@@ -999,6 +999,103 @@ fn missing_role_keeps_authorization_wait_and_qr() {
     finish_probe(&mut state);
     assert_eq!(state.auth.ecs.as_ref().unwrap().stage, Stage::Waiting);
     assert!(question(&state).2);
+
+    // The guide challenge body is budgeted: on a 16-row screen the QR block
+    // cannot fit, but the full copyable URL must survive; the QR is all-or-nothing.
+    let base = question(&state).0;
+    let url = "https://example.invalid/authorize";
+    let qr = crate::auth::prompt::generate_qr_text(url).expect("fixture QR");
+    let bounded =
+        crate::auth::prompt::ecs_challenge_body(&base, "i-test", url, Some(&qr), Some(9), 36);
+    assert!(
+        !bounded.contains('\u{2588}'),
+        "a 16-row guide panel must omit the QR whole: {bounded}"
+    );
+    assert!(
+        bounded.contains(&format!("URL: {url}")),
+        "the full URL must survive the QR omission: {bounded}"
+    );
+    let tiny =
+        crate::auth::prompt::ecs_challenge_body(&base, "i-test", url, Some(&qr), Some(5), 36);
+    assert_eq!(
+        tiny, base,
+        "when even the URL cannot fit, keep the actionable status hint"
+    );
+    let roomy =
+        crate::auth::prompt::ecs_challenge_body(&base, "i-test", url, Some(&qr), Some(40), 36);
+    assert!(
+        roomy.contains('\u{2588}') && roomy.contains("ECS Instance ID: i-test"),
+        "a roomy panel keeps the full legacy body: {roomy}"
+    );
+    let unbounded =
+        crate::auth::prompt::ecs_challenge_body(&base, "i-test", url, Some(&qr), None, 36);
+    assert!(
+        unbounded.contains('\u{2588}') && unbounded.contains(&format!("URL: {url}")),
+        "an unbounded panel keeps the legacy body: {unbounded}"
+    );
+
+    // End-to-end at the review's 40x16 entry: the TimedOut challenge keeps a
+    // visible Retry and the full URL, and drops the QR whole.
+    state.auth.host = crate::auth::host::AuthHost::Guide;
+    state.auth.ecs.as_mut().unwrap().stage = Stage::TimedOut;
+    let (base, options, show_link) = question(&state);
+    assert!(show_link);
+    assert_eq!(options.len(), 1);
+    let renderer = crate::runtime::prelude::RatatuiInlineRenderer::with_width(40);
+    let i18n = I18n::new(state.language);
+    let phase = &state.auth.state.as_ref().unwrap().phase;
+    let presentation = crate::auth::prompt::auth_presentation(
+        crate::auth::host::AuthHost::Guide,
+        i18n,
+        phase,
+        options.is_empty(),
+        Some(16),
+    );
+    let probe = crate::runtime::prelude::QuestionPanelModel {
+        id: "challenge-16",
+        question: &base,
+        options: &options,
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: false,
+        selection_mode: crate::types::QuestionSelectionMode::Single,
+        input_feedback: crate::runtime::prelude::QuestionInputFeedback::Disabled,
+    };
+    let budget = renderer.question_body_budget(&probe, i18n, presentation);
+    let body = crate::auth::prompt::ecs_challenge_body(
+        &base,
+        "i-test",
+        url,
+        Some(&qr),
+        budget,
+        renderer.question_body_width(),
+    );
+    let model = crate::runtime::prelude::QuestionPanelModel {
+        question: &body,
+        ..probe
+    };
+    let lines = renderer.question_panel_lines_with_presentation(model, presentation);
+    assert!(
+        lines.len() <= 15,
+        "40x16 challenge must fit the screen: {} lines: {lines:?}",
+        lines.len()
+    );
+    let text = lines.join("\n");
+    assert!(
+        !text.contains('\u{2588}'),
+        "QR must be omitted whole: {text}"
+    );
+    assert!(
+        text.contains("> [1] Check again"),
+        "Retry must stay visible: {text}"
+    );
+    assert!(text.contains("Keys:"), "{text}");
+    assert!(text.contains("ECS Instance ID: i-test"), "{text}");
+    assert!(
+        text.contains("https://example.invalid/"),
+        "the full URL must survive: {text}"
+    );
 }
 
 #[test]

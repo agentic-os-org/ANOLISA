@@ -427,7 +427,7 @@ mod tests {
             MessageId::GuideWizardDetailHint as usize
         );
         assert_eq!(
-            MessageId::GuideWizardCleanupUnconfirmed as usize + 1,
+            MessageId::GuideWizardLoginPrivilegeDenied as usize + 1,
             MessageId::ALL.len()
         );
     }
@@ -459,6 +459,32 @@ mod tests {
             zh.t(MessageId::QuestionAnswerNotSentBody),
             "问题仍在等待回答，请重试或按 Ctrl+C 取消。"
         );
+        let zh_title = zh.t(MessageId::AuthProviderManagementQuestion);
+        assert!(zh_title.contains("服务管理"), "{zh_title}");
+        assert!(!zh_title.contains("Provider Management"), "{zh_title}");
+        assert!(
+            en.t(MessageId::AuthProviderManagementQuestion)
+                .contains("Provider Management"),
+            "{}",
+            en.t(MessageId::AuthProviderManagementQuestion)
+        );
+        let zh_delete = zh.t(MessageId::GuideAuthDeleteKeys);
+        assert!(zh_delete.contains("确认"), "{zh_delete}");
+        assert!(!zh_delete.contains("发送"), "{zh_delete}");
+        assert!(
+            en.t(MessageId::GuideAuthDeleteKeys)
+                .contains("Enter confirm"),
+            "{}",
+            en.t(MessageId::GuideAuthDeleteKeys)
+        );
+        let zh_field = zh.t(MessageId::GuideAuthFieldKeys);
+        assert!(zh_field.contains("输入"), "{zh_field}");
+        assert!(zh_field.contains("提交"), "{zh_field}");
+        assert!(!zh_field.contains("发送"), "{zh_field}");
+        let en_field = en.t(MessageId::GuideAuthFieldKeys);
+        assert!(en_field.contains("Type the value"), "{en_field}");
+        assert!(en_field.contains("Enter submit"), "{en_field}");
+        assert!(!en_field.contains("send"), "{en_field}");
     }
 
     #[test]

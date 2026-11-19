@@ -1,5 +1,192 @@
 use super::*;
 use crate::ui::display_width;
+use crate::ui::QuestionPanelPresentation;
+
+/// Models the hosted panel write protocol on a rows x cols screen: full-width
+/// lines land at column 0, each trailing newline moves down one row, and a
+/// newline on the last row scrolls the top line away.
+fn visible_rows_after_write_from_top(written: &[u8], rows: usize, cols: usize) -> Vec<String> {
+    let mut screen: Vec<Vec<char>> = vec![vec![' '; cols]; rows];
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    for byte in written {
+        match byte {
+            b'\n' => {
+                if cursor_row + 1 == rows {
+                    screen.remove(0);
+                    screen.push(vec![' '; cols]);
+                } else {
+                    cursor_row += 1;
+                }
+                cursor_col = 0;
+            }
+            b'\r' => cursor_col = 0,
+            _ => {
+                if cursor_col < cols {
+                    screen[cursor_row][cursor_col] = *byte as char;
+                    cursor_col += 1;
+                }
+            }
+        }
+    }
+    screen
+        .iter()
+        .map(|row| row.iter().collect::<String>().trim_end().to_string())
+        .collect()
+}
+
+#[test]
+fn bounded_question_panel_keeps_title_footer_and_the_focused_choice() {
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let options: Vec<String> = (1..=9).map(|idx| format!("Provider choice {idx}")).collect();
+    let model = QuestionPanelModel {
+        id: "q-bounded",
+        question: "Select your AI provider",
+        options: &options,
+        selected_option: 8,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: false,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+    let presentation = QuestionPanelPresentation {
+        max_rows: Some(10),
+        ..Default::default()
+    };
+    let lines = renderer.question_panel_lines_with_presentation(model.clone(), presentation);
+    assert!(lines.len() <= 10, "{} lines: {lines:?}", lines.len());
+    let text = lines.join("\n");
+    assert!(text.contains("Agent question"), "{text}");
+    assert!(text.contains("Select your AI provider"), "{text}");
+    assert!(text.contains("> [9] Provider choice 9"), "{text}");
+    assert!(text.contains("Keys:"), "{text}");
+    let unbounded = renderer.question_panel_lines(model.clone());
+    assert!(unbounded.len() > lines.len(), "{}", unbounded.len());
+
+    // The trailing newline after the last line also consumes a terminal row, so a
+    // panel capped at exactly N lines scrolls its title off an N-row screen.
+    assert!(
+        lines.len() <= 9,
+        "bounded panel must reserve the last terminal row: {} lines",
+        lines.len()
+    );
+    let mut written = Vec::new();
+    let height = renderer
+        .write_question_panel_with_presentation(&mut written, model.clone(), presentation)
+        .expect("write bounded panel");
+    assert_eq!(height, lines.len());
+    let screen = visible_rows_after_write_from_top(&written, 10, 40);
+    assert!(
+        screen[0].contains("Agent question"),
+        "title scrolled off the top: {screen:?}"
+    );
+    assert!(
+        screen.iter().any(|row| row.contains("> [9] Provider choice 9")),
+        "focused choice lost: {screen:?}"
+    );
+    assert!(
+        screen.iter().any(|row| row.contains("Keys:")),
+        "footer lost: {screen:?}"
+    );
+
+    let tall_question = "status line\n".repeat(30);
+    let tall_model = QuestionPanelModel {
+        id: "q-bounded-tall",
+        question: &tall_question,
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: false,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::Disabled,
+    };
+    let tall_lines =
+        renderer.question_panel_lines_with_presentation(tall_model, presentation);
+    assert!(
+        tall_lines.len() <= 9,
+        "tall question must stay bounded: {} lines",
+        tall_lines.len()
+    );
+    let tall_text = tall_lines.join("\n");
+    assert!(tall_text.contains("Agent question"), "{tall_text}");
+    assert!(
+        tall_text.contains("Keys:"),
+        "instruction must survive a tall question: {tall_text}"
+    );
+
+    let tall_with_options = QuestionPanelModel {
+        id: "q-bounded-tall-options",
+        question: &tall_question,
+        options: &options,
+        selected_option: 8,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: false,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+    let action_lines =
+        renderer.question_panel_lines_with_presentation(tall_with_options, presentation);
+    assert!(
+        action_lines.len() <= 9,
+        "tall question with options must stay bounded: {} lines",
+        action_lines.len()
+    );
+    let action_text = action_lines.join("\n");
+    assert!(
+        action_text.contains("> [9] Provider choice 9"),
+        "a tall question must not squeeze out the focused action: {action_text}"
+    );
+    assert!(
+        action_text.contains("Keys:"),
+        "keys line must survive a tall question with options: {action_text}"
+    );
+}
+
+#[test]
+fn bounded_question_panel_keeps_a_wrapped_focused_choice_in_view() {
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let wrapped: Vec<String> = (1..=5)
+        .map(|idx| format!("{} {} c{idx}", "a".repeat(30), "b".repeat(30)))
+        .collect();
+    let model = QuestionPanelModel {
+        id: "q-bounded-wrapped",
+        question: "Pick one",
+        options: &wrapped,
+        selected_option: 4,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: false,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+    let presentation = QuestionPanelPresentation {
+        max_rows: Some(10),
+        ..Default::default()
+    };
+    let lines = renderer.question_panel_lines_with_presentation(model, presentation);
+    assert!(
+        lines.len() <= 10,
+        "{} lines: {lines:?}",
+        lines.len()
+    );
+    assert!(
+        lines.len() <= 9,
+        "bounded panel must reserve the last terminal row: {} lines",
+        lines.len()
+    );
+    let text = lines.join("\n");
+    assert!(
+        text.contains("> [5]"),
+        "focused choice lost: {text}"
+    );
+    assert!(
+        text.contains("c5"),
+        "focused choice tail clipped: {text}"
+    );
+}
 
 #[test]
 fn question_panel_renders_options_with_compact_instructions() {
@@ -584,19 +771,18 @@ fn plain_question_panel_wraps_long_question_and_options() {
         "Use the short safe command and keep the same provider session".to_string(),
         "Explain the failure first, then ask before any tool request".to_string(),
     ];
-    let text = renderer
-        .question_panel_lines(QuestionPanelModel {
-            id: "q-2",
-            question: "Choose how the Agent should continue after the failing command while preserving shell-first control",
-            options: &options,
-            selected_option: 2,
-            selected_options: &[],
-            custom_answer: "",
-            allow_free_text: true,
-            selection_mode: QuestionSelectionMode::Single,
-            input_feedback: QuestionInputFeedback::None,
-        })
-        .join("\n");
+    let model = QuestionPanelModel {
+        id: "q-2",
+        question: "Choose how the Agent should continue after the failing command while preserving shell-first control",
+        options: &options,
+        selected_option: 2,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+    let text = renderer.question_panel_lines(model.clone()).join("\n");
 
     assert!(text.contains("Agent question"), "{text}");
     assert!(!text.contains("Agent question q-2"), "{text}");
@@ -626,6 +812,67 @@ fn plain_question_panel_wraps_long_question_and_options() {
     );
     assert!(text.contains("send"), "{text}");
     assert_rendered_width(&text, 50);
+
+    // Narrow terminals fall back to the plain panel; the same row cap must apply
+    // there, keeping the title, the focused custom choice and the keys line.
+    let bounded = renderer.question_panel_lines_with_presentation(
+        model,
+        QuestionPanelPresentation {
+            max_rows: Some(10),
+            ..Default::default()
+        },
+    );
+    assert!(
+        bounded.len() <= 9,
+        "plain panel must honor max_rows and reserve the last row: {} lines: {bounded:?}",
+        bounded.len()
+    );
+    let bounded_text = bounded.join("\n");
+    assert!(bounded_text.contains("Agent question"), "{bounded_text}");
+    assert!(
+        bounded_text.contains("> [3] Other..."),
+        "focused custom choice lost: {bounded_text}"
+    );
+    assert!(
+        bounded_text.contains("Enter"),
+        "keys line lost: {bounded_text}"
+    );
+    assert_rendered_width(&bounded_text, 50);
+
+    let tall_question = "status line\n".repeat(30);
+    let tall_model = QuestionPanelModel {
+        id: "q-2-tall",
+        question: &tall_question,
+        options: &options,
+        selected_option: 2,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+    let tall_bounded = renderer.question_panel_lines_with_presentation(
+        tall_model,
+        QuestionPanelPresentation {
+            max_rows: Some(10),
+            ..Default::default()
+        },
+    );
+    assert!(
+        tall_bounded.len() <= 9,
+        "plain tall question must stay bounded: {} lines: {tall_bounded:?}",
+        tall_bounded.len()
+    );
+    let tall_text = tall_bounded.join("\n");
+    assert!(tall_text.contains("Agent question"), "{tall_text}");
+    assert!(
+        tall_text.contains("> [3] Other..."),
+        "plain tall question must not drop the focused choice: {tall_text}"
+    );
+    assert!(
+        tall_text.contains("Enter"),
+        "plain keys line lost: {tall_text}"
+    );
 }
 
 #[test]

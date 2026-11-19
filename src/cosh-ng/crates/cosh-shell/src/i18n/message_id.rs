@@ -123,4 +123,5 @@ collect_message_ids!([
     login_command_ids,
     cosh_root_help_ids,
     guide_wizard_ids,
+    guide_ai_management_ids,
 ],);

@@ -170,7 +170,25 @@ pub(crate) fn render_health(
     target: Target,
     invitation: Option<&Invitation>,
 ) -> Option<String> {
-    let text = render_health_full(renderer, report, show_facts, target, invitation);
+    render_health_with_entry(
+        renderer,
+        report,
+        show_facts,
+        target,
+        invitation,
+        invitation.is_some_and(|item| item.problem == "login-entry"),
+    )
+}
+
+pub(crate) fn render_health_with_entry(
+    renderer: &RatatuiInlineRenderer,
+    report: &HealthScanReport,
+    show_facts: bool,
+    target: Target,
+    invitation: Option<&Invitation>,
+    show_entry: bool,
+) -> Option<String> {
+    let text = render_health_full(renderer, report, show_facts, target, invitation, show_entry);
     if target != Target::Bash
         || text.as_ref().is_some_and(|text| {
             text.len() < crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES
@@ -201,7 +219,7 @@ pub(crate) fn render_health(
         }
     }
     compact.push_str(&render_health_full(
-        renderer, report, false, target, invitation,
+        renderer, report, false, target, invitation, show_entry,
     )?);
     (compact.len() < crate::diagnostics::health::banner_policy::MAX_TEXT_BYTES).then_some(compact)
 }
@@ -212,6 +230,7 @@ fn render_health_full(
     show_facts: bool,
     target: Target,
     invitation: Option<&Invitation>,
+    show_entry: bool,
 ) -> Option<String> {
     let mut output = Vec::new();
     if show_facts {
@@ -238,9 +257,7 @@ fn render_health_full(
         }
         let mut model = HealthBannerModel::new(&presentation);
         if target == Target::Bash {
-            model = model
-                .with_guide()
-                .with_login_entry(invitation.is_some_and(|item| item.problem == "login-entry"));
+            model = model.with_guide().with_login_entry(show_entry);
         }
         renderer.write_health_banner(&mut output, model).ok()?;
     }

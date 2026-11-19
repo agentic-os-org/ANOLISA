@@ -6,9 +6,6 @@
 
 use std::io::{self, Write};
 
-use nix::libc;
-use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-
 use crate::adapter::AdapterInstance;
 use crate::config::Language;
 use crate::raw_input::{AuthCardInput, RawInputEvent};
@@ -17,6 +14,7 @@ use crate::runtime::guide::result::{EndReason, TaskOutcome};
 use crate::runtime::prelude::{NoticePanelModel, RatatuiInlineRenderer, ShellEvent};
 use crate::runtime::state::InlineState;
 use crate::types::ShellEventKind;
+use nix::libc;
 
 use super::card_actions::render_auth_card_actions;
 use super::host::AuthHost;
@@ -30,21 +28,6 @@ pub(crate) struct TaskExit {
     pub(crate) terminate: Option<i32>,
 }
 
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-    }
-}
-
 pub(crate) fn run(
     input: &mut GuideInput,
     adapter: &AdapterInstance,
@@ -54,16 +37,11 @@ pub(crate) fn run(
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut output = crate::runtime::terminal::CrLfWriter::new(&mut handle);
-    let guard = match RawModeGuard::enter() {
-        Ok(guard) => guard,
-        Err(error) => return failed(format!("raw mode: {error}")),
-    };
-    // The wizard just left its alternate screen. Start the inline card on a
-    // clean screen so it never overlaps the page the user was reading.
+    // The wizard keeps its alternate screen and raw mode; clear only that screen so the card
+    // never overlaps the page the user was reading, and never touch the caller's Bash screen.
     let _ = output.write_all(b"\x1b[H\x1b[2J");
     let _ = output.flush();
     let exit = run_loop(input, adapter, language, blocked_writes, &mut output);
-    drop(guard);
     let _ = output.flush();
     exit
 }
@@ -104,6 +82,20 @@ fn run_loop<W: Write>(
     }
 
     loop {
+        if input.size_changed() && state.auth.state.is_some() {
+            // Geometry changed under us: the old panel height no longer describes the screen,
+            // so repaint the whole hosted screen instead of erasing rows at stale offsets.
+            let _ = output.write_all(b"\x1b[H\x1b[2J");
+            state.questions.active_panel_height = 0;
+            state.questions.active_panel_id = None;
+            state.questions.active_panel_cursor_row = None;
+            state.questions.active_panel_width = None;
+            if let Err(error) = super::prompt::render_current_auth_panel(&mut state, output) {
+                state.auth.outcome.reason = EndReason::Failed;
+                state.auth.outcome.error = Some(format!("auth resize: {error}"));
+                break;
+            }
+        }
         if let Some(signal) = crate::runtime::terminal::take_guide_signal() {
             if signal == libc::SIGINT {
                 state.auth.outcome.reason = EndReason::Cancelled;
@@ -318,6 +310,20 @@ pub(crate) fn refuse_unconfirmed_write<W: Write>(
     kind: crate::runtime::guide::result::ActionKind,
     output: &mut W,
 ) -> io::Result<bool> {
+    let terminal_rows = ratatui::crossterm::terminal::size()
+        .ok()
+        .map(|(_, rows)| rows);
+    refuse_unconfirmed_write_with_rows(state, kind, output, terminal_rows)
+}
+
+/// Refuses a held write; `terminal_rows` bounds the guide repaint that keeps the
+/// notice and the active card inside one viewport.
+pub(crate) fn refuse_unconfirmed_write_with_rows<W: Write>(
+    state: &mut InlineState,
+    kind: crate::runtime::guide::result::ActionKind,
+    output: &mut W,
+    terminal_rows: Option<u16>,
+) -> io::Result<bool> {
     if !state.auth.write_blocked(kind) {
         return Ok(false);
     }
@@ -326,16 +332,31 @@ pub(crate) fn refuse_unconfirmed_write<W: Write>(
         crate::i18n::MessageId::GuideWizardAiWriteBlocked,
         &[("action", i18n.t(kind.label()))],
     );
-    RatatuiInlineRenderer::for_terminal()
-        .with_language(state.language)
-        .write_notice_panel(
-            output,
-            NoticePanelModel {
-                title: "Change unconfirmed",
-                body: vec![message],
-                footer: None,
-            },
-        )?;
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let model = NoticePanelModel {
+        title: "Change unconfirmed",
+        body: vec![message],
+        footer: None,
+    };
+    if !state.auth.host.is_guide() {
+        renderer.write_notice_panel(output, model)?;
+        return Ok(true);
+    }
+    // Repaint notice and card as one bounded unit: appending below the card would
+    // scroll its top off a short screen and leave the next erase offset stale.
+    let notice_lines = renderer.notice_panel_lines(model);
+    output.write_all(b"\x1b[H\x1b[2J")?;
+    for line in &notice_lines {
+        writeln!(output, "{line}")?;
+    }
+    let notice_rows = notice_lines.len();
+    state.questions.active_panel_height = 0;
+    state.questions.active_panel_id = None;
+    state.questions.active_panel_cursor_row = None;
+    state.questions.active_panel_width = None;
+    let card_rows = terminal_rows.map(|rows| rows.saturating_sub(notice_rows as u16));
+    super::prompt::render_current_auth_panel_with_rows(state, output, card_rows)?;
+    state.questions.active_panel_height += notice_rows;
     Ok(true)
 }
 

@@ -8,6 +8,7 @@ use crate::config::guide::UserPaths;
 use crate::config::{detect_language_from_env, read_guidance_language};
 use crate::i18n::I18n;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::io::Write;
 
 mod ai;
 pub(crate) mod core;
@@ -129,7 +130,6 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                     session::Flow::AiManage => {
                         let frame = session.current_frame();
                         session.settle_ai_load();
-                        drop(screen);
                         guide_input.discard_pending();
                         let exit = run_auth_task(session, guide_input);
                         guide_input.discard_pending();
@@ -141,10 +141,9 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                             session.finish_ai_task(exit.outcome);
                             return LoopExit::Signal(signal);
                         }
-                        screen = match enter_screen() {
-                            Ok(screen) => screen,
-                            Err(_) => return LoopExit::Status(1),
-                        };
+                        if screen.resync().is_err() {
+                            return LoopExit::Status(1);
+                        }
                         session.restore_frame(frame);
                         session.finish_ai_task(exit.outcome);
                     }
@@ -153,15 +152,21 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                     }
                     session::Flow::LoginSet | session::Flow::LoginRestore => {
                         let action = login_action(&flow);
-                        drop(screen);
-                        for line in session.login_handoff_lines(action) {
-                            eprint!("{line}\r\n");
+                        guide_input.discard_pending();
+                        if screen.suspend().is_err() {
+                            return LoopExit::Status(1);
                         }
+                        let mut stdout = std::io::stdout();
+                        let _ = stdout.write_all(b"\x1b[H\x1b[2J");
+                        for line in session.login_handoff_lines(action) {
+                            let _ = write!(stdout, "{line}\r\n");
+                        }
+                        let _ = stdout.flush();
                         session.run_login(action);
-                        screen = match enter_screen() {
-                            Ok(screen) => screen,
-                            Err(_) => return LoopExit::Status(1),
-                        };
+                        guide_input.discard_pending();
+                        if screen.resume().is_err() {
+                            return LoopExit::Status(1);
+                        }
                         if let Some(signal) = crate::runtime::terminal::take_guide_signal() {
                             return LoopExit::Signal(signal);
                         }

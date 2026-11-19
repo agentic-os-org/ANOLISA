@@ -5,6 +5,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AuthSelectProviderQuestion => {
             Some("\u{1f511} Authentication Required \u{2014} Select your AI provider:")
         }
+        MessageId::AuthProviderManagementQuestion => {
+            Some("\u{1f511} Provider Management \u{2014} Select your AI provider:")
+        }
+        MessageId::GuideAiManagementKeys => {
+            Some("↑↓ select  Enter open  Esc back  Ctrl-D finish and return to the guide")
+        }
+        MessageId::GuideAuthDeleteKeys => {
+            Some("↑↓ select  Enter confirm  Esc back  Ctrl-D finish and return to the guide")
+        }
+        MessageId::GuideAuthFieldKeys => {
+            Some("Type the value  Enter submit  Esc back  Ctrl-D finish and return to the guide")
+        }
+        MessageId::GuideWizardLoginPrivilegeDenied => Some(
+            "Administrator authorization did not complete; the login shell was not changed and nothing was written. Try again, or run the login command in a terminal to see sudo's full output.",
+        ),
         MessageId::AuthEcsChecking => Some("Checking ECS RAM Role..."),
         MessageId::AuthEcsWaiting => Some(
             "Waiting for ECS RAM Role authorization. Configuration will continue automatically.",

@@ -14,6 +14,8 @@ use crate::adapter::GuideAuthSummary;
 
 use super::navigation::{Frame, Navigation};
 
+mod presentation;
+
 pub(crate) enum Flow {
     Continue,
     Exit,
@@ -281,35 +283,6 @@ impl Session {
             | Page::DataClearConfirm => MessageId::GuideWizardTipsPersonal,
         };
         self.i18n.t(id).to_string()
-    }
-
-    fn hint(&self) -> String {
-        let id = match self.page {
-            Page::Home => MessageId::GuideWizardHomeHint,
-            Page::Ai => MessageId::GuideWizardHomeHint,
-            Page::Start => MessageId::GuideWizardScrollHint,
-            Page::DataPrivacy => MessageId::GuideWizardScrollHint,
-            Page::Personal
-            | Page::Analysis
-            | Page::PersonalOffConfirm
-            | Page::DataImportConfirm
-            | Page::DataResetConfirm
-            | Page::DataClearConfirm => MessageId::GuideWizardDetailHint,
-            _ => MessageId::GuideWizardChoiceHint,
-        };
-        self.i18n.t(id).to_string()
-    }
-
-    fn markdown(&self) -> Option<String> {
-        match self.page {
-            Page::Start => Some(content::start_markdown(self.i18n).to_string()),
-            Page::DataPrivacy => Some(self.i18n.t(MessageId::GuideWizardDataPrivacy).to_string()),
-            _ => None,
-        }
-    }
-
-    fn is_markdown_page(&self) -> bool {
-        matches!(self.page, Page::Start | Page::DataPrivacy)
     }
 
     fn rows(&self) -> Vec<WizardRow> {
