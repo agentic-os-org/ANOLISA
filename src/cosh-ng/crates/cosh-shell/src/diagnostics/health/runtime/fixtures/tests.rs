@@ -209,3 +209,20 @@ fn conntrack_fixture_gates_notices_and_keeps_d_facts_silent() {
         .iter()
         .any(|member| member.key == "host|conntrack" && member.exit && !member.entered));
 }
+
+#[test]
+fn pids_fixture_stays_diagnostics_only() {
+    let config = HealthConfig {
+        network_capacity_notices: true,
+        pressure_notices: true,
+        ..HealthConfig::default()
+    };
+    let report = fixture_report("linux-pids", &config, &options());
+    assert!(report.findings.is_empty());
+    assert!(report
+        .facts
+        .iter()
+        .any(|fact| fact.key == "kernel.cgroup_pids_level"));
+    let signal = crate::diagnostics::health::suppression::episode::signals_from_report(&report);
+    assert!(signal.pids_counter.is_none());
+}

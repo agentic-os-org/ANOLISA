@@ -569,6 +569,7 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
 pub(crate) mod conntrack;
 pub(crate) mod handles;
 pub(crate) mod memory;
+pub(crate) mod pids;
 pub(crate) mod psi;
 pub(crate) mod quota;
 pub(crate) mod ro;
