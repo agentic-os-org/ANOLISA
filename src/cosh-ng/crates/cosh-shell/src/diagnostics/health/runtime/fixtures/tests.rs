@@ -226,3 +226,35 @@ fn pids_fixture_stays_diagnostics_only() {
     let signal = crate::diagnostics::health::suppression::episode::signals_from_report(&report);
     assert!(signal.pids_counter.is_none());
 }
+
+#[test]
+fn fs_events_fixture_emits_proven_chain_findings() {
+    let report = fixture_report("linux-fs-events", &HealthConfig::default(), &options());
+    let mut found: Vec<(String, HealthSeverity)> = report
+        .findings
+        .iter()
+        .map(|finding| (finding.id.clone(), finding.severity))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            ("J24".into(), HealthSeverity::Critical),
+            ("J29".into(), HealthSeverity::Warning)
+        ]
+    );
+    let candidate = crate::diagnostics::health::suppression::episode::candidate_for_finding(
+        &report, "J24", 4, "J24:/",
+    )
+    .unwrap();
+    assert!(candidate.event);
+    assert_eq!(
+        candidate.key,
+        "fs-event-v1|boot-a|ext4-forced-ro|sda1|uptime-ns:1099000000000"
+    );
+    let block = crate::diagnostics::health::suppression::episode::candidate_for_finding(
+        &report, "J29", 3, "J29:/",
+    )
+    .unwrap();
+    assert_eq!(block.problem, "block-io|8:1");
+}

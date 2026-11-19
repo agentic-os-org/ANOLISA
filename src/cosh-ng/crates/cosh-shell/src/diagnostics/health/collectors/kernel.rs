@@ -11,6 +11,7 @@ pub(crate) mod attribution;
 pub(crate) mod capacity;
 pub(crate) mod cgroup;
 mod collect;
+pub(crate) mod fs_events;
 mod oom;
 
 #[cfg(test)]

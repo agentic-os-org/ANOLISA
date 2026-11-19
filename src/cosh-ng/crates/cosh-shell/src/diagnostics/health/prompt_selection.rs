@@ -187,9 +187,10 @@ pub(crate) fn exposure_event(
     report: &HealthScanReport,
     item: &HealthTryItem,
 ) -> Option<(&'static str, String)> {
+    let base = item.finding_id.split(':').next();
     if !matches!(
-        item.finding_id.split(':').next(),
-        Some("J11" | "J12" | "J13")
+        base,
+        Some("J11" | "J12" | "J13" | "J24" | "J25" | "J26" | "J27" | "J28" | "J29")
     ) {
         return Some(("observation-v1", exposure_evidence(report, item)));
     }
@@ -200,6 +201,28 @@ pub(crate) fn exposure_event(
             .find(|fact| fact.key == key)
             .map(|fact| &fact.value)
     };
+    if matches!(base, Some("J24" | "J25" | "J26" | "J27" | "J28" | "J29")) {
+        let prefix = match base {
+            Some("J24") => "ext4_forced_ro",
+            Some("J25") => "ext4_error",
+            Some("J26") => "jbd2_abort",
+            Some("J27") => "jbd2_flush",
+            Some("J28") => "xfs_shutdown",
+            _ => "block_io",
+        };
+        let Some(super::HealthFactValue::String(identity)) =
+            fact(&format!("kernel.fs_{prefix}_identity"))
+        else {
+            return None;
+        };
+        let Some(super::HealthFactValue::String(boot)) = fact("kernel.boot_id") else {
+            return None;
+        };
+        if boot.is_empty() {
+            return None;
+        }
+        return Some(("fs-event-v1", format!("{identity}|boot:{boot}")));
+    }
     if fact("kernel.current_cgroup_version").is_some()
         && fact("kernel.oom_attributed_event_identity").is_none()
         && fact("kernel.cgroup_oom_kill_increment").is_some()

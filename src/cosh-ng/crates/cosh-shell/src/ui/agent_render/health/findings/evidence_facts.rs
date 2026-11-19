@@ -1,5 +1,61 @@
 use super::super::*;
 
+pub(in crate::ui::agent_render::health) fn pressure_evidence_text(
+    finding: &HealthFinding,
+    i18n: crate::I18n,
+) -> Option<String> {
+    let args = super::pressure_args(finding, i18n);
+    Some(i18n.format(
+        crate::MessageId::HealthEvidencePressureAvg,
+        &[
+            ("resource", args.get("resource")?),
+            ("kind", args.get("kind")?),
+            ("avg10", args.get("avg10")?),
+            ("avg60", args.get("avg60")?),
+        ],
+    ))
+}
+
+pub(in crate::ui::agent_render::health) fn quota_evidence_text(
+    finding: &HealthFinding,
+    i18n: crate::I18n,
+) -> Option<String> {
+    let mut pieces = Vec::new();
+    if finding
+        .detail_args
+        .get("max_zero")
+        .is_some_and(|value| value == "true")
+    {
+        pieces.push(
+            i18n.t(crate::MessageId::HealthEvidenceCgroupQuotaZero)
+                .to_string(),
+        );
+    } else if let (Some(percent), Some(remaining)) = (
+        finding.detail_args.get("percent"),
+        finding.detail_args.get("remaining_mib"),
+    ) {
+        pieces.push(i18n.format(
+            crate::MessageId::HealthEvidenceCgroupQuota,
+            &[("percent", percent), ("remaining_mib", remaining)],
+        ));
+    }
+    if let (Some(avg10), Some(avg60)) = (
+        finding.detail_args.get("avg10"),
+        finding.detail_args.get("avg60"),
+    ) {
+        pieces.push(i18n.format(
+            crate::MessageId::HealthEvidencePressureAvg,
+            &[
+                ("resource", i18n.t(crate::MessageId::HealthMetricMemory)),
+                ("kind", "full"),
+                ("avg10", avg10),
+                ("avg60", avg60),
+            ],
+        ));
+    }
+    (!pieces.is_empty()).then(|| pieces.join(" · "))
+}
+
 pub(in crate::ui::agent_render::health) fn format_evidence_fact(
     fact: &HealthFact,
     report: &HealthScanReport,

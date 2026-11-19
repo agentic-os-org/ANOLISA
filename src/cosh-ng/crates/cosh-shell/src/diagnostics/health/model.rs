@@ -422,6 +422,10 @@ pub(crate) enum HealthMessageId {
     HealthInsightCgroupMemoryPressure,
     HealthInsightPressureHigh,
     HealthInsightConntrackCapacity,
+    HealthInsightExt4Error,
+    HealthInsightJournalError,
+    HealthInsightXfsShutdown,
+    HealthInsightBlockIoError,
     HealthUnavailablePermissionDenied,
     HealthUnavailableCommandMissing,
     HealthUnavailableTimeout,
@@ -441,6 +445,10 @@ pub(crate) enum HealthMessageId {
     HealthFindingCgroupMemoryPressure,
     HealthFindingPressureHigh,
     HealthFindingConntrackCapacity,
+    HealthFindingExt4Error,
+    HealthFindingJournalError,
+    HealthFindingXfsShutdown,
+    HealthFindingBlockIoError,
     HealthFindingProviderUnconfigured,
     HealthFindingConfigUnavailable,
     HealthFindingHooksUntrusted,
@@ -535,6 +543,10 @@ impl HealthMessageId {
             Self::HealthInsightConntrackCapacity => {
                 crate::MessageId::HealthInsightConntrackCapacity
             }
+            Self::HealthInsightExt4Error => crate::MessageId::HealthInsightExt4Error,
+            Self::HealthInsightJournalError => crate::MessageId::HealthInsightJournalError,
+            Self::HealthInsightXfsShutdown => crate::MessageId::HealthInsightXfsShutdown,
+            Self::HealthInsightBlockIoError => crate::MessageId::HealthInsightBlockIoError,
             Self::HealthUnavailablePermissionDenied => {
                 crate::MessageId::HealthUnavailablePermissionDenied
             }
@@ -568,6 +580,10 @@ impl HealthMessageId {
             Self::HealthFindingConntrackCapacity => {
                 crate::MessageId::HealthFindingConntrackCapacity
             }
+            Self::HealthFindingExt4Error => crate::MessageId::HealthFindingExt4Error,
+            Self::HealthFindingJournalError => crate::MessageId::HealthFindingJournalError,
+            Self::HealthFindingXfsShutdown => crate::MessageId::HealthFindingXfsShutdown,
+            Self::HealthFindingBlockIoError => crate::MessageId::HealthFindingBlockIoError,
             Self::HealthFindingProviderUnconfigured => {
                 crate::MessageId::HealthFindingProviderUnconfigured
             }
