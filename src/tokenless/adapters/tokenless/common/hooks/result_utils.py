@@ -70,7 +70,7 @@ def process_result(value: object) -> dict | None:
 
 def result_status(status: str, is_error: bool, process: dict | None) -> str:
     status = str(status).lower()
-    if status in {"interrupted", "denied"}:
+    if status in {"error", "interrupted", "denied"}:
         return status
     if is_error or (
         process is not None
