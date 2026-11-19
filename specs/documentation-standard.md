@@ -61,6 +61,7 @@ placement, bilingual and maintenance rules.
 | `AGENTS.md` | English only | AI agent global constraints and development conventions |
 | `LICENSE` | English only | Apache License 2.0 |
 | `CONTRIBUTING.md` | Yes (`CONTRIBUTING_zh.md`) | General contribution guide: environment, commit rules, PR flow |
+| `GOVERNANCE.md` | Yes (`GOVERNANCE_zh.md`) | Community roles, decision-making tiers, and component lifecycle rules |
 | `CHANGELOG.md` | Yes (`CHANGELOG_zh.md`) | Version changelog with component version composition |
 | `CODE_OF_CONDUCT.md` | English only | Contributor Covenant (standard text) |
 | `SECURITY.md` | English only | Vulnerability reporting process |
@@ -286,6 +287,7 @@ in this directory, as specified in §3.1.
 These are inherited from the repository root:
 
 - `CODE_OF_CONDUCT.md`
+- `GOVERNANCE.md` / `GOVERNANCE_zh.md`
 - `SECURITY.md`
 - `NOTICE` (maintained centrally at root)
 
