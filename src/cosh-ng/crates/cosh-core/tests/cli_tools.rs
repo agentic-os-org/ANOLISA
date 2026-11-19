@@ -155,6 +155,21 @@ startup_timeout_ms = 1000
     )
     .expect("write cosh-core config");
 
+    let mut trust = Command::new(env!("CARGO_BIN_EXE_cosh-core"));
+    trust
+        .args(["mcp", "trust", "fake", "--yes"])
+        .env("HOME", home.path())
+        .env("COSH_STATES_DIR", home.path().join("states"))
+        .env_remove("COSH_AI_PROVIDER")
+        .stdin(Stdio::null());
+    common::opt_out_telemetry(&mut trust, home.path());
+    let trust_output = trust.output().expect("trust fake MCP server");
+    assert!(
+        trust_output.status.success(),
+        "trust stderr={}",
+        String::from_utf8_lossy(&trust_output.stderr)
+    );
+
     let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-core"));
     command
         .args(["--headless", "--bare", "--tools", "mcp__fake__echo"])

@@ -1,15 +1,15 @@
 use crate::{I18n, Language};
 fn format_mcp_json(json: &serde_json::Value) -> Vec<String> {
-    super::format_mcp_json(json, &I18n::new(Language::EnUs))
+    super::render::format_mcp_json(json, &I18n::new(Language::EnUs))
 }
 fn format_mcp_output(stdout: &str) -> Vec<String> {
-    super::format_mcp_output(stdout, &I18n::new(Language::EnUs))
+    super::render::format_mcp_output(stdout, &I18n::new(Language::EnUs))
 }
 fn mcp_success_body(stdout: &str, stderr: &str) -> Vec<String> {
     super::mcp_success_body(stdout, stderr, &I18n::new(Language::EnUs), &[])
 }
 fn extract_json_message_or_error(stdout: &str) -> Option<String> {
-    super::extract_json_message_or_error(stdout, &I18n::new(Language::EnUs))
+    super::render::extract_json_message_or_error(stdout, &I18n::new(Language::EnUs))
 }
 
 #[test]
@@ -299,4 +299,142 @@ fn subprocess_timeout_kills_slow_cosh_core() {
     )
     .is_err());
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn review_regression_mcp_trust_show_untrust() {
+    let show_body = "printf '%s\\n' '{\"server\":\"remote\",\"action\":\"show\",\"transport\":\"stdio\",\"command\":\"python3\",\"args\":[\"-c\",\"x\"],\"env_keys\":[],\"fingerprint\":\"sha256:abc\",\"trusted\":false}'";
+    let output = render_success_fixture("show", show_body, Language::EnUs);
+    assert!(output.contains("remote"), "{output}");
+    assert!(output.contains("python3"), "{output}");
+    assert!(output.contains("Command"), "{output}");
+    assert!(output.contains("Trusted"), "{output}");
+
+    let trust_body =
+        "printf '%s\\n' '{\"server\":\"remote\",\"action\":\"trust\",\"trusted\":true,\"fingerprint\":\"sha256:abc\",\"command\":\"python3\",\"args\":[\"-c\",\"x\"]}'";
+    let output = render_success_fixture("trust", trust_body, Language::EnUs);
+    assert!(output.contains("remote"), "{output}");
+    assert!(output.contains("Trusted"), "{output}");
+    assert!(output.contains("yes"), "{output}");
+    assert!(output.contains("sha256:abc"), "{output}");
+    assert!(output.contains("Command"), "{output}");
+    assert!(output.contains("python3"), "{output}");
+
+    let untrust_body =
+        "printf '%s\\n' '{\"server\":\"remote\",\"action\":\"untrust\",\"trusted\":false,\"fingerprint\":\"sha256:abc\"}'";
+    let output = render_success_fixture("untrust", untrust_body, Language::ZhCn);
+    assert!(output.contains("remote"), "{output}");
+    assert!(output.contains("已信任"), "{output}");
+    assert!(output.contains("否"), "{output}");
+}
+
+#[test]
+fn mcp_help_lists_trust_commands() {
+    let adapter = crate::adapter::AdapterInstance::Fake(crate::adapter::FakeAgentAdapter);
+    let mut state = crate::runtime::prelude::InlineState {
+        language: crate::Language::ZhCn,
+        ..Default::default()
+    };
+    let mut output = Vec::new();
+    super::render_mcp_command(Some("help"), None, None, &adapter, &mut state, &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    for expected in ["trust", "untrust", "show"] {
+        assert!(output.contains(expected), "{output}");
+    }
+}
+
+#[test]
+fn list_marks_untrusted_stdio_servers() {
+    let json = r#"[{"server":"probe","transport":"stdio","enabled":true,"trusted":false},{"server":"remote","transport":"streamable_http","enabled":true,"trusted":true}]"#;
+    let lines = format_mcp_output(json);
+    let joined = lines.join("\n");
+    assert!(joined.contains("needs trust"), "{joined}");
+    let probe_line = lines.iter().find(|line| line.contains("probe")).unwrap();
+    assert!(probe_line.contains("needs trust"), "{probe_line}");
+    let remote_line = lines.iter().find(|line| line.contains("remote")).unwrap();
+    assert!(!remote_line.contains("needs trust"), "{remote_line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn trust_aborts_when_preview_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let program = root.path().join("core");
+    // `show` fails; a trust commit would succeed if it were (wrongly) reached.
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = show ]; then exit 1; fi; done\nprintf '%s\\n' '{\"server\":\"remote\",\"action\":\"trust\",\"trusted\":true,\"fingerprint\":\"sha256:abc\"}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let adapter = crate::adapter::AdapterInstance::CoshCore(crate::adapter::CoshCoreAdapter::new(
+        program.to_string_lossy().into_owned(),
+        false,
+    ));
+    let mut state = crate::runtime::prelude::InlineState {
+        language: crate::Language::EnUs,
+        ..Default::default()
+    };
+    let mut output = Vec::new();
+    super::render_mcp_command(
+        Some("trust"),
+        Some("remote"),
+        None,
+        &adapter,
+        &mut state,
+        &mut output,
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("aborted"), "{output}");
+    assert!(!output.contains("Trusted"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_subprocess_forwards_shell_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let program = root.path().join("core");
+    let capture = root.path().join("workspace-capture");
+    let script = r#"#!/bin/sh
+ws=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) shift; ws="${1:-}";;
+  esac
+  shift
+done
+printf '%s' "$ws" > __CAPTURE__
+printf '%s\n' '{"server":"probe","action":"show","transport":"stdio","command":"python3","args":[],"env_keys":[],"fingerprint":"sha256:abc","trusted":false}'
+"#
+    .replace("__CAPTURE__", &capture.display().to_string());
+    std::fs::write(&program, script).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let adapter = crate::adapter::AdapterInstance::CoshCore(crate::adapter::CoshCoreAdapter::new(
+        program.to_string_lossy().into_owned(),
+        false,
+    ));
+    // A shell cwd distinct from the wrapper process cwd must be forwarded.
+    if let crate::adapter::AdapterInstance::CoshCore(cosh_core) = &adapter {
+        cosh_core.set_shell_cwd(Some("/shell/cwd/path"));
+    }
+    let mut state = crate::runtime::prelude::InlineState {
+        language: crate::Language::EnUs,
+        ..Default::default()
+    };
+    let mut output = Vec::new();
+    super::render_mcp_command(
+        Some("show"),
+        Some("probe"),
+        None,
+        &adapter,
+        &mut state,
+        &mut output,
+    )
+    .unwrap();
+    let forwarded = std::fs::read_to_string(&capture).unwrap();
+    assert_eq!(forwarded, "/shell/cwd/path");
 }

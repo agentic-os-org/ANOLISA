@@ -10,47 +10,8 @@ use wait_timeout::ChildExt;
 use crate::runtime::prelude::*;
 use crate::slash::panel::render_notice_panel;
 
-fn text<'a>(i18n: &I18n, en: &'a str, zh: &'a str) -> &'a str {
-    match i18n.language() {
-        Language::EnUs => en,
-        Language::ZhCn => zh,
-    }
-}
-
-fn localized_status<'a>(status: &'a str, i18n: &I18n) -> &'a str {
-    if i18n.language() == Language::EnUs {
-        return status;
-    }
-    match status {
-        "enabled" => "已启用",
-        "disabled" => "已禁用",
-        "connected" => "已连接",
-        "disconnected" => "已断开",
-        "pending" => "等待中",
-        "error" | "failed" => "失败",
-        "unknown" => "未知",
-        _ => status,
-    }
-}
-
-fn localized_action<'a>(action: &'a str, i18n: &I18n) -> &'a str {
-    if i18n.language() == Language::EnUs {
-        return action;
-    }
-    match action {
-        "list" => "列出服务器",
-        "connect" => "连接",
-        "connected" => "已连接",
-        "inspect" => "查看工具",
-        "inspected" => "已查看工具",
-        "refresh" => "刷新工具",
-        "refreshed" => "已刷新工具",
-        "disconnect" => "断开连接",
-        "login" => "登录授权",
-        "logout" => "删除授权凭据",
-        _ => action,
-    }
-}
+mod render;
+use render::{extract_json_message_or_error, format_mcp_output, text};
 
 // Bounded so a stuck `cosh-core mcp` call (e.g. an OAuth login waiting on a
 // browser) cannot block the slash rendering path indefinitely.
@@ -108,7 +69,8 @@ pub(super) fn render_mcp_command<W: Write>(
             ],
             None,
         ),
-        "list" | "connect" | "inspect" | "refresh" | "disconnect" | "logout" => {
+        "list" | "connect" | "inspect" | "refresh" | "disconnect" | "logout" | "show" | "trust"
+        | "untrust" => {
             if action != "list" && arg.is_none() {
                 return render_notice_panel(
                     output,
@@ -133,16 +95,77 @@ pub(super) fn render_mcp_command<W: Write>(
                     None,
                 );
             };
-            let mut cmd_args = vec!["mcp", action];
-            if let Some(server) = arg {
-                cmd_args.push(server);
+            // Resolve against the session workspace (shell cwd reported by the
+            // dispatch layer, falling back to the active session scope) so trust
+            // pins and checks agree with the live Core; the wrapper process cwd
+            // is stale after a PTY `cd` (issue #9518 review).
+            let workspace = cosh_core.shell_workspace();
+            let mut cmd_args: Vec<String> = Vec::new();
+            if let Some(ws) = &workspace {
+                cmd_args.push("--workspace".to_string());
+                cmd_args.push(ws.clone());
             }
+            cmd_args.push("mcp".to_string());
+            cmd_args.push(action.to_string());
+            if let Some(server) = arg {
+                cmd_args.push(server.to_string());
+            }
+            if action == "trust" {
+                // Preview before committing. Any preview failure aborts the trust
+                // (never fall through to a bare --yes commit); the commit is bound
+                // to the previewed fingerprint so a config change between preview
+                // and commit re-gates instead of trusting unseen bytes.
+                let mut show_args: Vec<&str> = Vec::new();
+                if let Some(ws) = &workspace {
+                    show_args.push("--workspace");
+                    show_args.push(ws.as_str());
+                }
+                show_args.extend(["mcp", "show", arg.unwrap_or("")]);
+                let preview = capture_mcp_cli(&cosh_core.program, &show_args, &i18n)
+                    .ok()
+                    .filter(|cap| cap.success)
+                    .and_then(|cap| {
+                        let stdout = String::from_utf8_lossy(&cap.stdout).into_owned();
+                        serde_json::from_str::<serde_json::Value>(&stdout)
+                            .ok()
+                            .and_then(|json| {
+                                json.get("fingerprint")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                            })
+                            .map(|fp| (stdout, fp))
+                    });
+                let Some((stdout, fp)) = preview else {
+                    render_notice_panel(
+                        output,
+                        title,
+                        vec![text(
+                            &i18n,
+                            "Cannot preview the server configuration; trust aborted. Run /mcp show <server> and retry.",
+                            "无法预览服务器配置，已中止信任。请运行 /mcp show <server> 后重试。",
+                        )
+                        .to_string()],
+                        None,
+                    )?;
+                    return Ok(());
+                };
+                render_notice_panel(output, title, format_mcp_output(&stdout, &i18n), None)?;
+                cmd_args.push("--expect-fingerprint".to_string());
+                cmd_args.push(fp);
+                cmd_args.push("--yes".to_string());
+            }
+            let cmd_args_ref: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
             let succeeded =
-                run_mcp_subprocess(&cosh_core.program, &cmd_args, title, output, &i18n)?;
+                run_mcp_subprocess(&cosh_core.program, &cmd_args_ref, title, output, &i18n)?;
             // The subprocess only mutates on-disk state; the live core keeps
             // serving its startup snapshot (tools, connections, credentials)
             // until an extension snapshot rebuild picks the changes up.
-            if succeeded && matches!(action, "connect" | "disconnect" | "refresh" | "logout") {
+            if succeeded
+                && matches!(
+                    action,
+                    "connect" | "disconnect" | "refresh" | "logout" | "trust" | "untrust"
+                )
+            {
                 cosh_core.note_mcp_mutation();
             }
             Ok(())
@@ -199,6 +222,24 @@ pub(super) fn render_mcp_command<W: Write>(
                     &i18n,
                     "  logout       Remove saved OAuth credentials",
                     "  logout       删除保存的 OAuth 凭据",
+                )
+                .to_string(),
+                text(
+                    &i18n,
+                    "  show         Show a stdio server's command and trust state",
+                    "  show         查看 stdio 服务器的命令与信任状态",
+                )
+                .to_string(),
+                text(
+                    &i18n,
+                    "  trust        Trust a stdio server to start at startup",
+                    "  trust        信任 stdio 服务器在启动时拉起",
+                )
+                .to_string(),
+                text(
+                    &i18n,
+                    "  untrust      Revoke startup trust for a stdio server",
+                    "  untrust      撤销 stdio 服务器的启动信任",
                 )
                 .to_string(),
             ],
@@ -259,11 +300,18 @@ fn run_mcp_subprocess<W: Write>(
                         capture.status_display
                     )]
                 };
+                tracing::warn!(
+                    args = ?args,
+                    status = %capture.status_display,
+                    stderr = %stderr.trim(),
+                    "cosh-core mcp command failed"
+                );
                 render_notice_panel(output, title, error_lines, None)?;
                 Ok(false)
             }
         }
         Err(error) => {
+            tracing::warn!(args = ?args, error = %error, "cosh-core mcp command could not run");
             render_notice_panel(output, title, vec![error], None)?;
             Ok(false)
         }
@@ -274,7 +322,7 @@ fn run_mcp_subprocess<W: Write>(
 // while stdout stays empty; without the fallback the success panel would be
 // blank.
 fn mcp_success_body(stdout: &str, stderr: &str, i18n: &I18n, args: &[&str]) -> Vec<String> {
-    if let ["mcp", "logout", server] = args {
+    if let [.., "mcp", "logout", server] = args {
         let original = format!("OAuth credentials removed for MCP server '{server}'.");
         let confirmation = text(
             i18n,
@@ -426,183 +474,6 @@ fn kill_mcp_process_group(process_group: u32) {
 
 #[cfg(not(unix))]
 fn kill_mcp_process_group(_process_group: u32) {}
-
-fn format_mcp_output(stdout: &str, i18n: &I18n) -> Vec<String> {
-    // Try to parse as JSON and format nicely
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-        format_mcp_json(&json, i18n)
-    } else {
-        // Fall back to raw output lines
-        stdout
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.to_string())
-            .collect()
-    }
-}
-
-fn extract_json_message_or_error(stdout: &str, i18n: &I18n) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-    extract_message_or_error(&json, i18n)
-}
-
-fn extract_message_or_error(json: &serde_json::Value, i18n: &I18n) -> Option<String> {
-    // Prioritize top-level message or error fields
-    if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
-        return Some(message.to_string());
-    }
-    if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
-        return Some(format!("{}: {error}", text(i18n, "Error", "错误")));
-    }
-    if let Some(error_obj) = json.get("error").and_then(|v| v.as_object()) {
-        if let Some(msg) = error_obj.get("message").and_then(|v| v.as_str()) {
-            return Some(format!("{}: {msg}", text(i18n, "Error", "错误")));
-        }
-    }
-    None
-}
-
-fn format_mcp_json(json: &serde_json::Value, i18n: &I18n) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    // Try structured formats first
-    // Case 1: {"servers": [...]} wrapper
-    // Case 2: Direct array [{...}, {...}]
-    let servers_array = json
-        .get("servers")
-        .and_then(|v| v.as_array())
-        .or_else(|| json.as_array());
-
-    if let Some(servers) = servers_array {
-        if servers.is_empty() {
-            lines.push(
-                text(i18n, "No MCP servers configured.", "尚未配置 MCP 服务器。").to_string(),
-            );
-            return lines;
-        }
-        for server in servers {
-            let name = server
-                .get("server")
-                .or_else(|| server.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let status = server
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or_else(|| match server.get("enabled").and_then(|v| v.as_bool()) {
-                    Some(true) => "enabled",
-                    Some(false) => "disabled",
-                    None => "unknown",
-                });
-            let status = localized_status(status, i18n);
-            let transport = server
-                .get("transport")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if transport.is_empty() {
-                lines.push(format!("  {name}  [{status}]"));
-            } else {
-                lines.push(format!("  {name}  [{status}]  {transport}"));
-            }
-
-            if let Some(tools) = server.get("tools").and_then(|v| v.as_array()) {
-                if !tools.is_empty() {
-                    lines.push(format!(
-                        "    {} ({}):",
-                        text(i18n, "Tools", "工具"),
-                        tools.len()
-                    ));
-                    for tool in tools.iter().take(20) {
-                        let tool_name = tool
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        lines.push(format!("      - {tool_name}"));
-                    }
-                    if tools.len() > 20 {
-                        lines.push(format!(
-                            "      {}",
-                            text(i18n, "... and {count} more", "……另有 {count} 项")
-                                .replace("{count}", &(tools.len() - 20).to_string())
-                        ));
-                    }
-                }
-            }
-        }
-    } else if let (Some(server), Some(true), Some(removed)) = (
-        json.get("server").and_then(serde_json::Value::as_str),
-        json.get("disabled").and_then(serde_json::Value::as_bool),
-        json.get("credentials_removed")
-            .and_then(serde_json::Value::as_bool),
-    ) {
-        lines.push(
-            text(
-                i18n,
-                "MCP server '{server}' disconnected.",
-                "MCP 服务器 '{server}' 已断开。",
-            )
-            .replace("{server}", server),
-        );
-        lines.push(
-            if removed {
-                text(
-                    i18n,
-                    "Saved OAuth credentials removed.",
-                    "已删除保存的 OAuth 凭据。",
-                )
-            } else {
-                text(
-                    i18n,
-                    "No saved OAuth credentials to remove.",
-                    "无已保存的 OAuth 凭据需要删除。",
-                )
-            }
-            .to_string(),
-        );
-    } else if let Some(action) = json.get("action").and_then(|v| v.as_str()) {
-        lines.push(format!(
-            "{}: {}",
-            text(i18n, "Action", "操作"),
-            localized_action(action, i18n)
-        ));
-        if let Some(server) = json.get("server").and_then(|v| v.as_str()) {
-            lines.push(format!("{}: {server}", text(i18n, "Server", "服务器")));
-        }
-        if let Some(tools) = json.get("tools").and_then(|v| v.as_array()) {
-            lines.push(format!(
-                "{} ({}):",
-                text(i18n, "Tools", "工具"),
-                tools.len()
-            ));
-            for tool in tools.iter().take(20) {
-                let name = tool
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                lines.push(format!("  - {name}"));
-            }
-            if tools.len() > 20 {
-                lines.push(format!(
-                    "  {}",
-                    text(i18n, "... and {count} more", "……另有 {count} 项")
-                        .replace("{count}", &(tools.len() - 20).to_string())
-                ));
-            }
-        }
-        // Include any message field
-        if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
-            lines.push(message.to_string());
-        }
-    } else if let Some(fallback) = extract_message_or_error(json, i18n) {
-        // Structure doesn't match expected patterns, but has message/error
-        lines.push(fallback);
-    } else {
-        // Generic JSON formatting as last resort
-        lines.push(serde_json::to_string_pretty(json).unwrap_or_else(|_| json.to_string()));
-    }
-
-    lines
-}
 
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
