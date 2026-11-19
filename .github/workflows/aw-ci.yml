@@ -118,6 +118,7 @@ jobs:
             src/aw
             providers/agent-sec-core
             providers/tokenless
+            providers/ws-ckpt
           # Main warms the dependency cache; PRs avoid uploading disposable caches.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks

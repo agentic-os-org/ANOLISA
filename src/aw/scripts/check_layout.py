@@ -41,6 +41,7 @@ def structure(metadata: dict, root: Path) -> None:
             "sha2",
             "aw-provider-sec-core",
         },
+        "aw-provider-ws-ckpt": {"aw-provider", "libc", "serde", "serde_json", "sha2", "tempfile", "tokio"},
         "aw-provider-sec-core": {
             "serde_yaml_ng",
             "aw-host",
@@ -89,7 +90,11 @@ def structure(metadata: dict, root: Path) -> None:
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
     }
-    providers = {"aw-provider-sec-core": "agent-sec-core", "aw-provider-tokenless": "tokenless"}
+    providers = {
+        "aw-provider-sec-core": "agent-sec-core",
+        "aw-provider-tokenless": "tokenless",
+        "aw-provider-ws-ckpt": "ws-ckpt",
+    }
     if members.keys() != allowed.keys() - providers.keys():
         raise ValueError("AW workspace members changed; review the crate boundaries")
     independent = metadata.get("provider_workspaces", [])
