@@ -9,7 +9,16 @@ from unittest.mock import patch
 from test_ci_checks import GateFixture, gate
 from check_inventory import check_inventory, collect, inventory
 from check_layout import source_sizes
-from check_matrix import CAPABILITY_DOCS, END, START, main, table, validate
+from check_matrix import (
+    CAPABILITY_DOCS,
+    END,
+    HOOK_EVENTS,
+    START,
+    capability_cells,
+    main,
+    table,
+    validate,
+)
 
 
 class InventoryTests(GateFixture):
@@ -225,6 +234,67 @@ class MatrixTests(GateFixture):
                 (self.root / name).read_text(),
                 f"intro\n{START}\n{table(self.matrix)}\n{END}\nfooter\n",
             )
+
+    def test_structured_16_hook_capability_cells_match_schemas_and_reject_unknown_hooks(self) -> None:
+        config_schema = json.loads(
+            (gate.AW / "crates/aw-config/schemas/configuration-v1alpha1.schema.json").read_text()
+        )
+        source_schema = json.loads(
+            (
+                gate.AW / "crates/aw-contracts/schemas/source-capability-v1alpha1.schema.json"
+            ).read_text()
+        )
+        self.assertEqual(
+            list(config_schema["properties"]["spec"]["properties"]["events"]["properties"]),
+            list(HOOK_EVENTS),
+        )
+        self.assertEqual(source_schema["$defs"]["hookEvent"]["enum"], list(HOOK_EVENTS))
+        cells = capability_cells(self.matrix)
+        self.assertEqual(set(cells), set(self.matrix["agents"]))
+        for agent, row in cells.items():
+            self.assertEqual(list(row), list(HOOK_EVENTS))
+            for event in HOOK_EVENTS:
+                cell = row[event]
+                self.assertEqual((cell["adapter"], cell["event"]), (agent, event))
+                if event in self.matrix["agents"][agent]["events"]:
+                    self.assertEqual(cell["status"], "supported")
+                    self.assertEqual(cell["sources"], ["native"])
+                    self.assertEqual(cell["mode"], "control")
+                    self.assertEqual(
+                        set(cell["effects"]),
+                        set(self.matrix["agents"][agent]["events"][event]),
+                    )
+                else:
+                    self.assertEqual(cell["status"], "unsupported")
+                    self.assertEqual(cell["sources"], [])
+                    self.assertIsNone(cell["mode"])
+                    self.assertEqual(cell["effects"], [])
+
+        unknown_hook = copy.deepcopy(self.matrix)
+        unknown_hook["agents"]["qoder"]["events"]["unknown.hook"] = {"observe": ["catalog"]}
+        with self.assertRaisesRegex(ValueError, "unknown semantic hook"):
+            capability_cells(unknown_hook)
+
+        missing_observe = copy.deepcopy(self.matrix)
+        del missing_observe["agents"]["qoder"]["events"]["tool.before"]["observe"]
+        with self.assertRaisesRegex(ValueError, "unsupported or incomplete effect set"):
+            capability_cells(missing_observe)
+
+        for event, bad_effect in (("session.end", "replace_input"), ("tool.after", "block")):
+            bad_pair = copy.deepcopy(self.matrix)
+            bad_pair["agents"]["qoder"]["events"][event] = {
+                "observe": ["catalog"],
+                bad_effect: ["catalog"],
+            }
+            with self.subTest(event=event, effect=bad_effect), self.assertRaisesRegex(
+                ValueError, "unsupported or incomplete effect set"
+            ):
+                capability_cells(bad_pair)
+
+        with patch("sys.argv", ["check_matrix.py", "--write-docs", "--cells-json"]), self.assertRaises(
+            SystemExit
+        ):
+            main()
 
 
 class ScriptLayoutTests(GateFixture):

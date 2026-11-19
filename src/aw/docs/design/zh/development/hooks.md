@@ -40,9 +40,13 @@ Scope 的映射，并在改变任一绑定前提供迁移方案和回归覆盖�
 
 ## Source 选择与生命周期
 
-统一 Source 接口和每任务 Resolved Hook Plan 属开发目标。当前 Adapter 提供准备后的
-能力和原生接线；引入共享抽象时保留现有可执行合同。计划中的 SPI、解析器、wire 字段
-和 CLI 不得写成已可用功能。
+运行期统一 Source SPI 切流与每任务 Resolved Hook Plan 的运行期接管仍属开发目标；
+版本化契约 `aw_contracts::source::SourceCapability`（`source-capability-v1alpha1`）、
+`aw_contracts::hook_plan::ResolvedHookPlan`（`resolved-hook-plan-v1alpha1`）以及
+无副作用纯求解器 `aw_core::resolver` 已定义并完成契约与离线 Shadow Plan 等价测试
+（见 [Core 准入](../core-admission.md#多源-hook-求解与-shadow-plan-等价核对)）。
+当前 Adapter 提供准备后的能力和原生接线；引入共享抽象时保留现有可执行合同。未接入运行期主路径的
+SPI、wire 字段和 CLI 不得写成已激活的运行期功能。
 
 新增解析按语义 Hook、效果和保证计算需求，优先选择满足要求的原生 Hook，以适合
 实际运行时且已验证的插桩补缺。一个实例可组合多种来源。Python 可复用 monitoring 或
@@ -64,9 +68,13 @@ Provider 效果或重放工具来承诺无条件恰好一次完成。
 受保护工作准入前解析并验证来源。在目标模型中，每个任务固定来源分配和策略版本。
 来源重配置在安全边界重新探测、安装和验证；普通策略更新不授权热补丁。分别确认
 App Ready、已安装、已验证、AW Ready 和实际采纳。attach 不将已在途工作标记成
-受保护。适用且启用的事件，以及适用且启用的步骤所请求的效果或失败动作缺少能力支持时，
-无论 `required` 取值如何都拒绝准入；启用且没有步骤的事件仍须得到支持。只有不承载任何配置要求的
-额外辅助观察 Source 可以降级并显式报告。显式原生回退管理 Service 可用性，不能
+受保护。在运行期静态能力准入（`admission::preflight` 与 `resolve_shadow_preflight`）中，
+适用且启用的事件，以及适用且启用的步骤所请求的效果或失败动作缺少能力支持时，
+无论 `required` 取值如何都拒绝准入；启用且没有步骤的事件仍须得到支持，只有不承载任何配置要求的
+额外辅助观察 Source 可以降级并显式报告。在离线多源规划（`aw_core::resolver::resolve`）中，
+不满足的 `required: true` Hook 返回 `ResolveError::UnsatisfiedRequired` 拒绝，不满足的
+`required: false` Hook 生成显式 `CoverageGap` 记录（`Coverage::is_complete() == false`），
+由运行期准入在激活前统一拒绝任何存在缺口的计划。显式原生回退管理 Service 可用性，不能
 放宽静态能力准入；须与策略兼容并保留拒绝、Provider 错误和取消。
 来源失联沿已准入故障合同处理，任务内不换 owner。
 机制无法撤除时，卸载可能需要重启。

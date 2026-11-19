@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/resolved-hook-plan/v1alpha1",
+  "title": "AW resolved Hook plan contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "target",
+    "adapter",
+    "hooks",
+    "coverage"
+  ],
+  "properties": {
+    "version": {
+      "const": "aw-resolved-hook-plan/v1alpha1"
+    },
+    "target": {
+      "$ref": "#/$defs/identifier"
+    },
+    "adapter": {
+      "$ref": "#/$defs/identifier"
+    },
+    "hooks": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "$ref": "#/$defs/hookEvent"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/resolvedHookPoint"
+      }
+    },
+    "coverage": {
+      "$ref": "#/$defs/coverage"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^a-zA-Z0-9._-]"
+      }
+    },
+    "profileString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "[^\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]",
+      "not": {
+        "pattern": "[\\r\\n\\u0000\\u2028\\u2029]"
+      }
+    },
+    "toolSelector": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {
+        "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]"
+      }
+    },
+    "sourceKind": {
+      "enum": [
+        "native",
+        "python",
+        "js",
+        "sight"
+      ]
+    },
+    "hookEvent": {
+      "enum": [
+        "session.start",
+        "input.submit",
+        "tool.before",
+        "tool.after",
+        "permission.request",
+        "compact.before",
+        "compact.after",
+        "subagent.start",
+        "subagent.stop",
+        "turn.stop",
+        "session.end",
+        "model.before_request",
+        "runtime.observed",
+        "runtime.exited",
+        "security.violation",
+        "coverage.changed"
+      ]
+    },
+    "hookAuthority": {
+      "enum": [
+        "control",
+        "observe"
+      ]
+    },
+    "hookEffect": {
+      "enum": [
+        "observe",
+        "block",
+        "replace_input",
+        "replace_result",
+        "ask"
+      ]
+    },
+    "failureAction": {
+      "enum": [
+        "report",
+        "block",
+        "withhold_result"
+      ]
+    },
+    "selectedSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "kind",
+        "contract",
+        "entrypoint",
+        "mode",
+        "effects",
+        "failure_actions",
+        "dispatches_steps"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "contract": {
+          "$ref": "#/$defs/profileString"
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/profileString"
+        },
+        "mode": {
+          "$ref": "#/$defs/hookAuthority"
+        },
+        "effects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/hookEffect"
+          }
+        },
+        "failure_actions": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/failureAction"
+          }
+        },
+        "dispatches_steps": {
+          "type": "boolean"
+        }
+      }
+    },
+    "resolvedStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_id",
+        "provider",
+        "effects",
+        "on_error",
+        "step_tools",
+        "native",
+        "dispatch_owner"
+      ],
+      "properties": {
+        "step_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "provider": {
+          "$ref": "#/$defs/identifier"
+        },
+        "effects": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/hookEffect"
+          }
+        },
+        "on_error": {
+          "$ref": "#/$defs/failureAction"
+        },
+        "step_tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolSelector"
+          }
+        },
+        "native": {
+          "type": "boolean"
+        },
+        "dispatch_owner": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "resolvedHookPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "required",
+        "budget_ms",
+        "event_tools",
+        "control_owner",
+        "observation_sources",
+        "steps"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/hookEvent"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "budget_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "event_tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolSelector"
+          }
+        },
+        "control_owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/selectedSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation_sources": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/selectedSource"
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/resolvedStep"
+          }
+        }
+      }
+    },
+    "satisfiedCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "required",
+        "control_owner",
+        "observation_sources",
+        "effects",
+        "failure_actions"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/hookEvent"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "control_owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation_sources": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "effects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/hookEffect"
+          }
+        },
+        "failure_actions": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/failureAction"
+          }
+        }
+      }
+    },
+    "coverageGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "required",
+        "status",
+        "reason",
+        "missing_effects",
+        "missing_failure_actions",
+        "fallback_sources"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/hookEvent"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "uncovered",
+            "degraded"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "unsupported_event",
+            "unsupported_effect",
+            "unsupported_failure_action",
+            "unsupported_native_step"
+          ]
+        },
+        "missing_effects": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/hookEffect"
+          }
+        },
+        "missing_failure_actions": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/failureAction"
+          }
+        },
+        "fallback_sources": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "satisfied",
+        "gaps"
+      ],
+      "properties": {
+        "satisfied": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/satisfiedCoverage"
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/coverageGap"
+          }
+        }
+      }
+    }
+  }
+}

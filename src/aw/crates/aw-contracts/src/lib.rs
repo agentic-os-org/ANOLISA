@@ -8,10 +8,12 @@
 pub mod canonical;
 pub mod deployment;
 pub mod evidence;
+pub mod hook_plan;
 pub mod objects;
 pub mod orchestration;
 pub mod registry;
 mod session_scope;
+pub mod source;
 pub mod validation;
 
 pub use registry::Registry;

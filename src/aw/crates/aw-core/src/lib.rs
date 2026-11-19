@@ -3,13 +3,15 @@
 //!
 //! Core invokes a trusted Host and journals facts. It never starts an Agent,
 //! installs OS protection, dispatches tools or manufactures adoption evidence.
-//! [`admission`] checks Hook policy capability without executing anything, and
+//! [`admission`] checks Hook policy capability without executing anything,
+//! [`resolver`] resolves desired Hook requirements across candidate Sources, and
 //! [`routes`] compiles admitted steps into immutable [`routes::PreparedRoutes`].
 
 pub mod admission;
 pub mod descriptor;
 pub mod journal;
 pub mod ports;
+pub mod resolver;
 pub mod routes;
 
 mod execute;

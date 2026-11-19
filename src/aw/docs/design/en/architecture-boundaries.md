@@ -16,12 +16,12 @@ ANOLISA/
 │   │   ├── aw-adapter/
 │   │   │   ├── src/                # Dialects, catalog, native validation and replies
 │   │   │   └── native/             # Python / JavaScript bridge assets
-│   │   ├── aw-contracts/           # src/, schemas/, tests/
+│   │   ├── aw-contracts/           # src/ (including source.rs, hook_plan.rs), schemas/, tests/
 │   │   ├── aw-config/              # Configuration and static validation
 │   │   ├── aw-provider/            # Common Provider protocol and view contracts
 │   │   ├── aw-exec/                # Bounded process execution
 │   │   ├── aw-host/                # Provider preparation and invocation
-│   │   ├── aw-core/                # Hook policy admission, Plan API and Journal
+│   │   ├── aw-core/                # Hook policy admission, Source resolver, PreparedRoutes compilation, Plan API and Journal
 │   │   ├── aw-cli/                 # Unified aw command frontend
 │   │   ├── aw-service/             # Client, service and runtime state
 │   │   └── aw-package/             # AW extension management and config editing
@@ -73,10 +73,15 @@ activate a Provider. Installed Providers also connect directly through
 | `LaunchFiles`, cancellation flag | Launcher supplies file access and cancellation, retaining directory and process ownership |
 | `Client`, full `Binding`, wire types, `HookBinding` | Remain in service and CLI; Adapter owns no connection or RPC state |
 | Native association, completion phases and replies | Adapter interprets native fields and returns comparison data or replies; CLI writes output and handles exit |
+| `RouteOptions`, `PreparedRoutes` | Adapter dialects supply declarative `RouteOptions` to `aw-core::routes::compile`; Service caches immutable `PreparedRoutes` snapshots on each `Instance` and task `Scope` |
 | Instances, events, claims, budgets, cancellation, audit | Service retains state and enforces constraints |
 
 Qoder ordering requirements, Hermes observation/transform phases, OpenClaw
 post-replacement observation and framework source aliases belong to the Adapter.
+Standard resident Source profile fallback in `reload::resident_supported`
+requires a catalog-registered adapter (`aw_adapter::select`) so unknown adapters
+fail early at registration (`registration_adapter_unsupported`) until the Source
+SPI takes over callback normalization.
 The service retains initial snapshots, digest checks and once-only invocation.
 Raw native bytes are corroborated through the service-supplied strict JSON
 decoder; a callback's `verified: true` is never accepted as evidence.

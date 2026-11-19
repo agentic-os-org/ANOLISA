@@ -223,13 +223,40 @@ pub(crate) fn resident_supported(capabilities: &AdapterCapabilities) -> Result<(
         }
         return Err("resident policy updates require a verified resident entrypoint".into());
     }
-    if !capabilities.adapter.trim().is_empty()
+    // Until the Source SPI takes over callback normalization, standard resident
+    // fallback requires a catalog-registered adapter (`crate::select`) so unknown
+    // adapters fail early at registration (`registration_adapter_unsupported`)
+    // instead of deferring failure to `sdk_callback` (`sdk_adapter`).
+    if crate::select(&capabilities.adapter).is_ok()
         && !capabilities.version.trim().is_empty()
         && STANDARD_RESIDENT_ENTRYPOINTS.contains(&capabilities.entrypoint.as_str())
     {
         return Ok(());
     }
     Err("resident policy updates require a supported resident Source profile".into())
+}
+
+pub(crate) fn compile_standard_resident_routes(
+    document: &Value,
+    steps: &[AdmittedStep],
+    capabilities: &AdapterCapabilities,
+) -> Result<PreparedRoutes> {
+    if capabilities.adapter.trim().is_empty()
+        || capabilities.version.trim().is_empty()
+        || !STANDARD_RESIDENT_ENTRYPOINTS.contains(&capabilities.entrypoint.as_str())
+    {
+        return Err("resident policy updates require a supported resident Source profile".into());
+    }
+    aw_core::routes::compile(document, steps, &RouteOptions::standard(capabilities)).map_err(
+        |error| {
+            format_route_error(
+                error,
+                SDK_BUDGET_ERRORS.0,
+                SDK_BUDGET_ERRORS.1,
+                SDK_BUDGET_ERRORS.2,
+            )
+        },
+    )
 }
 
 pub(crate) fn compile_resident_routes(
@@ -256,16 +283,7 @@ pub(crate) fn compile_resident_routes(
         return aw_core::routes::compile(document, steps, &options)
             .map_err(|error| format_route_error(error, invalid, range, non_integral));
     }
-    aw_core::routes::compile(document, steps, &RouteOptions::standard(capabilities)).map_err(
-        |error| {
-            format_route_error(
-                error,
-                SDK_BUDGET_ERRORS.0,
-                SDK_BUDGET_ERRORS.1,
-                SDK_BUDGET_ERRORS.2,
-            )
-        },
-    )
+    compile_standard_resident_routes(document, steps, capabilities)
 }
 
 pub(crate) fn convert_routes(
@@ -458,55 +476,54 @@ mod tests {
 
     #[test]
     fn scope_routes_match_every_resident_dialect_and_admit_standard_profiles() {
+        let mk_step =
+            |event: &str, step_id: &str, provider: &str, on_error: &str, op: &str, fx: &[&str]| {
+                AdmittedStep {
+                    event: event.into(),
+                    step_id: step_id.into(),
+                    provider: provider.into(),
+                    event_tools: vec!["*".into()],
+                    step_tools: vec!["*".into()],
+                    on_error: on_error.into(),
+                    execution: StepExecution::Provider {
+                        operation: op.into(),
+                        effects: fx.iter().map(|e| (*e).into()).collect(),
+                    },
+                }
+            };
         let steps = vec![
-            AdmittedStep {
-                event: "input.submit".into(),
-                step_id: "submit".into(),
-                provider: "security".into(),
-                event_tools: vec!["*".into()],
-                step_tools: vec!["*".into()],
-                on_error: "block".into(),
-                execution: StepExecution::Provider {
-                    operation: "check_skill".into(),
-                    effects: vec!["observe".into(), "block".into()],
-                },
-            },
-            AdmittedStep {
-                event: "tool.before".into(),
-                step_id: "rewrite".into(),
-                provider: "tokenless".into(),
-                event_tools: vec!["*".into()],
-                step_tools: vec!["*".into()],
-                on_error: "block".into(),
-                execution: StepExecution::Provider {
-                    operation: "rewrite".into(),
-                    effects: vec!["replace_input".into()],
-                },
-            },
-            AdmittedStep {
-                event: "tool.after".into(),
-                step_id: "observe".into(),
-                provider: "audit".into(),
-                event_tools: vec!["*".into()],
-                step_tools: vec!["*".into()],
-                on_error: "report".into(),
-                execution: StepExecution::Provider {
-                    operation: "record".into(),
-                    effects: vec!["observe".into()],
-                },
-            },
-            AdmittedStep {
-                event: "tool.after".into(),
-                step_id: "compress".into(),
-                provider: "tokenless".into(),
-                event_tools: vec!["*".into()],
-                step_tools: vec!["*".into()],
-                on_error: "report".into(),
-                execution: StepExecution::Provider {
-                    operation: "compress".into(),
-                    effects: vec!["replace_result".into()],
-                },
-            },
+            mk_step(
+                "input.submit",
+                "submit",
+                "security",
+                "block",
+                "check_skill",
+                &["observe", "block"],
+            ),
+            mk_step(
+                "tool.before",
+                "rewrite",
+                "tokenless",
+                "block",
+                "rewrite",
+                &["replace_input"],
+            ),
+            mk_step(
+                "tool.after",
+                "observe",
+                "audit",
+                "report",
+                "record",
+                &["observe"],
+            ),
+            mk_step(
+                "tool.after",
+                "compress",
+                "tokenless",
+                "report",
+                "compress",
+                &["replace_result"],
+            ),
         ];
         for (adapter, entrypoint, expected_steps, empty_steps) in [
             (
@@ -617,23 +634,20 @@ mod tests {
                 .to_string(),
             "SDK hook budgets must be 1..55000 ms"
         );
-        // Standard Source profiles compile without adding branches in reload.rs.
+        // Catalog-registered standard Source profiles compile via RouteOptions::standard
+        // without adding hardcoded branches in reload.rs; non-catalog adapters are rejected
+        // early at registration until the Source SPI takes over callback normalization.
         for entrypoint in ["application", "sdk", "sdk-worker", "factory"] {
-            let doc = json!({
-                "spec": {
-                    "agents": {"target": {"adapter": "future-source"}},
-                    "events": {},
-                    "execution": {"default_event_budget_ms": 3000}
-                }
-            });
+            let doc = json!({"spec": {"agents": {"target": {"adapter": "sdk"}}, "events": {}, "execution": {"default_event_budget_ms": 3000}}});
+            let events = BTreeMap::from([("tool.before".into(), vec!["observe".into()])]);
             let caps = AdapterCapabilities {
-                adapter: "future-source".into(),
+                adapter: "sdk".into(),
                 version: "1.0.0".into(),
                 entrypoint: entrypoint.into(),
-                events: BTreeMap::from([("tool.before".into(), vec!["observe".into()])]),
+                events: events.clone(),
                 failure_actions: BTreeMap::new(),
             };
-            let prepared = crate::reload::scope_routes(&doc, "target", &[], &caps).unwrap();
+            let prepared = compile_standard_resident_routes(&doc, &[], &caps).unwrap();
             assert_eq!(
                 prepared
                     .event("tool.before")
@@ -642,6 +656,16 @@ mod tests {
                 Some("report")
             );
             assert!(prepared.event("tool.after").is_none());
+
+            let unknown_doc = json!({"spec": {"agents": {"target": {"adapter": "future-source"}}, "events": {}, "execution": {"default_event_budget_ms": 3000}}});
+            let unknown_caps = AdapterCapabilities {
+                adapter: "future-source".into(),
+                ..caps
+            };
+            assert!(crate::reload::resident_supported(&unknown_caps).is_err());
+            assert!(
+                crate::reload::scope_routes(&unknown_doc, "target", &[], &unknown_caps).is_err()
+            );
         }
         for (adapter, entrypoint) in [
             ("qoder", "sdk-worker"),

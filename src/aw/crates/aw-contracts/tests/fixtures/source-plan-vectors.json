@@ -1,0 +1,524 @@
+{
+  "hook_events": [
+    "session.start",
+    "input.submit",
+    "tool.before",
+    "tool.after",
+    "permission.request",
+    "compact.before",
+    "compact.after",
+    "subagent.start",
+    "subagent.stop",
+    "turn.stop",
+    "session.end",
+    "model.before_request",
+    "runtime.observed",
+    "runtime.exited",
+    "security.violation",
+    "coverage.changed"
+  ],
+  "vectors": [
+    {
+      "name": "native-qwenpaw",
+      "kind": "source-capability-v1alpha1",
+      "document": {
+        "version": "aw-source-capability/v1alpha1",
+        "source_id": "qwenpaw-native",
+        "kind": "native",
+        "adapter": "qwenpaw",
+        "contract": "installed-native-hooks/v1",
+        "entrypoint": "app",
+        "hooks": {
+          "input.submit": {
+            "mode": "control",
+            "effects": [
+              "observe",
+              "block"
+            ],
+            "failure_actions": []
+          },
+          "tool.before": {
+            "mode": "control",
+            "effects": [
+              "observe",
+              "block",
+              "replace_input"
+            ],
+            "failure_actions": []
+          },
+          "tool.after": {
+            "mode": "control",
+            "effects": [
+              "observe",
+              "replace_result"
+            ],
+            "failure_actions": [
+              "withhold_result"
+            ]
+          }
+        }
+      },
+      "canonical": "{\"adapter\":\"qwenpaw\",\"contract\":\"installed-native-hooks/v1\",\"entrypoint\":\"app\",\"hooks\":{\"input.submit\":{\"effects\":[\"observe\",\"block\"],\"failure_actions\":[],\"mode\":\"control\"},\"tool.after\":{\"effects\":[\"observe\",\"replace_result\"],\"failure_actions\":[\"withhold_result\"],\"mode\":\"control\"},\"tool.before\":{\"effects\":[\"observe\",\"block\",\"replace_input\"],\"failure_actions\":[],\"mode\":\"control\"}},\"kind\":\"native\",\"source_id\":\"qwenpaw-native\",\"version\":\"aw-source-capability/v1alpha1\"}",
+      "digest": "e60b4567e24d07e763ea83e9163a1428bf3abf05661a37e6bcf80ca95aaa74f5"
+    },
+    {
+      "name": "python-monitoring",
+      "kind": "source-capability-v1alpha1",
+      "document": {
+        "version": "aw-source-capability/v1alpha1",
+        "source_id": "python-monitoring",
+        "kind": "python",
+        "adapter": "qwenpaw",
+        "contract": "python-monitoring/v1",
+        "entrypoint": "app",
+        "hooks": {
+          "model.before_request": {
+            "mode": "observe",
+            "effects": [
+              "observe"
+            ],
+            "failure_actions": []
+          },
+          "tool.before": {
+            "mode": "observe",
+            "effects": [
+              "observe"
+            ],
+            "failure_actions": []
+          }
+        }
+      },
+      "canonical": "{\"adapter\":\"qwenpaw\",\"contract\":\"python-monitoring/v1\",\"entrypoint\":\"app\",\"hooks\":{\"model.before_request\":{\"effects\":[\"observe\"],\"failure_actions\":[],\"mode\":\"observe\"},\"tool.before\":{\"effects\":[\"observe\"],\"failure_actions\":[],\"mode\":\"observe\"}},\"kind\":\"python\",\"source_id\":\"python-monitoring\",\"version\":\"aw-source-capability/v1alpha1\"}",
+      "digest": "77609986b2cb89660c3a46b5c66fb3f5f1151089477985fe20e7c4a7a773dc06"
+    },
+    {
+      "name": "js-final-gate",
+      "kind": "source-capability-v1alpha1",
+      "document": {
+        "version": "aw-source-capability/v1alpha1",
+        "source_id": "js-final-gate",
+        "kind": "js",
+        "adapter": "qoder-sdk",
+        "contract": "js-final-gate/v1",
+        "entrypoint": "sdk-worker",
+        "hooks": {
+          "tool.after": {
+            "mode": "control",
+            "effects": [
+              "observe",
+              "replace_result"
+            ],
+            "failure_actions": []
+          }
+        }
+      },
+      "canonical": "{\"adapter\":\"qoder-sdk\",\"contract\":\"js-final-gate/v1\",\"entrypoint\":\"sdk-worker\",\"hooks\":{\"tool.after\":{\"effects\":[\"observe\",\"replace_result\"],\"failure_actions\":[],\"mode\":\"control\"}},\"kind\":\"js\",\"source_id\":\"js-final-gate\",\"version\":\"aw-source-capability/v1alpha1\"}",
+      "digest": "ba879413685ebf6e275c3a0539cae7ce48af4d22e36cdbeafb891a3082a1d983"
+    },
+    {
+      "name": "sight-observer",
+      "kind": "source-capability-v1alpha1",
+      "document": {
+        "version": "aw-source-capability/v1alpha1",
+        "source_id": "sight-observer",
+        "kind": "sight",
+        "adapter": "qwenpaw",
+        "contract": "agentsight/v1",
+        "entrypoint": "ebpf",
+        "hooks": {
+          "runtime.observed": {
+            "mode": "observe",
+            "effects": [
+              "observe"
+            ],
+            "failure_actions": []
+          },
+          "tool.after": {
+            "mode": "observe",
+            "effects": [
+              "observe"
+            ],
+            "failure_actions": []
+          },
+          "tool.before": {
+            "mode": "observe",
+            "effects": [
+              "observe"
+            ],
+            "failure_actions": []
+          }
+        }
+      },
+      "canonical": "{\"adapter\":\"qwenpaw\",\"contract\":\"agentsight/v1\",\"entrypoint\":\"ebpf\",\"hooks\":{\"runtime.observed\":{\"effects\":[\"observe\"],\"failure_actions\":[],\"mode\":\"observe\"},\"tool.after\":{\"effects\":[\"observe\"],\"failure_actions\":[],\"mode\":\"observe\"},\"tool.before\":{\"effects\":[\"observe\"],\"failure_actions\":[],\"mode\":\"observe\"}},\"kind\":\"sight\",\"source_id\":\"sight-observer\",\"version\":\"aw-source-capability/v1alpha1\"}",
+      "digest": "ae862b907aba2ffc352efb7319887e99869c46172eb6a9ed1364724a4a91bbf5"
+    },
+    {
+      "name": "combined-plan",
+      "kind": "resolved-hook-plan-v1alpha1",
+      "document": {
+        "version": "aw-resolved-hook-plan/v1alpha1",
+        "target": "qwenpaw",
+        "adapter": "qwenpaw",
+        "hooks": {
+          "model.before_request": {
+            "event": "model.before_request",
+            "required": false,
+            "budget_ms": 250,
+            "event_tools": [
+              "*"
+            ],
+            "control_owner": null,
+            "observation_sources": [
+              {
+                "source_id": "python-monitoring",
+                "kind": "python",
+                "contract": "python-monitoring/v1",
+                "entrypoint": "app",
+                "mode": "observe",
+                "effects": [
+                  "observe"
+                ],
+                "failure_actions": [],
+                "dispatches_steps": true
+              }
+            ],
+            "steps": [
+              {
+                "step_id": "audit-model",
+                "provider": "policy",
+                "effects": [
+                  "observe"
+                ],
+                "on_error": "report",
+                "step_tools": [
+                  "*"
+                ],
+                "native": false,
+                "dispatch_owner": "python-monitoring"
+              }
+            ]
+          },
+          "tool.before": {
+            "event": "tool.before",
+            "required": true,
+            "budget_ms": 250,
+            "event_tools": [
+              "*"
+            ],
+            "control_owner": {
+              "source_id": "qwenpaw-native",
+              "kind": "native",
+              "contract": "installed-native-hooks/v1",
+              "entrypoint": "app",
+              "mode": "control",
+              "effects": [
+                "observe",
+                "block",
+                "replace_input"
+              ],
+              "failure_actions": [],
+              "dispatches_steps": true
+            },
+            "observation_sources": [
+              {
+                "source_id": "python-monitoring",
+                "kind": "python",
+                "contract": "python-monitoring/v1",
+                "entrypoint": "app",
+                "mode": "observe",
+                "effects": [
+                  "observe"
+                ],
+                "failure_actions": [],
+                "dispatches_steps": false
+              },
+              {
+                "source_id": "sight-observer",
+                "kind": "sight",
+                "contract": "agentsight/v1",
+                "entrypoint": "ebpf",
+                "mode": "observe",
+                "effects": [
+                  "observe"
+                ],
+                "failure_actions": [],
+                "dispatches_steps": false
+              }
+            ],
+            "steps": [
+              {
+                "step_id": "rewrite",
+                "provider": "policy",
+                "effects": [
+                  "replace_input"
+                ],
+                "on_error": "block",
+                "step_tools": [
+                  "*"
+                ],
+                "native": false,
+                "dispatch_owner": "qwenpaw-native"
+              },
+              {
+                "step_id": "check",
+                "provider": "policy",
+                "effects": [
+                  "observe",
+                  "block"
+                ],
+                "on_error": "block",
+                "step_tools": [
+                  "*"
+                ],
+                "native": false,
+                "dispatch_owner": "qwenpaw-native"
+              }
+            ]
+          }
+        },
+        "coverage": {
+          "satisfied": [
+            {
+              "event": "model.before_request",
+              "required": false,
+              "control_owner": null,
+              "observation_sources": [
+                "python-monitoring"
+              ],
+              "effects": [
+                "observe"
+              ],
+              "failure_actions": [
+                "report"
+              ]
+            },
+            {
+              "event": "tool.before",
+              "required": true,
+              "control_owner": "qwenpaw-native",
+              "observation_sources": [
+                "python-monitoring",
+                "sight-observer"
+              ],
+              "effects": [
+                "observe",
+                "block",
+                "replace_input"
+              ],
+              "failure_actions": [
+                "block"
+              ]
+            }
+          ],
+          "gaps": [
+            {
+              "event": "permission.request",
+              "required": false,
+              "status": "uncovered",
+              "reason": "unsupported_event",
+              "missing_effects": [
+                "observe",
+                "ask"
+              ],
+              "missing_failure_actions": [],
+              "fallback_sources": []
+            },
+            {
+              "event": "runtime.observed",
+              "required": false,
+              "status": "degraded",
+              "reason": "unsupported_native_step",
+              "missing_effects": [],
+              "missing_failure_actions": [],
+              "fallback_sources": [
+                "sight-observer"
+              ]
+            }
+          ]
+        }
+      },
+      "canonical": "{\"adapter\":\"qwenpaw\",\"coverage\":{\"gaps\":[{\"event\":\"permission.request\",\"fallback_sources\":[],\"missing_effects\":[\"observe\",\"ask\"],\"missing_failure_actions\":[],\"reason\":\"unsupported_event\",\"required\":false,\"status\":\"uncovered\"},{\"event\":\"runtime.observed\",\"fallback_sources\":[\"sight-observer\"],\"missing_effects\":[],\"missing_failure_actions\":[],\"reason\":\"unsupported_native_step\",\"required\":false,\"status\":\"degraded\"}],\"satisfied\":[{\"control_owner\":null,\"effects\":[\"observe\"],\"event\":\"model.before_request\",\"failure_actions\":[\"report\"],\"observation_sources\":[\"python-monitoring\"],\"required\":false},{\"control_owner\":\"qwenpaw-native\",\"effects\":[\"observe\",\"block\",\"replace_input\"],\"event\":\"tool.before\",\"failure_actions\":[\"block\"],\"observation_sources\":[\"python-monitoring\",\"sight-observer\"],\"required\":true}]},\"hooks\":{\"model.before_request\":{\"budget_ms\":250,\"control_owner\":null,\"event\":\"model.before_request\",\"event_tools\":[\"*\"],\"observation_sources\":[{\"contract\":\"python-monitoring/v1\",\"dispatches_steps\":true,\"effects\":[\"observe\"],\"entrypoint\":\"app\",\"failure_actions\":[],\"kind\":\"python\",\"mode\":\"observe\",\"source_id\":\"python-monitoring\"}],\"required\":false,\"steps\":[{\"dispatch_owner\":\"python-monitoring\",\"effects\":[\"observe\"],\"native\":false,\"on_error\":\"report\",\"provider\":\"policy\",\"step_id\":\"audit-model\",\"step_tools\":[\"*\"]}]},\"tool.before\":{\"budget_ms\":250,\"control_owner\":{\"contract\":\"installed-native-hooks/v1\",\"dispatches_steps\":true,\"effects\":[\"observe\",\"block\",\"replace_input\"],\"entrypoint\":\"app\",\"failure_actions\":[],\"kind\":\"native\",\"mode\":\"control\",\"source_id\":\"qwenpaw-native\"},\"event\":\"tool.before\",\"event_tools\":[\"*\"],\"observation_sources\":[{\"contract\":\"python-monitoring/v1\",\"dispatches_steps\":false,\"effects\":[\"observe\"],\"entrypoint\":\"app\",\"failure_actions\":[],\"kind\":\"python\",\"mode\":\"observe\",\"source_id\":\"python-monitoring\"},{\"contract\":\"agentsight/v1\",\"dispatches_steps\":false,\"effects\":[\"observe\"],\"entrypoint\":\"ebpf\",\"failure_actions\":[],\"kind\":\"sight\",\"mode\":\"observe\",\"source_id\":\"sight-observer\"}],\"required\":true,\"steps\":[{\"dispatch_owner\":\"qwenpaw-native\",\"effects\":[\"replace_input\"],\"native\":false,\"on_error\":\"block\",\"provider\":\"policy\",\"step_id\":\"rewrite\",\"step_tools\":[\"*\"]},{\"dispatch_owner\":\"qwenpaw-native\",\"effects\":[\"observe\",\"block\"],\"native\":false,\"on_error\":\"block\",\"provider\":\"policy\",\"step_id\":\"check\",\"step_tools\":[\"*\"]}]}},\"target\":\"qwenpaw\",\"version\":\"aw-resolved-hook-plan/v1alpha1\"}",
+      "digest": "4e4db0513b6442474cdde355c3206964dc8f30218800f4cf3617010d3204d483"
+    }
+  ],
+  "capability_cells": {
+    "adapter": "qwenpaw",
+    "cells": {
+      "session.start": {
+        "adapter": "qwenpaw",
+        "event": "session.start",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "input.submit": {
+        "adapter": "qwenpaw",
+        "event": "input.submit",
+        "status": "supported",
+        "sources": [
+          "native"
+        ],
+        "mode": "control",
+        "effects": [
+          "observe",
+          "block"
+        ],
+        "failure_actions": []
+      },
+      "tool.before": {
+        "adapter": "qwenpaw",
+        "event": "tool.before",
+        "status": "supported",
+        "sources": [
+          "native",
+          "python",
+          "sight"
+        ],
+        "mode": "control",
+        "effects": [
+          "observe",
+          "block",
+          "replace_input"
+        ],
+        "failure_actions": []
+      },
+      "tool.after": {
+        "adapter": "qwenpaw",
+        "event": "tool.after",
+        "status": "supported",
+        "sources": [
+          "native",
+          "sight"
+        ],
+        "mode": "control",
+        "effects": [
+          "observe",
+          "replace_result"
+        ],
+        "failure_actions": [
+          "withhold_result"
+        ]
+      },
+      "permission.request": {
+        "adapter": "qwenpaw",
+        "event": "permission.request",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "compact.before": {
+        "adapter": "qwenpaw",
+        "event": "compact.before",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "compact.after": {
+        "adapter": "qwenpaw",
+        "event": "compact.after",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "subagent.start": {
+        "adapter": "qwenpaw",
+        "event": "subagent.start",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "subagent.stop": {
+        "adapter": "qwenpaw",
+        "event": "subagent.stop",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "turn.stop": {
+        "adapter": "qwenpaw",
+        "event": "turn.stop",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "session.end": {
+        "adapter": "qwenpaw",
+        "event": "session.end",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "model.before_request": {
+        "adapter": "qwenpaw",
+        "event": "model.before_request",
+        "status": "supported",
+        "sources": [
+          "python"
+        ],
+        "mode": "observe",
+        "effects": [
+          "observe"
+        ],
+        "failure_actions": []
+      },
+      "runtime.observed": {
+        "adapter": "qwenpaw",
+        "event": "runtime.observed",
+        "status": "supported",
+        "sources": [
+          "sight"
+        ],
+        "mode": "observe",
+        "effects": [
+          "observe"
+        ],
+        "failure_actions": []
+      },
+      "runtime.exited": {
+        "adapter": "qwenpaw",
+        "event": "runtime.exited",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "security.violation": {
+        "adapter": "qwenpaw",
+        "event": "security.violation",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      },
+      "coverage.changed": {
+        "adapter": "qwenpaw",
+        "event": "coverage.changed",
+        "status": "unsupported",
+        "sources": [],
+        "mode": null,
+        "effects": [],
+        "failure_actions": []
+      }
+    },
+    "canonical": "{\"compact.after\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"compact.after\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"compact.before\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"compact.before\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"coverage.changed\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"coverage.changed\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"input.submit\":{\"adapter\":\"qwenpaw\",\"effects\":[\"observe\",\"block\"],\"event\":\"input.submit\",\"failure_actions\":[],\"mode\":\"control\",\"sources\":[\"native\"],\"status\":\"supported\"},\"model.before_request\":{\"adapter\":\"qwenpaw\",\"effects\":[\"observe\"],\"event\":\"model.before_request\",\"failure_actions\":[],\"mode\":\"observe\",\"sources\":[\"python\"],\"status\":\"supported\"},\"permission.request\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"permission.request\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"runtime.exited\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"runtime.exited\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"runtime.observed\":{\"adapter\":\"qwenpaw\",\"effects\":[\"observe\"],\"event\":\"runtime.observed\",\"failure_actions\":[],\"mode\":\"observe\",\"sources\":[\"sight\"],\"status\":\"supported\"},\"security.violation\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"security.violation\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"session.end\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"session.end\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"session.start\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"session.start\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"subagent.start\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"subagent.start\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"subagent.stop\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"subagent.stop\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"},\"tool.after\":{\"adapter\":\"qwenpaw\",\"effects\":[\"observe\",\"replace_result\"],\"event\":\"tool.after\",\"failure_actions\":[\"withhold_result\"],\"mode\":\"control\",\"sources\":[\"native\",\"sight\"],\"status\":\"supported\"},\"tool.before\":{\"adapter\":\"qwenpaw\",\"effects\":[\"observe\",\"block\",\"replace_input\"],\"event\":\"tool.before\",\"failure_actions\":[],\"mode\":\"control\",\"sources\":[\"native\",\"python\",\"sight\"],\"status\":\"supported\"},\"turn.stop\":{\"adapter\":\"qwenpaw\",\"effects\":[],\"event\":\"turn.stop\",\"failure_actions\":[],\"mode\":null,\"sources\":[],\"status\":\"unsupported\"}}",
+    "digest": "b2b24226e8d3fc48d660dc5511e481030a497d29a8c3e163c261eeb4d96d5ddd"
+  }
+}
