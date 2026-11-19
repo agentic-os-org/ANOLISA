@@ -210,6 +210,7 @@ class GateTests(GateFixture):
         provider_directories = {
             "aw-provider-sec-core": self.root.parents[1] / "providers/agent-sec-core",
             "aw-provider-tokenless": self.root.parents[1] / "providers/tokenless",
+            "aw-provider-ws-ckpt": self.root.parents[1] / "providers/ws-ckpt",
         }
         local_directories = provider_directories
         packages = []
@@ -250,6 +251,10 @@ class GateTests(GateFixture):
             (
                 "aw-provider-tokenless", self.root.parents[1] / "providers/tokenless",
                 ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "tempfile", "libc", "shlex", "aw-provider-sec-core"],
+            ),
+            (
+                "aw-provider-ws-ckpt", self.root.parents[1] / "providers/ws-ckpt",
+                ["aw-provider", "libc", "serde", "serde_json", "sha2", "tempfile", "tokio"],
             ),
             ("aw-adapter", self.root / "crates/aw-adapter",
              ["aw-config", "aw-contracts", "aw-core", "aw-exec", "aw-provider", "serde_json", "reqwest"]),

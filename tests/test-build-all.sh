@@ -175,10 +175,13 @@ test_aliases_are_normalized_and_deduplicated() {
 
 test_partial_backend_builds_its_provider() {
     local backend provider
-    for backend in tokenless sec-core; do
+    for backend in tokenless sec-core ws-ckpt; do
         setup_case "backend-$backend"
-        if [[ "$backend" == tokenless ]]; then provider=aw-provider-tokenless
-        else provider=aw-provider-sec-core; fi
+        provider="aw-provider-$backend"
+        if [[ "$backend" == ws-ckpt ]]; then
+            mkdir -p "$FIXTURE_ROOT/providers/ws-ckpt"
+            cp "$SOURCE_ROOT/providers/ws-ckpt/"{Makefile,Cargo.toml} "$FIXTURE_ROOT/providers/ws-ckpt/"
+        fi
         invoke --component "$backend" --no-install
         success
         [[ "$(grep -c '^make|' "$EVENT_LOG")" -eq 2 ]] || fail 'partial build omitted its provider or selected unrelated components'
