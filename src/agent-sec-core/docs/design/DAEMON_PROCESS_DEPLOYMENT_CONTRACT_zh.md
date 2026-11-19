@@ -896,9 +896,28 @@ GitHub 鉴权；已有代理连接不保证无缝恢复，须重连。
 接管的 credential Binding 实例 TCP 80/443，同 Scope 多实例共享端口。没有 UDP/443 drop
 或 filter chain。IPv6 与 HTTP/3/QUIC 不引流、不强制回退或拒绝，放行但不保护，fake 原样
 发送，鉴权可能失败。
-已进入 IPv4 代理的 HTTP(S) 仍执行原安全校验；HTTPS 全部执行 TLS MITM，无 fake 不等于
-TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停止代理与删除整个运行目录
-（`remove_all`）行为保持不变，不适用主动 disable 的 CA 保留规则，不能概括为所有故障都 fail-open。
+已进入 IPv4 代理的明文 HTTP 与已解包 HTTPS 仍执行原安全校验；HTTPS 仅在本 listener
+的原声明 hosts 精确命中可见 SNI 时 MITM。声明集合来自 Active Scope 固定 Policy 快照
+的完整校验 Plan，过滤不可用 credentials/rules 前提取，排序唯一且最多 256 个 DNS 名。
+`active.json` version 1 每 listener 必需 `hosts`，所保留规则 host 必须属于该集合；
+hosts、Plan 和秘密同代加载，坏 reload 保留完整旧代，manifest 删除则清空。
+新 TLS 的未命中、无/IP/无效 SNI、缺快照、未知 listener 和选择异常均原样 relay；
+不改 SNI、握手字节或目的 IP/port，只输出固定有界无敏感值诊断。命中比较忽略大小写及
+一个末尾点，并仅在命中时同步规范化连接 SNI，保证上游证书校验。hook 前畸形
+ClientHello 解析失败保持依赖原行为，不新增 TLS 关闭或重解析。
+
+命中只选择检查，不授予注入：无 fake 仍按安全检查后转发，逐请求检查最新 HTTP
+snapshot，Host/SNI 不符（含 HTTP/2 切换）仍为 421；已 MITM 连接不能转 relay。
+上游验证保持开启，命中后失败不降级，pinning/mTLS 仍可能失败，共享 CA 不限制域名
+或 Scope。host 变化只影响新连接，既有透传不能追溯解密。未选中 TLS 不解密、不注入、
+不扫描加密 token，另一 Scope 的声明也不扩大检查，ECH 只按可见外层 SNI。
+选择层 fail-open 依赖 Agent 只配置 fake 且不能取得 real；既有响应泄漏边界仍适用。
+已解包 HTTP 在 generation 缺失时拒绝。撤销失败的停止代理与删除整个运行目录
+（`remove_all`）行为不变，不适用主动 disable 的 CA 保留，不能概括所有故障都 fail-open。
+
+新的必需 hosts 字段不升级 manifest、Plan 或 secrets 版本，也不提供缺省兼容。部署和
+回滚须先 disable 并确认撤流，停止旧代理并清理不匹配运行计划/health，再成套更新 daemon
+与 addon，由匹配 producer 重新发布并待当前 generation ready 后恢复引流；不手工改 manifest。
 
 显式指定 `agent-sec-daemon serve --enable-gateway` 时，原有 Gateway 装配路径在启动
 Binding worker 前恢复 file Scope 删除屏障并同步执行
@@ -940,8 +959,11 @@ Scope 的重叠父子树复用已拥有的 cgroup，不迁移已受保护成员�
 在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
 等待其实际调用结束。网关等待不占用 Binding timer；file-only Scope 和 credential Scope
 使用独立变更锁，混合 Scope 归 credential 域。空 Scope 也释放端口，
-不删除 real、不停止 Agent。全局 key retirement 撤销所有 Scope 对该凭据的 fake。
-await 后须重新验证 canonical 授权，过时操作不得恢复引流。
+不删除 real、不停止 Agent。全局 key retirement 撤销所有 Scope 对该凭据的 fake，但有
+原声明 hosts 的 Active Scope 在全部凭据退役后仍保留 listener 与引流，继续拒绝旧 fake。
+路由仍核验原 Binding owner、完整成员及根 cgroup，Binding 失效/成员失败、Scope
+撤销或删除照常撤流；空原声明集合不扩大引流。await 后须重新验证 canonical 授权，
+过时操作不得恢复引流。
 
 | ID | 必须验证 | 验证入口 |
 |---|---|---|

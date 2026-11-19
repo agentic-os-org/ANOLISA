@@ -22,7 +22,9 @@ SECRETS_VERSION = 2
 
 MAX_PLAN_BYTES = 1024 * 1024
 MAX_SECRETS_BYTES = 8 * 1024 * 1024
-MAX_MANIFEST_BYTES = 64 * 1024
+# Eight listeners × 256 hosts × (253 DNS bytes + JSON framing), plus file metadata.
+# Keep this wire budget identical to asc-gateway-runtime's producer limit.
+MAX_MANIFEST_BYTES = 8 * 256 * 256 + 16 * 1024
 MAX_VALUE_BYTES = 512
 MAX_LISTENERS = 64
 MAX_RULES = 256
@@ -104,6 +106,8 @@ class ManagedFake:
 class Snapshot:
     generation: int
     listeners: dict[int, Plan]
+    # Declared targets survive filtering of unavailable credentials and rules.
+    hosts: dict[int, frozenset[str]]
     live: dict[str, Entry] = field(repr=False)
     retired: dict[str, ManagedFake] = field(repr=False)
     unavailable: dict[str, ManagedFake] = field(repr=False)
@@ -522,11 +526,12 @@ def build_snapshot(manifest_raw: bytes, read: Callable[[str, int], bytes]) -> Sn
         secrets_generation == generation, "secrets generation differs from manifest"
     )
     listeners: dict[int, Plan] = {}
+    hosts: dict[int, frozenset[str]] = {}
     agents: set[str] = set()
     items = _list(manifest["listeners"], "manifest listeners")
     _require(len(items) <= MAX_LISTENERS, "manifest has too many listeners")
     for item in items:
-        listener = _object(item, {"port", "scopeId", "plan"}, "listener")
+        listener = _object(item, {"port", "scopeId", "hosts", "plan"}, "listener")
         port = _integer(listener["port"], "listener port")
         _require(
             0 < port < 65536 and port not in listeners, "listener ports must be unique"
@@ -534,9 +539,21 @@ def build_snapshot(manifest_raw: bytes, read: Callable[[str, int], bytes]) -> Sn
         agent = _dns_label(listener["scopeId"], "listener agent")
         _require(agent not in agents, "listener agents must be unique")
         agents.add(agent)
+        declared = _list(listener["hosts"], "listener hosts")
+        _require(len(declared) <= MAX_RULES, "listener has too many hosts")
+        declared = [_host(host, "listener host") for host in declared]
+        _require(
+            all(a < b for a, b in zip(declared, declared[1:])),
+            "listener hosts must be sorted and unique",
+        )
+        hosts[port] = frozenset(declared)
         plan_name = _file_name(listener["plan"], "listener plan")
         plan = parse_plan(_decode_json(read(plan_name, MAX_PLAN_BYTES), "plan"))
         _require(plan.scope_id == agent, "plan scope differs from listener scope")
+        _require(
+            all(rule.host in hosts[port] for rule in plan.rules),
+            "plan rule host is outside the listener hosts",
+        )
         issued = {e.credential for e in live.values() if agent in e.scope_ids}
         _require(
             plan.credentials <= issued, "plan credential has no fake for its agent"
@@ -545,7 +562,28 @@ def build_snapshot(manifest_raw: bytes, read: Callable[[str, int], bytes]) -> Sn
     reals = tuple(
         sorted({e.real for e in live.values()}, key=lambda real: (-len(real), real))
     )
-    return Snapshot(generation, listeners, live, retired, unavailable, reals)
+    return Snapshot(generation, listeners, hosts, live, retired, unavailable, reals)
+
+
+def select_tls_host(
+    snapshot: Snapshot | None, port: int, sni: str | None
+) -> str | None:
+    """Select only this listener's exact DNS target; None preserves end-to-end TLS."""
+    if (
+        snapshot is None
+        or not isinstance(port, int)
+        or isinstance(port, bool)
+        or port not in snapshot.listeners
+        or not isinstance(sni, str)
+        or not 0 < len(sni) <= 254
+        or not sni.isascii()
+    ):
+        return None
+    try:
+        host = _host(sni.lower().removesuffix("."), "SNI")
+    except LoadError:
+        return None
+    return host if host in snapshot.hosts[port] else None
 
 
 def _file_name(value: object, what: str) -> str:
@@ -609,7 +647,7 @@ class _Basic:
 
 
 def _parse_basic(value: str) -> _Basic | str | None:
-    """Called only when a loaded plan explicitly enables Basic recognition."""
+    """Decode for credential detection; only an explicit Basic rule grants injection."""
     words = value.strip().split(None, 1)
     if not words or words[0].lower() != "basic":
         return None
@@ -702,23 +740,22 @@ def decide_request(snapshot: Snapshot | None, facts: RequestFacts) -> Decision:
     headers: dict[str, str] = {}
     basics: dict[str, _Basic] = {}
     observed_basics: list[_Basic] = []
-    basic_enabled = any(format_text == FORMAT_BASIC for _, format_text in formats)
     decoded = []
     for name, value in facts.headers:
         name = name.lower()
         if name in related and name in headers:
             return _reject("duplicate_header", agent)
         headers[name] = value
-        if basic_enabled:
-            basic = _parse_basic(value)
-            if isinstance(basic, str):
-                # An explicit Basic header cannot silently fall back to auto.
-                if (name, FORMAT_BASIC) in formats:
-                    return _reject(basic, agent)
-            elif basic is not None:
-                basics[name] = basic
-                observed_basics.append(basic)
-                decoded.extend((basic.username, basic.password))
+        # Detection must survive retirement of every rule, including custom headers.
+        basic = _parse_basic(value)
+        if isinstance(basic, str):
+            # An explicit Basic header cannot silently fall back to auto.
+            if (name, FORMAT_BASIC) in formats:
+                return _reject(basic, agent)
+        elif basic is not None:
+            basics[name] = basic
+            observed_basics.append(basic)
+            decoded.extend((basic.username, basic.password))
     if _contains_real(snapshot, facts, tuple(decoded)):
         return _reject("real_credential_exposed", agent)
 
@@ -764,7 +801,7 @@ def decide_request(snapshot: Snapshot | None, facts: RequestFacts) -> Decision:
     if (
         parsed is not None
         and facts.sni is not None
-        and facts.sni.lower().rstrip(".") != parsed[0]
+        and facts.sni.lower().removesuffix(".") != parsed[0]
     ):
         return _reject("sni_host_mismatch", agent)
     if facts.target_authority is not None:

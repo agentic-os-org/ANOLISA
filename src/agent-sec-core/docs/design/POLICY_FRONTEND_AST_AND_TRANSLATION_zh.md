@@ -682,8 +682,22 @@ Gateway 仅接受有界合取：精确 host、HTTPS scheme、method 字面相等
 path 字面相等/Cedar like。host 必填，省略 method 放宽至既有六种方法，省略 path 不增加
 限制，不补写请求 GET 或 `/`。Cedar `*` 跨 `/`，不是原生分段 glob；实际 path 歧义、
 HTTPS、Host/SNI/authority、退役检查独立于 permit。同一有效 pair/header/format/response
-候选去重，不同指令冲突拒绝，不按首条优先或递归改写。无托管凭据的请求通过安全检查后
-原样转发；托管 fake 即使位于未匹配 host/header/格式也不得降级为无凭据。无 fake 不注入。
+候选去重，不同指令冲突拒绝，不按首条优先或递归改写。已解包 HTTP 中无托管凭据的请求
+通过安全检查后原样转发；托管 fake 即使位于未匹配 host/header/格式也不得降级为无凭据。
+无 fake 不注入，不按注册 host 一律拒绝。
+
+新 TLS 连接仅按当前 listener 声明 hosts 精确匹配可见 SNI，不取 Scope 并集或 latest Policy。
+`active.json` 保持 version 1，但必需排序唯一的 `hosts`，在完整校验的 pinned Plan 过滤
+不可用 credentials/rules 前提取；保留规则的 host 必须属于该 listener。Active Scope 的
+Binding 仍有效时，全部 pair 退役也继续在原 host 引流和检查；Scope 删除或 Binding 失效
+仍经原 ownership 检查撤流。大小写和一个末尾点仅在命中时规范化，包括上游校验使用的
+连接 SNI；透传保留原 TLS 字节和目的 IP/port。缺 snapshot、未知 listener、无/IP/未命中
+SNI 或选择异常均透传并记录有界无敏感值诊断，hook 前 ClientHello 解析失败保持依赖原行为。
+命中后仍逐请求使用最新 HTTP 授权、Host/SNI 与 HTTP/2 421 边界，上游校验开启且不降级。
+集合变化只影响新 TLS 连接。透传不解密或扫描，即使目标仅由另一 Scope 声明；ECH 只看
+外层 SNI。Agent 仅配置 fake 是前提，不能据此排除已记录的响应改写泄漏。命中目标的
+pinning/mTLS 与共享 CA 不约束 Scope/域名仍是限制。部署或回滚需先 disable/撤流，成套
+更新 producer/addon 并重新完整发布；Plan 和 secrets 格式不变，不提供旧字段默认值。
 
 前端校验是纯函数。两个文件注解必须是 daemon 主机的规范绝对路径；相对路径、`~`、
 环境展开、NUL、`.`/`..` 在 I/O 前拒绝。全部准入及 root 授权完成后，管理入口才安全读取

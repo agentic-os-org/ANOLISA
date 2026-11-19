@@ -1,7 +1,7 @@
 """Pure Python hook contracts; mitmproxy imports are isolated test doubles.
 
-These tests exercise addon-owned rewriting and transport closure decisions, not
-mitmproxy's parser, wire protocol, or standalone process integration.
+These tests exercise addon-owned TLS selection, rewriting and closure decisions,
+not mitmproxy's parser, wire protocol, or standalone process integration.
 """
 
 import base64
@@ -46,6 +46,7 @@ modules = {name: ModuleType(name) for name in MODULE_NAMES}
 modules["mitmproxy"].ctx = SimpleNamespace()
 modules["mitmproxy"].exceptions = SimpleNamespace()
 modules["mitmproxy"].http = SimpleNamespace()
+modules["mitmproxy"].tls = SimpleNamespace()
 modules["mitmproxy.addons.termlog"].TermLogHandler = type("TermLogHandler", (), {})
 modules["mitmproxy.log"].LegacyLogEvents = type("LegacyLogEvents", (), {})
 modules["mitmproxy.net.http.http1"].expected_http_body_size = Mock(return_value=0)
@@ -338,11 +339,114 @@ class AddonHookTest(unittest.TestCase):
                 self.flow.kill.assert_not_called()
 
 
+class ClientHelloTest(unittest.TestCase):
+    def test_only_own_exact_sni_is_intercepted_without_changing_destination(
+        self,
+    ) -> None:
+        gateway = addon.SecretGateway()
+        gateway.snapshot = load(runtime_files())
+        for sni, intercept in (
+            ("api.github.com", True),
+            ("API.GitHub.COM.", True),
+            ("api.github.com..", False),
+            ("other.example", False),
+            ("evil-api.github.com", False),
+            ("api.github.com.evil.example", False),
+            ("sub.api.github.com", False),
+            (None, False),
+            ("", False),
+            ("127.0.0.1", False),
+            ("::1", False),
+            ("api.github.com:443", False),
+            (" api.github.com", False),
+            ("x" * 255, False),
+        ):
+            for server_sni in (None, sni):
+                with self.subTest(sni=sni, server_sni=server_sni):
+                    client = SimpleNamespace(sni=sni, proxy_mode=Mock())
+                    client.proxy_mode.listen_port.return_value = 15001
+                    server = SimpleNamespace(
+                        sni=server_sni, address=("192.0.2.1", 8443)
+                    )
+                    data = SimpleNamespace(
+                        context=SimpleNamespace(client=client, server=server),
+                        client_hello=SimpleNamespace(sni=sni),
+                        ignore_connection=False,
+                    )
+                    with self.assertNoLogs(addon.logger, level="WARNING"):
+                        gateway.tls_clienthello(data)
+                    self.assertEqual(data.ignore_connection, not intercept)
+                    self.assertEqual(client.sni, "api.github.com" if intercept else sni)
+                    self.assertEqual(
+                        server.sni,
+                        (
+                            "api.github.com"
+                            if intercept and server_sni is not None
+                            else server_sni
+                        ),
+                    )
+                    self.assertEqual(server.address, ("192.0.2.1", 8443))
+                    self.assertEqual(data.client_hello.sni, sni)
+
+    def test_selection_faults_relay_with_bounded_value_free_diagnostics(self) -> None:
+        gateway = addon.SecretGateway()
+        with self.assertLogs(addon.logger, level="WARNING") as logs:
+            for now, fault in (
+                (0.0, "snapshot"),
+                (1.0, "listener"),
+                (4.999, "selector"),
+                (5.0, "selector"),
+                (5.001, "snapshot"),
+                (10.0, "listener"),
+            ):
+                with self.subTest(fault=fault, now=now):
+                    self._selection_fault(gateway, fault, now)
+        self.assertEqual(len(logs.records), 3)
+        for record in logs.records:
+            self.assertTrue(addon._SafeDiagnostics().filter(record))
+            self.assertLess(len(record.getMessage()), 128)
+            self.assertNotIn("GitHub", record.getMessage())
+            for value in VALUES.values():
+                self.assertNotIn(value, record.getMessage())
+
+    def _selection_fault(self, gateway, fault, now) -> None:
+        with patch.object(addon.time, "monotonic", return_value=now):
+            gateway.snapshot = None if fault == "snapshot" else load(runtime_files())
+            client = SimpleNamespace(sni="API.GitHub.COM.", proxy_mode=Mock())
+            client.proxy_mode.listen_port.return_value = (
+                1 if fault == "listener" else 15001
+            )
+            server = SimpleNamespace(sni=client.sni, address=("192.0.2.1", 443))
+            data = SimpleNamespace(
+                context=SimpleNamespace(client=client, server=server),
+                client_hello=SimpleNamespace(sni=client.sni),
+                ignore_connection=False,
+            )
+            selector = (
+                Mock(side_effect=RuntimeError(VALUES["real"] * 100))
+                if fault == "selector"
+                else policy.select_tls_host
+            )
+            with patch.object(policy, "select_tls_host", selector):
+                gateway.tls_clienthello(data)
+            self.assertTrue(data.ignore_connection)
+            self.assertEqual(client.sni, "API.GitHub.COM.")
+            self.assertEqual(server.sni, client.sni)
+            self.assertEqual(server.address, ("192.0.2.1", 443))
+
+
 class FocusLoaderTest(unittest.TestCase):
     def test_malformed_snapshot_rejects_startup_and_preserves_last_good_generation(
         self,
     ) -> None:
-        for defect in ("live-owner", "retired", "unavailable", "length", "similarity"):
+        for defect in (
+            "live-owner",
+            "retired",
+            "unavailable",
+            "length",
+            "similarity",
+            "hosts",
+        ):
             for loaded in (False, True):
                 with (
                     self.subTest(defect=defect, loaded=loaded),
@@ -361,7 +465,7 @@ class FocusLoaderTest(unittest.TestCase):
                         secrets[defect][0]["credential"] = "github"
                     elif defect == "length":
                         secrets["entries"][0]["real"] = "R" * 39
-                    else:
+                    elif defect == "similarity":
                         secrets["entries"][0]["real"] = (
                             "R" + secrets["entries"][0]["fake"][1:]
                         )
@@ -380,6 +484,10 @@ class FocusLoaderTest(unittest.TestCase):
                             gateway.reload()
                         previous = gateway.snapshot
                         files = runtime_files(secrets=secrets, generation=generation)
+                        if defect == "hosts":
+                            manifest = json.loads(files["active.json"])
+                            del manifest["listeners"][0]["hosts"]
+                            files["active.json"] = json.dumps(manifest).encode()
                         for name, data in files.items():
                             (runtime / name).write_bytes(data)
                         gateway.reload()
@@ -404,6 +512,12 @@ class FocusLoaderTest(unittest.TestCase):
                             else ("reject", "gateway_not_ready")
                         ),
                     )
+                    self.assertEqual(
+                        policy.select_tls_host(
+                            gateway.snapshot, 15001, "api.github.com"
+                        ),
+                        "api.github.com" if loaded else None,
+                    )
                     if loaded:
                         self.assertEqual(
                             decision.header_value, f"Bearer {VALUES['real']}"
@@ -411,6 +525,38 @@ class FocusLoaderTest(unittest.TestCase):
                     else:
                         self.assertIsNone(decision.header_value)
                         self.assertEqual(decision.replacements, ())
+
+    def test_removed_manifest_clears_hosts_and_http_authorization_together(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="asc-removed-manifest-") as directory:
+            runtime = Path(directory)
+            (runtime / "status").mkdir()
+            for name, data in runtime_files().items():
+                (runtime / name).write_bytes(data)
+            gateway = addon.SecretGateway()
+            with patch.object(
+                addon,
+                "ctx",
+                SimpleNamespace(
+                    options=SimpleNamespace(agent_sec_runtime_dir=directory)
+                ),
+            ):
+                gateway.reload()
+                self.assertEqual(
+                    policy.select_tls_host(gateway.snapshot, 15001, "api.github.com"),
+                    "api.github.com",
+                )
+                (runtime / "active.json").unlink()
+                gateway.reload()
+            self.assertIsNone(gateway.snapshot)
+            self.assertIsNone(
+                policy.select_tls_host(gateway.snapshot, 15001, "api.github.com")
+            )
+            self.assertEqual(
+                policy.decide_request(gateway.snapshot, facts(API_FACTS)).code,
+                "gateway_not_ready",
+            )
 
 
 if __name__ == "__main__":
