@@ -175,6 +175,15 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Help me check system capacity limits (file handles, conntrack) and the top consumers, then suggest safe relief"
         }
         MessageId::HealthTryReasonSystemCapacity => "a system capacity limit is near exhaustion",
+        MessageId::HealthFindingExt4Error => "ext4 filesystem error",
+        MessageId::HealthInsightExt4Error => "ext4 reported an error on this filesystem",
+        MessageId::HealthFindingJournalError => "ext4 journal error",
+        MessageId::HealthInsightJournalError => "the ext4 journal aborted or hit flush errors",
+        MessageId::HealthFindingXfsShutdown => "XFS shutdown",
+        MessageId::HealthInsightXfsShutdown => "XFS shut down after an error cause chain",
+        MessageId::HealthFindingBlockIoError => "block I/O error",
+        MessageId::HealthInsightBlockIoError => "a block read/write request failed",
+        MessageId::HealthEvidenceFsDevice => "{device} ({mount})",
         MessageId::HealthFindingRecentOom => "recent OOM signal",
         MessageId::HealthFindingKernelPanic => "recent kernel panic",
         MessageId::HealthFindingServiceFailed => "service failed",

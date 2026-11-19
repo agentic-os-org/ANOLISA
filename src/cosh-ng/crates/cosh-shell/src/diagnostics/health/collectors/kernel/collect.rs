@@ -17,7 +17,7 @@ use super::super::{
 use super::oom::is_oom_line;
 use super::{attribution, cgroup, finish_signals, parse_kernel_signals_attributed};
 
-const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|oom_reaper|killed as a result of limit of|kernel panic|panic:|vfs: file-max limit|nf_conntrack: table full";
+const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|oom_reaper|killed as a result of limit of|kernel panic|panic:|vfs: file-max limit|nf_conntrack: table full|ext4-fs error|remounting filesystem read-only|aborting journal|detected io errors while flushing|jbd2:|xfs \\(|blk_update_request:";
 
 pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoch_seconds: u64) {
     let mut boot_id = None;
@@ -122,6 +122,21 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                 &capacity,
                                 output.elapsed_ms,
                             );
+                            let fs_lines = super::fs_events::parse_journal_fs_lines(
+                                &output.stdout,
+                                &verified_ctx,
+                            );
+                            let fs_chains = super::fs_events::build_chains(
+                                &fs_lines,
+                                &verified_ctx,
+                                now_epoch_seconds,
+                            );
+                            super::fs_events::record_fs_chains(
+                                builder,
+                                &fs_chains,
+                                &fs_lines,
+                                output.elapsed_ms,
+                            );
                             builder.add_check_done("kernel_signal");
                         }
                         None => {
@@ -166,6 +181,21 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                     super::capacity::record_capacity_events(
                                         builder,
                                         &capacity,
+                                        text.elapsed_ms,
+                                    );
+                                    let fs_lines = super::fs_events::parse_text_fs_lines(
+                                        &text.stdout,
+                                        "journalctl-text",
+                                    );
+                                    let fs_chains = super::fs_events::build_chains(
+                                        &fs_lines,
+                                        &ctx,
+                                        now_epoch_seconds,
+                                    );
+                                    super::fs_events::record_fs_chains(
+                                        builder,
+                                        &fs_chains,
+                                        &fs_lines,
                                         text.elapsed_ms,
                                     );
                                     builder.add_check_done("kernel_signal");
@@ -280,6 +310,7 @@ pub(super) fn is_kernel_signal_line(line: &str) -> bool {
         || lower.contains("panic:")
         || super::capacity::is_vfs_filemax_line(&lower)
         || super::capacity::is_conntrack_full_line(&lower)
+        || super::fs_events::classify_fs_line(&lower).is_some()
 }
 
 pub(super) fn kernel_unavailable_reason(
@@ -352,6 +383,10 @@ fn collect_kernel_from_dmesg(
                 "dmesg",
             );
             super::capacity::record_capacity_events(builder, &capacity, output.elapsed_ms);
+            let fs_lines =
+                super::fs_events::parse_text_fs_lines(&output.filtered.lines.join("\n"), "dmesg");
+            let fs_chains = super::fs_events::build_chains(&fs_lines, ctx, now_epoch_seconds);
+            super::fs_events::record_fs_chains(builder, &fs_chains, &fs_lines, output.elapsed_ms);
             builder.add_check_done("kernel_signal");
         }
         Err(err) => {

@@ -1,7 +1,9 @@
 use super::*;
 
 mod evidence_facts;
-pub(super) use evidence_facts::format_evidence_fact;
+pub(super) use evidence_facts::{
+    format_evidence_fact, pressure_evidence_text, quota_evidence_text,
+};
 
 pub(super) fn finding_insight_lines(
     report: &HealthScanReport,
@@ -144,6 +146,10 @@ pub(super) fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId
         HealthMessageId::HealthFindingConntrackCapacity => {
             HealthMessageId::HealthInsightConntrackCapacity
         }
+        HealthMessageId::HealthFindingExt4Error => HealthMessageId::HealthInsightExt4Error,
+        HealthMessageId::HealthFindingJournalError => HealthMessageId::HealthInsightJournalError,
+        HealthMessageId::HealthFindingXfsShutdown => HealthMessageId::HealthInsightXfsShutdown,
+        HealthMessageId::HealthFindingBlockIoError => HealthMessageId::HealthInsightBlockIoError,
         _ => HealthMessageId::HealthInsightGeneric,
     }
 }
@@ -168,7 +174,10 @@ pub(super) fn insight_text_for_finding(
     format_health_message(i18n, insight_id, &finding.detail_args)
 }
 
-fn pressure_args(finding: &HealthFinding, i18n: crate::I18n) -> BTreeMap<String, String> {
+pub(super) fn pressure_args(
+    finding: &HealthFinding,
+    i18n: crate::I18n,
+) -> BTreeMap<String, String> {
     let mut args = finding.detail_args.clone();
     if let Some(resource) = finding.detail_args.get("resource") {
         let label = match resource.as_str() {
@@ -259,6 +268,26 @@ pub(super) fn evidence_text(
             );
         }
     }
+    if matches!(
+        finding.title_id,
+        HealthMessageId::HealthFindingExt4Error
+            | HealthMessageId::HealthFindingJournalError
+            | HealthMessageId::HealthFindingXfsShutdown
+            | HealthMessageId::HealthFindingBlockIoError
+    ) {
+        if let (Some(device), Some(mount)) = (
+            finding.detail_args.get("device"),
+            finding.detail_args.get("mount"),
+        ) {
+            return i18n.format(
+                crate::MessageId::HealthEvidenceFsDevice,
+                &[
+                    ("device", &middle_ellipsis(device, 20)),
+                    ("mount", &middle_ellipsis(mount, 26)),
+                ],
+            );
+        }
+    }
 
     let mut pieces = Vec::new();
     for fact_id in &finding.evidence_fact_ids {
@@ -281,56 +310,6 @@ pub(super) fn pieces_with_candidate(pieces: &[String], candidate: &str) -> Vec<S
     let mut values = pieces.to_vec();
     values.push(candidate.to_string());
     values
-}
-
-fn pressure_evidence_text(finding: &HealthFinding, i18n: crate::I18n) -> Option<String> {
-    let args = pressure_args(finding, i18n);
-    Some(i18n.format(
-        crate::MessageId::HealthEvidencePressureAvg,
-        &[
-            ("resource", args.get("resource")?),
-            ("kind", args.get("kind")?),
-            ("avg10", args.get("avg10")?),
-            ("avg60", args.get("avg60")?),
-        ],
-    ))
-}
-
-fn quota_evidence_text(finding: &HealthFinding, i18n: crate::I18n) -> Option<String> {
-    let mut pieces = Vec::new();
-    if finding
-        .detail_args
-        .get("max_zero")
-        .is_some_and(|value| value == "true")
-    {
-        pieces.push(
-            i18n.t(crate::MessageId::HealthEvidenceCgroupQuotaZero)
-                .to_string(),
-        );
-    } else if let (Some(percent), Some(remaining)) = (
-        finding.detail_args.get("percent"),
-        finding.detail_args.get("remaining_mib"),
-    ) {
-        pieces.push(i18n.format(
-            crate::MessageId::HealthEvidenceCgroupQuota,
-            &[("percent", percent), ("remaining_mib", remaining)],
-        ));
-    }
-    if let (Some(avg10), Some(avg60)) = (
-        finding.detail_args.get("avg10"),
-        finding.detail_args.get("avg60"),
-    ) {
-        pieces.push(i18n.format(
-            crate::MessageId::HealthEvidencePressureAvg,
-            &[
-                ("resource", i18n.t(crate::MessageId::HealthMetricMemory)),
-                ("kind", "full"),
-                ("avg10", avg10),
-                ("avg60", avg60),
-            ],
-        ));
-    }
-    (!pieces.is_empty()).then(|| pieces.join(" · "))
 }
 
 pub(super) fn memory_available_evidence_text(

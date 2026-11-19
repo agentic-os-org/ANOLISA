@@ -285,6 +285,8 @@ pub(crate) fn evaluate_judgement_rules(
         findings.extend(conntrack::conntrack_findings(facts));
     }
 
+    findings.extend(fs_events::fs_event_findings(facts));
+
     findings.sort_by_key(|finding| {
         (
             std::cmp::Reverse(finding.severity.precedence()),
@@ -567,6 +569,7 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
 }
 
 pub(crate) mod conntrack;
+pub(crate) mod fs_events;
 pub(crate) mod handles;
 pub(crate) mod memory;
 pub(crate) mod pids;

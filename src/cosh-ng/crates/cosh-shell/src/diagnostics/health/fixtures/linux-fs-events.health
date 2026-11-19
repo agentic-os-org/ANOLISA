@@ -1,0 +1,51 @@
+# cosh-shell startup health fixture: E02 forced-ro + E05 block I/O proven chains
+host=fixture-linux-fs-events
+score=60
+check=fixture
+fact memory memory.total_mib u64 32768 MiB
+fact memory memory.total_kib u64 33554432 KiB
+fact memory memory.available_mib u64 16000 MiB
+fact memory memory.available_kib u64 16384000 KiB
+fact memory memory.available_ratio f64 0.488 -
+fact memory memory.used_ratio f64 0.512 -
+fact memory memory.swap_total_mib u64 8192 MiB
+fact memory memory.swap_used_mib u64 0 MiB
+fact memory memory.swap_used_ratio f64 0.0 -
+fact cpu cpu.load_1m f64 0.8 -
+fact cpu cpu.load_5m f64 0.6 -
+fact cpu cpu.cores u64 4 -
+fact cpu cpu.load_per_core_1m f64 0.20 -
+fact cpu cpu.load_per_core_5m f64 0.15 -
+fact disk filesystem.max_used_ratio f64 0.42 -
+fact disk filesystem.available_gib f64 100.0 GiB
+fact disk filesystem.riskiest_mount str / -
+fact disk filesystem.root_used_ratio f64 0.42 -
+fact disk filesystem.root_available_gib f64 100.0 GiB
+fact disk filesystem.mount./.path str / -
+fact disk filesystem.mount./.used_ratio f64 0.42 -
+fact disk filesystem.mount./.available_gib f64 100.0 GiB
+fact disk filesystem.mount./.volume_proven bool true -
+fact disk filesystem.mount./.volume_fs_type str ext4 -
+fact disk filesystem.mount./.volume_device str 8:1 -
+fact disk filesystem.mount./.volume_fsid str 1:2 -
+fact disk filesystem.mount./.volume_bavail_bytes u64 107374182400 bytes
+fact disk filesystem.mount./.volume_used_bytes u64 77309411328 bytes
+fact disk filesystem.mount./.volume_files u64 1000000 -
+fact disk filesystem.mount./.volume_favail u64 900000 -
+fact disk filesystem.mount./.volume_inode_applicable bool true -
+fact host host.uptime_seconds u64 100000 seconds
+fact kernel kernel.boot_id str boot-a -
+fact kernel kernel.fs_event_source str journalctl -
+fact kernel kernel.fs_ext4_forced_ro_age_seconds u64 100 seconds
+fact kernel kernel.fs_ext4_forced_ro_device str sda1 -
+fact kernel kernel.fs_ext4_forced_ro_dev_t str 8:1 -
+fact kernel kernel.fs_ext4_forced_ro_mount str / -
+fact kernel kernel.fs_ext4_forced_ro_identity str ext4-forced-ro|sda1|uptime-ns:1099000000000 -
+fact kernel kernel.fs_ext4_forced_ro_epoch u64 1700000000 seconds
+fact kernel kernel.fs_block_io_age_seconds u64 100 seconds
+fact kernel kernel.fs_block_io_device str sda -
+fact kernel kernel.fs_block_io_dev_t str 8:1 -
+fact kernel kernel.fs_block_io_mount str / -
+fact kernel kernel.fs_block_io_identity str block-io|sda|uptime-ns:1099000000000 -
+fact kernel kernel.fs_block_io_epoch u64 1700000000 seconds
+fact kernel kernel.fs_block_io_operation str READ -

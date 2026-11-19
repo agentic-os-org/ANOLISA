@@ -141,6 +141,15 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "帮我检查系统容量上限（文件句柄、conntrack）和主要占用，给出安全的缓解建议"
         }
         MessageId::HealthTryReasonSystemCapacity => "系统容量上限接近耗尽",
+        MessageId::HealthFindingExt4Error => "ext4 文件系统错误",
+        MessageId::HealthInsightExt4Error => "ext4 在该文件系统上报出错误",
+        MessageId::HealthFindingJournalError => "ext4 日志错误",
+        MessageId::HealthInsightJournalError => "ext4 日志中止或出现刷写错误",
+        MessageId::HealthFindingXfsShutdown => "XFS 关闭",
+        MessageId::HealthInsightXfsShutdown => "XFS 在错误原因链后关闭",
+        MessageId::HealthFindingBlockIoError => "块设备 I/O 错误",
+        MessageId::HealthInsightBlockIoError => "块设备读写请求失败",
+        MessageId::HealthEvidenceFsDevice => "{device}（{mount}）",
         MessageId::HealthFindingRecentOom => "近期 OOM 信号",
         MessageId::HealthFindingKernelPanic => "近期内核 panic",
         MessageId::HealthFindingServiceFailed => "服务失败",

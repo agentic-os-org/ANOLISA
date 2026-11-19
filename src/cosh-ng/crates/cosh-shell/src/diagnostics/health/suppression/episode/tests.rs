@@ -965,3 +965,42 @@ fn pids_counter_baseline_rolls_independently_without_delivery() {
     assert!(state.events.is_empty());
     assert!(state.counter_delivered.is_none());
 }
+
+fn fs_event_candidate(identity: &str, dev_t: &str, severity: u8) -> CandidateEpisode {
+    CandidateEpisode {
+        event: true,
+        key: format!("fs-event-v1|boot-a|{identity}"),
+        problem: format!("block-io|{dev_t}"),
+        severity,
+        epoch: Some(1700000000),
+        counter_window: None,
+        quota_branches: None,
+    }
+}
+
+#[test]
+fn fs_event_identity_dedup_and_ten_minute_channel_merge() {
+    let mut state = ledger();
+    let first = fs_event_candidate("block-io|sda|uptime-ns:1", "8:1", 3);
+    assert!(deliverable(&state, &first, 1000));
+    record_delivery(&mut state, &first, 1000);
+    assert!(!deliverable(&state, &first, 2000));
+    let fresh = fs_event_candidate("block-io|sda|uptime-ns:2", "8:1", 3);
+    assert!(!deliverable(&state, &fresh, 1000 + EVENT_MERGE_MS - 1));
+    assert!(deliverable(&state, &fresh, 1000 + EVENT_MERGE_MS));
+    let other_device = fs_event_candidate("block-io|sdb|uptime-ns:3", "8:17", 3);
+    assert!(deliverable(&state, &other_device, 2000));
+}
+
+#[test]
+fn fs_event_severity_escalation_passes_merge_window() {
+    let mut state = ledger();
+    let warning = fs_event_candidate("ext4-error|sda1|uptime-ns:1", "8:1", 3);
+    record_delivery(&mut state, &warning, 1000);
+    let critical = CandidateEpisode {
+        severity: 4,
+        key: "fs-event-v1|boot-a|ext4-forced-ro|sda1|uptime-ns:2".into(),
+        ..warning.clone()
+    };
+    assert!(deliverable(&state, &critical, 2000));
+}

@@ -157,6 +157,15 @@ macro_rules! health_volume_ids {
             HealthTryInspectSystemCapacity,
             HealthPromptInspectSystemCapacity,
             HealthTryReasonSystemCapacity,
+            HealthFindingExt4Error,
+            HealthInsightExt4Error,
+            HealthFindingJournalError,
+            HealthInsightJournalError,
+            HealthFindingXfsShutdown,
+            HealthInsightXfsShutdown,
+            HealthFindingBlockIoError,
+            HealthInsightBlockIoError,
+            HealthEvidenceFsDevice,
         );
     };
 }

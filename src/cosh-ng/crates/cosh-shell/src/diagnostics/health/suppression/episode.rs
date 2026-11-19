@@ -420,6 +420,33 @@ pub(crate) fn candidate_for_finding(
             quota_branches: None,
         });
     }
+    if matches!(base, "J24" | "J25" | "J26" | "J27" | "J28" | "J29") {
+        let prefix = match base {
+            "J24" => "ext4_forced_ro",
+            "J25" => "ext4_error",
+            "J26" => "jbd2_abort",
+            "J27" => "jbd2_flush",
+            "J28" => "xfs_shutdown",
+            _ => "block_io",
+        };
+        let identity = string_fact(report, &format!("kernel.fs_{prefix}_identity"))?;
+        let boot = string_fact(report, "kernel.boot_id").filter(|boot| !boot.is_empty())?;
+        let dev_t = string_fact(report, &format!("kernel.fs_{prefix}_dev_t")).unwrap_or_default();
+        let problem = if base == "J29" {
+            format!("block-io|{dev_t}")
+        } else {
+            problem.to_string()
+        };
+        return Some(CandidateEpisode {
+            event: true,
+            key: format!("fs-event-v1|{boot}|{identity}"),
+            problem,
+            severity,
+            epoch: unsigned_fact(report, &format!("kernel.fs_{prefix}_epoch")),
+            counter_window: None,
+            quota_branches: None,
+        });
+    }
     None
 }
 
