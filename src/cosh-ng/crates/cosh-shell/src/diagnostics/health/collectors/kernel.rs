@@ -1,23 +1,30 @@
-use std::fs;
-use std::time::Instant;
-
 use super::super::builder::HealthReportBuilder;
 use super::super::model::{
     HealthCollector, HealthFactCategory, HealthFactCoverage, HealthFactScope, HealthFactSource,
     HealthFactValue, HealthSeverity, HealthUnavailableReason,
 };
-use super::system::system_program;
-use super::{
-    run_health_command_filtered, unavailable_from_stderr, HealthCommandConfig, HealthCommandError,
-    HealthLineFilter,
-};
 use oom::{
     count_oom_events, is_oom_line, merge_oom_signal, oom_scope_label_id_from_constraint, OomSignal,
 };
 
+pub(crate) mod attribution;
+pub(crate) mod cgroup;
+mod collect;
 mod oom;
 
-const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|oom_reaper|killed as a result of limit of|kernel panic|panic:";
+#[cfg(test)]
+use super::{
+    HealthCommandConfig, HealthCommandError, HealthCommandOutput, HealthFilteredCommandOutput,
+    HealthLineFilter,
+};
+pub(crate) use collect::collect_kernel_signals;
+#[cfg(test)]
+use collect::{
+    is_kernel_signal_line, kernel_unavailable_reason, read_journal_signals,
+    read_proc_uptime_seconds,
+};
+#[cfg(test)]
+use std::fs;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct KernelSignalFacts {
@@ -33,6 +40,15 @@ pub(crate) struct KernelSignalFacts {
     pub(crate) oom_event_count_last_24h: u64,
     pub(crate) oom_latest_source_line_count: u64,
     pub(crate) oom_latest_confidence: Option<String>,
+    pub(crate) oom_attributed_age_seconds: Option<u64>,
+    pub(crate) oom_attributed_epoch: Option<u64>,
+    pub(crate) oom_attributed_event_identity: Option<String>,
+    pub(crate) oom_attributed_pid: Option<u64>,
+    pub(crate) oom_attributed_process: Option<String>,
+    pub(crate) oom_attributed_scope: Option<String>,
+    pub(crate) oom_attributed_task_cgroup: Option<String>,
+    pub(crate) oom_attributed_oom_cgroup: Option<String>,
+    pub(crate) oom_attributed_confidence: Option<String>,
     pub(crate) panic_recent: bool,
     pub(crate) log_source: String,
     coverage_since_epoch: Option<u64>,
@@ -192,6 +208,96 @@ impl KernelSignalFacts {
                 elapsed_ms,
             );
         }
+        if let Some(epoch) = self.oom_attributed_epoch {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_epoch",
+                HealthFactValue::Unsigned(epoch),
+                Some("seconds".to_string()),
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(age) = self.oom_attributed_age_seconds {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_age_seconds",
+                HealthFactValue::Unsigned(age),
+                Some("seconds".to_string()),
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(identity) = &self.oom_attributed_event_identity {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_event_identity",
+                HealthFactValue::String(identity.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(pid) = self.oom_attributed_pid {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_pid",
+                HealthFactValue::Unsigned(pid),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(process) = &self.oom_attributed_process {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_process",
+                HealthFactValue::String(process.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(scope) = &self.oom_attributed_scope {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_scope",
+                HealthFactValue::String(scope.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(cgroup) = &self.oom_attributed_task_cgroup {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_task_cgroup",
+                HealthFactValue::String(cgroup.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(cgroup) = &self.oom_attributed_oom_cgroup {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_oom_cgroup",
+                HealthFactValue::String(cgroup.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
+        if let Some(confidence) = &self.oom_attributed_confidence {
+            builder.add_fact(
+                HealthFactCategory::Kernel,
+                "kernel.oom_attributed_confidence",
+                HealthFactValue::String(confidence.clone()),
+                None,
+                kernel_source(&self.log_source),
+                elapsed_ms,
+            );
+        }
         builder
             .add_fact(
                 HealthFactCategory::Kernel,
@@ -212,154 +318,7 @@ impl KernelSignalFacts {
     }
 }
 
-pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoch_seconds: u64) {
-    if let Ok(boot) = fs::read_to_string("/proc/sys/kernel/random/boot_id") {
-        let boot = boot.trim();
-        if boot.len() == 36
-            && boot
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-        {
-            builder.add_fact(
-                HealthFactCategory::Kernel,
-                "kernel.boot_id",
-                HealthFactValue::String(boot.into()),
-                None,
-                HealthFactSource::Derived,
-                0,
-            );
-        }
-    }
-    let started = Instant::now();
-    match system_program("journalctl") {
-        Ok(program) => match read_journal_signals(HealthCommandConfig::default(), |args, config| {
-            super::run_health_command_filtered(
-                program,
-                args,
-                config,
-                HealthLineFilter {
-                    newest_first: true,
-                    ..HealthLineFilter::default()
-                },
-                is_kernel_signal_line,
-            )
-        }) {
-            Ok(output)
-                if output.exit_code == Some(0)
-                    || !output.stdout.trim().is_empty()
-                    || (output.exit_code == Some(1) && output.stderr.trim().is_empty()) =>
-            {
-                let mut facts = parse_reverse_journal_signals(&output.stdout, now_epoch_seconds);
-                // A partial read cannot prove which event was the most recent one.
-                if output.stdout_truncated && facts.oom_latest_confidence.as_deref() == Some("high")
-                {
-                    facts.oom_latest_confidence = Some("low".to_string());
-                }
-                facts.record(builder, output.elapsed_ms);
-                builder.add_check_done("kernel_signal");
-            }
-            Ok(output) => {
-                builder.add_unavailable(
-                    HealthCollector::KernelSignal,
-                    kernel_unavailable_reason(output.exit_code, &output.stderr),
-                    HealthSeverity::Unavailable,
-                    output.elapsed_ms,
-                );
-            }
-            Err(error) => {
-                builder.add_unavailable(
-                    HealthCollector::KernelSignal,
-                    error.unavailable_reason(),
-                    HealthSeverity::Unavailable,
-                    started.elapsed().as_millis(),
-                );
-            }
-        },
-        Err(HealthCommandError::CommandMissing) => {
-            collect_kernel_from_dmesg(builder, now_epoch_seconds, started)
-        }
-        Err(error) => {
-            builder.add_unavailable(
-                HealthCollector::KernelSignal,
-                error.unavailable_reason(),
-                HealthSeverity::Unavailable,
-                started.elapsed().as_millis(),
-            );
-        }
-    }
-}
-
-fn read_journal_signals(
-    config: HealthCommandConfig,
-    mut run: impl FnMut(
-        &[&str],
-        HealthCommandConfig,
-    ) -> Result<super::HealthFilteredCommandOutput, HealthCommandError>,
-) -> Result<super::HealthCommandOutput, HealthCommandError> {
-    let started = Instant::now();
-    let args = [
-        "--quiet",
-        "-k",
-        "--since",
-        "24 hours ago",
-        "--no-pager",
-        "--reverse",
-        "-n",
-        "200",
-        "-o",
-        "short-unix",
-        "--grep",
-        JOURNAL_SIGNAL_PATTERN,
-    ];
-    let output = run(&args, config)?;
-    // Localized option errors still name --grep; permission failures do not.
-    if !matches!(output.exit_code, Some(code) if code != 0)
-        || !output.filtered.lines.is_empty()
-        || !output.stderr.contains("--grep")
-    {
-        return Ok(journal_lines_output(output, 0));
-    }
-    let remaining = config.timeout.saturating_sub(started.elapsed());
-    if remaining.is_zero() {
-        return Err(HealthCommandError::Timeout);
-    }
-    let compatible = run(
-        &args[..args.len() - 2],
-        HealthCommandConfig {
-            timeout: remaining,
-            ..config
-        },
-    )?;
-    Ok(journal_lines_output(compatible, output.elapsed_ms))
-}
-
-fn journal_lines_output(
-    output: super::HealthFilteredCommandOutput,
-    prior_elapsed_ms: u128,
-) -> super::HealthCommandOutput {
-    super::HealthCommandOutput {
-        exit_code: output.exit_code,
-        stdout: output.filtered.lines.join("\n"),
-        stderr: output.stderr,
-        stdout_truncated: !output.filtered.complete || output.filtered.truncated_lines > 0,
-        stderr_truncated: false,
-        elapsed_ms: output.elapsed_ms + prior_elapsed_ms,
-    }
-}
-
-fn is_kernel_signal_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    is_oom_line(&lower) || lower.contains("kernel panic") || lower.contains("panic:")
-}
-
-fn kernel_unavailable_reason(exit_code: Option<i32>, stderr: &str) -> HealthUnavailableReason {
-    if exit_code.is_none() {
-        // No observed exit means a budget cut, not a failure to parse the log.
-        return HealthUnavailableReason::Timeout;
-    }
-    unavailable_from_stderr(stderr)
-}
-
+#[cfg(test)]
 pub(super) fn parse_reverse_journal_signals(
     content: &str,
     now_epoch_seconds: u64,
@@ -383,6 +342,38 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
     now_epoch_seconds: u64,
     boot_epoch_seconds: Option<u64>,
 ) -> KernelSignalFacts {
+    parse_kernel_signals_internal(
+        content,
+        log_source,
+        now_epoch_seconds,
+        boot_epoch_seconds,
+        None,
+    )
+}
+
+pub(crate) fn parse_kernel_signals_attributed(
+    content: &str,
+    log_source: impl Into<String>,
+    now_epoch_seconds: u64,
+    boot_epoch_seconds: Option<u64>,
+    ctx: &attribution::AttributionContext,
+) -> KernelSignalFacts {
+    parse_kernel_signals_internal(
+        content,
+        log_source,
+        now_epoch_seconds,
+        boot_epoch_seconds,
+        Some(ctx),
+    )
+}
+
+fn parse_kernel_signals_internal(
+    content: &str,
+    log_source: impl Into<String>,
+    now_epoch_seconds: u64,
+    boot_epoch_seconds: Option<u64>,
+    ctx: Option<&attribution::AttributionContext>,
+) -> KernelSignalFacts {
     let mut oom_events = Vec::new();
     let mut unclocked_oom_lines = 0;
     let mut panic_recent = false;
@@ -403,6 +394,30 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
             panic_recent = true;
         }
     }
+    let coverage_since_epoch = content
+        .lines()
+        .filter_map(|line| parse_time_prefix(line, boot_epoch_seconds))
+        .min();
+    finish_signals(
+        &oom_events,
+        unclocked_oom_lines,
+        panic_recent,
+        log_source.into(),
+        now_epoch_seconds,
+        coverage_since_epoch,
+        ctx,
+    )
+}
+
+fn finish_signals(
+    oom_events: &[OomSignal],
+    unclocked_oom_lines: u64,
+    panic_recent: bool,
+    log_source: String,
+    now_epoch_seconds: u64,
+    coverage_since_epoch: Option<u64>,
+    ctx: Option<&attribution::AttributionContext>,
+) -> KernelSignalFacts {
     let latest_oom = oom_events.iter().max_by_key(|event| event.event_epoch());
     let oom_latest_age_seconds = latest_oom
         .as_ref()
@@ -414,6 +429,12 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
     } else {
         None
     };
+    let attributed = ctx.and_then(|ctx| {
+        attribution::select_attributed(oom_events, ctx, now_epoch_seconds).map(|event| {
+            let confidence = if ctx.source_verified { "high" } else { "low" };
+            (event, confidence.to_string())
+        })
+    });
     KernelSignalFacts {
         oom_latest_event_epoch: latest_oom.as_ref().map(|signal| signal.event_epoch()),
         oom_latest_event_identity: latest_oom
@@ -439,82 +460,36 @@ pub(super) fn parse_kernel_signals_with_boot_epoch(
         oom_latest_oom_cgroup: latest_oom
             .as_ref()
             .and_then(|signal| signal.oom_cgroup.clone()),
-        oom_event_count_last_1h: count_oom_events(&oom_events, now_epoch_seconds, 3600),
-        oom_event_count_last_24h: count_oom_events(&oom_events, now_epoch_seconds, 86400),
+        oom_event_count_last_1h: count_oom_events(oom_events, now_epoch_seconds, 3600),
+        oom_event_count_last_24h: count_oom_events(oom_events, now_epoch_seconds, 86400),
         oom_latest_source_line_count: latest_oom
             .as_ref()
             .map(|signal| signal.source_line_count)
             .unwrap_or(unclocked_oom_lines),
         oom_latest_confidence: confidence,
+        oom_attributed_age_seconds: attributed.as_ref().map(|(event, _)| event.age_seconds),
+        oom_attributed_epoch: attributed.as_ref().map(|(event, _)| event.epoch),
+        oom_attributed_event_identity: attributed
+            .as_ref()
+            .map(|(event, _)| event.event_identity.clone()),
+        oom_attributed_pid: attributed.as_ref().map(|(event, _)| event.pid),
+        oom_attributed_process: attributed
+            .as_ref()
+            .and_then(|(event, _)| event.process.clone()),
+        oom_attributed_scope: attributed
+            .as_ref()
+            .map(|(event, _)| event.scope.to_string()),
+        oom_attributed_task_cgroup: attributed
+            .as_ref()
+            .and_then(|(event, _)| event.task_cgroup.clone()),
+        oom_attributed_oom_cgroup: attributed
+            .as_ref()
+            .and_then(|(event, _)| event.oom_cgroup.clone()),
+        oom_attributed_confidence: attributed.map(|(_, confidence)| confidence),
         panic_recent,
-        log_source: log_source.into(),
-        coverage_since_epoch: content
-            .lines()
-            .filter_map(|line| parse_time_prefix(line, boot_epoch_seconds))
-            .min(),
+        log_source,
+        coverage_since_epoch,
         sampled_at_epoch: now_epoch_seconds,
-    }
-}
-
-fn collect_kernel_from_dmesg(
-    builder: &mut HealthReportBuilder,
-    now_epoch_seconds: u64,
-    started: Instant,
-) {
-    let boot_epoch_seconds =
-        read_proc_uptime_seconds(builder).map(|uptime| now_epoch_seconds.saturating_sub(uptime));
-    let program = match system_program("dmesg") {
-        Ok(program) => program,
-        Err(err) => {
-            builder.add_unavailable(
-                HealthCollector::KernelSignal,
-                err.unavailable_reason(),
-                HealthSeverity::Unavailable,
-                started.elapsed().as_millis(),
-            );
-            return;
-        }
-    };
-    match run_health_command_filtered(
-        program,
-        &[],
-        HealthCommandConfig::default(),
-        HealthLineFilter::default(),
-        is_kernel_signal_line,
-    ) {
-        Ok(output) => {
-            if output.exit_code != Some(0) && output.filtered.lines.is_empty() {
-                builder.add_unavailable(
-                    HealthCollector::KernelSignal,
-                    kernel_unavailable_reason(output.exit_code, &output.stderr),
-                    HealthSeverity::Unavailable,
-                    output.elapsed_ms,
-                );
-                return;
-            }
-            let mut facts = parse_kernel_signals_with_boot_epoch(
-                &output.filtered.lines.join("\n"),
-                "dmesg",
-                now_epoch_seconds,
-                boot_epoch_seconds,
-            );
-            // A partial read cannot prove which event was the most recent one.
-            if (!output.filtered.complete || output.filtered.truncated_lines > 0)
-                && facts.oom_latest_confidence.as_deref() == Some("high")
-            {
-                facts.oom_latest_confidence = Some("low".to_string());
-            }
-            facts.record(builder, output.elapsed_ms);
-            builder.add_check_done("kernel_signal");
-        }
-        Err(err) => {
-            builder.add_unavailable(
-                HealthCollector::KernelSignal,
-                err.unavailable_reason(),
-                HealthSeverity::Unavailable,
-                started.elapsed().as_millis(),
-            );
-        }
     }
 }
 
@@ -548,28 +523,6 @@ fn kernel_source(log_source: &str) -> HealthFactSource {
     } else {
         HealthFactSource::JournalctlK
     }
-}
-
-fn read_proc_uptime_seconds(builder: &HealthReportBuilder) -> Option<u64> {
-    let report = builder.report();
-    if let Some(fact) = report
-        .facts
-        .iter()
-        .find(|fact| fact.key == "host.uptime_seconds")
-    {
-        return match fact.value {
-            HealthFactValue::Unsigned(seconds) => Some(seconds),
-            _ => None,
-        };
-    }
-    if report.check_results.iter().any(|check| {
-        check.collector == Some(HealthCollector::Host)
-            && check.status != super::super::model::HealthCheckStatus::Disabled
-    }) {
-        return None;
-    }
-    let content = fs::read_to_string("/proc/uptime").ok()?;
-    super::parse_proc_uptime_seconds(&content)
 }
 
 #[cfg(test)]

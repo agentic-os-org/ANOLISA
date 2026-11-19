@@ -193,6 +193,7 @@ library_tests! {
                     event: Some(("fixture-v1", "event1")),
                     severity: None,
                     legacy_problems: &[],
+                    episode: None,
                 }),
                 || {
                     fs::create_dir(&current_path).unwrap();

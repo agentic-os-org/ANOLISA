@@ -374,5 +374,7 @@ fn local_mounts_in(content: &str) -> BTreeSet<String> {
         .collect()
 }
 
+pub(super) mod volume;
+
 #[cfg(test)]
 mod tests;

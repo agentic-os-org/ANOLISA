@@ -64,7 +64,7 @@ fn journal_grep_compatibility_recovers_legacy_oom_evidence() {
         "Compiled without PCRE2 support, cannot use --grep",
     ] {
         let mut calls = 0;
-        let output = read_journal_signals(HealthCommandConfig::default(), |args, config| {
+        let output = read_journal_signals(HealthCommandConfig::default(), "short-unix", |args, config| {
             calls += 1;
             assert!(config.timeout <= HealthCommandConfig::default().timeout);
             assert!(args.windows(2).any(|pair| pair == ["-n", "200"]));
@@ -97,12 +97,13 @@ fn journal_grep_compatibility_keeps_modern_results_without_retry() {
         (journal_filtered(1, &[], ""), journal_output(1, "", "")),
     ] {
         let mut calls = 0;
-        let actual = read_journal_signals(HealthCommandConfig::default(), |args, _| {
-            calls += 1;
-            assert!(args.contains(&"--grep"));
-            Ok(filtered.clone())
-        })
-        .unwrap();
+        let actual =
+            read_journal_signals(HealthCommandConfig::default(), "short-unix", |args, _| {
+                calls += 1;
+                assert!(args.contains(&"--grep"));
+                Ok(filtered.clone())
+            })
+            .unwrap();
         assert_eq!(calls, 1);
         assert_eq!(actual, expected);
     }
@@ -125,7 +126,7 @@ fn journal_grep_compatibility_preserves_other_errors_without_retry() {
         ),
     ] {
         let mut calls = 0;
-        let actual = read_journal_signals(HealthCommandConfig::default(), |_, _| {
+        let actual = read_journal_signals(HealthCommandConfig::default(), "short-unix", |_, _| {
             calls += 1;
             Ok(filtered.clone())
         });
@@ -139,7 +140,7 @@ fn journal_grep_compatibility_preserves_other_errors_without_retry() {
         HealthCommandError::Io,
     ] {
         let mut calls = 0;
-        let actual = read_journal_signals(HealthCommandConfig::default(), |_, _| {
+        let actual = read_journal_signals(HealthCommandConfig::default(), "short-unix", |_, _| {
             calls += 1;
             Err(error.clone())
         });
@@ -156,6 +157,7 @@ fn journal_grep_compatibility_does_not_reset_an_exhausted_budget() {
             timeout: Duration::ZERO,
             ..HealthCommandConfig::default()
         },
+        "short-unix",
         |_, _| {
             calls += 1;
             Ok(journal_filtered(
@@ -177,7 +179,7 @@ fn journal_grep_fallback_keeps_oom_evidence_beyond_the_output_buffer() {
     while legacy.len() <= HealthCommandConfig::default().output_limit_bytes {
         legacy.push_str("1990.0 kernel: audit: unrelated noise record for the journal\n");
     }
-    let result = read_journal_signals(HealthCommandConfig::default(), |args, _| {
+    let result = read_journal_signals(HealthCommandConfig::default(), "short-unix", |args, _| {
         if args.contains(&"--grep") {
             return Ok(journal_filtered(
                 1,
@@ -205,7 +207,7 @@ fn journal_grep_fallback_keeps_the_newest_oom_during_a_storm() {
             10000 + index
         ));
     }
-    let output = read_journal_signals(HealthCommandConfig::default(), |args, _| {
+    let output = read_journal_signals(HealthCommandConfig::default(), "short-unix", |args, _| {
         if args.contains(&"--grep") {
             return Ok(journal_filtered(
                 1,
@@ -232,7 +234,7 @@ fn journal_grep_marks_a_partial_read_as_incomplete() {
             10000 + index
         ));
     }
-    let output = read_journal_signals(HealthCommandConfig::default(), |args, _| {
+    let output = read_journal_signals(HealthCommandConfig::default(), "short-unix", |args, _| {
         assert!(args.contains(&"--grep"));
         Ok(journal_filtered_fixture(
             &content,

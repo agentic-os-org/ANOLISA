@@ -25,7 +25,7 @@ fn legacy_journal_window_can_retain_only_a_reaper() {
         }
     };
     let mut calls = 0;
-    let output = read_journal_signals(HealthCommandConfig::default(), |args, _| {
+    let output = read_journal_signals(HealthCommandConfig::default(), "short-unix", |args, _| {
         calls += 1;
         assert!(args.contains(&"--reverse"));
         if args.contains(&"--grep") {
@@ -423,6 +423,7 @@ fn oom_claims_with_sources(
                         .map(|(domain, value)| (*domain, value.as_str())),
                     severity: candidate.severity,
                     legacy_problems: &candidate.legacy_problems,
+                    episode: candidate.episode.clone(),
                 },
             )
             .unwrap();

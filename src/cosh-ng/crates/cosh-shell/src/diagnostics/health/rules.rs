@@ -134,9 +134,69 @@ pub(crate) fn evaluate_judgement_rules(
         ));
     }
 
-    findings.extend(disk_findings(facts, config));
+    if volume::volume_active(facts) {
+        findings.extend(volume::volume_findings(facts));
+    } else {
+        findings.extend(disk_findings(facts, config));
+    }
 
-    if oom_age.is_some_and(|age| age <= 300.0) {
+    if number(facts, "kernel.current_cgroup_version").is_some() {
+        let attributed_age = number(facts, "kernel.oom_attributed_age_seconds");
+        let verified = string_value(facts, "kernel.oom_attributed_confidence") == Some("high");
+        if verified && attributed_age.is_some_and(|age| age <= 300.0) {
+            findings.push(finding(
+                "J11",
+                HealthSeverity::Critical,
+                HealthFindingCategory::RootCause,
+                HealthMessageId::HealthFindingRecentOom,
+                attributed_oom_evidence_ids(facts),
+            ));
+        } else if verified && attributed_age.is_some_and(|age| age <= 3600.0) {
+            findings.push(finding(
+                "J12",
+                HealthSeverity::Warning,
+                HealthFindingCategory::RootCause,
+                HealthMessageId::HealthFindingRecentOom,
+                attributed_oom_evidence_ids(facts),
+            ));
+        } else if number(facts, "kernel.cgroup_oom_kill_increment").is_some_and(|delta| delta > 0.0)
+        {
+            let window_start = number(facts, "kernel.cgroup_oom_kill_window_start_epoch");
+            let window_end = number(facts, "kernel.cgroup_oom_kill_window_end_epoch");
+            if let (Some(start), Some(end)) = (window_start, window_end) {
+                if end >= start {
+                    let span = end - start;
+                    let rule = if span <= 300.0 {
+                        Some(("J11", HealthSeverity::Critical))
+                    } else if span <= 3600.0 {
+                        Some(("J12", HealthSeverity::Warning))
+                    } else {
+                        None
+                    };
+                    if let Some((id, severity)) = rule {
+                        findings.push(finding(
+                            id,
+                            severity,
+                            HealthFindingCategory::RootCause,
+                            HealthMessageId::HealthFindingRecentOom,
+                            evidence_ids(
+                                facts,
+                                &[
+                                    "kernel.cgroup_oom_kill_increment",
+                                    "kernel.cgroup_oom_kill_window_start_epoch",
+                                    "kernel.cgroup_oom_kill_window_end_epoch",
+                                    "kernel.cgroup_oom_kill_count",
+                                    "kernel.cgroup_oom_kill_source",
+                                    "kernel.current_cgroup_path",
+                                    "kernel.boot_id",
+                                ],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    } else if oom_age.is_some_and(|age| age <= 300.0) {
         findings.push(finding(
             "J11",
             HealthSeverity::Critical,
@@ -252,6 +312,23 @@ fn expected_state_label(expected: HealthServiceExpectedState) -> &'static str {
         HealthServiceExpectedState::Active => "active",
         HealthServiceExpectedState::Inactive => "inactive",
     }
+}
+
+fn attributed_oom_evidence_ids(facts: &[HealthFact]) -> Vec<String> {
+    evidence_ids(
+        facts,
+        &[
+            "kernel.oom_attributed_age_seconds",
+            "kernel.oom_attributed_process",
+            "kernel.oom_attributed_pid",
+            "kernel.oom_attributed_scope",
+            "kernel.oom_attributed_task_cgroup",
+            "kernel.oom_attributed_oom_cgroup",
+            "kernel.oom_attributed_event_identity",
+            "kernel.boot_id",
+            "kernel.current_cgroup_path",
+        ],
+    )
 }
 
 fn oom_evidence_ids(facts: &[HealthFact]) -> Vec<String> {
@@ -468,5 +545,9 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
     facts.iter().find(|fact| fact.key == key)
 }
 
+pub(crate) mod volume;
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod v37_tests;

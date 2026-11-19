@@ -329,6 +329,7 @@ pub(crate) const RULE_ADVICE: &[(&str, &[AdviceKind])] = &[
     ("J08", &[AdviceKind::SwapPressure]),
     ("J09", &[AdviceKind::DiskUsage]),
     ("J10", &[AdviceKind::DiskUsage]),
+    ("J17", &[AdviceKind::DiskUsage]),
     ("J11", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
     ("J12", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
     ("J13", &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]),
@@ -358,6 +359,18 @@ const ROOT_FILESYSTEM_KEYS: &[&str] = &[
     "filesystem.mount./.path",
     "filesystem.mount./.used_ratio",
     "filesystem.mount./.available_gib",
+    "filesystem.mount./.volume_proven",
+    "filesystem.mount./.volume_unknown_reason",
+    "filesystem.mount./.volume_fs_type",
+    "filesystem.mount./.volume_device",
+    "filesystem.mount./.volume_fsid",
+    "filesystem.mount./.volume_bavail_bytes",
+    "filesystem.mount./.volume_bfree_bytes",
+    "filesystem.mount./.volume_used_bytes",
+    "filesystem.mount./.volume_files",
+    "filesystem.mount./.volume_favail",
+    "filesystem.mount./.volume_inode_applicable",
+    "filesystem.volume_*",
 ];
 
 pub(super) fn owns_fact(id: &str, key: &str) -> bool {
@@ -499,7 +512,7 @@ mod tests {
     fn rule_advice_declares_every_rule_exactly_once() {
         let mut declared: Vec<&str> = RULE_ADVICE.iter().map(|(rule, _)| *rule).collect();
         declared.sort_unstable();
-        let expected: Vec<String> = (1..=16).map(|index| format!("J{index:02}")).collect();
+        let expected: Vec<String> = (1..=17).map(|index| format!("J{index:02}")).collect();
         assert_eq!(declared, expected);
         assert!(advice_for_rule("J01").is_empty());
         assert!(advice_for_rule("J14").is_empty());
@@ -516,6 +529,31 @@ mod tests {
             advice_for_rule("J11"),
             &[AdviceKind::RecentOom, AdviceKind::ProcessMemory]
         );
+    }
+
+    #[test]
+    fn root_check_owns_every_volume_fact_it_records() {
+        for key in [
+            "filesystem.mount./.volume_proven",
+            "filesystem.mount./.volume_unknown_reason",
+            "filesystem.mount./.volume_fs_type",
+            "filesystem.mount./.volume_device",
+            "filesystem.mount./.volume_fsid",
+            "filesystem.mount./.volume_bavail_bytes",
+            "filesystem.mount./.volume_bfree_bytes",
+            "filesystem.mount./.volume_used_bytes",
+            "filesystem.mount./.volume_files",
+            "filesystem.mount./.volume_favail",
+            "filesystem.mount./.volume_inode_applicable",
+            "filesystem.volume_over_limit",
+            "filesystem.volume_mnt_ns",
+        ] {
+            assert!(owns_fact("filesystem.root", key), "{key}");
+        }
+        assert!(owns_fact("filesystem.mounts", "filesystem.mount./data.volume_proven"));
+        assert!(!owns_fact("filesystem.mounts", "filesystem.mount./.volume_proven"));
+        assert!(owns_fact("filesystem.mounts", "filesystem.volume_mnt_ns"));
+        assert!(owns_fact("filesystem.mounts", "filesystem.volume_over_limit"));
     }
 
     #[test]

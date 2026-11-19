@@ -146,6 +146,10 @@ pub(crate) fn exposure_evidence(report: &HealthScanReport, item: &HealthTryItem)
     }
     if matches!(finding.id.split(':').next(), Some("J11" | "J12" | "J13")) {
         for key in [
+            "kernel.oom_attributed_event_identity",
+            "kernel.oom_attributed_scope",
+            "kernel.oom_attributed_task_cgroup",
+            "kernel.oom_attributed_oom_cgroup",
             "kernel.oom_latest_event_identity",
             "kernel.boot_id",
             "kernel.oom_latest_pid",
@@ -196,11 +200,46 @@ pub(crate) fn exposure_event(
             .find(|fact| fact.key == key)
             .map(|fact| &fact.value)
     };
-    let Some(super::HealthFactValue::String(identity)) = fact("kernel.oom_latest_event_identity")
-    else {
+    if fact("kernel.current_cgroup_version").is_some()
+        && fact("kernel.oom_attributed_event_identity").is_none()
+        && fact("kernel.cgroup_oom_kill_increment").is_some()
+    {
+        let text = |key: &str| match fact(key) {
+            Some(super::HealthFactValue::String(value)) => Some(value.clone()),
+            _ => None,
+        };
+        let number = |key: &str| match fact(key) {
+            Some(super::HealthFactValue::Unsigned(value)) => Some(*value),
+            _ => None,
+        };
+        if let (Some(boot), Some(cgroup_id), Some(start), Some(end), Some(delta)) = (
+            text("kernel.boot_id"),
+            text("kernel.current_cgroup_id"),
+            number("kernel.cgroup_oom_kill_window_start_epoch"),
+            number("kernel.cgroup_oom_kill_window_end_epoch"),
+            number("kernel.cgroup_oom_kill_increment"),
+        ) {
+            return Some((
+                "cgroup-counter-v1",
+                format!("counter:{boot}:{cgroup_id}:{start}:{end}:{delta}"),
+            ));
+        }
+        return None;
+    }
+    let identity_key = if fact("kernel.oom_attributed_event_identity").is_some() {
+        "kernel.oom_attributed_event_identity"
+    } else {
+        "kernel.oom_latest_event_identity"
+    };
+    let pid_key = if fact("kernel.oom_attributed_pid").is_some() {
+        "kernel.oom_attributed_pid"
+    } else {
+        "kernel.oom_latest_pid"
+    };
+    let Some(super::HealthFactValue::String(identity)) = fact(identity_key) else {
         return None;
     };
-    let Some(super::HealthFactValue::Unsigned(pid)) = fact("kernel.oom_latest_pid") else {
+    let Some(super::HealthFactValue::Unsigned(pid)) = fact(pid_key) else {
         return None;
     };
     if *pid == 0 {

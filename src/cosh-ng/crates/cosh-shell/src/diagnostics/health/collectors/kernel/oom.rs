@@ -20,7 +20,7 @@ pub(super) struct OomSignal {
     pub(super) oom_cgroup: Option<String>,
     pub(super) source_line_count: u64,
     pub(super) has_event_anchor: bool,
-    has_kill_record: bool,
+    pub(super) has_kill_record: bool,
 }
 
 impl OomSignal {
