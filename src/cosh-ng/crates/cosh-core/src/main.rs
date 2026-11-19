@@ -105,6 +105,12 @@ fn needs_auth(config: &CoreConfig) -> bool {
 
 #[cfg(unix)]
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        // fd-exec (/proc/self/fd/N) makes the kernel derive comm from the fd path
+        // basename; restore the executable identity for ps/pgrep/OOM attribution.
+        let _ = nix::sys::prctl::set_name(c"cosh-core");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
