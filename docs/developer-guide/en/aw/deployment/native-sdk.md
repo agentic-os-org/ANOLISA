@@ -4,10 +4,15 @@
 
 Use `@anolisa/aw-sdk` or the asynchronous `anolisa-aw-sdk` Python package when
 an application owns startup and needs shared AW policy and lifecycle management.
-Both clients support framework-free semantic callbacks. Optional Qoder Hooks and
-QwenPaw Middleware remain thin native integrations. Linux is required; the Node
-package needs Node.js 22+. Install AW and Providers separately. These source-built
-candidate packages await publication through the AW release process.
+Both core packages provide connection transport, `Instance`, `Task`, `Admission`,
+`TaskScope`, Deployment Descriptor loading, cooperative control, and the
+framework-free language-level Source Runtime (`@anolisa/aw-sdk/sources` and
+`aw_sdk.sources`). Framework-specific integrations ship as separate optional
+adapter packages (`@anolisa/aw-sdk-qoder`, `@anolisa/aw-sdk-pi`,
+`anolisa-aw-sdk-qwenpaw`, and `anolisa-aw-sdk-claude`) rather than being bundled
+into the core packages. Linux is required; the Node packages need Node.js 22+.
+Install AW and Providers separately. These source-built candidate packages await
+publication through the AW release process.
 
 Build AW from the same candidate revision as the language package. Existing
 releases without `aw-sdk/v1` reject connection; cooperative control additionally
@@ -15,7 +20,9 @@ requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
 ## Configuration-driven Qoder integration
 
-Use `createQoderBridge` to retain the native Node entrypoint, daemon, authentication,
+Install `@anolisa/aw-sdk` together with the optional `@anolisa/aw-sdk-qoder`
+adapter package. Use `createQoderBridge` (imported from `@anolisa/aw-sdk-qoder`
+or forwarded through `@anolisa/aw-sdk/qoder`) to retain the native Node entrypoint, daemon, authentication,
 model settings, permissions and Hook groups. The bridge reads the same owned
 `aw.yaml` used by deployment, installs public Qoder Hooks and publishes cooperative
 attachment support. A deployment-generated Descriptor lets initialization read
@@ -24,7 +31,7 @@ validated wiring without starting a configuration-parser subprocess. Without
 a bounded CLI invocation. Neither path starts AW or sec-core.
 
 ```javascript
-import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
+import { createQoderBridge } from "@anolisa/aw-sdk-qoder";
 import { query } from "@qoder-ai/qoder-agent-sdk";
 
 const aw = await createQoderBridge({
@@ -80,20 +87,23 @@ public Hooks and adds no module patch or preload to the native SDK.
 
 ## Pi worker integration
 
-Use the optional `@anolisa/aw-sdk/pi` entrypoint on Node.js 22.19 or later.
+Install `@anolisa/aw-sdk` together with the optional `@anolisa/aw-sdk-pi`
+adapter package on Node.js 22.19 or later (legacy `@anolisa/aw-sdk/pi` forwards
+to `@anolisa/aw-sdk-pi` when installed).
 Existing application modules export `createSession({ sdk, cwd, args, ...options })`
 and `runWorker({ args, createSession, closeSession, withSession })`. Keep native
 model setup, settings, tools and callbacks in the application factory. Use the
 supplied `createSession` and `session.prompt()` for protected work.
 
 ```javascript
-import { runPiWorker } from "@anolisa/aw-sdk/pi";
+import { runPiWorker } from "@anolisa/aw-sdk-pi";
 
 await runPiWorker({
   application: "/absolute/pi-worker.mjs",
   configFile: "/absolute/aw.yaml",
   descriptorFile: "/absolute/aw-pi.descriptor.json",
   args: process.argv.slice(2),
+  automatic: false, // Set true to reattach automatically after worker restarts.
 });
 ```
 
@@ -101,6 +111,9 @@ Compile the descriptor with the `pi-worker-hooks` profile at deployment so the
 worker starts without `aw config show`; omit `descriptorFile` to use the offline
 parser. Configure a Pi target with an explicit daemon endpoint or state
 directory. The process publishes the SDK listener before entering the worker.
+Pass `automatic: true` when a restarted resident worker should automatically
+register and reconnect to the configured Service without external PID tracking
+(`automatic` defaults to `false`).
 Deployment attaches under the application's Linux user. AW is always required.
 
 ```bash
@@ -291,7 +304,7 @@ and [Python Source example](../../../../../src/aw/sdk/python/examples/language_s
 For low-level direct callbacks, use the
 [TypeScript example](../../../../../src/aw/sdk/typescript/examples/application.mjs)
 or [Python example](../../../../../src/aw/sdk/python/examples/application.py), set
-`AW_SOCKET` to its private socket, and install the matching language package.
+`AW_SOCKET` to its private socket, and install the matching core language package.
 The examples perform one tool call, adopt a before-hook block, emit the resulting
 observation and release their task. The configured policy determines the decision.
 
@@ -306,14 +319,19 @@ has drained. Exact fields and supported effects are in the
 A native Hook or language instrumentation source can feed these same callbacks.
 Automatic Source discovery and coverage selection remain planned. Adding an
 application with these semantics needs only the core SDK and no framework-specific
-Rust Adapter. For richer native effects, use the framework integrations below and see the [Python/QwenPaw guide](python-sdk.md).
+Rust Adapter. For richer native effects, install the optional framework adapter
+packages below and see the [Python/QwenPaw guide](python-sdk.md).
 
 ## Install and connect
 
-Install the candidate tarball in the application directory:
+Install the core candidate tarball (and only the optional framework adapter
+tarball your application uses) in the application directory:
 
 ```bash
 npm install /absolute/artifacts/anolisa-aw-sdk-0.1.1.tgz
+# Optional framework adapters (install only when needed):
+npm install /absolute/artifacts/anolisa-aw-sdk-qoder-0.1.1.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-pi-0.1.1.tgz
 ```
 
 Use an absolute socket path in a private directory owned by the application
@@ -323,7 +341,8 @@ on every enabled event applicable to this target; explicit Provider denials stil
 independently with `aw service serve --config /absolute/aw.yaml` and select the
 socket reported by that service. The SDK never starts a service or an Agent.
 
-The installed `examples/qoder.mjs` uses the configuration-driven bridge.
+The installed `@anolisa/aw-sdk-qoder` package includes `examples/qoder.mjs` using
+the configuration-driven bridge.
 For explicit lifecycle control, Keep the native application's authentication, daemon, model,
 permissions, setting sources and Hooks. Pass its existing options to
 `qoderOptions(task, options)`, then create the native Query and immediately

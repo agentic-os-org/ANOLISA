@@ -36,13 +36,30 @@ def prepare_claude_wheel(
 ) -> dict:
     """Use the image installation or install the checkout wheel in a private directory."""
     if receipt := environment.get("AW_RESIDENT_PYTHON_WHEEL"):
-        digest, name = Path(receipt).read_text().split()
-        assert re.fullmatch(r"[0-9a-f]{64}", digest), digest
-        assert name == f"anolisa_aw_sdk-{version('anolisa-aw-sdk')}-py3-none-any.whl", name
+        entries = {}
+        for line in Path(receipt).read_text().splitlines():
+            if not line.strip():
+                continue
+            digest, name = line.split()
+            assert re.fullmatch(r"[0-9a-f]{64}", digest), digest
+            entries[name] = digest
+        core_name = f"anolisa_aw_sdk-{version('anolisa-aw-sdk')}-py3-none-any.whl"
+        adapter_name = (
+            f"anolisa_aw_sdk_claude-{version('anolisa-aw-sdk-claude')}-py3-none-any.whl"
+        )
+        assert set(entries) == {core_name, adapter_name}, entries
         environment.pop("PYTHONPATH", None)
-        return {"name": name, "sha256": digest, "installation": "image"}
+        return {
+            "name": core_name,
+            "sha256": entries[core_name],
+            "adapter_name": adapter_name,
+            "adapter_sha256": entries[adapter_name],
+            "installation": "image",
+        }
     package = fixture.parents[2] / "sdk/python"
+    claude_package = fixture.parents[2] / "sdk/python-adapters/claude"
     wheel_directory = directory / "wheel"
+    claude_wheel_directory = directory / "wheel-claude"
     installed = directory / "installed"
     with (output / "wheel.log").open("w") as log:
         subprocess.run(
@@ -50,15 +67,23 @@ def prepare_claude_wheel(
              "--out-dir", str(wheel_directory), str(package)],
             stdout=log, stderr=subprocess.STDOUT, check=True, timeout=120,
         )
+        subprocess.run(
+            ["uv", "build", "--wheel", "--python", sys.executable,
+             "--out-dir", str(claude_wheel_directory), str(claude_package)],
+            stdout=log, stderr=subprocess.STDOUT, check=True, timeout=120,
+        )
         (wheel,) = wheel_directory.glob("*.whl")
+        (claude_wheel,) = claude_wheel_directory.glob("*.whl")
         subprocess.run(
             ["uv", "pip", "install", "--python", sys.executable, "--target", str(installed),
-             "--no-deps", str(wheel)],
+             "--no-deps", str(wheel), str(claude_wheel)],
             stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60,
         )
     environment["PYTHONPATH"] = str(installed)
     return {
         "name": wheel.name, "sha256": sha256(wheel.read_bytes()).hexdigest(),
+        "adapter_name": claude_wheel.name,
+        "adapter_sha256": sha256(claude_wheel.read_bytes()).hexdigest(),
         "installation": "private",
     }
 

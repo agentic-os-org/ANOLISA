@@ -23,7 +23,10 @@ if r['method'] == 'describe':
 elif r['method'] == 'invoke':
     with Path(r['config']['calls']).open('a') as f: f.write(r['event']['tool']['call_id']+'\\n')
     if r['event']['tool']['input'].get('slow'):
-        Path(r['config']['pid']).write_text(str(os.getpid()))
+        pid_file = Path(r['config']['pid'])
+        staged = pid_file.with_suffix('.tmp')
+        staged.write_text(str(os.getpid()))
+        staged.replace(pid_file)
         time.sleep(15)
     out['input_digest'] = r['input_digest']
     out['effects'] = []

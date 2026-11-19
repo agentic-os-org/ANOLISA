@@ -1,4 +1,4 @@
-"""Reject stale or mixed delivery artifacts before native acceptance."""
+"""Reject stale, mixed or leaky delivery artifacts before native acceptance."""
 
 import io
 import json
@@ -29,9 +29,20 @@ if name in ('node', 'npm') and sys.argv[1:] == ['--version']:
     print('fixture-version')
 elif name == 'npm':
     assert pathlib.Path('candidate-input').read_text() == 'archived'
+    pkg = pathlib.Path.cwd().name
     output = pathlib.Path(sys.argv[sys.argv.index('--pack-destination') + 1])
-    with tarfile.open(output / 'anolisa-aw-sdk-0.1.1.tgz', 'w:gz') as archive:
-        item = tarfile.TarInfo('package/dist/client.mjs')
+    tar_name = (
+        'anolisa-aw-sdk-0.1.1.tgz'
+        if pkg == 'typescript'
+        else f'anolisa-aw-sdk-{pkg}-0.1.1.tgz'
+    )
+    member = (
+        'package/dist/client.mjs'
+        if pkg == 'typescript'
+        else f'package/dist/native/{pkg}/index.mjs'
+    )
+    with tarfile.open(output / tar_name, 'w:gz') as archive:
+        item = tarfile.TarInfo(member)
         item.size = 7
         archive.addfile(item, io.BytesIO(b'current'))
 elif sys.argv[1:] == ['--version']:
@@ -44,22 +55,63 @@ else:
     assert sys.argv[1:4] == ['-m', 'pip', 'wheel']
     source = pathlib.Path(sys.argv[sys.argv.index('--no-index') + 1])
     assert (source / 'candidate-input').read_text() == 'archived'
+    pkg = source.name
     output = pathlib.Path(sys.argv[sys.argv.index('--wheel-dir') + 1])
-    with zipfile.ZipFile(output / 'anolisa_aw_sdk-0.1.1-py3-none-any.whl', 'w') as archive:
-        archive.writestr('aw_sdk/client.py', b'current')
+    whl_name = (
+        'anolisa_aw_sdk-0.1.1-py3-none-any.whl'
+        if pkg == 'python'
+        else f'anolisa_aw_sdk_{pkg}-0.1.1-py3-none-any.whl'
+    )
+    member = (
+        'aw_sdk/client.py'
+        if pkg == 'python'
+        else f'aw_sdk_{pkg}/_native/adapter.py'
+    )
+    with zipfile.ZipFile(output / whl_name, 'w') as archive:
+        archive.writestr(member, b'current')
 """
 
+FIXTURE_SPECS = (
+    ("npm", "core", "sdk-core.tgz"),
+    ("npm", "qoder", "sdk-qoder.tgz"),
+    ("npm", "pi", "sdk-pi.tgz"),
+    ("wheel", "core", "sdk-core.whl"),
+    ("wheel", "claude", "sdk-claude.whl"),
+    ("wheel", "qwenpaw", "sdk-qwenpaw.whl"),
+)
 
-def npm(path, content):
+
+def npm(path, content, member="package/dist/client.mjs"):
     with tarfile.open(path, "w:gz") as archive:
-        item = tarfile.TarInfo("package/dist/client.mjs")
+        item = tarfile.TarInfo(member)
         item.size = len(content)
         archive.addfile(item, io.BytesIO(content))
 
 
-def wheel(path, content):
+def wheel(path, content, member="aw_sdk/client.py"):
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("aw_sdk/client.py", content)
+        archive.writestr(member, content)
+
+
+def stage_fixture_artifacts(root, contents=None):
+    contents = contents or {}
+    cancel = Cancellation()
+    records = []
+    for kind, component, filename in FIXTURE_SPECS:
+        data = contents.get((kind, component), b"current")
+        if kind == "npm":
+            npm(root / filename, data)
+        else:
+            wheel(root / filename, data)
+        records.append(
+            {
+                "kind": kind,
+                "component": component,
+                "file": filename,
+                "sha256": digest(root / filename, cancel),
+            }
+        )
+    return records
 
 
 class CandidateTests(unittest.TestCase):
@@ -67,6 +119,28 @@ class CandidateTests(unittest.TestCase):
         for value in ("main", "a" * 39, "A" * 40):
             with self.assertRaises(ValueError):
                 candidate.commit_id(Path.cwd(), value, Cancellation())
+
+    def test_core_boundary_rejects_bundled_framework_bridges(self):
+        candidate.check_core_boundary(
+            "wheel", "core", {"aw_sdk/client.py": b"", "aw_sdk/sources.py": b""}
+        )
+        candidate.check_core_boundary(
+            "npm",
+            "core",
+            {
+                "package/dist/client.mjs": b"",
+                "package/dist/native/shared/scope.mjs": b"",
+            },
+        )
+        for member in ("aw_sdk/_native/qwenpaw/sdk.py", "aw_sdk/_native/claude/aw_claude.py"):
+            with self.assertRaisesRegex(ValueError, "must not bundle framework adapters"):
+                candidate.check_core_boundary("wheel", "core", {member: b""})
+        for member in (
+            "package/dist/native/qoder-sdk/sdk.mjs",
+            "package/dist/native/pi/resident.mjs",
+        ):
+            with self.assertRaisesRegex(ValueError, "must not bundle framework adapters"):
+                candidate.check_core_boundary("npm", "core", {member: b""})
 
     def test_rpm_set_rejects_stale_mixed_missing_and_duplicate(self):
         records = [
@@ -111,18 +185,13 @@ class CandidateTests(unittest.TestCase):
     def test_forged_receipt_cannot_make_old_payload_match(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            npm(root / "sdk.tgz", b"old")
-            wheel(root / "sdk.whl", b"current")
             cancel = Cancellation()
-            records = [
-                {"kind": kind, "file": file, "sha256": digest(root / file, cancel)}
-                for kind, file in (("npm", "sdk.tgz"), ("wheel", "sdk.whl"))
-            ]
+            records = stage_fixture_artifacts(root, {("npm", "core"): b"old"})
             receipt = root / "sdk-candidate.json"
             receipt.write_text(
                 json.dumps(
                     {
-                        "schema": "aw-sdk-candidate/v1",
+                        "schema": "aw-sdk-candidate/v2",
                         "commit": SHA,
                         "artifacts": records,
                     }
@@ -130,19 +199,17 @@ class CandidateTests(unittest.TestCase):
             )
 
             def rebuild(repo, sha, output, python, cancellation):
-                npm(output / "sdk.tgz", b"current")
-                wheel(output / "sdk.whl", b"current")
-                return {"artifacts": records}
+                return {"artifacts": stage_fixture_artifacts(output)}
 
             with patch.object(candidate, "build", side_effect=rebuild):
                 with self.assertRaisesRegex(ValueError, "payload differs"):
                     candidate.verify_sdk(root, SHA, receipt, sys.executable, cancel)
-                npm(root / "sdk.tgz", b"current")
-                records[0]["sha256"] = digest(root / "sdk.tgz", cancel)
+                npm(root / "sdk-core.tgz", b"current")
+                records[0]["sha256"] = digest(root / "sdk-core.tgz", cancel)
                 receipt.write_text(
                     json.dumps(
                         {
-                            "schema": "aw-sdk-candidate/v1",
+                            "schema": "aw-sdk-candidate/v2",
                             "commit": SHA,
                             "artifacts": records,
                         }
@@ -152,26 +219,21 @@ class CandidateTests(unittest.TestCase):
                     root, SHA, receipt, sys.executable, cancel
                 )
                 self.assertEqual(report["sdk_payloads"], "match-candidate-rebuild")
-                (root / "sdk.tgz").write_bytes(b"changed")
+                (root / "sdk-core.tgz").write_bytes(b"changed")
                 with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                     candidate.verify_sdk(root, SHA, receipt, sys.executable, cancel)
 
     def test_relabelled_payload_is_rejected(self):
-        for kind in ("npm", "wheel"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+        for kind, component in (("npm", "core"), ("wheel", "claude")):
+            with self.subTest(kind=kind, component=component), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                npm(root / "sdk.tgz", b"current")
-                wheel(root / "sdk.whl", b"current")
-                records = [
-                    {
-                        "kind": k,
-                        "file": name,
-                        "sha256": digest(root / name, Cancellation()),
-                    }
-                    for k, name in (("npm", "sdk.tgz"), ("wheel", "sdk.whl"))
-                ]
+                records = stage_fixture_artifacts(root)
                 rebuilt_records = [dict(row) for row in records]
-                row = next(row for row in records if row["kind"] == kind)
+                row = next(
+                    row
+                    for row in records
+                    if row["kind"] == kind and row["component"] == component
+                )
                 renamed = "old-0.0.1" + Path(row["file"]).suffix
                 (root / row["file"]).rename(root / renamed)
                 row["file"] = renamed
@@ -179,7 +241,7 @@ class CandidateTests(unittest.TestCase):
                 receipt.write_text(
                     json.dumps(
                         {
-                            "schema": "aw-sdk-candidate/v1",
+                            "schema": "aw-sdk-candidate/v2",
                             "commit": SHA,
                             "artifacts": records,
                         }
@@ -187,8 +249,7 @@ class CandidateTests(unittest.TestCase):
                 )
 
                 def rebuild(repo, sha, output, python, cancellation):
-                    npm(output / "sdk.tgz", b"current")
-                    wheel(output / "sdk.whl", b"current")
+                    stage_fixture_artifacts(output)
                     return {"artifacts": rebuilt_records}
 
                 with patch.object(candidate, "build", side_effect=rebuild):
@@ -203,15 +264,18 @@ class CandidateTests(unittest.TestCase):
             receipt = root / "sdk-candidate.json"
             invalid = [None, [], 1, "text"]
             invalid += [
-                {"schema": "aw-sdk-candidate/v1", "commit": SHA, "artifacts": rows}
+                {"schema": "aw-sdk-candidate/v1", "commit": SHA, "artifacts": []},
+            ]
+            invalid += [
+                {"schema": "aw-sdk-candidate/v2", "commit": SHA, "artifacts": rows}
                 for rows in (
                     None,
                     1,
                     {},
                     "ab",
-                    [None, {}],
-                    [{}, {}],
-                    [{"kind": []}, {"kind": "wheel"}],
+                    [None] * 6,
+                    [{}] * 6,
+                    [{"kind": "npm", "component": "core"}],
                 )
             ]
             with patch.object(candidate, "build") as rebuild:
@@ -236,8 +300,8 @@ class BuildTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         (self.repo / "LICENSE").write_text("fixture")
-        for sdk in ("typescript", "python"):
-            directory = self.repo / "src/aw/sdk" / sdk
+        for _, _, rel_dir in candidate.SDK_PACKAGES:
+            directory = self.repo / rel_dir
             directory.mkdir(parents=True)
             (directory / "candidate-input").write_text("archived")
         for args in (
@@ -272,8 +336,8 @@ class BuildTests(unittest.TestCase):
             .strip()
         )
         # Dirty inputs must never reach the fake builders.
-        for file in self.repo.glob("src/aw/sdk/*/candidate-input"):
-            file.write_text("dirty")
+        for _, _, rel_dir in candidate.SDK_PACKAGES:
+            (self.repo / rel_dir / "candidate-input").write_text("dirty")
         tools = self.root / "tools"
         tools.mkdir()
         for name in ("node", "npm", "python-builder"):
@@ -295,6 +359,7 @@ class BuildTests(unittest.TestCase):
 
     def test_build_and_verify_from_archive(self):
         receipt = self.build()
+        self.assertEqual(len(receipt["artifacts"]), len(candidate.SDK_PACKAGES))
         self.assertEqual(
             set(receipt["tools"]),
             {"node", "npm", "python", "pip", "setuptools", "wheel"},
@@ -335,7 +400,7 @@ class BuildTests(unittest.TestCase):
 
     def test_publication_failure_and_cancellation_roll_back(self):
         for failure in ("error", "cancel"):
-            for position in (1, 2, 3):
+            for position in (1, 4, 7):
                 with self.subTest(failure=failure, position=position):
                     self.output = self.root / f"{failure}-{position}"
                     cancel = Cancellation()

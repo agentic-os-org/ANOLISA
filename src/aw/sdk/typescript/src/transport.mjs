@@ -14,8 +14,8 @@ const unavailable = new Set([
   "ETIMEDOUT",
 ]);
 export class AwError extends Error {
-  constructor(code, { transport = false, cause } = {}) {
-    super(code, { cause });
+  constructor(code, { transport = false, cause, message } = {}) {
+    super(message ?? code, { cause });
     this.name = "AwError";
     this.code = code;
     this.unavailable = transport && unavailable.has(code);

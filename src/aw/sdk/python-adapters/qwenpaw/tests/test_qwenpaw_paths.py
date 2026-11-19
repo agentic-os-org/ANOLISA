@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from aw_sdk.qwenpaw import prepare_runtime
-from aw_sdk._native.qwenpaw import aw_paths
+from aw_sdk_qwenpaw._native import aw_paths
 
 
 class RuntimePaths(unittest.TestCase):
@@ -63,7 +63,7 @@ class RuntimePaths(unittest.TestCase):
         from aw_sdk import qwenpaw
 
         for public, module in (("AfterOnlyPlugin", "after_only"), ("QwenPawPlugin", "sdk")):
-            native = ModuleType("aw_sdk._native.qwenpaw." + module)
+            native = ModuleType("aw_sdk_qwenpaw._native." + module)
             sentinel = object()
             setattr(native, public, sentinel)
             self.isolation._norm = self.original

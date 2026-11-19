@@ -118,23 +118,25 @@ python3 -B scripts/resident_container.py --candidate-sha "$(git rev-parse HEAD)"
 ## 应用持有的 SDK 包
 
 默认 gate 执行共享协议消费者、Node 生命周期／传输测试与离线包外 npm 安装。
-在仓库根目录构建 tarball：
+在仓库根目录构建核心与 Qoder 适配包的 tarball：
 
 ```bash
 mkdir -p src/aw/target/sdk-package
 npm pack ./src/aw/sdk/typescript --pack-destination src/aw/target/sdk-package
+npm pack ./src/aw/sdk/typescript-adapters/qoder --pack-destination src/aw/target/sdk-package
 ```
 
-真实 Qoder 验收在独立应用目录安装该 tarball 与所选原生 Qoder SDK，并复制
+真实 Qoder 验收在独立应用目录安装这两个 tarball 与所选原生 Qoder SDK，并复制
 `src/aw/sdk/tests/native-qoder.mjs` 和 `src/aw/sdk/tests/fixtures/sdk-deny.py`。
 将 `AW_TEST_BINARY` 设置为候选二进制绝对路径，原生 `QODER_PERSONAL_ACCESS_TOKEN`
 沿既有凭据存储注入。执行 `timeout --kill-after=10s 300s node native-qoder.mjs`。
 测试创建私有临时服务／工作目录，通过实际 Bash 副作用验证在线、失联、恢复及
 AW／原生拒绝。应用负责 daemon／Query 清理。带凭据的原生验收与必跑离线包门禁分别记录。
 
-默认 gate 还会离线构建、安装 Python wheel 并执行合同测试。真实 QwenPaw App
-验收先在仓库外安装 wheel，设置 `AW_TEST_BINARY`、`AW_QWENPAW_BINARY`、
-`AW_SDK_PYTHONPATH`（安装包目录）与 `AW_TEST_OUTPUT`（已存在的私有证据目录），
+默认门禁还会离线构建 Python wheel，并验证安装后的消费者。真实 QwenPaw App 验收需要将配套的
+`anolisa-aw-sdk` 和 `anolisa-aw-sdk-qwenpaw` 两个 wheel 安装到仓库外的同一目录。
+将 `AW_SDK_PYTHONPATH` 指向该目录，`AW_TEST_BINARY`、`AW_QWENPAW_BINARY` 指向候选可执行文件，
+`AW_TEST_OUTPUT` 指向私有证据目录，然后
 在仓库根目录执行
 `timeout --kill-after=10s 180s python3 src/aw/sdk/tests/native_qwenpaw.py`。
 测试使用原生 App、控制模型及 observer 插件，验证工具进入期间 AW 退出、恢复和拒绝。

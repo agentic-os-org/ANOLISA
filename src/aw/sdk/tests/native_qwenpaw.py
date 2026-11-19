@@ -67,7 +67,7 @@ class NativeApp(unittest.TestCase):
                     )
                 )
                 (plugin / "plugin.py").write_text("""from aw_sdk import Instance
-from aw_sdk.qwenpaw import QwenPawPlugin
+from aw_sdk_qwenpaw import QwenPawPlugin
 instance=Instance(endpoint=%r,target='app',cwd=%r,availability='native_fallback',timeout_ms=1000,
  capabilities={'adapter':'qwenpaw','version':'public-middleware/v1','entrypoint':'app','events':{'tool.before':['observe','block'],'tool.after':['observe']}},install=lambda routes:plugin.ready(routes))
 plugin=QwenPawPlugin(instance)

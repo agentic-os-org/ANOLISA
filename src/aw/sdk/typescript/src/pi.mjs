@@ -1,95 +1,35 @@
-/** Application-owned Pi worker using the common SDK Instance, Task and configuration. */
-import { realpath } from "node:fs/promises";
-import { extname, isAbsolute } from "node:path";
-import { AwError, Instance } from "./client.mjs";
-import { loadConfiguration } from "./configuration.mjs";
-import { TaskScope } from "./task-scope.mjs";
-import { packages, loadWorker } from "../../../crates/aw-adapter/native/pi/entrypoint.mjs";
-import { runWorker } from "../../../crates/aw-adapter/native/pi/resident.mjs";
-import {
-  piProfile,
-  strictOutputRelease,
-  workerBinding,
-} from "../../../crates/aw-adapter/native/pi/sdk.mjs";
+/** Optional compatibility shim delegating to @anolisa/aw-sdk-pi. */
+import { AwError } from "./transport.mjs";
 
-/** Run an existing Pi worker factory and publish its cooperative attach listener. */
-export async function runPiWorker({
-  application,
-  args = [],
-  configFile,
-  descriptorFile,
-  target,
-  executable = "aw",
-  attachTimeoutMs = 5000,
-}) {
-  if (
-    typeof application !== "string" ||
-    !isAbsolute(application) ||
-    extname(application) !== ".mjs"
-  )
-    throw new AwError("pi_application_required");
-  if (
-    !Number.isInteger(attachTimeoutMs) ||
-    attachTimeoutMs < 100 ||
-    attachTimeoutMs > 60000
-  )
-    throw new AwError("invalid_attach_timeout");
+const PACKAGE = "@anolisa/aw-sdk-pi";
+const isMissingPackage = (error) =>
+  error?.code === "ERR_MODULE_NOT_FOUND" &&
+  typeof error.message === "string" &&
+  (error.message.includes(`'${PACKAGE}'`) ||
+    error.message.includes(`"${PACKAGE}"`));
 
-  application = await realpath(application);
-  // Resolve wiring before importing the business factory and Pi packages.
-  const configured = await loadConfiguration({
-    configFile,
-    descriptorFile,
-    target,
-    executable,
-    profile: piProfile,
-    requiresService: true,
+function missingAdapter(cause) {
+  return new AwError("optional_adapter_not_installed", {
+    cause,
+    message:
+      `Optional Pi adapter package '${PACKAGE}' is not installed. ` +
+      `Install '${PACKAGE}' alongside '@anolisa/aw-sdk' or import runPiWorker directly from '${PACKAGE}'.`,
   });
-  const installed = packages(application);
-  const strictOutput = strictOutputRelease(installed);
-  const { worker, sdk, core } = await loadWorker(
-    application,
-    args,
-    installed,
-    strictOutput,
-  );
-  const binding = workerBinding({
-    worker,
-    inputEnabled: configured.inputEnabled,
-    strictOutput,
-  });
-  const instance = new Instance({
-    endpoint: configured.endpoint,
-    target: configured.target,
-    availability: configured.availability,
-    capabilities: binding.capabilities,
-    // Give Task release and event cleanup the same bound as the native bridge.
-    timeoutMs: 6000,
-    reconnectMs: 100,
-    install: binding.install,
-  });
-  let workerError;
-  let failed = false;
+}
+
+async function loadOptional() {
   try {
-    await runWorker(worker, sdk, core, args, {
-      startup: binding.startup,
-      createScope: () => new TaskScope(instance, { timeoutMs: attachTimeoutMs }),
-      ready: () => instance.listen(),
-    });
+    return await import(PACKAGE);
   } catch (error) {
-    failed = true;
-    workerError = error;
-  } finally {
-    try {
-      await instance.close();
-    } catch (closeError) {
-      if (!failed) throw closeError;
-      throw new AggregateError(
-        [workerError, closeError],
-        workerError?.message ?? "Pi worker and AW shutdown failed",
-        { cause: workerError },
-      );
-    }
+    if (!isMissingPackage(error)) throw error;
+    /* DEV_FALLBACK_START */
+    return import("../../typescript-adapters/pi/src/index.mjs");
+    /* DEV_FALLBACK_END */
+    throw missingAdapter(error);
   }
-  if (failed) throw workerError;
+}
+
+export async function runPiWorker(options) {
+  const adapter = await loadOptional();
+  return adapter.runPiWorker(options);
 }

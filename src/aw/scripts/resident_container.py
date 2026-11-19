@@ -45,9 +45,18 @@ def source_files(root: Path) -> list[Path]:
 def wheel_sources(root: Path) -> list[Path]:
     """Allowlist wheel build inputs separately from runtime fixtures."""
     package = root / "sdk/python"
-    paths = [root.parents[1] / "LICENSE", package / "pyproject.toml", package / "setup.py"]
+    claude_adapter = root / "sdk/python-adapters/claude"
+    paths = [
+        root.parents[1] / "LICENSE",
+        package / "pyproject.toml",
+        package / "setup.py",
+        claude_adapter / "pyproject.toml",
+        claude_adapter / "setup.py",
+    ]
     paths.extend(sorted((package / "src/aw_sdk").glob("*.py")))
     paths.append(package / "src/aw_sdk/py.typed")
+    paths.extend(sorted((claude_adapter / "src/aw_sdk_claude").glob("*.py")))
+    paths.append(claude_adapter / "src/aw_sdk_claude/py.typed")
     for pattern in ("*.py", "*.json"):
         paths.extend(sorted((package / "examples").rglob(pattern)))
     for adapter in ("claude-sdk", "qwenpaw"):

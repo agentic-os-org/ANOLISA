@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel>=0.42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anolisa-aw-sdk-qwenpaw"
+version = "0.1.1"
+description = "Optional QwenPaw plugin integration for anolisa-aw-sdk"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+classifiers = ["Operating System :: POSIX :: Linux", "Typing :: Typed"]
+dependencies = ["anolisa-aw-sdk==0.1.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aw_sdk_qwenpaw = ["py.typed"]
+
+[tool.setuptools.data-files]
+"share/anolisa-aw-sdk-qwenpaw/examples/qwenpaw" = ["examples/qwenpaw/plugin.py", "examples/qwenpaw/plugin.json"]
+"share/anolisa-aw-sdk-qwenpaw/examples/qwenpaw-after" = ["examples/qwenpaw-after/plugin.py", "examples/qwenpaw-after/plugin.json"]

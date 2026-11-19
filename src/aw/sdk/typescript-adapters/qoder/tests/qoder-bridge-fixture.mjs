@@ -5,12 +5,12 @@ import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { createQoderBridge } from "../src/qoder.mjs";
+import { createQoderBridge } from "../src/index.mjs";
 
 const execute = promisify(execFile);
 const binary =
   process.env.AW_TEST_BINARY ??
-  fileURLToPath(new URL("../../../target/debug/aw", import.meta.url));
+  fileURLToPath(new URL("../../../../target/debug/aw", import.meta.url));
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const before = {
   hook_event_name: "PreToolUse",
@@ -46,7 +46,7 @@ export async function fixture(required = true, input = false) {
             argv: [
               "/usr/bin/python3",
               fileURLToPath(
-                new URL("../../tests/fixtures/sdk-deny.py", import.meta.url),
+                new URL("../../../tests/fixtures/sdk-deny.py", import.meta.url),
               ),
             ],
           },

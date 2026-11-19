@@ -1,4 +1,4 @@
-import { createQoderBridge } from "@anolisa/aw-sdk/qoder";
+import { createQoderBridge } from "@anolisa/aw-sdk-qoder";
 import { query } from "@qoder-ai/qoder-agent-sdk";
 
 // Keep the application's native daemon/authentication, options and Hooks.

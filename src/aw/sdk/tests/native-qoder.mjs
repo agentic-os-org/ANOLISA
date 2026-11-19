@@ -5,7 +5,7 @@ import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { once } from "node:events";
 import { Instance } from "@anolisa/aw-sdk";
-import { qoderOptions } from "@anolisa/aw-sdk/qoder";
+import { qoderOptions } from "@anolisa/aw-sdk-qoder";
 import { query, startDaemon } from "@qoder-ai/qoder-agent-sdk";
 const binary = process.env.AW_TEST_BINARY;
 assert(binary, "AW_TEST_BINARY is required");

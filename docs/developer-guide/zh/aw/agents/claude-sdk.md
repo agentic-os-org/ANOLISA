@@ -208,8 +208,9 @@ MCP 检查。准备和销毁期间均保留准入占用，更新无法越过这�
 
 ## 原生 Python worker 协作式挂接
 
-在业务 Python 环境安装包含 `aw_sdk.claude` 的 AW Python SDK wheel 和 Claude
-Agent SDK 0.2.88，业务 worker 与 Service 使用同一用户。部署阶段用
+在业务 Python 环境同时安装 AW Python SDK 核心 wheel（`anolisa-aw-sdk`）、可选 Claude
+适配 wheel（`anolisa-aw-sdk-claude`）和 Claude
+Agent SDK 0.2.88（兼容子路径 `aw_sdk.claude` 会在已安装该可选包时转发至 `aw_sdk_claude`），业务 worker 与 Service 使用同一用户。部署阶段用
 `claude-resident-hooks` Profile 编译 Descriptor，worker 启动时不再运行配置解析：
 
 ```bash
@@ -233,7 +234,7 @@ SIGKILL，同组的原生子进程一并退出。因此独立 worker 使用 `set
 使用 `listen(automatic=True)` 可在配置的 Service 就绪时自动挂接。
 
 ```python
-from aw_sdk.claude import ResidentClaude
+from aw_sdk_claude import ResidentClaude
 from claude_agent_sdk import ClaudeAgentOptions
 
 async def startup():
@@ -266,8 +267,8 @@ aw connect --config /absolute/aw.yaml --sdk-pid "$WORKER_PID"
 aw disconnect --socket "$AW_SOCKET" --sdk-instance "$AW_SDK_INSTANCE"
 ```
 
-在客户端 options 中使用 `aw_sdk.claude.create_sdk_mcp_server` 创建受管的进程内 MCP
-服务。对提交检查拒绝，在 query 外层捕获 `aw_sdk.claude.SubmissionDenied`。
+在客户端 options 中使用 `aw_sdk_claude.create_sdk_mcp_server` 创建受管的进程内 MCP
+服务。对提交检查拒绝，在 query 外层捕获 `aw_sdk_claude.SubmissionDenied`。
 协作式工厂准入已配置的 `input.submit`、含 `replace_input` 的 `tool.before` 和含
 `replace_result` 的 `tool.after`。最终工具结果安全检查沿用对应的前台入口。
 

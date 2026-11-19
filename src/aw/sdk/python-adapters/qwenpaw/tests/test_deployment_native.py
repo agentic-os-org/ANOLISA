@@ -10,9 +10,14 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import os
 from aw_sdk import AwError
-from test_deployment import BINARY, MULTI_ADAPTER
 from test_qwenpaw import Response
+
+MULTI_ADAPTER = json.loads(
+    (Path(__file__).resolve().parents[3] / "tests/fixtures/target-availability.json").read_text()
+)
+BINARY = os.environ["AW_TEST_BINARY"]
 
 
 class NativeDeployment(unittest.IsolatedAsyncioTestCase):

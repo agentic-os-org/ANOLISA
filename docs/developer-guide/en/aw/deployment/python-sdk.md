@@ -2,13 +2,18 @@
 
 [中文版](../../../zh/aw/deployment/python-sdk.md)
 
-`anolisa-aw-sdk` provides an asynchronous Linux client for Python 3.11+ and an
-optional QwenPaw plugin. The application retains native startup, configuration,
-permissions and scheduling. Install AW and Providers separately and run the
-Service under the application user. This source-built wheel is a release
-candidate; registry publication follows the AW release process.
+`anolisa-aw-sdk` provides the framework-free asynchronous Linux client for
+Python 3.11+, including `Instance`, `Task`, `Admission`, `TaskScope`,
+Deployment Descriptor loading, cooperative control, and the language-level
+Source Runtime (`aw_sdk.sources`). Framework-specific integrations ship as
+separate optional wheels (`anolisa-aw-sdk-qwenpaw` and `anolisa-aw-sdk-claude`)
+rather than being bundled into the core wheel. The application retains native
+startup, configuration, permissions and scheduling. Install AW and Providers
+separately and run the Service under the application user. These source-built
+wheels are release candidates; registry publication follows the AW release
+process.
 
-Build AW from the same candidate revision as the language package. Existing
+Build AW from the same candidate revision as the language packages. Existing
 releases without `aw-sdk/v1` reject connection; cooperative control additionally
 requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
@@ -20,28 +25,36 @@ provide `snapshot_arg` to preserve the checked input through stream iteration.
 
 ## Install and integrate
 
-Install the wheel in the application's environment:
+Install the core wheel (and only the optional framework adapter wheel your
+application uses) in the application's environment:
 
 ```bash
 python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.1.1-py3-none-any.whl
+# Optional framework adapters (install only when needed):
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_qwenpaw-0.1.1-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_claude-0.1.1-py3-none-any.whl
 ```
 
-The top-level `aw_sdk` import loads no Agent framework. `Instance` accepts an
+The top-level `aw_sdk` import loads no Agent framework and the core wheel ships
+no framework-private adapter sources. `Instance` accepts an
 absolute `endpoint`, configured `target`, native `capabilities`, explicit
 `availability` and an `install(routes)` callback. It also accepts `cwd`,
 `environment`, `config`, `timeout_ms` and `reconnect_ms`. Context defaults to the
 application's directory and environment; use the same directory as the native
 Agent. No binary or policy engine is included in the wheel.
 
-For QwenPaw, copy the installed example under
-`share/anolisa-aw-sdk/examples/qwenpaw/` into a new native plugin directory,
-enable `plugins.aw-sdk`, and set `AW_CONFIG` to the absolute deployment
-configuration path. Keep `qwenpaw app`, the original model, permissions and other
+For QwenPaw, install `anolisa-aw-sdk-qwenpaw` alongside `anolisa-aw-sdk`, copy
+the installed example under
+`share/anolisa-aw-sdk-qwenpaw/examples/qwenpaw/` into a new native plugin
+directory, enable `plugins.aw-sdk`, and set `AW_CONFIG` to the absolute
+deployment configuration path. Legacy `aw_sdk.qwenpaw` imports delegate to
+`aw_sdk_qwenpaw` when installed and report an install hint when absent. Keep
+`qwenpaw app`, the original model, permissions and other
 plugins. The example reads the configuration through AW's authoritative offline
 parser; initialization starts neither AW nor sec-core.
 
 ```python
-from aw_sdk.qwenpaw import QwenPawPlugin
+from aw_sdk_qwenpaw import QwenPawPlugin
 
 plugin = QwenPawPlugin.from_config("/absolute/aw.yaml")
 ```
@@ -67,7 +80,7 @@ plugins loaded earlier keep their original startup cost. An application with an
 early Python startup entry can cover all plugin loading by calling:
 
 ```python
-from aw_sdk.qwenpaw import prepare_runtime
+from aw_sdk_qwenpaw import prepare_runtime
 
 accelerated = prepare_runtime()  # Before QwenPaw starts loading plugins.
 ```
@@ -159,8 +172,8 @@ to release application-owned resources.
 ## Deferred tool-after attachment
 
 The experimental `AfterOnlyPlugin` keeps native `qwenpaw app` startup independent
-of AW and sec-core. Copy `share/anolisa-aw-sdk/examples/qwenpaw-after/` from the
-installed wheel into a new native plugin directory and enable `plugins.aw-after`.
+of AW and sec-core. Copy `share/anolisa-aw-sdk-qwenpaw/examples/qwenpaw-after/` from the
+installed `anolisa-aw-sdk-qwenpaw` wheel into a new native plugin directory and enable `plugins.aw-after`.
 Set `AW_SOCKET` to the private socket selected by your AW configuration. Use this
 plugin alone for the AW integration; it replaces the optional `aw-sdk` plugin.
 The application retains its native model, permissions and other Hooks.
