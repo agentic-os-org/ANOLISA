@@ -1,5 +1,7 @@
 use super::*;
-use crate::diagnostics::health::model::{HealthCheckStatus, HealthCollector, HealthFactValue};
+use crate::diagnostics::health::model::{
+    HealthCheckStatus, HealthCollector, HealthFactValue, HealthScanReport,
+};
 use std::os::unix::fs::PermissionsExt;
 
 fn volume_signal(key: &str, entered: bool, exit: bool, valid: bool) -> VolumeMemberSignal {

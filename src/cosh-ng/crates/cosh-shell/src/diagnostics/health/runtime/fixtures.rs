@@ -158,6 +158,9 @@ fn fixture_source(name: &str) -> Option<&'static str> {
         }
         "linux-pids" | "pids" => Some(include_str!("../fixtures/linux-pids.health")),
         "linux-fs-events" | "fs-events" => Some(include_str!("../fixtures/linux-fs-events.health")),
+        "linux-host-events" | "host-events" => {
+            Some(include_str!("../fixtures/linux-host-events.health"))
+        }
         _ => None,
     }
 }

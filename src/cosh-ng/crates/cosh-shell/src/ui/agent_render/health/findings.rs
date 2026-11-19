@@ -150,6 +150,8 @@ pub(super) fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId
         HealthMessageId::HealthFindingJournalError => HealthMessageId::HealthInsightJournalError,
         HealthMessageId::HealthFindingXfsShutdown => HealthMessageId::HealthInsightXfsShutdown,
         HealthMessageId::HealthFindingBlockIoError => HealthMessageId::HealthInsightBlockIoError,
+        HealthMessageId::HealthFindingHungTask => HealthMessageId::HealthInsightHungTask,
+        HealthMessageId::HealthFindingSoftLockup => HealthMessageId::HealthInsightSoftLockup,
         _ => HealthMessageId::HealthInsightGeneric,
     }
 }
@@ -285,6 +287,28 @@ pub(super) fn evidence_text(
                     ("device", &middle_ellipsis(device, 20)),
                     ("mount", &middle_ellipsis(mount, 26)),
                 ],
+            );
+        }
+    }
+    if finding.title_id == HealthMessageId::HealthFindingHungTask {
+        if let (Some(process), Some(pid)) = (
+            finding.detail_args.get("process"),
+            finding.detail_args.get("pid"),
+        ) {
+            return i18n.format(
+                crate::MessageId::HealthEvidenceHungTask,
+                &[("process", &middle_ellipsis(process, 16)), ("pid", pid)],
+            );
+        }
+    }
+    if finding.title_id == HealthMessageId::HealthFindingSoftLockup {
+        if let (Some(cpu), Some(seconds)) = (
+            finding.detail_args.get("cpu"),
+            finding.detail_args.get("seconds"),
+        ) {
+            return i18n.format(
+                crate::MessageId::HealthEvidenceSoftLockup,
+                &[("cpu", cpu), ("seconds", seconds)],
             );
         }
     }
