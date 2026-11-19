@@ -1712,6 +1712,10 @@ jobs:
         working-directory: src/ws-ckpt
         run: make test-openclaw-scripts
 
+      - name: Run ws-ckpt Skill regression tests
+        working-directory: src/ws-ckpt
+        run: make test-skill
+
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
         run: |
