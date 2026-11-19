@@ -19,6 +19,18 @@ Agent, Skill, session, `active_model`, and output-language preferences, but
 `agent.approval_mode`, `agent.allowed_tools`, and project audit settings are
 ignored. `cosh-shell` reads the user file, not the system or project file.
 
+For interactive Shell saves such as `/config language`, the configuration file
+or its symlink target must be owned by the account running Cosh as a regular
+user. Group write permission alone is insufficient. Cosh needs access to the
+configuration locks and permission to replace the file in its target directory.
+
+If the user configuration points to a shared or administrator-owned file,
+ask the administrator for the settings intended for your account. Save them in
+a private copy with mode `0600` that your account owns. Place that copy at
+`~/.copilot-shell/config.toml` in a directory writable by your account. If the
+path was a symlink, replace the link itself with your copy and keep the shared
+file in place. Run `/config language` again to save your preference.
+
 ECS automatic access (`aliyun` with `auth_source = "ecs_identity"`) always uses
 the fixed model `auto`. Neither `active_model` nor provider `model` settings can
 change it, and project models are never saved by selecting this access method.

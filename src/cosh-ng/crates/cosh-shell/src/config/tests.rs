@@ -486,6 +486,165 @@ language = "auto"
     let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
 }
 
+library_tests! {
+#[test]
+fn write_language_config_preserves_open_reader_snapshot() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let original = "[ai]\nactive_provider = \"keep\"\n\n[ui]\nlanguage = \"auto\"\n";
+    std::fs::write(&path, original).expect("seed config");
+    let mut reader = std::fs::File::open(&path).expect("open current config");
+
+    write_language_config_to_path(&path, "zh-CN").expect("save language");
+
+    let mut snapshot = String::new();
+    reader.read_to_string(&mut snapshot).expect("read snapshot");
+    assert_eq!(snapshot, original);
+    let current = std::fs::read_to_string(&path).expect("read current config");
+    let current: toml::Value = current.parse().expect("valid TOML");
+    assert_eq!(current["ai"]["active_provider"].as_str(), Some("keep"));
+    assert_eq!(current["ui"]["language"].as_str(), Some("zh-CN"));
+}
+
+#[test]
+fn write_language_config_concurrently_keeps_provider_values() {
+    use std::sync::Barrier;
+
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let original = "[ai]\nactive_provider = \"keep\"\n[ai.providers.keep]\nmodel = \"marker\"\n[ui]\nlanguage = \"en-US\"\n";
+    std::fs::write(&path, original).expect("seed config");
+    let expected: toml::Value = original.parse().expect("valid seed");
+    let start = Barrier::new(3);
+
+    std::thread::scope(|scope| {
+        for language in ["auto", "zh-CN"] {
+            let (path, start) = (&path, &start);
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..32 {
+                    write_language_config_to_path(path, language).expect("save language");
+                }
+            });
+        }
+        start.wait();
+        for _ in 0..128 {
+            let content = std::fs::read_to_string(&path).expect("read current config");
+            let current: toml::Value = content.parse().expect("valid TOML");
+            assert_eq!(current.get("ai"), expected.get("ai"));
+        }
+    });
+
+    let content = std::fs::read_to_string(&path).expect("read final config");
+    let current: toml::Value = content.parse().expect("valid final TOML");
+    assert_eq!(current.get("ai"), expected.get("ai"));
+    assert!(matches!(
+        current["ui"]["language"].as_str(),
+        Some("auto" | "zh-CN")
+    ));
+}
+
+#[test]
+fn write_language_config_refuses_to_save_without_shared_lock() {
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let original = "[ai]\nactive_provider = \"keep\"\n";
+    std::fs::write(&path, original).expect("seed config");
+    std::fs::create_dir(dir.path().join(".config.toml.lock")).expect("unavailable lock");
+
+    let error = write_language_config_to_path(&path, "auto").expect_err("require the config lock");
+    assert!(error.contains("config lock"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("read config"),
+        original
+    );
+}
+
+#[test]
+fn write_language_config_initializes_a_missing_symlink_target() {
+    let dir = tempfile::tempdir().expect("config directory");
+    let path = dir.path().join("config.toml");
+    let target = dir.path().join("dotfiles.toml");
+    std::os::unix::fs::symlink("dotfiles.toml", &path).expect("link config");
+
+    write_language_config_to_path(&path, "en-US").expect("save via symlink");
+
+    assert!(path.is_symlink());
+    let content = std::fs::read_to_string(target).expect("read target");
+    let config: toml::Value = content.parse().expect("valid TOML");
+    assert_eq!(config["ui"]["language"].as_str(), Some("en-US"));
+}
+
+#[test]
+fn write_language_config_rejects_a_symlink_with_directory_syntax() {
+    for destination in ["settings.toml/", "settings.toml/."] {
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("config.toml");
+        let target = dir.path().join("settings.toml");
+        let original = "[ui]\nlanguage = \"auto\"\n";
+        std::fs::write(&target, original).expect("seed config");
+        std::os::unix::fs::symlink(destination, &path).expect("link config");
+
+        assert!(write_language_config_to_path(&path, "en-US").is_err(), "{destination}");
+        assert_eq!(std::fs::read_to_string(&target).expect("read target"), original);
+    }
+}
+
+#[test]
+fn write_language_config_reads_the_latest_snapshot_through_a_symlink() {
+    use nix::fcntl::{Flock, FlockArg};
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("config directory");
+    let intermediate_dir = tempfile::tempdir().expect("intermediate directory");
+    let alias_dir = tempfile::tempdir().expect("alias directory");
+    let target = dir.path().join("config.toml");
+    let intermediate = intermediate_dir.path().join("config.toml");
+    let alias = alias_dir.path().join("config.toml");
+    std::os::unix::fs::symlink(&target, &intermediate).expect("link config");
+    std::os::unix::fs::symlink(&intermediate, &alias).expect("link alias");
+
+    for (lock_dir, language) in [(dir.path(), "en-US"), (intermediate_dir.path(), "zh-CN")] {
+        std::fs::write(&target, "[ai]\nactive_provider = \"old\"\n").expect("seed config");
+        let lock = std::fs::File::create(lock_dir.join(".config.toml.lock")).expect("open lock");
+        let lock = Flock::lock(lock, FlockArg::LockExclusive).expect("hold config lock");
+        let (started, starting) = channel();
+        let (finished, finishing) = channel();
+
+        std::thread::scope(|scope| {
+            let alias = &alias;
+            scope.spawn(move || {
+                started.send(()).expect("signal start");
+                let result = write_language_config_to_path(alias, language);
+                finished.send(result).expect("signal result");
+            });
+            starting.recv().expect("writer started");
+            let early = finishing.recv_timeout(Duration::from_millis(250));
+            std::fs::write(&target, "[ai]\nactive_provider = \"new\"\n").expect("update provider");
+            drop(lock);
+            assert_eq!(
+                early,
+                Err(RecvTimeoutError::Timeout),
+                "save must wait for {}",
+                lock_dir.display()
+            );
+            finishing
+                .recv()
+                .expect("writer ended")
+                .expect("save language");
+        });
+
+        let content = std::fs::read_to_string(&target).expect("read target");
+        let config: toml::Value = content.parse().expect("valid TOML");
+        assert_eq!(config["ai"]["active_provider"].as_str(), Some("new"));
+        assert_eq!(config["ui"]["language"].as_str(), Some(language));
+    }
+}
+}
+
 #[test]
 fn write_language_config_persists_auto_literal() {
     let path = temp_config_path("auto-language");
