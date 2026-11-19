@@ -172,3 +172,40 @@ fn pressure_fixture_gates_notices_and_signals_recovery() {
         .iter()
         .any(|member| member.key == "host|psi_memory" && member.exit && member.valid));
 }
+
+#[test]
+fn conntrack_fixture_gates_notices_and_keeps_d_facts_silent() {
+    let config = HealthConfig {
+        network_capacity_notices: true,
+        ..HealthConfig::default()
+    };
+    let report = fixture_report("linux-conntrack", &config, &options());
+    let ids: Vec<&str> = report
+        .findings
+        .iter()
+        .map(|finding| finding.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["J23"]);
+    assert_eq!(report.findings[0].severity, HealthSeverity::Warning);
+    let off = fixture_report("linux-conntrack", &HealthConfig::default(), &options());
+    assert!(off.findings.is_empty());
+    let low = fixture_report("linux-conntrack-low", &config, &options());
+    assert!(low.findings.is_empty());
+    let zero = fixture_report("linux-conntrack-zero", &config, &options());
+    assert!(zero.findings.is_empty());
+    let entry = crate::diagnostics::health::suppression::episode::signals_from_report(&report);
+    assert!(entry
+        .volume
+        .iter()
+        .any(|member| member.key == "host|conntrack" && member.entered));
+    let exit = crate::diagnostics::health::suppression::episode::signals_from_report(&low);
+    assert!(exit
+        .volume
+        .iter()
+        .any(|member| member.key == "host|conntrack" && member.exit));
+    let removed = crate::diagnostics::health::suppression::episode::signals_from_report(&zero);
+    assert!(removed
+        .volume
+        .iter()
+        .any(|member| member.key == "host|conntrack" && member.exit && !member.entered));
+}

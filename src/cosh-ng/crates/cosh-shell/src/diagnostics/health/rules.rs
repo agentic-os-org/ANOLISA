@@ -281,6 +281,10 @@ pub(crate) fn evaluate_judgement_rules(
         findings.extend(quota::quota_findings(facts));
     }
 
+    if config.network_capacity_notices && host_qualified {
+        findings.extend(conntrack::conntrack_findings(facts));
+    }
+
     findings.sort_by_key(|finding| {
         (
             std::cmp::Reverse(finding.severity.precedence()),
@@ -562,6 +566,8 @@ fn fact<'a>(facts: &'a [HealthFact], key: &str) -> Option<&'a HealthFact> {
     facts.iter().find(|fact| fact.key == key)
 }
 
+pub(crate) mod conntrack;
+pub(crate) mod handles;
 pub(crate) mod memory;
 pub(crate) mod psi;
 pub(crate) mod quota;

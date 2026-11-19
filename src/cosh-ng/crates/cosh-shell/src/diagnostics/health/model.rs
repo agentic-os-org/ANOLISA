@@ -401,6 +401,7 @@ pub(crate) enum HealthMessageId {
     HealthTryInspectHighLoad,
     HealthTryInspectProcessMemory,
     HealthTryReviewUnavailableChecks,
+    HealthTryInspectSystemCapacity,
     HealthPromptAnalyzeMemoryPressure,
     HealthPromptCheckSwapPressure,
     HealthPromptCheckRecentOom,
@@ -409,6 +410,7 @@ pub(crate) enum HealthMessageId {
     HealthPromptInspectHighLoad,
     HealthPromptInspectProcessMemory,
     HealthPromptReviewUnavailableChecks,
+    HealthPromptInspectSystemCapacity,
     HealthInsightMemoryAvailableLow,
     HealthInsightDiskHigh,
     HealthInsightMountReadonly,
@@ -419,6 +421,7 @@ pub(crate) enum HealthMessageId {
     HealthInsightGeneric,
     HealthInsightCgroupMemoryPressure,
     HealthInsightPressureHigh,
+    HealthInsightConntrackCapacity,
     HealthUnavailablePermissionDenied,
     HealthUnavailableCommandMissing,
     HealthUnavailableTimeout,
@@ -437,6 +440,7 @@ pub(crate) enum HealthMessageId {
     HealthFindingServiceInactive,
     HealthFindingCgroupMemoryPressure,
     HealthFindingPressureHigh,
+    HealthFindingConntrackCapacity,
     HealthFindingProviderUnconfigured,
     HealthFindingConfigUnavailable,
     HealthFindingHooksUntrusted,
@@ -457,6 +461,7 @@ pub(crate) enum HealthMessageId {
     HealthTryReasonServiceState,
     HealthTryReasonHighLoad,
     HealthTryReasonMissingCoreCheck,
+    HealthTryReasonSystemCapacity,
 }
 
 impl HealthMessageId {
@@ -491,6 +496,9 @@ impl HealthMessageId {
             Self::HealthTryReviewUnavailableChecks => {
                 crate::MessageId::HealthTryReviewUnavailableChecks
             }
+            Self::HealthTryInspectSystemCapacity => {
+                crate::MessageId::HealthTryInspectSystemCapacity
+            }
             Self::HealthPromptAnalyzeMemoryPressure => {
                 crate::MessageId::HealthPromptAnalyzeMemoryPressure
             }
@@ -507,6 +515,9 @@ impl HealthMessageId {
             Self::HealthPromptReviewUnavailableChecks => {
                 crate::MessageId::HealthPromptReviewUnavailableChecks
             }
+            Self::HealthPromptInspectSystemCapacity => {
+                crate::MessageId::HealthPromptInspectSystemCapacity
+            }
             Self::HealthInsightMemoryAvailableLow => {
                 crate::MessageId::HealthInsightMemoryAvailableLow
             }
@@ -521,6 +532,9 @@ impl HealthMessageId {
                 crate::MessageId::HealthInsightCgroupMemoryPressure
             }
             Self::HealthInsightPressureHigh => crate::MessageId::HealthInsightPressureHigh,
+            Self::HealthInsightConntrackCapacity => {
+                crate::MessageId::HealthInsightConntrackCapacity
+            }
             Self::HealthUnavailablePermissionDenied => {
                 crate::MessageId::HealthUnavailablePermissionDenied
             }
@@ -551,6 +565,9 @@ impl HealthMessageId {
                 crate::MessageId::HealthFindingCgroupMemoryPressure
             }
             Self::HealthFindingPressureHigh => crate::MessageId::HealthFindingPressureHigh,
+            Self::HealthFindingConntrackCapacity => {
+                crate::MessageId::HealthFindingConntrackCapacity
+            }
             Self::HealthFindingProviderUnconfigured => {
                 crate::MessageId::HealthFindingProviderUnconfigured
             }
@@ -587,6 +604,7 @@ impl HealthMessageId {
             Self::HealthTryReasonMissingCoreCheck => {
                 crate::MessageId::HealthTryReasonMissingCoreCheck
             }
+            Self::HealthTryReasonSystemCapacity => crate::MessageId::HealthTryReasonSystemCapacity,
         }
     }
 }

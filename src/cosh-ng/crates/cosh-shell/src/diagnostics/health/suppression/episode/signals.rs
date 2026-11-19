@@ -6,7 +6,7 @@ use super::super::super::model::{
 };
 use super::super::super::rules::memory::memory_judgement;
 use super::super::super::rules::volume::{evaluate_volumes, MemberLevel};
-use super::super::super::rules::{psi, quota, ro, service};
+use super::super::super::rules::{conntrack, psi, quota, ro, service};
 use super::{
     volume_member_key, CounterSample, EpisodeSignal, QuotaBranchSignal, QuotaComboSignal,
     VolumeMemberSignal,
@@ -96,6 +96,17 @@ pub(crate) fn signals_from_report(report: &HealthScanReport) -> EpisodeSignal {
             exit: reading.judgement.exit,
             valid: reading.judgement.valid,
         });
+    }
+    if host_qualified && string_fact(report, "host.conntrack_netns_id").is_some() {
+        let conntrack = conntrack::conntrack_judgement(&report.facts);
+        if conntrack.valid {
+            volume.push(VolumeMemberSignal {
+                key: "host|conntrack".to_string(),
+                entered: conntrack.entry == Some(MemberLevel::Critical),
+                exit: conntrack.exit,
+                valid: conntrack.valid,
+            });
+        }
     }
     let mut quota = Vec::new();
     let judgement = quota::quota_judgement(&report.facts);

@@ -342,3 +342,64 @@ fn unqualified_host_keeps_cgroup_combo_but_drops_host_psi() {
         .collect();
     assert_eq!(ids, vec!["J19", "J20:cgroup"]);
 }
+
+fn conntrack_facts(count: u64, max: u64) -> Vec<HealthFact> {
+    vec![
+        fact("host.conntrack_count", HealthFactValue::Unsigned(count)),
+        fact("host.conntrack_max", HealthFactValue::Unsigned(max)),
+        fact(
+            "host.conntrack_netns_id",
+            HealthFactValue::String("4:5".into()),
+        ),
+    ]
+}
+
+#[test]
+fn network_capacity_notices_gate_conntrack_findings() {
+    let report = host_qualified_report(conntrack_facts(999_000, 1_000_000));
+    assert!(evaluate_judgement_rules(&report, &crate::config::HealthConfig::default()).is_empty());
+    let config = crate::config::HealthConfig {
+        network_capacity_notices: true,
+        ..Default::default()
+    };
+    let findings = evaluate_judgement_rules(&report, &config);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].id, "J23");
+    assert_eq!(findings[0].severity, HealthSeverity::Warning);
+    let report90 = host_qualified_report(conntrack_facts(900_000, 1_000_000));
+    assert!(evaluate_judgement_rules(&report90, &config).is_empty());
+    let unqualified = report_with(conntrack_facts(999_000, 1_000_000));
+    assert!(evaluate_judgement_rules(&unqualified, &config).is_empty());
+}
+
+#[test]
+fn file_nr_and_capacity_events_stay_diagnostics_only() {
+    let facts = vec![
+        fact("host.file_nr_allocated", HealthFactValue::Unsigned(1000)),
+        fact("host.file_nr_unused", HealthFactValue::Unsigned(0)),
+        fact("host.file_nr_max", HealthFactValue::Unsigned(1000)),
+        fact(
+            "host.file_nr_level",
+            HealthFactValue::String("critical".into()),
+        ),
+        fact(
+            "kernel.vfs_filemax_latest_age_seconds",
+            HealthFactValue::Unsigned(100),
+        ),
+        fact(
+            "kernel.vfs_filemax_event_identity",
+            HealthFactValue::String("uptime-ns:1".into()),
+        ),
+        fact(
+            "kernel.conntrack_full_latest_age_seconds",
+            HealthFactValue::Unsigned(100),
+        ),
+    ];
+    let report = host_qualified_report(facts);
+    let config = crate::config::HealthConfig {
+        network_capacity_notices: true,
+        pressure_notices: true,
+        ..Default::default()
+    };
+    assert!(evaluate_judgement_rules(&report, &config).is_empty());
+}

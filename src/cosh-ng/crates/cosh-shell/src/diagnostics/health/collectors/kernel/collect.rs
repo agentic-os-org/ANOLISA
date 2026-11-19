@@ -17,7 +17,7 @@ use super::super::{
 use super::oom::is_oom_line;
 use super::{attribution, cgroup, finish_signals, parse_kernel_signals_attributed};
 
-const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|oom_reaper|killed as a result of limit of|kernel panic|panic:";
+const JOURNAL_SIGNAL_PATTERN: &str = "(?i)oom-kill|out of memory|killed process|oom_reaper|killed as a result of limit of|kernel panic|panic:|vfs: file-max limit|nf_conntrack: table full";
 
 pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoch_seconds: u64) {
     let mut boot_id = None;
@@ -112,6 +112,16 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                 }
                             }
                             facts.record(builder, output.elapsed_ms);
+                            let capacity = super::capacity::parse_journal_capacity_events(
+                                &output.stdout,
+                                &verified_ctx,
+                                now_epoch_seconds,
+                            );
+                            super::capacity::record_capacity_events(
+                                builder,
+                                &capacity,
+                                output.elapsed_ms,
+                            );
                             builder.add_check_done("kernel_signal");
                         }
                         None => {
@@ -149,6 +159,15 @@ pub(crate) fn collect_kernel_signals(builder: &mut HealthReportBuilder, now_epoc
                                         facts.oom_latest_confidence = Some("low".to_string());
                                     }
                                     facts.record(builder, text.elapsed_ms);
+                                    let capacity = super::capacity::parse_text_capacity_events(
+                                        &text.stdout,
+                                        "journalctl-text",
+                                    );
+                                    super::capacity::record_capacity_events(
+                                        builder,
+                                        &capacity,
+                                        text.elapsed_ms,
+                                    );
                                     builder.add_check_done("kernel_signal");
                                 }
                                 Err(error) => {
@@ -256,7 +275,11 @@ fn journal_lines_output(
 
 pub(super) fn is_kernel_signal_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    is_oom_line(&lower) || lower.contains("kernel panic") || lower.contains("panic:")
+    is_oom_line(&lower)
+        || lower.contains("kernel panic")
+        || lower.contains("panic:")
+        || super::capacity::is_vfs_filemax_line(&lower)
+        || super::capacity::is_conntrack_full_line(&lower)
 }
 
 pub(super) fn kernel_unavailable_reason(
@@ -324,6 +347,11 @@ fn collect_kernel_from_dmesg(
                 }
             }
             facts.record(builder, output.elapsed_ms);
+            let capacity = super::capacity::parse_text_capacity_events(
+                &output.filtered.lines.join("\n"),
+                "dmesg",
+            );
+            super::capacity::record_capacity_events(builder, &capacity, output.elapsed_ms);
             builder.add_check_done("kernel_signal");
         }
         Err(err) => {

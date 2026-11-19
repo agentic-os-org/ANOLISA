@@ -387,6 +387,17 @@ fn pressure_notices_defaults_off_and_parses_in_both_formats() {
 }
 
 #[test]
+fn network_capacity_notices_defaults_off_and_parses_in_both_formats() {
+    assert!(!CoshConfig::default().health.network_capacity_notices);
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("health.network_capacity_notices = true\n", &mut cfg);
+    assert!(cfg.health.network_capacity_notices);
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[health]\nnetwork_capacity_notices = true\n", &mut cfg);
+    assert!(cfg.health.network_capacity_notices);
+}
+
+#[test]
 fn parse_toml_health_config() {
     let content = r#"
 [health]

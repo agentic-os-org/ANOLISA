@@ -12,6 +12,7 @@ use super::model::{
 
 mod command;
 mod disk;
+mod host_scalars;
 mod kernel;
 mod memory;
 mod pressure;
@@ -187,6 +188,7 @@ pub(crate) fn collect_host(builder: &mut HealthReportBuilder) {
         }
     }
     collect_host_pressure(builder, started.elapsed().as_millis());
+    host_scalars::collect_host_scalars(builder, started.elapsed().as_millis());
 }
 
 fn collect_host_pressure(builder: &mut HealthReportBuilder, elapsed_ms: u128) {

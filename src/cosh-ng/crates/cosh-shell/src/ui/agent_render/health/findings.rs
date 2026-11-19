@@ -141,6 +141,9 @@ pub(super) fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId
             HealthMessageId::HealthInsightCgroupMemoryPressure
         }
         HealthMessageId::HealthFindingPressureHigh => HealthMessageId::HealthInsightPressureHigh,
+        HealthMessageId::HealthFindingConntrackCapacity => {
+            HealthMessageId::HealthInsightConntrackCapacity
+        }
         _ => HealthMessageId::HealthInsightGeneric,
     }
 }
@@ -243,6 +246,17 @@ pub(super) fn evidence_text(
     if finding.title_id == HealthMessageId::HealthFindingCgroupMemoryPressure {
         if let Some(text) = quota_evidence_text(finding, i18n) {
             return text;
+        }
+    }
+    if finding.title_id == HealthMessageId::HealthFindingConntrackCapacity {
+        if let (Some(count), Some(max)) = (
+            finding.detail_args.get("count"),
+            finding.detail_args.get("max"),
+        ) {
+            return i18n.format(
+                crate::MessageId::HealthEvidenceConntrack,
+                &[("count", count), ("max", max)],
+            );
         }
     }
 
