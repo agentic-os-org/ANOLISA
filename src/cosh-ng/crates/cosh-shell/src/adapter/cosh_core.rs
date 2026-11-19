@@ -130,6 +130,23 @@ impl CoshCoreAdapter {
         }
     }
 
+    /// Resolves the workspace for short-lived MCP CLI subprocesses: the shell
+    /// cwd reported by the slash dispatch layer, falling back to the active
+    /// session's workspace scope (the same rule registry queries use). The
+    /// wrapper process cwd is not used because a PTY `cd` does not update it.
+    pub(crate) fn shell_workspace(&self) -> Option<String> {
+        self.shell_cwd
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| {
+                self.session
+                    .lock()
+                    .ok()
+                    .and_then(|session| session.active_workspace_scope().map(str::to_string))
+            })
+    }
+
     /// Inspects a persisted session summary without selecting it.
     ///
     /// # Errors

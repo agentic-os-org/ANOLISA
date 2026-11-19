@@ -135,12 +135,25 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
 
         let mut tools = ToolRegistry::with_defaults(skill_manager);
         let mut tool_registration_healthy = true;
+        let (startup_servers, untrusted_mcp) = crate::tool::mcp::partition_startup_servers(
+            &self.config.mcp.servers,
+            &self.project_root,
+        );
         crate::tool::mcp::register_configured_tools(
             &mut tools,
-            &self.config.mcp.servers,
+            &startup_servers,
             &self.project_root,
         )
         .await;
+        if !untrusted_mcp.is_empty() {
+            diagnostics.push(ExtensionDiagnostic::new(
+                "mcp_server_untrusted",
+                format!(
+                    "MCP stdio servers need explicit trust before startup: {}",
+                    untrusted_mcp.join(", ")
+                ),
+            ));
+        }
         if let Err(error) = mcp.register_tools(&mut tools) {
             tool_registration_healthy = false;
             diagnostics.push(ExtensionDiagnostic::new(error.code(), error.to_string()));
@@ -237,8 +250,14 @@ mod tests {
     use crate::extension::EXTENSION_CONFIG_FILENAME;
 
     #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the process-wide trust state env must remain isolated while the snapshot builds"
+    )]
     async fn snapshot_includes_configured_mcp_tools() {
+        let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
         let temporary = tempfile::tempdir().unwrap();
+        std::env::set_var("COSH_STATES_DIR", temporary.path().join("states"));
         let server = temporary.path().join("configured-mcp.sh");
         fs::write(
             &server,
@@ -257,20 +276,27 @@ done
         )
         .unwrap();
         let mut config = CoreConfig::default();
-        config.mcp.servers.insert(
-            "configured".to_string(),
-            McpServerConfig {
-                command: "sh".to_string(),
-                url: None,
-                args: vec![server.to_string_lossy().into_owned()],
-                env: std::collections::HashMap::new(),
-                bearer_token: None,
-                oauth: Default::default(),
-                timeout_ms: 1_000,
-                startup_timeout_ms: 1_000,
-                allowed_tools: None,
-            },
-        );
+        let server_config = McpServerConfig {
+            command: "sh".to_string(),
+            url: None,
+            args: vec![server.to_string_lossy().into_owned()],
+            env: std::collections::HashMap::new(),
+            bearer_token: None,
+            oauth: Default::default(),
+            timeout_ms: 1_000,
+            startup_timeout_ms: 1_000,
+            allowed_tools: None,
+        };
+        crate::tool::mcp::trust::trust(
+            "configured",
+            &server_config,
+            &temporary.path().join("workspace"),
+        )
+        .unwrap();
+        config
+            .mcp
+            .servers
+            .insert("configured".to_string(), server_config);
         let mut manager = ExtensionManager::new_isolated_with_state(
             temporary.path().join("workspace"),
             Some(temporary.path().join("user")),
@@ -293,6 +319,7 @@ done
             .get("mcp__configured__echo")
             .expect("configured MCP tool");
         assert_eq!(tool.kind(), crate::tool::ToolKind::Mcp);
+        std::env::remove_var("COSH_STATES_DIR");
     }
 
     #[tokio::test]

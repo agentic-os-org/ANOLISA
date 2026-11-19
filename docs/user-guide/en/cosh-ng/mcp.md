@@ -54,6 +54,45 @@ Use HTTPS for remote endpoints. HTTP is accepted only for loopback hosts such
 as `localhost`, `127.0.0.1`, or `::1`. A server must define exactly one of
 `command` and `url`.
 
+## Trust a stdio server
+
+A local stdio server is code that runs at session startup, so cosh starts it
+only after you explicitly trust it. A newly configured stdio server is listed
+as needing trust and does not auto-start until trusted. Remote HTTP servers
+are not gated because they run no local code.
+
+```text
+/mcp show filesystem
+/mcp trust filesystem
+```
+
+`show` prints the command, arguments, environment variable names and a trust
+fingerprint without starting the server. `trust` records that fingerprint and
+allows startup; in the TUI it previews the configuration first and binds the
+trust to the fingerprint you saw. In a terminal, `cosh-core mcp trust
+filesystem` asks for a `y/N` confirmation; piped or non-interactive calls are
+refused unless you pass `--yes`.
+
+The pin covers the resolved command, arguments, explicit environment values
+and `allowed_tools`. Changing any of them — including starting the session
+from a different workspace so a relative command resolves elsewhere —
+invalidates the pin, so the server stops auto-starting until you trust it
+again. Re-run `show` and `trust` after editing the definition.
+
+The running session uses the config loaded at startup. A trust or revocation
+is written to disk immediately and applies to future startups; the current
+session picks it up on the next snapshot rebuild. If you edited the config or
+the rebuild fails, restart `cosh` so the change takes effect in the current
+session.
+
+```text
+/mcp untrust filesystem
+```
+
+`untrust` revokes startup trust by name, even if the server is no longer in the
+config, so a removed server cannot revive its old trust. Revocation takes
+effect on the next snapshot rebuild.
+
 ## Connect and inspect
 
 Start `cosh` in the workspace the server should receive, then run:
@@ -65,8 +104,10 @@ Start `cosh` in the workspace the server should receive, then run:
 ```
 
 `list` confirms the definition was loaded. `connect` starts or contacts the
-server and discovers tools. `inspect` shows the discovered and Agent-visible
-names without printing credentials. MCP tools are exposed as
+server and discovers tools; for a stdio server it requires an existing trust
+pin and refuses an untrusted server until you `trust` it. `inspect` and
+`refresh` also refuse an untrusted stdio server. `inspect` shows the discovered
+and Agent-visible names without printing credentials. MCP tools are exposed as
 `mcp__<server>__<tool>` and remain subject to approval.
 
 For OAuth, run the login command in a Shell (the interactive `/mcp login`
@@ -86,7 +127,8 @@ Finish the browser flow, then connect and inspect the server from `cosh`.
 /mcp logout search
 ```
 
-`refresh` rediscovers tools. `disconnect` disables startup connection and
+`refresh` rediscovers tools (it requires an existing trust pin for stdio
+servers). `disconnect` disables startup connection and
 removes saved OAuth credentials; `connect` enables it again. `logout` removes
 OAuth credentials without changing the definition. Changes take effect for the
 next Agent task when a task is already running.
@@ -96,6 +138,7 @@ next Agent task when a task is already running.
 | Symptom | Check |
 |---|---|
 | `/mcp list` is empty | Use system or user config, not project config |
+| stdio server does not auto-start | Trust it: `/mcp show <server>` then `/mcp trust <server>` |
 | Local server will not start | Check executable, arguments, `env`, and `startup_timeout_ms` |
 | Connected server exposes no tools | Check `allowed_tools` (`[]` exposes none) |
 | Remote endpoint is rejected | Use HTTPS, or HTTP only on loopback; check token/OAuth settings |

@@ -84,6 +84,27 @@ pub enum McpCommand {
         /// Configured MCP server name.
         server: String,
     },
+    /// Show a configured stdio server's command, args and trust fingerprint without starting it.
+    Show {
+        /// Configured MCP server name.
+        server: String,
+    },
+    /// Trust a configured stdio server to start at session startup (pins command/args/env).
+    Trust {
+        /// Configured MCP server name.
+        server: String,
+        /// Skip the interactive confirmation (explicit non-interactive consent).
+        #[arg(long)]
+        yes: bool,
+        /// Only trust if the current fingerprint matches this previewed value.
+        #[arg(long)]
+        expect_fingerprint: Option<String>,
+    },
+    /// Revoke startup trust for a configured stdio server.
+    Untrust {
+        /// Configured MCP server name.
+        server: String,
+    },
     /// Authorize an MCP server in a browser.
     Login {
         /// Configured MCP server name.
