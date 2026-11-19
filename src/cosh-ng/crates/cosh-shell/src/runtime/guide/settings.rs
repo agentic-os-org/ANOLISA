@@ -45,7 +45,7 @@ impl Session {
         match store.set_banner(enabled) {
             Ok(_) => {
                 self.message = Some(format!(
-                    "{} {}",
+                    "{}{}",
                     self.i18n.format(
                         MessageId::GuideWizardSavedLine,
                         &[("value", self.toggle_label(enabled))],

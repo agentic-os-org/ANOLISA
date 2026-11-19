@@ -1,5 +1,5 @@
-//! Login page privileged actions, run after the full screen is dropped so the
-//! foreground sudo password prompt owns the terminal.
+//! Login page privileged actions. The wizard keeps its alternate screen and only
+//! lends raw mode to the foreground sudo password prompt.
 
 use crate::i18n::MessageId;
 use crate::runtime::guide::result::{ActionKind, ChangeFact, EndReason, TaskOutcome, Verification};
@@ -247,7 +247,7 @@ impl Session {
             MessageId::GuideWizardSudoHandoffRestore
         };
         let uid = status.uid.to_string();
-        vec![
+        let mut lines = vec![
             self.i18n
                 .t(MessageId::GuideWizardSudoHandoffTitle)
                 .to_string(),
@@ -257,23 +257,40 @@ impl Session {
             ),
             self.i18n.format(change, &[("target", &target)]),
             String::new(),
-            self.i18n
-                .t(MessageId::GuideWizardSudoHandoffPrompt)
-                .to_string(),
-            self.i18n
-                .t(MessageId::GuideWizardSudoHandoffEnter)
-                .to_string(),
-            self.i18n
-                .t(MessageId::GuideWizardSudoHandoffEcho)
-                .to_string(),
+        ];
+        // Root is the one case the wizard can decide locally: sudo never asks it
+        // for a password, so the password tutorial would only be noise.
+        if status.uid != 0 {
+            lines.push(
+                self.i18n
+                    .t(MessageId::GuideWizardSudoHandoffPrompt)
+                    .to_string(),
+            );
+            lines.push(
+                self.i18n
+                    .t(MessageId::GuideWizardSudoHandoffEnter)
+                    .to_string(),
+            );
+            lines.push(
+                self.i18n
+                    .t(MessageId::GuideWizardSudoHandoffEcho)
+                    .to_string(),
+            );
+        }
+        lines.push(
             self.i18n
                 .t(MessageId::GuideWizardSudoHandoffCancel)
                 .to_string(),
-            self.i18n
-                .t(MessageId::GuideWizardSudoHandoffNoPassword)
-                .to_string(),
-            String::new(),
-        ]
+        );
+        if status.uid != 0 {
+            lines.push(
+                self.i18n
+                    .t(MessageId::GuideWizardSudoHandoffNoPassword)
+                    .to_string(),
+            );
+        }
+        lines.push(String::new());
+        lines
     }
 
     pub(crate) fn run_login(&mut self, action: &str) {
@@ -330,6 +347,7 @@ impl Session {
                 "guide login change unconfirmed"
             ),
             Outcome::Error(_) => warn_failure(operation, "login_protocol"),
+            Outcome::Denied => warn_failure(operation, "privilege_denied"),
             Outcome::Verified(_) | Outcome::Cancelled => {}
         }
         let mut task = TaskOutcome::default();
@@ -374,6 +392,17 @@ impl Session {
                 task.reason = EndReason::Failed;
                 task.error = Some(error);
                 task.message(self.i18n)
+            }
+            Outcome::Denied => {
+                task.reason = EndReason::Failed;
+                task.record(
+                    ActionKind::LoginShell,
+                    ChangeFact::None,
+                    Verification::Verified,
+                );
+                self.i18n
+                    .t(MessageId::GuideWizardLoginPrivilegeDenied)
+                    .to_string()
             }
         };
         self.blocked_writes.extend(task.unknown_kinds());

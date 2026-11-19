@@ -703,15 +703,20 @@ pub(super) fn send_auth_response<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if super::standalone::refuse_unconfirmed_write(
-        state,
-        crate::runtime::guide::result::ActionKind::Configure,
-        output,
-    )? {
+    if state
+        .auth
+        .write_blocked(crate::runtime::guide::result::ActionKind::Configure)
+    {
+        // Restore first so the refusal repaints the retry card instead of the
+        // spent submission card; the repaint writes the notice and the card.
         if let Some(auth) = state.auth.state.as_mut() {
             restore_after_failed_submission_at(auth, None);
         }
-        render_current_auth_panel(state, output)?;
+        super::standalone::refuse_unconfirmed_write(
+            state,
+            crate::runtime::guide::result::ActionKind::Configure,
+            output,
+        )?;
         return Ok(());
     }
     if state.agent_run.active.is_none()

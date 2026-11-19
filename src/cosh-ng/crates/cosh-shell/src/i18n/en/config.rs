@@ -159,9 +159,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::GuideWizardHomeHint => "↑↓ select  Enter open  Esc quit",
         MessageId::GuideWizardChoiceHint => "↑↓ select  Enter save  Esc back",
+        MessageId::GuideWizardOpenHint => "↑↓ select  Enter open  Esc back",
+        MessageId::GuideWizardConfirmHint => "↑↓ select  Enter {action}  Esc back",
         MessageId::GuideWizardScrollHint => "↑↓ scroll  PgUp/PgDn page  Esc back",
         MessageId::GuideWizardSavedLine => "Saved: {value}",
-        MessageId::GuideWizardSavedNextLogin => "Saved. Applies to the next login.",
+        MessageId::GuideWizardSavedNextLogin => ", applies to the next login.",
         MessageId::GuideWizardSaveFailed => "Save failed: {error}",
         MessageId::GuideWizardReadFailed => "Unable to read",
         MessageId::GuideWizardLanguageAuto => "Follow system",
@@ -273,6 +275,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Unconfirmed: {actions}. Read the current state or finish and return; these writes remain on hold in this guide."
         }
         MessageId::GuideWizardResultNone => "No configuration changed.",
+        MessageId::GuideWizardResultCancelledNone => "Cancelled. No configuration changed.",
         MessageId::GuideWizardResultCancelled => {
             "This action was cancelled; saved changes are kept."
         }

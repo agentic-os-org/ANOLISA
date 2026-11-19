@@ -8,6 +8,9 @@ use crate::Language;
 
 pub(super) struct Prepared {
     facts: String,
+    facts_help_only: String,
+    show_entry: bool,
+    snapshot: GuideSnapshot,
     invitation: Option<(Claim, String)>,
 }
 
@@ -18,7 +21,10 @@ impl Prepared {
                 return text;
             }
         }
-        &self.facts
+        if self.show_entry && store.guidance_still_enabled(runtime, &self.snapshot) == Ok(true) {
+            return &self.facts;
+        }
+        &self.facts_help_only
     }
 }
 
@@ -37,15 +43,44 @@ pub(super) fn prepare(
             .login_config
             .as_ref()
             .is_none_or(|config| config.health.enabled);
-    let body = guidance::render_health(renderer, report, show_facts, guidance::Target::Bash, None)
-        .unwrap_or_default();
+    let show_entry = ai_enabled && snapshot.preferences.guide_enabled;
+    let body = guidance::render_health_with_entry(
+        renderer,
+        report,
+        show_facts,
+        guidance::Target::Bash,
+        None,
+        show_entry,
+    )
+    .unwrap_or_default();
     let facts = if body.is_empty() {
         body
     } else {
         format!("\n{body}")
     };
+    let facts_help_only = if show_entry {
+        let body = guidance::render_health_with_entry(
+            renderer,
+            report,
+            show_facts,
+            guidance::Target::Bash,
+            None,
+            false,
+        )
+        .unwrap_or_default();
+        if body.is_empty() {
+            body
+        } else {
+            format!("\n{body}")
+        }
+    } else {
+        facts.clone()
+    };
     let mut prepared = Prepared {
         facts,
+        facts_help_only,
+        show_entry,
+        snapshot: snapshot.clone(),
         invitation: None,
     };
     if !ai_enabled || !snapshot.preferences.guide_enabled {
@@ -59,17 +94,18 @@ pub(super) fn prepare(
     };
     let (kind, invitation) = if let Some(candidate) = candidate {
         (InviteKind::LoginHealth, candidate)
-    } else if !snapshot.preferences.banner_enabled || !had_candidate {
+    } else if !show_facts && (!snapshot.preferences.banner_enabled || !had_candidate) {
         (InviteKind::LoginEntry, guidance::login_entry(language))
     } else {
         return prepared;
     };
-    let Some(text) = guidance::render_health(
+    let Some(text) = guidance::render_health_with_entry(
         renderer,
         report,
         show_facts,
         guidance::Target::Bash,
         Some(&invitation),
+        show_entry,
     ) else {
         return prepared;
     };

@@ -135,6 +135,7 @@ fn supervise_with_budget(
     let mut terminate: Option<i32> = None;
     let mut worker_pid: Option<u32> = None;
     let mut commit_started: Option<Instant> = None;
+    let mut withdrawn_at: Option<Instant> = None;
     let mut final_reply: Option<String> = None;
     let mut exited = false;
     // The result file is shared with the worker through `dup`, so both ends
@@ -187,6 +188,7 @@ fn supervise_with_budget(
                             || (probes.terminal_lost)()
                         {
                             cancelled = true;
+                            withdrawn_at.get_or_insert_with(Instant::now);
                             let _ = grant.write_all(b"0");
                             let _ = grant.flush();
                         } else {
@@ -215,8 +217,17 @@ fn supervise_with_budget(
             && (pending_exit(&mut terminate, probes) || (probes.terminal_lost)())
         {
             cancelled = true;
+            withdrawn_at.get_or_insert_with(Instant::now);
             let _ = grant.write_all(b"0");
             let _ = grant.flush();
+        }
+        // A signal sent only to this process never reaches the foreground sudo,
+        // so waiting for it to notice the withdrawn grant could wait forever.
+        // No grant means no account write, so stopping it here is safe.
+        if cancelled && !granted && withdrawn_at.is_some_and(|at| at.elapsed() >= stop_grace) {
+            worker.force_stop(worker_pid);
+            exited = true;
+            break;
         }
         if granted {
             // A commit in flight is never interrupted as a plain cancel; the
@@ -280,6 +291,13 @@ fn supervise_with_budget(
     if cancelled && !granted {
         republish(terminate, probes);
         return Outcome::Cancelled;
+    }
+    // sudo exited without a grant (sudoers refusal, exhausted password retries),
+    // so the worker never ran and the account cannot have changed. Reporting this
+    // as unconfirmed would hold further writes for a failure that is certain.
+    if !granted && exited {
+        republish(terminate, probes);
+        return Outcome::Denied;
     }
     republish(terminate, probes);
     Outcome::Unconfirmed

@@ -109,6 +109,15 @@ fn attempt_held_write(state: &mut InlineState, kind: ActionKind) {
     assert!(text.contains("Change unconfirmed"), "{kind:?}: {text}");
     assert!(state.auth.ecs.is_none());
     assert!(state.auth.ecs_trial.preference_job.is_none());
+    assert!(
+        text.starts_with("\x1b[H\x1b[2J"),
+        "{kind:?}: a guide refusal must repaint the hosted screen: {text:?}"
+    );
+    let written_rows = text.matches('\n').count();
+    assert_eq!(
+        state.questions.active_panel_height, written_rows,
+        "{kind:?}: notice rows must join the tracked panel height"
+    );
 }
 
 #[test]
@@ -134,6 +143,52 @@ fn rereview_fix_typed_unknown_blocks_each_write_now_and_after_management_reopens
             reopened.auth.write_blocked(kind),
             "later reads/success cannot erase Unknown"
         );
+    }
+
+    // Short-screen evidence: the notice and the activated card share one 16-row
+    // viewport, the card top and keys stay on screen, and the next erase uses the
+    // combined height instead of the stale card height.
+    for kind in [ActionKind::Activate, ActionKind::Delete] {
+        let mut state = guide_state();
+        record_write_result(&mut state, kind, &Err(transport_failure()));
+        let auth = state.auth.state.as_mut().unwrap();
+        auth.phase = if kind == ActionKind::Activate {
+            AuthPhase::ProviderAction { provider_idx: 0 }
+        } else {
+            AuthPhase::ConfirmDelete { provider_idx: 0 }
+        };
+        auth.selected_provider = usize::from(kind == ActionKind::Delete);
+        let mut output = Vec::new();
+        assert!(
+            refuse_unconfirmed_write_with_rows(&mut state, kind, &mut output, Some(16)).unwrap()
+        );
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("\x1b[H\x1b[2J"), "{kind:?}: {text:?}");
+        let rows = text.matches('\n').count();
+        assert!(
+            rows <= 15,
+            "{kind:?}: notice+card must fit a 16-row screen: {rows} rows"
+        );
+        assert_eq!(state.questions.active_panel_height, rows, "{kind:?}");
+        assert!(text.contains("Change unconfirmed"), "{kind:?}: {text}");
+        assert!(text.contains("Keys:"), "{kind:?}: keys line lost: {text}");
+        let focus = if kind == ActionKind::Delete {
+            "> [2]"
+        } else {
+            "> [1]"
+        };
+        assert!(
+            text.contains(focus),
+            "{kind:?}: focused action lost: {text}"
+        );
+        let mut cleared = Vec::new();
+        crate::auth::prompt::clear_active_auth_panel(&mut state, &mut cleared).unwrap();
+        let cleared = String::from_utf8(cleared).unwrap();
+        assert!(
+            cleared.starts_with(&format!("\x1b[{rows}A")),
+            "{kind:?}: next navigation must erase notice+card: {cleared:?}"
+        );
+        assert_eq!(state.questions.active_panel_height, 0, "{kind:?}");
     }
 }
 

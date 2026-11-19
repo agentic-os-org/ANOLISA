@@ -5,6 +5,7 @@ use std::io::{self, Stdout};
 use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
+        cursor::{Hide, Show},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
@@ -71,6 +72,25 @@ impl Screen {
         }
         result?;
         Ok(scroll)
+    }
+
+    /// A hosted task drew straight to this screen, so the cached buffer no longer describes it.
+    pub(crate) fn resync(&mut self) -> io::Result<()> {
+        self.terminal.clear()
+    }
+
+    /// Lends the tty to a foreground program without giving up the alternate screen.
+    pub(crate) fn suspend(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), Show)
+    }
+
+    /// Takes the tty back after a foreground program owned it in canonical mode.
+    pub(crate) fn resume(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        let cleared = self.terminal.clear();
+        execute!(self.terminal.backend_mut(), Hide)?;
+        cleared
     }
 
     pub(crate) fn too_small(&self) -> bool {

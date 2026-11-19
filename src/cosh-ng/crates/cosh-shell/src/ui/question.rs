@@ -29,10 +29,14 @@ mod presentation;
 pub use presentation::QuestionPanelPresentation;
 use presentation::{
     instruction_rows as presented_instruction_rows, instruction_text as presented_instruction_text,
+    row_budget,
 };
 #[path = "question/styles.rs"]
 mod styles;
 use styles::{option_heading_style, option_marker_style, render_custom_option_lines};
+#[path = "question/viewport.rs"]
+mod viewport;
+use viewport::selected_option_window;
 
 /// Separates an option label from secondary text rendered in dark gray.
 pub(crate) const OPTION_DETAIL_SEPARATOR: &str = "\n    ";
@@ -197,7 +201,7 @@ impl RatatuiInlineRenderer {
                 content_width,
             ));
         }
-        lines
+        viewport::bound_plain_lines(lines, &model, i18n, presentation, content_width)
     }
 
     pub fn write_question_answer_panel<W: Write>(
@@ -267,10 +271,14 @@ fn question_panel_height(
     presentation: QuestionPanelPresentation<'_>,
 ) -> u16 {
     let content_width = question_content_width(width);
-    question_rows(model, content_width)
+    let rows = question_rows(model, content_width)
         + option_rows(model, i18n, content_width)
         + presented_instruction_rows(model, i18n, content_width, presentation)
-        + 2
+        + 2;
+    match row_budget(presentation.max_rows) {
+        Some(budget) => rows.min(budget),
+        None => rows,
+    }
 }
 
 fn render_question_panel(
@@ -298,9 +306,22 @@ fn render_question_panel(
     block.render(area, buffer);
 
     let content_width = inner.width as usize;
-    let question_rows = question_rows(&model, content_width);
-    let option_rows = option_rows(&model, i18n, content_width);
+    let mut question_rows = question_rows(&model, content_width);
+    let mut option_rows = option_rows(&model, i18n, content_width);
     let instruction_rows = presented_instruction_rows(&model, i18n, content_width, presentation);
+    if presentation.max_rows.is_some() {
+        // Reserve the keys line and the focused choice before the question so a
+        // tall status body can never squeeze the actions out of the capped panel.
+        let available = inner.height.saturating_sub(instruction_rows);
+        let focus_rows = if model.options.is_empty() {
+            0
+        } else {
+            selected_option_window(&model, i18n, selected_option, content_width).1 as u16
+        };
+        let reserved = focus_rows.min(available);
+        question_rows = question_rows.min(available.saturating_sub(reserved));
+        option_rows = option_rows.min(available.saturating_sub(question_rows));
+    }
     let chunks = Layout::vertical(vec![
         Constraint::Length(question_rows),
         Constraint::Length(option_rows),
@@ -337,6 +358,14 @@ fn render_question_panel(
                 content_width,
             ));
         }
+    }
+    if presentation.max_rows.is_some() && option_lines.len() > option_rows as usize {
+        let (start, len) = selected_option_window(&model, i18n, selected_option, content_width);
+        let window = option_rows as usize;
+        let scroll = start
+            .saturating_sub(window.saturating_sub(len).max(1) / 2)
+            .min(option_lines.len().saturating_sub(window));
+        option_lines = option_lines.into_iter().skip(scroll).take(window).collect();
     }
     if option_rows > 0 {
         Paragraph::new(Text::from(option_lines))

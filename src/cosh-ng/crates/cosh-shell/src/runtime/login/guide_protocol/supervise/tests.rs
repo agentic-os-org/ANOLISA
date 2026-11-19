@@ -122,6 +122,11 @@ impl Worker for FakeWorker {
         if self.exited {
             return Poll::Exited;
         }
+        // sudo can refuse before the worker ever starts: no Ready, no grant.
+        if self.on_grant == "exit-before-ready" {
+            self.exited = true;
+            return Poll::Exited;
+        }
         if self.ready_on_poll && !self.ready_written {
             self.write_ready();
         }
@@ -150,6 +155,10 @@ impl Worker for FakeWorker {
                         self.write_ready();
                         self.withdrawn_polls = 0;
                     }
+                    // Real sudo is still waiting for a password here, so it never
+                    // reads the withdrawn grant. Bound the stand-in so a regression
+                    // fails the assertion instead of hanging the suite.
+                    (Some(false), "stuck-after-withdrawal") => {}
                     (Some(false), _) => self.exited = true,
                     _ => {}
                 }
@@ -166,6 +175,12 @@ impl Worker for FakeWorker {
             }
             self.withdrawn_polls += 1;
             if self.withdrawn_polls >= 4 {
+                self.exited = true;
+            }
+        }
+        if self.granted == Some(false) && self.on_grant == "stuck-after-withdrawal" {
+            self.withdrawn_polls += 1;
+            if self.withdrawn_polls >= 2000 {
                 self.exited = true;
             }
         }
@@ -230,6 +245,36 @@ fn a_cancel_before_ready_never_grants_a_commit() {
     assert!(
         !raw.contains("\"outcome\""),
         "a withdrawn grant must not produce a result: {raw}"
+    );
+}
+
+#[test]
+fn a_withdrawn_grant_stops_a_child_that_never_notices_it() {
+    let (outcome, raw, forced, elapsed) = run(
+        false,
+        "stuck-after-withdrawal",
+        terminal_present,
+        Some(nix::libc::SIGTERM),
+    );
+    assert_eq!(outcome, Outcome::Cancelled);
+    assert!(
+        forced,
+        "a signal sent only to this process never reaches sudo; the child must be stopped"
+    );
+    assert!(!raw.contains("\"outcome\""), "{raw}");
+    assert!(
+        elapsed < TEST_GRACE * 8,
+        "withdrawal did not converge within the stop grace: {elapsed:?}"
+    );
+}
+
+#[test]
+fn a_child_that_exits_before_any_grant_is_denied_not_unconfirmed() {
+    let (outcome, raw, _forced, _elapsed) = run(true, "exit-before-ready", terminal_present, None);
+    assert_eq!(outcome, Outcome::Denied);
+    assert!(
+        !raw.contains("\"outcome\""),
+        "a refusal must not produce a worker result: {raw}"
     );
 }
 

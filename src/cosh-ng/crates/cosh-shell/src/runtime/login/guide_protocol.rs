@@ -116,6 +116,8 @@ pub(crate) enum Outcome {
     Error(String),
     /// Authorization was withdrawn before any account write could start.
     Cancelled,
+    /// Authorization failed before any grant, so the account cannot have changed.
+    Denied,
 }
 
 pub(crate) fn classify(
