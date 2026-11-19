@@ -127,7 +127,7 @@ cargo run -p skillfs -- list /path/to/skills
 # 生成或查看 skillfs-views.toml
 cargo run -p skillfs -- classify /path/to/skills
 
-# Explain source precedence and views without mounting.
+# 不挂载，解释源优先级与视图归属
 cargo run -p skillfs -- explain --config /path/to/skillfs-mount.toml
 
 # 挂载 FUSE 文件系统
