@@ -609,12 +609,12 @@ class TlsSelectionTest(unittest.TestCase):
             policy.decide_request(snapshot, facts(request)).code,
             "credential_not_allowed",
         )
-        self.assertEqual(snapshot.listeners[15001].credentials, frozenset())
-        for port, plan in snapshot.listeners.items():
+        self.assertEqual(snapshot.listeners[15001].plan.credentials, frozenset())
+        for port, listener in snapshot.listeners.items():
             own_fake = next(
                 fake
                 for fake, entry in snapshot.live.items()
-                if plan.scope_id in entry.scope_ids
+                if listener.plan.scope_id in entry.scope_ids
             )
             for header in ("Authorization", "X-Unconfigured"):
                 for password, action, code in (
@@ -717,7 +717,8 @@ class LoadTest(unittest.TestCase):
         files["active.json"] = json.dumps(manifest).encode()
         snapshot = load(files)
         self.assertEqual(
-            snapshot.hosts, {15001 + i: frozenset(hosts) for i in range(8)}
+            {port: listener.hosts for port, listener in snapshot.listeners.items()},
+            {15001 + i: frozenset(hosts) for i in range(8)},
         )
         for port in snapshot.listeners:
             self.assertEqual(

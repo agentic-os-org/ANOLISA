@@ -103,11 +103,16 @@ class ManagedFake:
 
 
 @dataclass(frozen=True)
+class Listener:
+    plan: Plan
+    # Declared targets survive filtering of unavailable credentials and rules.
+    hosts: frozenset[str]
+
+
+@dataclass(frozen=True)
 class Snapshot:
     generation: int
-    listeners: dict[int, Plan]
-    # Declared targets survive filtering of unavailable credentials and rules.
-    hosts: dict[int, frozenset[str]]
+    listeners: dict[int, Listener]
     live: dict[str, Entry] = field(repr=False)
     retired: dict[str, ManagedFake] = field(repr=False)
     unavailable: dict[str, ManagedFake] = field(repr=False)
@@ -525,8 +530,7 @@ def build_snapshot(manifest_raw: bytes, read: Callable[[str, int], bytes]) -> Sn
     _require(
         secrets_generation == generation, "secrets generation differs from manifest"
     )
-    listeners: dict[int, Plan] = {}
-    hosts: dict[int, frozenset[str]] = {}
+    listeners: dict[int, Listener] = {}
     agents: set[str] = set()
     items = _list(manifest["listeners"], "manifest listeners")
     _require(len(items) <= MAX_LISTENERS, "manifest has too many listeners")
@@ -546,23 +550,23 @@ def build_snapshot(manifest_raw: bytes, read: Callable[[str, int], bytes]) -> Sn
             all(a < b for a, b in zip(declared, declared[1:])),
             "listener hosts must be sorted and unique",
         )
-        hosts[port] = frozenset(declared)
+        hosts = frozenset(declared)
         plan_name = _file_name(listener["plan"], "listener plan")
         plan = parse_plan(_decode_json(read(plan_name, MAX_PLAN_BYTES), "plan"))
         _require(plan.scope_id == agent, "plan scope differs from listener scope")
         _require(
-            all(rule.host in hosts[port] for rule in plan.rules),
+            all(rule.host in hosts for rule in plan.rules),
             "plan rule host is outside the listener hosts",
         )
         issued = {e.credential for e in live.values() if agent in e.scope_ids}
         _require(
             plan.credentials <= issued, "plan credential has no fake for its agent"
         )
-        listeners[port] = plan
+        listeners[port] = Listener(plan, hosts)
     reals = tuple(
         sorted({e.real for e in live.values()}, key=lambda real: (-len(real), real))
     )
-    return Snapshot(generation, listeners, hosts, live, retired, unavailable, reals)
+    return Snapshot(generation, listeners, live, retired, unavailable, reals)
 
 
 def select_tls_host(
@@ -583,7 +587,7 @@ def select_tls_host(
         host = _host(sni.lower().removesuffix("."), "SNI")
     except LoadError:
         return None
-    return host if host in snapshot.hosts[port] else None
+    return host if host in snapshot.listeners[port].hosts else None
 
 
 def _file_name(value: object, what: str) -> str:
@@ -711,9 +715,10 @@ def _reject(code: str, agent: str | None = None) -> Decision:
 
 def decide_request(snapshot: Snapshot | None, facts: RequestFacts) -> Decision:
     """Validate original request facts, then require one unambiguous injection."""
-    plan = snapshot.listeners.get(facts.port) if snapshot else None
-    if snapshot is None or plan is None:
+    listener = snapshot.listeners.get(facts.port) if snapshot else None
+    if snapshot is None or listener is None:
         return _reject("gateway_not_ready")
+    plan = listener.plan
     agent = plan.scope_id
     if (
         len(facts.headers) > 256
@@ -734,7 +739,7 @@ def decide_request(snapshot: Snapshot | None, facts: RequestFacts) -> Decision:
     formats = {
         (r.header.lower(), r.format)
         for listener in snapshot.listeners.values()
-        for r in listener.rules
+        for r in listener.plan.rules
     }
     related = {header for header, _ in formats} | {"host", ":authority"}
     headers: dict[str, str] = {}
