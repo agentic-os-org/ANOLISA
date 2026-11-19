@@ -115,3 +115,5 @@ model = "qwen3.7-plus"
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun 凭据 |
 
 缺少 key 时，交互式 Core 会请求认证。独立 headless client 必须回复该 control request，或在启动前配置凭据。配置层规则见[配置](../configuration.md)，control protocol 见 [Headless 模式](headless-mode.md)。
+
+已配置的 OpenAI-compatible Provider 在建立模型流时返回 HTTP 401 或 403，本轮以 Provider 错误结束，问题保留在会话中。回到 Shell 提示符后，可用 `/auth` 更新凭据或切换 Provider，再重新提问。

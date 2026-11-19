@@ -155,3 +155,8 @@ If a key is missing, interactive Core asks for authentication. A standalone
 headless client must answer that control request or configure credentials before
 startup. See [Configuration](../configuration.md) for file-layer rules and
 [Headless mode](headless-mode.md) for the control protocol.
+
+If a configured OpenAI-compatible provider returns HTTP 401 or 403 when
+opening the model stream, the turn ends with the provider error and the
+question remains in the session. From the Shell prompt, use `/auth` to
+update credentials or switch providers before asking again.

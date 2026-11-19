@@ -43,7 +43,6 @@ use self::tool_execution::{
     InvalidArgumentStreak, MAX_INVALID_ARGUMENT_ATTEMPTS,
 };
 
-mod auth;
 mod extensions;
 pub(crate) mod provider_access;
 mod tool_execution;
@@ -716,10 +715,6 @@ impl CoshCore {
                         AuditOutcomeStatus::Failed,
                         Some("provider_auth_error"),
                     );
-                    // Attempt re-auth
-                    if self.try_reauth(reader, writer).await {
-                        continue; // Retry the turn with new credentials
-                    }
                     return Err(e);
                 }
                 Err(e) => {

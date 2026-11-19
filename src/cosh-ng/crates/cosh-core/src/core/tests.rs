@@ -81,6 +81,52 @@ struct CountingShellTool {
 
 struct ExternalTool;
 
+struct UnauthorizedProvider;
+
+#[async_trait]
+impl ContentGenerator for UnauthorizedProvider {
+    async fn generate(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::provider::ToolDeclaration],
+        _config: &GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        Err("API error 401 Unauthorized".to_string())
+    }
+
+    fn cancel(&self) {}
+}
+
+#[tokio::test]
+async fn provider_401_ends_turn_without_waiting_for_auth_input() {
+    let mut core = CoshCore::new_legacy(
+        CoreConfig::default(),
+        Box::new(UnauthorizedProvider),
+        ToolRegistry::new(),
+    );
+    let (input, _open_input) = tokio::io::duplex(1024);
+    let mut reader = BufReader::new(input).lines();
+    let mut output = Vec::new();
+
+    let turn = tokio::time::timeout(
+        Duration::from_secs(5),
+        core.handle_user_message("explain the current directory", &mut reader, &mut output),
+    )
+    .await;
+    let protocol = String::from_utf8(output).unwrap();
+    assert!(
+        !protocol.contains(r#""subtype":"auth_required""#),
+        "{protocol}"
+    );
+    let error = turn.expect("turn waited for input").unwrap_err();
+    assert!(error.contains("401 Unauthorized"), "{error}");
+    assert_eq!(core.metrics.api_requests, 1);
+    assert_eq!(
+        core.messages.last().unwrap().content.as_text(),
+        "explain the current directory"
+    );
+}
+
 /// Records the `GenerateConfig` of every agent-turn request it serves.
 struct ConfigRecordingProvider {
     configs: Arc<Mutex<Vec<crate::provider::GenerateConfig>>>,
